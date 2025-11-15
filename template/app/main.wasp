@@ -1,9 +1,9 @@
-app OpenSaaS {
+app AlfredOSCloud {
   wasp: {
-    version: "^0.19.0"
+    version: "^0.18.0"
   },
 
-  title: "My Open SaaS App",
+  title: "AlfredOS Cloud",
 
   head: [
     "<link rel='icon' href='/favicon.ico' />",
@@ -38,8 +38,8 @@ app OpenSaaS {
       //   (RequestPasswordReset(Route|Page), PasswordReset(Route|Page), EmailVerification(Route|Page))
       email: {
         fromField: {
-          name: "Open SaaS App",
-          email: "me@example.com"
+          name: "AlfredOS Cloud",
+          email: "noreply@alfredos.cloud"
         },
         emailVerification: {
           clientRoute: EmailVerificationRoute,
@@ -68,7 +68,7 @@ app OpenSaaS {
       // }
     },
     onAuthFailedRedirectTo: "/login",
-    onAuthSucceededRedirectTo: "/demo-app",
+    onAuthSucceededRedirectTo: "/dashboard",
   },
 
   db: {
@@ -76,11 +76,17 @@ app OpenSaaS {
     seeds: [
       // Populates the database with a bunch of fake users to work with during development.
       import { seedMockUsers } from "@src/server/scripts/dbSeeds",
+      // Creates an admin user for testing
+      import { createAdminUser } from "@src/server/scripts/createAdminUser",
     ]
   },
 
   client: {
     rootComponent: import App from "@src/client/App",
+  },
+
+  server: {
+    setupFn: import { serverSetup } from "@src/server/serverSetup",
   },
 
   emailSender: {
@@ -146,6 +152,46 @@ action updateIsUserAdminById {
 }
 //#endregion
 
+//#region Environments
+route DashboardRoute { path: "/dashboard", to: DashboardPage }
+page DashboardPage {
+  authRequired: true,
+  component: import DashboardPage from "@src/environments/DashboardPage"
+}
+
+route EnvironmentsListRoute { path: "/environments", to: EnvironmentsListPage }
+page EnvironmentsListPage {
+  authRequired: true,
+  component: import EnvironmentsListPage from "@src/environments/EnvironmentsListPage"
+}
+
+route EnvironmentDetailRoute { path: "/environments/:id", to: EnvironmentDetailPage }
+page EnvironmentDetailPage {
+  authRequired: true,
+  component: import EnvironmentDetailPage from "@src/environments/EnvironmentDetailPage"
+}
+
+query getEnvironments {
+  fn: import { getEnvironments } from "@src/environments/operations",
+  entities: [Environment]
+}
+
+query getEnvironmentById {
+  fn: import { getEnvironmentById } from "@src/environments/operations",
+  entities: [Environment]
+}
+
+action createEnvironment {
+  fn: import { createEnvironment } from "@src/environments/operations",
+  entities: [Environment]
+}
+
+action deleteEnvironment {
+  fn: import { deleteEnvironment } from "@src/environments/operations",
+  entities: [Environment]
+}
+//#endregion
+
 //#region Demo AI App
 route DemoAppRoute { path: "/demo-app", to: DemoAppPage }
 page DemoAppPage {
@@ -183,6 +229,7 @@ query getAllTasksByUser {
   entities: [Task]
 }
 //#endregion
+
 
 //#region Payment
 route PricingPageRoute { path: "/pricing", to: PricingPage }
@@ -253,17 +300,18 @@ query getDailyStats {
   entities: [User, DailyStats]
 }
 
-job dailyStatsJob {
-  executor: PgBoss,
-  perform: {
-    fn: import { calculateDailyStats } from "@src/analytics/stats"
-  },
-  schedule: {
-    cron: "0 * * * *" // every hour. useful in production
-    // cron: "* * * * *" // every minute. useful for debugging
-  },
-  entities: [User, DailyStats, Logs, PageViewSource]
-}
+// Disabled PgBoss job in favor of BullMQ custom implementation
+// job dailyStatsJob {
+//   executor: PgBoss,
+//   perform: {
+//     fn: import { calculateDailyStats } from "@src/analytics/stats"
+//   },
+//   schedule: {
+//     cron: "0 * * * *" // every hour. useful in production
+//     // cron: "* * * * *" // every minute. useful for debugging
+//   },
+//   entities: [User, DailyStats, Logs, PageViewSource]
+// }
 //#endregion
 
 //#region Admin Dashboard
@@ -277,6 +325,22 @@ route AdminUsersRoute { path: "/admin/users", to: AdminUsersPage }
 page AdminUsersPage {
   authRequired: true,
   component: import AdminUsers from "@src/admin/dashboards/users/UsersDashboardPage"
+}
+
+route AdminEnvironmentsRoute { path: "/admin/environments", to: AdminEnvironmentsPage }
+page AdminEnvironmentsPage {
+  authRequired: true,
+  component: import AdminEnvironmentsPage from "@src/admin/dashboards/environments/EnvironmentsDashboardPage"
+}
+
+query getPaginatedEnvironments {
+  fn: import { getPaginatedEnvironments } from "@src/environment/operations",
+  entities: [Environment, User]
+}
+
+query getEnvironmentStats {
+  fn: import { getEnvironmentStats } from "@src/environment/operations",
+  entities: [Environment]
 }
 
 route AdminSettingsRoute { path: "/admin/settings", to: AdminSettingsPage }
@@ -314,3 +378,4 @@ page AdminMessagesPage {
   component: import AdminMessages from "@src/admin/dashboards/messages/MessagesPage"
 }
 //#endregion
+

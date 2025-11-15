@@ -1,0 +1,117 @@
+
+[36m============================================================
+Cloudflare DNS Client Test Suite
+============================================================[0m
+
+
+[36m============================================================
+Test 1: Client Initialization & Authentication
+============================================================[0m
+
+[34mℹ Creating Cloudflare DNS client...[0m
+[32m✓ DNS client created successfully[0m
+[32m✓ Environment variables loaded correctly[0m
+[34mℹ Fetching zone information...[0m
+[32m✓ Zone access verified: alfredos.site[0m
+[32m✓ Zone ID: 1d85256d2ac7314f62f2064ad20fb59f[0m
+[32m✓ Zone status: active[0m
+
+[36m============================================================
+Test 2: Create A Record
+============================================================[0m
+
+[34mℹ Creating test record: test-agent-1763219341028.alfredos.site -> 1.2.3.4[0m
+Creating DNS A record: test-agent-1763219341028.alfredos.site -> 1.2.3.4
+DNS A record created: test-agent-1763219341028.alfredos.site (ID: d68bd212597f614a5f62eba9f7d67eff)
+[32m✓ A record created successfully (ID: d68bd212597f614a5f62eba9f7d67eff)[0m
+
+[36m============================================================
+Test 3: Read/Get A Record
+============================================================[0m
+
+[34mℹ Fetching record: test-agent-1763219341028.alfredos.site[0m
+[32m✓ Record found: test-agent-1763219341028.alfredos.site -> 1.2.3.4[0m
+[32m✓ IP address matches expected value: 1.2.3.4[0m
+[32m✓ TTL is correct: 300 seconds[0m
+[32m✓ Proxied setting is correct: false[0m
+
+[36m============================================================
+Test 4: Update A Record
+============================================================[0m
+
+[34mℹ Updating record to point to 5.6.7.8[0m
+DNS A record updated: test-agent-1763219341028.alfredos.site -> 5.6.7.8
+[32m✓ A record updated successfully[0m
+[32m✓ IP address updated correctly: 5.6.7.8[0m
+
+[36m============================================================
+Test 5: Validate Zone Record Listing
+============================================================[0m
+
+[34mℹ Listing A records in zone...[0m
+[32m✓ Found 1 A records in zone[0m
+[32m✓ Test record found in zone listing: test-agent-1763219341028.alfredos.site -> 5.6.7.8[0m
+
+[36m============================================================
+Test 5a: Error Handling - Duplicate Records
+============================================================[0m
+
+[34mℹ Attempting to create duplicate record...[0m
+[34mℹ Note: Cloudflare allows duplicate A records (valid DNS behavior)[0m
+Creating DNS A record: test-agent-1763219341028.alfredos.site -> 9.9.9.9
+DNS A record created: test-agent-1763219341028.alfredos.site (ID: 5c51f4f5ce85b1a59a470d813df025aa)
+[32m✓ Cloudflare allows duplicate A records (this is valid DNS behavior)[0m
+[34mℹ Cleaning up duplicate record...[0m
+DNS A record deleted: test-agent-1763219341028.alfredos.site (ID: 5c51f4f5ce85b1a59a470d813df025aa)
+DNS A record deleted: test-agent-1763219341028.alfredos.site (ID: d68bd212597f614a5f62eba9f7d67eff)
+[32m✓ All duplicate records cleaned up[0m
+
+[36m============================================================
+Test 6: Delete A Record
+============================================================[0m
+
+[34mℹ Deleting test record: test-agent-1763219341028.alfredos.site[0m
+No DNS A record found for test-agent-1763219341028.alfredos.site
+[32m✓ A record deleted successfully[0m
+[32m✓ Record verified as deleted[0m
+
+[36m============================================================
+Test 7: Error Handling - Delete Non-existent Record
+============================================================[0m
+
+[34mℹ Attempting to delete non-existent record...[0m
+No DNS A record found for nonexistent-1763219341028.alfredos.site
+[32m✓ Non-existent record deletion handled gracefully[0m
+
+[36m============================================================
+Test 8: Error Handling - Update Non-existent Record
+============================================================[0m
+
+[34mℹ Attempting to update non-existent record...[0m
+Failed to update DNS A record for nonexistent-1763219341028.alfredos.site: Error: No DNS A record found for nonexistent-1763219341028.alfredos.site
+    at CloudflareDNSClient.updateARecord (/Users/Shared/dev/alfredos-cloud/template/app/src/cloud/cloudflare/dns.ts:136:15)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async runTests (/Users/Shared/dev/alfredos-cloud/template/app/src/cloud/cloudflare/test-dns.ts:172:7)
+[32m✓ Update failure handled correctly: DNS record update failed: No DNS A record found for nonexistent-1763219341028.alfredos.site[0m
+
+[36m============================================================
+Test Summary
+============================================================[0m
+
+[32m✓ All tests completed successfully![0m
+[32m✓ DNS client authentication: PASSED[0m
+[32m✓ Zone access validation: PASSED[0m
+[32m✓ Create A record: PASSED[0m
+[32m✓ Read A record: PASSED[0m
+[32m✓ Update A record: PASSED[0m
+[32m✓ List records: PASSED[0m
+[32m✓ Delete A record: PASSED[0m
+[32m✓ Error handling: PASSED[0m
+[32m✓ TTL configuration: PASSED (300 seconds)[0m
+[32m✓ Proxied setting: PASSED (false)[0m
+[32m✓ Cleanup: COMPLETE[0m
+
+[32m============================================================
+ALL TESTS PASSED - DNS Client is fully functional!
+============================================================[0m
+

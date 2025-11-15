@@ -1,7 +1,7 @@
 import { listOrders } from "@lemonsqueezy/lemonsqueezy.js";
 import Stripe from "stripe";
 import { type DailyStats } from "wasp/entities";
-import { type DailyStatsJob } from "wasp/server/jobs";
+// Removed DailyStatsJob import - job is disabled in favor of BullMQ
 import { stripeClient } from "../payment/stripe/stripeClient";
 import {
   getDailyPageViews,
@@ -17,9 +17,9 @@ export type DailyStatsProps = {
   isLoading?: boolean;
 };
 
-export const calculateDailyStats: DailyStatsJob<never, void> = async (
-  _args,
-  context,
+export const calculateDailyStats = async (
+  _args: never,
+  context: any,
 ) => {
   const nowUTC = new Date(Date.now());
   nowUTC.setUTCHours(0, 0, 0, 0);

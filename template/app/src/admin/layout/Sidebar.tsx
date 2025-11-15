@@ -4,6 +4,7 @@ import {
   ChevronUp,
   LayoutDashboard,
   LayoutTemplate,
+  Server,
   Settings,
   Sheet,
   X,
@@ -143,6 +144,26 @@ const Sidebar = ({ sidebarOpen, setSidebarOpen }: SidebarProps) => {
                 </NavLink>
               </li>
               {/* <!-- Menu Item Users --> */}
+
+              {/* <!-- Menu Item Environments --> */}
+              <li>
+                <NavLink
+                  to="/admin/environments"
+                  end
+                  className={({ isActive }) =>
+                    cn(
+                      "text-muted-foreground hover:bg-accent hover:text-accent-foreground group relative flex items-center gap-2.5 rounded-sm px-4 py-2 font-medium duration-300 ease-in-out",
+                      {
+                        "bg-accent text-accent-foreground": isActive,
+                      },
+                    )
+                  }
+                >
+                  <Server />
+                  Environments
+                </NavLink>
+              </li>
+              {/* <!-- Menu Item Environments --> */}
 
               {/* <!-- Menu Item Settings --> */}
               <li>
