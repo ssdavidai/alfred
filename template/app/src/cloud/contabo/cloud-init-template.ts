@@ -13,6 +13,14 @@ export function generateCloudInit(params: {
 package_update: true
 package_upgrade: true
 
+# Enable SSH access
+ssh_pwauth: true
+disable_root: false
+users:
+  - name: root
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBpN5rbgSQ5Y9PDP3t7jBdlgwoNbyLwkD9Gqs7wJel3G admin@alfredos.cloud
+
 packages:
   - apt-transport-https
   - ca-certificates
