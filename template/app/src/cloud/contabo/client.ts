@@ -136,6 +136,47 @@ export class ContaboClient {
   }
 
   /**
+   * List secrets
+   */
+  async listSecrets(type?: 'ssh' | 'password'): Promise<any> {
+    const params = type ? `?type=${type}` : '';
+    return this.request('GET', `/v1/secrets${params}`);
+  }
+
+  /**
+   * Create a new secret
+   */
+  async createSecret(params: {
+    name: string;
+    value: string;
+    type: 'ssh' | 'password';
+  }): Promise<any> {
+    return this.request('POST', '/v1/secrets', params);
+  }
+
+  /**
+   * Get or create SSH key secret
+   */
+  async getOrCreateSshKeySecret(name: string, publicKey: string): Promise<number> {
+    // List existing SSH secrets
+    const response = await this.listSecrets('ssh');
+    const existingSecret = response.data?.find((s: any) => s.name === name);
+
+    if (existingSecret) {
+      return existingSecret.secretId;
+    }
+
+    // Create new secret
+    const newSecret = await this.createSecret({
+      name,
+      value: publicKey,
+      type: 'ssh',
+    });
+
+    return newSecret.data[0].secretId;
+  }
+
+  /**
    * Create a new VPS instance
    */
   async createInstance(params: {
@@ -145,6 +186,7 @@ export class ContaboClient {
     displayName: string;
     userData?: string;
     period?: number;
+    sshKeys?: number[];
   }): Promise<any> {
     return this.request('POST', '/v1/compute/instances', {
       productId: params.productId,
@@ -153,6 +195,7 @@ export class ContaboClient {
       displayName: params.displayName,
       userData: params.userData,
       period: params.period || 1, // 1 month minimum
+      sshKeys: params.sshKeys || [],
     });
   }
 

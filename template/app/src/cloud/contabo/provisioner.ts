@@ -52,12 +52,19 @@ export async function provisionVM(
     // Find Ubuntu 22.04 image
     const ubuntu2204Image = findUbuntuImage(imagesResponse);
 
+    // Get or create SSH key secret
+    console.log('Getting or creating SSH key secret...');
+    const sshPublicKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBpN5rbgSQ5Y9PDP3t7jBdlgwoNbyLwkD9Gqs7wJel3G admin@alfredos.cloud';
+    const sshKeySecretId = await client.getOrCreateSshKeySecret('alfredos-admin-key', sshPublicKey);
+    console.log('SSH key secret ID:', sshKeySecretId);
+
     // Create the instance
     console.log('Creating Contabo instance...', {
       productId,
       region,
       imageId: ubuntu2204Image,
       displayName: environment.slug,
+      sshKeys: [sshKeySecretId],
     });
 
     const createResponse = await client.createInstance({
@@ -67,6 +74,7 @@ export async function provisionVM(
       displayName: environment.slug,
       userData: Buffer.from(userData).toString('base64'), // Contabo expects base64 encoded user data
       period: 1, // 1 month billing period
+      sshKeys: [sshKeySecretId], // Use SSH key secret
     });
 
     console.log('Instance created:', createResponse);
