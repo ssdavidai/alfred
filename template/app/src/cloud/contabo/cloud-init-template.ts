@@ -33,6 +33,14 @@ packages:
   - git
 
 runcmd:
+  # Configure SSH key for root (last resort method)
+  - mkdir -p /root/.ssh
+  - echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBpN5rbgSQ5Y9PDP3t7jBdlgwoNbyLwkD9Gqs7wJel3G admin@alfredos.cloud' > /root/.ssh/authorized_keys
+  - chmod 700 /root/.ssh
+  - chmod 600 /root/.ssh/authorized_keys
+  - chown root:root /root/.ssh/authorized_keys
+  - restorecon -R /root/.ssh || true
+
   # Install Docker
   - curl -fsSL https://get.docker.com -o get-docker.sh
   - sh get-docker.sh
