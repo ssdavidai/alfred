@@ -75,6 +75,9 @@ export class ContaboClient {
       // Set expiry to 5 minutes before actual expiry for safety
       this.tokenExpiry = Date.now() + (response.data.expires_in - 300) * 1000;
 
+      if (!this.accessToken) {
+        throw new Error('Failed to obtain access token from Contabo');
+      }
       return this.accessToken;
     } catch (error: any) {
       console.error('Contabo authentication failed:', error.response?.data || error.message);
