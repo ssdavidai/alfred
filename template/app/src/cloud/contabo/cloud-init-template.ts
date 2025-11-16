@@ -13,17 +13,16 @@ export function generateCloudInit(params: {
 package_update: true
 package_upgrade: true
 
-# Enable SSH access
-ssh_pwauth: false
-disable_root: false
+# Configure root user with SSH key
+users:
+  - name: root
+    lock_passwd: false
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBpN5rbgSQ5Y9PDP3t7jBdlgwoNbyLwkD9Gqs7wJel3G admin@alfredos.cloud
 
-# Write SSH key directly to root's authorized_keys
-write_files:
-  - path: /root/.ssh/authorized_keys
-    permissions: '0600'
-    owner: root:root
-    content: |
-      ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBpN5rbgSQ5Y9PDP3t7jBdlgwoNbyLwkD9Gqs7wJel3G admin@alfredos.cloud
+# Allow both password and key auth for debugging
+ssh_pwauth: true
+disable_root: false
 
 packages:
   - apt-transport-https
@@ -34,10 +33,6 @@ packages:
   - git
 
 runcmd:
-  # Ensure SSH directory permissions
-  - chmod 700 /root/.ssh
-  - chmod 600 /root/.ssh/authorized_keys
-
   # Install Docker
   - curl -fsSL https://get.docker.com -o get-docker.sh
   - sh get-docker.sh
