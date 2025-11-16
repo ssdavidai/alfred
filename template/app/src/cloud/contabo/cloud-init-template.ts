@@ -16,10 +16,8 @@ package_upgrade: true
 # Enable SSH access
 ssh_pwauth: true
 disable_root: false
-users:
-  - name: root
-    ssh_authorized_keys:
-      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBpN5rbgSQ5Y9PDP3t7jBdlgwoNbyLwkD9Gqs7wJel3G admin@alfredos.cloud
+ssh_authorized_keys:
+  - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBpN5rbgSQ5Y9PDP3t7jBdlgwoNbyLwkD9Gqs7wJel3G admin@alfredos.cloud
 
 packages:
   - apt-transport-https
@@ -30,6 +28,12 @@ packages:
   - git
 
 runcmd:
+  # Configure SSH for root
+  - mkdir -p /root/.ssh
+  - chmod 700 /root/.ssh
+  - echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBpN5rbgSQ5Y9PDP3t7jBdlgwoNbyLwkD9Gqs7wJel3G admin@alfredos.cloud" >> /root/.ssh/authorized_keys
+  - chmod 600 /root/.ssh/authorized_keys
+
   # Install Docker
   - curl -fsSL https://get.docker.com -o get-docker.sh
   - sh get-docker.sh
