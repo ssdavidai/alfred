@@ -4,6 +4,9 @@ node_modules/
 # macOS-specific files.
 .DS_Store
 
+# Nested repository
+alfredos-stack/
+
 # We want to keep the template clean from the usual build artifacts.
 # We also don't want to ship these ignore rules to the users.
 template/app/migrations
