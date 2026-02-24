@@ -25,6 +25,16 @@ Security Elevation Phase 1 additions:
 - VectorGovernanceStore: Semantic state governance (ZVEC)
 - ResourceGovernor: Rate limits, queue depth, safe deserialization
 
+Security Elevation Phase 2 additions:
+- GovernanceDaemon: Multi-process governance consistency
+- LedgerEncryption: AES-256-GCM encryption at rest
+
+Security Elevation Phase 3 additions:
+- WireProtocolHandler: Structured message format for vector governance events
+- IndexRebuildGovernor: Governed index rebuild with anomaly quarantine
+- DriftGovernor: Advanced drift detection and governance triggers
+- SandboxManager: OS-level sandbox integrations for untrusted execution
+
 Example:
     >>> from alfred.bat import BatInterceptor, RiskEngine, EnforcementEngine, GovernanceLedger
     >>> from alfred.bat.rules import DEFAULT_RULES
@@ -44,7 +54,7 @@ Example:
     >>> print(f"Allowed: {result.allowed}, Risk: {result.decision.classification.level}")
 """
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"
 __author__ = "Alfred Security Team"
 
 from .proposal import OperationProposal
@@ -161,6 +171,64 @@ from .encryption import (
     create_encryption,
 )
 
+# Security Elevation Phase 3 - Wire Protocol
+from .wire_protocol import (
+    WireProtocolHandler,
+    WireMessage,
+    ProtocolHeader,
+    MessageType,
+    MessagePriority,
+    VectorPayload,
+    AnomalyPayload,
+    AnomalyType,
+    DriftPayload,
+    IndexRebuildPayload,
+    QuarantineStatus,
+    create_protocol_handler,
+)
+
+# Security Elevation Phase 3 - Index Rebuild Governance
+from .index_governance import (
+    IndexRebuildGovernor,
+    AnomalyQuarantine,
+    QuarantinedArtifact,
+    QuarantineReason,
+    RebuildRequest,
+    RebuildProgress,
+    RebuildStatus,
+    RebuildApprovalStatus,
+    create_rebuild_governor,
+)
+
+# Security Elevation Phase 3 - Drift Analytics
+from .drift_analytics import (
+    DriftGovernor,
+    DriftDetector,
+    AnomalyAnalyzer,
+    DriftType,
+    AnomalyScore,
+    TriggerAction,
+    DriftTrigger,
+    DriftMetrics,
+    VectorStatistics,
+    create_drift_governor,
+)
+
+# Security Elevation Phase 3 - Sandbox
+from .sandbox import (
+    SandboxManager,
+    SandboxBase,
+    ProcessSandbox,
+    PlatformSandbox,
+    SandboxConfig,
+    SandboxResources,
+    SandboxStatus,
+    SandboxType,
+    IsolationLevel,
+    ExecutionResult,
+    create_sandbox_manager,
+)
+
 __all__ = [
     # Proposal
     "OperationProposal",
@@ -265,4 +333,50 @@ __all__ = [
     "EncryptedLedgerWriter",
     "EncryptionError",
     "create_encryption",
+    # Wire Protocol (Security Elevation Phase 3)
+    "WireProtocolHandler",
+    "WireMessage",
+    "ProtocolHeader",
+    "MessageType",
+    "MessagePriority",
+    "VectorPayload",
+    "AnomalyPayload",
+    "AnomalyType",
+    "DriftPayload",
+    "IndexRebuildPayload",
+    "QuarantineStatus",
+    "create_protocol_handler",
+    # Index Rebuild Governance (Security Elevation Phase 3)
+    "IndexRebuildGovernor",
+    "AnomalyQuarantine",
+    "QuarantinedArtifact",
+    "QuarantineReason",
+    "RebuildRequest",
+    "RebuildProgress",
+    "RebuildStatus",
+    "RebuildApprovalStatus",
+    "create_rebuild_governor",
+    # Drift Analytics (Security Elevation Phase 3)
+    "DriftGovernor",
+    "DriftDetector",
+    "AnomalyAnalyzer",
+    "DriftType",
+    "AnomalyScore",
+    "TriggerAction",
+    "DriftTrigger",
+    "DriftMetrics",
+    "VectorStatistics",
+    "create_drift_governor",
+    # Sandbox (Security Elevation Phase 3)
+    "SandboxManager",
+    "SandboxBase",
+    "ProcessSandbox",
+    "PlatformSandbox",
+    "SandboxConfig",
+    "SandboxResources",
+    "SandboxStatus",
+    "SandboxType",
+    "IsolationLevel",
+    "ExecutionResult",
+    "create_sandbox_manager",
 ]
