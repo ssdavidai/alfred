@@ -44,7 +44,7 @@ Example:
     >>> print(f"Allowed: {result.allowed}, Risk: {result.decision.classification.level}")
 """
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __author__ = "Alfred Security Team"
 
 from .proposal import OperationProposal
@@ -141,6 +141,26 @@ from .resource_governor import (
     create_resource_governor,
 )
 
+# Security Elevation Phase 2 - Governance Daemon
+from .daemon import (
+    GovernanceDaemon,
+    DaemonClient,
+    DaemonMode,
+    DaemonCommand,
+    DaemonMessage,
+    DaemonResponse,
+    create_daemon,
+)
+
+# Security Elevation Phase 2 - Ledger Encryption
+from .encryption import (
+    LedgerEncryption,
+    EncryptedBlock,
+    EncryptedLedgerWriter,
+    EncryptionError,
+    create_encryption,
+)
+
 __all__ = [
     # Proposal
     "OperationProposal",
@@ -231,4 +251,18 @@ __all__ = [
     "ResourceLimitExceeded",
     "DeserializationError",
     "create_resource_governor",
+    # Governance Daemon (Security Elevation Phase 2)
+    "GovernanceDaemon",
+    "DaemonClient",
+    "DaemonMode",
+    "DaemonCommand",
+    "DaemonMessage",
+    "DaemonResponse",
+    "create_daemon",
+    # Ledger Encryption (Security Elevation Phase 2)
+    "LedgerEncryption",
+    "EncryptedBlock",
+    "EncryptedLedgerWriter",
+    "EncryptionError",
+    "create_encryption",
 ]
