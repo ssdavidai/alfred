@@ -18,6 +18,13 @@ Phase 2 additions:
 - BreakGlassManager: Emergency override mechanism
 - Profiles: Pre-configured governance profiles
 
+Security Elevation Phase 1 additions:
+- IdentityRegistry: Agent identity verification (Ed25519/process attestation)
+- DelegationManager: Capability delegation with provenance chains
+- PolicyIntegrityGuard: Signed policy manifest verification
+- VectorGovernanceStore: Semantic state governance (ZVEC)
+- ResourceGovernor: Rate limits, queue depth, safe deserialization
+
 Example:
     >>> from alfred.bat import BatInterceptor, RiskEngine, EnforcementEngine, GovernanceLedger
     >>> from alfred.bat.rules import DEFAULT_RULES
@@ -37,7 +44,7 @@ Example:
     >>> print(f"Allowed: {result.allowed}, Risk: {result.decision.classification.level}")
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "Alfred Security Team"
 
 from .proposal import OperationProposal
@@ -76,6 +83,62 @@ from .profiles import (
     list_profiles,
     get_default_profile,
     PROFILES,
+)
+
+# Security Elevation Phase 1 - Track B: Identity, Delegation, Policy Integrity
+from .identity import (
+    IdentityRegistry,
+    IdentityMode,
+    AgentCredential,
+    CredentialStatus,
+    ProcessAttestation,
+    SignedProposal,
+    sign_proposal,
+    create_identity_registry,
+)
+from .delegation import (
+    DelegationManager,
+    DelegationChain,
+    DelegationContext,
+    Capability,
+    CapabilitySet,
+    DelegationError,
+    DEFAULT_CAPABILITIES,
+    create_delegation_manager,
+)
+from .policy_integrity import (
+    PolicyIntegrityGuard,
+    PolicyManifest,
+    ImmutableRoot,
+    StartupGate,
+    PolicyIntegrityError,
+    create_integrity_guard,
+)
+
+# Security Elevation Phase 1 - Track C: Semantic State Governance (ZVEC)
+from .zvec import (
+    VectorGovernanceStore,
+    VectorArtifact,
+    IndexMutationEnvelope,
+    DriftReport,
+    VectorOperation,
+    VerificationStrategy,
+    DriftSignal,
+    create_vector_store,
+)
+
+# Security Elevation Phase 1 - Track D: Platform/Operational Security
+from .resource_governor import (
+    ResourceGovernor,
+    ResourceLimits,
+    RateLimiter,
+    MetadataValidator,
+    QueueDepthMonitor,
+    LedgerRotator,
+    SafeDeserializer,
+    ResourceLimitExceeded,
+    DeserializationError,
+    create_resource_governor,
 )
 
 __all__ = [
@@ -123,4 +186,49 @@ __all__ = [
     "list_profiles",
     "get_default_profile",
     "PROFILES",
+    # Identity (Security Elevation Phase 1 - Track B)
+    "IdentityRegistry",
+    "IdentityMode",
+    "AgentCredential",
+    "CredentialStatus",
+    "ProcessAttestation",
+    "SignedProposal",
+    "sign_proposal",
+    "create_identity_registry",
+    # Delegation (Security Elevation Phase 1 - Track B)
+    "DelegationManager",
+    "DelegationChain",
+    "DelegationContext",
+    "Capability",
+    "CapabilitySet",
+    "DelegationError",
+    "DEFAULT_CAPABILITIES",
+    "create_delegation_manager",
+    # Policy Integrity (Security Elevation Phase 1 - Track B)
+    "PolicyIntegrityGuard",
+    "PolicyManifest",
+    "ImmutableRoot",
+    "StartupGate",
+    "PolicyIntegrityError",
+    "create_integrity_guard",
+    # ZVEC (Security Elevation Phase 1 - Track C)
+    "VectorGovernanceStore",
+    "VectorArtifact",
+    "IndexMutationEnvelope",
+    "DriftReport",
+    "VectorOperation",
+    "VerificationStrategy",
+    "DriftSignal",
+    "create_vector_store",
+    # Resource Governor (Security Elevation Phase 1 - Track D)
+    "ResourceGovernor",
+    "ResourceLimits",
+    "RateLimiter",
+    "MetadataValidator",
+    "QueueDepthMonitor",
+    "LedgerRotator",
+    "SafeDeserializer",
+    "ResourceLimitExceeded",
+    "DeserializationError",
+    "create_resource_governor",
 ]

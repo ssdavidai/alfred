@@ -259,7 +259,7 @@ class GovernanceLedger:
         try:
             # Append to file
             with open(self._path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry_data) + "\n")
+                f.write(json.dumps(entry_data, default=str) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
 

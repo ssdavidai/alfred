@@ -1,4 +1,4 @@
-"""
+﻿"""
 Wrappers for standard library functions.
 
 These wrappers intercept operations and route them through
@@ -73,10 +73,7 @@ def create_bat_subprocess_run(
         )
 
         if not result.allowed:
-            raise PermissionError(
-                f"Command blocked by Bat Protocol: {result.decision.rationale}\n"
-                f"Command: {cmd_str}"
-            )
+            raise PermissionError("GovernanceError: Operation denied by policy.")
 
         return original_run(*args, **kwargs)
 
@@ -135,10 +132,7 @@ def create_bat_popen(
             )
 
             if not result.allowed:
-                raise PermissionError(
-                    f"Command blocked by Bat Protocol: {result.decision.rationale}\n"
-                    f"Command: {cmd_str}"
-                )
+                raise PermissionError("GovernanceError: Operation denied by policy.")
 
             super().__init__(*args, **kwargs)
 
@@ -188,10 +182,7 @@ def create_bat_open(
             )
 
             if not result.allowed:
-                raise PermissionError(
-                    f"File write blocked by Bat Protocol: {result.decision.rationale}\n"
-                    f"File: {file}"
-                )
+                raise PermissionError("GovernanceError: Operation denied by policy.")
 
         # Intercept read operations (lower risk, but still logged)
         elif is_read:
@@ -206,10 +197,7 @@ def create_bat_open(
             )
 
             if not result.allowed:
-                raise PermissionError(
-                    f"File read blocked by Bat Protocol: {result.decision.rationale}\n"
-                    f"File: {file}"
-                )
+                raise PermissionError("GovernanceError: Operation denied by policy.")
 
         return original_open(file, mode, *args, **kwargs)
 
@@ -249,10 +237,7 @@ def create_bat_os_remove(
         )
 
         if not result.allowed:
-            raise PermissionError(
-                f"File deletion blocked by Bat Protocol: {result.decision.rationale}\n"
-                f"File: {path}"
-            )
+            raise PermissionError("GovernanceError: Operation denied by policy.")
 
         return original_remove(path, *args, **kwargs)
 
@@ -292,10 +277,7 @@ def create_bat_shutil_rmtree(
         )
 
         if not result.allowed:
-            raise PermissionError(
-                f"Directory deletion blocked by Bat Protocol: {result.decision.rationale}\n"
-                f"Directory: {path}"
-            )
+            raise PermissionError("GovernanceError: Operation denied by policy.")
 
         return original_rmtree(path, *args, **kwargs)
 
@@ -435,3 +417,4 @@ def patch_all(
     shutil.rmtree = create_bat_shutil_rmtree(interceptor, agent_id, shutil.rmtree)
 
     return originals
+

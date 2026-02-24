@@ -10,9 +10,7 @@ Provides command-line interface for:
 
 import argparse
 import json
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 import logging
 
 from .risk import RiskLevel
@@ -20,6 +18,21 @@ from .enforcement import EnforcementMode
 
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_signing_key(raw: str | None) -> bytes | None:
+    """Parse a hex-encoded signing key value."""
+    if raw is None:
+        return None
+    value = raw.strip()
+    if value.startswith("0x"):
+        value = value[2:]
+    if not value:
+        return None
+    try:
+        return bytes.fromhex(value)
+    except ValueError:
+        raise ValueError("Invalid signing key. Expected hex-encoded bytes.")
 
 
 def bat_status(args: argparse.Namespace) -> int:
@@ -31,8 +44,7 @@ def bat_status(args: argparse.Namespace) -> int:
     Returns:
         Exit code
     """
-    from ..interceptor import BatInterceptor
-    from ..ledger import GovernanceLedger
+    from .ledger import GovernanceLedger
 
     print("=" * 60)
     print("BAT PROTOCOL STATUS")
@@ -63,19 +75,29 @@ def bat_status(args: argparse.Namespace) -> int:
         print(f"Ledger Entries: {entry_count}")
 
         # Verify integrity
+        signing_key = None
         try:
-            ledger = GovernanceLedger(ledger_path, b"status-check-key")
-            valid, errors = ledger.verify()
-            print(f"Ledger Integrity: {'✓ Valid' if valid else '✗ INVALID'}")
-            if errors:
-                print(f"  Errors: {len(errors)}")
-                for err in errors[:3]:
-                    print(f"    - {err}")
-        except Exception as e:
-            print(f"Ledger Integrity: ✗ Error: {e}")
+            signing_key = _parse_signing_key(getattr(args, "signing_key", None))
+        except ValueError as e:
+            print(f"Ledger Integrity: skipped ({e})")
 
-        # Show stats
-        stats = ledger.get_stats()
+        if signing_key is not None:
+            try:
+                ledger = GovernanceLedger(ledger_path, signing_key)
+                valid, errors = ledger.verify()
+                print(f"Ledger Integrity: {'valid' if valid else 'INVALID'}")
+                if errors:
+                    print(f"  Errors: {len(errors)}")
+                    for err in errors[:3]:
+                        print(f"    - {err}")
+            except Exception as e:
+                print(f"Ledger Integrity: error: {e}")
+        else:
+            print("Ledger Integrity: skipped (no signing key provided)")
+
+        # Show stats (does not require verification key).
+        stats_ledger = GovernanceLedger(ledger_path, b"stats-only-key")
+        stats = stats_ledger.get_stats()
         print(f"\nActions:")
         for action, count in stats.get("actions", {}).items():
             print(f"  {action}: {count}")
@@ -186,9 +208,9 @@ def bat_test_policy(args: argparse.Namespace) -> int:
     Returns:
         Exit code
     """
-    from .parser import DSLParser
-    from ..risk import RiskEngine
-    from ..proposal import OperationProposal
+    from .dsl.parser import DSLParser
+    from .risk import RiskEngine
+    from .proposal import OperationProposal
 
     rules_path = Path(args.rules)
 
@@ -263,7 +285,7 @@ def bat_verify_ledger(args: argparse.Namespace) -> int:
     Returns:
         Exit code
     """
-    from ..ledger import GovernanceLedger
+    from .ledger import GovernanceLedger
 
     ledger_path = getattr(args, 'ledger_path', None)
     if not ledger_path:
@@ -278,9 +300,14 @@ def bat_verify_ledger(args: argparse.Namespace) -> int:
     print(f"Verifying ledger: {ledger_path}")
     print()
 
-    # We need the signing key for verification
-    # In production, this would come from secure storage
-    signing_key = getattr(args, 'signing_key', b"default-verification-key")
+    try:
+        signing_key = _parse_signing_key(getattr(args, "signing_key", None))
+    except ValueError as e:
+        print(str(e))
+        return 1
+    if signing_key is None:
+        print("Signing key required. Provide --signing-key as hex bytes.")
+        return 1
 
     ledger = GovernanceLedger(ledger_path, signing_key)
     valid, errors = ledger.verify()
@@ -308,9 +335,9 @@ def bat_explain(args: argparse.Namespace) -> int:
     Returns:
         Exit code
     """
-    from .parser import DSLParser
-    from ..risk import RiskEngine
-    from ..proposal import OperationProposal
+    from .dsl.parser import DSLParser
+    from .risk import RiskEngine
+    from .proposal import OperationProposal
 
     rules_path = Path(getattr(args, 'rules', 'rules.yaml'))
 
@@ -375,6 +402,7 @@ def build_bat_parser(subparsers) -> None:
     )
     status.add_argument("--config", help="Path to config file")
     status.add_argument("--ledger-path", help="Path to ledger file")
+    status.add_argument("--signing-key", help="Ledger signing key (hex)")
     status.set_defaults(func=bat_status)
 
     # bat audit
@@ -404,7 +432,7 @@ def build_bat_parser(subparsers) -> None:
         help="Verify ledger integrity"
     )
     verify.add_argument("--ledger-path", help="Path to ledger file")
-    verify.add_argument("--signing-key", help="Signing key (hex)")
+    verify.add_argument("--signing-key", help="Signing key (hex, required)")
     verify.set_defaults(func=bat_verify_ledger)
 
     # bat explain

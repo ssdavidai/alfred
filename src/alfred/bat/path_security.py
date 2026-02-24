@@ -122,17 +122,16 @@ class PathHardener:
 
         # Normalize path
         try:
-            # Expand user home directory
             expanded = Path(path).expanduser()
-
-            # Resolve to absolute path (follows symlinks by default)
-            if allow_symlinks:
-                normalized = expanded.resolve()
+            if base_dir is not None and not expanded.is_absolute():
+                candidate = Path(base_dir).expanduser() / expanded
+            elif expanded.is_absolute():
+                candidate = expanded
             else:
-                # Resolve without following symlinks
-                normalized = Path(os.path.normpath(str(expanded)))
-                if not normalized.is_absolute():
-                    normalized = Path.cwd() / normalized
+                candidate = Path.cwd() / expanded
+
+            # Always resolve for canonical containment checks.
+            normalized = candidate.resolve(strict=False)
 
         except OSError as e:
             raise PathSecurityError(f"Invalid path: {e}")
@@ -154,11 +153,25 @@ class PathHardener:
                     f"Path '{normalized}' is outside allowed directory '{base}'"
                 )
 
-            # Check for symlink escape
-            if not allow_symlinks and normalized.is_symlink():
+            # Check for symlink escape when symlinks are disabled.
+            # We must inspect all existing components, not only the terminal path.
+            if not allow_symlinks and cls._has_symlink_component(candidate):
                 raise PathSecurityError("Symbolic links are not allowed")
 
         return normalized
+
+    @classmethod
+    def _has_symlink_component(cls, candidate: Path) -> bool:
+        """Return True if any existing path component is a symlink."""
+        absolute = candidate if candidate.is_absolute() else (Path.cwd() / candidate)
+        current = Path(absolute.anchor) if absolute.anchor else Path(".")
+        for part in absolute.parts:
+            if current.anchor and part == current.anchor:
+                continue
+            current = current / part
+            if current.exists() and current.is_symlink():
+                return True
+        return False
 
     @classmethod
     def is_sensitive(cls, path: str) -> bool:

@@ -48,16 +48,26 @@ class InterceptResult:
         """Allow using InterceptResult in boolean context."""
         return self.allowed
 
-    def raise_if_blocked(self) -> None:
+    def feedback_message(self, opaque: bool = True) -> str:
+        """Agent-facing feedback message.
+
+        In secure/enforce usage, callers should use opaque=True to avoid
+        leaking policy internals through denial rationale.
+        """
+        if self.allowed:
+            return "Operation allowed."
+        if opaque:
+            return "GovernanceError: Operation denied by policy."
+        return f"GovernanceError: {self.decision.rationale}"
+
+    def raise_if_blocked(self, opaque: bool = True) -> None:
         """Raise PermissionError if the operation is blocked.
 
         Raises:
             PermissionError: If the operation is not allowed
         """
         if not self.allowed:
-            raise PermissionError(
-                f"Operation blocked by Bat Protocol: {self.decision.rationale}"
-            )
+            raise PermissionError(self.feedback_message(opaque=opaque))
 
 
 class BatInterceptor:
@@ -201,6 +211,45 @@ class BatInterceptor:
             decision=decision,
             proposal=proposal,
         )
+
+    def execute(
+        self,
+        agent_id: str,
+        operation_type: str,
+        target: str,
+        executor: Callable[[], Any],
+        metadata: Optional[dict] = None,
+        content: str = "",
+        invariant_check: Optional[Callable[[OperationProposal], tuple[bool, str]]] = None,
+    ) -> Any:
+        """Atomic governance handoff scaffold.
+
+        The agent submits a complete proposal and delegated executor callback.
+        Governance evaluates first, then optionally revalidates invariants at
+        execution time, then performs execution.
+        """
+        result = self.intercept(
+            agent_id=agent_id,
+            operation_type=operation_type,
+            target=target,
+            metadata=metadata,
+            content=content,
+        )
+        result.raise_if_blocked(opaque=True)
+
+        if invariant_check is not None:
+            ok, reason = invariant_check(result.proposal)
+            if not ok:
+                logger.warning(
+                    "execution.invariant_failed agent=%s op=%s target=%s reason=%s",
+                    agent_id,
+                    operation_type,
+                    target,
+                    reason,
+                )
+                raise PermissionError("GovernanceError: Operation denied by policy.")
+
+        return executor()
 
     def intercept_file_read(
         self,
