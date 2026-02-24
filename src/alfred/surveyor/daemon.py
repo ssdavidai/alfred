@@ -167,43 +167,56 @@ class Daemon:
         all_changed = result.changed_semantic | result.changed_structural
         if not all_changed:
             log.info("daemon.no_changed_clusters")
-        else:
-            # Build cluster membership map (semantic)
-            cluster_members: dict[int, list[str]] = {}
-            for path, cid in result.semantic.items():
-                if cid == -1:
-                    continue
-                cluster_members.setdefault(cid, []).append(path)
+            # Still process drift monitoring even when no clusters changed
+            try:
+                self.drift.process(
+                    state=self.state,
+                    model_backend="openai-compatible" if self.cfg.ollama.api_key else "ollama",
+                    embedding_model=self.cfg.ollama.model,
+                )
+            except Exception as e:
+                log.warning("daemon.drift_monitor_failed", error=str(e))
+            return
 
-            for cid in all_changed:
-                members = cluster_members.get(cid, [])
-                if len(members) < self.cfg.labeler.min_cluster_size_to_label:
-                    continue
+        # Build cluster membership map (semantic)
+        cluster_members: dict[int, list[str]] = {}
+        for path, cid in result.semantic.items():
+            if cid == -1:
+                continue
+            cluster_members.setdefault(cid, []).append(path)
 
-                # Label the cluster
-                tags = await self.labeler.label_cluster(cid, members, records)
-                if tags:
-                    # Write tags to all members
-                    for path in members:
-                        self.writer.write_alfred_tags(path, tags)
+        clusters_processed = 0
+        for cid in all_changed:
+            members = cluster_members.get(cid, [])
+            if len(members) < self.cfg.labeler.min_cluster_size_to_label:
+                continue
 
-                    # Update cluster state
-                    cluster_key = f"semantic_{cid}"
-                    from .state import ClusterState
-                    from datetime import datetime, timezone
-                    self.state.clusters[cluster_key] = ClusterState(
-                        label=tags,
-                        member_files=members,
-                        last_labeled=datetime.now(timezone.utc).isoformat(),
-                    )
+            # Label the cluster
+            tags = await self.labeler.label_cluster(cid, members, records)
+            if tags:
+                # Write tags to all members
+                for path in members:
+                    self.writer.write_alfred_tags(path, tags)
 
-                # Suggest relationships
-                rels = await self.labeler.suggest_relationships(cid, members, records)
-                for rel in rels:
-                    source = rel.get("source", "")
-                    if source in records:
-                        self.writer.write_relationships(source, [rel])
+                # Update cluster state
+                cluster_key = f"semantic_{cid}"
+                from .state import ClusterState
+                from datetime import datetime, timezone
+                self.state.clusters[cluster_key] = ClusterState(
+                    label=tags,
+                    member_files=members,
+                    last_labeled=datetime.now(timezone.utc).isoformat(),
+                )
+                clusters_processed += 1
 
+            # Suggest relationships
+            rels = await self.labeler.suggest_relationships(cid, members, records)
+            for rel in rels:
+                source = rel.get("source", "")
+                if source in records:
+                    self.writer.write_relationships(source, [rel])
+
+        # Process drift monitoring after labeling
         try:
             self.drift.process(
                 state=self.state,
@@ -213,4 +226,4 @@ class Daemon:
         except Exception as e:
             log.warning("daemon.drift_monitor_failed", error=str(e))
 
-        log.info("daemon.labeling_complete", clusters_processed=len(all_changed))
+        log.info("daemon.labeling_complete", clusters_processed=clusters_processed)
