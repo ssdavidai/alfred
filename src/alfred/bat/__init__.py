@@ -11,9 +11,16 @@ This module provides:
 - SecretBackend: Secure secret storage interface
 - BatInterceptor: Main entry point for governance
 
+Phase 2 additions:
+- DSL: YAML-based declarative risk rules
+- PathHardener: Path security validation
+- TemporalRiskAccumulator: Sliding window risk analysis
+- BreakGlassManager: Emergency override mechanism
+- Profiles: Pre-configured governance profiles
+
 Example:
     >>> from alfred.bat import BatInterceptor, RiskEngine, EnforcementEngine, GovernanceLedger
-    >>> from alfred.bat.rules.default import DEFAULT_RULES
+    >>> from alfred.bat.rules import DEFAULT_RULES
     >>> 
     >>> # Initialize governance components
     >>> risk_engine = RiskEngine(rules=DEFAULT_RULES)
@@ -30,7 +37,7 @@ Example:
     >>> print(f"Allowed: {result.allowed}, Risk: {result.decision.classification.level}")
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__ = "Alfred Security Team"
 
 from .proposal import OperationProposal
@@ -39,6 +46,7 @@ from .enforcement import (
     EnforcementEngine,
     EnforcementPolicy,
     EnforcementDecision,
+    EnforcementMode,
     Action,
 )
 from .ledger import GovernanceLedger, LedgerEntry, LedgerWriteError
@@ -50,6 +58,25 @@ from .secrets import (
     get_default_backend,
 )
 from .interceptor import BatInterceptor, InterceptResult
+from .path_security import PathHardener, PathSecurityError
+from .temporal import (
+    TemporalRiskAccumulator,
+    SequenceRule,
+    RiskEscalation,
+)
+from .break_glass import (
+    BreakGlassManager,
+    BreakGlassOverride,
+    BreakGlassSession,
+)
+from .profiles import (
+    BatProfile,
+    ProfileName,
+    get_profile,
+    list_profiles,
+    get_default_profile,
+    PROFILES,
+)
 
 __all__ = [
     # Proposal
@@ -63,6 +90,7 @@ __all__ = [
     "EnforcementEngine",
     "EnforcementPolicy",
     "EnforcementDecision",
+    "EnforcementMode",
     "Action",
     # Ledger
     "GovernanceLedger",
@@ -77,4 +105,22 @@ __all__ = [
     # Interceptor
     "BatInterceptor",
     "InterceptResult",
+    # Path Security (Phase 2)
+    "PathHardener",
+    "PathSecurityError",
+    # Temporal Analysis (Phase 2)
+    "TemporalRiskAccumulator",
+    "SequenceRule",
+    "RiskEscalation",
+    # Break-Glass (Phase 2)
+    "BreakGlassManager",
+    "BreakGlassOverride",
+    "BreakGlassSession",
+    # Profiles (Phase 2)
+    "BatProfile",
+    "ProfileName",
+    "get_profile",
+    "list_profiles",
+    "get_default_profile",
+    "PROFILES",
 ]
