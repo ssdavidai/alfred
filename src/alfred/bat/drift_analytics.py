@@ -121,12 +121,31 @@ class DriftMetrics:
     def __post_init__(self):
         """Compute derived values."""
         self.deviation = abs(self.current_value - self.baseline_value)
+        
+        # Compute relative deviation when baseline is non-zero
+        # When baseline is 0, use absolute deviation compared to threshold
         if self.baseline_value != 0:
             self.relative_deviation = self.deviation / abs(self.baseline_value)
+        else:
+            # For zero baseline, relative_deviation is infinity if there's any deviation
+            # We use absolute deviation compared to threshold for scoring
+            self.relative_deviation = float('inf') if self.deviation > 0 else 0.0
         
-        # Classify score based on threshold
+        # Classify score based on threshold and deviation
+        # Special handling for zero baseline: use absolute deviation vs threshold
         if self.deviation == 0:
             self.score = AnomalyScore.NORMAL
+        elif self.baseline_value == 0:
+            # Zero baseline: compare absolute deviation to threshold
+            # If threshold is also 0, any deviation is critical
+            if self.threshold == 0:
+                self.score = AnomalyScore.CRITICAL
+            elif self.deviation < self.threshold:
+                self.score = AnomalyScore.WARNING
+            elif self.deviation < self.threshold * 2:
+                self.score = AnomalyScore.ANOMALOUS
+            else:
+                self.score = AnomalyScore.CRITICAL
         elif self.relative_deviation < 0.1:
             self.score = AnomalyScore.NORMAL
         elif self.relative_deviation < 0.25:
@@ -323,35 +342,62 @@ class DriftDetector:
         count = len(vectors)
         dimensions = len(vectors[0])
         
-        # Compute centroid (mean vector)
+        # Validate all vectors have consistent dimensions
+        # Track dimension mismatches as anomalies
+        dimension_mismatch = False
+        for i, v in enumerate(vectors):
+            if len(v) != dimensions:
+                logger.warning(
+                    f"Vector {i} has {len(v)} dimensions, expected {dimensions}. "
+                    f"Using minimum dimension count for statistics."
+                )
+                dimension_mismatch = True
+                dimensions = min(dimensions, len(v))
+        
+        if dimensions == 0:
+            return VectorStatistics(count=count, dimensions=0)
+        
+        # Compute centroid (mean vector) - only use valid dimensions
         centroid = [0.0] * dimensions
+        valid_count = 0
         for v in vectors:
-            for i, val in enumerate(v):
-                centroid[i] += val
-        centroid = [c / count for c in centroid]
+            if len(v) >= dimensions:
+                valid_count += 1
+                for i in range(dimensions):
+                    centroid[i] += v[i]
+        
+        if valid_count == 0:
+            return VectorStatistics(count=count, dimensions=dimensions)
+        
+        centroid = [c / valid_count for c in centroid]
         
         # Compute variance and std_dev
         variance = [0.0] * dimensions
         for v in vectors:
-            for i, val in enumerate(v):
-                variance[i] += (val - centroid[i]) ** 2
-        variance = [v / count for v in variance]
+            if len(v) >= dimensions:
+                for i in range(dimensions):
+                    variance[i] += (v[i] - centroid[i]) ** 2
+        variance = [v / valid_count for v in variance]
         std_dev = [math.sqrt(v) for v in variance]
         
         # Compute norms
         norms = [self._compute_norm(v) for v in vectors]
-        min_norm = min(norms)
-        max_norm = max(norms)
-        mean_norm = statistics.mean(norms)
+        min_norm = min(norms) if norms else 0.0
+        max_norm = max(norms) if norms else 0.0
+        mean_norm = statistics.mean(norms) if norms else 0.0
         
         # Compute sparsity (ratio of near-zero elements)
-        sparsity = sum(
-            1 for v in vectors
-            for val in v
-            if abs(val) < 1e-10
-        ) / (count * dimensions)
+        total_elements = sum(len(v) for v in vectors)
+        if total_elements == 0:
+            sparsity = 0.0
+        else:
+            sparsity = sum(
+                1 for v in vectors
+                for val in v
+                if abs(val) < 1e-10
+            ) / total_elements
         
-        return VectorStatistics(
+        stats = VectorStatistics(
             count=count,
             dimensions=dimensions,
             centroid=centroid,
@@ -362,6 +408,16 @@ class DriftDetector:
             mean_norm=mean_norm,
             sparsity=sparsity,
         )
+        
+        # Store dimension mismatch in metadata if detected
+        if dimension_mismatch:
+            # Return stats but note the anomaly
+            logger.warning(
+                f"Dimension mismatch detected in vector batch. "
+                f"Statistics computed with {dimensions} dimensions from {valid_count}/{count} vectors."
+            )
+        
+        return stats
     
     def _compute_norm(self, vector: list[float]) -> float:
         """Compute L2 norm of a vector."""
@@ -756,12 +812,14 @@ class DriftGovernor:
         self,
         vectors: Sequence[list[float]],
         reference_embeddings: Optional[Sequence[list[float]]] = None,
+        expected_dimensions: Optional[int] = None,
     ) -> Optional[DriftTrigger]:
         """Evaluate vectors for drift and generate triggers.
         
         Args:
             vectors: Vectors to evaluate
             reference_embeddings: Reference embeddings for plausibility
+            expected_dimensions: Expected number of dimensions (uses baseline if None)
         
         Returns:
             DriftTrigger if thresholds exceeded, None otherwise
@@ -770,11 +828,15 @@ class DriftGovernor:
             # Detect drift
             drift_metrics = self._detector.detect(vectors)
             
+            # Get expected dimensions from baseline if not provided
+            if expected_dimensions is None:
+                expected_dimensions = self._detector._baseline.dimensions if self._detector._baseline else 0
+            
             # Analyze individual embeddings
             all_metrics = list(drift_metrics)
             for v in vectors[:10]:  # Sample first 10 for efficiency
                 anomaly_metrics = self._analyzer.analyze_embedding(
-                    v, len(v) if v else 0, reference_embeddings
+                    v, expected_dimensions, reference_embeddings
                 )
                 all_metrics.extend(anomaly_metrics)
             

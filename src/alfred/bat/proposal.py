@@ -139,6 +139,28 @@ class OperationProposal:
         data = json.dumps(asdict(self), sort_keys=True, default=str)
         return hashlib.sha256(data.encode()).hexdigest()
 
+    def to_dict(self) -> dict:
+        """Serialize to dictionary.
+
+        Returns:
+            Dictionary representation
+
+        Example:
+            >>> proposal = OperationProposal(agent_id="test", operation_type="read_file", target="/tmp/file")
+            >>> d = proposal.to_dict()
+            >>> d["agent_id"]
+            'test'
+        """
+        return {
+            "proposal_id": self.proposal_id,
+            "agent_id": self.agent_id,
+            "operation_type": self.operation_type,
+            "target": self.target,
+            "metadata": self.metadata,
+            "content_hash": self.content_hash,
+            "timestamp": self.timestamp.isoformat(),
+        }
+
     def to_json(self) -> str:
         """Serialize to JSON for wire transmission.
 
@@ -151,7 +173,7 @@ class OperationProposal:
             >>> '"agent_id": "test"' in json_str
             True
         """
-        return json.dumps(asdict(self), default=str)
+        return json.dumps(self.to_dict())
 
     @classmethod
     def from_json(cls, json_str: str) -> "OperationProposal":

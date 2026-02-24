@@ -35,6 +35,14 @@ Security Elevation Phase 3 additions:
 - DriftGovernor: Advanced drift detection and governance triggers
 - SandboxManager: OS-level sandbox integrations for untrusted execution
 
+Phase 4 Enterprise additions:
+- QuorumManager: Multi-party authorization for high-risk operations
+- PolicySigner: Cryptographic policy signing
+- ImmutablePolicyStore: Policy version management with hash chaining
+- RemotePolicyClient: Remote policy distribution with caching
+- LedgerSynchronizer: Multi-node ledger synchronization
+- ComplianceReporter: SOC 2 / ISO 27001 compliance reporting
+
 Example:
     >>> from alfred.bat import BatInterceptor, RiskEngine, EnforcementEngine, GovernanceLedger
     >>> from alfred.bat.rules import DEFAULT_RULES
@@ -54,7 +62,7 @@ Example:
     >>> print(f"Allowed: {result.allowed}, Risk: {result.decision.classification.level}")
 """
 
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 __author__ = "Alfred Security Team"
 
 from .proposal import OperationProposal
@@ -229,6 +237,62 @@ from .sandbox import (
     create_sandbox_manager,
 )
 
+# Phase 4 Enterprise - Quorum Approval
+from .quorum import (
+    QuorumManager,
+    ApprovalRequest,
+    ApprovalStatus,
+    ApproverIdentity,
+    AuthMethod,
+    create_quorum_manager,
+)
+
+# Phase 4 Enterprise - Policy Signing
+from .policy_signing import (
+    PolicySigner,
+    SignedPolicy,
+    ImmutablePolicyStore,
+    PolicyVersionManager,
+    PolicyStatus,
+    create_policy_store,
+)
+
+# Phase 4 Enterprise - Remote Policy Distribution
+from .policy_server import (
+    RemotePolicyClient,
+    PolicyServer,
+    RemotePolicyResponse,
+    CachedPolicy,
+    PolicySource,
+    create_remote_client,
+    create_policy_server,
+)
+
+# Phase 4 Enterprise - Ledger Synchronization
+from .ledger_sync import (
+    LedgerSynchronizer,
+    NodeInfo,
+    SyncEntry,
+    SyncState,
+    SyncStatus,
+    ConflictResolution,
+    create_ledger_synchronizer,
+)
+
+# Phase 4 Enterprise - Compliance Reporting
+from .compliance import (
+    ComplianceReporter,
+    ComplianceFramework,
+    ComplianceControl,
+    ControlStatus,
+    Evidence,
+    EvidenceType,
+    ControlAssessment,
+    SOC2_CONTROLS,
+    ISO27001_CONTROLS,
+    create_compliance_reporter,
+)
+
 __all__ = [
     # Proposal
     "OperationProposal",
@@ -379,4 +443,45 @@ __all__ = [
     "IsolationLevel",
     "ExecutionResult",
     "create_sandbox_manager",
+    # Quorum Approval (Phase 4 Enterprise)
+    "QuorumManager",
+    "ApprovalRequest",
+    "ApprovalStatus",
+    "ApproverIdentity",
+    "AuthMethod",
+    "create_quorum_manager",
+    # Policy Signing (Phase 4 Enterprise)
+    "PolicySigner",
+    "SignedPolicy",
+    "ImmutablePolicyStore",
+    "PolicyVersionManager",
+    "PolicyStatus",
+    "create_policy_store",
+    # Remote Policy Distribution (Phase 4 Enterprise)
+    "RemotePolicyClient",
+    "PolicyServer",
+    "RemotePolicyResponse",
+    "CachedPolicy",
+    "PolicySource",
+    "create_remote_client",
+    "create_policy_server",
+    # Ledger Synchronization (Phase 4 Enterprise)
+    "LedgerSynchronizer",
+    "NodeInfo",
+    "SyncEntry",
+    "SyncState",
+    "SyncStatus",
+    "ConflictResolution",
+    "create_ledger_synchronizer",
+    # Compliance Reporting (Phase 4 Enterprise)
+    "ComplianceReporter",
+    "ComplianceFramework",
+    "ComplianceControl",
+    "ControlStatus",
+    "Evidence",
+    "EvidenceType",
+    "ControlAssessment",
+    "SOC2_CONTROLS",
+    "ISO27001_CONTROLS",
+    "create_compliance_reporter",
 ]
