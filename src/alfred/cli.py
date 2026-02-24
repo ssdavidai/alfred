@@ -485,6 +485,30 @@ def cmd_surveyor(args: argparse.Namespace) -> None:
         print("\nStopped.")
 
 
+def cmd_drift(args: argparse.Namespace) -> None:
+    raw = _load_unified_config(args.config)
+
+    if "surveyor" not in raw:
+        print("Surveyor is not configured in this config file.")
+        return
+
+    from alfred.surveyor.config import load_from_unified
+    from alfred.surveyor import drift_cli as dcli
+
+    config = load_from_unified(raw)
+    subcmd = getattr(args, "drift_cmd", None)
+    if subcmd == "status":
+        dcli.cmd_status(config)
+    elif subcmd == "history":
+        dcli.cmd_history(config, limit=args.limit)
+    elif subcmd == "show":
+        dcli.cmd_show(config, args.timestamp)
+    else:
+        print("Usage: alfred drift {status|history|show}")
+        print("Run `alfred drift --help` for details.")
+        sys.exit(1)
+
+
 # --- Argument parser ---
 
 def build_parser() -> argparse.ArgumentParser:
@@ -623,6 +647,15 @@ def build_parser() -> argparse.ArgumentParser:
     # surveyor
     sub.add_parser("surveyor", help="Start surveyor pipeline")
 
+    # drift
+    drift = sub.add_parser("drift", help="Surveyor semantic drift monitor")
+    drift_sub = drift.add_subparsers(dest="drift_cmd")
+    drift_sub.add_parser("status", help="Show latest drift report summary")
+    drift_history = drift_sub.add_parser("history", help="List available drift reports")
+    drift_history.add_argument("--limit", type=int, default=10)
+    drift_show = drift_sub.add_parser("show", help="Show a drift report by timestamp or filename")
+    drift_show.add_argument("timestamp", help="Report timestamp or filename (e.g. 20260224T120000Z)")
+
     # tui
     sub.add_parser("tui", help="Launch interactive Ink TUI dashboard (requires Node.js)")
 
@@ -653,6 +686,7 @@ def main() -> None:
         "process": cmd_process,
         "temporal": cmd_temporal,
         "surveyor": cmd_surveyor,
+        "drift": cmd_drift,
         "tui": cmd_tui,
     }
 

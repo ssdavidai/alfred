@@ -80,6 +80,18 @@ class LoggingConfig:
 
 
 @dataclass
+class FeatureFlags:
+    semantic_drift_monitor: bool = False
+
+
+@dataclass
+class SemanticDriftConfig:
+    snapshot_retention: int = 10
+    similarity_threshold: float = 0.5
+    warn_on_high_drift: bool = True
+
+
+@dataclass
 class PipelineConfig:
     vault: VaultConfig
     watcher: WatcherConfig
@@ -90,6 +102,8 @@ class PipelineConfig:
     labeler: LabelerConfig
     state: StateConfig
     logging: LoggingConfig
+    features: FeatureFlags = field(default_factory=FeatureFlags)
+    semantic_drift: SemanticDriftConfig = field(default_factory=SemanticDriftConfig)
 
 
 _ENV_PATTERN = re.compile(r"\$\{(\w+)\}")
@@ -160,6 +174,8 @@ def load_config(config_path: str | Path) -> PipelineConfig:
         labeler=_build_dataclass(LabelerConfig, raw.get("labeler")),
         state=_build_dataclass(StateConfig, raw.get("state")),
         logging=_build_dataclass(LoggingConfig, raw.get("logging")),
+        features=_build_dataclass(FeatureFlags, raw.get("features")),
+        semantic_drift=_build_dataclass(SemanticDriftConfig, raw.get("semantic_drift")),
     )
 
 
@@ -177,4 +193,6 @@ def load_from_unified(raw: dict) -> PipelineConfig:
         labeler=_build_dataclass(LabelerConfig, tool.get("labeler")),
         state=_build_dataclass(StateConfig, tool.get("state")),
         logging=_build_dataclass(LoggingConfig, raw.get("logging")),
+        features=_build_dataclass(FeatureFlags, raw.get("features")),
+        semantic_drift=_build_dataclass(SemanticDriftConfig, raw.get("semantic_drift")),
     )

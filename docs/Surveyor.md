@@ -197,6 +197,14 @@ All configuration lives in `config.yaml` under the `surveyor` section.
 ### Full Example
 
 ```yaml
+features:
+  semantic_drift_monitor: false
+
+semantic_drift:
+  snapshot_retention: 10
+  similarity_threshold: 0.5
+  warn_on_high_drift: true
+
 surveyor:
   watcher:
     debounce_seconds: 30
@@ -266,6 +274,12 @@ surveyor:
 **State:**
 - `path`: State persistence file location (default: `./data/surveyor_state.json`)
 
+**Semantic Drift Monitor (optional):**
+- `features.semantic_drift_monitor`: Enable snapshot + drift comparison layer (default: false)
+- `semantic_drift.snapshot_retention`: Number of snapshots to retain (default: 10)
+- `semantic_drift.similarity_threshold`: Threshold for split/merge and new/dissolved heuristics (default: 0.5)
+- `semantic_drift.warn_on_high_drift`: Log warning when churn exceeds threshold (default: true)
+
 ## Usage
 
 ### Run Once
@@ -318,6 +332,8 @@ Surveyor maintains several data files:
 - `data/surveyor_state.json`: File hashes, cluster assignments, labeling history
 - `data/surveyor.log`: Processing logs
 - `data/vault_audit.log`: Append-only log of all vault mutations
+- `data/semantic_snapshots/*.json`: Cluster snapshots per run (when enabled)
+- `data/semantic_drift/*.log`: Drift reports between consecutive snapshots (when enabled)
 
 State files can be deleted to force full re-processing. The vault itself is always the source of truth.
 

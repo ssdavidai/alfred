@@ -266,6 +266,14 @@ def run_quickstart() -> None:
             "level": "INFO",
             "dir": "./data",
         },
+        "features": {
+            "semantic_drift_monitor": False,
+        },
+        "semantic_drift": {
+            "snapshot_retention": 10,
+            "similarity_threshold": 0.5,
+            "warn_on_high_drift": True,
+        },
         "curator": {
             "inbox_dir": "inbox",
             "processed_dir": "inbox/processed",

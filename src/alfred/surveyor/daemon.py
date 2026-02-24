@@ -9,6 +9,7 @@ import structlog
 
 from .clusterer import Clusterer
 from .config import PipelineConfig
+from .drift import DriftMonitor
 from .embedder import Embedder
 from .labeler import Labeler
 from .parser import parse_file, VaultRecord
@@ -33,6 +34,11 @@ class Daemon:
         self.clusterer = Clusterer(cfg.clustering, self.state)
         self.labeler = Labeler(cfg.openrouter, cfg.labeler)
         self.writer = VaultWriter(cfg.vault.path, self.state)
+        self.drift = DriftMonitor(
+            data_dir=Path(cfg.state.path).resolve().parent,
+            config=cfg.semantic_drift,
+            enabled=cfg.features.semantic_drift_monitor,
+        )
 
     def request_shutdown(self) -> None:
         log.info("daemon.shutdown_requested")
@@ -161,42 +167,50 @@ class Daemon:
         all_changed = result.changed_semantic | result.changed_structural
         if not all_changed:
             log.info("daemon.no_changed_clusters")
-            return
+        else:
+            # Build cluster membership map (semantic)
+            cluster_members: dict[int, list[str]] = {}
+            for path, cid in result.semantic.items():
+                if cid == -1:
+                    continue
+                cluster_members.setdefault(cid, []).append(path)
 
-        # Build cluster membership map (semantic)
-        cluster_members: dict[int, list[str]] = {}
-        for path, cid in result.semantic.items():
-            if cid == -1:
-                continue
-            cluster_members.setdefault(cid, []).append(path)
+            for cid in all_changed:
+                members = cluster_members.get(cid, [])
+                if len(members) < self.cfg.labeler.min_cluster_size_to_label:
+                    continue
 
-        for cid in all_changed:
-            members = cluster_members.get(cid, [])
-            if len(members) < self.cfg.labeler.min_cluster_size_to_label:
-                continue
+                # Label the cluster
+                tags = await self.labeler.label_cluster(cid, members, records)
+                if tags:
+                    # Write tags to all members
+                    for path in members:
+                        self.writer.write_alfred_tags(path, tags)
 
-            # Label the cluster
-            tags = await self.labeler.label_cluster(cid, members, records)
-            if tags:
-                # Write tags to all members
-                for path in members:
-                    self.writer.write_alfred_tags(path, tags)
+                    # Update cluster state
+                    cluster_key = f"semantic_{cid}"
+                    from .state import ClusterState
+                    from datetime import datetime, timezone
+                    self.state.clusters[cluster_key] = ClusterState(
+                        label=tags,
+                        member_files=members,
+                        last_labeled=datetime.now(timezone.utc).isoformat(),
+                    )
 
-                # Update cluster state
-                cluster_key = f"semantic_{cid}"
-                from surveyor.state import ClusterState
-                from datetime import datetime, timezone
-                self.state.clusters[cluster_key] = ClusterState(
-                    label=tags,
-                    member_files=members,
-                    last_labeled=datetime.now(timezone.utc).isoformat(),
-                )
+                # Suggest relationships
+                rels = await self.labeler.suggest_relationships(cid, members, records)
+                for rel in rels:
+                    source = rel.get("source", "")
+                    if source in records:
+                        self.writer.write_relationships(source, [rel])
 
-            # Suggest relationships
-            rels = await self.labeler.suggest_relationships(cid, members, records)
-            for rel in rels:
-                source = rel.get("source", "")
-                if source in records:
-                    self.writer.write_relationships(source, [rel])
+        try:
+            self.drift.process(
+                state=self.state,
+                model_backend="openai-compatible" if self.cfg.ollama.api_key else "ollama",
+                embedding_model=self.cfg.ollama.model,
+            )
+        except Exception as e:
+            log.warning("daemon.drift_monitor_failed", error=str(e))
 
         log.info("daemon.labeling_complete", clusters_processed=len(all_changed))

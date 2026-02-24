@@ -29,6 +29,14 @@ logging:
   level: "INFO"
   dir: "./data"
 
+features:
+  semantic_drift_monitor: false
+
+semantic_drift:
+  snapshot_retention: 10
+  similarity_threshold: 0.5
+  warn_on_high_drift: true
+
 curator:
   inbox_dir: "inbox"
   processed_dir: "inbox/processed"
