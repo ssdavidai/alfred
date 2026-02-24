@@ -376,8 +376,8 @@ class IdentityRegistry:
             )
             return True, "Signature valid"
         except ImportError:
-            logger.warning("PyNaCl not installed - signature verification skipped")
-            return True, "Signature verification skipped (PyNaCl not installed)"
+            logger.error("PyNaCl not installed - cannot verify signatures in secure mode")
+            return False, "Signature verification failed: PyNaCl not installed"
         except nacl.exceptions.BadSignature:
             return False, "Invalid signature"
         except Exception as e:

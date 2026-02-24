@@ -31,3 +31,6 @@ tui-ink/dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Hypothesis test cache
+.hypothesis/

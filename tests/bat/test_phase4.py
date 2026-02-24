@@ -437,10 +437,13 @@ class TestLedgerSynchronizer:
     
     def test_receive_entry(self, temp_dir, signing_key):
         """Test receiving an entry."""
+        from nacl.signing import SigningKey
+
+        node_signing_key = SigningKey(signing_key)
         sync = LedgerSynchronizer(
             node_id="node-1",
             ledger_path=temp_dir / "ledger",
-            signing_key=signing_key,
+            signing_key=bytes(node_signing_key.verify_key),
         )
         
         # Compute correct hash for content
@@ -458,10 +461,43 @@ class TestLedgerSynchronizer:
             entry_hash=content_hash,
             prev_hash=None,
             content=content,
+            signature=node_signing_key.sign(content_hash.encode()).signature.hex(),
         )
         
         accepted = sync.receive_entry(entry)
         
+        assert accepted
+
+    def test_receive_entry_with_signing_seed(self, temp_dir, signing_key):
+        """Test receiving an entry when synchronizer is configured with signing seed."""
+        from nacl.signing import SigningKey
+
+        node_signing_key = SigningKey(signing_key)
+        sync = LedgerSynchronizer(
+            node_id="node-1",
+            ledger_path=temp_dir / "ledger",
+            signing_key=signing_key,
+        )
+
+        import hashlib
+        content = {"test": "data"}
+        content_hash = hashlib.sha256(
+            json.dumps(content, sort_keys=True).encode()
+        ).hexdigest()
+
+        entry = SyncEntry(
+            entry_id="entry-001-seed",
+            sequence=1,
+            timestamp=datetime.now(timezone.utc),
+            node_id="node-2",
+            entry_hash=content_hash,
+            prev_hash=None,
+            content=content,
+            signature=node_signing_key.sign(content_hash.encode()).signature.hex(),
+        )
+
+        accepted = sync.receive_entry(entry)
+
         assert accepted
     
     def test_get_missing_entries(self, temp_dir, signing_key):

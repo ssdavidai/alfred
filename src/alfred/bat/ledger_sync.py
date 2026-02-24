@@ -191,7 +191,7 @@ class LedgerSynchronizer:
         Args:
             node_id: Unique identifier for this node
             ledger_path: Path to the local ledger
-            signing_key: Key for signing entries
+            signing_key: Key material for entry verification (verify key or signing seed)
             peers: List of peer addresses
             sync_interval: Seconds between sync attempts
             conflict_resolution: Strategy for resolving conflicts
@@ -514,7 +514,7 @@ class LedgerSynchronizer:
             return False
     
     def _verify_entry(self, entry: SyncEntry) -> bool:
-        """Verify an entry's integrity."""
+        """Verify an entry's integrity and authenticity."""
         # Verify hash - hash is computed over content dict
         content_hash = hashlib.sha256(
             json.dumps(entry.content, sort_keys=True).encode()
@@ -528,10 +528,111 @@ class LedgerSynchronizer:
             )
             return False
         
+        # Verify cryptographic signature
+        if not entry.signature:
+            logger.warning(f"Entry missing signature: {entry.entry_id[:8]}...")
+            return False
+        
+        try:
+            from nacl.signing import VerifyKey
+            from nacl.signing import SigningKey
+            from nacl.exceptions import BadSignatureError
+            
+            # Signature should cover the entry_hash
+            signature_bytes = bytes.fromhex(entry.signature)
+
+            # Accept either verify key bytes or a signing seed for compatibility.
+            candidate_keys = []
+            try:
+                candidate_keys.append(VerifyKey(self._signing_key))
+            except Exception:
+                pass
+            try:
+                candidate_keys.append(SigningKey(self._signing_key).verify_key)
+            except Exception:
+                pass
+
+            if not candidate_keys:
+                logger.warning("No usable Ed25519 key material for entry verification")
+                return False
+
+            for verify_key in candidate_keys:
+                try:
+                    verify_key.verify(entry.entry_hash.encode(), signature_bytes)
+                    return True
+                except BadSignatureError:
+                    continue
+            
+            logger.warning(f"Invalid signature for entry: {entry.entry_id[:8]}...")
+            return False
+            
+        except ImportError:
+            # Fail closed if PyNaCl is not installed
+            logger.error("PyNaCl not installed - cannot verify signatures")
+            return False
+        except ValueError as e:
+            logger.warning(f"Malformed signature for entry {entry.entry_id[:8]}...: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"Signature verification failed for entry {entry.entry_id[:8]}...: {e}")
+            return False
+    
+    def _validate_entry_id(self, entry_id: str) -> bool:
+        """Validate that an entry_id is safe for use in file paths.
+        
+        Security: Prevents path traversal attacks by ensuring entry_id
+        contains only safe characters and the resolved path stays within
+        the ledger directory.
+        
+        Args:
+            entry_id: The entry identifier to validate
+            
+        Returns:
+            True if the entry_id is safe, False otherwise
+        """
+        import re
+        
+        # Check for empty entry_id
+        if not entry_id:
+            logger.warning("Empty entry_id rejected")
+            return False
+        
+        # Check for path traversal sequences
+        if ".." in entry_id or "/" in entry_id or "\\" in entry_id:
+            logger.warning(f"Entry_id contains path traversal sequences: {entry_id[:16]}...")
+            return False
+        
+        # Check that entry_id contains only safe characters (alphanumeric, hyphens, underscores)
+        if not re.match(r'^[a-zA-Z0-9_-]+$', entry_id):
+            logger.warning(f"Entry_id contains unsafe characters: {entry_id[:16]}...")
+            return False
+        
+        # Verify the resolved path stays within the ledger directory
+        entry_file = self._ledger_path / f"{entry_id}.json"
+        try:
+            resolved_path = entry_file.resolve()
+            ledger_path_resolved = self._ledger_path.resolve()
+            
+            # Check that the resolved path is within the ledger directory
+            if not str(resolved_path).startswith(str(ledger_path_resolved)):
+                logger.warning(f"Entry_id resolves outside ledger directory: {entry_id[:16]}...")
+                return False
+        except Exception as e:
+            logger.warning(f"Failed to resolve path for entry_id {entry_id[:16]}...: {e}")
+            return False
+        
         return True
     
     def _has_entry(self, entry_id: str) -> bool:
-        """Check if we have an entry."""
+        """Check if we have an entry.
+        
+        Security: Validates entry_id before using it in file path construction
+        to prevent path traversal attacks.
+        """
+        # Validate entry_id to prevent path traversal
+        if not self._validate_entry_id(entry_id):
+            return False
+        
         entry_file = self._ledger_path / f"{entry_id}.json"
         return entry_file.exists()
     
@@ -602,7 +703,18 @@ class LedgerSynchronizer:
         return False
     
     def _write_entry(self, entry: SyncEntry) -> None:
-        """Write an entry to the ledger."""
+        """Write an entry to the ledger.
+        
+        Security: Validates entry_id before using it in file path construction
+        to prevent path traversal attacks.
+        
+        Raises:
+            ValueError: If entry_id fails validation (contains path traversal or unsafe characters)
+        """
+        # Validate entry_id to prevent path traversal
+        if not self._validate_entry_id(entry.entry_id):
+            raise ValueError(f"Invalid entry_id: {entry.entry_id[:16]}...")
+        
         entry_file = self._ledger_path / f"{entry.entry_id}.json"
         entry_file.write_text(json.dumps(entry.to_dict(), indent=2))
     

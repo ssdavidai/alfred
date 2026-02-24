@@ -110,6 +110,7 @@ class PolicySigner:
         version: str,
         previous_hash: Optional[str] = None,
         metadata: Optional[dict] = None,
+        status: PolicyStatus = PolicyStatus.ACTIVE,
     ) -> SignedPolicy:
         """Sign a policy.
         
@@ -119,6 +120,7 @@ class PolicySigner:
             version: Policy version string
             previous_hash: Hash of previous version
             metadata: Additional metadata
+            status: Policy status (defaults to ACTIVE)
         
         Returns:
             SignedPolicy with signature
@@ -126,8 +128,8 @@ class PolicySigner:
         # Compute hash
         policy_hash = hashlib.sha256(policy_content.encode()).hexdigest()
         
-        # Create signature
-        sig_data = f"{policy_hash}:{version}:{signed_by}"
+        # Create signature - includes status to prevent tampering
+        sig_data = f"{policy_hash}:{version}:{signed_by}:{status.value}"
         if previous_hash:
             sig_data += f":{previous_hash}"
         
@@ -145,6 +147,7 @@ class PolicySigner:
             signed_by=signed_by,
             version=version,
             previous_hash=previous_hash,
+            status=status,
             metadata=metadata or {},
         )
     
@@ -189,8 +192,8 @@ class PolicySigner:
             )
             return False
         
-        # Verify signature
-        sig_data = f"{signed.policy_hash}:{signed.version}:{signed.signed_by}"
+        # Verify signature - includes status to prevent tampering
+        sig_data = f"{signed.policy_hash}:{signed.version}:{signed.signed_by}:{signed.status.value}"
         if signed.previous_hash:
             sig_data += f":{signed.previous_hash}"
         
@@ -361,18 +364,28 @@ class ImmutablePolicyStore:
             if not policy:
                 return None
             
-            # Update status and metadata
-            policy.status = PolicyStatus.DEPRECATED
-            policy.metadata["deprecated_at"] = datetime.now(timezone.utc).isoformat()
-            policy.metadata["deprecation_reason"] = reason
+            # Update metadata
+            metadata = dict(policy.metadata)
+            metadata["deprecated_at"] = datetime.now(timezone.utc).isoformat()
+            metadata["deprecation_reason"] = reason
             
-            # Store updated version (overwrite existing)
+            # Re-sign with DEPRECATED status to maintain signature integrity
+            signed = self._signer.sign_policy(
+                policy.policy_content,
+                policy.signed_by,
+                policy.version,
+                policy.previous_hash,
+                metadata,
+                PolicyStatus.DEPRECATED,
+            )
+            
+            # Store updated version
             entry_path = self._path / f"{version}.json"
-            entry_path.write_text(json.dumps(policy.to_dict(), indent=2))
+            entry_path.write_text(json.dumps(signed.to_dict(), indent=2))
             
             logger.info(f"Deprecated policy version {version}: {reason}")
             
-            return policy
+            return signed
     
     def revoke_version(self, version: str, reason: str, revoked_by: str) -> Optional[SignedPolicy]:
         """Revoke a policy version.
@@ -390,18 +403,20 @@ class ImmutablePolicyStore:
             if not policy:
                 return None
             
-            policy.status = PolicyStatus.REVOKED
-            policy.metadata["revoked_at"] = datetime.now(timezone.utc).isoformat()
-            policy.metadata["revocation_reason"] = reason
-            policy.metadata["revoked_by"] = revoked_by
+            # Update metadata
+            metadata = dict(policy.metadata)
+            metadata["revoked_at"] = datetime.now(timezone.utc).isoformat()
+            metadata["revocation_reason"] = reason
+            metadata["revoked_by"] = revoked_by
             
-            # Re-sign with updated metadata
+            # Re-sign with REVOKED status to maintain signature integrity
             signed = self._signer.sign_policy(
                 policy.policy_content,
                 policy.signed_by,
                 policy.version,
                 policy.previous_hash,
-                policy.metadata,
+                metadata,
+                PolicyStatus.REVOKED,
             )
             
             # Store updated version
