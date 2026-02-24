@@ -29,7 +29,15 @@ surveyor = [
     "numpy>=1.26",
     "openai>=1.30",
 ]
-all = ["alfred-vault[surveyor]", "alfred-vault[temporal]"]
+bat = [
+    "keyring>=25.0",
+]
+all = ["alfred-vault[surveyor]", "alfred-vault[temporal]", "alfred-vault[bat]"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.0",
+    "pytest-asyncio>=0.23",
+]
 
 [project.urls]
 Homepage = "https://github.com/ssdavidai/alfred"
