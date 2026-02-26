@@ -487,6 +487,7 @@ def cmd_surveyor(args: argparse.Namespace) -> None:
 
 def cmd_drift(args: argparse.Namespace) -> None:
     raw = _load_unified_config(args.config)
+    _setup_logging_from_config(raw)
 
     if "surveyor" not in raw:
         print("Surveyor is not configured in this config file.")

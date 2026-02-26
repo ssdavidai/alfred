@@ -192,19 +192,22 @@ The `[all]` extra installs machine learning and vector database dependencies:
 
 ## Configuration
 
-All configuration lives in `config.yaml` under the `surveyor` section.
+Configuration lives in `config.yaml`. The `surveyor` section contains tool-specific settings, while `features` and `semantic_drift` are top-level sections shared across tools.
 
 ### Full Example
 
 ```yaml
+# Top-level feature flags (shared across tools)
 features:
   semantic_drift_monitor: false
 
+# Top-level semantic drift settings
 semantic_drift:
   snapshot_retention: 10
   similarity_threshold: 0.5
   warn_on_high_drift: true
 
+# Surveyor-specific configuration
 surveyor:
   watcher:
     debounce_seconds: 30

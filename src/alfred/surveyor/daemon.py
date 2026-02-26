@@ -7,13 +7,15 @@ from pathlib import Path
 
 import structlog
 
+from datetime import datetime, timezone
+
 from .clusterer import Clusterer
 from .config import PipelineConfig
 from .drift import DriftMonitor
 from .embedder import Embedder
 from .labeler import Labeler
 from .parser import parse_file, VaultRecord
-from .state import PipelineState
+from .state import ClusterState, PipelineState
 from .utils import compute_md5
 from .watcher import VaultWatcher
 from .writer import VaultWriter
@@ -200,8 +202,6 @@ class Daemon:
 
                 # Update cluster state
                 cluster_key = f"semantic_{cid}"
-                from .state import ClusterState
-                from datetime import datetime, timezone
                 self.state.clusters[cluster_key] = ClusterState(
                     label=tags,
                     member_files=members,

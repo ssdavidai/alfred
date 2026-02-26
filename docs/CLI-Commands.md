@@ -87,7 +87,7 @@ The curator also runs as part of `alfred up`. For standalone use, it watches the
 
 The surveyor runs its 4-stage pipeline once and exits. As part of `alfred up`, it runs as a daemon with configurable intervals.
 
-`alfred drift ...` commands are available only when `features.semantic_drift_monitor` is enabled.
+`alfred drift ...` commands are always available, but drift artifacts/reports are only generated when `features.semantic_drift_monitor` is enabled; otherwise, the CLI reports that semantic drift monitoring is disabled and exits.
 
 ## Temporal (Kinetic Layer)
 

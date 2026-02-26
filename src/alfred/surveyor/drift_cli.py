@@ -28,8 +28,8 @@ def cmd_status(config: PipelineConfig) -> None:
         return
 
     print("Semantic Drift Status")
-    print(f"Compared clusters: {latest['previous_cluster_count']} -> {latest['current_cluster_count']}")
-    print(f"Cluster delta: {latest['cluster_count_delta']}")
+    print(f"Compared clusters: {latest.get('previous_cluster_count', '?')} -> {latest.get('current_cluster_count', '?')}")
+    print(f"Cluster delta: {latest.get('cluster_count_delta', '?')}")
     print(f"New clusters: {len(latest.get('new_clusters', []))}")
     print(f"Dissolved clusters: {len(latest.get('dissolved_clusters', []))}")
     print(f"Overall churn: {round(latest.get('overall_churn', 0.0) * 100, 2)}%")
