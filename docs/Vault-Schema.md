@@ -1,6 +1,6 @@
 # Vault Schema
 
-Alfred organizes vault records into 20 entity types plus 5 learning types. All records are Markdown files with YAML frontmatter and are linked together with Obsidian `[[wikilinks]]`.
+Alfred organizes vault records into 19 entity types plus 5 learning types. All records are Markdown files with YAML frontmatter and are linked together with Obsidian `[[wikilinks]]`.
 
 ## Record Types
 
@@ -17,7 +17,6 @@ Alfred organizes vault records into 20 entity types plus 5 learning types. All r
 | `process` | `process/` | Repeatable workflow or procedure | status, owner |
 | `run` | `run/` | Instance of a process execution | status, process, project |
 | `event` | `event/` | Scheduled or past event | status, date, location, participants |
-| `thread` | `thread/` | Discussion thread | status, project |
 
 ### Entity Records
 
@@ -47,7 +46,8 @@ Each record type has a defined set of valid statuses:
 |-------|---------------|
 | project | `active`, `paused`, `completed`, `abandoned`, `proposed` |
 | task | `todo`, `in-progress`, `done`, `blocked`, `cancelled` |
-| session, conversation, run | `active`, `completed` |
+| session, run | `active`, `completed` |
+| conversation | `active`, `waiting`, `resolved`, `closed`, `archived` |
 | person, org, location, account, asset | `active`, `inactive` |
 | assumption, constraint | `active`, `retired`, `superseded` |
 | decision | `final`, `draft`, `superseded`, `reversed` |
@@ -57,7 +57,7 @@ Each record type has a defined set of valid statuses:
 ## Required Fields
 
 Every record must have:
-- `type` — the record type (one of the 20 types above)
+- `type` — the record type (one of the 19 types above)
 - `name` (or type-specific name field like `subject` for decisions) — the record title
 - `status` — current status
 - `created` — ISO date of creation

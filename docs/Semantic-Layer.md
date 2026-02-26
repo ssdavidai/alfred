@@ -73,11 +73,11 @@ See [Surveyor](Surveyor) for pipeline details.
 
 ## Record Types
 
-20 record types across three categories:
+19 record types across three categories:
 
 | Category | Types |
 |----------|-------|
-| **Operational** | project, task, session, conversation, input, note, process, run, event, thread |
+| **Operational** | project, task, session, conversation, input, note, process, run, event |
 | **Entity** | person, org, location, account, asset |
 | **Epistemic** | assumption, decision, constraint, contradiction, synthesis |
 

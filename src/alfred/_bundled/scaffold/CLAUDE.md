@@ -10,7 +10,7 @@ There are no build steps, tests, or linting commands. The vault is edited direct
 
 ## Architecture
 
-### Record Types (20 types, all markdown + YAML frontmatter)
+### Record Types (19 types, all markdown + YAML frontmatter)
 
 Every file is a **record** with a `type` frontmatter property. The core types are: `project`, `task`, `session`, `conversation`, `input`, `person`, `org`, `location`, `note`, `decision`, `process`, `run`, `event`.
 
@@ -33,7 +33,7 @@ Each type has a **template** in `_templates/` defining its frontmatter schema an
 - `_templates/` — Record type templates (one per type)
 - `_bases/` — Base view definitions (`.base` files with YAML filters/sorts)
 - `view/` — Views (Home, CRM, Task Manager) combining base views + Alfred dynamic sections
-- `project/`, `task/`, `person/`, `org/`, `location/`, `conversation/`, `process/`, `account/`, `asset/`, `event/`, `note/`, `run/`, `input/`, `session/`, `thread/` — Entity records by type
+- `project/`, `task/`, `person/`, `org/`, `location/`, `conversation/`, `process/`, `account/`, `asset/`, `event/`, `note/`, `run/`, `input/`, `session/` — Entity records by type
 - `assumption/`, `constraint/`, `contradiction/`, `decision/`, `synthesis/` — Epistemic (learn) records
 - `YYYY/MM/DD/` — Date-organized temporal content:
   - `inbox/` — Inbound items (emails, voice memos)
@@ -43,6 +43,6 @@ Each type has a **template** in `_templates/` defining its frontmatter schema an
 ### Key Conventions
 
 - **Linking:** Records reference each other via `[[wikilinks]]` in frontmatter (e.g., `project: "[[project/My Project]]"`). The graph connects everything.
-- **Status values vary by type:** tasks use `todo|active|blocked|done|cancelled`; projects use `active|paused|completed|abandoned|proposed`; inputs use `unprocessed|processed|deferred`; conversations use `active|waiting|resolved|archived`.
+- **Status values vary by type:** tasks use `todo|active|blocked|done|cancelled`; projects use `active|paused|completed|abandoned|proposed`; inputs use `unprocessed|processed|deferred`; conversations use `active|waiting|resolved|closed|archived`.
 - **Session folders** are the unit of work. Human work: `YYYY/MM/DD/{person}/HHMM_{slug}/`. Alfred work: `YYYY/MM/DD/alfred/HHMM_{slug}/`. Provenance is the folder path. Sessions are created automatically by the session tracker worker.
 - **Base views use `this.file` pattern** — project pages, person pages, and views all embed the same base definitions; the `file.hasLink(this.file)` filter makes each page show only its own related records.

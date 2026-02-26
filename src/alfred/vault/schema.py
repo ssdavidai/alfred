@@ -5,7 +5,7 @@ from __future__ import annotations
 # --- Known record types and their valid statuses ---
 
 KNOWN_TYPES: set[str] = {
-    "project", "task", "session", "thread", "input", "person", "org",
+    "project", "task", "session", "input", "person", "org",
     "location", "note", "decision", "process", "run", "event",
     "account", "asset", "conversation", "assumption", "constraint",
     "contradiction", "synthesis",
@@ -19,7 +19,6 @@ STATUS_BY_TYPE: dict[str, set[str]] = {
     "project": {"active", "paused", "completed", "abandoned", "proposed"},
     "task": {"todo", "active", "blocked", "done", "cancelled"},
     "session": {"active", "completed"},
-    "thread": {"active", "waiting", "closed"},
     "input": {"unprocessed", "processed", "deferred"},
     "person": {"active", "inactive"},
     "org": {"active", "inactive"},
@@ -31,7 +30,7 @@ STATUS_BY_TYPE: dict[str, set[str]] = {
     "event": set(),  # no status constraint
     "account": {"active", "suspended", "closed", "pending"},
     "asset": {"active", "retired", "maintenance", "disposed"},
-    "conversation": {"active", "waiting", "resolved", "archived"},
+    "conversation": {"active", "waiting", "resolved", "closed", "archived"},
     "assumption": {"active", "challenged", "invalidated", "confirmed"},
     "constraint": {"active", "expired", "waived", "superseded"},
     "contradiction": {"unresolved", "resolved", "accepted"},
@@ -57,7 +56,7 @@ TYPE_DIRECTORY: dict[str, str] = {
     "constraint": "constraint",
     "contradiction": "contradiction",
     "synthesis": "synthesis",
-    # session, thread, input have flexible placement
+    # session, input have flexible placement
 }
 
 # Fields that should be lists

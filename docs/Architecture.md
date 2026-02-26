@@ -53,8 +53,8 @@ Four specialized workers maintain the vault continuously:
 
 Each worker has **scope enforcement** — the Curator can create and edit but not delete; the Janitor can edit and delete but not create; the Distiller can only create learning-type records. This prevents any single worker from having unconstrained write access.
 
-20 record types across three categories:
-- **Operational**: project, task, session, conversation, input, note, process, run, event, thread
+19 record types across three categories:
+- **Operational**: project, task, session, conversation, input, note, process, run, event
 - **Entity**: person, org, location, account, asset
 - **Epistemic**: assumption, decision, constraint, contradiction, synthesis
 
