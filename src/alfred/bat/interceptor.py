@@ -247,6 +247,17 @@ class BatInterceptor:
                     target,
                     reason,
                 )
+                # Record invariant failure to ledger for audit consistency
+                from .enforcement import EnforcementDecision, Action
+                denial_decision = EnforcementDecision(
+                    proposal_id=result.proposal.proposal_id,
+                    action=Action.BLOCK,
+                    policy_version=result.decision.policy_version,
+                    classification=result.decision.classification,
+                    timestamp=result.proposal.timestamp,
+                    rationale=f"Invariant check failed: {reason}",
+                )
+                self._ledger.record(result.proposal, denial_decision)
                 raise PermissionError("GovernanceError: Operation denied by policy.")
 
         return executor()

@@ -142,11 +142,15 @@ def is_within_vault(path: str, vault_root: str = None) -> bool:
     else:
         vault_root = os.path.expanduser(vault_root)
 
-    expanded_path = os.path.expanduser(path)
-    normalized_path = os.path.normpath(expanded_path)
-    normalized_vault = os.path.normpath(vault_root)
-
-    return normalized_path.startswith(normalized_vault)
+    try:
+        from pathlib import Path
+        resolved_path = Path(path).expanduser().resolve()
+        resolved_vault = Path(vault_root).expanduser().resolve()
+        # relative_to raises ValueError if path is not within vault
+        resolved_path.relative_to(resolved_vault)
+        return True
+    except ValueError:
+        return False
 
 
 # Default risk classification rules

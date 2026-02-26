@@ -197,10 +197,20 @@ def create_custom_profile(
         Custom BatProfile instance
     """
     # Start with base profile
+    # For custom profiles, try to match an existing ProfileName or fall back to SECURE
+    try:
+        profile_name = ProfileName(name.lower())
+    except ValueError:
+        logger.warning(
+            "Custom profile name '%s' is not a standard profile; using SECURE as base enum.",
+            name,
+        )
+        profile_name = ProfileName.SECURE
+
     if base_profile:
         base = get_profile(base_profile)
         base_dict = {
-            "name": ProfileName(name.lower()),  # Will fail enum validation
+            "name": profile_name,
             "description": description,
             "default_mode": base.default_mode,
             "l1_action": base.l1_action,
@@ -214,7 +224,7 @@ def create_custom_profile(
         }
     else:
         base_dict = {
-            "name": ProfileName(name.lower()),
+            "name": profile_name,
             "description": description,
             "default_mode": EnforcementMode.ENFORCE,
             "l1_action": Action.ALLOW,
@@ -246,8 +256,20 @@ def profile_from_dict(data: dict) -> BatProfile:
     Returns:
         BatProfile instance
     """
-    # Parse enums
-    name = ProfileName(data.get("name", "custom"))
+    # Parse enums with fallback to SECURE for invalid values
+    raw_name = data.get("name")
+    if raw_name is None:
+        logger.warning("Profile name missing in configuration; defaulting to 'secure'.")
+        name = ProfileName.SECURE
+    else:
+        try:
+            name = ProfileName(raw_name)
+        except ValueError:
+            logger.warning(
+                "Invalid profile name '%s' in configuration; defaulting to 'secure'.",
+                raw_name,
+            )
+            name = ProfileName.SECURE
     default_mode = EnforcementMode(data.get("default_mode", "enforce"))
     l1_action = Action(data.get("l1_action", "allow"))
     l2_action = Action(data.get("l2_action", "require_confirmation"))

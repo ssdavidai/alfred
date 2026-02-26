@@ -313,7 +313,7 @@ class DSLParser:
             patterns = self._allowlists.get(allowlist_name, [])
             return lambda p, k=key, pats=patterns: any(
                 fnmatch(str(p.metadata.get(k, "")), pat)
-                for pat in patterns
+                for pat in pats
             )
 
         if "equals" in value:

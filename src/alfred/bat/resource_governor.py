@@ -171,27 +171,33 @@ class RateLimiter:
     
     def _clean_old_entries(self, now: float) -> None:
         """Remove entries outside the time windows."""
-        # Clean second window (keep last 2 seconds for safety margin)
+        # Clean second window (keep last 1 second)
         for key in list(self._second_window.keys()):
-            while self._second_window[key] and now - self._second_window[key][0] > 2:
+            while self._second_window[key] and now - self._second_window[key][0] > 1:
                 self._second_window[key].popleft()
-        
-        # Clean minute window (keep last 70 seconds for safety margin)
+
+        # Clean minute window (keep last 60 seconds)
         for key in list(self._minute_window.keys()):
-            while self._minute_window[key] and now - self._minute_window[key][0] > 70:
+            while self._minute_window[key] and now - self._minute_window[key][0] > 60:
                 self._minute_window[key].popleft()
-        
-        # Clean hour window (keep last 3700 seconds for safety margin)
-        while self._hour_window and now - self._hour_window[0] > 3700:
+
+        # Clean hour window (keep last 3600 seconds)
+        while self._hour_window and now - self._hour_window[0] > 3600:
             self._hour_window.popleft()
     
     def get_usage(self, agent_id: str) -> dict:
         """Get current rate limit usage for an agent."""
         now = time.time()
         self._clean_old_entries(now)
-        
+
+        # Aggregate per-second count across all operations for this agent
+        per_second_count = sum(
+            len(dq) for key, dq in self._second_window.items()
+            if key.startswith(f"{agent_id}:")
+        )
+
         return {
-            "per_second": len(self._second_window.get(agent_id, deque())),
+            "per_second": per_second_count,
             "per_minute": len(self._minute_window.get(agent_id, deque())),
             "per_hour": len(self._hour_window),
             "limits": {
@@ -387,7 +393,7 @@ class SafeDeserializer:
         try:
             return json.loads(data)
         except json.JSONDecodeError as e:
-            raise DeserializationError(f"JSON parsing failed: e")
+            raise DeserializationError(f"JSON parsing failed: {e}")
     
     @classmethod
     def check_code_path(cls, module_name: str, function_name: str) -> bool:

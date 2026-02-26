@@ -107,8 +107,8 @@ class PolicyManifest:
             )
             return True
         except ImportError:
-            logger.warning("PyNaCl not installed - signature verification skipped")
-            return True
+            logger.error("PyNaCl not installed - cannot verify policy manifest signature")
+            return False
         except nacl.exceptions.BadSignature:
             return False
         except Exception as e:
@@ -436,11 +436,22 @@ class PolicyIntegrityGuard:
             files = []
             for ext in (".yaml", ".yml", ".json", ".py"):
                 files.extend(self._policy_dir.glob(f"**/*{ext}"))
-        
+
+        # Exclude manifest.json and temp files to avoid self-referential hashing
+        files = [
+            p for p in files
+            if p.is_file()
+            and p.name != "manifest.json"
+            and not p.name.endswith(".tmp")
+        ]
+
         # Compute hashes
         for file_path in files:
             if file_path.is_file():
                 rel_path = file_path.relative_to(self._policy_dir)
+                # Defensively skip manifest and temp files even if explicitly provided
+                if rel_path.name == "manifest.json" or rel_path.name.endswith(".tmp"):
+                    continue
                 manifest.files[str(rel_path)] = self._compute_file_hash(file_path)
         
         # Sign if key provided

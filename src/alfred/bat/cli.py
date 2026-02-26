@@ -142,39 +142,40 @@ def bat_audit(args: argparse.Namespace) -> int:
         print("No ledger found.")
         return 1
 
-    # Parse and filter entries
-    entries = []
+    # Stream and filter entries, keeping only the last `limit` matches
+    from collections import deque
+
+    limit = getattr(args, 'limit', 20)
+    level_filter = getattr(args, 'level', None)
+    action_filter = getattr(args, 'action', None)
+    agent_filter = getattr(args, 'agent', None)
+
+    # Use bounded deque to maintain constant memory for last N matches
+    entries = deque(maxlen=limit)
+
     with open(ledger_path, "r", encoding="utf-8") as f:
         for line in f:
             try:
-                entries.append(json.loads(line.strip()))
+                entry = json.loads(line.strip())
             except json.JSONDecodeError:
                 continue
 
-    # Filter by risk level
-    if hasattr(args, 'level') and args.level:
-        entries = [
-            e for e in entries
-            if args.level in str(e.get("decision", {}).get("classification", {}).get("level", ""))
-        ]
+            # Apply filters inline
+            if level_filter:
+                if level_filter not in str(entry.get("decision", {}).get("classification", {}).get("level", "")):
+                    continue
 
-    # Filter by action
-    if hasattr(args, 'action') and args.action:
-        entries = [
-            e for e in entries
-            if args.action in str(e.get("decision", {}).get("action", ""))
-        ]
+            if action_filter:
+                if action_filter not in str(entry.get("decision", {}).get("action", "")):
+                    continue
 
-    # Filter by agent
-    if hasattr(args, 'agent') and args.agent:
-        entries = [
-            e for e in entries
-            if args.agent in str(e.get("proposal", {}).get("agent_id", ""))
-        ]
+            if agent_filter:
+                if agent_filter not in str(entry.get("proposal", {}).get("agent_id", "")):
+                    continue
 
-    # Limit
-    limit = getattr(args, 'limit', 20)
-    entries = entries[-limit:]
+            entries.append(entry)
+
+    entries = list(entries)
 
     print(f"Showing {len(entries)} entries:\n")
     print("-" * 60)

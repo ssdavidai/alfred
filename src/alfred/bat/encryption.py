@@ -208,8 +208,11 @@ class LedgerEncryption:
             )
             
         except ImportError:
-            logger.warning("cryptography not installed - using fallback encryption")
-            return self._fallback_encrypt(plaintext, context)
+            logger.error("cryptography not installed - encryption requires the cryptography library")
+            raise EncryptionError(
+                "cryptography library required for encryption. "
+                "Install with: pip install cryptography"
+            )
         except Exception as e:
             raise EncryptionError(f"Encryption failed: {e}")
     
@@ -240,8 +243,11 @@ class LedgerEncryption:
             return plaintext
             
         except ImportError:
-            logger.warning("cryptography not installed - using fallback decryption")
-            return self._fallback_decrypt(block, context)
+            logger.error("cryptography not installed - decryption requires the cryptography library")
+            raise EncryptionError(
+                "cryptography library required for decryption. "
+                "Install with: pip install cryptography"
+            )
         except Exception as e:
             raise EncryptionError(f"Decryption failed: {e}")
     
