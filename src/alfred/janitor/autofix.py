@@ -1,6 +1,6 @@
 """Stage 1: Deterministic autofix — pure Python fixes without LLM.
 
-Handles issue codes: FM001, FM002, FM003, FM004 (direct fixes)
+Handles issue codes: FM001, FM002, FM003, FM004, LINK002 (direct fixes)
 and DIR001, ORPHAN001, DUP001 (flag with janitor_note).
 """
 
@@ -234,6 +234,9 @@ def _apply_fix(
     if code == IssueCode.DUPLICATE_NAME:
         return _flag_issue(issue, rel_path, vault_path, session_path)
 
+    if code == IssueCode.UNLINKED_BODY_ENTITY:
+        return _fix_unlinked_body_entity(issue, rel_path, vault_path, session_path)
+
     # Issue codes handled by later stages (LINK001, STUB001) or not autofix-able
     return "skipped"
 
@@ -388,6 +391,67 @@ def _fix_invalid_field_type(
         return "fixed"
     except VaultError as e:
         log.warning("autofix.fm004_failed", file=rel_path, error=str(e))
+        return "skipped"
+
+
+def _fix_unlinked_body_entity(
+    issue: Issue,
+    rel_path: str,
+    vault_path: Path,
+    session_path: str,
+) -> str:
+    """LINK002: Promote body entity wikilinks to related: frontmatter.
+
+    Obsidian Bases' file.hasLink(this.file) only checks frontmatter links.
+    Entity wikilinks in body text won't appear in base view tables unless
+    they're also in a frontmatter field (related:, relationships:, etc.).
+    """
+    try:
+        record = vault_read(vault_path, rel_path)
+        fm = record["frontmatter"]
+    except VaultError:
+        return "skipped"
+
+    # Parse the missing links from the issue detail
+    if not issue.detail:
+        return "skipped"
+
+    missing_links = [link.strip() for link in issue.detail.split(",")]
+    if not missing_links:
+        return "skipped"
+
+    # Get current related: array
+    related = fm.get("related", [])
+    if not isinstance(related, list):
+        related = [related] if related else []
+
+    # Extract existing link targets from related: to avoid duplicates
+    import re
+    existing = set()
+    for item in related:
+        if isinstance(item, str):
+            m = re.search(r"\[\[([^\]|]+)", item)
+            if m:
+                existing.add(m.group(1))
+
+    # Add missing links
+    added = 0
+    for link in missing_links:
+        if link not in existing:
+            related.append(f"[[{link}]]")
+            existing.add(link)
+            added += 1
+
+    if added == 0:
+        return "skipped"
+
+    try:
+        vault_edit(vault_path, rel_path, set_fields={"related": related})
+        log_mutation(session_path, "edit", rel_path)
+        log.info("autofix.link002_fixed", file=rel_path, added=added)
+        return "fixed"
+    except VaultError as e:
+        log.warning("autofix.link002_failed", file=rel_path, error=str(e))
         return "skipped"
 
 

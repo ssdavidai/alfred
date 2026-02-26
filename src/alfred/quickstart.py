@@ -22,7 +22,7 @@ ENTITY_DIRS = [
     "inbox", "inbox/processed",
     "account", "asset", "conversation", "note",
     "decision", "assumption", "constraint", "contradiction", "synthesis",
-    "event", "task", "session", "run", "input", "thread", "view",
+    "event", "task", "session", "run", "input", "view",
 ]
 
 

@@ -25,6 +25,7 @@ class IssueCode(str, Enum):
     WRONG_DIRECTORY = "DIR001"
     # Links
     BROKEN_WIKILINK = "LINK001"
+    UNLINKED_BODY_ENTITY = "LINK002"
     # Orphan
     ORPHANED_RECORD = "ORPHAN001"
     # Stub
@@ -47,6 +48,7 @@ SEVERITY_MAP: dict[IssueCode, Severity] = {
     IssueCode.INVALID_FIELD_TYPE: Severity.WARNING,
     IssueCode.WRONG_DIRECTORY: Severity.WARNING,
     IssueCode.BROKEN_WIKILINK: Severity.CRITICAL,
+    IssueCode.UNLINKED_BODY_ENTITY: Severity.WARNING,
     IssueCode.ORPHANED_RECORD: Severity.WARNING,
     IssueCode.STUB_RECORD: Severity.INFO,
     IssueCode.DUPLICATE_NAME: Severity.INFO,

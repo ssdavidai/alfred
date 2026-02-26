@@ -23,6 +23,12 @@ from .utils import compute_md5, get_logger
 log = get_logger(__name__)
 
 
+def _frontmatter_text(fm: dict) -> str:
+    """Serialize frontmatter dict to a string for wikilink extraction."""
+    import yaml
+    return yaml.dump(fm, default_flow_style=False, allow_unicode=True)
+
+
 def _build_stem_index(vault_path: Path, ignore_dirs: set[str]) -> dict[str, set[str]]:
     """Map stem names to file relative paths for wikilink resolution.
 
@@ -258,6 +264,37 @@ def _check_record(
                 message=f"Broken wikilink: [[{target}]]",
                 suggested_fix="Fix target path or create missing record",
             ))
+
+    # LINK002: Entity wikilinks in body but not in any frontmatter field
+    # Obsidian Bases' file.hasLink(this.file) only checks frontmatter links,
+    # so body-only entity links won't appear in base view tables.
+    _entity_dirs = set(TYPE_DIRECTORY.values())
+    fm_text = _frontmatter_text(record.frontmatter)
+    fm_link_targets = set(extract_wikilinks(fm_text))
+    body_links = set(extract_wikilinks(record.body))
+    missing_from_fm = []
+    for link in body_links - fm_link_targets:
+        if "/" not in link:
+            continue
+        link_dir = link.split("/", 1)[0]
+        if link_dir not in _entity_dirs:
+            continue
+        # Skip self-references
+        rel_no_ext = rel_path[:-3] if rel_path.endswith(".md") else rel_path
+        if link == rel_no_ext:
+            continue
+        # Only flag if the target actually exists
+        if stem_index.get(link):
+            missing_from_fm.append(link)
+    if missing_from_fm:
+        issues.append(Issue(
+            code=IssueCode.UNLINKED_BODY_ENTITY,
+            severity=Severity.WARNING,
+            file=rel_path,
+            message=f"{len(missing_from_fm)} entity link(s) in body but not in frontmatter",
+            detail=", ".join(sorted(missing_from_fm)[:5]),
+            suggested_fix="Add to related: frontmatter array",
+        ))
 
     # ORPHAN001: Orphaned record (no inbound links)
     exempt_dirs = set(config.sweep.orphan_exempt_dirs)
