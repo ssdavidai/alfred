@@ -1,10 +1,18 @@
 import type { Server as HttpServer, IncomingMessage } from "http";
 import type { Duplex } from "stream";
 import type { Application, Request, Response } from "express";
+import https from "https";
 import { WebSocketServer, WebSocket } from "ws";
 import { prisma } from "wasp/server";
 import { getSessionAndUserFromBearerToken } from "wasp/auth/session";
 import { decryptApiKey } from "./tenantProxy";
+
+// Force HTTP/1.1 ALPN so Tailscale Serve properly forwards WebSocket upgrades.
+// Without this, Tailscale Serve may negotiate HTTP/2 and strip upgrade headers.
+const upstreamAgent = new https.Agent({
+  rejectUnauthorized: false,
+  ALPNProtocols: ["http/1.1"],
+});
 
 /**
  * Get user ID from a request using Wasp's Bearer token auth.
@@ -127,7 +135,7 @@ export function registerTerminalStatusRoute(app: Application): void {
           }, 10_000);
 
           const testWs = new WebSocket(wsUrl, {
-            rejectUnauthorized: false,
+            agent: upstreamAgent,
             headers: { Authorization: `Bearer ${tenantApiKey}` },
           });
 
@@ -229,7 +237,7 @@ export function attachTerminalProxy(server: HttpServer): void {
 
       wss.handleUpgrade(req, socket, head, (browserWs: InstanceType<typeof WebSocket>) => {
         const upstreamWs = new WebSocket(upstreamUrl, {
-          rejectUnauthorized: false,
+          agent: upstreamAgent,
           headers: {
             Authorization: `Bearer ${tenantApiKey}`,
           },
