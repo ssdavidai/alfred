@@ -193,7 +193,20 @@ export function attachTerminalProxy(server: HttpServer): void {
         let browserClosed = false;
         let upstreamClosed = false;
 
-        function cleanupBoth() {
+        function sendControlToBrowser(msg: Record<string, unknown>) {
+          if (browserClosed || browserWs.readyState !== WebSocket.OPEN) return;
+          const json = JSON.stringify(msg);
+          const encoded = new TextEncoder().encode(json);
+          const buf = new Uint8Array(1 + encoded.length);
+          buf[0] = 0x01; // MSG_CONTROL
+          buf.set(encoded, 1);
+          browserWs.send(buf);
+        }
+
+        function cleanupBoth(reason?: string) {
+          if (reason) {
+            sendControlToBrowser({ type: "disconnect", reason });
+          }
           if (!browserClosed && browserWs.readyState === WebSocket.OPEN) {
             browserWs.close();
           }
@@ -218,19 +231,21 @@ export function attachTerminalProxy(server: HttpServer): void {
         });
 
         upstreamWs.on("error", (err: any) => {
-          console.error("[terminal-proxy] upstream error:", err.message, "code:", err.code, "errno:", err.errno);
-          cleanupBoth();
+          const detail = `Upstream error: ${err.message} (code: ${err.code || "none"})`;
+          console.error("[terminal-proxy]", detail);
+          cleanupBoth(detail);
         });
 
-        upstreamWs.on("unexpected-response", (_req: any, res: any) => {
-          console.error("[terminal-proxy] upstream unexpected-response:", res.statusCode, res.statusMessage);
-          cleanupBoth();
+        upstreamWs.on("unexpected-response", (_req: any, httpRes: any) => {
+          const detail = `Upstream rejected: HTTP ${httpRes.statusCode} ${httpRes.statusMessage}`;
+          console.error("[terminal-proxy]", detail);
+          cleanupBoth(detail);
         });
 
         upstreamWs.on("close", (code, reason) => {
           console.log("[terminal-proxy] upstream closed:", code, reason?.toString());
           upstreamClosed = true;
-          cleanupBoth();
+          cleanupBoth(reason?.toString() || `Upstream closed (code: ${code})`);
         });
 
         browserWs.on("close", () => {
