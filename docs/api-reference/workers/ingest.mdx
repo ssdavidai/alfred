@@ -1,0 +1,100 @@
+---
+title: "Ingest Conversation"
+description: "Split bulk conversation into inbox files"
+api: "POST /api/v1/workers/ingest"
+---
+
+Processes a bulk conversation export and splits it into individual inbox files for curator processing. Each message becomes a separate file in the vault's `inbox/` directory.
+
+<ParamField body="dry_run" type="boolean" optional default={false}>
+  If `true`, performs a dry run without writing any files. Returns what would be created.
+</ParamField>
+
+<RequestExample>
+
+```bash Standard Ingest
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/ingest \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json"
+```
+
+```bash Dry Run
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/ingest \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dry_run": true
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "message": "Successfully ingested 47 messages",
+  "files_created": 47,
+  "source_file": "bulk_export_2026-02-26.txt",
+  "inbox_path": "/vault/inbox",
+  "dry_run": false,
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+```json Dry Run Response
+{
+  "status": "ok",
+  "message": "Dry run: would create 47 files",
+  "files_created": 0,
+  "files_would_create": 47,
+  "source_file": "bulk_export_2026-02-26.txt",
+  "inbox_path": "/vault/inbox",
+  "dry_run": true,
+  "preview": [
+    "inbox/20260226_103000_msg_001.md",
+    "inbox/20260226_103015_msg_002.md",
+    "inbox/20260226_103030_msg_003.md"
+  ],
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Operation status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message
+</ResponseField>
+
+<ResponseField name="files_created" type="number">
+  Number of inbox files actually created
+</ResponseField>
+
+<ResponseField name="files_would_create" type="number" optional>
+  Number of files that would be created (dry run only)
+</ResponseField>
+
+<ResponseField name="source_file" type="string">
+  Name of the bulk conversation file that was processed
+</ResponseField>
+
+<ResponseField name="inbox_path" type="string">
+  Absolute path to the inbox directory
+</ResponseField>
+
+<ResponseField name="dry_run" type="boolean">
+  Whether this was a dry run
+</ResponseField>
+
+<ResponseField name="preview" type="string[]" optional>
+  Preview of file paths (dry run only, first 3 files)
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of operation
+</ResponseField>

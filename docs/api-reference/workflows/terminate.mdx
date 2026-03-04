@@ -1,0 +1,42 @@
+---
+title: "Terminate Workflow"
+description: "Forcefully terminate a running workflow"
+api: "POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows/{wfId}/terminate"
+---
+
+Immediately terminates a workflow execution. This is a hard stop - the workflow cannot be resumed and will not execute cleanup logic.
+
+<ParamField path="wfId" type="string" required>
+  The workflow ID to terminate
+</ParamField>
+
+<ParamField body="reason" type="string" optional>
+  Human-readable reason for termination. Will be recorded in workflow history.
+</ParamField>
+
+<ParamField body="run_id" type="string" optional>
+  Specific run ID to terminate. If omitted, terminates the most recent run.
+</ParamField>
+
+<RequestExample>
+```bash cURL
+curl -X POST \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "reason": "Manual termination - inbox processing stuck"
+  }' \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows/curator-sweep-20260226-143022/terminate
+```
+</RequestExample>
+
+<ResponseExample>
+```json 200 OK
+{
+  "success": true,
+  "workflowId": "curator-sweep-20260226-143022",
+  "runId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "terminated": true
+}
+```
+</ResponseExample>

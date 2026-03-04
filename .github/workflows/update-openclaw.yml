@@ -1,0 +1,47 @@
+name: Update OpenClaw on all tenants
+
+on:
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Upload and run update
+        run: |
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            scripts/update-openclaw.sh \
+            deploy@${{ secrets.DEPLOY_HOST }}:/tmp/update-openclaw.sh
+
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no deploy@${{ secrets.DEPLOY_HOST }} << 'REMOTE'
+          node --experimental-sqlite -e "
+          const { DatabaseSync } = require('node:sqlite');
+          const { execSync } = require('node:child_process');
+          const { existsSync } = require('node:fs');
+          const CTRL_DIR = '/opt/alfred-saas/alfred-ctrl';
+          const db = new DatabaseSync(CTRL_DIR + '/data/alfred-ctrl.db');
+          const rows = db.prepare(\"SELECT customer_name, ip_address, ssh_key_path FROM instances WHERE status='running' AND ip_address IS NOT NULL AND ssh_key_path IS NOT NULL\").all();
+          db.close();
+          let failures = 0;
+          for (const row of rows) {
+            let keyPath = row.ssh_key_path.replace(/^\\/app\\/alfred-ctrl\\//, CTRL_DIR + '/');
+            if (!existsSync(keyPath)) continue;
+            console.log('\n========== ' + row.customer_name + ' (' + row.ip_address + ') ==========');
+            try {
+              execSync('scp -o StrictHostKeyChecking=no -o ConnectTimeout=20 -i ' + keyPath + ' /tmp/update-openclaw.sh deploy@' + row.ip_address + ':/tmp/update-openclaw.sh', {encoding:'utf8',timeout:30000});
+              const out = execSync('ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 -i ' + keyPath + ' deploy@' + row.ip_address + ' bash /tmp/update-openclaw.sh', {encoding:'utf8',timeout:180000});
+              console.log(out);
+            } catch(e) { console.log('FAILED: ' + e.message.split('\\n')[0]); failures++; }
+          }
+          if (failures > 0) process.exit(1);
+          "
+          REMOTE

@@ -1,0 +1,83 @@
+---
+title: "Delete Record"
+description: "Delete a vault record"
+api: "DELETE /api/v1/vault/records/{path}"
+---
+
+## Overview
+
+Permanently deletes a vault record. Use with caution - this operation cannot be undone unless you have vault backups.
+
+## Path Parameters
+
+<ParamField path="path" type="string" required>
+  Relative path to the record (e.g., `person/Alice.md`). URL-encode if the path contains spaces or special characters.
+</ParamField>
+
+## Query Parameters
+
+<ParamField query="scope" type="string" optional>
+  Operation scope for authorization (`curator`, `janitor`, `distiller`). Defaults to no scope restrictions.
+</ParamField>
+
+## Response
+
+<ResponseField name="path" type="string">
+  Path to the deleted record
+</ResponseField>
+
+<ResponseField name="deleted" type="boolean">
+  Always `true` on success
+</ResponseField>
+
+## Request Example
+
+<RequestExample>
+
+```bash cURL
+curl -X DELETE \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/vault/records/person/Alice%20Chen.md?scope=janitor \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+```javascript JavaScript
+const recordPath = 'person/Alice Chen.md';
+const encodedPath = encodeURIComponent(recordPath);
+
+const response = await fetch(`https://alfred-acme.tailnet.ts.net:3100/api/v1/vault/records/${encodedPath}?scope=janitor`, {
+  method: 'DELETE',
+  headers: {
+    'Authorization': 'Bearer YOUR_API_KEY'
+  }
+});
+
+const result = await response.json();
+console.log(result);
+```
+
+</RequestExample>
+
+## Response Example
+
+<ResponseExample>
+
+```json 200 OK
+{
+  "path": "person/Alice Chen.md",
+  "deleted": true
+}
+```
+
+```json 404 Not Found
+{
+  "error": "Record not found: person/Unknown Person.md"
+}
+```
+
+```json 403 Forbidden
+{
+  "error": "Scope 'curator' does not allow delete operations"
+}
+```
+
+</ResponseExample>

@@ -1,0 +1,7 @@
+tunnel: {{ tunnel_id }}
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: {{ subdomain }}.{{ domain }}
+    service: http://localhost:18789
+  - service: http_status:404

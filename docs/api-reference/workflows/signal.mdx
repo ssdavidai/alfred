@@ -1,0 +1,53 @@
+---
+title: "Signal Workflow"
+description: "Send a signal to a running workflow"
+api: "POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows/{wfId}/signal"
+---
+
+Sends a signal to a running workflow. Signals allow external systems to communicate with workflows, triggering actions or passing data.
+
+<ParamField path="wfId" type="string" required>
+  The workflow ID to signal
+</ParamField>
+
+<ParamField body="signal_name" type="string" required>
+  The name of the signal to send. Must match a signal handler defined in the workflow.
+
+  Common signals: `pause`, `resume`, `update_config`, `force_sweep`
+</ParamField>
+
+<ParamField body="input" type="any" optional>
+  Data to pass with the signal. Structure depends on the signal handler.
+</ParamField>
+
+<ParamField body="run_id" type="string" optional>
+  Specific run ID to signal. If omitted, signals the most recent run.
+</ParamField>
+
+<RequestExample>
+```bash cURL
+curl -X POST \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "signal_name": "update_config",
+    "input": {
+      "sweep_interval": 600,
+      "batch_size": 10
+    }
+  }' \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows/curator-sweep-20260226-143022/signal
+```
+</RequestExample>
+
+<ResponseExample>
+```json 200 OK
+{
+  "success": true,
+  "workflowId": "curator-sweep-20260226-143022",
+  "runId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "signalName": "update_config",
+  "delivered": true
+}
+```
+</ResponseExample>

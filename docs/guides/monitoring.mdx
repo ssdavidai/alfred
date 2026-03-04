@@ -1,0 +1,494 @@
+---
+title: "Monitoring"
+description: "Monitor your Alfred instance health, logs, and system status"
+icon: "chart-line"
+---
+
+Alfred provides comprehensive monitoring endpoints for health checks, system info, container status, log streaming, and Tailscale connectivity.
+
+## Health Check
+
+Get a complete health overview:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/health \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "status": "healthy",
+  "timestamp": "2026-02-26T15:30:00Z",
+  "system": {
+    "hostname": "alfred-acme",
+    "uptime_seconds": 86400,
+    "load_average": [0.5, 0.6, 0.7],
+    "memory": {
+      "total_mb": 4096,
+      "used_mb": 2048,
+      "free_mb": 2048,
+      "percent": 50
+    },
+    "disk": {
+      "total_gb": 100,
+      "used_gb": 35,
+      "free_gb": 65,
+      "percent": 35
+    }
+  },
+  "containers": [
+    {
+      "name": "alfred-init",
+      "state": "exited",
+      "status": "Exited (0) 24 hours ago",
+      "health": "healthy"
+    },
+    {
+      "name": "alfred-worker",
+      "state": "running",
+      "status": "Up 24 hours",
+      "health": "healthy"
+    },
+    {
+      "name": "alfred-temporal",
+      "state": "running",
+      "status": "Up 24 hours",
+      "health": "healthy"
+    },
+    {
+      "name": "alfred-openclaw",
+      "state": "running",
+      "status": "Up 24 hours",
+      "health": "healthy"
+    },
+    {
+      "name": "alfred-aas",
+      "state": "running",
+      "status": "Up 24 hours",
+      "health": "healthy"
+    }
+  ],
+  "workers": {
+    "curator": {
+      "status": "running",
+      "last_run": "2026-02-26T15:25:00Z"
+    },
+    "janitor": {
+      "status": "running",
+      "last_run": "2026-02-26T15:20:00Z"
+    },
+    "distiller": {
+      "status": "running",
+      "last_run": "2026-02-26T15:15:00Z"
+    }
+  },
+  "tailscale": {
+    "connected": true,
+    "hostname": "alfred-acme",
+    "ip": "100.64.1.23"
+  }
+}
+```
+
+<Note>
+The `alfred-init` container always shows `exited` with exit code 0. This is normal — it runs once at startup to initialize the vault structure.
+</Note>
+
+## Health Status Interpretation
+
+| Status | Meaning |
+|--------|---------|
+| **healthy** | All containers running, workers active, system resources OK |
+| **degraded** | One or more workers stopped or containers unhealthy, but core services running |
+| **down** | Critical containers stopped or system resources exhausted |
+
+## System Information
+
+Get detailed system metrics:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/health/system \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "system": {
+    "hostname": "alfred-acme",
+    "platform": "linux",
+    "arch": "x64",
+    "uptime_seconds": 86400,
+    "load_average": [0.5, 0.6, 0.7],
+    "memory": {
+      "total_mb": 4096,
+      "used_mb": 2048,
+      "free_mb": 2048,
+      "percent": 50
+    },
+    "disk": {
+      "path": "/mnt/encrypted",
+      "total_gb": 100,
+      "used_gb": 35,
+      "free_gb": 65,
+      "percent": 35
+    },
+    "cpu": {
+      "cores": 2,
+      "model": "AMD EPYC 7002 Series Processor",
+      "speed_mhz": 2445
+    }
+  }
+}
+```
+
+<Tip>
+Monitor `memory.percent` and `disk.percent`. Alert if either exceeds 80%.
+</Tip>
+
+## Container Status
+
+Check all container states:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/health/containers \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "containers": [
+    {
+      "name": "alfred-worker",
+      "state": "running",
+      "status": "Up 24 hours",
+      "exitCode": null,
+      "health": "healthy"
+    },
+    {
+      "name": "alfred-temporal",
+      "state": "running",
+      "status": "Up 24 hours",
+      "exitCode": null,
+      "health": "healthy"
+    }
+  ]
+}
+```
+
+### Container States
+
+| State | Description |
+|-------|-------------|
+| **running** | Container is active |
+| **exited** | Container stopped (check `exitCode`: 0 = normal, non-zero = error) |
+| **restarting** | Container is restarting (possible crash loop) |
+| **paused** | Container is paused |
+| **dead** | Container is dead (requires manual intervention) |
+
+## Log Streaming
+
+Stream real-time logs using Server-Sent Events (SSE):
+
+### Stream All Logs
+
+```bash
+curl -N https://alfred-acme.tailnet.ts.net:3100/api/logs/stream \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response (SSE stream):**
+
+```
+data: {"timestamp":"2026-02-26T15:30:00Z","service":"curator","level":"info","message":"Processing inbox file: meeting-notes.md"}
+
+data: {"timestamp":"2026-02-26T15:30:15Z","service":"janitor","level":"info","message":"Scan complete: 3 issues found"}
+
+data: {"timestamp":"2026-02-26T15:30:20Z","service":"distiller","level":"info","message":"Extracted 2 decisions from project/API Redesign.md"}
+```
+
+### Filter by Service
+
+Stream logs from a specific service:
+
+```bash
+curl -N https://alfred-acme.tailnet.ts.net:3100/api/logs/stream?service=curator \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+Available services:
+- `curator`
+- `janitor`
+- `distiller`
+- `openclaw`
+- `aas`
+- `temporal`
+
+### Tail Recent Logs
+
+Get the last N lines before streaming:
+
+```bash
+curl -N https://alfred-acme.tailnet.ts.net:3100/api/logs/stream?tail=100 \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+### Combined Filters
+
+```bash
+curl -N https://alfred-acme.tailnet.ts.net:3100/api/logs/stream?service=janitor&tail=50 \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+<Tip>
+SSE streams use `-N` (no buffer) with curl to receive events in real-time. For programmatic access, use an SSE client library.
+</Tip>
+
+## Tailscale Status
+
+Check Tailscale connectivity:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/health/tailscale \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "tailscale": {
+    "connected": true,
+    "hostname": "alfred-acme",
+    "ip": "100.64.1.23",
+    "version": "1.58.2",
+    "exit_node": null,
+    "peers": 5
+  }
+}
+```
+
+If Tailscale is disconnected:
+
+```json
+{
+  "ok": false,
+  "tailscale": {
+    "connected": false,
+    "error": "Tailscale daemon not running"
+  }
+}
+```
+
+## Example Monitoring Workflows
+
+### Health Check Script
+
+Check health every 5 minutes and alert on degradation:
+
+```bash
+#!/bin/bash
+
+API_KEY="YOUR_API_KEY"
+BASE_URL="https://alfred-acme.tailnet.ts.net:3100"
+WEBHOOK="https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+
+while true; do
+  STATUS=$(curl -s -X GET "$BASE_URL/api/health" \
+    -H "X-API-Key: $API_KEY" | jq -r '.status')
+
+  if [ "$STATUS" != "healthy" ]; then
+    curl -X POST "$WEBHOOK" \
+      -H "Content-Type: application/json" \
+      -d "{\"text\":\"Alfred health check failed: $STATUS\"}"
+  fi
+
+  sleep 300
+done
+```
+
+### Log Monitoring
+
+Watch for errors in real-time:
+
+```bash
+curl -N https://alfred-acme.tailnet.ts.net:3100/api/logs/stream \
+  -H "X-API-Key: YOUR_API_KEY" | \
+  jq -r 'select(.level == "error") | "\(.timestamp) [\(.service)] \(.message)"'
+```
+
+**Output:**
+
+```
+2026-02-26T15:30:00Z [curator] Failed to process inbox file: invalid JSON
+2026-02-26T15:32:15Z [janitor] Cannot fix broken link: target not found
+```
+
+### Resource Monitoring
+
+Check disk and memory usage:
+
+```bash
+curl -s https://alfred-acme.tailnet.ts.net:3100/api/health/system \
+  -H "X-API-Key: YOUR_API_KEY" | \
+  jq '{disk: .system.disk.percent, memory: .system.memory.percent}'
+```
+
+**Output:**
+
+```json
+{
+  "disk": 35,
+  "memory": 50
+}
+```
+
+Alert if either exceeds 80%:
+
+```bash
+DISK=$(curl -s https://alfred-acme.tailnet.ts.net:3100/api/health/system \
+  -H "X-API-Key: YOUR_API_KEY" | jq '.system.disk.percent')
+
+if [ "$DISK" -gt 80 ]; then
+  echo "WARNING: Disk usage at ${DISK}%"
+fi
+```
+
+### Container Restart Detection
+
+Monitor for container restarts:
+
+```bash
+curl -N https://alfred-acme.tailnet.ts.net:3100/api/logs/stream?service=docker \
+  -H "X-API-Key: YOUR_API_KEY" | \
+  grep -i "restart"
+```
+
+If a container is in a restart loop, check its logs:
+
+```bash
+curl -N https://alfred-acme.tailnet.ts.net:3100/api/logs/stream?service=curator&tail=200 \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+## Interpreting Health Check Output
+
+### Healthy System
+
+```json
+{
+  "status": "healthy",
+  "containers": [
+    {"name": "alfred-init", "state": "exited", "exitCode": 0, "health": "healthy"},
+    {"name": "alfred-worker", "state": "running", "health": "healthy"},
+    {"name": "alfred-temporal", "state": "running", "health": "healthy"},
+    {"name": "alfred-openclaw", "state": "running", "health": "healthy"},
+    {"name": "alfred-aas", "state": "running", "health": "healthy"}
+  ],
+  "workers": {
+    "curator": {"status": "running"},
+    "janitor": {"status": "running"},
+    "distiller": {"status": "running"}
+  }
+}
+```
+
+All containers running (except init), all workers active.
+
+### Degraded System
+
+```json
+{
+  "status": "degraded",
+  "containers": [
+    {"name": "alfred-worker", "state": "running", "health": "healthy"},
+    {"name": "alfred-openclaw", "state": "exited", "exitCode": 1, "health": "unhealthy"}
+  ],
+  "workers": {
+    "curator": {"status": "stopped"}
+  }
+}
+```
+
+One container crashed, one worker stopped. Core services still running but functionality limited.
+
+**Action:** Restart the failed container and worker.
+
+### Down System
+
+```json
+{
+  "status": "down",
+  "containers": [
+    {"name": "alfred-worker", "state": "exited", "exitCode": 137, "health": "unhealthy"}
+  ]
+}
+```
+
+Critical container killed (exit 137 = OOM). System unusable.
+
+**Action:** Investigate resource exhaustion, increase server memory, or reduce workload.
+
+## Troubleshooting
+
+### Health Endpoint Returns 500
+
+The monitoring container itself is down. SSH into the instance:
+
+```bash
+ssh deploy@alfred-acme.tailnet.ts.net
+docker ps -a
+```
+
+Check if `alfred-aas` is running.
+
+### Logs Not Streaming
+
+Check if the log aggregation service is running:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/health/containers \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+If `alfred-aas` is down, restart it:
+
+```bash
+ssh deploy@alfred-acme.tailnet.ts.net
+docker compose restart alfred-aas
+```
+
+### Tailscale Disconnected
+
+Check Tailscale status on the host:
+
+```bash
+ssh deploy@alfred-acme.tailnet.ts.net
+sudo tailscale status
+```
+
+If disconnected, restart Tailscale:
+
+```bash
+sudo systemctl restart tailscaled
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Worker Operations" icon="gears" href="/guides/worker-operations">
+    Manage and troubleshoot workers
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/guides/configuration">
+    Update monitoring and alerting config
+  </Card>
+</CardGroup>

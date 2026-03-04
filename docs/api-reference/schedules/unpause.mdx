@@ -1,0 +1,39 @@
+---
+title: "Unpause Schedule"
+description: "Resume a paused workflow schedule"
+api: "POST https://alfred-acme.tailnet.ts.net:3100/api/v1/schedules/{schId}/unpause"
+---
+
+Resumes a paused workflow schedule. The schedule will begin executing according to its cron expression.
+
+<ParamField path="schId" type="string" required>
+  The schedule ID to unpause
+</ParamField>
+
+<ParamField body="reason" type="string" optional>
+  Human-readable reason for unpausing. Will be stored in schedule metadata.
+</ParamField>
+
+<RequestExample>
+```bash cURL
+curl -X POST \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "reason": "Vault migration complete"
+  }' \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/schedules/curator-hourly/unpause
+```
+</RequestExample>
+
+<ResponseExample>
+```json 200 OK
+{
+  "success": true,
+  "scheduleId": "curator-hourly",
+  "paused": false,
+  "nextRunTime": "2026-02-26T15:00:00.000Z",
+  "reason": "Vault migration complete"
+}
+```
+</ResponseExample>

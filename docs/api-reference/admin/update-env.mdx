@@ -1,0 +1,58 @@
+---
+title: "Update Environment Variables"
+description: "Update environment configuration"
+api: "PATCH /api/v1/admin/config/env"
+---
+
+Update one or more environment variables in the Alfred instance's `.env` file. Set a value to `null` to delete an environment variable.
+
+## Request Body
+
+<ParamField body="key" type="string">
+  Any environment variable key-value pair. Set value to `null` to delete the key.
+</ParamField>
+
+<RequestExample>
+
+```bash curl
+# Update multiple environment variables
+curl -X PATCH -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "OPENROUTER_API_KEY": "sk-or-v1-new-key-here",
+    "ALERT_WEBHOOK_URL": "https://discord.com/api/webhooks/...",
+    "ALERT_WEBHOOK_TYPE": "discord"
+  }' \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/config/env
+
+# Delete an environment variable
+curl -X PATCH -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ALERT_WEBHOOK_URL": null
+  }' \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/config/env
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "message": "Environment updated",
+  "keys": ["OPENROUTER_API_KEY", "ALERT_WEBHOOK_URL", "ALERT_WEBHOOK_TYPE"]
+}
+```
+
+</ResponseExample>
+
+<Warning>
+  - Cannot modify `AAS_API_KEY` via this endpoint (returns 400 error)
+  - Changes require container restart to take effect
+  - Always backup your `.env` before making changes
+</Warning>
+
+<Note>
+  After updating environment variables, restart affected containers using the container restart endpoint. For example, restart the worker after updating `OPENROUTER_API_KEY`.
+</Note>

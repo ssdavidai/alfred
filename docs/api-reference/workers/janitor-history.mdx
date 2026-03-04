@@ -1,0 +1,137 @@
+---
+title: "Get Sweep History"
+description: "Retrieve janitor sweep history"
+api: "GET /api/v1/workers/janitor/history"
+---
+
+Returns a chronological history of janitor sweeps, including both automatic daemon sweeps and manual API-triggered operations.
+
+<ParamField query="limit" type="number" default={10}>
+  Maximum number of sweep records to return. Maximum allowed: 100.
+</ParamField>
+
+<RequestExample>
+
+```bash Default Limit
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/janitor/history \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+```bash Custom Limit
+curl -X GET "https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/janitor/history?limit=25" \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "total_sweeps": 142,
+  "returned": 10,
+  "sweeps": [
+    {
+      "sweep_id": "sweep_20260226_101500",
+      "timestamp": "2026-02-26T10:15:00Z",
+      "type": "auto",
+      "operation": "scan",
+      "duration_seconds": 8.3,
+      "files_scanned": 423,
+      "issues_found": 12,
+      "issues_fixed": 0
+    },
+    {
+      "sweep_id": "sweep_20260226_093012",
+      "timestamp": "2026-02-26T09:30:12Z",
+      "type": "manual",
+      "operation": "fix",
+      "duration_seconds": 53.0,
+      "files_scanned": 421,
+      "issues_found": 18,
+      "issues_fixed": 15,
+      "triggered_by": "api"
+    },
+    {
+      "sweep_id": "sweep_20260226_081500",
+      "timestamp": "2026-02-26T08:15:00Z",
+      "type": "auto",
+      "operation": "scan",
+      "duration_seconds": 7.8,
+      "files_scanned": 420,
+      "issues_found": 5,
+      "issues_fixed": 0
+    },
+    {
+      "sweep_id": "sweep_20260225_221500",
+      "timestamp": "2026-02-25T22:15:00Z",
+      "type": "auto",
+      "operation": "scan",
+      "duration_seconds": 8.1,
+      "files_scanned": 418,
+      "issues_found": 8,
+      "issues_fixed": 0
+    }
+  ],
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Response status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="total_sweeps" type="number">
+  Total number of sweeps in history
+</ResponseField>
+
+<ResponseField name="returned" type="number">
+  Number of sweep records returned in this response
+</ResponseField>
+
+<ResponseField name="sweeps" type="object[]">
+  List of sweep records, most recent first
+
+  <ResponseField name="sweep_id" type="string">
+    Unique identifier for the sweep
+  </ResponseField>
+
+  <ResponseField name="timestamp" type="string">
+    ISO 8601 timestamp when sweep started
+  </ResponseField>
+
+  <ResponseField name="type" type="string">
+    Sweep type: `auto` (daemon), `manual` (API), or `cli`
+  </ResponseField>
+
+  <ResponseField name="operation" type="string">
+    Operation performed: `scan` or `fix`
+  </ResponseField>
+
+  <ResponseField name="duration_seconds" type="number">
+    Time taken to complete the sweep
+  </ResponseField>
+
+  <ResponseField name="files_scanned" type="number">
+    Number of vault files scanned
+  </ResponseField>
+
+  <ResponseField name="issues_found" type="number">
+    Number of issues detected
+  </ResponseField>
+
+  <ResponseField name="issues_fixed" type="number">
+    Number of issues fixed (0 for scan-only operations)
+  </ResponseField>
+
+  <ResponseField name="triggered_by" type="string" optional>
+    Trigger source for manual sweeps: `api`, `cli`, or username
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of history retrieval
+</ResponseField>

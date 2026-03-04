@@ -1,0 +1,49 @@
+name: Verify qmd fix in container
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Verify qmd on David's tenant
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no deploy@${{ secrets.DEPLOY_HOST }} << 'REMOTE'
+          node --experimental-sqlite -e "
+          const { DatabaseSync } = require('node:sqlite');
+          const { execSync } = require('node:child_process');
+          const { existsSync } = require('node:fs');
+          const CTRL_DIR = '/opt/alfred-saas/alfred-ctrl';
+          const db = new DatabaseSync(CTRL_DIR + '/data/alfred-ctrl.db');
+          const row = db.prepare(\"SELECT customer_name, ip_address, ssh_key_path FROM instances WHERE customer_name = 'alfred-david-mm5ah5wu'\").get();
+          db.close();
+          let keyPath = row.ssh_key_path.replace(/^\\/app\\/alfred-ctrl\\//, CTRL_DIR + '/');
+          const sshCmd = 'ssh -o ConnectTimeout=20 -o StrictHostKeyChecking=no -i ' + keyPath + ' deploy@' + row.ip_address;
+          console.log('=== Checking ' + row.customer_name + ' (' + row.ip_address + ') ===');
+          try {
+            const checks = [
+              'docker exec compose-openclaw-1 ls -la /usr/local/bin/qmd',
+              'docker exec compose-openclaw-1 ls -la /opt/bun/install/global/node_modules/qmd/qmd',
+              'docker exec compose-openclaw-1 ls -la /opt/ | grep -E bun',
+              'docker exec compose-openclaw-1 bash -c \"echo PATH=\\\\$PATH\"',
+              'docker exec compose-openclaw-1 bash -c \"which qmd || echo qmd-not-found\"',
+              'docker exec compose-openclaw-1 qmd status | head -1',
+            ];
+            for (const cmd of checks) {
+              try {
+                const result = execSync(sshCmd + ' \"cd /opt/alfred/compose && ' + cmd + ' 2>&1\"', {encoding:'utf8',timeout:15000});
+                console.log(cmd.split(' ').slice(-1)[0] + ': ' + result.trim().split('\\n')[0]);
+              } catch(e) { console.log(cmd.split(' ').slice(-1)[0] + ': ERROR'); }
+            }
+          } catch(e) { console.log('SSH FAILED'); }
+          "
+          REMOTE

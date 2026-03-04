@@ -1,0 +1,67 @@
+---
+title: "Stop Workers"
+description: "Stop all Alfred daemon workers"
+api: "POST /api/v1/workers/down"
+---
+
+Gracefully stops all running Alfred daemon workers. This sends a SIGTERM signal to each worker process and waits for clean shutdown.
+
+<RequestExample>
+
+```bash cURL
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/down \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json"
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "message": "All workers stopped successfully",
+  "stopped": ["curator", "janitor", "distiller", "surveyor"],
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+```json Error Response
+{
+  "status": "error",
+  "message": "Failed to stop some workers",
+  "stopped": ["curator", "janitor"],
+  "failed": ["distiller"],
+  "errors": {
+    "distiller": "Process did not respond to SIGTERM within timeout"
+  },
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Operation status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message
+</ResponseField>
+
+<ResponseField name="stopped" type="string[]">
+  List of workers that were successfully stopped
+</ResponseField>
+
+<ResponseField name="failed" type="string[]" optional>
+  List of workers that failed to stop (only present on error)
+</ResponseField>
+
+<ResponseField name="errors" type="object" optional>
+  Per-worker error messages (only present on error)
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of operation
+</ResponseField>

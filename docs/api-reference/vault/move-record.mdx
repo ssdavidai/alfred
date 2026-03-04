@@ -1,0 +1,106 @@
+---
+title: "Move Record"
+description: "Move or rename a vault record"
+api: "POST /api/v1/vault/move"
+---
+
+## Overview
+
+Moves or renames a vault record. This operation also updates all wikilinks in other vault records that reference the moved record (if Obsidian CLI is available).
+
+## Body Parameters
+
+<ParamField body="from" type="string" required>
+  Current relative path to the record (e.g., `person/Alice.md`)
+</ParamField>
+
+<ParamField body="to" type="string" required>
+  New relative path for the record (e.g., `person/Alice Chen.md` or `person/archived/Alice.md`)
+</ParamField>
+
+## Response
+
+<ResponseField name="from" type="string">
+  Original path
+</ResponseField>
+
+<ResponseField name="to" type="string">
+  New path
+</ResponseField>
+
+<ResponseField name="moved" type="boolean">
+  Always `true` on success
+</ResponseField>
+
+<ResponseField name="links_updated" type="number" optional>
+  Number of wikilinks updated in other records (only present if Obsidian CLI is available)
+</ResponseField>
+
+## Request Example
+
+<RequestExample>
+
+```bash cURL
+curl -X POST \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/vault/move \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "person/Alice.md",
+    "to": "person/Alice Chen.md"
+  }'
+```
+
+```javascript JavaScript
+const response = await fetch('https://alfred-acme.tailnet.ts.net:3100/api/v1/vault/move', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer YOUR_API_KEY',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    from: 'person/Alice.md',
+    to: 'person/Alice Chen.md'
+  })
+});
+
+const result = await response.json();
+console.log(result);
+```
+
+</RequestExample>
+
+## Response Example
+
+<ResponseExample>
+
+```json 200 OK
+{
+  "from": "person/Alice.md",
+  "to": "person/Alice Chen.md",
+  "moved": true,
+  "links_updated": 7
+}
+```
+
+```json 200 OK (No Obsidian CLI)
+{
+  "from": "person/Alice.md",
+  "to": "person/Alice Chen.md",
+  "moved": true
+}
+```
+
+```json 404 Not Found
+{
+  "error": "Source record not found: person/Unknown.md"
+}
+```
+
+```json 409 Conflict
+{
+  "error": "Destination already exists: person/Alice Chen.md"
+}
+```
+
+</ResponseExample>

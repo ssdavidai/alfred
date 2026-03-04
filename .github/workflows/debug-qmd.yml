@@ -1,0 +1,54 @@
+name: Debug qmd in OpenClaw container
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Run debug on David's tenant
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no deploy@${{ secrets.DEPLOY_HOST }} << 'REMOTE'
+          node --experimental-sqlite -e "
+          const { DatabaseSync } = require('node:sqlite');
+          const { execSync } = require('node:child_process');
+          const { existsSync } = require('node:fs');
+          const CTRL_DIR = '/opt/alfred-saas/alfred-ctrl';
+          const db = new DatabaseSync(CTRL_DIR + '/data/alfred-ctrl.db');
+          const rows = db.prepare(\"SELECT customer_name, ip_address, ssh_key_path FROM instances WHERE status='running' AND ip_address IS NOT NULL AND ssh_key_path IS NOT NULL AND customer_name LIKE '%david-mm%'\").all();
+          db.close();
+          for (const row of rows) {
+            let keyPath = row.ssh_key_path.replace(/^\\/app\\/alfred-ctrl\\//, CTRL_DIR + '/');
+            if (!existsSync(keyPath)) continue;
+            console.log('========== ' + row.customer_name + ' ==========');
+            const sshCmd = 'ssh -o StrictHostKeyChecking=no -o ConnectTimeout=20 -i ' + keyPath + ' deploy@' + row.ip_address;
+            const cmds = [
+              'docker inspect compose-openclaw-1 --format \"{{.Config.Image}} created={{.Created}}\"',
+              'docker exec compose-openclaw-1 which qmd || echo qmd-not-in-path',
+              'docker exec compose-openclaw-1 ls -la /usr/local/bin/qmd || echo no-symlink',
+              'docker exec compose-openclaw-1 ls -la /root/.bun/bin/ || echo root-bun-no-access',
+              'docker exec compose-openclaw-1 ls -la /root/.bun/install/global/node_modules/qmd/qmd || echo qmd-script-no-access',
+              'docker exec compose-openclaw-1 whoami',
+              'docker exec compose-openclaw-1 id',
+              'docker exec compose-openclaw-1 bash -c \"echo PATH=\\$PATH\"',
+              'docker exec compose-openclaw-1 ls -la /root/ || echo root-no-access',
+            ];
+            for (const cmd of cmds) {
+              try {
+                const out = execSync(sshCmd + ' \"' + cmd + '\"', {encoding:'utf8',timeout:30000});
+                console.log(cmd.split(' ').slice(-2).join(' ') + ': ' + out.trim());
+              } catch(e) { console.log(cmd.split(' ').slice(-2).join(' ') + ': ERROR: ' + (e.stderr || e.message).toString().trim().split('\\n').pop()); }
+            }
+          }
+          "
+          REMOTE

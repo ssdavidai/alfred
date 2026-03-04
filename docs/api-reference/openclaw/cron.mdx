@@ -1,0 +1,75 @@
+---
+title: "List Cron Jobs"
+description: "List all scheduled cron jobs"
+api: "GET /api/v1/openclaw/cron"
+---
+
+Returns a list of all scheduled cron jobs configured in the OpenClaw gateway, including their schedules, status, and execution history.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/openclaw/cron \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "jobs": [
+    {
+      "jobId": "cron_janitor_sweep",
+      "name": "Vault Janitor Sweep",
+      "schedule": "0 */6 * * *",
+      "scheduleHuman": "Every 6 hours",
+      "agentId": "agent_janitor",
+      "enabled": true,
+      "lastRun": {
+        "startedAt": "2026-02-26T12:00:15Z",
+        "completedAt": "2026-02-26T12:03:42Z",
+        "status": "success",
+        "duration": 207
+      },
+      "nextRun": "2026-02-26T18:00:00Z",
+      "stats": {
+        "totalRuns": 87,
+        "successRate": 1.0,
+        "averageDuration": 198
+      }
+    },
+    {
+      "jobId": "cron_distiller_extract",
+      "name": "Knowledge Distillation",
+      "schedule": "0 0 * * 0",
+      "scheduleHuman": "Weekly on Sunday at midnight",
+      "agentId": "agent_distiller",
+      "enabled": true,
+      "lastRun": {
+        "startedAt": "2026-02-23T00:00:10Z",
+        "completedAt": "2026-02-23T00:12:35Z",
+        "status": "success",
+        "duration": 745
+      },
+      "nextRun": "2026-03-02T00:00:00Z",
+      "stats": {
+        "totalRuns": 12,
+        "successRate": 0.92,
+        "averageDuration": 682
+      }
+    }
+  ],
+  "total": 2,
+  "enabled": 2,
+  "disabled": 0
+}
+```
+
+</ResponseExample>

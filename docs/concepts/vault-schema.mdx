@@ -1,0 +1,169 @@
+---
+title: "Vault Schema"
+description: "Complete reference for Alfred's vault record format and structure"
+icon: "database"
+---
+
+## Overview
+
+Alfred's vault uses a structured Markdown format with YAML frontmatter. Every record is a `.md` file with metadata that defines its type, relationships, and properties.
+
+## Record Format
+
+All vault records follow this pattern:
+
+```markdown
+---
+type: person
+role: Software Engineer
+org: "[[org/Acme Corp]]"
+email: alice@example.com
+---
+
+# Alice Smith
+
+Notes about Alice go here. You can use [[wikilinks]] to reference other records.
+```
+
+<Note>
+The vault is the source of truth for all data. State files are just bookkeeping and can be deleted to force re-processing.
+</Note>
+
+## Record Types
+
+Alfred supports 25 distinct record types, organized into two categories:
+
+### Entity Types (20)
+
+Core operational records representing people, projects, tasks, and other tangible entities:
+
+| Type | Purpose | Directory |
+|------|---------|-----------|
+| `person` | People and contacts | `vault/person/` |
+| `org` | Organizations and companies | `vault/org/` |
+| `project` | Projects and initiatives | `vault/project/` |
+| `task` | Tasks and action items | `vault/task/` |
+| `event` | Events and occurrences | `vault/event/` |
+| `meeting` | Meetings and discussions | `vault/meeting/` |
+| `note` | General notes and observations | `vault/note/` |
+| `resource` | External resources and references | `vault/resource/` |
+| `tool` | Tools and software | `vault/tool/` |
+| `concept` | Concepts and ideas | `vault/concept/` |
+| `location` | Physical or virtual locations | `vault/location/` |
+| `goal` | Goals and objectives | `vault/goal/` |
+| `metric` | Metrics and measurements | `vault/metric/` |
+| `process` | Processes and workflows | `vault/process/` |
+| `system` | Systems and architectures | `vault/system/` |
+| `artifact` | Artifacts and deliverables | `vault/artifact/` |
+| `channel` | Communication channels | `vault/channel/` |
+| `tag` | Tags and categories | `vault/tag/` |
+| `view` | Saved views and queries | `vault/view/` |
+| `template` | Templates and scaffolds | `vault/template/` |
+
+### Learning Types (5)
+
+Meta-records that capture latent knowledge extracted from operational records:
+
+| Type | Purpose | Directory |
+|------|---------|-----------|
+| `assumption` | Implicit assumptions | `vault/_learn/assumption/` |
+| `decision` | Decisions and rationale | `vault/_learn/decision/` |
+| `constraint` | Constraints and limitations | `vault/_learn/constraint/` |
+| `contradiction` | Contradictions and conflicts | `vault/_learn/contradiction/` |
+| `synthesis` | Syntheses and connections | `vault/_learn/synthesis/` |
+
+<Tip>
+Learning types are automatically extracted by the Distiller tool from your operational records. They live in the `_learn/` directory to distinguish them from entity types.
+</Tip>
+
+## Relationships
+
+Relationships between records use Obsidian wikilink syntax:
+
+```markdown
+[[type/Record Name]]
+```
+
+Examples:
+- `[[person/Alice Smith]]` - links to a person
+- `[[project/Q1 Launch]]` - links to a project
+- `[[org/Acme Corp]]` - links to an organization
+
+<Warning>
+The type prefix (`person/`, `project/`, etc.) is required. Bare wikilinks like `[[Alice Smith]]` are not valid in Alfred's schema.
+</Warning>
+
+## Status Fields
+
+Many record types have a `status` field with type-specific valid values:
+
+| Type | Valid Status Values |
+|------|---------------------|
+| `task` | `backlog`, `active`, `done`, `dropped` |
+| `project` | `active`, `paused`, `complete`, `archived` |
+| `goal` | `active`, `achieved`, `abandoned` |
+| `meeting` | `scheduled`, `completed`, `cancelled` |
+| `event` | `upcoming`, `past` |
+
+Other types may have custom status fields or no status field at all.
+
+## Required Fields
+
+Each record type has different required fields:
+
+<AccordionGroup>
+<Accordion title="Common Required Fields">
+- `person`: `role`
+- `task`: `status`
+- `project`: `status`
+- `goal`: `status`
+- `meeting`: `status`
+</Accordion>
+
+<Accordion title="Optional Common Fields">
+- `owner`: who is responsible (wikilink to person)
+- `priority`: importance level
+- `tags`: array of tags
+- `related`: array of related record wikilinks
+</Accordion>
+</AccordionGroup>
+
+## List Fields
+
+Certain types support multi-value list fields:
+
+**Person**:
+- `role`: job title or role
+- `org`: organization (wikilink)
+- `email`: contact email
+
+**Project**:
+- `status`: current status
+- `owner`: project owner (wikilink)
+- `priority`: priority level
+
+**Task**:
+- `status`: current status
+- `owner`: task assignee (wikilink)
+- `priority`: priority level
+- `project`: parent project (wikilink)
+
+## Schema Endpoint
+
+You can retrieve the complete schema programmatically:
+
+```bash
+curl -H "Authorization: Bearer $AAS_API_KEY" \
+  https://<instance>.ts.net/api/v1/vault/schema
+```
+
+This returns a JSON object with:
+- All 25 record types
+- Required fields per type
+- Valid status values per type
+- Directory mappings
+- Field definitions
+
+<Note>
+The schema is defined in the Alfred source at `src/alfred/vault/schema.py` and is the authoritative reference for all vault operations.
+</Note>

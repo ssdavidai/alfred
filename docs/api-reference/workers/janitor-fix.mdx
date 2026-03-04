@@ -1,0 +1,162 @@
+---
+title: "Fix Issues"
+description: "Scan vault and fix detected issues using the agent"
+api: "POST /api/v1/workers/janitor/fix"
+---
+
+Performs a structural scan followed by agent-based automated fixing. The janitor agent will attempt to resolve all detected issues by editing vault files, updating frontmatter, fixing links, and removing orphans.
+
+<Warning>
+  This operation modifies vault files. All changes are logged in the mutation audit log, but consider backing up your vault first.
+</Warning>
+
+<RequestExample>
+
+```bash cURL
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/janitor/fix \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json"
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "message": "Fix completed successfully",
+  "scan_id": "scan_20260226_103000",
+  "fix_id": "fix_20260226_103012",
+  "scan_duration_seconds": 7.2,
+  "fix_duration_seconds": 45.8,
+  "total_duration_seconds": 53.0,
+  "files_scanned": 423,
+  "issues_found": 12,
+  "issues_fixed": 10,
+  "issues_unfixed": 2,
+  "fixes_by_category": {
+    "broken_links": 3,
+    "invalid_frontmatter": 2,
+    "orphaned_files": 3,
+    "missing_required_fields": 2
+  },
+  "fixes": [
+    {
+      "category": "broken_links",
+      "file": "projects/acme-redesign.md",
+      "action": "updated_link",
+      "details": {
+        "old": "[[person/Jane Smith]]",
+        "new": "[[person/Jane Doe]]",
+        "reason": "Found matching person with corrected name"
+      }
+    },
+    {
+      "category": "invalid_frontmatter",
+      "file": "tasks/implement-auth.md",
+      "action": "corrected_field",
+      "details": {
+        "field": "status",
+        "old_value": "completed",
+        "new_value": "done",
+        "reason": "Mapped invalid status to valid equivalent"
+      }
+    },
+    {
+      "category": "orphaned_files",
+      "file": "notes/temp-scratch.md",
+      "action": "deleted",
+      "details": {
+        "reason": "No incoming links and marked as temporary"
+      }
+    }
+  ],
+  "unfixed": [
+    {
+      "category": "broken_links",
+      "file": "projects/legacy-integration.md",
+      "reason": "Could not determine correct link target",
+      "details": {
+        "broken_link": "[[tool/UnknownTool]]"
+      }
+    },
+    {
+      "category": "missing_required_fields",
+      "file": "people/contractor.md",
+      "reason": "Required field 'email' has no clear value in file content",
+      "details": {
+        "field": "email"
+      }
+    }
+  ],
+  "mutations_logged": 13,
+  "timestamp": "2026-02-26T10:30:53Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Operation status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message
+</ResponseField>
+
+<ResponseField name="scan_id" type="string">
+  Unique identifier for the scan phase
+</ResponseField>
+
+<ResponseField name="fix_id" type="string">
+  Unique identifier for the fix phase
+</ResponseField>
+
+<ResponseField name="scan_duration_seconds" type="number">
+  Time taken for the scan phase
+</ResponseField>
+
+<ResponseField name="fix_duration_seconds" type="number">
+  Time taken for the fix phase
+</ResponseField>
+
+<ResponseField name="total_duration_seconds" type="number">
+  Total operation time
+</ResponseField>
+
+<ResponseField name="files_scanned" type="number">
+  Number of vault files scanned
+</ResponseField>
+
+<ResponseField name="issues_found" type="number">
+  Total issues detected
+</ResponseField>
+
+<ResponseField name="issues_fixed" type="number">
+  Number of issues successfully fixed
+</ResponseField>
+
+<ResponseField name="issues_unfixed" type="number">
+  Number of issues that could not be fixed
+</ResponseField>
+
+<ResponseField name="fixes_by_category" type="object">
+  Breakdown of fixes by issue category
+</ResponseField>
+
+<ResponseField name="fixes" type="object[]">
+  Detailed list of fixes applied
+</ResponseField>
+
+<ResponseField name="unfixed" type="object[]">
+  List of issues that could not be automatically fixed
+</ResponseField>
+
+<ResponseField name="mutations_logged" type="number">
+  Number of vault mutations written to audit log
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of operation completion
+</ResponseField>

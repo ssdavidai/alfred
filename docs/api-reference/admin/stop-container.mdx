@@ -1,0 +1,41 @@
+---
+title: "Stop Container"
+description: "Stop a specific Docker Compose service container"
+api: "POST /api/v1/admin/containers/{service}/stop"
+---
+
+Stop a running container in the Alfred stack. The container will remain stopped until manually started or the compose stack is restarted.
+
+## Path Parameters
+
+<ParamField path="service" type="string" required>
+  The service name to stop (e.g., "worker", "openclaw", "temporal"). Must contain only alphanumeric characters, hyphens, or underscores.
+</ParamField>
+
+<RequestExample>
+
+```bash curl
+# Stop the Alfred worker
+curl -X POST -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/containers/worker/stop
+
+# Stop Temporal UI
+curl -X POST -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/containers/temporal-ui/stop
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "message": "Container worker stopped"
+}
+```
+
+</ResponseExample>
+
+<Warning>
+  Stopping the worker container will halt all Alfred daemons (curator, janitor, distiller). Stopping temporal will prevent workflow execution.
+</Warning>

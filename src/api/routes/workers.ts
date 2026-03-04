@@ -1,0 +1,164 @@
+import { addRoute } from "../server.js";
+import { sendJson, ValidationError } from "../errors.js";
+import { dockerExec, dockerComposeCmd, ALFRED_CMD } from "../helpers.js";
+
+export function registerWorkerRoutes(): void {
+  // Overall daemon status
+  addRoute("GET", "/api/v1/workers/status", async ({ res }) => {
+    const stdout = await dockerExec("alfred", [...ALFRED_CMD, "status"]);
+    sendJson(res, 200, { raw: stdout.trim() });
+  });
+
+  // Start workers
+  addRoute("POST", "/api/v1/workers/up", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    const args = [...ALFRED_CMD, "up", "--foreground"];
+    if (b?.only) args.push("--only", b.only as string);
+    const stdout = await dockerExec("alfred", args);
+    sendJson(res, 200, { message: stdout.trim() || "Workers started" });
+  });
+
+  // Stop workers
+  addRoute("POST", "/api/v1/workers/down", async ({ res }) => {
+    const stdout = await dockerExec("alfred", [...ALFRED_CMD, "down"]);
+    sendJson(res, 200, { message: stdout.trim() || "Workers stopped" });
+  });
+
+  // Restart alfred container
+  addRoute("POST", "/api/v1/workers/restart", async ({ res }) => {
+    await dockerComposeCmd(["restart", "alfred"]);
+    sendJson(res, 200, { message: "Alfred container restarted" });
+  });
+
+  // Ingest (split bulk conversation into inbox)
+  addRoute("POST", "/api/v1/workers/ingest", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    const args = [...ALFRED_CMD, "ingest"];
+    if (b?.dry_run) args.push("--dry-run");
+    const stdout = await dockerExec("alfred", args);
+    try {
+      sendJson(res, 200, JSON.parse(stdout));
+    } catch {
+      sendJson(res, 200, { raw: stdout.trim() });
+    }
+  });
+
+  // Process inbox
+  addRoute("POST", "/api/v1/workers/process", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    const args = [...ALFRED_CMD, "process"];
+    if (b?.limit) args.push("--limit", String(b.limit));
+    if (b?.dry_run) args.push("--dry-run");
+    if (b?.jobs) args.push("--jobs", String(b.jobs));
+    const stdout = await dockerExec("alfred", args);
+    try {
+      sendJson(res, 200, JSON.parse(stdout));
+    } catch {
+      sendJson(res, 200, { raw: stdout.trim() });
+    }
+  });
+
+  // --- Janitor ---
+
+  // Janitor status
+  addRoute("GET", "/api/v1/workers/janitor/status", async ({ res }) => {
+    const stdout = await dockerExec("alfred", [...ALFRED_CMD, "janitor", "status"]);
+    try {
+      sendJson(res, 200, JSON.parse(stdout));
+    } catch {
+      sendJson(res, 200, { raw: stdout.trim() });
+    }
+  });
+
+  // Janitor scan
+  addRoute("POST", "/api/v1/workers/janitor/scan", async ({ res }) => {
+    const stdout = await dockerExec("alfred", [...ALFRED_CMD, "janitor", "scan"]);
+    try {
+      sendJson(res, 200, JSON.parse(stdout));
+    } catch {
+      sendJson(res, 200, { raw: stdout.trim() });
+    }
+  });
+
+  // Janitor fix (scan + agent fix)
+  addRoute("POST", "/api/v1/workers/janitor/fix", async ({ res }) => {
+    const stdout = await dockerExec("alfred", [...ALFRED_CMD, "janitor", "fix"]);
+    try {
+      sendJson(res, 200, JSON.parse(stdout));
+    } catch {
+      sendJson(res, 200, { raw: stdout.trim() });
+    }
+  });
+
+  // Janitor history
+  addRoute("GET", "/api/v1/workers/janitor/history", async ({ res, query }) => {
+    const limit = query.get("limit") ?? "10";
+    const stdout = await dockerExec("alfred", [...ALFRED_CMD, "janitor", "history", "--limit", limit]);
+    try {
+      sendJson(res, 200, JSON.parse(stdout));
+    } catch {
+      sendJson(res, 200, { raw: stdout.trim() });
+    }
+  });
+
+  // Janitor ignore
+  addRoute("POST", "/api/v1/workers/janitor/ignore", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.file !== "string") {
+      throw new ValidationError("file is required");
+    }
+    const args = [...ALFRED_CMD, "janitor", "ignore", b.file as string];
+    if (b.reason) args.push("--reason", b.reason as string);
+    const stdout = await dockerExec("alfred", args);
+    sendJson(res, 200, { message: stdout.trim() || "File ignored" });
+  });
+
+  // --- Distiller ---
+
+  // Distiller status
+  addRoute("GET", "/api/v1/workers/distiller/status", async ({ res }) => {
+    const stdout = await dockerExec("alfred", [...ALFRED_CMD, "distiller", "status"]);
+    try {
+      sendJson(res, 200, JSON.parse(stdout));
+    } catch {
+      sendJson(res, 200, { raw: stdout.trim() });
+    }
+  });
+
+  // Distiller scan
+  addRoute("POST", "/api/v1/workers/distiller/scan", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    const args = [...ALFRED_CMD, "distiller", "scan"];
+    if (b?.project) args.push("--project", b.project as string);
+    const stdout = await dockerExec("alfred", args);
+    try {
+      sendJson(res, 200, JSON.parse(stdout));
+    } catch {
+      sendJson(res, 200, { raw: stdout.trim() });
+    }
+  });
+
+  // Distiller run (scan + extract)
+  addRoute("POST", "/api/v1/workers/distiller/run", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    const args = [...ALFRED_CMD, "distiller", "run"];
+    if (b?.project) args.push("--project", b.project as string);
+    const stdout = await dockerExec("alfred", args);
+    try {
+      sendJson(res, 200, JSON.parse(stdout));
+    } catch {
+      sendJson(res, 200, { raw: stdout.trim() });
+    }
+  });
+
+  // Distiller history
+  addRoute("GET", "/api/v1/workers/distiller/history", async ({ res, query }) => {
+    const limit = query.get("limit") ?? "10";
+    const stdout = await dockerExec("alfred", [...ALFRED_CMD, "distiller", "history", "--limit", limit]);
+    try {
+      sendJson(res, 200, JSON.parse(stdout));
+    } catch {
+      sendJson(res, 200, { raw: stdout.trim() });
+    }
+  });
+}

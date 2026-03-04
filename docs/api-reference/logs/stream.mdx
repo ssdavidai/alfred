@@ -1,0 +1,92 @@
+---
+title: "Stream Logs"
+description: "Stream real-time logs from Alfred services via Server-Sent Events"
+api: "GET /api/v1/logs"
+---
+
+Stream logs from one or more services in real-time using Server-Sent Events (SSE). This is a long-lived connection that streams log lines as they are produced.
+
+## Query Parameters
+
+<ParamField query="service" type="string" optional>
+  Filter logs to a specific service (e.g., "alfred", "openclaw", "temporal"). If omitted, logs from all services are streamed.
+</ParamField>
+
+<ParamField query="tail" type="string | number" optional default="100">
+  Number of initial log lines to send before streaming new logs. Set to 0 to skip historical logs.
+</ParamField>
+
+## Response
+
+The response uses `Content-Type: text/event-stream` and follows the Server-Sent Events protocol. Each log line is sent as a separate event:
+
+```
+data: {"line": "2026-02-26T10:15:23Z [alfred] Starting curator daemon"}\n\n
+```
+
+The stream ends with a close event:
+
+```
+event: close\ndata: {}\n\n
+```
+
+<RequestExample>
+
+```bash curl
+# Stream all logs with default tail
+curl -N -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/logs
+
+# Stream only Alfred service logs
+curl -N -H "X-API-Key: YOUR_API_KEY" \
+  "https://alfred-acme.tailnet.ts.net:3100/api/v1/logs?service=alfred"
+
+# Stream with no historical logs
+curl -N -H "X-API-Key: YOUR_API_KEY" \
+  "https://alfred-acme.tailnet.ts.net:3100/api/v1/logs?tail=0"
+```
+
+```javascript JavaScript (EventSource)
+const eventSource = new EventSource(
+  'https://alfred-acme.tailnet.ts.net:3100/api/v1/logs?service=openclaw',
+  {
+    headers: {
+      'X-API-Key': 'YOUR_API_KEY'
+    }
+  }
+);
+
+eventSource.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  console.log(data.line);
+};
+
+eventSource.addEventListener('close', () => {
+  eventSource.close();
+  console.log('Stream closed');
+});
+
+eventSource.onerror = (error) => {
+  console.error('Stream error:', error);
+  eventSource.close();
+};
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```
+data: {"line": "2026-02-26T10:15:20Z [alfred] INFO - Curator watching inbox/"}\n\n
+data: {"line": "2026-02-26T10:15:21Z [alfred] INFO - Janitor scan complete: 0 issues"}\n\n
+data: {"line": "2026-02-26T10:15:22Z [openclaw] Gateway listening on 0.0.0.0:8989"}\n\n
+data: {"line": "2026-02-26T10:15:23Z [temporal] Started WorkflowTaskPoller"}\n\n
+event: close
+data: {}
+```
+
+</ResponseExample>
+
+<Note>
+  Important: Use the `-N` flag with curl to disable buffering for streaming responses. For JavaScript, use the EventSource API which handles SSE connections automatically.
+</Note>

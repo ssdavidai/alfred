@@ -1,0 +1,595 @@
+---
+title: "Vault Management"
+description: "Complete guide to CRUD operations on vault records"
+icon: "vault"
+---
+
+The vault API provides full CRUD operations on structured Obsidian records. All operations respect scope enforcement (curator/janitor/distiller rules).
+
+## Understanding the Vault
+
+Alfred's vault contains 25 record types organized by directory:
+
+- **20 entity types**: person, org, project, task, event, location, resource, source, topic, question, note, metric, goal, risk, opportunity, insight, feedback, tool, skill, contact
+- **5 learning types**: assumption, decision, constraint, contradiction, synthesis
+
+Each record is a Markdown file with YAML frontmatter.
+
+## Schema Reference
+
+Get the complete schema:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/vault/schema \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response (truncated):**
+
+```json
+{
+  "ok": true,
+  "schema": {
+    "types": {
+      "person": {
+        "directory": "person",
+        "required_fields": ["name"],
+        "name_field": "name",
+        "status_values": ["active", "inactive"],
+        "list_fields": ["roles", "tags", "orgs", "projects"]
+      },
+      "task": {
+        "directory": "task",
+        "required_fields": ["title", "status"],
+        "name_field": "title",
+        "status_values": ["todo", "in-progress", "blocked", "done", "cancelled"],
+        "list_fields": ["tags", "people", "projects"]
+      }
+    }
+  }
+}
+```
+
+<Tip>
+Use the schema endpoint to build type-aware clients. It includes all required fields, status values, and list fields for each type.
+</Tip>
+
+## Reading Records
+
+### Read a Single Record
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/read \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "person",
+    "name": "Alice Johnson"
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "record": {
+    "type": "person",
+    "name": "Alice Johnson",
+    "frontmatter": {
+      "name": "Alice Johnson",
+      "status": "active",
+      "roles": ["Engineer", "Team Lead"],
+      "orgs": ["[[org/Acme Corp]]"],
+      "email": "alice@acme.com",
+      "tags": ["engineering", "leadership"]
+    },
+    "body": "Alice is a senior engineer and team lead for the platform team.",
+    "path": "person/Alice Johnson.md"
+  }
+}
+```
+
+### List Records by Type
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/vault/list?type=project \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "records": [
+    {
+      "title": "Q1 Microservices Migration",
+      "type": "project",
+      "path": "project/Q1 Microservices Migration.md",
+      "status": "in-progress",
+      "created": "2026-02-26T10:00:00Z"
+    },
+    {
+      "title": "Customer Portal Redesign",
+      "type": "project",
+      "path": "project/Customer Portal Redesign.md",
+      "status": "planning",
+      "created": "2026-02-25T14:30:00Z"
+    }
+  ]
+}
+```
+
+### Get Vault Context
+
+Get all recent records and relationships:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/vault/context?limit=50 \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "context": {
+    "record_count": 47,
+    "type_distribution": {
+      "person": 12,
+      "project": 5,
+      "task": 18,
+      "decision": 8,
+      "note": 4
+    },
+    "recent_records": [
+      {
+        "type": "task",
+        "name": "Implement authentication service",
+        "created": "2026-02-26T15:30:00Z"
+      }
+    ]
+  }
+}
+```
+
+## Creating Records
+
+### Create a Person
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/create \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "person",
+    "name": "Bob Smith",
+    "fields": {
+      "status": "active",
+      "roles": ["Product Manager"],
+      "email": "bob@acme.com",
+      "tags": ["product", "strategy"]
+    },
+    "body": "Bob leads product strategy for the platform team."
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "record": {
+    "type": "person",
+    "name": "Bob Smith",
+    "path": "person/Bob Smith.md"
+  }
+}
+```
+
+### Create a Task
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/create \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "task",
+    "name": "Migrate database to Postgres",
+    "fields": {
+      "status": "todo",
+      "priority": "high",
+      "people": ["[[person/Alice Johnson]]"],
+      "projects": ["[[project/Q1 Microservices Migration]]"],
+      "due": "2026-03-15",
+      "tags": ["infrastructure", "migration"]
+    },
+    "body": "Migrate the primary database from MySQL to Postgres. Requires schema conversion and data migration scripts."
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "record": {
+    "type": "task",
+    "name": "Migrate database to Postgres",
+    "path": "task/Migrate database to Postgres.md"
+  }
+}
+```
+
+<Note>
+Required fields vary by type. Use the schema endpoint to check requirements. Common required fields: `name`/`title`, `status`.
+</Note>
+
+## Editing Records
+
+### Set Field Values
+
+Replace a field value:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/edit \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "task",
+    "name": "Migrate database to Postgres",
+    "edits": {
+      "status": "in-progress"
+    }
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "record": {
+    "type": "task",
+    "name": "Migrate database to Postgres",
+    "path": "task/Migrate database to Postgres.md"
+  }
+}
+```
+
+### Append to List Fields
+
+Add items to list fields (roles, tags, people, projects, etc.):
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/edit \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "person",
+    "name": "Alice Johnson",
+    "append": {
+      "tags": ["mentor"],
+      "projects": ["[[project/Customer Portal Redesign]]"]
+    }
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "record": {
+    "type": "person",
+    "name": "Alice Johnson",
+    "path": "person/Alice Johnson.md"
+  }
+}
+```
+
+<Tip>
+Append is idempotent. Adding an existing tag/relationship won't create duplicates.
+</Tip>
+
+### Append to Body
+
+Add content to the record body:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/edit \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "task",
+    "name": "Migrate database to Postgres",
+    "body_append": "\n\n## Progress Update 2026-02-26\n\nSchema conversion complete. Starting data migration."
+  }'
+```
+
+### Combined Edit
+
+Update multiple fields at once:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/edit \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "task",
+    "name": "Migrate database to Postgres",
+    "edits": {
+      "status": "done",
+      "completed": "2026-02-28"
+    },
+    "append": {
+      "tags": ["completed"]
+    },
+    "body_append": "\n\nMigration completed successfully on 2026-02-28."
+  }'
+```
+
+## Moving Records
+
+Rename a record (moves the file):
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/move \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "project",
+    "old_name": "Q1 Microservices Migration",
+    "new_name": "Microservices Migration 2026"
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "old_path": "project/Q1 Microservices Migration.md",
+  "new_path": "project/Microservices Migration 2026.md"
+}
+```
+
+<Warning>
+Moving a record updates all wikilinks to it across the vault (if Obsidian CLI is available). Without Obsidian CLI, links become broken.
+</Warning>
+
+## Deleting Records
+
+Delete a record:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/delete \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "task",
+    "name": "Obsolete task"
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "deleted": "task/Obsolete task.md"
+}
+```
+
+<Warning>
+Deletes are permanent. Consider setting `status: cancelled` or `status: inactive` instead.
+</Warning>
+
+## Searching Records
+
+### Glob Search
+
+Find files by pattern:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/search \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "method": "glob",
+    "pattern": "**/*Migration*"
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "matches": [
+    "project/Microservices Migration 2026.md",
+    "task/Migrate database to Postgres.md",
+    "decision/Migration Timeline Approved.md"
+  ]
+}
+```
+
+### Grep Search
+
+Search file contents:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/search \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "method": "grep",
+    "pattern": "high priority",
+    "type": "task"
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "matches": [
+    {
+      "file": "task/Migrate database to Postgres.md",
+      "line": 8,
+      "content": "priority: high"
+    },
+    {
+      "file": "task/Fix authentication bug.md",
+      "line": 9,
+      "content": "This is a high priority security issue."
+    }
+  ]
+}
+```
+
+<Tip>
+Grep supports regex patterns. Use `"pattern": "status: (in-progress|blocked)"` to find tasks needing attention.
+</Tip>
+
+## Scope Enforcement
+
+Operations are restricted by scope:
+
+| Scope | Create | Edit | Move | Delete |
+|-------|--------|------|------|--------|
+| **curator** | ✅ entity types | ✅ entity types | ❌ | ❌ |
+| **janitor** | ❌ | ✅ all types | ✅ all types | ✅ all types |
+| **distiller** | ✅ learning types | ✅ learning types | ❌ | ❌ |
+| **default** | ✅ all types | ✅ all types | ✅ all types | ✅ all types |
+
+The tenant API runs with `scope: default` (full access).
+
+## Example Workflows
+
+### Find All Active Projects
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/search \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "method": "grep",
+    "pattern": "status: (in-progress|planning)",
+    "type": "project"
+  }'
+```
+
+### Update Task Status Pipeline
+
+<Steps>
+  <Step title="List tasks by status">
+    ```bash
+    curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/search \
+      -H "X-API-Key: YOUR_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"method": "grep", "pattern": "status: todo", "type": "task"}'
+    ```
+  </Step>
+  <Step title="Pick a task and start it">
+    ```bash
+    curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/edit \
+      -H "X-API-Key: YOUR_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "type": "task",
+        "name": "Implement authentication service",
+        "edits": {"status": "in-progress"}
+      }'
+    ```
+  </Step>
+  <Step title="Complete it">
+    ```bash
+    curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/edit \
+      -H "X-API-Key: YOUR_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "type": "task",
+        "name": "Implement authentication service",
+        "edits": {"status": "done", "completed": "2026-02-26"}
+      }'
+    ```
+  </Step>
+</Steps>
+
+### Create Related Records
+
+Create a project with tasks and people:
+
+<CodeGroup>
+
+```bash Create Project
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/create \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "project",
+    "name": "API Redesign",
+    "fields": {
+      "status": "planning",
+      "tags": ["api", "backend"]
+    }
+  }'
+```
+
+```bash Create Task
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/vault/create \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "task",
+    "name": "Design REST endpoints",
+    "fields": {
+      "status": "todo",
+      "projects": ["[[project/API Redesign]]"],
+      "people": ["[[person/Alice Johnson]]"]
+    }
+  }'
+```
+
+</CodeGroup>
+
+## Troubleshooting
+
+### Record Not Found
+
+Check the exact name and type:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/vault/list?type=person \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+Names are case-sensitive and must match exactly.
+
+### Invalid Field
+
+Check the schema for valid fields:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/vault/schema \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+### Scope Error
+
+The tenant API has full access, but if you're testing with a scoped session (via `alfred vault` CLI), operations may fail. The API does not enforce scope restrictions.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Inbox Workflow" icon="inbox" href="/guides/inbox-workflow">
+    Learn the ingestion pipeline
+  </Card>
+  <Card title="Worker Operations" icon="gears" href="/guides/worker-operations">
+    Manage Curator, Janitor, and Distiller
+  </Card>
+</CardGroup>

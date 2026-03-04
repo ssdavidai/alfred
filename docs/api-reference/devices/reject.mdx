@@ -1,0 +1,36 @@
+---
+title: "Reject Device"
+description: "Reject a pending device pairing request"
+api: "POST /api/v1/devices/{requestId}/reject"
+---
+
+Rejects a pending device pairing request, preventing the device from connecting to the OpenClaw gateway.
+
+<ParamField path="requestId" type="string" required>
+  The unique identifier of the pending pairing request to reject.
+</ParamField>
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/req_7k9m3p2q1/reject \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "message": "Device request rejected successfully",
+  "requestId": "req_7k9m3p2q1"
+}
+```
+
+</ResponseExample>

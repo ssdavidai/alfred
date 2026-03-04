@@ -1,0 +1,40 @@
+name: Check OpenClaw status on all tenants
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Check status
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no deploy@${{ secrets.DEPLOY_HOST }} << 'REMOTE'
+          node --experimental-sqlite -e "
+          const { DatabaseSync } = require('node:sqlite');
+          const { execSync } = require('node:child_process');
+          const { existsSync } = require('node:fs');
+          const CTRL_DIR = '/opt/alfred-saas/alfred-ctrl';
+          const db = new DatabaseSync(CTRL_DIR + '/data/alfred-ctrl.db');
+          const rows = db.prepare(\"SELECT customer_name, ip_address, ssh_key_path FROM instances WHERE status='running' AND ip_address IS NOT NULL AND ssh_key_path IS NOT NULL\").all();
+          db.close();
+          for (const row of rows) {
+            let keyPath = row.ssh_key_path.replace(/^\\/app\\/alfred-ctrl\\//, CTRL_DIR + '/');
+            if (!existsSync(keyPath)) continue;
+            const sshCmd = 'ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -i ' + keyPath + ' deploy@' + row.ip_address;
+            try {
+              const out = execSync(sshCmd + ' \"cd /opt/alfred/compose && docker compose ps --format \\\"table {{.Service}}\\t{{.Status}}\\\" | grep openclaw\"', {encoding:'utf8',timeout:15000});
+              console.log(row.customer_name + ' (IP:' + row.ip_address + '): ' + out.trim());
+            } catch(e) { console.log(row.customer_name + ' (IP:' + row.ip_address + '): ERROR'); }
+          }
+          "
+          REMOTE
