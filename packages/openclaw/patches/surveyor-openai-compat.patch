@@ -1,0 +1,89 @@
+diff --git a/config.yaml.example b/config.yaml.example
+index 2c43e2f..52319fc 100644
+--- a/config.yaml.example
++++ b/config.yaml.example
+@@ -70,6 +70,12 @@ surveyor:
+     base_url: "http://localhost:11434"
+     model: "nomic-embed-text"
+     embedding_dims: 768
++    # api_key: "${OPENROUTER_API_KEY}"  # If set, uses OpenAI-compatible /v1/embeddings endpoint
++    # When using OpenRouter for embeddings, set:
++    #   base_url: "https://openrouter.ai/api/v1"
++    #   model: "openai/text-embedding-3-small"
++    #   embedding_dims: 1536
++    #   api_key: "${OPENROUTER_API_KEY}"
+   milvus:
+     uri: "./data/milvus_lite.db"
+     collection_name: "vault_embeddings"
+diff --git a/src/alfred/surveyor/config.py b/src/alfred/surveyor/config.py
+index d7cd80c..2b62adb 100644
+--- a/src/alfred/surveyor/config.py
++++ b/src/alfred/surveyor/config.py
+@@ -27,6 +27,7 @@ class OllamaConfig:
+     base_url: str = "http://localhost:11434"
+     model: str = "nomic-embed-text"
+     embedding_dims: int = 768
++    api_key: str = ""  # If set, uses OpenAI-compatible /v1/embeddings endpoint
+ 
+ 
+ @dataclass
+diff --git a/src/alfred/surveyor/embedder.py b/src/alfred/surveyor/embedder.py
+index 091d81d..2c40974 100644
+--- a/src/alfred/surveyor/embedder.py
++++ b/src/alfred/surveyor/embedder.py
+@@ -29,8 +29,14 @@ class Embedder:
+         vault_path: Path,
+         state: PipelineState,
+     ) -> None:
+-        self.ollama_url = f"{ollama_cfg.base_url}/api/embeddings"
+-        self.ollama_model = ollama_cfg.model
++        self.api_key = ollama_cfg.api_key
++        if self.api_key:
++            # OpenAI-compatible endpoint (e.g. OpenRouter)
++            self.embed_url = f"{ollama_cfg.base_url}/embeddings"
++        else:
++            # Native Ollama endpoint
++            self.embed_url = f"{ollama_cfg.base_url}/api/embeddings"
++        self.model = ollama_cfg.model
+         self.embedding_dims = ollama_cfg.embedding_dims
+         self.vault_path = vault_path
+         self.state = state
+@@ -67,21 +73,32 @@ class Embedder:
+         log.info("embedder.collection_created", name=self.collection_name)
+ 
+     async def _get_embedding(self, text: str) -> list[float] | None:
+-        """Call Ollama to get embedding vector with retry."""
++        """Call embedding API with retry. Supports Ollama and OpenAI-compatible endpoints."""
++        headers = {}
++        if self.api_key:
++            headers["Authorization"] = f"Bearer {self.api_key}"
++            body = {"model": self.model, "input": text}
++        else:
++            body = {"model": self.model, "prompt": text}
++
+         for attempt in range(MAX_RETRIES):
+             try:
+                 async with httpx.AsyncClient(timeout=60.0) as client:
+                     resp = await client.post(
+-                        self.ollama_url,
+-                        json={"model": self.ollama_model, "prompt": text},
++                        self.embed_url,
++                        json=body,
++                        headers=headers,
+                     )
+                     resp.raise_for_status()
+-                    return resp.json()["embedding"]
++                    data = resp.json()
++                    if self.api_key:
++                        return data["data"][0]["embedding"]
++                    return data["embedding"]
+             except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
+                 delay = RETRY_BASE_DELAY * (2 ** attempt)
+-                log.warning("embedder.ollama_retry", attempt=attempt + 1, error=str(e), delay=delay)
++                log.warning("embedder.embed_retry", attempt=attempt + 1, error=str(e), delay=delay)
+                 await asyncio.sleep(delay)
+-        log.error("embedder.ollama_failed", max_retries=MAX_RETRIES)
++        log.error("embedder.embed_failed", max_retries=MAX_RETRIES)
+         return None
+ 
+     async def process_diff(
