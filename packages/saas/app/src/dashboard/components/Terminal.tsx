@@ -7,6 +7,16 @@ import "@xterm/xterm/css/xterm.css";
 const MSG_DATA = 0x00;
 const MSG_CONTROL = 0x01;
 
+// Wasp stores the session ID in localStorage under "wasp:sessionId"
+function getWaspSessionId(): string | null {
+  try {
+    const raw = localStorage.getItem("wasp:sessionId");
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
 type Status = "connecting" | "connected" | "disconnected";
 
 export default function Terminal() {
@@ -33,13 +43,22 @@ export default function Terminal() {
     setStatus("connecting");
     setDisconnectReason("");
 
+    const sessionId = getWaspSessionId();
+    if (!sessionId) {
+      setDisconnectReason("Not authenticated. Please log in again.");
+      setStatus("disconnected");
+      return;
+    }
+
     // Pre-flight check: verify auth and instance before WebSocket
     try {
-      const statusRes = await fetch("/api/terminal-status", { credentials: "include" });
+      const statusRes = await fetch("/api/terminal-status", {
+        headers: { Authorization: `Bearer ${sessionId}` },
+      });
       const statusData = await statusRes.json();
       if (!statusData.ok) {
         const messages: Record<string, string> = {
-          not_authenticated: `Not authenticated. Cookies: ${statusData.debug?.cookieNames?.join(", ") || "none"}`,
+          not_authenticated: "Session expired. Please log in again.",
           no_instance: "No instance found. Please complete setup first.",
           not_running: statusData.message || "Instance is not running.",
           not_ready: "Instance is still provisioning. Please wait.",
@@ -54,7 +73,7 @@ export default function Terminal() {
     }
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/api/terminal`;
+    const wsUrl = `${protocol}//${window.location.host}/api/terminal?token=${encodeURIComponent(sessionId)}`;
 
     const term = new XTerm({
       cursorBlink: true,

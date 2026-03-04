@@ -1,61 +1,34 @@
 import type { Server as HttpServer, IncomingMessage } from "http";
 import type { Duplex } from "stream";
-import type { Application } from "express";
+import type { Application, Request, Response } from "express";
 import { WebSocketServer, WebSocket } from "ws";
 import { prisma } from "wasp/server";
+import { getSessionAndUserFromBearerToken } from "wasp/auth/session";
 import { decryptApiKey } from "./tenantProxy";
 
-function parseCookies(header: string | undefined): Record<string, string> {
-  const cookies: Record<string, string> = {};
-  if (!header) return cookies;
-  for (const pair of header.split(";")) {
-    const eqIdx = pair.indexOf("=");
-    if (eqIdx < 0) continue;
-    const key = pair.slice(0, eqIdx).trim();
-    const value = pair.slice(eqIdx + 1).trim();
-    cookies[key] = value;
-  }
-  return cookies;
-}
-
-async function getUserFromSessionCookie(
+/**
+ * Get user ID from a request using Wasp's Bearer token auth.
+ * Works for both Express requests and raw IncomingMessage (WebSocket upgrades).
+ */
+async function getUserIdFromRequest(
   req: IncomingMessage,
-): Promise<{ userId: string } | null> {
-  const cookies = parseCookies(req.headers.cookie);
-  const sessionId = cookies["auth_session"];
-  if (!sessionId) return null;
-
-  // Wasp/Lucia stores sessions in the Session table
-  // Session → Auth → User
-  const session = await (prisma as any).session.findUnique({
-    where: { id: sessionId },
-    select: {
-      expiresAt: true,
-      auth: {
-        select: { userId: true },
-      },
-    },
-  });
-
-  if (!session || !session.auth) return null;
-  if (new Date(session.expiresAt) < new Date()) return null;
-
-  return { userId: session.auth.userId };
+): Promise<string | null> {
+  const result = await getSessionAndUserFromBearerToken(req as any);
+  if (!result) return null;
+  return result.user.id;
 }
 
 export function registerTerminalStatusRoute(app: Application): void {
-  app.get("/api/terminal-status", async (req, res) => {
+  app.get("/api/terminal-status", async (req: Request, res: Response) => {
     try {
-      const cookies = parseCookies(req.headers.cookie);
-      const cookieNames = Object.keys(cookies);
-      const sessionUser = await getUserFromSessionCookie(req as unknown as IncomingMessage);
-      if (!sessionUser) {
-        res.status(401).json({ ok: false, error: "not_authenticated", message: "No valid session", debug: { cookieNames, hasAuthSession: !!cookies["auth_session"] } });
+      const userId = await getUserIdFromRequest(req as unknown as IncomingMessage);
+      if (!userId) {
+        res.status(401).json({ ok: false, error: "not_authenticated", message: "No valid session" });
         return;
       }
 
       const instance = await prisma.instance.findUnique({
-        where: { userId: sessionUser.userId },
+        where: { userId },
       });
 
       if (!instance) {
@@ -69,11 +42,11 @@ export function registerTerminalStatusRoute(app: Application): void {
       }
 
       if (!instance.tailscaleHostname || !instance.apiKey) {
-        res.json({ ok: false, error: "not_ready", message: "Instance not fully provisioned", hasTailscale: !!instance.tailscaleHostname, hasApiKey: !!instance.apiKey });
+        res.json({ ok: false, error: "not_ready", message: "Instance not fully provisioned" });
         return;
       }
 
-      res.json({ ok: true, hostname: instance.tailscaleHostname });
+      res.json({ ok: true });
     } catch (err: any) {
       console.error("[terminal-status] error:", err);
       res.status(500).json({ ok: false, error: "internal", message: err.message });
@@ -82,36 +55,42 @@ export function registerTerminalStatusRoute(app: Application): void {
 }
 
 export function attachTerminalProxy(server: HttpServer): void {
-  console.log("[terminal-proxy] attachTerminalProxy called, registering upgrade handler");
+  console.log("[terminal-proxy] attachTerminalProxy called");
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", async (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
     if (url.pathname !== "/api/terminal") return;
 
-    console.log("[terminal-proxy] upgrade request received for /api/terminal");
+    console.log("[terminal-proxy] upgrade request received");
 
     try {
-      const sessionUser = await getUserFromSessionCookie(req);
-      if (!sessionUser) {
-        console.log("[terminal-proxy] auth failed: no valid session cookie");
+      // WebSocket can't send custom headers, so the client passes the
+      // session token as a query parameter. Inject it as an Authorization
+      // header so Wasp's getSessionAndUserFromBearerToken can read it.
+      const token = url.searchParams.get("token");
+      if (token) {
+        req.headers.authorization = `Bearer ${token}`;
+      }
+
+      const userId = await getUserIdFromRequest(req);
+      if (!userId) {
+        console.log("[terminal-proxy] auth failed");
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
         return;
       }
 
-      console.log("[terminal-proxy] auth OK, userId:", sessionUser.userId);
+      console.log("[terminal-proxy] auth OK, userId:", userId);
 
       const instance = await prisma.instance.findUnique({
-        where: { userId: sessionUser.userId },
+        where: { userId },
       });
 
       if (!instance || instance.status !== "running" || !instance.tailscaleHostname || !instance.apiKey) {
         console.log("[terminal-proxy] instance check failed:", {
           found: !!instance,
           status: instance?.status,
-          hasTailscale: !!instance?.tailscaleHostname,
-          hasApiKey: !!instance?.apiKey,
         });
         socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
         socket.destroy();
@@ -121,12 +100,11 @@ export function attachTerminalProxy(server: HttpServer): void {
       const tenantApiKey = decryptApiKey(instance.apiKey);
       const upstreamUrl = `wss://${instance.tailscaleHostname}:3100/terminal?token=${encodeURIComponent(tenantApiKey)}`;
 
-      console.log("[terminal-proxy] connecting upstream to", instance.tailscaleHostname + ":3100/terminal");
+      console.log("[terminal-proxy] connecting upstream to", instance.tailscaleHostname);
 
       wss.handleUpgrade(req, socket, head, (browserWs: InstanceType<typeof WebSocket>) => {
-        // Connect to tenant ctrl terminal
         const upstreamWs = new WebSocket(upstreamUrl, {
-          rejectUnauthorized: false, // Tailscale certs are self-signed
+          rejectUnauthorized: false,
         });
 
         let browserClosed = false;
@@ -143,7 +121,6 @@ export function attachTerminalProxy(server: HttpServer): void {
 
         upstreamWs.on("open", () => {
           console.log("[terminal-proxy] upstream connected");
-          // Bridge browser ↔ upstream (binary passthrough)
           browserWs.on("message", (data: Buffer, isBinary: boolean) => {
             if (upstreamWs.readyState === WebSocket.OPEN) {
               upstreamWs.send(data, { binary: isBinary });
@@ -169,7 +146,6 @@ export function attachTerminalProxy(server: HttpServer): void {
         });
 
         browserWs.on("close", () => {
-          console.log("[terminal-proxy] browser closed");
           browserClosed = true;
           cleanupBoth();
         });
