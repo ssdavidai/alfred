@@ -39,7 +39,7 @@ export default function Terminal() {
       const statusData = await statusRes.json();
       if (!statusData.ok) {
         const messages: Record<string, string> = {
-          not_authenticated: "Not authenticated. Please log in again.",
+          not_authenticated: `Not authenticated. Cookies: ${statusData.debug?.cookieNames?.join(", ") || "none"}`,
           no_instance: "No instance found. Please complete setup first.",
           not_running: statusData.message || "Instance is not running.",
           not_ready: "Instance is still provisioning. Please wait.",

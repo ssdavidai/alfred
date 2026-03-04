@@ -46,9 +46,11 @@ async function getUserFromSessionCookie(
 export function registerTerminalStatusRoute(app: Application): void {
   app.get("/api/terminal-status", async (req, res) => {
     try {
+      const cookies = parseCookies(req.headers.cookie);
+      const cookieNames = Object.keys(cookies);
       const sessionUser = await getUserFromSessionCookie(req as unknown as IncomingMessage);
       if (!sessionUser) {
-        res.status(401).json({ ok: false, error: "not_authenticated", message: "No valid session" });
+        res.status(401).json({ ok: false, error: "not_authenticated", message: "No valid session", debug: { cookieNames, hasAuthSession: !!cookies["auth_session"] } });
         return;
       }
 
