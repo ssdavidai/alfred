@@ -7,12 +7,6 @@ import { prisma } from "wasp/server";
 import { getSessionAndUserFromBearerToken } from "wasp/auth/session";
 import { decryptApiKey } from "./tenantProxy";
 
-// Shared agent for upstream connections to tenant via Tailscale Serve.
-// Uses valid Tailscale certs — no need to disable certificate validation.
-const upstreamAgent = new https.Agent({
-  ALPNProtocols: ["http/1.1"],
-});
-
 /**
  * Get user ID from a request using Wasp's Bearer token auth.
  * Works for both Express requests and raw IncomingMessage (WebSocket upgrades).
@@ -195,7 +189,6 @@ export function registerTerminalStatusRoute(app: Application): void {
             port: 3100,
             path: "/terminal",
             method: "GET",
-            agent: upstreamAgent,
             headers: {
               "Connection": "Upgrade",
               "Upgrade": "websocket",
@@ -357,7 +350,6 @@ export function attachTerminalProxy(server: HttpServer): void {
 
       wss.handleUpgrade(req, socket, head, (browserWs: InstanceType<typeof WebSocket>) => {
         const upstreamWs = new WebSocket(upstreamUrl, {
-          agent: upstreamAgent,
           headers: {
             Authorization: `Bearer ${tenantApiKey}`,
           },

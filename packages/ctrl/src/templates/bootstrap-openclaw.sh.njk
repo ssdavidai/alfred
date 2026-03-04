@@ -108,7 +108,10 @@ echo "[bootstrap] Exposing Temporal UI via Tailscale (admin only)..."
 sudo tailscale serve --bg --https 8233 http://localhost:8233
 
 echo "[bootstrap] Exposing tenant API via Tailscale (admin + SaaS proxy)..."
-sudo tailscale serve --bg --https 3100 http://localhost:3100
+# Use tls-terminated-tcp so raw HTTP (including WebSocket upgrade headers) passes
+# through to the ctrl API. The --https mode acts as a Layer 7 reverse proxy that
+# strips Connection/Upgrade headers, breaking WebSocket.
+sudo tailscale serve --bg --tls-terminated-tcp 3100 tcp://localhost:3100
 
 echo "[bootstrap] Temporal UI: https://${TS_HOSTNAME}:8233"
 echo "[bootstrap] Tenant API: https://${TS_HOSTNAME}:3100"

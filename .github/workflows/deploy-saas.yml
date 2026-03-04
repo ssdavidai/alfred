@@ -356,6 +356,76 @@ jobs:
             echo "QMD config patch complete"
           '
 
+      - name: Switch Tailscale Serve to tls-terminated-tcp on tenants
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} '
+            CTRL_PATH="/opt/alfred-saas/alfred-ctrl/dist/index.mjs"
+            CTRL_CWD="/opt/alfred-saas/alfred-ctrl"
+
+            INSTANCES=$(cd "$CTRL_CWD" && node --experimental-sqlite "$CTRL_PATH" list --json --status running 2>/dev/null || echo "[]")
+            COUNT=$(echo "$INSTANCES" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
+            echo "Found $COUNT running instance(s) for Tailscale Serve update"
+
+            if [ "$COUNT" = "0" ]; then
+              echo "No running instances — skipping"
+              exit 0
+            fi
+
+            echo "$INSTANCES" | python3 -c "
+          import sys, json
+          for inst in json.load(sys.stdin):
+              ip = inst.get(\"ip_address\", \"\")
+              key = inst.get(\"ssh_key_path\", \"\")
+              name = inst.get(\"customer_name\", \"unknown\")
+              if ip and key:
+                  print(f\"{name}|{ip}|{key}\")
+            " > /tmp/tenant-list.txt
+
+            while IFS="|" read -r NAME IP KEY; do
+              HOST_KEY="${KEY/\/app\/alfred-ctrl/\/opt\/alfred-saas\/alfred-ctrl}"
+              echo "--- Tenant: $NAME ($IP) ---"
+
+              if [ ! -f "$HOST_KEY" ]; then
+                echo "  SKIP: SSH key not found at $HOST_KEY"; continue
+              fi
+
+              TMPKEY=$(mktemp)
+              sudo cp "$HOST_KEY" "$TMPKEY" && sudo chown deploy:deploy "$TMPKEY" && chmod 600 "$TMPKEY"
+
+              SSH_ERR=$(ssh -i "$TMPKEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes "deploy@$IP" "echo ok" 2>&1)
+              if [ $? -ne 0 ]; then
+                echo "  SKIP: Cannot SSH: $SSH_ERR"; rm -f "$TMPKEY"; continue
+              fi
+
+              # Check current Tailscale Serve config and update port 3100 if needed
+              RESULT=$(ssh -i "$TMPKEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 "deploy@$IP" "
+                # Check if already using tls-terminated-tcp for port 3100
+                TS_STATUS=\$(sudo tailscale serve status 2>&1 || true)
+                if echo \"\$TS_STATUS\" | grep -q \"tls-terminated-tcp.*3100\"; then
+                  echo \"Already using tls-terminated-tcp for port 3100 — skipping\"
+                  exit 0
+                fi
+
+                # Remove only the port 3100 https entry, then add tls-terminated-tcp
+                echo \"Reconfiguring port 3100: https → tls-terminated-tcp...\"
+                sudo tailscale serve --https 3100 off 2>/dev/null || true
+                sudo tailscale serve --bg --tls-terminated-tcp 3100 tcp://localhost:3100
+
+                # Verify
+                TS_NEW=\$(sudo tailscale serve status 2>&1 || true)
+                echo \"Updated. Current config:\"
+                echo \"\$TS_NEW\"
+              " 2>&1)
+              echo "  $RESULT" | sed "s/^/  /"
+
+              rm -f "$TMPKEY"
+              echo "  Done"
+            done < /tmp/tenant-list.txt
+
+            rm -f /tmp/tenant-list.txt
+            echo "Tailscale Serve update complete"
+          '
+
       - name: Verify deployment
         run: |
           sleep 5
