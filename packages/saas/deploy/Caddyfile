@@ -1,0 +1,27 @@
+alfred.black {
+    root * /opt/alfred-saas/client
+    @backend {
+        path /api/* /auth/* /operations/* /jobs/* /payments/* /webhooks/*
+    }
+    handle @backend {
+        reverse_proxy localhost:3000
+    }
+    handle {
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+app.alfred.black {
+    @get method GET HEAD OPTIONS
+    handle @get {
+        redir https://alfred.black{uri} permanent
+    }
+    handle {
+        reverse_proxy localhost:3000
+    }
+}
+
+plausible.alfred.black {
+    reverse_proxy localhost:8000
+}

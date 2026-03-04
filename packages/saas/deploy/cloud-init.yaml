@@ -1,0 +1,71 @@
+#cloud-config
+
+users:
+  - name: deploy
+    groups: docker, sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - "${SSH_PUBLIC_KEY}"
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - fail2ban
+  - ufw
+  - ca-certificates
+  - curl
+  - gnupg
+  - jq
+
+write_files:
+  - path: /etc/fail2ban/jail.local
+    content: |
+      [DEFAULT]
+      bantime = 3600
+      findtime = 600
+      maxretry = 3
+      [sshd]
+      enabled = true
+
+runcmd:
+  # UFW firewall
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+
+  # Docker from official repo
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+  - apt-get update
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+  # Node.js 22
+  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  - apt-get install -y nodejs
+
+  # Caddy
+  - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+  - apt-get update
+  - apt-get install -y caddy
+
+  # Tailscale
+  - curl -fsSL https://tailscale.com/install.sh | sh
+
+  # Create app directory
+  - mkdir -p /opt/alfred-saas/alfred-ctrl/data
+  - chown -R deploy:deploy /opt/alfred-saas
+
+  # Start fail2ban
+  - systemctl enable fail2ban
+  - systemctl start fail2ban
+
+  # Signal cloud-init complete
+  - touch /opt/alfred-saas/.cloud-init-complete

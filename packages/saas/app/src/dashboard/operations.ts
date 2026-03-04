@@ -1,0 +1,463 @@
+import { HttpError } from "wasp/server";
+import type {
+  GetDashboardData,
+  GetInboxItems,
+  GetVaultRecords,
+  GetVaultRecord,
+  GetVaultGraph,
+  GetWorkerStatus,
+  GetDevices,
+  GetContainerLogs,
+  GetActivityFeed,
+  GetCredentials,
+  GetAgentConfig,
+  GetWorkspaceFile,
+} from "wasp/server/operations";
+import type {
+  SubmitInboxItem,
+  TriggerWorker,
+  ApproveDevice,
+  RejectDevice,
+  RemoveDevice,
+  UpdateCredentials,
+  UpdateAgentConfig,
+  UpdateAgentModel,
+  UpdateWorkspaceFile,
+} from "wasp/server/operations";
+import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
+
+// ============================================================
+// Dashboard Home
+// ============================================================
+
+/** Derive an overall status from the healthcheck response. */
+function deriveHealthStatus(
+  health: any,
+): "ok" | "degraded" | "down" | "unknown" {
+  if (!health || !Array.isArray(health.containers)) return "unknown";
+  const containers: any[] = health.containers;
+  if (containers.length === 0) return "down";
+  const running = containers.filter(
+    (c: any) => c.State === "running" || (c.State === "exited" && c.ExitCode === 0),
+  );
+  if (running.length === containers.length) return "ok";
+  if (running.length > 0) return "degraded";
+  return "down";
+}
+
+/** Transform raw vault context into the shape the dashboard expects. */
+function transformVaultContext(raw: any): {
+  total_records: number;
+  types: Record<string, number>;
+} | null {
+  if (!raw || raw.error || raw.raw) return null;
+  const byType: Record<string, any[]> = raw.records_by_type || {};
+  const types: Record<string, number> = {};
+  for (const [type, records] of Object.entries(byType)) {
+    types[type] = Array.isArray(records) ? records.length : 0;
+  }
+  return {
+    total_records: raw.total ?? 0,
+    types,
+  };
+}
+
+export const getDashboardData: GetDashboardData<void, any> = async (
+  _args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+
+  // Fetch all data sources independently so one failure doesn't break others
+  const [healthResult, vaultResult, inboxResult, devicesResult, containersResult, openclawCfgResult] =
+    await Promise.allSettled([
+      proxyToTenant(instance, { path: "/api/v1/admin/health" }),
+      proxyToTenant(instance, { path: "/api/v1/vault/context" }),
+      proxyToTenant(instance, { path: "/api/v1/vault/inbox" }),
+      proxyToTenant(instance, { path: "/api/v1/devices" }),
+      proxyToTenant(instance, { path: "/api/v1/admin/containers" }),
+      proxyToTenant(instance, { path: "/api/v1/admin/config/openclaw" }),
+    ]);
+
+  const healthRaw =
+    healthResult.status === "fulfilled" ? healthResult.value : null;
+  const vaultRaw =
+    vaultResult.status === "fulfilled" ? vaultResult.value : null;
+  const inboxRaw =
+    inboxResult.status === "fulfilled" ? inboxResult.value : null;
+  const devicesRaw =
+    devicesResult.status === "fulfilled" ? devicesResult.value : null;
+  const containersRaw =
+    containersResult.status === "fulfilled" ? containersResult.value : null;
+  const openclawCfgRaw =
+    openclawCfgResult.status === "fulfilled" ? openclawCfgResult.value : null;
+
+  // Build health object with derived status
+  const health = healthRaw
+    ? {
+        status: deriveHealthStatus(healthRaw),
+        containers: Array.isArray(healthRaw.containers)
+          ? healthRaw.containers.filter((c: any) => c.State === "running")
+          : [],
+        disk_percent: healthRaw.disk_percent,
+        memory_percent: healthRaw.memory_percent,
+      }
+    : null;
+
+  // Inbox file count (exclude "processed" directory)
+  const inboxFiles = Array.isArray(inboxRaw?.files)
+    ? inboxRaw.files.filter((f: string) => f !== "processed")
+    : [];
+
+  // Device counts
+  const paired = Array.isArray(devicesRaw?.paired) ? devicesRaw.paired.length : 0;
+  const pending = Array.isArray(devicesRaw?.pending) ? devicesRaw.pending.length : 0;
+
+  // Full container list
+  const containers = Array.isArray(containersRaw?.containers)
+    ? containersRaw.containers
+    : Array.isArray(containersRaw)
+      ? containersRaw
+      : [];
+
+  // Gateway token for OpenClaw UI link
+  const gatewayToken: string | null =
+    openclawCfgRaw?.gateway?.auth?.token ?? null;
+
+  return {
+    health,
+    vault: transformVaultContext(vaultRaw),
+    instance: {
+      status: instance!.status,
+      tier: instance!.tier,
+      tailscaleHostname: instance!.tailscaleHostname ?? null,
+      subdomainUrl: (instance as any).subdomainUrl ?? null,
+    },
+    inbox: { count: inboxFiles.length },
+    devices: { paired, pending },
+    containers,
+    gatewayToken,
+  };
+};
+
+// ============================================================
+// Inbox
+// ============================================================
+export const getInboxItems: GetInboxItems<void, any> = async (
+  _args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/vault/inbox" });
+};
+
+export const submitInboxItem: SubmitInboxItem<
+  { title: string; content: string; type?: string; filename?: string; encoding?: string },
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+
+  // Raw file upload mode — preserve original filename and content as-is
+  if (args.filename) {
+    return proxyToTenant(instance, {
+      method: "POST",
+      path: "/api/v1/vault/inbox",
+      body: {
+        filename: args.filename,
+        content: args.content,
+        ...(args.encoding ? { encoding: args.encoding } : {}),
+      },
+      timeoutMs: 60_000,
+    });
+  }
+
+  // Text note mode — wrap in markdown
+  const filename = args.title.replace(/[\/\\:*?"<>|]/g, "_").replace(/\s+/g, "-") + ".md";
+  const body = args.content
+    ? `# ${args.title}\n\n${args.content}`
+    : `# ${args.title}`;
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/vault/inbox",
+    body: {
+      filename,
+      content: body,
+    },
+  });
+};
+
+// ============================================================
+// Vault Browser
+// ============================================================
+export const getVaultRecords: GetVaultRecords<
+  { type?: string; query?: string },
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+
+  if (args.query) {
+    return proxyToTenant(instance, {
+      path: "/api/v1/vault/search",
+      query: { grep: args.query },
+    });
+  }
+
+  if (args.type) {
+    const data: any = await proxyToTenant(instance, {
+      path: `/api/v1/vault/list/${args.type}`,
+    });
+    // vault list results don't include 'type' — inject it from the request
+    if (data && Array.isArray(data.results)) {
+      data.results = data.results.map((r: any) => ({ ...r, type: args.type }));
+    }
+    return data;
+  }
+
+  return proxyToTenant(instance, { path: "/api/v1/vault/context" });
+};
+
+export const getVaultRecord: GetVaultRecord<{ path: string }, any> = async (
+  args,
+  context,
+) => {
+  // Validate path to prevent directory traversal
+  if (!args.path) {
+    throw new HttpError(400, "Record path is required");
+  }
+  const normalized = args.path.replace(/\\/g, "/");
+  if (
+    normalized.includes("..") ||
+    normalized.startsWith("/") ||
+    normalized.includes("\0")
+  ) {
+    throw new HttpError(400, "Invalid record path");
+  }
+
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/vault/records/${encodeURIComponent(args.path)}`,
+  });
+};
+
+// ============================================================
+// Vault Graph (3D knowledge graph)
+// ============================================================
+export const getVaultGraph: GetVaultGraph<void, any> = async (
+  _args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/vault/graph" });
+};
+
+// ============================================================
+// AI Assistants (Workers)
+// ============================================================
+export const getWorkerStatus: GetWorkerStatus<void, any> = async (
+  _args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+  const [containers, health] = await Promise.all([
+    proxyToTenant(instance, { path: "/api/v1/admin/containers" }),
+    proxyToTenant(instance, { path: "/api/v1/admin/health" }),
+  ]);
+  return { containers, health };
+};
+
+export const triggerWorker: TriggerWorker<
+  { action: string; service?: string },
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+
+  switch (args.action) {
+    case "restart":
+      return proxyToTenant(instance, {
+        method: "POST",
+        path: `/api/v1/admin/containers/${args.service || "alfred"}/restart`,
+      });
+    case "stop":
+      return proxyToTenant(instance, {
+        method: "POST",
+        path: `/api/v1/admin/containers/${args.service || "alfred"}/stop`,
+      });
+    case "start":
+      return proxyToTenant(instance, {
+        method: "POST",
+        path: `/api/v1/admin/containers/${args.service || "alfred"}/start`,
+      });
+    default:
+      throw new HttpError(400, `Unknown action: ${args.action}`);
+  }
+};
+
+// ============================================================
+// Devices
+// ============================================================
+export const getDevices: GetDevices<void, any> = async (_args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/devices" });
+};
+
+export const approveDevice: ApproveDevice<
+  { requestId: string; name?: string },
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/devices/${args.requestId}/approve`,
+    body: args.name ? { name: args.name } : undefined,
+  });
+};
+
+export const rejectDevice: RejectDevice<{ requestId: string }, any> = async (
+  args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/devices/${args.requestId}/reject`,
+  });
+};
+
+export const removeDevice: RemoveDevice<{ deviceId: string }, any> = async (
+  args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/devices/${args.deviceId}`,
+  });
+};
+
+// ============================================================
+// Activity Feed
+// ============================================================
+export const getActivityFeed: GetActivityFeed<void, any> = async (
+  _args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/admin/activity",
+    query: { limit: "50" },
+  });
+};
+
+// ============================================================
+// Container Logs
+// ============================================================
+export const getContainerLogs: GetContainerLogs<
+  { service?: string; tail?: string },
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  const service = args.service || "alfred";
+  const tail = args.tail || "200";
+  return proxyToTenant(instance, {
+    path: `/api/v1/admin/containers/${service}/logs`,
+    query: { tail },
+  });
+};
+
+// ============================================================
+// Credentials
+// ============================================================
+export const getCredentials: GetCredentials<void, any> = async (
+  _args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/admin/credentials" });
+};
+
+export const updateCredentials: UpdateCredentials<
+  Record<string, string | null>,
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PATCH",
+    path: "/api/v1/admin/credentials",
+    body: args,
+  });
+};
+
+// ============================================================
+// Agent Config
+// ============================================================
+export const getAgentConfig: GetAgentConfig<
+  { agentId?: string } | void,
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  const agentId = (args as any)?.agentId;
+  const path = agentId
+    ? `/api/v1/admin/agents/${encodeURIComponent(agentId)}`
+    : "/api/v1/admin/agents";
+  return proxyToTenant(instance, { path });
+};
+
+export const updateAgentConfig: UpdateAgentConfig<
+  Record<string, any>,
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PATCH",
+    path: "/api/v1/admin/agents",
+    body: args,
+  });
+};
+
+// ============================================================
+// Agent Model (per-agent)
+// ============================================================
+export const updateAgentModel: UpdateAgentModel<
+  { agentId: string; model: string; field?: string },
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PATCH",
+    path: `/api/v1/admin/agents/${encodeURIComponent(args.agentId)}/model`,
+    body: { model: args.model, field: args.field },
+  });
+};
+
+// ============================================================
+// Workspace Files
+// ============================================================
+const WORKSPACE_FILES = ["SOUL.md", "USER.md", "MEMORY.md", "AGENTS.md", "TOOLS.md"];
+
+export const getWorkspaceFile: GetWorkspaceFile<
+  { filename: string },
+  any
+> = async (args, context) => {
+  if (!WORKSPACE_FILES.includes(args.filename)) {
+    throw new HttpError(400, `Invalid workspace file: ${args.filename}`);
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/admin/workspace/${encodeURIComponent(args.filename)}`,
+  });
+};
+
+export const updateWorkspaceFile: UpdateWorkspaceFile<
+  { filename: string; content: string },
+  any
+> = async (args, context) => {
+  if (!WORKSPACE_FILES.includes(args.filename)) {
+    throw new HttpError(400, `Invalid workspace file: ${args.filename}`);
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PUT",
+    path: `/api/v1/admin/workspace/${encodeURIComponent(args.filename)}`,
+    body: { content: args.content },
+  });
+};

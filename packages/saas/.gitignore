@@ -1,0 +1,6 @@
+node_modules
+.wasp
+dist
+*.db
+.env.server
+.env.client
