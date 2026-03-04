@@ -70,11 +70,11 @@ export function attachTerminalUpgrade(server: http.Server): void {
       if (activeSession === ws) activeSession = null;
     }
 
-    // Spawn docker exec with interactive flag
-    proc = spawn("docker", [
-      "compose", "-f", `${COMPOSE_DIR}/docker-compose.yaml`,
-      "exec", "-i", "openclaw", "/bin/sh",
-    ], {
+    // Use `script` to allocate a real PTY for docker exec.
+    // This gives us a proper interactive shell (prompt, echo, line editing)
+    // without needing the native node-pty module.
+    const dockerCmd = `docker compose -f ${COMPOSE_DIR}/docker-compose.yaml exec -it openclaw /bin/sh`;
+    proc = spawn("script", ["-q", "-c", dockerCmd, "/dev/null"], {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -113,17 +113,6 @@ export function attachTerminalUpgrade(server: http.Server): void {
 
       if (type === MSG_DATA && proc?.stdin?.writable) {
         proc.stdin.write(payload);
-      } else if (type === MSG_CONTROL) {
-        try {
-          const msg = JSON.parse(payload.toString());
-          if (msg.type === "resize" && proc?.pid) {
-            // Without node-pty, resize is not directly supported.
-            // docker exec -i doesn't allocate a PTY, so SIGWINCH won't apply.
-            // This is a known limitation — terminal width/height hints are ignored.
-          }
-        } catch {
-          // ignore malformed control messages
-        }
       }
     });
 
