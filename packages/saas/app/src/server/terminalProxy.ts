@@ -101,25 +101,24 @@ export function registerTerminalStatusRoute(app: Application): void {
         results.httpHealth = { error: err.message, code: err.code, cause: err.cause?.message };
       }
 
-      // Test 2: Call ctrl debug/headers endpoint WITH upgrade headers
-      // This tells us: (a) what headers the ctrl API actually sees, (b) terminal module status
+      // Test 2: Check terminal module status on ctrl API
       try {
         const debugUrl = `https://${hostname}:3100/api/v1/admin/debug/headers`;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 10_000);
         const debugRes = await fetch(debugUrl, {
-          headers: {
-            Authorization: `Bearer ${tenantApiKey}`,
-            Connection: "Upgrade",
-            Upgrade: "websocket",
-          },
+          headers: { Authorization: `Bearer ${tenantApiKey}` },
           signal: controller.signal,
         });
         clearTimeout(timer);
         const debugData = await debugRes.json();
-        results.ctrlDebugHeaders = debugData;
+        results.ctrlTerminalStatus = {
+          terminalReady: debugData.terminalReady,
+          terminalError: debugData.terminalError,
+          httpVersion: debugData.httpVersion,
+        };
       } catch (err: any) {
-        results.ctrlDebugHeaders = { error: err.message, code: err.code };
+        results.ctrlTerminalStatus = { error: err.message, code: err.code };
       }
 
       // Test 3: WebSocket connection attempt
