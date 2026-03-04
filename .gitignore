@@ -1,0 +1,15 @@
+node_modules/
+dist/
+.wasp/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+build/
+*.db
+/data/
+.env
+.env.server
+.env.client
+.DS_Store
