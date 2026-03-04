@@ -884,10 +884,17 @@ export async function updateImages(
   const log = (msg: string) => onLog?.(msg);
   const tag = sha ?? "latest";
 
+  // Remap SSH key path: DB may store /app/alfred-ctrl/... (container path)
+  // but we may be running on the host where cwd is /opt/alfred-saas/alfred-ctrl
+  const sshKeyPath = instance.ssh_key_path.replace(
+    /^\/app\/alfred-ctrl\//,
+    process.cwd() + "/"
+  );
+
   log(`Pulling images (tag: ${tag})...`);
   const pullResult = await ssh.exec(
     instance.ip_address,
-    instance.ssh_key_path,
+    sshKeyPath,
     `cd ${DEFAULTS.dockerComposeDir} && docker compose pull`
   );
   log(pullResult.stdout);
@@ -895,7 +902,7 @@ export async function updateImages(
   log("Restarting containers...");
   const upResult = await ssh.exec(
     instance.ip_address,
-    instance.ssh_key_path,
+    sshKeyPath,
     `cd ${DEFAULTS.dockerComposeDir} && docker compose up -d --remove-orphans`
   );
   log(upResult.stdout);
