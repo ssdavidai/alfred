@@ -26,6 +26,7 @@ export default function Terminal() {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [status, setStatus] = useState<Status>("disconnected");
   const [disconnectReason, setDisconnectReason] = useState<string>("");
+  const [debugInfo, setDebugInfo] = useState<string>("");
 
   const connect = useCallback(async () => {
     if (!containerRef.current) return;
@@ -148,6 +149,13 @@ export default function Terminal() {
     ws.onclose = () => {
       setStatus("disconnected");
       setDisconnectReason((prev) => prev || "Connection closed");
+      // Run diagnostics when WebSocket closes unexpectedly
+      fetch("/api/terminal-debug", {
+        headers: { Authorization: `Bearer ${sessionId}` },
+      })
+        .then((r) => r.json())
+        .then((data) => setDebugInfo(JSON.stringify(data, null, 2)))
+        .catch(() => {});
     };
 
     ws.onerror = () => {
@@ -239,6 +247,16 @@ export default function Terminal() {
       {status === "disconnected" && disconnectReason && (
         <div className="border-b border-gold-dim/40 bg-red-400/5 px-4 py-1.5">
           <span className="font-mono text-xs text-red-400">{disconnectReason}</span>
+        </div>
+      )}
+
+      {/* Debug diagnostics */}
+      {status === "disconnected" && debugInfo && (
+        <div className="border-b border-gold-dim/40 bg-blue-400/5 px-4 py-1.5">
+          <details>
+            <summary className="font-mono text-xs text-blue-400 cursor-pointer">Diagnostics</summary>
+            <pre className="font-mono text-[0.6rem] text-blue-300 mt-1 whitespace-pre-wrap">{debugInfo}</pre>
+          </details>
         </div>
       )}
 
