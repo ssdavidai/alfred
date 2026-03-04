@@ -1,0 +1,721 @@
+app AlfredSaaS {
+  wasp: {
+    version: "^0.19.0"
+  },
+
+  title: "Alfred - Your Personal Agentic Butler",
+
+  head: [
+    "<link rel='icon' href='/favicon.ico' />",
+    "<link rel='apple-touch-icon' href='/images/alfred-logo-192.png' />",
+    "<meta charset='utf-8' />",
+    "<meta name='description' content='Alfred is an agentic butler for people who have too many tabs open in their head. Calendar, email, finances, health data, family logistics — Alfred manages it all.' />",
+    "<meta name='author' content='Alfred' />",
+    "<meta name='keywords' content='alfred, agentic butler, ai assistant, personal ai, life management, automation' />",
+
+    "<meta property='og:type' content='website' />",
+    "<meta property='og:title' content='Alfred - Your Personal Agentic Butler' />",
+    "<meta property='og:site_name' content='Alfred' />",
+    "<meta property='og:url' content='https://alfred.black' />",
+    "<meta property='og:description' content='Agentic butler for people who have too many tabs open in their head.' />",
+    "<meta property='og:image' content='/images/alfred-logo-512.png' />",
+
+    "<link rel='preconnect' href='https://fonts.googleapis.com' />",
+    "<link rel='preconnect' href='https://fonts.gstatic.com' crossorigin />",
+    "<link href='https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=DM+Sans:wght@300;400;500&family=JetBrains+Mono:wght@300;400&display=swap' rel='stylesheet' />",
+
+    "<script defer data-domain='alfred.black' src='https://plausible.alfred.black/js/script.js'></script>",
+  ],
+
+  auth: {
+    userEntity: User,
+    methods: {
+      email: {
+        fromField: {
+          name: "Alfred",
+          email: "noreply@alfred.black"
+        },
+        emailVerification: {
+          clientRoute: EmailVerificationRoute,
+          getEmailContentFn: import { getVerificationEmailContent } from "@src/auth/email-and-pass/emails",
+        },
+        passwordReset: {
+          clientRoute: PasswordResetRoute,
+          getEmailContentFn: import { getPasswordResetEmailContent } from "@src/auth/email-and-pass/emails",
+        },
+        userSignupFields: import { getEmailUserFields } from "@src/auth/userSignupFields",
+      },
+      // google: {
+      //   userSignupFields: import { getGoogleUserFields } from "@src/auth/userSignupFields",
+      //   configFn: import { getGoogleAuthConfig } from "@src/auth/userSignupFields",
+      // },
+      // gitHub: {
+      //   userSignupFields: import { getGitHubUserFields } from "@src/auth/userSignupFields",
+      //   configFn: import { getGitHubAuthConfig } from "@src/auth/userSignupFields",
+      // },
+    },
+    onAuthFailedRedirectTo: "/login",
+    onAuthSucceededRedirectTo: "/setup",
+  },
+
+  db: {
+    seeds: [
+      import { seedMockUsers } from "@src/server/scripts/dbSeeds",
+    ]
+  },
+
+  client: {
+    rootComponent: import App from "@src/client/App",
+  },
+
+  emailSender: {
+    provider: Mailgun,
+    defaultFrom: {
+      name: "Alfred",
+      email: "noreply@mg.alfred.black"
+    },
+  },
+
+  server: {
+    setupFn: import { serverSetup } from "@src/server/setup",
+    middlewareConfigFn: import { serverMiddlewareFn } from "@src/server/middleware",
+  },
+}
+
+// ============================================================
+// Landing & Marketing
+// ============================================================
+route LandingPageRoute { path: "/", to: LandingPage }
+page LandingPage {
+  component: import LandingPage from "@src/landing-page/LandingPage"
+}
+
+// ============================================================
+// Auth Pages
+// ============================================================
+route LoginRoute { path: "/login", to: LoginPage }
+page LoginPage {
+  component: import Login from "@src/auth/LoginPage"
+}
+
+route SignupRoute { path: "/signup", to: SignupPage }
+page SignupPage {
+  component: import { Signup } from "@src/auth/SignupPage"
+}
+
+route RequestPasswordResetRoute { path: "/request-password-reset", to: RequestPasswordResetPage }
+page RequestPasswordResetPage {
+  component: import { RequestPasswordResetPage } from "@src/auth/email-and-pass/RequestPasswordResetPage",
+}
+
+route PasswordResetRoute { path: "/password-reset", to: PasswordResetPage }
+page PasswordResetPage {
+  component: import { PasswordResetPage } from "@src/auth/email-and-pass/PasswordResetPage",
+}
+
+route EmailVerificationRoute { path: "/email-verification", to: EmailVerificationPage }
+page EmailVerificationPage {
+  component: import { EmailVerificationPage } from "@src/auth/email-and-pass/EmailVerificationPage",
+}
+
+// ============================================================
+// User Account
+// ============================================================
+route AccountRoute { path: "/account", to: AccountPage }
+page AccountPage {
+  authRequired: true,
+  component: import Account from "@src/user/AccountPage"
+}
+
+query getPaginatedUsers {
+  fn: import { getPaginatedUsers } from "@src/user/operations",
+  entities: [User]
+}
+
+action updateIsUserAdminById {
+  fn: import { updateIsUserAdminById } from "@src/user/operations",
+  entities: [User]
+}
+
+action deleteUserById {
+  fn: import { deleteUserById } from "@src/user/operations",
+  entities: [User, Instance, ProvisioningJob, ApiKey, ContactFormMessage]
+}
+
+action adminUpdateUser {
+  fn: import { adminUpdateUser } from "@src/user/operations",
+  entities: [User]
+}
+
+action adminCreateInstance {
+  fn: import { adminCreateInstance } from "@src/admin/instanceOperations",
+  entities: [Instance, User, ProvisioningJob]
+}
+
+// ============================================================
+// Payment / Pricing
+// ============================================================
+route PricingPageRoute { path: "/pricing", to: PricingPage }
+page PricingPage {
+  component: import PricingPage from "@src/payment/PricingPage"
+}
+
+route CheckoutResultRoute { path: "/checkout", to: CheckoutResultPage }
+page CheckoutResultPage {
+  authRequired: true,
+  component: import CheckoutResultPage from "@src/payment/CheckoutResultPage"
+}
+
+query getCustomerPortalUrl {
+  fn: import { getCustomerPortalUrl } from "@src/payment/operations",
+  entities: [User]
+}
+
+action generateCheckoutSession {
+  fn: import { generateCheckoutSession } from "@src/payment/operations",
+  entities: [User, AdminSetting]
+}
+
+api paymentsWebhook {
+  fn: import { paymentsWebhook } from "@src/payment/webhook",
+  entities: [User, Instance, ProvisioningJob],
+  middlewareConfigFn: import { paymentsMiddlewareConfigFn } from "@src/payment/webhook",
+  httpRoute: (POST, "/payments-webhook")
+}
+
+// ============================================================
+// Provisioning
+// ============================================================
+route SetupRoute { path: "/setup", to: SetupPage }
+page SetupPage {
+  authRequired: true,
+  component: import SetupPage from "@src/provisioning/SetupPage"
+}
+
+query getProvisioningStatus {
+  fn: import { getProvisioningStatus } from "@src/provisioning/operations",
+  entities: [Instance, ProvisioningJob]
+}
+
+action reprovisionInstance {
+  fn: import { reprovisionInstance } from "@src/provisioning/operations",
+  entities: [Instance, ProvisioningJob]
+}
+
+job provisionInstance {
+  executor: PgBoss,
+  perform: {
+    fn: import { provisionInstanceJob } from "@src/provisioning/worker"
+  },
+  schedule: {
+    cron: "*/1 * * * *" // poll for pending jobs every minute (backup)
+  },
+  entities: [Instance, ProvisioningJob]
+}
+
+job destroyInstance {
+  executor: PgBoss,
+  perform: {
+    fn: import { destroyInstanceJob } from "@src/lifecycle/worker"
+  },
+  entities: [Instance]
+}
+
+// ============================================================
+// Dashboard
+// ============================================================
+route DashboardRoute { path: "/dashboard", to: DashboardPage }
+page DashboardPage {
+  authRequired: true,
+  component: import DashboardPage from "@src/dashboard/DashboardPage"
+}
+
+route InboxRoute { path: "/dashboard/inbox", to: InboxPage }
+page InboxPage {
+  authRequired: true,
+  component: import InboxPage from "@src/dashboard/InboxPage"
+}
+
+route VaultBrowserRoute { path: "/dashboard/vault", to: VaultBrowserPage }
+page VaultBrowserPage {
+  authRequired: true,
+  component: import VaultBrowserPage from "@src/dashboard/VaultBrowserPage"
+}
+
+route VaultRecordRoute { path: "/dashboard/vault/*", to: VaultRecordPage }
+page VaultRecordPage {
+  authRequired: true,
+  component: import VaultRecordPage from "@src/dashboard/VaultRecordPage"
+}
+
+route AssistantsRoute { path: "/dashboard/assistants", to: AssistantsPage }
+page AssistantsPage {
+  authRequired: true,
+  component: import AssistantsPage from "@src/dashboard/AssistantsPage"
+}
+
+route DevicesRoute { path: "/dashboard/devices", to: DevicesPage }
+page DevicesPage {
+  authRequired: true,
+  component: import DevicesPage from "@src/dashboard/DevicesPage"
+}
+
+route CredentialsRoute { path: "/dashboard/credentials", to: CredentialsPage }
+page CredentialsPage {
+  authRequired: true,
+  component: import CredentialsPage from "@src/dashboard/CredentialsPage"
+}
+
+route StreamsRoute { path: "/dashboard/streams", to: StreamsPage }
+page StreamsPage {
+  authRequired: true,
+  component: import StreamsPage from "@src/streams/StreamsPage"
+}
+
+route LogsRoute { path: "/dashboard/logs", to: LogsPage }
+page LogsPage {
+  authRequired: true,
+  component: import LogsPage from "@src/dashboard/LogsPage"
+}
+
+route WorkspaceRoute { path: "/dashboard/workspace", to: WorkspacePage }
+page WorkspacePage {
+  authRequired: true,
+  component: import WorkspacePage from "@src/dashboard/WorkspacePage"
+}
+
+route SettingsRoute { path: "/dashboard/settings", to: SettingsPage }
+page SettingsPage {
+  authRequired: true,
+  component: import SettingsPage from "@src/dashboard/SettingsPage"
+}
+
+route ApiDocsRoute { path: "/dashboard/api-docs", to: ApiDocsPage }
+page ApiDocsPage {
+  authRequired: true,
+  component: import ApiDocsPage from "@src/dashboard/ApiDocsPage"
+}
+
+// API Key management
+query listApiKeys {
+  fn: import { listApiKeys } from "@src/apikeys/operations",
+  entities: [ApiKey]
+}
+
+action createApiKey {
+  fn: import { createApiKey } from "@src/apikeys/operations",
+  entities: [ApiKey]
+}
+
+action revokeApiKey {
+  fn: import { revokeApiKey } from "@src/apikeys/operations",
+  entities: [ApiKey]
+}
+
+// User API proxy (Bearer token auth with user API keys)
+api userApiProxy {
+  fn: import { userApiProxy } from "@src/apikeys/proxy",
+  entities: [ApiKey, Instance],
+  middlewareConfigFn: import { apiProxyMiddleware } from "@src/apikeys/proxy",
+  httpRoute: (ALL, "/user-api")
+}
+
+// Dashboard queries and actions (proxy to tenant API)
+query getDashboardData {
+  fn: import { getDashboardData } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getInboxItems {
+  fn: import { getInboxItems } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action submitInboxItem {
+  fn: import { submitInboxItem } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getVaultRecords {
+  fn: import { getVaultRecords } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getVaultRecord {
+  fn: import { getVaultRecord } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getVaultGraph {
+  fn: import { getVaultGraph } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getWorkerStatus {
+  fn: import { getWorkerStatus } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action triggerWorker {
+  fn: import { triggerWorker } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getDevices {
+  fn: import { getDevices } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action approveDevice {
+  fn: import { approveDevice } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action rejectDevice {
+  fn: import { rejectDevice } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action removeDevice {
+  fn: import { removeDevice } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getContainerLogs {
+  fn: import { getContainerLogs } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getActivityFeed {
+  fn: import { getActivityFeed } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getCredentials {
+  fn: import { getCredentials } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action updateCredentials {
+  fn: import { updateCredentials } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getAgentConfig {
+  fn: import { getAgentConfig } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action updateAgentConfig {
+  fn: import { updateAgentConfig } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action updateAgentModel {
+  fn: import { updateAgentModel } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getWorkspaceFile {
+  fn: import { getWorkspaceFile } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action updateWorkspaceFile {
+  fn: import { updateWorkspaceFile } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// ============================================================
+// Tasks
+// ============================================================
+route TasksRoute { path: "/dashboard/tasks", to: TasksPage }
+page TasksPage {
+  authRequired: true,
+  component: import TasksPage from "@src/tasks/TasksPage"
+}
+
+query getTasks {
+  fn: import { getTasks } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+query getTaskDetail {
+  fn: import { getTaskDetail } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action updateTask {
+  fn: import { updateTask } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action updateTaskStatus {
+  fn: import { updateTaskStatus } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+// ============================================================
+// Intuition (Learning Engine)
+// ============================================================
+route IntuitionRoute { path: "/dashboard/intuition", to: IntuitionPage }
+page IntuitionPage {
+  authRequired: true,
+  component: import IntuitionPage from "@src/intuition/IntuitionPage"
+}
+
+query getIntuitionStatus {
+  fn: import { getIntuitionStatus } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+query getIntuitionInstincts {
+  fn: import { getIntuitionInstincts } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+query getIntuitionQueue {
+  fn: import { getIntuitionQueue } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+action routeInput {
+  fn: import { routeInput } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+action enableIntuition {
+  fn: import { enableIntuition } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+action disableIntuition {
+  fn: import { disableIntuition } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+// ============================================================
+// Streams
+// ============================================================
+query getStreams {
+  fn: import { getStreams } from "@src/streams/operations",
+  entities: [Stream, StreamEvent]
+}
+
+query getStreamEvents {
+  fn: import { getStreamEvents } from "@src/streams/operations",
+  entities: [Stream, StreamEvent]
+}
+
+action createStream {
+  fn: import { createStream } from "@src/streams/operations",
+  entities: [Stream, Instance]
+}
+
+action updateStream {
+  fn: import { updateStream } from "@src/streams/operations",
+  entities: [Stream]
+}
+
+action deleteStream {
+  fn: import { deleteStream } from "@src/streams/operations",
+  entities: [Stream, StreamEvent, Instance]
+}
+
+action pauseStream {
+  fn: import { pauseStream } from "@src/streams/operations",
+  entities: [Stream, Instance]
+}
+
+action resumeStream {
+  fn: import { resumeStream } from "@src/streams/operations",
+  entities: [Stream, Instance]
+}
+
+action regenerateWebhookToken {
+  fn: import { regenerateWebhookToken } from "@src/streams/operations",
+  entities: [Stream]
+}
+
+// ============================================================
+// Monitoring & Operations
+// ============================================================
+job healthMonitor {
+  executor: PgBoss,
+  perform: {
+    fn: import { healthMonitorJob } from "@src/monitoring/worker"
+  },
+  schedule: {
+    cron: "*/2 * * * *" // every 2 minutes
+  },
+  entities: [Instance]
+}
+
+job syncSubscriptions {
+  executor: PgBoss,
+  perform: {
+    fn: import { syncSubscriptionsJob } from "@src/lifecycle/worker"
+  },
+  schedule: {
+    cron: "0 * * * *" // every hour
+  },
+  entities: [User, Instance]
+}
+
+job suspendedCleanup {
+  executor: PgBoss,
+  perform: {
+    fn: import { suspendedCleanupJob } from "@src/lifecycle/worker"
+  },
+  schedule: {
+    cron: "0 4 * * *" // daily at 4am
+  },
+  entities: [Instance]
+}
+
+// ============================================================
+// Analytics (kept from OpenSaaS template)
+// ============================================================
+query getDailyStats {
+  fn: import { getDailyStats } from "@src/analytics/operations",
+  entities: [User, DailyStats]
+}
+
+job dailyStatsJob {
+  executor: PgBoss,
+  perform: {
+    fn: import { calculateDailyStats } from "@src/analytics/stats"
+  },
+  schedule: {
+    cron: "0 * * * *"
+  },
+  entities: [User, DailyStats, Logs, PageViewSource]
+}
+
+// ============================================================
+// Internal Admin Dashboard
+// ============================================================
+route AdminRoute { path: "/admin", to: AdminDashboardPage }
+page AdminDashboardPage {
+  authRequired: true,
+  component: import AdminDashboardPage from "@src/admin/dashboards/analytics/AnalyticsDashboardPage"
+}
+
+route AdminUsersRoute { path: "/admin/users", to: AdminUsersPage }
+page AdminUsersPage {
+  authRequired: true,
+  component: import AdminUsers from "@src/admin/dashboards/users/UsersDashboardPage"
+}
+
+route AdminInstancesRoute { path: "/admin/instances", to: AdminInstancesPage }
+page AdminInstancesPage {
+  authRequired: true,
+  component: import AdminInstances from "@src/admin/dashboards/instances/InstancesDashboardPage"
+}
+
+query getAdminInstances {
+  fn: import { getAdminInstances } from "@src/admin/operations",
+  entities: [Instance, User]
+}
+
+route AdminInstanceDetailRoute { path: "/admin/instances/:instanceId", to: AdminInstanceDetailPage }
+page AdminInstanceDetailPage {
+  authRequired: true,
+  component: import AdminInstanceDetail from "@src/admin/dashboards/instances/InstanceDetailPage"
+}
+
+route AdminProvisioningJobsRoute { path: "/admin/provisioning", to: AdminProvisioningJobsPage }
+page AdminProvisioningJobsPage {
+  authRequired: true,
+  component: import AdminProvisioningJobs from "@src/admin/dashboards/instances/ProvisioningJobsPage"
+}
+
+query getAdminInstanceDetail {
+  fn: import { getAdminInstanceDetail } from "@src/admin/instanceOperations",
+  entities: [Instance, User, ProvisioningJob]
+}
+
+query getAdminInstanceHealth {
+  fn: import { getAdminInstanceHealth } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+query getAdminInstanceDevices {
+  fn: import { getAdminInstanceDevices } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+query getAdminProvisioningJobs {
+  fn: import { getAdminProvisioningJobs } from "@src/admin/instanceOperations",
+  entities: [ProvisioningJob, User]
+}
+
+action adminDestroyInstance {
+  fn: import { adminDestroyInstance } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+action adminProvisionInstance {
+  fn: import { adminProvisionInstance } from "@src/admin/instanceOperations",
+  entities: [Instance, ProvisioningJob]
+}
+
+action adminTriggerWorker {
+  fn: import { adminTriggerWorker } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+action adminApproveDevice {
+  fn: import { adminApproveDevice } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+action adminRejectDevice {
+  fn: import { adminRejectDevice } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+action adminPatchAllInstanceConfigs {
+  fn: import { adminPatchAllInstanceConfigs } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+// ============================================================
+// Waitlist / Closed Beta
+// ============================================================
+route WaitlistRoute { path: "/waitlist", to: WaitlistPage }
+page WaitlistPage {
+  authRequired: true,
+  component: import WaitlistPage from "@src/payment/WaitlistPage"
+}
+
+query getAdminSettings {
+  fn: import { getAdminSettings } from "@src/admin/settingsOperations",
+  entities: [AdminSetting]
+}
+
+action updateAdminSetting {
+  fn: import { updateAdminSetting } from "@src/admin/settingsOperations",
+  entities: [AdminSetting]
+}
+
+query getClosedBetaStatus {
+  fn: import { getClosedBetaStatus } from "@src/admin/settingsOperations",
+  entities: [AdminSetting]
+}
+
+
+route TermsOfServiceRoute { path: "/tos", to: TermsOfServicePage }
+page TermsOfServicePage {
+  component: import TermsOfServicePage from "@src/legal/TermsOfServicePage"
+}
+
+route PrivacyPolicyRoute { path: "/pp", to: PrivacyPolicyPage }
+page PrivacyPolicyPage {
+  component: import PrivacyPolicyPage from "@src/legal/PrivacyPolicyPage"
+}
+
+route NotFoundRoute { path: "*", to: NotFoundPage }
+page NotFoundPage {
+  component: import { NotFoundPage } from "@src/client/components/NotFoundPage"
+}

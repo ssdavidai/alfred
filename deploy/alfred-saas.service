@@ -1,0 +1,17 @@
+[Unit]
+Description=Alfred SaaS
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=deploy
+WorkingDirectory=/opt/alfred-saas
+ExecStart=/usr/bin/node .wasp/build/server/bundle/server.js
+Restart=always
+RestartSec=5
+EnvironmentFile=/opt/alfred-saas/.env.server
+Environment=NODE_ENV=production PORT=3000
+
+[Install]
+WantedBy=multi-user.target

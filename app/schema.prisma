@@ -1,0 +1,176 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id                        String          @id @default(uuid())
+  createdAt                 DateTime        @default(now())
+
+  email                     String?         @unique
+  username                  String?         @unique
+  isAdmin                   Boolean         @default(false)
+
+  paymentProcessorUserId    String?         @unique
+  subscriptionStatus        String?         // 'active', 'cancel_at_period_end', 'past_due', 'deleted'
+  subscriptionPlan          String?         // 'premium', 'black' (grandfathered: 'starter', 'pro')
+  datePaid                  DateTime?
+  credits                   Int             @default(0)
+
+  instance                  Instance?
+  provisioningJobs          ProvisioningJob[]
+  contactFormMessages       ContactFormMessage[]
+  apiKeys                   ApiKey[]
+  streams                   Stream[]
+  streamEvents              StreamEvent[]
+}
+
+model ApiKey {
+  id                String    @id @default(uuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id])
+  name              String                   // user-given name e.g. "My Script"
+  keyHash           String    @unique        // SHA-256 hash of the full key
+  keyPrefix         String                   // first 8 chars for display (e.g. "alf_a1b2...")
+  lastUsedAt        DateTime?
+  createdAt         DateTime  @default(now())
+}
+
+model Instance {
+  id                String    @id @default(uuid())
+  userId            String    @unique
+  user              User      @relation(fields: [userId], references: [id])
+  customerName      String    @unique    // "alfred-<slug>"
+  tier              String               // PREMIUM, BLACK (grandfathered: STARTER, PRO)
+  serverType        String               // cx53 (grandfathered: cx33, cx43)
+  status            String    @default("provisioning")  // provisioning|running|suspended|error|destroyed
+  tailscaleHostname String?
+  subdomainUrl      String?              // e.g. https://acme.alfred.black
+  apiKey            String?              // encrypted AAS_API_KEY for tenant API
+  ipAddress         String?
+  provisionedAt     DateTime?
+  suspendedAt       DateTime?
+  lastHealthCheck   DateTime?
+  lastHealthStatus  String?              // ok|degraded|down|unreachable
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+}
+
+model ProvisioningJob {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  instanceId  String?
+  status      String    @default("pending")  // pending|running|completed|failed
+  currentStep String?
+  logs        String[]
+  error       String?
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+}
+
+model DailyStats {
+  id                               Int             @id @default(autoincrement())
+  date                             DateTime        @default(now()) @unique
+
+  totalViews                       Int             @default(0)
+  prevDayViewsChangePercent        String          @default("0")
+  userCount                        Int             @default(0)
+  paidUserCount                    Int             @default(0)
+  userDelta                        Int             @default(0)
+  paidUserDelta                    Int             @default(0)
+  totalRevenue                     Float           @default(0)
+  totalProfit                      Float           @default(0)
+
+  sources                          PageViewSource[]
+}
+
+model PageViewSource {
+  @@id([date, name])
+  name                     String
+  date                     DateTime        @default(now())
+
+  dailyStats               DailyStats?     @relation(fields: [dailyStatsId], references: [id])
+  dailyStatsId             Int?
+
+  visitors                 Int
+}
+
+model Logs {
+  id                       Int             @id @default(autoincrement())
+  createdAt                DateTime        @default(now())
+
+  message                  String
+  level                    String
+}
+
+model ContactFormMessage {
+  id                        String          @id @default(uuid())
+  createdAt                 DateTime        @default(now())
+
+  user                      User            @relation(fields: [userId], references: [id])
+  userId                    String
+
+  content                   String
+  isRead                    Boolean         @default(false)
+  repliedAt                 DateTime?
+}
+
+model AdminSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model Stream {
+  id           String        @id @default(uuid())
+  userId       String
+  user         User          @relation(fields: [userId], references: [id])
+  name         String        // "Gmail", "Omi Ambient", "OpenClaw Sessions"
+  type         String        // "scheduled"|"webhook"|"realtime"|"system"|"file"
+  source       String        // "gmail"|"omi"|"openclaw-sessions"|"polar"|"custom"
+  isSystem     Boolean       @default(false)
+  enabled      Boolean       @default(true)
+  config       Json          // source-specific: {interval, credentialRef, webhookSecret, etc.}
+  webhookToken String?       @unique  // for webhook streams — used in URL
+  lastRunAt    DateTime?
+  lastEventAt  DateTime?
+  status       String        @default("idle")  // "idle"|"running"|"error"|"paused"
+  errorMessage String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  events       StreamEvent[]
+
+  @@unique([userId, source])
+}
+
+model StreamEvent {
+  id          String   @id @default(uuid())
+  streamId    String
+  stream      Stream   @relation(fields: [streamId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  receivedAt  DateTime @default(now())
+  sourceRef   String?  // for dedup
+  type        String
+  raw         Json
+  summary     String?
+  processed   Boolean  @default(false)
+  inboxItemId String?  // linked once Alfred processes it
+
+  // Intuition (learning engine) fields
+  vaultRecord     String?
+  processedAt     DateTime?
+  classification  String?
+  quarantined     Boolean  @default(false)
+  quarantineError String?
+
+  @@index([streamId, receivedAt])
+  @@index([userId, processed])
+  @@unique([streamId, sourceRef])
+}
