@@ -21,7 +21,7 @@ const KNOWN_TYPES = [
 const STATUS_BY_TYPE: Record<string, string[]> = {
   project: ["active", "paused", "completed", "abandoned", "proposed"],
   task: ["todo", "active", "blocked", "done", "cancelled"],
-  session: ["active", "completed"],
+  session: ["active", "paused", "finished"],
   input: ["unprocessed", "processed", "deferred"],
   person: ["active", "inactive"],
   org: ["active", "inactive"],

@@ -101,6 +101,14 @@ async def execute_alfred_instructions(hint: dict[str, Any]) -> None:
                     updated = _apply_frontmatter_updates(raw, {"assigned_to": details})
                     await client.update_record(target, updated)
 
+            elif action_type in ("route", "move"):
+                destination = action.get("details", action.get("target", ""))
+                if destination and target:
+                    await client._client.post(
+                        "/api/v1/learning/route",
+                        json={"input_id": target, "destination": destination},
+                    )
+
             elif action_type == "notify":
                 await client.notify(target, details)
 

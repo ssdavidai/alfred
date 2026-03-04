@@ -90,7 +90,7 @@ def validate_instinct_record(instinct: dict[str, Any]) -> ValidationResult:
             result.add_error("confidence_score must be between 0.0 and 1.0")
 
     # observations list (wikilinks)
-    observations = instinct.get("observations")
+    observations = instinct.get("observations", instinct.get("based_on", []))
     if observations is not None and not isinstance(observations, list):
         result.add_error("observations must be a list")
 
@@ -101,9 +101,9 @@ def validate_instinct_record(instinct: dict[str, Any]) -> ValidationResult:
         if abs(total - 1.0) > 0.01:
             result.add_error(f"matching_weights must sum to 1.0 (got {total:.2f})")
 
-    # Domain — optional in rich schema (description replaces it)
-    if not instinct.get("domain") and not routing_rule:
-        result.add_error("Missing required field: domain")
+    # Domain — required only for legacy schema (without routing_rule)
+    if not instinct.get("routing_rule") and not instinct.get("domain"):
+        result.add_error("domain is required when routing_rule is not specified")
 
     return result
 
@@ -123,6 +123,11 @@ def validate_instinct_proposal(proposal: dict[str, Any]) -> ValidationResult:
         if not inner.valid:
             result.errors.extend(inner.errors)
             result.valid = False
+
+        # New instincts must be grounded in at least 3 observations
+        observations = instinct.get("observations", instinct.get("based_on", []))
+        if not isinstance(observations, list) or len(observations) < 3:
+            result.add_error("New instincts require at least 3 observations")
 
     elif action == "update":
         if not proposal.get("path"):

@@ -18,6 +18,7 @@ with workflow.unsafe.imports_passed_through():
     from src.activities.notify import escalate_to_user
     from src.activities.vault import write_observation_record
     from src.matching.discretion import should_route_autonomously
+    from src.matching.metadata import extract_input_metadata
 
 
 @dataclass
@@ -60,14 +61,12 @@ class JudgmentWorkflow:
                 escalated += 1
                 continue
 
-            # 2. Extract metadata is already done; build from input
-            metadata = {
-                "domains": inp.get("domains", []),
-                "keywords": inp.get("keywords", []),
-                "input_type": inp.get("stream_type", inp.get("type", "other")),
-                "attachment_patterns": inp.get("attachment_patterns", []),
-                "tags": inp.get("tags", []),
-            }
+            # 2. Extract metadata (Python — deterministic)
+            metadata = await workflow.execute_activity(
+                extract_input_metadata,
+                args=[inp],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
 
             # 3. Score each instinct (Python — deterministic)
             scores: list[dict[str, Any]] = await workflow.execute_activity(
@@ -88,20 +87,29 @@ class JudgmentWorkflow:
                     start_to_close_timeout=timedelta(seconds=30),
                 )
                 # Record observation (machine-routed)
-                from datetime import datetime, timezone
+                instinct = best["instinct"]
+                score = best["score"]
+                breakdown = best.get("breakdown", {})
+                routing_rule = instinct.get("routing_rule", {})
 
-                now = datetime.now(timezone.utc).isoformat()
                 observation = {
                     "input_type": inp.get("stream_type", "other"),
                     "input_source": "auto-judgment",
                     "input_ref": inp.get("id", ""),
-                    "routing_decision": destination,
-                    "reasoning": f"Auto-routed by instinct '{best['instinct'].get('name', '')}' with score {best['score']:.2f}",
+                    "routing_decision": {
+                        "destination": destination,
+                        "process": routing_rule.get("process", ""),
+                        "assigned_to": routing_rule.get("default_assignee", ""),
+                    },
+                    "reasoning": (
+                        f"Auto-routed by instinct '{instinct.get('name', '')}'"
+                        f" with score {score:.2f}"
+                    ),
                     "signals": {
-                        "domain_patterns": [],
-                        "keyword_patterns": [],
-                        "input_types": [],
-                        "attachment_patterns": [],
+                        "domain_patterns": breakdown.get("domain", []),
+                        "keyword_patterns": breakdown.get("keywords", []),
+                        "input_types": breakdown.get("input_type", []),
+                        "attachment_patterns": breakdown.get("attachment", []),
                     },
                     "confidence": "machine",
                     "routed_by": "alfred",

@@ -17,7 +17,10 @@ from src.config import load_config
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("register-schedules")
 
-SCHEDULES = [
+# Schedule definitions — calendar-based schedules use a placeholder for the
+# ScheduleCalendarSpec which gets combined with the tenant timezone at
+# registration time via ScheduleSpec(time_zone_name=...).
+INTERVAL_SCHEDULES = [
     {
         "id": "al-event-processor",
         "workflow": "EventProcessorWorkflow",
@@ -29,17 +32,25 @@ SCHEDULES = [
         "interval": timedelta(minutes=5),
     },
     {
+        "id": "al-learning",
+        "workflow": "LearningWorkflow",
+        "interval": timedelta(minutes=5),
+    },
+    {
+        "id": "al-judgment",
+        "workflow": "JudgmentWorkflow",
+        "interval": timedelta(minutes=2),
+    },
+]
+
+CALENDAR_SCHEDULES = [
+    {
         "id": "al-daily-digest",
         "workflow": "DailyDigestWorkflow",
         "calendar": ScheduleCalendarSpec(
             hour=[ScheduleRange(start=18)],
             minute=[ScheduleRange(start=0)],
         ),
-    },
-    {
-        "id": "al-learning",
-        "workflow": "LearningWorkflow",
-        "interval": timedelta(minutes=5),
     },
     {
         "id": "al-reflection",
@@ -49,29 +60,42 @@ SCHEDULES = [
             minute=[ScheduleRange(start=0)],
         ),
     },
-    {
-        "id": "al-judgment",
-        "workflow": "JudgmentWorkflow",
-        "interval": timedelta(minutes=2),
-    },
 ]
+
+
+def _build_schedule_entries(timezone: str) -> list[dict]:
+    """Combine interval and calendar schedules into a unified list with specs."""
+    entries = []
+    for sched in INTERVAL_SCHEDULES:
+        entries.append({
+            **sched,
+            "spec": ScheduleSpec(
+                intervals=[ScheduleIntervalSpec(every=sched["interval"])]
+            ),
+        })
+    for sched in CALENDAR_SCHEDULES:
+        entries.append({
+            **sched,
+            "spec": ScheduleSpec(
+                calendars=[sched["calendar"]],
+                time_zone_name=timezone,
+            ),
+        })
+    return entries
 
 
 async def register_all() -> None:
     config = load_config()
     client = await Client.connect(config.temporal_host)
+    timezone = config.tenant_timezone
+    logger.info("Using tenant timezone: %s", timezone)
 
-    for sched in SCHEDULES:
+    schedules = _build_schedule_entries(timezone)
+
+    for sched in schedules:
         schedule_id = sched["id"]
         workflow_name = sched["workflow"]
-
-        # Build spec
-        if "interval" in sched:
-            spec = ScheduleSpec(
-                intervals=[ScheduleIntervalSpec(every=sched["interval"])]
-            )
-        else:
-            spec = ScheduleSpec(calendars=[sched["calendar"]])
+        spec = sched["spec"]
 
         action = ScheduleActionStartWorkflow(
             workflow_name,

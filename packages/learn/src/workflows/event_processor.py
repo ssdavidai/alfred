@@ -73,23 +73,28 @@ class EventProcessorWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
 
-            # 3. Classify via Clerk (LLM — creative)
-            classification = await workflow.execute_activity(
-                classify_event,
-                args=[event, metadata],
-                start_to_close_timeout=timedelta(seconds=60),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
+            # 3. Classify via Clerk + 4. Validate (retry once before quarantine)
+            classification = None
+            validated = None
+            for attempt in range(2):
+                classification = await workflow.execute_activity(
+                    classify_event,
+                    args=[event, metadata],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
 
-            # 4. Validate (Python — structural)
-            validated = await workflow.execute_activity(
-                validate_classification,
-                args=[classification],
-                start_to_close_timeout=timedelta(seconds=10),
-            )
+                validated = await workflow.execute_activity(
+                    validate_classification,
+                    args=[classification],
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
+
+                if validated.valid:
+                    break
 
             if not validated.valid:
-                # Quarantine on validation failure
+                # Quarantine on second validation failure
                 await workflow.execute_activity(
                     quarantine_event,
                     args=[event, validated.errors],

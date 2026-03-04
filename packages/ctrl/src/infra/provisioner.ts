@@ -31,6 +31,9 @@ import workspaceUser from "../templates/workspace/USER.md";
 import hookReadme from "../hooks/alfred-inbox/HOOK.md";
 // @ts-expect-error esbuild plugin loads handler.js as text
 import hookHandler from "../hooks/alfred-inbox/handler.js";
+import observerHookReadme from "../hooks/alfred-learn-observer/HOOK.md";
+// @ts-expect-error esbuild plugin loads handler.js as text
+import observerHookHandler from "../hooks/alfred-learn-observer/handler.js";
 
 nunjucks.configure({ autoescape: false });
 
@@ -386,6 +389,22 @@ export async function provision(
       ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, hookHandler, `${hookBasePath}/handler.js`, 0o644, undefined, hostKeyOpts),
     ]);
     log("Hook uploaded");
+
+    // Upload alfred-learn-observer hook (captures routing patterns → observation queue for learning)
+    log("Uploading alfred-learn-observer hook...");
+    const observerHookBasePath = "/mnt/encrypted/openclaw/hooks/alfred-learn-observer";
+    await ssh.exec(
+      server.public_net.ipv4.ip,
+      keyPair.privateKeyPath,
+      `mkdir -p ${observerHookBasePath}`,
+      undefined,
+      hostKeyOpts,
+    );
+    await Promise.all([
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, observerHookReadme, `${observerHookBasePath}/HOOK.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, observerHookHandler, `${observerHookBasePath}/handler.js`, 0o644, undefined, hostKeyOpts),
+    ]);
+    log("Observer hook uploaded");
 
     // Pre-configure openclaw.json with baked-in config before openclaw starts.
     // Includes: heartbeat (4h), compaction (60k token flush), qmd memory

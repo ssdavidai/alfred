@@ -21,7 +21,7 @@ Flow every 5 minutes:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from temporalio import workflow
@@ -124,21 +124,26 @@ class SessionTrackerWorkflow:
             )
             created += 1
         else:
-            # Open session exists — ask Clerk if same topic
-            topic_decision = await workflow.execute_activity(
-                clerk_compare_topics,
-                args=[
-                    current_session.get("topic_summary", ""),
-                    recent,
-                ],
-                start_to_close_timeout=timedelta(seconds=30),
-            )
+            # Open session exists — check time gap before deciding
+            last_activity_str = current_session.get("last_activity", "")
+            newest_record_ts = recent[-1].get("timestamp", "") if recent else ""
 
-            if topic_decision.get("same_topic", False):
-                # Same topic — append records
+            # Parse timestamps (handle "Z" suffix)
+            gap_minutes = None
+            if last_activity_str and newest_record_ts:
+                last_ts = datetime.fromisoformat(
+                    last_activity_str.replace("Z", "+00:00")
+                )
+                newest_ts = datetime.fromisoformat(
+                    newest_record_ts.replace("Z", "+00:00")
+                )
+                gap_minutes = (newest_ts - last_ts).total_seconds() / 60
+
+            if gap_minutes is not None and gap_minutes < 30:
+                # <30 min gap — deterministic: same session, no Clerk call
                 updated_session = await workflow.execute_activity(
                     append_to_session,
-                    args=[current_session, recent, topic_decision.get("suggested_topic_summary", "")],
+                    args=[current_session, recent, current_session.get("topic_summary", "")],
                     start_to_close_timeout=timedelta(seconds=30),
                 )
                 await workflow.execute_activity(
@@ -146,11 +151,11 @@ class SessionTrackerWorkflow:
                     args=[{"current_session": updated_session}],
                     start_to_close_timeout=timedelta(seconds=10),
                 )
-            else:
-                # Different topic — close current, create new
+            elif gap_minutes is not None and gap_minutes > 120:
+                # >2 hr gap — deterministic: different session, no Clerk call
                 await workflow.execute_activity(
                     close_session,
-                    args=[current_session, "paused"],
+                    args=[current_session, "finished"],
                     start_to_close_timeout=timedelta(seconds=60),
                 )
                 closed += 1
@@ -166,5 +171,48 @@ class SessionTrackerWorkflow:
                     start_to_close_timeout=timedelta(seconds=10),
                 )
                 created += 1
+            else:
+                # 30-120 min gap (or unknown) — ask Clerk to decide
+                topic_decision = await workflow.execute_activity(
+                    clerk_compare_topics,
+                    args=[
+                        current_session.get("topic_summary", ""),
+                        recent,
+                    ],
+                    start_to_close_timeout=timedelta(seconds=30),
+                )
+
+                if topic_decision.get("same_topic", False):
+                    # Same topic — append records
+                    updated_session = await workflow.execute_activity(
+                        append_to_session,
+                        args=[current_session, recent, topic_decision.get("suggested_topic_summary", "")],
+                        start_to_close_timeout=timedelta(seconds=30),
+                    )
+                    await workflow.execute_activity(
+                        write_session_state,
+                        args=[{"current_session": updated_session}],
+                        start_to_close_timeout=timedelta(seconds=10),
+                    )
+                else:
+                    # Different topic — close current, create new
+                    await workflow.execute_activity(
+                        close_session,
+                        args=[current_session, "paused"],
+                        start_to_close_timeout=timedelta(seconds=60),
+                    )
+                    closed += 1
+
+                    new_session = await workflow.execute_activity(
+                        create_session,
+                        args=[recent],
+                        start_to_close_timeout=timedelta(seconds=30),
+                    )
+                    await workflow.execute_activity(
+                        write_session_state,
+                        args=[{"current_session": new_session}],
+                        start_to_close_timeout=timedelta(seconds=10),
+                    )
+                    created += 1
 
         return SessionResult(sessions_created=created, sessions_closed=closed)

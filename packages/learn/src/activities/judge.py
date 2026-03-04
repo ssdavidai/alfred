@@ -113,20 +113,18 @@ async def execute_route(
     input_event: dict[str, Any],
     destination: str,
 ) -> None:
-    """Execute a routing decision — move input to destination."""
+    """Execute a routing decision — move input to destination via alfred-ctrl API."""
     config = load_config()
     client = VaultClient(config)
     try:
         path = input_event.get("path", "")
         if path:
-            existing = await client.read_record(path)
-            content = existing.get("content", "")
-            # Add routing metadata to frontmatter
-            if "---" in content:
-                parts = content.split("---", 2)
-                if len(parts) >= 3:
-                    updated = f"---{parts[1]}routed_to: \"{destination}\"\nrouted_by: alfred\n---{parts[2]}"
-                    await client.update_record(path, updated)
+            # Move the file via the alfred-ctrl learning/route endpoint
+            resp = await client._client.post(
+                "/api/v1/learning/route",
+                json={"input_id": path, "destination": destination},
+            )
+            resp.raise_for_status()
     finally:
         await client.close()
 

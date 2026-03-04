@@ -20,8 +20,10 @@ import {
 import { Brain, Loader2, Power, PowerOff, Eye, Zap, Clock, Target } from "lucide-react";
 
 const ROUTE_OPTIONS = [
+  { value: "task", label: "Task" },
+  { value: "event", label: "Event" },
+  { value: "note", label: "Note" },
   { value: "inbox", label: "Inbox" },
-  { value: "vault", label: "Vault" },
   { value: "discard", label: "Discard" },
 ];
 
@@ -73,7 +75,7 @@ export default function IntuitionPage() {
   const handleRoute = async (inputId: string, destination: string) => {
     setRoutingId(inputId);
     try {
-      await routeInput({ inputId, destination });
+      await routeInput({ input_id: inputId, destination });
       refetchQueue();
     } catch (err: any) {
       console.error("Route failed:", err);
@@ -171,7 +173,7 @@ export default function IntuitionPage() {
             <StatusCard
               icon={<Brain className="h-4 w-4 text-gold" />}
               label="Instincts"
-              value={typeof status.instincts === "object" ? status.instincts?.total ?? 0 : status.instinctCount ?? 0}
+              value={typeof status.instincts === "object" ? status.instincts?.active ?? 0 : status.instinctCount ?? 0}
             />
             <StatusCard
               icon={<Target className="h-4 w-4 text-gold" />}

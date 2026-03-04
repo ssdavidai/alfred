@@ -121,6 +121,7 @@ export function registerLearningRoutes(): void {
     const observationDir = path.join(VAULT_PATH, "observation");
     const instinctDir = path.join(VAULT_PATH, "intuition", "instincts");
     const reflectionDir = path.join(VAULT_PATH, "reflection");
+    const eventDir = path.join(VAULT_PATH, "event");
 
     const observations = readVaultRecords(observationDir);
     const instincts = readVaultRecords(instinctDir);
@@ -135,6 +136,82 @@ export function registerLearningRoutes(): void {
       if (match) enabled = match[1].trim().toLowerCase() === "true";
     } catch {
       // default to true
+    }
+
+    // processedToday: count stream events processed today
+    const todayPrefix = new Date().toISOString().slice(0, 10);
+    let processedToday = 0;
+    const processedEventsPath = path.join(STREAMS_DIR, "processed-events.json");
+    try {
+      const data = JSON.parse(fs.readFileSync(processedEventsPath, "utf-8"));
+      const events = data.events as Record<string, { processed_at?: string }> | undefined;
+      if (events) {
+        for (const entry of Object.values(events)) {
+          if (entry.processed_at && entry.processed_at.startsWith(todayPrefix)) {
+            processedToday++;
+          }
+        }
+      }
+    } catch {
+      // processed-events.json may not exist
+    }
+
+    // autoRouteRate: percentage of observations routed by alfred
+    const totalObs = observations.length;
+    let autoRouted = 0;
+    if (totalObs > 0) {
+      for (const obs of observations) {
+        if (obs.frontmatter.routed_by === "alfred") {
+          autoRouted++;
+        }
+      }
+    }
+    const autoRouteRate = totalObs > 0 ? Math.round((autoRouted / totalObs) * 100) : 0;
+
+    // queueSize: count of unrouted inputs across the vault
+    const allFiles = walkMdDir(VAULT_PATH);
+    let queueSize = 0;
+    for (const fullPath of allFiles) {
+      try {
+        const content = fs.readFileSync(fullPath, "utf-8");
+        const { frontmatter: fm } = parseFrontmatter(content);
+        if (fm.status === "unrouted") queueSize++;
+      } catch {
+        // skip
+      }
+    }
+
+    // recentActivity: last 20 lines from activity log
+    const activityLogPath = "/mnt/encrypted/alfred/learn-activity.jsonl";
+    let recentActivity: unknown[] = [];
+    try {
+      const content = fs.readFileSync(activityLogPath, "utf-8");
+      const lines = content.trim().split("\n").filter(Boolean);
+      recentActivity = lines.slice(-20).reverse().map((line: string) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return { raw: line };
+        }
+      });
+    } catch {
+      // activity log may not exist
+    }
+
+    // lastDigest: find the most recent event file with tag "digest"
+    let lastDigest: { timestamp: string; path: string; summary: string } | null = null;
+    const eventRecords = readVaultRecords(eventDir);
+    const digestRecords = eventRecords.filter((r) =>
+      r.frontmatter.tag === "digest" || r.frontmatter.tags?.includes("digest")
+    );
+    if (digestRecords.length > 0) {
+      digestRecords.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
+      const latest = digestRecords[0];
+      lastDigest = {
+        timestamp: latest.created,
+        path: latest.path,
+        summary: latest.body.slice(0, 500),
+      };
     }
 
     sendJson(res, 200, {
@@ -154,6 +231,12 @@ export function registerLearningRoutes(): void {
       },
       reflections: { total: reflections.length },
       streams: { processed: streamProcessed },
+      processedToday,
+      autoRouteRate,
+      queueSize,
+      recentActivity,
+      instinctCount: instincts.length,
+      lastDigest,
     });
   });
 
@@ -167,7 +250,7 @@ export function registerLearningRoutes(): void {
     records.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
 
     const page = records.slice(offset, offset + limit);
-    sendJson(res, 200, { records: page, total: records.length, limit, offset });
+    sendJson(res, 200, { items: page, total: records.length, limit, offset });
   });
 
   // GET /api/v1/learning/instincts — list instinct records
@@ -175,7 +258,7 @@ export function registerLearningRoutes(): void {
     const dir = path.join(VAULT_PATH, "intuition", "instincts");
     const records = readVaultRecords(dir);
     records.sort((a, b) => a.name.localeCompare(b.name));
-    sendJson(res, 200, { records, total: records.length });
+    sendJson(res, 200, { items: records, total: records.length });
   });
 
   // GET /api/v1/learning/reflections — list reflection records
@@ -183,7 +266,7 @@ export function registerLearningRoutes(): void {
     const dir = path.join(VAULT_PATH, "reflection");
     const records = readVaultRecords(dir);
     records.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
-    sendJson(res, 200, { records, total: records.length });
+    sendJson(res, 200, { items: records, total: records.length });
   });
 
   // GET /api/v1/learning/queue — unrouted inputs
@@ -206,7 +289,7 @@ export function registerLearningRoutes(): void {
         // skip
       }
     }
-    sendJson(res, 200, { records: unrouted, total: unrouted.length });
+    sendJson(res, 200, { items: unrouted, total: unrouted.length });
   });
 
   // POST /api/v1/learning/route — route an input to a destination
@@ -399,5 +482,53 @@ export function registerLearningRoutes(): void {
 
     fs.unlinkSync(filePath);
     sendJson(res, 200, { message: `Dismissed quarantined file: ${id}` });
+  });
+
+  // GET /api/v1/learning/observations/:id — single observation detail
+  addRoute("GET", "/api/v1/learning/observations/:id", async ({ res, params }) => {
+    const id = sanitizeId(params.id);
+    const filePath = path.join(VAULT_PATH, "observation", id);
+
+    let content: string;
+    try {
+      content = fs.readFileSync(filePath, "utf-8");
+    } catch {
+      throw new NotFoundError(`Observation not found: ${id}`);
+    }
+
+    const { frontmatter, body } = parseFrontmatter(content);
+    sendJson(res, 200, {
+      path: path.join("observation", id),
+      frontmatter,
+      body,
+    });
+  });
+
+  // GET /api/v1/learning/instincts/:id — single instinct detail
+  addRoute("GET", "/api/v1/learning/instincts/:id", async ({ res, params }) => {
+    const id = sanitizeId(params.id);
+    const filePath = path.join(VAULT_PATH, "intuition", "instincts", id);
+
+    let content: string;
+    try {
+      content = fs.readFileSync(filePath, "utf-8");
+    } catch {
+      throw new NotFoundError(`Instinct not found: ${id}`);
+    }
+
+    const { frontmatter, body } = parseFrontmatter(content);
+    sendJson(res, 200, {
+      path: path.join("intuition", "instincts", id),
+      frontmatter,
+      body,
+    });
+  });
+
+  // GET /api/v1/learning/sessions — list session records
+  addRoute("GET", "/api/v1/learning/sessions", async ({ res }) => {
+    const dir = path.join(VAULT_PATH, "session");
+    const records = readVaultRecords(dir);
+    records.sort((a, b) => (b.created || "").localeCompare(a.created || ""));
+    sendJson(res, 200, { items: records, total: records.length });
   });
 }

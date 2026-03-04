@@ -320,6 +320,36 @@ status: active
 
 
 @activity.defn
+async def write_quarantine_record(event_id: str, errors: list[str]) -> str:
+    """Write a quarantine markdown file to the vault via alfred-ctrl API."""
+    config = load_config()
+    client = VaultClient(config)
+    try:
+        from datetime import timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        errors_yaml = "\n".join(f'  - "{e}"' for e in errors)
+
+        content = f"""---
+type: quarantine
+event_id: {event_id}
+quarantined_at: {now}
+errors:
+{errors_yaml}
+---
+
+# Quarantined Event
+
+Event ID: {event_id}
+Reason: {'; '.join(errors)}
+"""
+        path = await client.write_record("quarantine", event_id, content)
+        return path
+    finally:
+        await client.close()
+
+
+@activity.defn
 async def fetch_unprocessed_observations() -> list[dict[str, Any]]:
     """Fetch observations with status 'unprocessed'."""
     config = load_config()
@@ -373,7 +403,10 @@ async def apply_instinct_change(proposal: dict[str, Any]) -> None:
             for source_path in proposal.get("source_paths", []):
                 existing = await client.read_record(source_path)
                 raw = existing.get("content", "")
-                updated = _apply_frontmatter_updates(raw, {"status": "merged"})
+                updated = _apply_frontmatter_updates(raw, {
+                    "status": "deprecated",
+                    "deprecation_reason": f"merged into {name}",
+                })
                 await client.update_record(source_path, updated)
 
         elif action == "deprecate":
@@ -440,6 +473,7 @@ async def write_reflection_report(
     observations: list[dict[str, Any]],
     proposals: list[dict[str, Any]],
     changes: int,
+    reasoning: str = "",
 ) -> str:
     """Write a nightly reflection report."""
     config = load_config()
@@ -462,7 +496,15 @@ changes_applied: {changes}
 # Reflection — {date_str}
 
 Reviewed {len(observations)} observations. Applied {changes} instinct changes.
+"""
 
+        if reasoning:
+            content += f"""
+## Reasoning
+{reasoning}
+"""
+
+        content += """
 ## Proposals Applied
 """
         for p in proposals:
@@ -527,7 +569,7 @@ def _build_instinct_content(instinct: dict[str, Any]) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     name = instinct.get("name", "Unnamed Instinct")
     description = instinct.get("description", "")
-    obs_count = instinct.get("observation_count", 0)
+    obs_count = len(instinct.get("observations", [])) or instinct.get("observation_count", 0)
     threshold = instinct.get("discretion_threshold", 0.95)
     weights = instinct.get("matching_weights", {
         "domain": 0.30, "keywords": 0.30,

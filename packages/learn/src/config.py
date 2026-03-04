@@ -27,6 +27,9 @@ class Config:
     enabled: bool = field(default_factory=lambda: os.environ.get("ALFRED_LEARN_ENABLED", "true").lower() == "true")
     use_date_paths: bool = field(default_factory=lambda: os.environ.get("USE_DATE_PATHS", "true").lower() == "true")
 
+    # Tenant timezone (IANA, e.g. "America/New_York") — used by daily schedules
+    tenant_timezone: str = field(default_factory=lambda: os.environ.get("TENANT_TIMEZONE", "UTC"))
+
     # Clerk agent
     clerk_agent_id: str = field(default_factory=lambda: os.environ.get("CLERK_AGENT_ID", "learn_clerk"))
 
@@ -62,6 +65,10 @@ class Config:
     @property
     def vault_quarantine_dir(self) -> str:
         return f"{self.vault_path}/inbox/_quarantine"
+
+    @property
+    def session_state_path(self) -> str:
+        return f"{self.alfred_data_dir}/session-state.json"
 
     @property
     def observation_queue_path(self) -> str:

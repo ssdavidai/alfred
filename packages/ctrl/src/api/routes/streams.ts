@@ -3,8 +3,7 @@ import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, ConflictError, NotFoundError } from "../errors.js";
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const STREAMS_DIR = path.join(DATA_DIR, "streams");
+const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
 const PROCESSED_EVENTS_PATH = path.join(STREAMS_DIR, "processed-events.json");
 
 // Ensure streams directory exists

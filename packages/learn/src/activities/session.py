@@ -53,7 +53,8 @@ async def fetch_recent_records(minutes: int) -> list[dict[str, Any]]:
                         ts = datetime.fromisoformat(created.replace("Z", "+00:00"))
                         now = datetime.now(timezone.utc)
                         if (now - ts).total_seconds() <= minutes * 60:
-                            records.append(r)
+                            if not r.get("session_id"):  # Only unassigned records
+                                records.append(r)
                     except (ValueError, TypeError):
                         pass
         return records
@@ -93,6 +94,7 @@ status: active
 started: {now}
 last_activity: {now}
 record_count: {len(record_paths)}
+idle_minutes: 0
 ---
 
 ## Records
@@ -112,7 +114,7 @@ record_count: {len(record_paths)}
                     raw = existing.get("content", "")
                     if "---" in raw:
                         from src.activities.vault import _apply_frontmatter_updates
-                        updated = _apply_frontmatter_updates(raw, {"session_id": f'"{path}"'})
+                        updated = _apply_frontmatter_updates(raw, {"session_id": path})
                         await client.update_record(rpath, updated)
                 except Exception:
                     pass
@@ -169,7 +171,7 @@ async def append_to_session(
                     raw = existing.get("content", "")
                     if "---" in raw:
                         from src.activities.vault import _apply_frontmatter_updates
-                        updated = _apply_frontmatter_updates(raw, {"session_id": f'"{session_path}"'})
+                        updated = _apply_frontmatter_updates(raw, {"session_id": session_path})
                         await client.update_record(rpath, updated)
                 except Exception:
                     pass
@@ -191,7 +193,12 @@ async def close_session(session: dict[str, Any], status: str) -> dict[str, Any]:
         started = session.get("started", now)
 
         # Ask Clerk to match session to vault context
-        context = await clerk_match_session_context(session)
+        try:
+            context = await clerk_match_session_context(session)
+            if not isinstance(context, dict):
+                context = {}
+        except Exception:
+            context = {}
 
         project = context.get("project", "")
         participants = context.get("participants", [])

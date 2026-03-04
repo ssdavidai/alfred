@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from src.config import load_config
 from src.utils.vault_client import VaultClient
@@ -33,6 +34,19 @@ async def init_vault() -> None:
     config = load_config()
     client = VaultClient(config)
 
+    # Ensure all required vault directories exist on the mounted volume
+    required_dirs = [
+        config.vault_observation_dir,
+        config.vault_intuition_dir,
+        config.vault_instincts_dir,
+        config.vault_reflection_dir,
+        os.path.join(config.vault_path, "session"),
+        config.vault_quarantine_dir,
+    ]
+    for directory in required_dirs:
+        os.makedirs(directory, exist_ok=True)
+        logger.info("Ensured directory exists: %s", directory)
+
     try:
         # Create the intuition index
         try:
@@ -45,7 +59,6 @@ async def init_vault() -> None:
                 logger.warning("Could not create intuition index: %s", e)
 
         logger.info("Vault initialization complete.")
-        logger.info("Folders managed by alfred-ctrl: observation/, intuition/, reflection/")
     finally:
         await client.close()
 

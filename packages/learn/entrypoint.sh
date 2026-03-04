@@ -14,6 +14,9 @@ for i in {1..60}; do
     sleep 1
 done
 
+echo "[alfred-learn] Initializing vault directories..."
+python -m scripts.init_vault || echo "[alfred-learn] Warning: init_vault failed, directories may already exist"
+
 echo "Registering Temporal schedules..."
 if python -m scripts.register_schedules 2>&1; then
     echo "✓ Schedules registered successfully"
