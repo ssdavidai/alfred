@@ -43,25 +43,37 @@ async function getUserFromSessionCookie(
 }
 
 export function attachTerminalProxy(server: HttpServer): void {
+  console.log("[terminal-proxy] attachTerminalProxy called, registering upgrade handler");
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", async (req: IncomingMessage, socket: Duplex, head: Buffer) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
     if (url.pathname !== "/api/terminal") return;
 
+    console.log("[terminal-proxy] upgrade request received for /api/terminal");
+
     try {
       const sessionUser = await getUserFromSessionCookie(req);
       if (!sessionUser) {
+        console.log("[terminal-proxy] auth failed: no valid session cookie");
         socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
         socket.destroy();
         return;
       }
+
+      console.log("[terminal-proxy] auth OK, userId:", sessionUser.userId);
 
       const instance = await prisma.instance.findUnique({
         where: { userId: sessionUser.userId },
       });
 
       if (!instance || instance.status !== "running" || !instance.tailscaleHostname || !instance.apiKey) {
+        console.log("[terminal-proxy] instance check failed:", {
+          found: !!instance,
+          status: instance?.status,
+          hasTailscale: !!instance?.tailscaleHostname,
+          hasApiKey: !!instance?.apiKey,
+        });
         socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
         socket.destroy();
         return;
@@ -69,6 +81,8 @@ export function attachTerminalProxy(server: HttpServer): void {
 
       const tenantApiKey = decryptApiKey(instance.apiKey);
       const upstreamUrl = `wss://${instance.tailscaleHostname}:3100/terminal?token=${encodeURIComponent(tenantApiKey)}`;
+
+      console.log("[terminal-proxy] connecting upstream to", instance.tailscaleHostname + ":3100/terminal");
 
       wss.handleUpgrade(req, socket, head, (browserWs: InstanceType<typeof WebSocket>) => {
         // Connect to tenant ctrl terminal
@@ -89,6 +103,7 @@ export function attachTerminalProxy(server: HttpServer): void {
         }
 
         upstreamWs.on("open", () => {
+          console.log("[terminal-proxy] upstream connected");
           // Bridge browser ↔ upstream (binary passthrough)
           browserWs.on("message", (data: Buffer, isBinary: boolean) => {
             if (upstreamWs.readyState === WebSocket.OPEN) {
@@ -103,16 +118,19 @@ export function attachTerminalProxy(server: HttpServer): void {
           });
         });
 
-        upstreamWs.on("error", () => {
+        upstreamWs.on("error", (err) => {
+          console.error("[terminal-proxy] upstream error:", err.message);
           cleanupBoth();
         });
 
-        upstreamWs.on("close", () => {
+        upstreamWs.on("close", (code, reason) => {
+          console.log("[terminal-proxy] upstream closed:", code, reason?.toString());
           upstreamClosed = true;
           cleanupBoth();
         });
 
         browserWs.on("close", () => {
+          console.log("[terminal-proxy] browser closed");
           browserClosed = true;
           cleanupBoth();
         });
@@ -122,7 +140,7 @@ export function attachTerminalProxy(server: HttpServer): void {
         });
       });
     } catch (err) {
-      console.error("Terminal proxy error:", err);
+      console.error("[terminal-proxy] error:", err);
       socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\n");
       socket.destroy();
     }
