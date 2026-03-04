@@ -17,7 +17,6 @@ if (fs.existsSync(envPath)) {
 
 import { setApiKey } from "./auth.js";
 import { createApiServer } from "./server.js";
-import { attachTerminalUpgrade } from "./routes/terminal.js";
 
 const apiKey = process.env.AAS_API_KEY;
 if (!apiKey) {
@@ -31,7 +30,16 @@ const port = parseInt(process.env.AAS_PORT ?? "3100", 10);
 const host = process.env.AAS_HOST ?? "127.0.0.1";
 
 const server = createApiServer();
-attachTerminalUpgrade(server);
+
+// Terminal WebSocket — loaded dynamically to avoid blocking startup if ws fails
+import("./routes/terminal.js")
+  .then(({ attachTerminalUpgrade }) => {
+    attachTerminalUpgrade(server);
+    console.log("Terminal WebSocket endpoint attached");
+  })
+  .catch((err) => {
+    console.error("Failed to load terminal module (non-fatal):", err.message);
+  });
 
 server.listen(port, host, () => {
   console.log(`Alfred tenant API listening on http://${host}:${port}`);
