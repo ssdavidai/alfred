@@ -1,0 +1,34 @@
+---
+title: "Regenerate Tailscale Certificate"
+description: "Request a new TLS certificate for the Tailscale hostname"
+api: "POST /api/v1/admin/tailscale/cert"
+---
+
+Regenerate the TLS certificate for this instance's Tailscale hostname. The hostname is automatically detected from `tailscale status`.
+
+<RequestExample>
+
+```bash curl
+curl -X POST -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/tailscale/cert
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "message": "Certificate regenerated for alfred-acme.tailnet.ts.net"
+}
+```
+
+</ResponseExample>
+
+<Note>
+  Tailscale certificates are automatically renewed before expiration. Manual regeneration is only needed if you encounter certificate errors or if the certificate was accidentally deleted.
+</Note>
+
+<Warning>
+  The new certificate will be written to `/var/lib/tailscale/certs/`. Ensure the AAS service is configured to use certificates from this directory.
+</Warning>

@@ -1,0 +1,66 @@
+---
+title: "List Skills"
+description: "List all available OpenClaw agent skills"
+api: "GET /api/v1/openclaw/skills"
+---
+
+Returns a list of all available skills that can be used by OpenClaw agents, including their definitions, parameters, and descriptions.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/openclaw/skills \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "skills": [
+    {
+      "id": "vault-curator",
+      "name": "Vault Curator",
+      "description": "Process inbox items and create structured vault records",
+      "version": "1.0.0",
+      "scope": "curator",
+      "parameters": {
+        "inbox_path": {
+          "type": "string",
+          "required": true,
+          "description": "Path to inbox directory"
+        }
+      },
+      "enabled": true
+    },
+    {
+      "id": "vault-janitor",
+      "name": "Vault Janitor",
+      "description": "Scan and fix vault structural issues",
+      "version": "1.0.0",
+      "scope": "janitor",
+      "parameters": {},
+      "enabled": true
+    },
+    {
+      "id": "vault-distiller",
+      "name": "Vault Distiller",
+      "description": "Extract latent knowledge from vault records",
+      "version": "1.0.0",
+      "scope": "distiller",
+      "parameters": {},
+      "enabled": true
+    }
+  ],
+  "total": 3
+}
+```
+
+</ResponseExample>

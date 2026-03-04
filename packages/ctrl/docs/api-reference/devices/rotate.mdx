@@ -1,0 +1,51 @@
+---
+title: "Rotate Device Token"
+description: "Rotate authentication token for a paired device"
+api: "POST /api/v1/devices/{deviceId}/rotate"
+---
+
+Rotates the authentication token for a paired device. The device will need to re-authenticate with the new token. Optionally update the device role and scope during rotation.
+
+<ParamField path="deviceId" type="string" required>
+  The unique identifier of the paired device whose token should be rotated.
+</ParamField>
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<ParamField body="role" type="string" required>
+  The role to assign to the device. Valid values: `agent`, `user`, `admin`.
+</ParamField>
+
+<ParamField body="scope" type="string">
+  Optional scope restrictions for the device token (e.g., `vault:read`, `vault:write`).
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/dev_a1b2c3d4e5/rotate \
+  --header 'Authorization: Bearer YOUR_API_KEY' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "role": "agent",
+    "scope": "vault:read vault:write"
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "message": "Device token rotated successfully",
+  "deviceId": "dev_a1b2c3d4e5",
+  "newToken": "oc_agent_7x9k2m5n8p1q4r6t",
+  "expiresAt": "2027-02-26T14:35:22Z"
+}
+```
+
+</ResponseExample>

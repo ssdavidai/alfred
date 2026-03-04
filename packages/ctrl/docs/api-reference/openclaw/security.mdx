@@ -1,0 +1,127 @@
+---
+title: "Security Audit"
+description: "Audit OpenClaw gateway security configuration"
+api: "GET /api/v1/openclaw/security"
+---
+
+Performs a security audit of the OpenClaw gateway configuration and returns a detailed security report with findings and recommendations.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/openclaw/security \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "overallScore": 87,
+  "riskLevel": "low",
+  "timestamp": "2026-02-26T14:42:30Z",
+  "categories": [
+    {
+      "category": "authentication",
+      "score": 95,
+      "findings": [
+        {
+          "severity": "info",
+          "title": "Strong authentication enabled",
+          "description": "All devices require token-based authentication",
+          "status": "pass"
+        },
+        {
+          "severity": "low",
+          "title": "Token rotation policy",
+          "description": "Consider implementing automatic token rotation every 90 days",
+          "status": "recommendation"
+        }
+      ]
+    },
+    {
+      "category": "network",
+      "score": 85,
+      "findings": [
+        {
+          "severity": "info",
+          "title": "Tailscale mesh network",
+          "description": "Gateway accessible only via Tailscale VPN",
+          "status": "pass"
+        },
+        {
+          "severity": "info",
+          "title": "Firewall configured",
+          "description": "Hetzner firewall allows only SSH and ICMP inbound",
+          "status": "pass"
+        },
+        {
+          "severity": "medium",
+          "title": "LAN binding",
+          "description": "Gateway bound to LAN interface. Consider localhost-only binding with Tailscale reverse proxy",
+          "status": "warning"
+        }
+      ]
+    },
+    {
+      "category": "storage",
+      "score": 90,
+      "findings": [
+        {
+          "severity": "info",
+          "title": "LUKS2 encryption enabled",
+          "description": "Data volume encrypted with LUKS2",
+          "status": "pass"
+        },
+        {
+          "severity": "info",
+          "title": "Secure key backup",
+          "description": "LUKS keys backed up to encrypted storage",
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "category": "secrets",
+      "score": 80,
+      "findings": [
+        {
+          "severity": "info",
+          "title": "No secrets in cloud-init",
+          "description": "Secrets uploaded post-provision via SSH",
+          "status": "pass"
+        },
+        {
+          "severity": "low",
+          "title": "Secret rotation",
+          "description": "2 secrets not rotated in 90+ days",
+          "status": "recommendation"
+        }
+      ]
+    }
+  ],
+  "recommendations": [
+    "Implement automatic token rotation policy (90 days)",
+    "Consider localhost-only binding with Tailscale serve",
+    "Rotate HETZNER_S3_ACCESS_KEY and restic_password",
+    "Enable audit logging for all API access",
+    "Set up automated security scan schedule"
+  ],
+  "compliance": {
+    "encryptionAtRest": true,
+    "encryptionInTransit": true,
+    "principleOfLeastPrivilege": true,
+    "auditLogging": true,
+    "secretManagement": true
+  }
+}
+```
+
+</ResponseExample>

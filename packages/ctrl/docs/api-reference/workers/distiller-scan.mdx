@@ -1,0 +1,188 @@
+---
+title: "Scan for Learnings"
+description: "Scan vault records for learning extraction candidates"
+api: "POST /api/v1/workers/distiller/scan"
+---
+
+Performs a one-time scan of vault records to identify extraction candidates without actually extracting learnings. Returns a list of records that contain latent knowledge (assumptions, decisions, constraints, contradictions, synthesis).
+
+<ParamField body="project" type="string" optional>
+  Filter candidates to a specific project. If omitted, scans all vault records.
+
+  Example: `"acme-redesign"`
+</ParamField>
+
+<RequestExample>
+
+```bash Scan All Records
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/distiller/scan \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json"
+```
+
+```bash Scan Specific Project
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/distiller/scan \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project": "acme-redesign"
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "message": "Scan completed successfully",
+  "scan_id": "scan_20260226_103000",
+  "duration_seconds": 12.4,
+  "records_scanned": 423,
+  "candidates_found": 8,
+  "candidates_by_type": {
+    "project": 3,
+    "task": 2,
+    "issue": 2,
+    "note": 1
+  },
+  "candidates": [
+    {
+      "file": "projects/acme-redesign.md",
+      "type": "project",
+      "title": "ACME Website Redesign",
+      "status": "in-progress",
+      "estimated_learnings": 4,
+      "signals": [
+        "Contains explicit decision language",
+        "Multiple constraint statements",
+        "Technical assumptions documented"
+      ]
+    },
+    {
+      "file": "tasks/implement-auth.md",
+      "type": "task",
+      "title": "Implement OAuth2 Authentication",
+      "status": "done",
+      "estimated_learnings": 2,
+      "signals": [
+        "Implementation decisions made",
+        "Security constraints noted"
+      ]
+    },
+    {
+      "file": "issues/performance-regression.md",
+      "type": "issue",
+      "title": "Database Query Performance Regression",
+      "status": "resolved",
+      "estimated_learnings": 3,
+      "signals": [
+        "Root cause analysis",
+        "Contradicts previous assumption",
+        "Resolution decision documented"
+      ]
+    }
+  ],
+  "project_filter": null,
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+```json Project-Filtered Response
+{
+  "status": "ok",
+  "message": "Scan completed successfully",
+  "scan_id": "scan_20260226_103000",
+  "duration_seconds": 3.2,
+  "records_scanned": 47,
+  "candidates_found": 3,
+  "candidates_by_type": {
+    "project": 1,
+    "task": 1,
+    "issue": 1
+  },
+  "candidates": [
+    {
+      "file": "projects/acme-redesign.md",
+      "type": "project",
+      "title": "ACME Website Redesign",
+      "status": "in-progress",
+      "estimated_learnings": 4,
+      "signals": [
+        "Contains explicit decision language",
+        "Multiple constraint statements",
+        "Technical assumptions documented"
+      ]
+    }
+  ],
+  "project_filter": "acme-redesign",
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Operation status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message
+</ResponseField>
+
+<ResponseField name="scan_id" type="string">
+  Unique identifier for this scan
+</ResponseField>
+
+<ResponseField name="duration_seconds" type="number">
+  Time taken to complete the scan
+</ResponseField>
+
+<ResponseField name="records_scanned" type="number">
+  Number of vault records scanned
+</ResponseField>
+
+<ResponseField name="candidates_found" type="number">
+  Number of extraction candidates identified
+</ResponseField>
+
+<ResponseField name="candidates_by_type" type="object">
+  Breakdown of candidates by record type
+</ResponseField>
+
+<ResponseField name="candidates" type="object[]">
+  Detailed list of extraction candidates
+
+  <ResponseField name="file" type="string">
+    Vault-relative path to the candidate record
+  </ResponseField>
+
+  <ResponseField name="type" type="string">
+    Record type (project, task, issue, note, etc.)
+  </ResponseField>
+
+  <ResponseField name="title" type="string">
+    Record title from frontmatter
+  </ResponseField>
+
+  <ResponseField name="status" type="string">
+    Record status from frontmatter
+  </ResponseField>
+
+  <ResponseField name="estimated_learnings" type="number">
+    Estimated number of learnings that could be extracted
+  </ResponseField>
+
+  <ResponseField name="signals" type="string[]">
+    Heuristic signals that identified this as a candidate
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="project_filter" type="string | null">
+  Project filter applied (null if scanning all records)
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of operation
+</ResponseField>

@@ -1,0 +1,450 @@
+---
+title: "Configuration"
+description: "Managing Alfred instance configuration"
+icon: "sliders"
+---
+
+Alfred's configuration is split between environment variables (`.env`) and OpenClaw gateway settings (`openclaw.json`). This guide covers reading, updating, and applying configuration changes.
+
+## Configuration Files
+
+| File | Purpose | Restart Required |
+|------|---------|------------------|
+| `.env` | API keys, agent backend, service endpoints | Yes (containers) |
+| `openclaw.json` | OpenClaw gateway settings (port, UI, devices) | Yes (openclaw only) |
+
+Both files live at `/mnt/encrypted/` on the instance.
+
+## Reading Configuration
+
+### Get .env Variables
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/config/env \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "env": {
+    "OPENROUTER_API_KEY": "sk-or-v1-abc123...",
+    "HETZNER_S3_ENDPOINT": "https://fsn1.your-objectstorage.com",
+    "HETZNER_S3_BUCKET": "alfred-backups",
+    "HETZNER_S3_ACCESS_KEY_ID": "abc123",
+    "HETZNER_S3_SECRET_ACCESS_KEY": "xyz789",
+    "RESTIC_PASSWORD": "secure-passphrase",
+    "TAILSCALE_HOSTNAME": "alfred-acme",
+    "OPENCLAW_PORT": "3000"
+  }
+}
+```
+
+<Warning>
+`AAS_API_KEY` is filtered from the response for security. It cannot be read via API.
+</Warning>
+
+### Get OpenClaw Configuration
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/config/openclaw \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "config": {
+    "controlUi": {
+      "bind": "lan",
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    },
+    "devices": [
+      {
+        "deviceId": "dev_abc123",
+        "deviceName": "Alice's iPhone",
+        "platform": "ios"
+      }
+    ],
+    "pairing": {
+      "enabled": true,
+      "requireApproval": true
+    }
+  }
+}
+```
+
+## Updating Configuration
+
+### Update .env
+
+Replace environment variables:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/env \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "OPENROUTER_API_KEY": "sk-or-v1-new-key-xyz"
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "message": "Environment updated",
+  "updated": ["OPENROUTER_API_KEY"],
+  "restart_required": true
+}
+```
+
+<Note>
+Partial updates are supported. Only provided keys are updated. Existing keys remain unchanged.
+</Note>
+
+### Update OpenClaw Configuration
+
+Deep merge updates into `openclaw.json`:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/openclaw \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "controlUi": {
+      "bind": "localhost"
+    },
+    "pairing": {
+      "requireApproval": false
+    }
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "message": "OpenClaw configuration updated",
+  "restart_required": true
+}
+```
+
+<Tip>
+Deep merge means nested objects are merged, not replaced. `{"controlUi": {"bind": "localhost"}}` updates only the `bind` field, preserving other `controlUi` settings.
+</Tip>
+
+## Restarting Services
+
+Configuration changes require container restarts to take effect.
+
+### Restart All Containers
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/restart \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "message": "All containers restarted"
+}
+```
+
+This runs `docker compose restart` on the instance (downtime: ~10 seconds).
+
+### Restart Specific Container
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/restart \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service": "alfred-openclaw"
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "message": "alfred-openclaw restarted"
+}
+```
+
+Available services:
+- `alfred-worker`
+- `alfred-temporal`
+- `alfred-openclaw`
+- `alfred-aas`
+
+<Warning>
+Restarting `alfred-worker` stops all daemons (Curator, Janitor, Distiller). They will auto-restart but lose in-progress work.
+</Warning>
+
+## Common Configuration Patterns
+
+### Change OpenRouter API Key
+
+<Steps>
+  <Step title="Update .env">
+    ```bash
+    curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/env \
+      -H "X-API-Key: YOUR_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"OPENROUTER_API_KEY": "sk-or-v1-new-key"}'
+    ```
+  </Step>
+  <Step title="Restart worker">
+    ```bash
+    curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/restart \
+      -H "X-API-Key: YOUR_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d '{"service": "alfred-worker"}'
+    ```
+  </Step>
+  <Step title="Verify">
+    Trigger a Curator run to test the new key:
+    ```bash
+    curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/process \
+      -H "X-API-Key: YOUR_API_KEY"
+    ```
+  </Step>
+</Steps>
+
+### Enable OpenClaw Remote Access
+
+By default, OpenClaw binds to `localhost` (Tailscale-only). Enable LAN access:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/openclaw \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "controlUi": {
+      "bind": "lan",
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    }
+  }'
+```
+
+Restart OpenClaw:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/restart \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"service": "alfred-openclaw"}'
+```
+
+<Warning>
+`bind: "lan"` exposes OpenClaw on the local network. Use only on trusted networks or behind a firewall.
+</Warning>
+
+### Disable Pairing Approval
+
+Allow devices to pair automatically (skip manual approval):
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/openclaw \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "pairing": {
+      "requireApproval": false
+    }
+  }'
+```
+
+Restart OpenClaw:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/restart \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"service": "alfred-openclaw"}'
+```
+
+<Warning>
+Disabling approval allows any device to pair. Only use in single-user or fully trusted environments.
+</Warning>
+
+### Update Backup Configuration
+
+Change the restic repository or password:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/env \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "HETZNER_S3_BUCKET": "new-backup-bucket",
+    "RESTIC_PASSWORD": "new-secure-password"
+  }'
+```
+
+<Note>
+Backup configuration changes do not require a restart. Next backup will use the new settings.
+</Note>
+
+### Switch Agent Backend
+
+Change from OpenClaw to Claude Code:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/env \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "AGENT_BACKEND": "cli",
+    "AGENT_CLI_PATH": "/usr/local/bin/claude"
+  }'
+```
+
+Restart workers:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/config/restart \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"service": "alfred-worker"}'
+```
+
+<Tip>
+Supported backends: `openclaw` (default), `cli` (Claude Code), `http` (Zo Computer). Each requires different env vars (see `.env.example`).
+</Tip>
+
+## Configuration Reference
+
+### Environment Variables
+
+<Accordion title="Core Settings">
+  - `OPENROUTER_API_KEY` — OpenRouter API key for agent backend
+  - `AGENT_BACKEND` — Agent backend (`openclaw`, `cli`, `http`)
+  - `TAILSCALE_HOSTNAME` — Tailscale machine name
+</Accordion>
+
+<Accordion title="OpenClaw Settings">
+  - `OPENCLAW_PORT` — Gateway port (default: 3000)
+  - `OPENCLAW_API_URL` — Gateway URL (auto-configured)
+</Accordion>
+
+<Accordion title="Backup Settings">
+  - `HETZNER_S3_ENDPOINT` — S3-compatible endpoint
+  - `HETZNER_S3_BUCKET` — Backup bucket name
+  - `HETZNER_S3_ACCESS_KEY_ID` — S3 access key
+  - `HETZNER_S3_SECRET_ACCESS_KEY` — S3 secret key
+  - `RESTIC_PASSWORD` — Encryption password for backups
+</Accordion>
+
+<Accordion title="CLI Backend Settings">
+  - `AGENT_CLI_PATH` — Path to `claude` binary
+  - `AGENT_CLI_API_KEY` — Claude API key
+</Accordion>
+
+<Accordion title="HTTP Backend Settings">
+  - `AGENT_HTTP_URL` — Zo Computer API endpoint
+  - `AGENT_HTTP_API_KEY` — Zo API key
+</Accordion>
+
+### OpenClaw Configuration
+
+<Accordion title="Control UI Settings">
+  ```json
+  {
+    "controlUi": {
+      "bind": "localhost",  // or "lan"
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    }
+  }
+  ```
+</Accordion>
+
+<Accordion title="Pairing Settings">
+  ```json
+  {
+    "pairing": {
+      "enabled": true,
+      "requireApproval": true
+    }
+  }
+  ```
+</Accordion>
+
+<Accordion title="Device List">
+  Managed automatically via pairing workflow. Do not edit manually.
+</Accordion>
+
+## Troubleshooting
+
+### Configuration Update Failed
+
+Check logs:
+
+```bash
+curl -N https://alfred-acme.tailnet.ts.net:3100/api/logs/stream?service=aas&tail=50 \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+Common issues:
+- **Invalid JSON**: Ensure proper JSON formatting
+- **Permission denied**: The API runs as `deploy` user — file permissions OK
+- **File locked**: Another process is writing to the file (rare)
+
+### Restart Didn't Apply Changes
+
+Verify the update was written:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/config/env \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+If missing, re-apply the update.
+
+### Worker Using Old Configuration
+
+Workers cache config on startup. Force a restart:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/restart \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+### OpenClaw Won't Start After Config Change
+
+Check for syntax errors in `openclaw.json`:
+
+```bash
+ssh deploy@alfred-acme.tailnet.ts.net
+cat /mnt/encrypted/openclaw.json | jq .
+```
+
+If invalid, restore from backup:
+
+```bash
+ssh deploy@alfred-acme.tailnet.ts.net
+cp /mnt/encrypted/openclaw.json.backup /mnt/encrypted/openclaw.json
+docker compose restart alfred-openclaw
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Worker Operations" icon="gears" href="/guides/worker-operations">
+    Configure worker behavior and intervals
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/guides/monitoring">
+    Monitor config changes in logs
+  </Card>
+</CardGroup>

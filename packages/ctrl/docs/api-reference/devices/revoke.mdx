@@ -1,0 +1,46 @@
+---
+title: "Revoke Device Access"
+description: "Revoke specific role access for a paired device"
+api: "POST /api/v1/devices/{deviceId}/revoke"
+---
+
+Revokes specific role-based access for a paired device without fully removing it. The device remains paired but loses access to operations requiring the revoked role.
+
+<ParamField path="deviceId" type="string" required>
+  The unique identifier of the paired device whose access should be revoked.
+</ParamField>
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<ParamField body="role" type="string" required>
+  The role to revoke from the device. Valid values: `agent`, `user`, `admin`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/dev_x9y8z7w6v5/revoke \
+  --header 'Authorization: Bearer YOUR_API_KEY' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "role": "admin"
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "message": "Device access revoked successfully",
+  "deviceId": "dev_x9y8z7w6v5",
+  "revokedRole": "admin",
+  "remainingRoles": ["agent"]
+}
+```
+
+</ResponseExample>

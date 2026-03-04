@@ -1,0 +1,75 @@
+---
+title: "Start Workers"
+description: "Start Alfred daemon workers"
+api: "POST /api/v1/workers/up"
+---
+
+Starts the Alfred daemon workers. Can optionally start only specific workers by providing a comma-separated list.
+
+<ParamField body="only" type="string" optional>
+  Comma-separated list of workers to start. Valid values: `curator`, `janitor`, `distiller`, `surveyor`. If omitted, all configured workers will start.
+
+  Example: `"curator,janitor"`
+</ParamField>
+
+<RequestExample>
+
+```bash Start All Workers
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/up \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json"
+```
+
+```bash Start Specific Workers
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/up \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "only": "curator,janitor"
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "message": "Workers started successfully",
+  "started": ["curator", "janitor", "distiller", "surveyor"],
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+```json Partial Start
+{
+  "status": "ok",
+  "message": "Selected workers started successfully",
+  "started": ["curator", "janitor"],
+  "skipped": ["distiller", "surveyor"],
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Operation status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message
+</ResponseField>
+
+<ResponseField name="started" type="string[]">
+  List of workers that were started
+</ResponseField>
+
+<ResponseField name="skipped" type="string[]" optional>
+  List of workers that were skipped (only present when `only` parameter is used)
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of operation
+</ResponseField>

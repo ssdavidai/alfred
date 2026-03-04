@@ -1,0 +1,51 @@
+---
+title: "Get OpenClaw Configuration"
+description: "Retrieve the current OpenClaw gateway configuration"
+api: "GET /api/v1/admin/config/openclaw"
+---
+
+Read the current OpenClaw configuration from `/mnt/encrypted/openclaw/openclaw.json`.
+
+<RequestExample>
+
+```bash curl
+curl -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/config/openclaw
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "gateway": {
+    "bind": "lan",
+    "port": 8989,
+    "controlUi": {
+      "enabled": true,
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    }
+  },
+  "devices": [
+    {
+      "id": "device-abc123",
+      "name": "MacBook Pro",
+      "approved": true,
+      "keys": {
+        "public": "ssh-ed25519 AAAAC3..."
+      }
+    }
+  ],
+  "registry": {
+    "url": "https://registry.openclaw.ai",
+    "token": "ocr_abc123..."
+  }
+}
+```
+
+</ResponseExample>
+
+<Note>
+  The OpenClaw configuration includes gateway settings, approved devices, and registry credentials. Changes to this file require restarting the openclaw container to take effect.
+</Note>

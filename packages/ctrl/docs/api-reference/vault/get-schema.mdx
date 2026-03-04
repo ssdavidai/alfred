@@ -1,0 +1,239 @@
+---
+title: "Get Vault Schema"
+description: "Returns the complete vault schema definition"
+api: "GET /api/v1/vault/schema"
+---
+
+## Overview
+
+Returns the full vault schema including all known record types, status values, field definitions, and directory structure. This endpoint is useful for validating record creation and understanding the vault's type system.
+
+## Response
+
+<ResponseField name="known_types" type="array">
+  List of all 25 valid record types (20 entity types + 5 learning types)
+</ResponseField>
+
+<ResponseField name="learn_types" type="array">
+  Subset of learning/knowledge types: `assumption`, `decision`, `constraint`, `contradiction`, `synthesis`
+</ResponseField>
+
+<ResponseField name="status_by_type" type="object">
+  Map of record type to allowed status values
+  <ResponseField name="person" type="array">
+    e.g., `["active", "inactive", "archived"]`
+  </ResponseField>
+  <ResponseField name="project" type="array">
+    e.g., `["planning", "active", "on_hold", "completed", "cancelled"]`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="list_fields" type="object">
+  Map of record type to fields that contain arrays
+  <ResponseField name="person" type="array">
+    e.g., `["skills", "projects", "orgs"]`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="required_fields" type="object">
+  Map of record type to required frontmatter fields
+  <ResponseField name="person" type="array">
+    e.g., `["type", "status"]`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="name_field_by_type" type="object">
+  Map of record type to the field used as the display name
+  <ResponseField name="person" type="string">
+    e.g., `"name"`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="type_directory" type="object">
+  Map of record type to its subdirectory in the vault
+  <ResponseField name="person" type="string">
+    e.g., `"person"`
+  </ResponseField>
+  <ResponseField name="assumption" type="string">
+    e.g., `"_learn/assumption"`
+  </ResponseField>
+</ResponseField>
+
+## Request Example
+
+<RequestExample>
+
+```bash cURL
+curl -X GET \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/vault/schema \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+```javascript JavaScript
+const response = await fetch('https://alfred-acme.tailnet.ts.net:3100/api/v1/vault/schema', {
+  method: 'GET',
+  headers: {
+    'Authorization': 'Bearer YOUR_API_KEY'
+  }
+});
+
+const schema = await response.json();
+console.log(schema);
+```
+
+</RequestExample>
+
+## Response Example
+
+<ResponseExample>
+
+```json 200 OK
+{
+  "known_types": [
+    "person", "org", "project", "task", "meeting", "document", "resource",
+    "tool", "skill", "goal", "milestone", "event", "location", "asset",
+    "product", "service", "process", "policy", "standard", "metric",
+    "assumption", "decision", "constraint", "contradiction", "synthesis"
+  ],
+  "learn_types": [
+    "assumption", "decision", "constraint", "contradiction", "synthesis"
+  ],
+  "status_by_type": {
+    "person": ["active", "inactive", "archived"],
+    "org": ["active", "inactive", "archived"],
+    "project": ["planning", "active", "on_hold", "completed", "cancelled"],
+    "task": ["backlog", "todo", "in_progress", "blocked", "done", "cancelled"],
+    "meeting": ["scheduled", "completed", "cancelled"],
+    "document": ["draft", "review", "published", "archived"],
+    "resource": ["available", "in_use", "maintenance", "retired"],
+    "tool": ["evaluating", "adopted", "deprecated"],
+    "skill": ["learning", "proficient", "expert"],
+    "goal": ["draft", "active", "achieved", "abandoned"],
+    "milestone": ["upcoming", "achieved", "missed"],
+    "event": ["scheduled", "completed", "cancelled"],
+    "location": ["active", "inactive"],
+    "asset": ["active", "deprecated", "retired"],
+    "product": ["concept", "development", "launched", "sunset"],
+    "service": ["active", "deprecated", "retired"],
+    "process": ["draft", "active", "deprecated"],
+    "policy": ["draft", "active", "deprecated"],
+    "standard": ["draft", "active", "deprecated"],
+    "metric": ["tracking", "paused", "retired"],
+    "assumption": ["active", "validated", "invalidated"],
+    "decision": ["proposed", "accepted", "rejected", "superseded"],
+    "constraint": ["active", "resolved", "obsolete"],
+    "contradiction": ["identified", "resolved", "accepted"],
+    "synthesis": ["draft", "published"]
+  },
+  "list_fields": {
+    "person": ["skills", "projects", "orgs", "tags"],
+    "org": ["members", "projects", "tags"],
+    "project": ["members", "milestones", "deliverables", "tags"],
+    "task": ["assignees", "blockers", "tags"],
+    "meeting": ["attendees", "topics", "decisions", "action_items", "tags"],
+    "document": ["authors", "reviewers", "related", "tags"],
+    "resource": ["owners", "tags"],
+    "tool": ["users", "use_cases", "tags"],
+    "skill": ["related_skills", "tags"],
+    "goal": ["milestones", "owners", "tags"],
+    "milestone": ["deliverables", "owners", "tags"],
+    "event": ["attendees", "organizers", "tags"],
+    "location": ["tags"],
+    "asset": ["owners", "tags"],
+    "product": ["owners", "features", "tags"],
+    "service": ["owners", "dependencies", "tags"],
+    "process": ["owners", "steps", "tags"],
+    "policy": ["owners", "related_policies", "tags"],
+    "standard": ["owners", "related_standards", "tags"],
+    "metric": ["owners", "tags"],
+    "assumption": ["sources", "related", "tags"],
+    "decision": ["stakeholders", "alternatives", "related", "tags"],
+    "constraint": ["sources", "related", "tags"],
+    "contradiction": ["sources", "related", "tags"],
+    "synthesis": ["sources", "related", "tags"]
+  },
+  "required_fields": {
+    "person": ["type", "status"],
+    "org": ["type", "status"],
+    "project": ["type", "status"],
+    "task": ["type", "status"],
+    "meeting": ["type", "status", "date"],
+    "document": ["type", "status"],
+    "resource": ["type", "status"],
+    "tool": ["type", "status"],
+    "skill": ["type", "status"],
+    "goal": ["type", "status"],
+    "milestone": ["type", "status"],
+    "event": ["type", "status", "date"],
+    "location": ["type", "status"],
+    "asset": ["type", "status"],
+    "product": ["type", "status"],
+    "service": ["type", "status"],
+    "process": ["type", "status"],
+    "policy": ["type", "status"],
+    "standard": ["type", "status"],
+    "metric": ["type", "status"],
+    "assumption": ["type", "status"],
+    "decision": ["type", "status"],
+    "constraint": ["type", "status"],
+    "contradiction": ["type", "status"],
+    "synthesis": ["type", "status"]
+  },
+  "name_field_by_type": {
+    "person": "name",
+    "org": "name",
+    "project": "name",
+    "task": "title",
+    "meeting": "title",
+    "document": "title",
+    "resource": "name",
+    "tool": "name",
+    "skill": "name",
+    "goal": "title",
+    "milestone": "title",
+    "event": "title",
+    "location": "name",
+    "asset": "name",
+    "product": "name",
+    "service": "name",
+    "process": "name",
+    "policy": "name",
+    "standard": "name",
+    "metric": "name",
+    "assumption": "title",
+    "decision": "title",
+    "constraint": "title",
+    "contradiction": "title",
+    "synthesis": "title"
+  },
+  "type_directory": {
+    "person": "person",
+    "org": "org",
+    "project": "project",
+    "task": "task",
+    "meeting": "meeting",
+    "document": "document",
+    "resource": "resource",
+    "tool": "tool",
+    "skill": "skill",
+    "goal": "goal",
+    "milestone": "milestone",
+    "event": "event",
+    "location": "location",
+    "asset": "asset",
+    "product": "product",
+    "service": "service",
+    "process": "process",
+    "policy": "policy",
+    "standard": "standard",
+    "metric": "metric",
+    "assumption": "_learn/assumption",
+    "decision": "_learn/decision",
+    "constraint": "_learn/constraint",
+    "contradiction": "_learn/contradiction",
+    "synthesis": "_learn/synthesis"
+  }
+}
+```
+
+</ResponseExample>

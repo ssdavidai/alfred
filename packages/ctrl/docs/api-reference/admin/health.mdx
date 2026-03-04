@@ -1,0 +1,65 @@
+---
+title: "Run Health Check"
+description: "Execute the healthcheck.sh script and return system health metrics"
+api: "GET /api/v1/admin/health"
+---
+
+Run the comprehensive health check script that monitors container health, disk usage, and memory usage.
+
+<RequestExample>
+
+```bash curl
+curl -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/health
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "containers": [
+    {
+      "name": "alfred-init-1",
+      "service": "init",
+      "state": "exited",
+      "health": "",
+      "exitCode": 0,
+      "status": "healthy"
+    },
+    {
+      "name": "alfred-worker-1",
+      "service": "worker",
+      "state": "running",
+      "health": "healthy",
+      "exitCode": 0,
+      "status": "healthy"
+    },
+    {
+      "name": "alfred-openclaw-1",
+      "service": "openclaw",
+      "state": "running",
+      "health": "",
+      "exitCode": 0,
+      "status": "healthy"
+    },
+    {
+      "name": "alfred-temporal-1",
+      "service": "temporal",
+      "state": "running",
+      "health": "healthy",
+      "exitCode": 0,
+      "status": "healthy"
+    }
+  ],
+  "disk_percent": 45,
+  "memory_percent": 62
+}
+```
+
+</ResponseExample>
+
+<Note>
+  This endpoint runs the same health check script that alfred-ctrl uses for monitoring. A healthy status means all containers are running or properly exited (init container), disk usage is below 90%, and memory usage is below 95%.
+</Note>

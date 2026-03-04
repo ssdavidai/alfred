@@ -1,0 +1,73 @@
+---
+title: "Introduction"
+description: "Alfred is an AI-powered knowledge management system that turns raw inputs into a structured, interconnected vault of records."
+---
+
+## What is Alfred?
+
+Alfred watches your inbox, processes raw inputs (meeting notes, conversations, documents), and produces structured Markdown records in an [Obsidian](https://obsidian.md) vault. It maintains relationships between records using wikilinks, enforces schemas, and continuously improves vault quality through automated scans and knowledge extraction.
+
+Each Alfred instance runs on a dedicated server, accessible exclusively through your [Tailscale](https://tailscale.com) mesh network. Everything — from dropping files into the inbox to managing Temporal workflows — is available through the REST API documented here.
+
+## How it works
+
+<Steps>
+  <Step title="Drop content into the inbox">
+    Upload meeting notes, conversations, or documents via the API or directly into the vault's `inbox/` directory.
+  </Step>
+  <Step title="Curator processes the input">
+    The Curator worker watches the inbox, invokes an AI agent to parse the raw content, and creates structured vault records with proper frontmatter, types, and wikilinks.
+  </Step>
+  <Step title="Janitor maintains vault health">
+    The Janitor periodically scans the vault for broken links, invalid frontmatter, orphaned records, and other structural issues — then fixes them automatically.
+  </Step>
+  <Step title="Distiller extracts knowledge">
+    The Distiller analyzes operational records and extracts latent knowledge: assumptions, decisions, constraints, contradictions, and syntheses.
+  </Step>
+</Steps>
+
+## Four tools, one vault
+
+| Tool | Purpose | Trigger |
+|------|---------|---------|
+| **Curator** | Processes raw inbox files into typed vault records | Watches `inbox/` for new files |
+| **Janitor** | Scans for and fixes structural issues (broken links, bad frontmatter) | Periodic sweeps |
+| **Distiller** | Extracts assumptions, decisions, constraints from records | On-demand or scheduled |
+| **Surveyor** | Embeds, clusters, labels, and discovers relationships | Pipeline execution |
+
+## What you can do with the API
+
+<Columns cols={2}>
+  <Card title="Manage vault records" icon="vault" href="/api-reference/vault/get-context">
+    Create, read, edit, move, delete records. Search by glob or grep. Upload files to the inbox.
+  </Card>
+  <Card title="Control workers" icon="gears" href="/api-reference/workers/status">
+    Start, stop, restart the Curator, Janitor, and Distiller. Trigger scans and processing runs.
+  </Card>
+  <Card title="Orchestrate workflows" icon="diagram-project" href="/api-reference/workflows/list">
+    List, start, terminate, signal, and cancel Temporal workflows. Manage cron schedules.
+  </Card>
+  <Card title="Manage devices" icon="mobile" href="/api-reference/devices/list">
+    Approve, reject, rotate, and revoke OpenClaw device access.
+  </Card>
+  <Card title="Administer the instance" icon="server" href="/api-reference/admin/health">
+    Manage containers, environment config, Tailscale networking, backups, and system health.
+  </Card>
+  <Card title="Stream logs" icon="scroll" href="/api-reference/logs/stream">
+    Real-time SSE log streaming from any Docker Compose service.
+  </Card>
+</Columns>
+
+## Next steps
+
+<Columns cols={3}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running in 5 minutes
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/architecture">
+    Understand how the system fits together
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference/introduction">
+    Jump straight to the endpoints
+  </Card>
+</Columns>

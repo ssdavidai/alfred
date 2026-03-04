@@ -1,0 +1,122 @@
+#!/bin/bash
+# bootstrap-openclaw.sh — Two-phase OpenClaw + Tailscale bootstrap
+# Adapted from zoclaw bootstrap pattern for Hetzner VPS (systemd + Docker)
+set -euo pipefail
+
+CUSTOMER_NAME="{{ customer_name }}"
+TAILNET_NAME="{{ tailnet_name }}"
+TS_AUTHKEY="{{ ts_authkey }}"
+COMPOSE_DIR="/opt/alfred/compose"
+
+echo "[bootstrap] Starting Tailscale + OpenClaw bootstrap for ${CUSTOMER_NAME}"
+
+# --- Phase 0: Join Tailscale ---
+echo "[bootstrap] Joining Tailscale network..."
+sudo tailscale up --authkey="${TS_AUTHKEY}" --hostname="alfred-${CUSTOMER_NAME}"
+
+echo "[bootstrap] Waiting for Tailscale to connect..."
+sleep 5
+
+# Verify Tailscale is connected
+if ! tailscale status >/dev/null 2>&1; then
+  echo "[bootstrap] ERROR: Tailscale failed to connect"
+  exit 1
+fi
+echo "[bootstrap] Tailscale connected"
+
+# Get Tailscale hostname
+TS_HOSTNAME=$(tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//')
+echo "[bootstrap] Tailscale hostname: ${TS_HOSTNAME}"
+
+# --- Phase 1: Start OpenClaw WITHOUT trustedProxies ---
+# This allows local device auto-pairing to happen
+echo "[bootstrap] Phase 1: Starting OpenClaw for device pairing..."
+
+cd "${COMPOSE_DIR}"
+docker compose up -d openclaw
+
+# Wait for OpenClaw to be healthy
+echo "[bootstrap] Waiting for OpenClaw health..."
+for i in $(seq 1 30); do
+  if docker compose exec openclaw node -e "fetch('http://localhost:18789/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))" 2>/dev/null; then
+    echo "[bootstrap] OpenClaw is healthy"
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "[bootstrap] ERROR: OpenClaw failed to become healthy"
+    exit 1
+  fi
+  sleep 2
+done
+
+# Trigger local device auto-pairing
+echo "[bootstrap] Triggering device auto-pairing..."
+docker compose exec openclaw node openclaw.mjs gateway health 2>/dev/null || true
+
+# Wait for pairing to complete
+echo "[bootstrap] Waiting for pairing to settle..."
+sleep 5
+
+# --- Phase 1b: Register per-tool OpenClaw agents ---
+# Each Alfred tool (curator, janitor, distiller) needs its own agent with
+# a dedicated workspace pointing to the vault mount inside the container.
+echo "[bootstrap] Registering per-tool OpenClaw agents..."
+for AGENT_NAME in vault-curator vault-janitor vault-distiller; do
+  docker compose exec -T openclaw node openclaw.mjs agents add "${AGENT_NAME}" \
+    --workspace /home/node/.openclaw/workspace \
+    --non-interactive 2>&1 || echo "[bootstrap] WARNING: Failed to register ${AGENT_NAME}"
+  echo "[bootstrap] Registered agent: ${AGENT_NAME}"
+done
+
+# --- Phase 1c: Set default model for all agents ---
+DEFAULT_MODEL="{{ default_model | default('openrouter/anthropic/claude-haiku-4.5') }}"
+echo "[bootstrap] Setting default model (${DEFAULT_MODEL}) for all agents..."
+for AGENT_NAME in main vault-curator vault-janitor vault-distiller; do
+  AGENT_DIR="/home/node/.openclaw/agents/${AGENT_NAME}/agent"
+  docker compose exec -e "OPENCLAW_AGENT_DIR=${AGENT_DIR}" -T openclaw \
+    node openclaw.mjs models set "${DEFAULT_MODEL}" 2>&1 \
+    || echo "[bootstrap] WARNING: Failed to set model for ${AGENT_NAME}"
+  echo "[bootstrap] Model set for ${AGENT_NAME}: ${DEFAULT_MODEL}"
+done
+
+# --- Phase 2: Restart after device pairing ---
+# controlUi config was pre-written before openclaw started.
+# Restart to ensure device pairing state is fully loaded.
+echo "[bootstrap] Phase 2: Restarting OpenClaw after device pairing..."
+docker compose restart openclaw
+
+# Wait for healthy again
+for i in $(seq 1 30); do
+  if docker compose exec openclaw node -e "fetch('http://localhost:18789/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))" 2>/dev/null; then
+    echo "[bootstrap] OpenClaw restarted successfully"
+    break
+  fi
+  if [ "$i" -eq 30 ]; then
+    echo "[bootstrap] ERROR: OpenClaw failed to restart"
+    exit 1
+  fi
+  sleep 2
+done
+
+# --- Phase 3: Provision HTTPS cert and Tailscale Serve (admin-only services) ---
+# User-facing access is via Cloudflare Tunnel, not Tailscale Serve.
+# Only expose admin services (Temporal UI, tenant API) over the Tailscale mesh.
+echo "[bootstrap] Provisioning TLS certificate..."
+sudo tailscale cert "${TS_HOSTNAME}"
+
+echo "[bootstrap] Exposing Temporal UI via Tailscale (admin only)..."
+sudo tailscale serve --bg --https 8233 http://localhost:8233
+
+echo "[bootstrap] Exposing tenant API via Tailscale (admin + SaaS proxy)..."
+sudo tailscale serve --bg --https 3100 http://localhost:3100
+
+echo "[bootstrap] Temporal UI: https://${TS_HOSTNAME}:8233"
+echo "[bootstrap] Tenant API: https://${TS_HOSTNAME}:3100"
+
+# --- Phase 4: Start remaining services ---
+echo "[bootstrap] Starting all services..."
+cd "${COMPOSE_DIR}"
+docker compose up -d
+
+echo "[bootstrap] Bootstrap complete!"
+echo "[bootstrap] Dashboard: https://${TS_HOSTNAME}"

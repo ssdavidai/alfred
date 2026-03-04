@@ -1,0 +1,205 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Alfred",
+  "description": "API documentation for Alfred — AI-powered Obsidian vault management",
+  "colors": {
+    "primary": "#0D9373",
+    "light": "#55D799",
+    "dark": "#117866"
+  },
+  "favicon": "/favicon.svg",
+  "navbar": {
+    "links": [
+      {
+        "type": "github",
+        "href": "https://github.com/ssdavidai/alfred-ctrl"
+      }
+    ]
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/ssdavidai/alfred-ctrl"
+    }
+  },
+  "api": {
+    "mdx": {
+      "auth": {
+        "method": "bearer",
+        "name": "Authorization"
+      }
+    },
+    "playground": {
+      "display": "interactive"
+    }
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/inbox-workflow",
+              "guides/vault-management",
+              "guides/worker-operations",
+              "guides/device-pairing",
+              "guides/monitoring",
+              "guides/configuration",
+              "guides/backups-recovery"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/vault-schema",
+              "concepts/record-types",
+              "concepts/security-model"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api-reference/introduction",
+              "api-reference/authentication"
+            ]
+          },
+          {
+            "group": "Vault",
+            "pages": [
+              "api-reference/vault/get-context",
+              "api-reference/vault/search",
+              "api-reference/vault/list-by-type",
+              "api-reference/vault/read-record",
+              "api-reference/vault/create-record",
+              "api-reference/vault/edit-record",
+              "api-reference/vault/move-record",
+              "api-reference/vault/delete-record",
+              "api-reference/vault/get-schema",
+              "api-reference/vault/upload-inbox",
+              "api-reference/vault/upload-inbox-bulk",
+              "api-reference/vault/list-inbox"
+            ]
+          },
+          {
+            "group": "Workers",
+            "pages": [
+              "api-reference/workers/status",
+              "api-reference/workers/up",
+              "api-reference/workers/down",
+              "api-reference/workers/restart",
+              "api-reference/workers/ingest",
+              "api-reference/workers/process",
+              "api-reference/workers/janitor-status",
+              "api-reference/workers/janitor-scan",
+              "api-reference/workers/janitor-fix",
+              "api-reference/workers/janitor-history",
+              "api-reference/workers/janitor-ignore",
+              "api-reference/workers/distiller-status",
+              "api-reference/workers/distiller-scan",
+              "api-reference/workers/distiller-run",
+              "api-reference/workers/distiller-history"
+            ]
+          },
+          {
+            "group": "Workflows",
+            "pages": [
+              "api-reference/workflows/list",
+              "api-reference/workflows/describe",
+              "api-reference/workflows/start",
+              "api-reference/workflows/terminate",
+              "api-reference/workflows/signal",
+              "api-reference/workflows/cancel",
+              "api-reference/workflows/history"
+            ]
+          },
+          {
+            "group": "Schedules",
+            "pages": [
+              "api-reference/schedules/list",
+              "api-reference/schedules/describe",
+              "api-reference/schedules/create",
+              "api-reference/schedules/delete",
+              "api-reference/schedules/pause",
+              "api-reference/schedules/unpause",
+              "api-reference/schedules/trigger"
+            ]
+          },
+          {
+            "group": "Devices",
+            "pages": [
+              "api-reference/devices/list",
+              "api-reference/devices/approve",
+              "api-reference/devices/reject",
+              "api-reference/devices/remove",
+              "api-reference/devices/clear",
+              "api-reference/devices/rotate",
+              "api-reference/devices/revoke"
+            ]
+          },
+          {
+            "group": "OpenClaw",
+            "pages": [
+              "api-reference/openclaw/health",
+              "api-reference/openclaw/status",
+              "api-reference/openclaw/restart",
+              "api-reference/openclaw/skills",
+              "api-reference/openclaw/sessions",
+              "api-reference/openclaw/agents",
+              "api-reference/openclaw/cron",
+              "api-reference/openclaw/plugins",
+              "api-reference/openclaw/hooks",
+              "api-reference/openclaw/secrets",
+              "api-reference/openclaw/doctor",
+              "api-reference/openclaw/security",
+              "api-reference/openclaw/memory"
+            ]
+          },
+          {
+            "group": "Logs",
+            "pages": [
+              "api-reference/logs/stream"
+            ]
+          },
+          {
+            "group": "Admin",
+            "pages": [
+              "api-reference/admin/list-containers",
+              "api-reference/admin/restart-container",
+              "api-reference/admin/stop-container",
+              "api-reference/admin/start-container",
+              "api-reference/admin/container-logs",
+              "api-reference/admin/get-env",
+              "api-reference/admin/update-env",
+              "api-reference/admin/get-openclaw-config",
+              "api-reference/admin/update-openclaw-config",
+              "api-reference/admin/tailscale-status",
+              "api-reference/admin/tailscale-serve",
+              "api-reference/admin/tailscale-cert",
+              "api-reference/admin/health",
+              "api-reference/admin/system-info",
+              "api-reference/admin/trigger-backup",
+              "api-reference/admin/list-snapshots",
+              "api-reference/admin/temporal-cluster",
+              "api-reference/admin/temporal-task-queues"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

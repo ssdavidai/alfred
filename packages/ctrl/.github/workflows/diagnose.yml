@@ -1,0 +1,25 @@
+name: Diagnose tenant
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Upload and run diagnostic
+        run: |
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            scripts/diagnose-tenant.mjs \
+            deploy@${{ secrets.DEPLOY_HOST }}:/tmp/diagnose-tenant.mjs
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no deploy@${{ secrets.DEPLOY_HOST }} \
+            "node --experimental-sqlite /tmp/diagnose-tenant.mjs"

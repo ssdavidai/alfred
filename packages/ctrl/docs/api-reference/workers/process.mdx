@@ -1,0 +1,137 @@
+---
+title: "Process Inbox"
+description: "Batch-process inbox files"
+api: "POST /api/v1/workers/process"
+---
+
+Processes inbox files in batches using the curator. This is a one-time batch operation, distinct from the continuous daemon watcher.
+
+<ParamField body="limit" type="number" optional>
+  Maximum number of inbox files to process. If omitted, processes all files.
+</ParamField>
+
+<ParamField body="dry_run" type="boolean" optional default={false}>
+  If `true`, performs a dry run without invoking the agent. Returns what would be processed.
+</ParamField>
+
+<ParamField body="jobs" type="number" optional default={1}>
+  Number of parallel processing jobs. Set to higher values for faster batch processing (uses multiprocessing).
+</ParamField>
+
+<RequestExample>
+
+```bash Process All Files
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/process \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json"
+```
+
+```bash Process Limited Files
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/process \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "limit": 10,
+    "jobs": 3
+  }'
+```
+
+```bash Dry Run
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/process \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dry_run": true
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "message": "Successfully processed 10 inbox files",
+  "processed": 10,
+  "succeeded": 8,
+  "failed": 2,
+  "skipped": 0,
+  "duration_seconds": 124.5,
+  "jobs": 3,
+  "dry_run": false,
+  "failures": [
+    {
+      "file": "inbox/20260226_103000_msg_042.md",
+      "error": "Agent backend timeout after 60s"
+    },
+    {
+      "file": "inbox/20260226_104500_msg_089.md",
+      "error": "Invalid frontmatter in generated record"
+    }
+  ],
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+```json Dry Run Response
+{
+  "status": "ok",
+  "message": "Dry run: would process 47 files",
+  "processed": 0,
+  "would_process": 47,
+  "dry_run": true,
+  "files": [
+    "inbox/20260226_103000_msg_001.md",
+    "inbox/20260226_103015_msg_002.md",
+    "inbox/20260226_103030_msg_003.md"
+  ],
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Operation status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message
+</ResponseField>
+
+<ResponseField name="processed" type="number">
+  Number of files actually processed
+</ResponseField>
+
+<ResponseField name="succeeded" type="number">
+  Number of files successfully processed
+</ResponseField>
+
+<ResponseField name="failed" type="number">
+  Number of files that failed processing
+</ResponseField>
+
+<ResponseField name="skipped" type="number">
+  Number of files skipped (already processed, invalid format, etc.)
+</ResponseField>
+
+<ResponseField name="duration_seconds" type="number">
+  Total processing time in seconds
+</ResponseField>
+
+<ResponseField name="jobs" type="number">
+  Number of parallel jobs used
+</ResponseField>
+
+<ResponseField name="dry_run" type="boolean">
+  Whether this was a dry run
+</ResponseField>
+
+<ResponseField name="failures" type="object[]" optional>
+  List of failed files with error messages
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of operation
+</ResponseField>

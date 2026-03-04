@@ -1,0 +1,57 @@
+---
+title: "List Devices"
+description: "Retrieve all pending and paired devices in the OpenClaw gateway"
+api: "GET /api/v1/devices"
+---
+
+Returns a list of all devices associated with the OpenClaw gateway, separated into pending approval requests and paired devices.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "pending": [
+    {
+      "requestId": "req_7k9m3p2q1",
+      "displayName": "MacBook Pro - Claude Code",
+      "platform": "darwin",
+      "role": "agent",
+      "requestedAt": "2026-02-26T14:32:18Z"
+    }
+  ],
+  "paired": [
+    {
+      "deviceId": "dev_a1b2c3d4e5",
+      "displayName": "iPad - Mobile Client",
+      "platform": "ios",
+      "role": "user",
+      "pairedAt": "2026-02-25T09:15:42Z",
+      "lastSeen": "2026-02-26T13:47:03Z"
+    },
+    {
+      "deviceId": "dev_x9y8z7w6v5",
+      "displayName": "Ubuntu Server - Automation",
+      "platform": "linux",
+      "role": "agent",
+      "pairedAt": "2026-02-20T16:22:30Z",
+      "lastSeen": "2026-02-26T14:30:01Z"
+    }
+  ]
+}
+```
+
+</ResponseExample>

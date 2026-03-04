@@ -1,0 +1,62 @@
+name: Deploy
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: deploy-ctrl
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install and build
+        run: npm ci && npm run build
+
+      - name: Prune to production deps
+        run: npm ci --omit=dev
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to VM
+        run: |
+          rsync -azP --delete \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            dist/ \
+            deploy@${{ secrets.DEPLOY_HOST }}:/opt/alfred-saas/alfred-ctrl/dist/
+
+          rsync -azP --delete \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            node_modules/ \
+            deploy@${{ secrets.DEPLOY_HOST }}:/opt/alfred-saas/alfred-ctrl/node_modules/
+
+          rsync -azP \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            package.json \
+            deploy@${{ secrets.DEPLOY_HOST }}:/opt/alfred-saas/alfred-ctrl/
+
+      - name: Verify deployment
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} \
+            'node /opt/alfred-saas/alfred-ctrl/dist/index.mjs --help' | head -5
+
+      - name: Deploy API to running tenants
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} \
+            'cd /opt/alfred-saas/alfred-ctrl && node --experimental-sqlite dist/index.mjs deploy-api --all'
+
+      - name: Repair Cloudflare tunnels on running tenants
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} \
+            'cd /opt/alfred-saas/alfred-ctrl && node --experimental-sqlite dist/index.mjs repair-tunnel --all'

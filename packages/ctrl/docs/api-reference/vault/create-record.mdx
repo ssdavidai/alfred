@@ -1,0 +1,120 @@
+---
+title: "Create Record"
+description: "Create a new vault record"
+api: "POST /api/v1/vault/records"
+---
+
+## Overview
+
+Creates a new record in the vault with the specified type, name, frontmatter fields, and markdown body.
+
+## Body Parameters
+
+<ParamField body="type" type="string" required>
+  Record type (e.g., `person`, `project`, `task`, `assumption`). Must be one of the 25 known types.
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  Display name for the record. This becomes the filename (e.g., `Alice Chen` → `person/Alice Chen.md`).
+</ParamField>
+
+<ParamField body="fields" type="object" optional>
+  Key-value pairs for frontmatter metadata. Field names and types must match the schema for the record type.
+</ParamField>
+
+<ParamField body="body" type="string" optional>
+  Markdown body content (everything after frontmatter).
+</ParamField>
+
+<ParamField body="scope" type="string" optional>
+  Operation scope for authorization (`curator`, `janitor`, `distiller`). Defaults to no scope restrictions.
+</ParamField>
+
+## Response
+
+<ResponseField name="path" type="string">
+  Path to the newly created record
+</ResponseField>
+
+<ResponseField name="created" type="boolean">
+  Always `true` on success
+</ResponseField>
+
+## Request Example
+
+<RequestExample>
+
+```bash cURL
+curl -X POST \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/vault/records \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "person",
+    "name": "Alice Chen",
+    "fields": {
+      "role": "ML Engineer",
+      "org": "[[org/Acme Corp]]",
+      "skills": ["python", "pytorch", "kubernetes"],
+      "status": "active"
+    },
+    "body": "## Background\n\nAlice joined Acme in December 2025."
+  }'
+```
+
+```javascript JavaScript
+const response = await fetch('https://alfred-acme.tailnet.ts.net:3100/api/v1/vault/records', {
+  method: 'POST',
+  headers: {
+    'Authorization': 'Bearer YOUR_API_KEY',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    type: 'person',
+    name: 'Alice Chen',
+    fields: {
+      role: 'ML Engineer',
+      org: '[[org/Acme Corp]]',
+      skills: ['python', 'pytorch', 'kubernetes'],
+      status: 'active'
+    },
+    body: '## Background\n\nAlice joined Acme in December 2025.'
+  })
+});
+
+const result = await response.json();
+console.log(result);
+```
+
+</RequestExample>
+
+## Response Example
+
+<ResponseExample>
+
+```json 201 Created
+{
+  "path": "person/Alice Chen.md",
+  "created": true
+}
+```
+
+```json 400 Bad Request
+{
+  "error": "Invalid type 'unknown_type'. Must be one of: person, org, project, ..."
+}
+```
+
+```json 409 Conflict
+{
+  "error": "Record already exists: person/Alice Chen.md"
+}
+```
+
+```json 403 Forbidden
+{
+  "error": "Scope 'janitor' does not allow create operations"
+}
+```
+
+</ResponseExample>

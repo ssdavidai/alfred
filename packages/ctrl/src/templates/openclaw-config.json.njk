@@ -1,0 +1,57 @@
+{
+  "agents": {
+    "defaults": {
+      "heartbeat": {
+        "every": "4h",
+        "prompt": "Read HEARTBEAT.md if it exists. Follow it strictly. Additionally: scan recent conversation for any new people, pets, places, or organizations not yet in MEMORY.md — add them as one-line entity facts now. If nothing needs attention and no new entities, reply HEARTBEAT_OK."
+      },
+      "compaction": {
+        "memoryFlush": {
+          "enabled": true,
+          "softThresholdTokens": 60000,
+          "prompt": "CRITICAL: Do ALL of the following before compaction:\n1. Write detailed conversation summary to memory/YYYY-MM-DD.md\n2. Write memory/current-task.md with current task breakdown\n3. Save last ~20 human+assistant messages to memory/pre-compact-dialogue.md\n4. Update MEMORY.md with any NEW entity facts from this session\nReply with NO_REPLY after writing all files."
+        }
+      }
+    },
+    "clerk": {
+      "model": "anthropic/claude-sonnet-4-6",
+      "systemPrompt": "You are a classification clerk for Alfred Black. You receive raw data (conversations, emails, events) and return structured JSON. You never converse — you only classify, extract, and return JSON. Be precise and consistent.",
+      "tools": {},
+      "heartbeat": { "enabled": false },
+      "compaction": { "enabled": false }
+    }
+  },
+  "memory": {
+    "backend": "qmd",
+    "citations": "auto",
+    "qmd": {
+      "searchMode": "search",
+      "includeDefaultMemory": true,
+      "paths": [
+        {"path": "{{ vault_path }}", "name": "vault", "pattern": "**/*.md"}
+      ],
+      "update": {"interval": "5m", "debounceMs": 15000, "onBoot": true},
+      "limits": {"maxResults": 8, "timeoutMs": 5000}
+    }
+  },
+  "hooks": {
+    "internal": {
+      "enabled": true,
+      "entries": {
+        "alfred-inbox": {
+          "enabled": true,
+          "flushTurns": 10,
+          "flushIdleMs": 300000
+        },
+        "alfred-learn-observer": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "gateway": {
+    "controlUi": {
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    }
+  }
+}
