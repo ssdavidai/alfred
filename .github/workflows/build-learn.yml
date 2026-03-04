@@ -55,6 +55,20 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Setup SSH
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Roll out to running tenants
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} \
+            'cd /opt/alfred-saas/alfred-ctrl && node --experimental-sqlite dist/index.mjs update --all'
+
       - name: Build (PR only)
         if: github.event_name == 'pull_request'
         uses: docker/build-push-action@v6
