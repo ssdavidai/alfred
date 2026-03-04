@@ -70,7 +70,7 @@ export function attachTerminalProxy(server: HttpServer): void {
       const tenantApiKey = decryptApiKey(instance.apiKey);
       const upstreamUrl = `wss://${instance.tailscaleHostname}:3100/terminal?token=${encodeURIComponent(tenantApiKey)}`;
 
-      wss.handleUpgrade(req, socket, head, (browserWs) => {
+      wss.handleUpgrade(req, socket, head, (browserWs: InstanceType<typeof WebSocket>) => {
         // Connect to tenant ctrl terminal
         const upstreamWs = new WebSocket(upstreamUrl, {
           rejectUnauthorized: false, // Tailscale certs are self-signed

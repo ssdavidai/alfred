@@ -61,6 +61,7 @@
     "@types/express": "^5.0.0",
     "@types/react": "^18.0.37",
     "@types/three": "^0.175.0",
+    "@types/ws": "^8.5.13",
     "prisma": "5.19.1",
     "typescript": "5.8.2",
     "vite": "^7.0.6"
