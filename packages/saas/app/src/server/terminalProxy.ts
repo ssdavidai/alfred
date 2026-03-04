@@ -1,7 +1,6 @@
 import type { Server as HttpServer, IncomingMessage } from "http";
 import type { Duplex } from "stream";
 import type { Application, Request, Response } from "express";
-import https from "https";
 import { WebSocketServer, WebSocket } from "ws";
 import { prisma } from "wasp/server";
 import { getSessionAndUserFromBearerToken } from "wasp/auth/session";
@@ -102,148 +101,28 @@ export function registerTerminalStatusRoute(app: Application): void {
         results.httpHealth = { error: err.message, code: err.code, cause: err.cause?.message };
       }
 
-      // Test 2: Raw HTTPS request WITH explicit upgrade headers (bypasses ws library)
-      // If this gets 404: Tailscale Serve is stripping upgrade headers
-      // If this gets 101 or 401: upgrade headers pass through, issue is in ws library
+      // Test 2: Call ctrl debug/headers endpoint WITH upgrade headers
+      // This tells us: (a) what headers the ctrl API actually sees, (b) terminal module status
       try {
-        const rawResult = await new Promise<Record<string, unknown>>((resolve) => {
-          const timer = setTimeout(() => {
-            rawReq.destroy();
-            resolve({ error: "timeout after 10s" });
-          }, 10_000);
-
-          const rawReq = https.request({
-            hostname,
-            port: 3100,
-            path: "/terminal",
-            method: "GET",
-            headers: {
-              "Connection": "Upgrade",
-              "Upgrade": "websocket",
-              "Sec-WebSocket-Version": "13",
-              "Sec-WebSocket-Key": Buffer.from(
-                Array.from({ length: 16 }, () => Math.floor(Math.random() * 256))
-              ).toString("base64"),
-              "Authorization": `Bearer ${tenantApiKey}`,
-            },
-          });
-
-          rawReq.on("upgrade", (upRes, _socket, _head) => {
-            clearTimeout(timer);
-            _socket.destroy();
-            resolve({
-              event: "upgrade",
-              statusCode: upRes.statusCode,
-              headers: {
-                upgrade: upRes.headers["upgrade"],
-                connection: upRes.headers["connection"],
-                server: upRes.headers["server"],
-              },
-            });
-          });
-
-          rawReq.on("response", (upRes) => {
-            clearTimeout(timer);
-            let body = "";
-            upRes.on("data", (d: any) => body += d);
-            upRes.on("end", () => {
-              rawReq.destroy();
-              resolve({
-                event: "response (upgrade NOT honoured)",
-                statusCode: upRes.statusCode,
-                statusMessage: upRes.statusMessage,
-                body: body.slice(0, 300),
-                responseHeaders: {
-                  server: upRes.headers["server"],
-                  connection: upRes.headers["connection"],
-                  upgrade: upRes.headers["upgrade"],
-                  contentType: upRes.headers["content-type"],
-                  via: upRes.headers["via"],
-                },
-              });
-            });
-          });
-
-          rawReq.on("error", (err: any) => {
-            clearTimeout(timer);
-            resolve({ event: "error", error: err.message, code: err.code });
-          });
-
-          rawReq.end();
+        const debugUrl = `https://${hostname}:3100/api/v1/admin/debug/headers`;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10_000);
+        const debugRes = await fetch(debugUrl, {
+          headers: {
+            Authorization: `Bearer ${tenantApiKey}`,
+            Connection: "Upgrade",
+            Upgrade: "websocket",
+          },
+          signal: controller.signal,
         });
-        results.rawUpgradeTest = rawResult;
+        clearTimeout(timer);
+        const debugData = await debugRes.json();
+        results.ctrlDebugHeaders = debugData;
       } catch (err: any) {
-        results.rawUpgradeTest = { error: err.message };
+        results.ctrlDebugHeaders = { error: err.message, code: err.code };
       }
 
-      // Test 3: Same raw request but WITH ALPN http/1.1 forced
-      try {
-        const alpnResult = await new Promise<Record<string, unknown>>((resolve) => {
-          const timer = setTimeout(() => {
-            alpnReq.destroy();
-            resolve({ error: "timeout after 10s" });
-          }, 10_000);
-
-          const alpnReq = https.request({
-            hostname,
-            port: 3100,
-            path: "/terminal",
-            method: "GET",
-            headers: {
-              "Connection": "Upgrade",
-              "Upgrade": "websocket",
-              "Sec-WebSocket-Version": "13",
-              "Sec-WebSocket-Key": Buffer.from(
-                Array.from({ length: 16 }, () => Math.floor(Math.random() * 256))
-              ).toString("base64"),
-              "Authorization": `Bearer ${tenantApiKey}`,
-            },
-          });
-
-          alpnReq.on("upgrade", (upRes, _socket, _head) => {
-            clearTimeout(timer);
-            _socket.destroy();
-            resolve({
-              event: "upgrade",
-              statusCode: upRes.statusCode,
-              alpn: "http/1.1 forced",
-            });
-          });
-
-          alpnReq.on("response", (upRes) => {
-            clearTimeout(timer);
-            let body = "";
-            upRes.on("data", (d: any) => body += d);
-            upRes.on("end", () => {
-              alpnReq.destroy();
-              resolve({
-                event: "response (upgrade NOT honoured)",
-                statusCode: upRes.statusCode,
-                body: body.slice(0, 300),
-                alpn: "http/1.1 forced",
-                responseHeaders: {
-                  server: upRes.headers["server"],
-                  connection: upRes.headers["connection"],
-                  upgrade: upRes.headers["upgrade"],
-                  via: upRes.headers["via"],
-                },
-              });
-            });
-          });
-
-          alpnReq.on("error", (err: any) => {
-            clearTimeout(timer);
-            resolve({ event: "error", error: err.message, code: err.code, alpn: "http/1.1 forced" });
-          });
-
-          alpnReq.end();
-        });
-        results.rawUpgradeWithAlpn = alpnResult;
-      } catch (err: any) {
-        results.rawUpgradeWithAlpn = { error: err.message };
-      }
-
-      // Test 4: ws library with default agent (no custom agent, no ALPN override)
+      // Test 3: WebSocket connection attempt
       try {
         const wsUrl = `wss://${hostname}:3100/terminal`;
         const wsResult = await new Promise<Record<string, unknown>>((resolve) => {
@@ -259,12 +138,12 @@ export function registerTerminalStatusRoute(app: Application): void {
           testWs.on("open", () => {
             clearTimeout(timer);
             testWs.close();
-            resolve({ connected: true, agent: "default" });
+            resolve({ connected: true });
           });
 
           testWs.on("error", (err: any) => {
             clearTimeout(timer);
-            resolve({ error: err.message, code: err.code, agent: "default" });
+            resolve({ error: err.message, code: err.code });
           });
 
           testWs.on("unexpected-response", (_req: any, httpRes: any) => {
@@ -277,20 +156,13 @@ export function registerTerminalStatusRoute(app: Application): void {
                 error: "unexpected-response",
                 statusCode: httpRes.statusCode,
                 body: body.slice(0, 200),
-                agent: "default",
-                responseHeaders: {
-                  server: httpRes.headers["server"],
-                  connection: httpRes.headers["connection"],
-                  upgrade: httpRes.headers["upgrade"],
-                  via: httpRes.headers["via"],
-                },
               });
             });
           });
         });
-        results.wsDefaultAgent = wsResult;
+        results.wsTest = wsResult;
       } catch (err: any) {
-        results.wsDefaultAgent = { error: err.message };
+        results.wsTest = { error: err.message };
       }
 
       res.json({ ok: true, diagnostics: results });

@@ -184,6 +184,20 @@ export function registerAdminRoutes(): void {
     }
   });
 
+  // --- Diagnostics ---
+
+  // Echo request headers back (to verify what actually arrives at the ctrl API)
+  addRoute("GET", "/api/v1/admin/debug/headers", async ({ req, res }) => {
+    sendJson(res, 200, {
+      method: req.method,
+      url: req.url,
+      httpVersion: req.httpVersion,
+      headers: req.headers,
+      terminalReady: (globalThis as any).__terminalReady ?? "not_set",
+      terminalError: (globalThis as any).__terminalError ?? null,
+    });
+  });
+
   // --- System info ---
 
   addRoute("GET", "/api/v1/admin/system/info", async ({ res }) => {

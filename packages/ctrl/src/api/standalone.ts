@@ -35,9 +35,12 @@ const server = createApiServer();
 import("./routes/terminal.js")
   .then(({ attachTerminalUpgrade }) => {
     attachTerminalUpgrade(server);
+    (globalThis as any).__terminalReady = true;
     console.log("Terminal WebSocket endpoint attached");
   })
   .catch((err) => {
+    (globalThis as any).__terminalReady = false;
+    (globalThis as any).__terminalError = err.message;
     console.error("Failed to load terminal module (non-fatal):", err.message);
   });
 
