@@ -1,0 +1,27 @@
+name: Ops
+on:
+  workflow_dispatch:
+    inputs:
+      instance:
+        description: 'Instance name (e.g. alfred-david-mm5ah5wu)'
+        required: true
+      command:
+        description: 'Command to run on instance via SSH'
+        required: true
+        default: 'cd /opt/alfred/compose && docker compose restart openclaw'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Run command on instance
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} \
+            "cd /opt/alfred-saas/alfred-ctrl && node --experimental-sqlite dist/index.mjs run '${{ inputs.instance }}' '${{ inputs.command }}'"

@@ -189,6 +189,33 @@ program
   });
 
 program
+  .command("run <name> <cmd>")
+  .description("Run a command on an instance via SSH")
+  .action(async (name, cmd) => {
+    getDb();
+    const instance = getInstanceByName(name);
+    if (!instance) {
+      console.error(`Instance "${name}" not found`);
+      closeDb();
+      process.exit(1);
+    }
+    if (!instance.ip_address || !instance.ssh_key_path) {
+      console.error("Instance not fully provisioned");
+      closeDb();
+      process.exit(1);
+    }
+    const sshKeyPath = instance.ssh_key_path.replace(
+      /^\/app\/alfred-ctrl\//,
+      process.cwd() + "/"
+    );
+    closeDb();
+    const result = await sshExec(instance.ip_address, sshKeyPath, cmd);
+    process.stdout.write(result.stdout);
+    if (result.stderr) process.stderr.write(result.stderr);
+    process.exit(result.code);
+  });
+
+program
   .command("update [name]")
   .description("Pull latest images and restart")
   .option("--all", "Update all running instances")
