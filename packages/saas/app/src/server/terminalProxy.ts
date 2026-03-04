@@ -89,14 +89,17 @@ export function registerTerminalStatusRoute(app: Application): void {
 
       // Test 2: WebSocket connection to tenant terminal
       try {
-        const wsUrl = `wss://${hostname}:3100/terminal?token=${encodeURIComponent(tenantApiKey)}`;
+        const wsUrl = `wss://${hostname}:3100/terminal`;
         const wsResult = await new Promise<Record<string, unknown>>((resolve) => {
           const timer = setTimeout(() => {
             testWs.close();
             resolve({ error: "timeout after 10s" });
           }, 10_000);
 
-          const testWs = new WebSocket(wsUrl, { rejectUnauthorized: false });
+          const testWs = new WebSocket(wsUrl, {
+            rejectUnauthorized: false,
+            headers: { Authorization: `Bearer ${tenantApiKey}` },
+          });
 
           testWs.on("open", () => {
             clearTimeout(timer);
@@ -181,13 +184,16 @@ export function attachTerminalProxy(server: HttpServer): void {
       }
 
       const tenantApiKey = decryptApiKey(instance.apiKey);
-      const upstreamUrl = `wss://${instance.tailscaleHostname}:3100/terminal?token=${encodeURIComponent(tenantApiKey)}`;
+      const upstreamUrl = `wss://${instance.tailscaleHostname}:3100/terminal`;
 
       console.log("[terminal-proxy] connecting upstream to", instance.tailscaleHostname);
 
       wss.handleUpgrade(req, socket, head, (browserWs: InstanceType<typeof WebSocket>) => {
         const upstreamWs = new WebSocket(upstreamUrl, {
           rejectUnauthorized: false,
+          headers: {
+            Authorization: `Bearer ${tenantApiKey}`,
+          },
         });
 
         let browserClosed = false;
