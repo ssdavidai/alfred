@@ -52,6 +52,89 @@ export function registerTerminalStatusRoute(app: Application): void {
       res.status(500).json({ ok: false, error: "internal", message: err.message });
     }
   });
+
+  // Diagnostic endpoint: test upstream connectivity to tenant
+  app.get("/api/terminal-debug", async (req: Request, res: Response) => {
+    try {
+      const userId = await getUserIdFromRequest(req as unknown as IncomingMessage);
+      if (!userId) {
+        res.status(401).json({ ok: false, error: "not_authenticated" });
+        return;
+      }
+
+      const instance = await prisma.instance.findUnique({ where: { userId } });
+      if (!instance || !instance.tailscaleHostname || !instance.apiKey) {
+        res.json({ ok: false, error: "no_instance_or_not_ready" });
+        return;
+      }
+
+      const tenantApiKey = decryptApiKey(instance.apiKey);
+      const hostname = instance.tailscaleHostname;
+      const results: Record<string, unknown> = { hostname };
+
+      // Test 1: HTTP health check to tenant
+      try {
+        const healthUrl = `https://${hostname}:3100/api/v1/admin/health`;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10_000);
+        const healthRes = await fetch(healthUrl, {
+          headers: { Authorization: `Bearer ${tenantApiKey}` },
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        results.httpHealth = { status: healthRes.status, ok: healthRes.ok };
+      } catch (err: any) {
+        results.httpHealth = { error: err.message, code: err.code, cause: err.cause?.message };
+      }
+
+      // Test 2: WebSocket connection to tenant terminal
+      try {
+        const wsUrl = `wss://${hostname}:3100/terminal?token=${encodeURIComponent(tenantApiKey)}`;
+        const wsResult = await new Promise<Record<string, unknown>>((resolve) => {
+          const timer = setTimeout(() => {
+            testWs.close();
+            resolve({ error: "timeout after 10s" });
+          }, 10_000);
+
+          const testWs = new WebSocket(wsUrl, { rejectUnauthorized: false });
+
+          testWs.on("open", () => {
+            clearTimeout(timer);
+            testWs.close();
+            resolve({ connected: true });
+          });
+
+          testWs.on("error", (err: any) => {
+            clearTimeout(timer);
+            resolve({
+              error: err.message,
+              code: err.code,
+              type: err.type,
+              errno: (err as any).errno,
+              address: (err as any).address,
+            });
+          });
+
+          testWs.on("unexpected-response", (_req: any, httpRes: any) => {
+            clearTimeout(timer);
+            testWs.close();
+            resolve({
+              error: "unexpected-response",
+              statusCode: httpRes.statusCode,
+              statusMessage: httpRes.statusMessage,
+            });
+          });
+        });
+        results.wsTerminal = wsResult;
+      } catch (err: any) {
+        results.wsTerminal = { error: err.message };
+      }
+
+      res.json({ ok: true, diagnostics: results });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
 }
 
 export function attachTerminalProxy(server: HttpServer): void {
@@ -134,8 +217,13 @@ export function attachTerminalProxy(server: HttpServer): void {
           });
         });
 
-        upstreamWs.on("error", (err) => {
-          console.error("[terminal-proxy] upstream error:", err.message);
+        upstreamWs.on("error", (err: any) => {
+          console.error("[terminal-proxy] upstream error:", err.message, "code:", err.code, "errno:", err.errno);
+          cleanupBoth();
+        });
+
+        upstreamWs.on("unexpected-response", (_req: any, res: any) => {
+          console.error("[terminal-proxy] upstream unexpected-response:", res.statusCode, res.statusMessage);
           cleanupBoth();
         });
 
