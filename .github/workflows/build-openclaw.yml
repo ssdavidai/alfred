@@ -1,0 +1,37 @@
+name: Build & Push Docker Image (OpenClaw)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/openclaw/**'
+  workflow_dispatch:
+
+concurrency:
+  group: build-openclaw
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push openclaw image
+        uses: docker/build-push-action@v6
+        with:
+          context: packages/openclaw
+          file: packages/openclaw/dockerfiles/openclaw.Dockerfile
+          push: true
+          tags: ssdavidai00/alfred-openclaw:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,365 @@
+name: Deploy SaaS
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/saas/**'
+      - 'packages/ctrl/**'
+      - 'deploy/**'
+concurrency:
+  group: deploy-saas
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Wasp CLI
+        run: curl -sSL https://get.wasp.sh/installer.sh | sh -s -- -v 0.19.1
+        env:
+          WASP_TELEMETRY_DISABLED: 1
+
+      - name: Build Wasp app
+        run: cd packages/saas/app && ~/.local/bin/wasp build
+
+      - name: Patch npm overrides into Wasp build
+        run: |
+          cd packages/saas/app/.wasp/build
+          # Wasp doesn't copy npm overrides from app/package.json.
+          # Pin three@0.175.0 to avoid Clock class removal in newer versions.
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.overrides = { ...pkg.overrides, 'three': '0.175.0' };
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Install build dependencies
+        run: cd packages/saas/app/.wasp/build && npm install
+
+      - name: Patch Prisma to use db push (no migration files in this project)
+        run: |
+          cd packages/saas/app/.wasp/build/server
+          sed -i 's/"db-migrate-prod": "prisma migrate deploy --schema=..\/db\/schema.prisma"/"db-migrate-prod": "prisma db push --schema=..\/db\/schema.prisma --skip-generate"/' package.json
+
+      - name: Build web-app client
+        run: cd packages/saas/app/.wasp/build/web-app && REACT_APP_API_URL=https://alfred.black npx vite build
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Patch Dockerfile for provisioning deps
+        run: |
+          # Add openssh-keygen to production stage (needed by alfred-ctrl for keypair generation)
+          sed -i 's/RUN apk add --no-cache python3$/RUN apk add --no-cache python3 openssh-keygen/' packages/saas/app/.wasp/build/Dockerfile
+
+      - name: Deploy server build to VM
+        run: |
+          rsync -azP --delete \
+            --exclude='web-app/' \
+            --exclude='node_modules/' \
+            --exclude='.waspchecksums' \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            packages/saas/app/.wasp/build/ \
+            deploy@${{ secrets.DEPLOY_HOST }}:/opt/alfred-saas/wasp-build/
+
+      - name: Deploy client to VM
+        run: |
+          rsync -azP --delete \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            packages/saas/app/.wasp/build/web-app/build/ \
+            deploy@${{ secrets.DEPLOY_HOST }}:/opt/alfred-saas/client/
+
+      - name: Deploy Plausible config to VM
+        run: |
+          rsync -azP \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            deploy/clickhouse/ \
+            deploy@${{ secrets.DEPLOY_HOST }}:/opt/alfred-saas/clickhouse/
+          rsync -azP \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            deploy/docker-compose.yaml \
+            deploy@${{ secrets.DEPLOY_HOST }}:/opt/alfred-saas/docker-compose.yaml
+
+      - name: Build Docker image and restart
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} '
+            cd /opt/alfred-saas/wasp-build &&
+            docker build -t alfred-saas:latest . &&
+            cd /opt/alfred-saas &&
+            docker compose up -d --force-recreate app &&
+            sleep 5 &&
+            docker exec alfred-saas-app-1 \
+              npx prisma db push --schema="../db/schema.prisma" --skip-generate
+          '
+
+      - name: Configure Caddy and Plausible
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} 'grep -q "PLAUSIBLE_API_KEY" /opt/alfred-saas/.env 2>/dev/null && echo "Plausible API key already set" || { echo "PLAUSIBLE_API_KEY=${{ secrets.PLAUSIBLE_API_KEY }}" >> /opt/alfred-saas/.env && echo "Plausible API key added"; }'
+      - name: Update Caddy for domain migration
+        run: |
+          scp -i ~/.ssh/deploy_key deploy/Caddyfile deploy@${{ secrets.DEPLOY_HOST }}:/tmp/Caddyfile
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} 'sudo cp /tmp/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy && echo "Caddy reloaded" && rm /tmp/Caddyfile'
+
+
+      - name: Update Wasp server env for new domain
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} '
+            ENV_FILE="/opt/alfred-saas/.env.server"
+            # Update WASP_WEB_CLIENT_URL
+            if grep -q "WASP_WEB_CLIENT_URL" "$ENV_FILE" 2>/dev/null; then
+              sed -i "s|WASP_WEB_CLIENT_URL=.*|WASP_WEB_CLIENT_URL=https://alfred.black|" "$ENV_FILE"
+            else
+              echo "WASP_WEB_CLIENT_URL=https://alfred.black" >> "$ENV_FILE"
+            fi
+            # Update WASP_SERVER_URL
+            if grep -q "WASP_SERVER_URL" "$ENV_FILE" 2>/dev/null; then
+              sed -i "s|WASP_SERVER_URL=.*|WASP_SERVER_URL=https://alfred.black|" "$ENV_FILE"
+            else
+              echo "WASP_SERVER_URL=https://alfred.black" >> "$ENV_FILE"
+            fi
+            echo "Wasp env updated: WASP_WEB_CLIENT_URL=https://alfred.black, WASP_SERVER_URL=https://alfred.black"
+          '
+
+      - name: Restart app with updated env
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} '
+            cd /opt/alfred-saas &&
+            docker compose up -d --force-recreate app &&
+            echo "App container restarted with new env"
+          '
+
+      - name: Fix alfred worker PID loop on existing tenants
+        run: |
+          # Write the compose-patch script to the control plane via SSH stdin
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} 'cat > /tmp/fix-alfred-pid.py' << 'PYEOF'
+          import re, sys
+          compose_path = sys.argv[1]
+          with open(compose_path) as f:
+            content = f.read()
+          # Check if already patched with entrypoint override
+          if "entrypoint:" in content and "rm -f /app/data/alfred.pid" in content:
+            print("Already patched"); sys.exit(0)
+          # Remove any existing command: line from the alfred service block
+          # (the old command: was ignored by the image entrypoint anyway)
+          patched = re.sub(
+            r"(  alfred:.*?env_file:\n\s+- \.env\n)\s*command:.*\n",
+            "\\1",
+            content, count=1, flags=re.DOTALL)
+          # Add entrypoint override + empty command after env_file block
+          patched = re.sub(
+            r"(  alfred:.*?env_file:\n\s+- \.env\n)",
+            '\\1    entrypoint: ["bash", "-c", "rm -f /app/data/alfred.pid && exec /app/entrypoint.sh"]\n    command: []\n',
+            patched, count=1, flags=re.DOTALL)
+          if patched == content and "entrypoint:" not in patched:
+            print("ERROR: Could not find alfred service env_file block to patch"); sys.exit(1)
+          with open(compose_path, "w") as f:
+            f.write(patched)
+          print("Patched successfully")
+          PYEOF
+
+          # Run the fix on each tenant from the control plane
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} '
+            CTRL_PATH="/opt/alfred-saas/alfred-ctrl/dist/index.mjs"
+            CTRL_CWD="/opt/alfred-saas/alfred-ctrl"
+            COMPOSE_DIR="/opt/alfred/compose"
+            COMPOSE_FILE="$COMPOSE_DIR/docker-compose.yaml"
+
+            # Verify patch script arrived
+            if [ ! -f /tmp/fix-alfred-pid.py ]; then
+              echo "ERROR: Patch script not found on control plane"
+              exit 1
+            fi
+            echo "Patch script ready on control plane"
+
+            INSTANCES=$(cd "$CTRL_CWD" && node --experimental-sqlite "$CTRL_PATH" list --json --status running 2>/dev/null || echo "[]")
+            COUNT=$(echo "$INSTANCES" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
+            echo "Found $COUNT running instance(s)"
+
+            if [ "$COUNT" = "0" ]; then
+              echo "No running instances to patch"
+              rm -f /tmp/fix-alfred-pid.py
+              exit 0
+            fi
+
+            # Write instance list to a temp file to avoid pipe/stdin conflicts
+            echo "$INSTANCES" | python3 -c "
+          import sys, json
+          for inst in json.load(sys.stdin):
+              ip = inst.get(\"ip_address\", \"\")
+              key = inst.get(\"ssh_key_path\", \"\")
+              name = inst.get(\"customer_name\", \"unknown\")
+              if ip and key:
+                  print(f\"{name}|{ip}|{key}\")
+            " > /tmp/tenant-list.txt
+
+            while IFS="|" read -r NAME IP KEY; do
+              # Map container path to host path (DB stores /app/alfred-ctrl/... from inside Docker)
+              HOST_KEY="${KEY/\/app\/alfred-ctrl/\/opt\/alfred-saas\/alfred-ctrl}"
+              echo "--- Tenant: $NAME ($IP), key: $HOST_KEY ---"
+
+              # Verify key file exists
+              if [ ! -f "$HOST_KEY" ]; then
+                echo "  SKIP: SSH key not found at $HOST_KEY (DB path: $KEY)"
+                continue
+              fi
+
+              # Copy key to temp with correct permissions (original may be owned by Docker)
+              TMPKEY=$(mktemp)
+              sudo cp "$HOST_KEY" "$TMPKEY" && sudo chown deploy:deploy "$TMPKEY" && chmod 600 "$TMPKEY"
+
+              # Test SSH connectivity
+              SSH_ERR=$(ssh -i "$TMPKEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes "deploy@$IP" "echo ok" 2>&1)
+              if [ $? -ne 0 ]; then
+                echo "  SKIP: Cannot SSH to $NAME: $SSH_ERR"
+                rm -f "$TMPKEY"
+                continue
+              fi
+
+              # Pipe the patch script to the tenant via SSH stdin
+              RESULT=$(ssh -i "$TMPKEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "deploy@$IP" \
+                "python3 - $COMPOSE_FILE" < /tmp/fix-alfred-pid.py 2>&1)
+              echo "  $RESULT"
+
+              if echo "$RESULT" | grep -q "Patched successfully"; then
+                echo "  Restarting alfred container..."
+                ssh -i "$TMPKEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 "deploy@$IP" \
+                  "cd $COMPOSE_DIR && docker compose up -d --force-recreate alfred" 2>&1 | sed "s/^/  /"
+              fi
+              rm -f "$TMPKEY"
+              echo "  Done"
+            done < /tmp/tenant-list.txt
+
+            rm -f /tmp/fix-alfred-pid.py /tmp/tenant-list.txt
+            echo "Tenant PID fix complete"
+          '
+
+      - name: Push QMD memory config to all running tenants
+        run: |
+          # Write the config-patch script to the control plane via SSH stdin (avoids YAML quoting hell)
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} 'cat > /tmp/patch-qmd-config.py' << 'PYEOF'
+          import json, os, sys
+
+          def deep_merge(base, overlay):
+              for k, v in overlay.items():
+                  if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+                      deep_merge(base[k], v)
+                  else:
+                      base[k] = v
+              return base
+
+          p = sys.argv[1]
+          cfg = {}
+          if os.path.exists(p):
+              with open(p) as f:
+                  cfg = json.load(f)
+
+          patch = {
+              "memory": {
+                  "backend": "qmd",
+                  "citations": "auto",
+                  "qmd": {
+                      "includeDefaultMemory": True,
+                      "paths": [{"path": "/home/node/.openclaw/workspace/vault", "name": "vault", "pattern": "**/*.md"}],
+                      "update": {"interval": "5m", "debounceMs": 15000, "onBoot": True},
+                      "limits": {"maxResults": 8, "timeoutMs": 5000}
+                  }
+              }
+          }
+
+          current_backend = cfg.get("memory", {}).get("backend", "")
+          current_paths = cfg.get("memory", {}).get("qmd", {}).get("paths", [])
+          already_correct = (
+              current_backend == "qmd" and
+              any(p.get("name") == "vault" for p in current_paths)
+          )
+          if already_correct:
+              print("Already configured — skipping")
+              sys.exit(0)
+
+          deep_merge(cfg, patch)
+          with open(p, "w") as f:
+              json.dump(cfg, f, indent=2)
+          print("Config patched")
+          PYEOF
+
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} '
+            CTRL_PATH="/opt/alfred-saas/alfred-ctrl/dist/index.mjs"
+            CTRL_CWD="/opt/alfred-saas/alfred-ctrl"
+            OPENCLAW_JSON="/mnt/encrypted/openclaw/openclaw.json"
+
+            if [ ! -f /tmp/patch-qmd-config.py ]; then
+              echo "ERROR: patch script not found on control plane"; exit 1
+            fi
+
+            INSTANCES=$(cd "$CTRL_CWD" && node --experimental-sqlite "$CTRL_PATH" list --json --status running 2>/dev/null || echo "[]")
+            COUNT=$(echo "$INSTANCES" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
+            echo "Found $COUNT running instance(s) to patch"
+
+            if [ "$COUNT" = "0" ]; then
+              echo "No running instances — skipping"
+              rm -f /tmp/patch-qmd-config.py
+              exit 0
+            fi
+
+            echo "$INSTANCES" | python3 -c "
+          import sys, json
+          for inst in json.load(sys.stdin):
+              ip = inst.get(\"ip_address\", \"\")
+              key = inst.get(\"ssh_key_path\", \"\")
+              name = inst.get(\"customer_name\", \"unknown\")
+              if ip and key:
+                  print(f\"{name}|{ip}|{key}\")
+            " > /tmp/tenant-list.txt
+
+            while IFS="|" read -r NAME IP KEY; do
+              HOST_KEY="${KEY/\/app\/alfred-ctrl/\/opt\/alfred-saas\/alfred-ctrl}"
+              echo "--- Tenant: $NAME ($IP) ---"
+
+              if [ ! -f "$HOST_KEY" ]; then
+                echo "  SKIP: SSH key not found at $HOST_KEY"; continue
+              fi
+
+              TMPKEY=$(mktemp)
+              sudo cp "$HOST_KEY" "$TMPKEY" && sudo chown deploy:deploy "$TMPKEY" && chmod 600 "$TMPKEY"
+
+              SSH_ERR=$(ssh -i "$TMPKEY" -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes "deploy@$IP" "echo ok" 2>&1)
+              if [ $? -ne 0 ]; then
+                echo "  SKIP: Cannot SSH: $SSH_ERR"; rm -f "$TMPKEY"; continue
+              fi
+
+              RESULT=$(ssh -i "$TMPKEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 "deploy@$IP" \
+                "python3 - $OPENCLAW_JSON" < /tmp/patch-qmd-config.py 2>&1)
+              echo "  $RESULT"
+
+              if echo "$RESULT" | grep -q "Config patched"; then
+                echo "  Restarting openclaw..."
+                ssh -i "$TMPKEY" -o StrictHostKeyChecking=no -o ConnectTimeout=30 "deploy@$IP" \
+                  "cd /opt/alfred/compose && docker compose restart openclaw" 2>&1 | sed "s/^/  /"
+              fi
+
+              rm -f "$TMPKEY"
+              echo "  Done"
+            done < /tmp/tenant-list.txt
+
+            rm -f /tmp/patch-qmd-config.py /tmp/tenant-list.txt
+            echo "QMD config patch complete"
+          '
+
+      - name: Verify deployment
+        run: |
+          sleep 5
+          STATUS=$(ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} \
+            'curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/auth/me')
+          echo "Health check status: $STATUS"
+          [ "$STATUS" = "200" ] || [ "$STATUS" = "401" ]
