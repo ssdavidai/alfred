@@ -70,45 +70,54 @@ export function attachTerminalUpgrade(server: http.Server): void {
       if (activeSession === ws) activeSession = null;
     }
 
-    // Use `script` to allocate a real PTY for docker exec.
-    // This gives us a proper interactive shell (prompt, echo, line editing)
-    // without needing the native node-pty module.
-    const dockerCmd = `docker compose -f ${COMPOSE_DIR}/docker-compose.yaml exec -it openclaw /bin/sh`;
-    proc = spawn("script", ["-q", "-c", dockerCmd, "/dev/null"], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    function startShell() {
+      // Use `script` to allocate a real PTY for docker exec.
+      // -e ENV=/tmp/.ocrc makes sh source our PATH setup on start.
+      const dockerCmd = `docker compose -f ${COMPOSE_DIR}/docker-compose.yaml exec -it -e ENV=/tmp/.ocrc openclaw /bin/sh`;
+      proc = spawn("script", ["-q", "-c", dockerCmd, "/dev/null"], {
+        stdio: ["pipe", "pipe", "pipe"],
+      });
 
-    // Bootstrap: create an `openclaw` CLI wrapper and add to PATH.
-    // Written to stdin after shell starts; `clear` hides the setup output.
-    proc.stdin!.write(
-      `printf '#!/bin/sh\\nexec node /app/openclaw.mjs "$@"\\n' > /tmp/openclaw && chmod +x /tmp/openclaw && export PATH="/tmp:$PATH" && clear\n`,
-    );
+      proc.stdout!.on("data", (chunk: Buffer) => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        const buf = Buffer.alloc(1 + chunk.length);
+        buf[0] = MSG_DATA;
+        chunk.copy(buf, 1);
+        ws.send(buf);
+        resetIdle();
+      });
 
-    proc.stdout!.on("data", (chunk: Buffer) => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      const buf = Buffer.alloc(1 + chunk.length);
-      buf[0] = MSG_DATA;
-      chunk.copy(buf, 1);
-      ws.send(buf);
+      proc.stderr!.on("data", (chunk: Buffer) => {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        const buf = Buffer.alloc(1 + chunk.length);
+        buf[0] = MSG_DATA;
+        chunk.copy(buf, 1);
+        ws.send(buf);
+        resetIdle();
+      });
+
+      proc.on("exit", (code) => {
+        cleanup(`process exited (${code})`);
+      });
+
+      proc.on("error", (err) => {
+        cleanup(`process error: ${err.message}`);
+      });
+
       resetIdle();
-    });
+    }
 
-    proc.stderr!.on("data", (chunk: Buffer) => {
-      if (ws.readyState !== WebSocket.OPEN) return;
-      const buf = Buffer.alloc(1 + chunk.length);
-      buf[0] = MSG_DATA;
-      chunk.copy(buf, 1);
-      ws.send(buf);
-      resetIdle();
-    });
+    // Step 1: Non-interactive setup — create openclaw CLI wrapper and ENV file.
+    // spawn with array args avoids all shell quoting issues.
+    const setupShCmd = `rm -rf /tmp/openclaw /tmp/.ocrc && echo '#!/bin/sh' > /tmp/openclaw && echo 'exec node /app/openclaw.mjs "$@"' >> /tmp/openclaw && chmod +x /tmp/openclaw && echo 'export PATH="/tmp:$PATH"' > /tmp/.ocrc`;
+    const setup = spawn("docker", [
+      "compose", "-f", `${COMPOSE_DIR}/docker-compose.yaml`,
+      "exec", "-T", "openclaw", "sh", "-c", setupShCmd,
+    ], { stdio: "ignore" });
 
-    proc.on("exit", (code) => {
-      cleanup(`process exited (${code})`);
-    });
-
-    proc.on("error", (err) => {
-      cleanup(`process error: ${err.message}`);
-    });
+    // Step 2: Start interactive shell after setup completes (or fails)
+    setup.on("close", () => startShell());
+    setup.on("error", () => startShell());
 
     ws.on("message", (data: Buffer) => {
       if (!Buffer.isBuffer(data) || data.length < 1) return;
@@ -136,7 +145,5 @@ export function attachTerminalUpgrade(server: http.Server): void {
     connBuf[0] = MSG_CONTROL;
     connBuf.write(connMsg, 1);
     ws.send(connBuf);
-
-    resetIdle();
   });
 }
