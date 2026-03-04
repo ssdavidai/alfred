@@ -17,7 +17,6 @@ export function attachTerminalUpgrade(server: http.Server): void {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== "/terminal") return;
 
-    // Authenticate via query param token (WebSocket upgrade can't use custom headers reliably)
     const token = url.searchParams.get("token");
     if (token) {
       req.headers.authorization = `Bearer ${token}`;
@@ -46,6 +45,8 @@ export function attachTerminalUpgrade(server: http.Server): void {
     activeSession = ws;
     let idleTimer: ReturnType<typeof setTimeout>;
     let proc: ChildProcess | null = null;
+    let termCols = 80;
+    let termRows = 24;
 
     function resetIdle() {
       clearTimeout(idleTimer);
@@ -71,9 +72,19 @@ export function attachTerminalUpgrade(server: http.Server): void {
     }
 
     function startShell() {
-      // Use `script` to allocate a real PTY for docker exec.
-      // -e ENV=/tmp/.ocrc makes sh source our PATH setup on start.
-      const dockerCmd = `docker compose -f ${COMPOSE_DIR}/docker-compose.yaml exec -it -e ENV=/tmp/.ocrc openclaw /bin/sh`;
+      // Start interactive shell with PTY via script(1).
+      // COLUMNS/LINES/TERM are passed as env vars; .ocrc runs stty to set PTY size.
+      const dockerCmd = [
+        "docker compose",
+        `-f ${COMPOSE_DIR}/docker-compose.yaml`,
+        "exec -it",
+        `-e ENV=/tmp/.ocrc`,
+        `-e COLUMNS=${termCols}`,
+        `-e LINES=${termRows}`,
+        `-e TERM=xterm-256color`,
+        "openclaw /bin/sh",
+      ].join(" ");
+
       proc = spawn("script", ["-q", "-c", dockerCmd, "/dev/null"], {
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -107,15 +118,24 @@ export function attachTerminalUpgrade(server: http.Server): void {
       resetIdle();
     }
 
-    // Step 1: Non-interactive setup — create openclaw CLI wrapper and ENV file.
-    // spawn with array args avoids all shell quoting issues.
-    const setupShCmd = `rm -rf /tmp/openclaw /tmp/.ocrc && echo '#!/bin/sh' > /tmp/openclaw && echo 'exec node /app/openclaw.mjs "$@"' >> /tmp/openclaw && chmod +x /tmp/openclaw && echo 'export PATH="/tmp:$PATH"' > /tmp/.ocrc`;
+    // Phase 1: Non-interactive setup — create openclaw wrapper + shell rc file.
+    // spawn() with array args avoids all shell quoting issues.
+    const setupShCmd = [
+      "rm -rf /tmp/openclaw /tmp/.ocrc",
+      "echo '#!/bin/sh' > /tmp/openclaw",
+      "echo 'exec node /app/openclaw.mjs \"$@\"' >> /tmp/openclaw",
+      "chmod +x /tmp/openclaw",
+      "echo 'export PATH=\"/tmp:$PATH\"' > /tmp/.ocrc",
+      "echo 'export TERM=xterm-256color' >> /tmp/.ocrc",
+      "echo 'stty cols ${COLUMNS:-80} rows ${LINES:-24} 2>/dev/null' >> /tmp/.ocrc",
+    ].join(" && ");
+
     const setup = spawn("docker", [
       "compose", "-f", `${COMPOSE_DIR}/docker-compose.yaml`,
       "exec", "-T", "openclaw", "sh", "-c", setupShCmd,
     ], { stdio: "ignore" });
 
-    // Step 2: Start interactive shell after setup completes (or fails)
+    // Phase 2: Start interactive shell after setup completes (or fails)
     setup.on("close", () => startShell());
     setup.on("error", () => startShell());
 
@@ -126,8 +146,24 @@ export function attachTerminalUpgrade(server: http.Server): void {
       const type = data[0];
       const payload = data.subarray(1);
 
-      if (type === MSG_DATA && proc?.stdin?.writable) {
-        proc.stdin.write(payload);
+      if (type === MSG_DATA) {
+        if (proc?.stdin?.writable) {
+          proc.stdin.write(payload);
+        }
+      } else if (type === MSG_CONTROL) {
+        try {
+          const msg = JSON.parse(payload.toString());
+          if (msg.type === "resize" && msg.cols > 0 && msg.rows > 0) {
+            termCols = msg.cols;
+            termRows = msg.rows;
+            // Resize the PTY if shell is already running
+            if (proc?.stdin?.writable) {
+              proc.stdin.write(`stty cols ${msg.cols} rows ${msg.rows} 2>/dev/null\n`);
+            }
+          }
+        } catch {
+          // ignore malformed control messages
+        }
       }
     });
 
@@ -139,7 +175,7 @@ export function attachTerminalUpgrade(server: http.Server): void {
       cleanup("websocket error");
     });
 
-    // Send a connected control message
+    // Send connected control message
     const connMsg = JSON.stringify({ type: "connected" });
     const connBuf = Buffer.alloc(1 + Buffer.byteLength(connMsg));
     connBuf[0] = MSG_CONTROL;
