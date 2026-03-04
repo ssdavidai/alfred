@@ -189,19 +189,19 @@ program
   });
 
 program
-  .command("update <name>")
+  .command("update [name]")
   .description("Pull latest images and restart")
   .option("--all", "Update all running instances")
   .action(async (name, opts) => {
     getDb();
 
-    if (opts.all || name === "--all") {
+    if (opts.all) {
       const instances = listInstances("running");
       for (const inst of instances) {
         console.log(`\nUpdating ${inst.customer_name}...`);
         await updateImages(inst.id, undefined, console.log);
       }
-    } else {
+    } else if (name) {
       const instance = getInstanceByName(name);
       if (!instance) {
         console.error(`Instance "${name}" not found`);
@@ -209,6 +209,10 @@ program
         process.exit(1);
       }
       await updateImages(instance.id, undefined, console.log);
+    } else {
+      console.error("Usage: update <name> or update --all");
+      closeDb();
+      process.exit(1);
     }
     closeDb();
   });
