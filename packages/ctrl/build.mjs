@@ -68,7 +68,7 @@ const apiBuildOptions = {
   target: "node22",
   format: "esm",
   outfile: "dist/api.mjs",
-  banner: { js: "#!/usr/bin/env node" },
+  banner: { js: "#!/usr/bin/env node\nimport{createRequire}from'module';const require=createRequire(import.meta.url);" },
   external: nodeBuiltins,
   loader: {},
   sourcemap: true,
