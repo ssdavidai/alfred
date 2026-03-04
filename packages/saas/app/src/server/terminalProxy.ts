@@ -7,10 +7,9 @@ import { prisma } from "wasp/server";
 import { getSessionAndUserFromBearerToken } from "wasp/auth/session";
 import { decryptApiKey } from "./tenantProxy";
 
-// Force HTTP/1.1 ALPN so Tailscale Serve properly forwards WebSocket upgrades.
-// Without this, Tailscale Serve may negotiate HTTP/2 and strip upgrade headers.
+// Shared agent for upstream connections to tenant via Tailscale Serve.
+// Uses valid Tailscale certs — no need to disable certificate validation.
 const upstreamAgent = new https.Agent({
-  rejectUnauthorized: false,
   ALPNProtocols: ["http/1.1"],
 });
 
@@ -94,7 +93,7 @@ export function registerTerminalStatusRoute(app: Application): void {
         results.dnsResolution = { error: err.message };
       }
 
-      // Test 1: HTTP health check to tenant
+      // Test 1: HTTP health check (proves basic HTTPS connectivity works)
       try {
         const healthUrl = `https://${hostname}:3100/api/v1/admin/health`;
         const controller = new AbortController();
@@ -109,23 +108,149 @@ export function registerTerminalStatusRoute(app: Application): void {
         results.httpHealth = { error: err.message, code: err.code, cause: err.cause?.message };
       }
 
-      // Test 2: HTTP GET /terminal (not WebSocket — to see what HTTP handler returns)
+      // Test 2: Raw HTTPS request WITH explicit upgrade headers (bypasses ws library)
+      // If this gets 404: Tailscale Serve is stripping upgrade headers
+      // If this gets 101 or 401: upgrade headers pass through, issue is in ws library
       try {
-        const termUrl = `https://${hostname}:3100/terminal`;
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 10_000);
-        const termRes = await fetch(termUrl, {
-          headers: { Authorization: `Bearer ${tenantApiKey}` },
-          signal: controller.signal,
+        const rawResult = await new Promise<Record<string, unknown>>((resolve) => {
+          const timer = setTimeout(() => {
+            rawReq.destroy();
+            resolve({ error: "timeout after 10s" });
+          }, 10_000);
+
+          const rawReq = https.request({
+            hostname,
+            port: 3100,
+            path: "/terminal",
+            method: "GET",
+            headers: {
+              "Connection": "Upgrade",
+              "Upgrade": "websocket",
+              "Sec-WebSocket-Version": "13",
+              "Sec-WebSocket-Key": Buffer.from(
+                Array.from({ length: 16 }, () => Math.floor(Math.random() * 256))
+              ).toString("base64"),
+              "Authorization": `Bearer ${tenantApiKey}`,
+            },
+          });
+
+          rawReq.on("upgrade", (upRes, _socket, _head) => {
+            clearTimeout(timer);
+            _socket.destroy();
+            resolve({
+              event: "upgrade",
+              statusCode: upRes.statusCode,
+              headers: {
+                upgrade: upRes.headers["upgrade"],
+                connection: upRes.headers["connection"],
+                server: upRes.headers["server"],
+              },
+            });
+          });
+
+          rawReq.on("response", (upRes) => {
+            clearTimeout(timer);
+            let body = "";
+            upRes.on("data", (d: any) => body += d);
+            upRes.on("end", () => {
+              rawReq.destroy();
+              resolve({
+                event: "response (upgrade NOT honoured)",
+                statusCode: upRes.statusCode,
+                statusMessage: upRes.statusMessage,
+                body: body.slice(0, 300),
+                responseHeaders: {
+                  server: upRes.headers["server"],
+                  connection: upRes.headers["connection"],
+                  upgrade: upRes.headers["upgrade"],
+                  contentType: upRes.headers["content-type"],
+                  via: upRes.headers["via"],
+                },
+              });
+            });
+          });
+
+          rawReq.on("error", (err: any) => {
+            clearTimeout(timer);
+            resolve({ event: "error", error: err.message, code: err.code });
+          });
+
+          rawReq.end();
         });
-        clearTimeout(timer);
-        const termBody = await termRes.text().catch(() => "");
-        results.httpTerminal = { status: termRes.status, body: termBody.slice(0, 200) };
+        results.rawUpgradeTest = rawResult;
       } catch (err: any) {
-        results.httpTerminal = { error: err.message };
+        results.rawUpgradeTest = { error: err.message };
       }
 
-      // Test 3: WebSocket connection to tenant terminal
+      // Test 3: Same raw request but WITH ALPN http/1.1 forced
+      try {
+        const alpnResult = await new Promise<Record<string, unknown>>((resolve) => {
+          const timer = setTimeout(() => {
+            alpnReq.destroy();
+            resolve({ error: "timeout after 10s" });
+          }, 10_000);
+
+          const alpnReq = https.request({
+            hostname,
+            port: 3100,
+            path: "/terminal",
+            method: "GET",
+            agent: upstreamAgent,
+            headers: {
+              "Connection": "Upgrade",
+              "Upgrade": "websocket",
+              "Sec-WebSocket-Version": "13",
+              "Sec-WebSocket-Key": Buffer.from(
+                Array.from({ length: 16 }, () => Math.floor(Math.random() * 256))
+              ).toString("base64"),
+              "Authorization": `Bearer ${tenantApiKey}`,
+            },
+          });
+
+          alpnReq.on("upgrade", (upRes, _socket, _head) => {
+            clearTimeout(timer);
+            _socket.destroy();
+            resolve({
+              event: "upgrade",
+              statusCode: upRes.statusCode,
+              alpn: "http/1.1 forced",
+            });
+          });
+
+          alpnReq.on("response", (upRes) => {
+            clearTimeout(timer);
+            let body = "";
+            upRes.on("data", (d: any) => body += d);
+            upRes.on("end", () => {
+              alpnReq.destroy();
+              resolve({
+                event: "response (upgrade NOT honoured)",
+                statusCode: upRes.statusCode,
+                body: body.slice(0, 300),
+                alpn: "http/1.1 forced",
+                responseHeaders: {
+                  server: upRes.headers["server"],
+                  connection: upRes.headers["connection"],
+                  upgrade: upRes.headers["upgrade"],
+                  via: upRes.headers["via"],
+                },
+              });
+            });
+          });
+
+          alpnReq.on("error", (err: any) => {
+            clearTimeout(timer);
+            resolve({ event: "error", error: err.message, code: err.code, alpn: "http/1.1 forced" });
+          });
+
+          alpnReq.end();
+        });
+        results.rawUpgradeWithAlpn = alpnResult;
+      } catch (err: any) {
+        results.rawUpgradeWithAlpn = { error: err.message };
+      }
+
+      // Test 4: ws library with default agent (no custom agent, no ALPN override)
       try {
         const wsUrl = `wss://${hostname}:3100/terminal`;
         const wsResult = await new Promise<Record<string, unknown>>((resolve) => {
@@ -135,25 +260,18 @@ export function registerTerminalStatusRoute(app: Application): void {
           }, 10_000);
 
           const testWs = new WebSocket(wsUrl, {
-            agent: upstreamAgent,
             headers: { Authorization: `Bearer ${tenantApiKey}` },
           });
 
           testWs.on("open", () => {
             clearTimeout(timer);
             testWs.close();
-            resolve({ connected: true });
+            resolve({ connected: true, agent: "default" });
           });
 
           testWs.on("error", (err: any) => {
             clearTimeout(timer);
-            resolve({
-              error: err.message,
-              code: err.code,
-              type: err.type,
-              errno: (err as any).errno,
-              address: (err as any).address,
-            });
+            resolve({ error: err.message, code: err.code, agent: "default" });
           });
 
           testWs.on("unexpected-response", (_req: any, httpRes: any) => {
@@ -165,19 +283,21 @@ export function registerTerminalStatusRoute(app: Application): void {
               resolve({
                 error: "unexpected-response",
                 statusCode: httpRes.statusCode,
-                statusMessage: httpRes.statusMessage,
                 body: body.slice(0, 200),
-                headers: {
+                agent: "default",
+                responseHeaders: {
                   server: httpRes.headers["server"],
-                  contentType: httpRes.headers["content-type"],
+                  connection: httpRes.headers["connection"],
+                  upgrade: httpRes.headers["upgrade"],
+                  via: httpRes.headers["via"],
                 },
               });
             });
           });
         });
-        results.wsTerminal = wsResult;
+        results.wsDefaultAgent = wsResult;
       } catch (err: any) {
-        results.wsTerminal = { error: err.message };
+        results.wsDefaultAgent = { error: err.message };
       }
 
       res.json({ ok: true, diagnostics: results });
