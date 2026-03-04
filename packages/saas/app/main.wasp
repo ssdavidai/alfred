@@ -296,6 +296,12 @@ page ApiDocsPage {
   component: import ApiDocsPage from "@src/dashboard/ApiDocsPage"
 }
 
+route TerminalRoute { path: "/dashboard/terminal", to: TerminalPage }
+page TerminalPage {
+  authRequired: true,
+  component: import TerminalPage from "@src/dashboard/TerminalPage"
+}
+
 // API Key management
 query listApiKeys {
   fn: import { listApiKeys } from "@src/apikeys/operations",

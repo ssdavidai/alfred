@@ -17,6 +17,7 @@ if (fs.existsSync(envPath)) {
 
 import { setApiKey } from "./auth.js";
 import { createApiServer } from "./server.js";
+import { attachTerminalUpgrade } from "./routes/terminal.js";
 
 const apiKey = process.env.AAS_API_KEY;
 if (!apiKey) {
@@ -30,6 +31,7 @@ const port = parseInt(process.env.AAS_PORT ?? "3100", 10);
 const host = process.env.AAS_HOST ?? "127.0.0.1";
 
 const server = createApiServer();
+attachTerminalUpgrade(server);
 
 server.listen(port, host, () => {
   console.log(`Alfred tenant API listening on http://${host}:${port}`);

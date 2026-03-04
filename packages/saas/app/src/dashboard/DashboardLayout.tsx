@@ -23,6 +23,7 @@ import {
   FileCode,
   Brain,
   ClipboardList,
+  TerminalSquare,
 } from "lucide-react";
 import { cn } from "../client/utils";
 
@@ -41,6 +42,7 @@ const dashboardNavItems: NavItem[] = [
   { path: "/dashboard/assistants", label: "Services", icon: Bot },
   { path: "/dashboard/credentials", label: "Credentials", icon: KeyRound },
   { path: "/dashboard/workspace", label: "Workspace", icon: FileCode },
+  { path: "/dashboard/terminal", label: "Terminal", icon: TerminalSquare },
   { path: "/dashboard/logs", label: "Logs", icon: ScrollText },
   { path: "/dashboard/settings", label: "Settings", icon: Settings },
 ];

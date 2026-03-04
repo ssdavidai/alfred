@@ -19,12 +19,14 @@
     "ink-spinner": "^5.0.0",
     "nunjucks": "^3.2.4",
     "react": "^18.3.1",
-    "ssh2": "^1.16.0"
+    "ssh2": "^1.16.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/nunjucks": "^3.2.6",
     "@types/react": "^18.3.12",
     "@types/ssh2": "^1.15.4",
+    "@types/ws": "^8.5.13",
     "esbuild": "^0.24.2",
     "typescript": "^5.7.2"
   }
