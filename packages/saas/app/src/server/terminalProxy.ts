@@ -72,6 +72,20 @@ export function registerTerminalStatusRoute(app: Application): void {
       const hostname = instance.tailscaleHostname;
       const results: Record<string, unknown> = { hostname };
 
+      // Test 0: DNS resolution
+      try {
+        const dns = await import("dns");
+        const dnsResult = await new Promise<string>((resolve, reject) => {
+          dns.default.lookup(hostname, (err: any, address: string) => {
+            if (err) reject(err);
+            else resolve(address);
+          });
+        });
+        results.dnsResolution = dnsResult;
+      } catch (err: any) {
+        results.dnsResolution = { error: err.message };
+      }
+
       // Test 1: HTTP health check to tenant
       try {
         const healthUrl = `https://${hostname}:3100/api/v1/admin/health`;
@@ -87,7 +101,23 @@ export function registerTerminalStatusRoute(app: Application): void {
         results.httpHealth = { error: err.message, code: err.code, cause: err.cause?.message };
       }
 
-      // Test 2: WebSocket connection to tenant terminal
+      // Test 2: HTTP GET /terminal (not WebSocket — to see what HTTP handler returns)
+      try {
+        const termUrl = `https://${hostname}:3100/terminal`;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10_000);
+        const termRes = await fetch(termUrl, {
+          headers: { Authorization: `Bearer ${tenantApiKey}` },
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        const termBody = await termRes.text().catch(() => "");
+        results.httpTerminal = { status: termRes.status, body: termBody.slice(0, 200) };
+      } catch (err: any) {
+        results.httpTerminal = { error: err.message };
+      }
+
+      // Test 3: WebSocket connection to tenant terminal
       try {
         const wsUrl = `wss://${hostname}:3100/terminal`;
         const wsResult = await new Promise<Record<string, unknown>>((resolve) => {
@@ -120,11 +150,20 @@ export function registerTerminalStatusRoute(app: Application): void {
 
           testWs.on("unexpected-response", (_req: any, httpRes: any) => {
             clearTimeout(timer);
-            testWs.close();
-            resolve({
-              error: "unexpected-response",
-              statusCode: httpRes.statusCode,
-              statusMessage: httpRes.statusMessage,
+            let body = "";
+            httpRes.on("data", (d: any) => body += d);
+            httpRes.on("end", () => {
+              testWs.close();
+              resolve({
+                error: "unexpected-response",
+                statusCode: httpRes.statusCode,
+                statusMessage: httpRes.statusMessage,
+                body: body.slice(0, 200),
+                headers: {
+                  server: httpRes.headers["server"],
+                  contentType: httpRes.headers["content-type"],
+                },
+              });
             });
           });
         });
