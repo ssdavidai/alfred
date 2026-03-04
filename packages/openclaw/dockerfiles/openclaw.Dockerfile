@@ -49,6 +49,10 @@ RUN mkdir -p /home/node/.cache/qmd && \
     chown -R node:node /home/node/.cache && \
     su node -c "qmd status" 2>/dev/null || true
 
+# CLI wrapper so `openclaw` works from interactive shells
+RUN printf '#!/bin/sh\nexec node /app/openclaw.mjs "$@"\n' > /usr/local/bin/openclaw && \
+    chmod +x /usr/local/bin/openclaw
+
 USER node
 
 CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]

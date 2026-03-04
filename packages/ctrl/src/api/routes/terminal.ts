@@ -73,7 +73,15 @@ export function attachTerminalUpgrade(server: http.Server): void {
     // Use `script` to allocate a real PTY for docker exec.
     // This gives us a proper interactive shell (prompt, echo, line editing)
     // without needing the native node-pty module.
-    const dockerCmd = `docker compose -f ${COMPOSE_DIR}/docker-compose.yaml exec -it openclaw /bin/sh`;
+    // The init command creates an `openclaw` wrapper (the CLI is node /app/openclaw.mjs)
+    // and sources it via ENV so the shell has it on PATH immediately.
+    const init = [
+      `printf '#!/bin/sh\\nexec node /app/openclaw.mjs "$@"\\n' > /tmp/openclaw`,
+      `chmod +x /tmp/openclaw`,
+      `export PATH="/tmp:$PATH"`,
+      `exec /bin/sh`,
+    ].join(" && ");
+    const dockerCmd = `docker compose -f ${COMPOSE_DIR}/docker-compose.yaml exec -it openclaw /bin/sh -c '${init}'`;
     proc = spawn("script", ["-q", "-c", dockerCmd, "/dev/null"], {
       stdio: ["pipe", "pipe", "pipe"],
     });
