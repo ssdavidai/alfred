@@ -1,5 +1,6 @@
 import type { Server as HttpServer, IncomingMessage } from "http";
 import type { Duplex } from "stream";
+import type { Application } from "express";
 import { WebSocketServer, WebSocket } from "ws";
 import { prisma } from "wasp/server";
 import { decryptApiKey } from "./tenantProxy";
@@ -40,6 +41,42 @@ async function getUserFromSessionCookie(
   if (new Date(session.expiresAt) < new Date()) return null;
 
   return { userId: session.auth.userId };
+}
+
+export function registerTerminalStatusRoute(app: Application): void {
+  app.get("/api/terminal-status", async (req, res) => {
+    try {
+      const sessionUser = await getUserFromSessionCookie(req as unknown as IncomingMessage);
+      if (!sessionUser) {
+        res.status(401).json({ ok: false, error: "not_authenticated", message: "No valid session" });
+        return;
+      }
+
+      const instance = await prisma.instance.findUnique({
+        where: { userId: sessionUser.userId },
+      });
+
+      if (!instance) {
+        res.json({ ok: false, error: "no_instance", message: "No instance found" });
+        return;
+      }
+
+      if (instance.status !== "running") {
+        res.json({ ok: false, error: "not_running", message: `Instance is ${instance.status}` });
+        return;
+      }
+
+      if (!instance.tailscaleHostname || !instance.apiKey) {
+        res.json({ ok: false, error: "not_ready", message: "Instance not fully provisioned", hasTailscale: !!instance.tailscaleHostname, hasApiKey: !!instance.apiKey });
+        return;
+      }
+
+      res.json({ ok: true, hostname: instance.tailscaleHostname });
+    } catch (err: any) {
+      console.error("[terminal-status] error:", err);
+      res.status(500).json({ ok: false, error: "internal", message: err.message });
+    }
+  });
 }
 
 export function attachTerminalProxy(server: HttpServer): void {

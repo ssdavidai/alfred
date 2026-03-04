@@ -17,7 +17,7 @@ export default function Terminal() {
   const [status, setStatus] = useState<Status>("disconnected");
   const [disconnectReason, setDisconnectReason] = useState<string>("");
 
-  const connect = useCallback(() => {
+  const connect = useCallback(async () => {
     if (!containerRef.current) return;
 
     // Clean up previous
@@ -28,6 +28,29 @@ export default function Terminal() {
     if (termRef.current) {
       termRef.current.dispose();
       termRef.current = null;
+    }
+
+    setStatus("connecting");
+    setDisconnectReason("");
+
+    // Pre-flight check: verify auth and instance before WebSocket
+    try {
+      const statusRes = await fetch("/api/terminal-status", { credentials: "include" });
+      const statusData = await statusRes.json();
+      if (!statusData.ok) {
+        const messages: Record<string, string> = {
+          not_authenticated: "Not authenticated. Please log in again.",
+          no_instance: "No instance found. Please complete setup first.",
+          not_running: statusData.message || "Instance is not running.",
+          not_ready: "Instance is still provisioning. Please wait.",
+          internal: `Server error: ${statusData.message}`,
+        };
+        setDisconnectReason(messages[statusData.error] || statusData.message || "Pre-flight check failed");
+        setStatus("disconnected");
+        return;
+      }
+    } catch {
+      // Status endpoint not available — proceed anyway
     }
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -71,9 +94,6 @@ export default function Terminal() {
     termRef.current = term;
     fitAddonRef.current = fitAddon;
 
-    setStatus("connecting");
-    setDisconnectReason("");
-
     const ws = new WebSocket(wsUrl);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
@@ -113,7 +133,7 @@ export default function Terminal() {
 
     ws.onerror = () => {
       setStatus("disconnected");
-      setDisconnectReason("Connection error");
+      setDisconnectReason((prev) => prev || "WebSocket connection failed");
     };
 
     // Send terminal input to server
@@ -156,7 +176,8 @@ export default function Terminal() {
   }, []);
 
   useEffect(() => {
-    const cleanup = connect();
+    let cleanup: (() => void) | undefined;
+    connect().then((c) => { cleanup = c; });
     return () => {
       cleanup?.();
     };
