@@ -125,7 +125,7 @@ export function attachTerminalUpgrade(server: http.Server): void {
       "echo '#!/bin/sh' > /tmp/openclaw",
       "echo 'exec node /app/openclaw.mjs \"$@\"' >> /tmp/openclaw",
       "chmod +x /tmp/openclaw",
-      "echo 'export PATH=\"/tmp:$PATH\"' > /tmp/.ocrc",
+      "echo 'export PATH=\"/tmp:/app/node_modules/.bin:$PATH\"' > /tmp/.ocrc",
       "echo 'export TERM=xterm-256color' >> /tmp/.ocrc",
       "echo 'stty cols ${COLUMNS:-80} rows ${LINES:-24} 2>/dev/null' >> /tmp/.ocrc",
     ].join(" && ");
