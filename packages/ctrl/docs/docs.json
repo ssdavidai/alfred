@@ -42,8 +42,27 @@
             "group": "Getting Started",
             "pages": [
               "introduction",
-              "quickstart",
-              "architecture"
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture",
+              "architecture/infrastructure",
+              "architecture/agent",
+              "architecture/data",
+              "architecture/semantic",
+              "architecture/kinetic",
+              "architecture/interface"
+            ]
+          },
+          {
+            "group": "Concepts",
+            "pages": [
+              "concepts/vault-schema",
+              "concepts/record-types",
+              "concepts/security-model"
             ]
           },
           {
@@ -56,14 +75,6 @@
               "guides/monitoring",
               "guides/configuration",
               "guides/backups-recovery"
-            ]
-          },
-          {
-            "group": "Concepts",
-            "pages": [
-              "concepts/vault-schema",
-              "concepts/record-types",
-              "concepts/security-model"
             ]
           }
         ]
