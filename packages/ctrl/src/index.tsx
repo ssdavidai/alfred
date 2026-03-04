@@ -197,9 +197,14 @@ program
 
     if (opts.all) {
       const instances = listInstances("running");
+      console.log(`Updating ${instances.length} running instance(s)...`);
       for (const inst of instances) {
-        console.log(`\nUpdating ${inst.customer_name}...`);
-        await updateImages(inst.id, undefined, console.log);
+        console.log(`\n--- ${inst.customer_name} ---`);
+        try {
+          await updateImages(inst.id, undefined, console.log);
+        } catch (e: any) {
+          console.error(`FAILED: ${e.message}`);
+        }
       }
     } else if (name) {
       const instance = getInstanceByName(name);
