@@ -5,7 +5,7 @@ import WhatIsAlfred from "./components/WhatIsAlfred";
 import LifeWithAlfred from "./components/LifeWithAlfred";
 // import Pricing from "./components/Pricing";
 import EarlyAccess from "./components/EarlyAccess";
-import CTA from "./components/CTA";
+// import CTA from "./components/CTA";
 import Footer from "./components/Footer";
 
 export default function LandingPage() {
@@ -18,7 +18,7 @@ export default function LandingPage() {
       <LifeWithAlfred />
       {/* <Pricing /> */}
       <EarlyAccess />
-      <CTA />
+      {/* <CTA /> */}
       <Footer />
     </div>
   );
