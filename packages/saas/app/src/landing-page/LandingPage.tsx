@@ -3,7 +3,8 @@ import Overwhelm from "./components/Overwhelm";
 import KnowledgeGraph from "./components/KnowledgeGraph";
 import WhatIsAlfred from "./components/WhatIsAlfred";
 import LifeWithAlfred from "./components/LifeWithAlfred";
-import Pricing from "./components/Pricing";
+// import Pricing from "./components/Pricing";
+import EarlyAccess from "./components/EarlyAccess";
 import CTA from "./components/CTA";
 import Footer from "./components/Footer";
 
@@ -15,7 +16,8 @@ export default function LandingPage() {
       <KnowledgeGraph />
       <WhatIsAlfred />
       <LifeWithAlfred />
-      <Pricing />
+      {/* <Pricing /> */}
+      <EarlyAccess />
       <CTA />
       <Footer />
     </div>

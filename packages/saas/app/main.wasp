@@ -543,6 +543,11 @@ action regenerateWebhookToken {
   entities: [Stream]
 }
 
+action submitAccessRequest {
+  fn: import { submitAccessRequest } from "@src/landing-page/operations",
+  entities: []
+}
+
 // ============================================================
 // Monitoring & Operations
 // ============================================================
