@@ -188,10 +188,10 @@ export default function EarlyAccess() {
                       What is your monthly budget?
                     </option>
                     <option value="I don't know yet">I don't know yet</option>
-                    <option value="Under $100">Under $100</option>
-                    <option value="$100–$300">$100–$300</option>
-                    <option value="$300–$1,000">$300–$1,000</option>
-                    <option value="Over $1,000">Over $1,000</option>
+                    <option value="ChatGPT Pro territory ($20/mo)">ChatGPT Pro territory ($20/mo)</option>
+                    <option value="Claude Max territory ($200/mo)">Claude Max territory ($200/mo)</option>
+                    <option value="Clay territory ($500–$1,000/mo)">Clay territory ($500–$1,000/mo)</option>
+                    <option value="Athena territory ($1,000+/mo)">Athena territory ($1,000+/mo)</option>
                   </select>
                 </div>
 
