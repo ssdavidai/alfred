@@ -40,7 +40,7 @@ export default function Hero() {
         </p>
 
         <a
-          href="#pricing"
+          href="#early-access"
           className="reveal mt-12 inline-block border border-gold bg-transparent px-10 py-4 font-mono text-sm font-light uppercase tracking-[0.35em] text-gold transition-all duration-300 hover:bg-gold hover:text-[#0A0A0A]"
         >
           Hire Alfred

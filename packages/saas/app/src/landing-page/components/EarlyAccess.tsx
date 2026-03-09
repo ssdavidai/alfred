@@ -81,6 +81,7 @@ export default function EarlyAccess() {
     <>
       <section
         ref={sectionRef}
+        id="early-access"
         className="bg-[#0A0A0A] px-6 py-32 lg:py-40"
       >
         <div className="mx-auto max-w-[640px] text-center">
