@@ -36,11 +36,9 @@ RUN git clone --depth 1 https://github.com/ssdavidai/alfred.git /alfred-src
 COPY patches/surveyor-openai-compat.patch /tmp/surveyor-openai-compat.patch
 RUN cd /alfred-src && git apply /tmp/surveyor-openai-compat.patch || true
 
-# Install Alfred from source
+# Install Alfred from source (scaffold/ and skills/ are bundled via _bundled/ by pip install)
 RUN cp /alfred-src/pyproject.toml /alfred-src/README.md /app/ && \
     cp -r /alfred-src/src /app/src && \
-    cp -r /alfred-src/skills /app/skills && \
-    cp -r /alfred-src/scaffold /app/scaffold && \
     rm -rf /alfred-src
 RUN pip install --no-cache-dir -e ".[all]"
 

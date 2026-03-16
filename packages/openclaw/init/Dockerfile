@@ -6,8 +6,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /setup
 
-# Clone Alfred repo for scaffold and skills
+# Clone Alfred repo and install so _bundled/ (scaffold + skills) is populated
 RUN git clone --depth 1 https://github.com/ssdavidai/alfred.git /alfred-src
+RUN pip install --no-cache-dir --no-deps /alfred-src
 
 COPY init/entrypoint.sh ./entrypoint.sh
 COPY config.yaml.tpl ./config.yaml.tpl

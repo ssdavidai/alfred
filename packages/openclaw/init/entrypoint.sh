@@ -4,10 +4,14 @@ set -euo pipefail
 
 echo "=== Alfred init container ==="
 
+# Resolve bundled paths via the installed Python package
+SCAFFOLD_DIR=$(python3 -c "from alfred._data import get_scaffold_dir; print(get_scaffold_dir())")
+SKILLS_SRC_DIR=$(python3 -c "from alfred._data import get_skills_dir; print(get_skills_dir())")
+
 # --- 1. Scaffold vault ---
 if [[ ! -f /vault/CLAUDE.md ]]; then
     echo "[init] Scaffolding vault from template..."
-    rsync -a --ignore-existing /alfred-src/scaffold/ /vault/
+    rsync -a --ignore-existing "$SCAFFOLD_DIR/" /vault/
     echo "[init] Vault scaffolded"
 else
     echo "[init] Vault already scaffolded, skipping"
@@ -32,14 +36,14 @@ SKILLS_DST="/openclaw-state/workspace/skills"
 mkdir -p "$SKILLS_DST"
 
 for skill in vault-curator vault-janitor vault-distiller; do
-    SRC_HASH=$(find "/alfred-src/skills/$skill" -type f -exec md5sum {} \; | sort | md5sum | cut -d' ' -f1)
+    SRC_HASH=$(find "$SKILLS_SRC_DIR/$skill" -type f -exec md5sum {} \; | sort | md5sum | cut -d' ' -f1)
     HASH_FILE="$SKILLS_DST/$skill/.content-hash"
 
     if [[ -f "$HASH_FILE" ]] && [[ "$(cat "$HASH_FILE")" == "$SRC_HASH" ]]; then
         echo "[init] Skill $skill unchanged, skipping"
     else
         rm -rf "${SKILLS_DST:?}/$skill"
-        cp -r "/alfred-src/skills/$skill" "$SKILLS_DST/$skill"
+        cp -r "$SKILLS_SRC_DIR/$skill" "$SKILLS_DST/$skill"
         echo "$SRC_HASH" > "$HASH_FILE"
         echo "[init] Skill $skill copied"
     fi
