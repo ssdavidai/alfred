@@ -36,14 +36,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Setup SSH
+      - name: Trigger fleet rollout
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
-
-      - name: Roll out to running tenants
-        run: |
-          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} \
-            'cd /opt/alfred-saas/alfred-ctrl && node --experimental-sqlite dist/index.mjs update --all'
+          curl -f -X POST https://alfred.black/api/internal/fleet-update \
+            -H "Authorization: Bearer ${{ secrets.FLEET_UPDATE_SECRET }}" \
+            -H "Content-Type: application/json" \
+            --max-time 120
