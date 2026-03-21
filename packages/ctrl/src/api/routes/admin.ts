@@ -259,6 +259,57 @@ export function registerAdminRoutes(): void {
       sendJson(res, 200, { raw: stdout.trim() });
     }
   });
+
+  // Fix OpenClaw memory limit in docker-compose.yaml (safe, non-destructive)
+  addRoute("POST", "/api/v1/admin/compose/fix-memory", async ({ res }) => {
+    const fs = await import("node:fs");
+    const composePath = `${COMPOSE_DIR}/docker-compose.yaml`;
+    let content: string;
+    try {
+      content = fs.readFileSync(composePath, "utf-8");
+    } catch (err) {
+      sendJson(res, 500, { error: `Cannot read compose file: ${err}` });
+      return;
+    }
+
+    const changes: string[] = [];
+
+    // Fix openclaw mem_limit: 2g -> 4g
+    if (content.includes("mem_limit: 2g")) {
+      content = content.replace(/mem_limit: 2g/g, "mem_limit: 4g");
+      changes.push("mem_limit: 2g -> 4g (all services)");
+    }
+
+    // Add NODE_OPTIONS if not in environment block for openclaw
+    if (!content.includes("NODE_OPTIONS")) {
+      content = content.replace(
+        /- OPENCLAW_GATEWAY_TOKEN_FILE=/,
+        "- NODE_OPTIONS=--max-old-space-size=3072\n      - OPENCLAW_GATEWAY_TOKEN_FILE="
+      );
+      changes.push("Added NODE_OPTIONS=--max-old-space-size=3072 to openclaw");
+    }
+
+    // Fix healthcheck retries
+    content = content.replace(
+      /retries: 10\n(\s+)start_period: 30s/g,
+      "retries: 30\n$1start_period: 60s"
+    );
+
+    if (changes.length === 0) {
+      sendJson(res, 200, { message: "No changes needed — compose already up to date", changes: [] });
+      return;
+    }
+
+    // Write updated compose
+    fs.writeFileSync(composePath, content, "utf-8");
+
+    // Respond immediately, recreate in background
+    sendJson(res, 200, { message: "Compose updated. OpenClaw recreating in background.", changes });
+
+    dockerComposeCmd(["up", "-d", "--force-recreate", "openclaw"]).catch((err) => {
+      console.error("Failed to recreate openclaw after compose fix:", err);
+    });
+  });
 }
 
 function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
