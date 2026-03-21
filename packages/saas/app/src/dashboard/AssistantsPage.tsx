@@ -3,6 +3,7 @@ import {
   getWorkerStatus,
   getAgentConfig,
   getCredentials,
+  getModelCatalog,
   triggerWorker,
   updateAgentModel,
   updateCredentials,
@@ -43,86 +44,24 @@ import {
 import { useState, useEffect, useMemo } from "react";
 
 /* ------------------------------------------------------------------ */
-/*  Model catalog                                                      */
+/*  Model catalog (dynamic — fetched from provider APIs)               */
 /* ------------------------------------------------------------------ */
 
-const MODEL_CATALOG = [
-  {
-    provider: "Anthropic",
-    envKey: "ANTHROPIC_API_KEY",
-    prefix: "anthropic/",
-    models: [
-      { id: "anthropic/claude-opus-4-6", name: "Claude Opus 4.6" },
-      { id: "anthropic/claude-sonnet-4-5-20250929", name: "Claude Sonnet 4.5" },
-      { id: "anthropic/claude-haiku-4-5-20251001", name: "Claude Haiku 4.5" },
-      { id: "anthropic/claude-sonnet-4-20250514", name: "Claude Sonnet 4" },
-      { id: "anthropic/claude-3.5-sonnet", name: "Claude 3.5 Sonnet" },
-      { id: "anthropic/claude-3.5-haiku", name: "Claude 3.5 Haiku" },
-    ],
-  },
-  {
-    provider: "OpenAI",
-    envKey: "OPENAI_API_KEY",
-    prefix: "openai/",
-    models: [
-      { id: "openai/gpt-4.1", name: "GPT-4.1" },
-      { id: "openai/gpt-4.1-mini", name: "GPT-4.1 Mini" },
-      { id: "openai/gpt-4.1-nano", name: "GPT-4.1 Nano" },
-      { id: "openai/o3", name: "o3" },
-      { id: "openai/o4-mini", name: "o4-mini" },
-      { id: "openai/gpt-4o", name: "GPT-4o" },
-      { id: "openai/gpt-4o-mini", name: "GPT-4o Mini" },
-    ],
-  },
-  {
-    provider: "Google",
-    envKey: "GOOGLE_API_KEY",
-    prefix: "google/",
-    models: [
-      { id: "google/gemini-2.5-pro-preview", name: "Gemini 2.5 Pro" },
-      { id: "google/gemini-2.5-flash-preview", name: "Gemini 2.5 Flash" },
-      { id: "google/gemini-2.0-flash-001", name: "Gemini 2.0 Flash" },
-    ],
-  },
-  {
-    provider: "xAI",
-    envKey: "XAI_API_KEY",
-    prefix: "x-ai/",
-    models: [
-      { id: "x-ai/grok-3-beta", name: "Grok 3" },
-      { id: "x-ai/grok-3-fast-beta", name: "Grok 3 Fast" },
-      { id: "x-ai/grok-3-mini-beta", name: "Grok 3 Mini" },
-    ],
-  },
-  {
-    provider: "Meta (via OpenRouter)",
-    envKey: null,
-    prefix: "meta-llama/",
-    models: [
-      { id: "meta-llama/llama-4-maverick", name: "Llama 4 Maverick" },
-      { id: "meta-llama/llama-4-scout", name: "Llama 4 Scout" },
-      { id: "meta-llama/llama-3.3-70b-instruct", name: "Llama 3.3 70B" },
-    ],
-  },
-  {
-    provider: "DeepSeek (via OpenRouter)",
-    envKey: null,
-    prefix: "deepseek/",
-    models: [
-      { id: "deepseek/deepseek-r1", name: "DeepSeek R1" },
-      { id: "deepseek/deepseek-chat-v3-0324", name: "DeepSeek V3" },
-    ],
-  },
-  {
-    provider: "Mistral (via OpenRouter)",
-    envKey: null,
-    prefix: "mistralai/",
-    models: [
-      { id: "mistralai/mistral-large-2411", name: "Mistral Large" },
-      { id: "mistralai/mistral-small-2503", name: "Mistral Small" },
-    ],
-  },
-] as const;
+interface CatalogModel {
+  id: string;
+  name: string;
+  provider: string;
+  contextWindow?: number;
+  maxOutput?: number;
+  pricing?: { input: number; output: number };
+  source: "direct" | "openrouter";
+}
+
+interface CatalogGroup {
+  provider: string;
+  source: "direct" | "openrouter";
+  models: CatalogModel[];
+}
 
 const ENTER_CUSTOM = "__enter_custom__";
 
@@ -130,52 +69,29 @@ const ENTER_CUSTOM = "__enter_custom__";
 /*  Provider / credential helpers                                      */
 /* ------------------------------------------------------------------ */
 
-function getRequiredProvider(modelId: string) {
-  for (const group of MODEL_CATALOG) {
-    if (group.envKey && modelId.startsWith(group.prefix)) {
-      return { envKey: group.envKey, label: group.provider };
-    }
-  }
-  return null;
+/** All models in the fetched catalog are available (they come from configured providers). */
+function isModelAvailable(_modelId: string, _configuredKeys: Set<string>) {
+  return true; // catalog only contains models from configured providers
 }
 
-function isModelAvailable(modelId: string, configuredKeys: Set<string>) {
-  if (configuredKeys.has("OPENROUTER_API_KEY")) return true;
-  const provider = getRequiredProvider(modelId);
-  if (!provider) return false; // OpenRouter-only provider, needs OPENROUTER_API_KEY
-  return configuredKeys.has(provider.envKey);
+function sourceIcon(source: "direct" | "openrouter") {
+  if (source === "direct") return <span className="text-green-400">&#10003;</span>;
+  return <span className="text-yellow-400">&#9679;</span>;
 }
 
-type CredIndicator = "configured" | "via-openrouter" | "missing";
-
-function getCredentialIndicator(
-  group: (typeof MODEL_CATALOG)[number],
-  configuredKeys: Set<string>,
-): CredIndicator {
-  const hasOpenRouter = configuredKeys.has("OPENROUTER_API_KEY");
-  if (group.envKey) {
-    if (configuredKeys.has(group.envKey)) return "configured";
-    if (hasOpenRouter) return "via-openrouter";
-    return "missing";
-  }
-  // OpenRouter-only provider
-  return hasOpenRouter ? "configured" : "missing";
-}
-
-function indicatorIcon(status: CredIndicator) {
-  if (status === "configured") return <span className="text-green-400">&#10003;</span>;
-  if (status === "via-openrouter") return <span className="text-yellow-400">&#9679;</span>;
-  return <span className="text-red-400">&#10007;</span>;
-}
-
-/** Check if modelId exists in the catalog. */
-function isInCatalog(modelId: string): boolean {
-  for (const group of MODEL_CATALOG) {
+function isInCatalog(modelId: string, groups: CatalogGroup[]): boolean {
+  for (const group of groups) {
     for (const m of group.models) {
       if (m.id === modelId) return true;
     }
   }
   return false;
+}
+
+function formatPrice(price: number): string {
+  if (price === 0) return "free";
+  if (price < 0.01) return "<$0.01/M";
+  return `$${price.toFixed(2)}/M`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -218,18 +134,20 @@ function statusIcon(state: string) {
 function ModelSelect({
   value,
   onSelect,
-  configuredKeys,
+  groups,
+  isLoading,
   placeholder,
 }: {
   value: string;
   onSelect: (modelId: string) => void;
-  configuredKeys: Set<string>;
+  groups: CatalogGroup[];
+  isLoading?: boolean;
   placeholder?: string;
 }) {
   const [customMode, setCustomMode] = useState(false);
   const [customInput, setCustomInput] = useState("");
+  const [search, setSearch] = useState("");
 
-  // Only show text input when user explicitly clicks "Custom model ID..."
   if (customMode) {
     return (
       <div className="flex gap-2">
@@ -273,7 +191,21 @@ function ModelSelect({
     );
   }
 
-  const valueInCatalog = value && isInCatalog(value);
+  const valueInCatalog = value && isInCatalog(value, groups);
+
+  // Filter groups by search term
+  const filteredGroups = search
+    ? groups
+        .map((g) => ({
+          ...g,
+          models: g.models.filter(
+            (m) =>
+              m.name.toLowerCase().includes(search.toLowerCase()) ||
+              m.id.toLowerCase().includes(search.toLowerCase()),
+          ),
+        }))
+        .filter((g) => g.models.length > 0)
+    : groups;
 
   return (
     <Select
@@ -288,32 +220,57 @@ function ModelSelect({
       }}
     >
       <SelectTrigger className="w-full">
-        <SelectValue placeholder={placeholder || "Select a model..."} />
+        <SelectValue placeholder={isLoading ? "Loading models..." : (placeholder || "Select a model...")} />
       </SelectTrigger>
       <SelectContent>
-        {/* If current value is not in catalog, show it as a selectable item */}
+        {/* Search input */}
+        <div className="px-2 pb-2">
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search models..."
+            className="h-8 text-xs"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
+          />
+        </div>
+
+        {/* Current value if not in catalog */}
         {value && !valueInCatalog && (
           <SelectGroup>
             <SelectLabel className="text-muted-foreground">Current</SelectLabel>
             <SelectItem value={value}>{value}</SelectItem>
           </SelectGroup>
         )}
-        {MODEL_CATALOG.map((group) => {
-          const indicator = getCredentialIndicator(group, configuredKeys);
-          return (
-            <SelectGroup key={group.provider}>
-              <SelectLabel className="flex items-center gap-2">
-                {indicatorIcon(indicator)}
-                <span>{group.provider}</span>
-              </SelectLabel>
-              {group.models.map((m) => (
-                <SelectItem key={m.id} value={m.id}>
-                  {m.name}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          );
-        })}
+
+        {filteredGroups.map((group) => (
+          <SelectGroup key={group.provider}>
+            <SelectLabel className="flex items-center gap-2">
+              {sourceIcon(group.source)}
+              <span className="capitalize">{group.provider}</span>
+              <span className="text-muted-foreground text-[10px]">
+                {group.source === "direct" ? "direct" : "openrouter"}
+              </span>
+            </SelectLabel>
+            {group.models.map((m) => (
+              <SelectItem key={m.id} value={m.id}>
+                <span>{m.name}</span>
+                {m.pricing && (
+                  <span className="text-muted-foreground ml-2 text-[10px]">
+                    {formatPrice(m.pricing.input)}/{formatPrice(m.pricing.output)}
+                  </span>
+                )}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        ))}
+
+        {!isLoading && filteredGroups.length === 0 && (
+          <div className="text-muted-foreground px-4 py-2 text-xs">
+            {search ? "No models match your search" : "No API keys configured. Add keys in Credentials."}
+          </div>
+        )}
+
         <SelectGroup>
           <SelectLabel className="text-muted-foreground">Other</SelectLabel>
           <SelectItem value={ENTER_CUSTOM}>Custom model ID...</SelectItem>
@@ -474,6 +431,11 @@ export default function AssistantsPage() {
     data: credentialsData,
     refetch: refetchCredentials,
   } = useQuery(getCredentials);
+  const {
+    data: catalogData,
+    isLoading: catalogLoading,
+    refetch: refetchCatalog,
+  } = useQuery(getModelCatalog);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("main");
 
@@ -486,6 +448,8 @@ export default function AssistantsPage() {
     }
     return keys;
   }, [credentialsData]);
+
+  const catalogGroups: CatalogGroup[] = catalogData?.groups || [];
 
   const handleAction = async (action: string, service: string) => {
     setActionLoading(`${action}-${service}`);
@@ -501,6 +465,7 @@ export default function AssistantsPage() {
 
   const onModelSaved = () => {
     refetchCredentials();
+    refetchCatalog();
     setTimeout(() => refetch(), 3000);
   };
 
@@ -621,12 +586,15 @@ export default function AssistantsPage() {
           {activeTab === "surveyor" ? (
             <SurveyorTab
               config={agentConfig.surveyor}
-              configuredKeys={configuredKeys}
+              catalogGroups={catalogGroups}
+              catalogLoading={catalogLoading}
               onSaved={onModelSaved}
             />
           ) : (
             <AgentModelTab
               agentId={activeTab}
+              catalogGroups={catalogGroups}
+              catalogLoading={catalogLoading}
               configuredKeys={configuredKeys}
               onSaved={onModelSaved}
             />
@@ -643,10 +611,14 @@ export default function AssistantsPage() {
 
 function AgentModelTab({
   agentId,
+  catalogGroups,
+  catalogLoading,
   configuredKeys,
   onSaved,
 }: {
   agentId: string;
+  catalogGroups: CatalogGroup[];
+  catalogLoading: boolean;
   configuredKeys: Set<string>;
   onSaved: () => void;
 }) {
@@ -671,21 +643,10 @@ function AgentModelTab({
 
   const handleModelSelect = async (modelId: string) => {
     setMessage(null);
-
-    // Check if the model is available with current credentials
-    if (!isModelAvailable(modelId, configuredKeys)) {
-      // Open the API key dialog
-      setPendingModel(modelId);
-      setKeyDialogOpen(true);
-      return;
-    }
-
-    // Model is available, save directly
     setSaving(true);
     try {
       const result = await updateAgentModel({ agentId, model: modelId });
       setMessage(result?.message || "Model updated successfully");
-      // Delay refetch to allow OpenClaw's async config flush to complete
       setTimeout(() => { refetchAgent(); onSaved(); }, 3000);
     } catch (e: any) {
       setMessage(e.message || "Failed to update model");
@@ -764,7 +725,8 @@ function AgentModelTab({
             <ModelSelect
               value={agent.defaultModel || ""}
               onSelect={handleModelSelect}
-              configuredKeys={configuredKeys}
+              groups={catalogGroups}
+              isLoading={catalogLoading}
               placeholder="Select a model..."
             />
             {agent.resolvedDefault && agent.resolvedDefault !== agent.defaultModel && (
@@ -872,11 +834,13 @@ function AgentModelTab({
 
 function SurveyorTab({
   config,
-  configuredKeys,
+  catalogGroups,
+  catalogLoading,
   onSaved,
 }: {
   config: any;
-  configuredKeys: Set<string>;
+  catalogGroups: CatalogGroup[];
+  catalogLoading: boolean;
   onSaved: () => void;
 }) {
   const [embedderModel, setEmbedderModel] = useState(config?.embedder_model || "");
@@ -896,13 +860,6 @@ function SurveyorTab({
 
   const handleLabelerSelect = async (modelId: string) => {
     setMessage(null);
-
-    if (!isModelAvailable(modelId, configuredKeys)) {
-      setPendingLabelerModel(modelId);
-      setKeyDialogOpen(true);
-      return;
-    }
-
     setSaving(true);
     try {
       await updateAgentModel({ agentId: "surveyor", model: modelId });
@@ -974,7 +931,8 @@ function SurveyorTab({
               <ModelSelect
                 value={config?.labeler_model || ""}
                 onSelect={handleLabelerSelect}
-                configuredKeys={configuredKeys}
+                groups={catalogGroups}
+                isLoading={catalogLoading}
                 placeholder="Select a labeler model..."
               />
               <p className="text-muted-foreground mt-1 text-xs">

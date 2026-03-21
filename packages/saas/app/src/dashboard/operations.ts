@@ -11,6 +11,7 @@ import type {
   GetActivityFeed,
   GetCredentials,
   GetAgentConfig,
+  GetModelCatalog,
   GetWorkspaceFile,
 } from "wasp/server/operations";
 import type {
@@ -390,6 +391,19 @@ export const updateCredentials: UpdateCredentials<
 // ============================================================
 // Agent Config
 // ============================================================
+export const getModelCatalog: GetModelCatalog<
+  { refresh?: boolean } | void,
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  const refresh = (args as any)?.refresh ? "true" : "false";
+  return proxyToTenant(instance, {
+    path: "/api/v1/admin/models",
+    query: { refresh },
+    timeoutMs: 30_000, // model fetching can be slow (multiple provider APIs)
+  });
+};
+
 export const getAgentConfig: GetAgentConfig<
   { agentId?: string } | void,
   any

@@ -422,6 +422,11 @@ action updateAgentModel {
   entities: [Instance]
 }
 
+query getModelCatalog {
+  fn: import { getModelCatalog } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
 query getWorkspaceFile {
   fn: import { getWorkspaceFile } from "@src/dashboard/operations",
   entities: [Instance]
