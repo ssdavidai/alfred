@@ -674,18 +674,17 @@ function AgentModelTab({
   };
 
   // Compute dialog props from pending model
-  const pendingProvider = pendingModel ? getRequiredProvider(pendingModel) : null;
   const pendingModelName = useMemo(() => {
     if (!pendingModel) return "";
-    for (const group of MODEL_CATALOG) {
+    for (const group of catalogGroups) {
       for (const m of group.models) {
         if (m.id === pendingModel) return m.name;
       }
     }
     return pendingModel;
-  }, [pendingModel]);
-  const pendingProviderLabel = pendingProvider?.label || "OpenRouter";
-  const pendingProviderEnvKey = pendingProvider?.envKey || null;
+  }, [pendingModel, catalogGroups]);
+  const pendingProviderLabel = "OpenRouter";
+  const pendingProviderEnvKey: string | null = null;
 
   if (agentLoading) {
     return (
@@ -902,16 +901,15 @@ function SurveyorTab({
     }
   };
 
-  const pendingProvider = pendingLabelerModel ? getRequiredProvider(pendingLabelerModel) : null;
   const pendingModelName = useMemo(() => {
     if (!pendingLabelerModel) return "";
-    for (const group of MODEL_CATALOG) {
+    for (const group of catalogGroups) {
       for (const m of group.models) {
         if (m.id === pendingLabelerModel) return m.name;
       }
     }
     return pendingLabelerModel;
-  }, [pendingLabelerModel]);
+  }, [pendingLabelerModel, catalogGroups]);
 
   return (
     <>
@@ -986,8 +984,8 @@ function SurveyorTab({
           if (!open) setPendingLabelerModel(null);
         }}
         modelName={pendingModelName}
-        providerLabel={pendingProvider?.label || "OpenRouter"}
-        providerEnvKey={pendingProvider?.envKey || null}
+        providerLabel="OpenRouter"
+        providerEnvKey={null}
         onSaved={handleKeyDialogSaved}
       />
     </>
