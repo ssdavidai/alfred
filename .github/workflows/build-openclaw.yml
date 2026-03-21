@@ -37,8 +37,9 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Trigger fleet rollout
+        continue-on-error: true
         run: |
           curl -f -X POST https://alfred.black/api/internal/fleet-update \
             -H "Authorization: Bearer ${{ secrets.FLEET_UPDATE_SECRET }}" \
             -H "Content-Type: application/json" \
-            --max-time 120
+            --max-time 120 || echo "Fleet rollout endpoint not available (non-fatal)"

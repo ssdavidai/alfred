@@ -43,6 +43,7 @@ services:
       - "127.0.0.1:18789:18789"
     environment:
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
+      - NODE_OPTIONS=--max-old-space-size=1536
     env_file:
       - .env
     command: ["node", "openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
