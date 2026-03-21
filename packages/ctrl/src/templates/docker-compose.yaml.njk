@@ -43,7 +43,7 @@ services:
       - "127.0.0.1:18789:18789"
     environment:
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
-      - NODE_OPTIONS=--max-old-space-size=1536
+      - NODE_OPTIONS=--max-old-space-size=3072
     env_file:
       - .env
     command: ["node", "openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
@@ -51,8 +51,8 @@ services:
       test: ["CMD", "node", "-e", "fetch('http://localhost:18789/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 30
+      start_period: 60s
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
@@ -60,7 +60,7 @@ services:
       - ALL
     cap_add:
       - DAC_OVERRIDE
-    mem_limit: 2g
+    mem_limit: 4g
     pids_limit: 256
 
   alfred:
