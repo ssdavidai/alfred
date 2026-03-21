@@ -31,7 +31,7 @@ class Config:
     tenant_timezone: str = field(default_factory=lambda: os.environ.get("TENANT_TIMEZONE", "UTC"))
 
     # Clerk agent
-    clerk_agent_id: str = field(default_factory=lambda: os.environ.get("CLERK_AGENT_ID", "learn_clerk"))
+    clerk_agent_id: str = field(default_factory=lambda: os.environ.get("CLERK_AGENT_ID", "learn-clerk"))
 
     # Processing limits
     max_events_per_run: int = 20

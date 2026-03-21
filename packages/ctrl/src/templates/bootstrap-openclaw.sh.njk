@@ -57,27 +57,10 @@ docker compose exec openclaw node openclaw.mjs gateway health 2>/dev/null || tru
 echo "[bootstrap] Waiting for pairing to settle..."
 sleep 5
 
-# --- Phase 1b: Register per-tool OpenClaw agents ---
-# Each Alfred tool (curator, janitor, distiller) needs its own agent with
-# a dedicated workspace pointing to the vault mount inside the container.
-echo "[bootstrap] Registering per-tool OpenClaw agents..."
-for AGENT_NAME in vault-curator vault-janitor vault-distiller; do
-  docker compose exec -T openclaw node openclaw.mjs agents add "${AGENT_NAME}" \
-    --workspace /home/node/.openclaw/workspace \
-    --non-interactive 2>&1 || echo "[bootstrap] WARNING: Failed to register ${AGENT_NAME}"
-  echo "[bootstrap] Registered agent: ${AGENT_NAME}"
-done
-
-# --- Phase 1c: Set default model for all agents ---
-DEFAULT_MODEL="{{ default_model | default('openrouter/anthropic/claude-haiku-4.5') }}"
-echo "[bootstrap] Setting default model (${DEFAULT_MODEL}) for all agents..."
-for AGENT_NAME in main vault-curator vault-janitor vault-distiller; do
-  AGENT_DIR="/home/node/.openclaw/agents/${AGENT_NAME}/agent"
-  docker compose exec -e "OPENCLAW_AGENT_DIR=${AGENT_DIR}" -T openclaw \
-    node openclaw.mjs models set "${DEFAULT_MODEL}" 2>&1 \
-    || echo "[bootstrap] WARNING: Failed to set model for ${AGENT_NAME}"
-  echo "[bootstrap] Model set for ${AGENT_NAME}: ${DEFAULT_MODEL}"
-done
+# --- Phase 1b: Agent registration ---
+# Agents and per-agent models are now defined in openclaw-config.json.njk
+# (pre-configured before OpenClaw starts). No CLI registration needed.
+echo "[bootstrap] Agents configured via openclaw.json (main, learn-clerk, vault-curator, vault-distiller, vault-janitor, vault-surveyor)"
 
 # --- Phase 2: Restart after device pairing ---
 # controlUi config was pre-written before openclaw started.
