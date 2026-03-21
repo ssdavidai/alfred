@@ -31,19 +31,24 @@ jobs:
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan -H ${{ secrets.DEPLOY_HOST }} >> ~/.ssh/known_hosts
 
+      - name: Fix deploy directory ownership
+        run: |
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} \
+            'sudo chown -R deploy:deploy /opt/alfred-saas/alfred-ctrl/'
+
       - name: Deploy to VM
         run: |
-          rsync -azP --delete \
+          rsync -azP --delete --no-group \
             -e "ssh -i ~/.ssh/deploy_key" \
             packages/ctrl/dist/ \
             deploy@${{ secrets.DEPLOY_HOST }}:/opt/alfred-saas/alfred-ctrl/dist/
 
-          rsync -azP --delete \
+          rsync -azP --delete --no-group \
             -e "ssh -i ~/.ssh/deploy_key" \
             packages/ctrl/node_modules/ \
             deploy@${{ secrets.DEPLOY_HOST }}:/opt/alfred-saas/alfred-ctrl/node_modules/
 
-          rsync -azP \
+          rsync -azP --no-group \
             -e "ssh -i ~/.ssh/deploy_key" \
             packages/ctrl/package.json \
             deploy@${{ secrets.DEPLOY_HOST }}:/opt/alfred-saas/alfred-ctrl/
