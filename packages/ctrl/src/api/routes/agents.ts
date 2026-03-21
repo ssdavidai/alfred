@@ -67,23 +67,53 @@ interface AgentModelStatus {
   };
 }
 
-/** Query OpenClaw for a single agent's model status. */
+const OPENCLAW_JSON = "/home/node/.openclaw/openclaw.json";
+
+/** Read per-agent model from openclaw.json, then enrich with live provider auth. */
 async function getAgentModelStatus(agentDef: typeof AGENTS[number]): Promise<Record<string, any>> {
   try {
-    const raw = await dockerExec("openclaw", [...OPENCLAW_CMD, "models", "status", "--agent", agentDef.id, "--json"]);
-    const status: AgentModelStatus = JSON.parse(raw.trim());
+    // Read model from openclaw.json (source of truth for per-agent config)
+    const readScript = [
+      "import json",
+      `d = json.load(open("${OPENCLAW_JSON}"))`,
+      `aid = "${agentDef.id}"`,
+      "agents = d.get('agents', {}).get('list', [])",
+      "defaults = d.get('agents', {}).get('defaults', {}).get('model', {})",
+      "agent_model = None",
+      "for a in agents:",
+      "  if a.get('id') == aid:",
+      "    agent_model = a.get('model')",
+      "    break",
+      "print(json.dumps({'model': agent_model, 'default': defaults.get('primary')}))",
+    ].join("\n");
+    const modelResult = await dockerExec("openclaw", ["python3", "-c", readScript]);
+    const modelInfo = JSON.parse(modelResult.trim());
+
+    const agentModel = modelInfo.model || modelInfo.default || null;
+
+    // Try to get live provider auth status (non-critical)
+    let providers: any[] = [];
+    let missingProviders: string[] = [];
+    try {
+      const raw = await dockerExec("openclaw", [...OPENCLAW_CMD, "models", "status", "--agent", agentDef.id, "--json"]);
+      const status: AgentModelStatus = JSON.parse(raw.trim());
+      providers = status.auth?.providers || [];
+      missingProviders = status.auth?.missingProvidersInUse || [];
+    } catch {
+      // OpenClaw may be starting up
+    }
+
     return {
       id: agentDef.id,
       label: agentDef.label,
       description: agentDef.description,
-      defaultModel: status.defaultModel || null,
-      resolvedDefault: status.resolvedDefault || status.defaultModel || null,
-      fallbacks: status.fallbacks || [],
-      providers: status.auth?.providers || [],
-      missingProviders: status.auth?.missingProvidersInUse || [],
+      defaultModel: agentModel,
+      resolvedDefault: agentModel,
+      fallbacks: [],
+      providers,
+      missingProviders,
     };
   } catch (err: any) {
-    // Agent may not exist yet or openclaw may be down
     return {
       id: agentDef.id,
       label: agentDef.label,
@@ -183,13 +213,43 @@ export function registerAgentRoutes(): void {
       throw new ValidationError(`Unknown agent: ${agentId}. Known agents: ${AGENTS.map((a) => a.id).join(", ")}, surveyor`);
     }
 
-    // Set model via OpenClaw CLI with OPENCLAW_AGENT_DIR env var
-    await dockerExec("openclaw", [...OPENCLAW_CMD, "models", "set", model], {
-      OPENCLAW_AGENT_DIR: agentDef.agentDir,
-    });
+    // Directly patch openclaw.json to set the per-agent model.
+    // `openclaw models set` only sets the global default, not per-agent.
+    const patchScript = [
+      "import json, sys, shutil",
+      `p = "${OPENCLAW_JSON}"`,
+      "d = json.load(open(p))",
+      `aid = "${agentDef.id}"`,
+      `model = "${model}"`,
+      "agents = d.get('agents', {}).get('list', [])",
+      "found = False",
+      "for a in agents:",
+      "  if a.get('id') == aid:",
+      "    a['model'] = model",
+      "    found = True",
+      "    break",
+      "if not found:",
+      "  print(json.dumps({'error': f'Agent {aid} not found in openclaw.json'}))",
+      "  sys.exit(1)",
+      "shutil.copy2(p, p + '.bak')",
+      "with open(p, 'w') as f:",
+      "  json.dump(d, f, indent=2)",
+      "print(json.dumps({'ok': True, 'agent': aid, 'model': model}))",
+    ].join("\n");
 
-    // Return optimistic response — reading back immediately would race
-    // against OpenClaw's async config flush and return stale data.
+    const patchResult = await dockerExec("openclaw", ["python3", "-c", patchScript]);
+    const parsed = JSON.parse(patchResult.trim());
+    if (parsed.error) {
+      throw new ValidationError(parsed.error);
+    }
+
+    // Reload OpenClaw gateway config by sending SIGHUP
+    try {
+      await dockerExec("openclaw", ["kill", "-s", "SIGHUP", "1"]);
+    } catch {
+      // SIGHUP may not be supported; gateway will pick up changes on next request
+    }
+
     sendJson(res, 200, {
       message: `Model for ${agentDef.label} updated to ${model}`,
       agent: {
