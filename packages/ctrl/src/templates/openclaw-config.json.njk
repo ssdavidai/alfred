@@ -1,6 +1,9 @@
 {
   "agents": {
     "defaults": {
+      "model": {
+        "primary": "openrouter/anthropic/claude-sonnet-4-5"
+      },
       "heartbeat": {
         "every": "4h",
         "prompt": "Read HEARTBEAT.md if it exists. Follow it strictly. Additionally: scan recent conversation for any new people, pets, places, or organizations not yet in MEMORY.md — add them as one-line entity facts now. If nothing needs attention and no new entities, reply HEARTBEAT_OK."
@@ -11,8 +14,49 @@
           "softThresholdTokens": 60000,
           "prompt": "CRITICAL: Do ALL of the following before compaction:\n1. Write detailed conversation summary to memory/YYYY-MM-DD.md\n2. Write memory/current-task.md with current task breakdown\n3. Save last ~20 human+assistant messages to memory/pre-compact-dialogue.md\n4. Update MEMORY.md with any NEW entity facts from this session\nReply with NO_REPLY after writing all files."
         }
+      },
+      "subagents": {
+        "model": "openrouter/qwen/qwen3.5-35b-a3b"
       }
     },
+    "list": [
+      {
+        "id": "alfred",
+        "name": "Alfred",
+        "model": "openrouter/anthropic/claude-sonnet-4-5",
+        "workspace": "/home/node/.openclaw/workspace"
+      },
+      {
+        "id": "learn-clerk",
+        "name": "Learn Clerk",
+        "model": "openrouter/qwen/qwen3.5-35b-a3b",
+        "workspace": "/home/node/.openclaw/workspace"
+      },
+      {
+        "id": "vault-curator",
+        "name": "Vault Curator",
+        "model": "openrouter/qwen/qwen3.5-35b-a3b",
+        "workspace": "/home/node/.openclaw/workspace"
+      },
+      {
+        "id": "vault-distiller",
+        "name": "Vault Distiller",
+        "model": "openrouter/qwen/qwen3.5-35b-a3b",
+        "workspace": "/home/node/.openclaw/workspace"
+      },
+      {
+        "id": "vault-janitor",
+        "name": "Vault Janitor",
+        "model": "openrouter/qwen/qwen3.5-9b",
+        "workspace": "/home/node/.openclaw/workspace"
+      },
+      {
+        "id": "vault-surveyor",
+        "name": "Vault Surveyor",
+        "model": "openrouter/qwen/qwen3.5-9b",
+        "workspace": "/home/node/.openclaw/workspace"
+      }
+    ]
   },
   "memory": {
     "backend": "qmd",
@@ -43,8 +87,24 @@
     }
   },
   "gateway": {
+    "port": 18789,
+    "bind": "0.0.0.0",
+    "auth": {
+      "mode": "token",
+      "allowTailscale": true
+    },
     "controlUi": {
+      "enabled": true,
       "dangerouslyAllowHostHeaderOriginFallback": true
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": { "enabled": true },
+        "responses": { "enabled": true }
+      }
+    },
+    "tools": {
+      "allow": ["sessions_send", "sessions_spawn"]
     }
   }
 }

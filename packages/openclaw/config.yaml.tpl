@@ -69,7 +69,7 @@ surveyor:
   openrouter:
     api_key: "${OPENROUTER_API_KEY}"
     base_url: "https://openrouter.ai/api/v1"
-    model: "x-ai/grok-4.1-fast"
+    model: "qwen/qwen3.5-35b-a3b"
     temperature: 0.3
   labeler:
     max_files_per_cluster_context: 20
