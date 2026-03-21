@@ -132,12 +132,17 @@ export function registerCredentialRoutes(): void {
 
     writeEnv(env);
 
-    // Restart containers that read env vars for provider auth
-    await dockerComposeCmd(["up", "-d", "alfred", "openclaw"]);
-
+    // Respond immediately, then restart containers in the background.
+    // docker compose up -d can take 30s+ waiting for health checks,
+    // which exceeds the SaaS proxy timeout (15s).
     sendJson(res, 200, {
-      message: "Credentials updated",
+      message: "Credentials updated. Services are restarting (may take ~30s).",
       restarted: ["alfred", "openclaw"],
+    });
+
+    // Fire-and-forget restart
+    dockerComposeCmd(["up", "-d", "alfred", "openclaw"]).catch((err) => {
+      console.error("Background container restart failed:", err);
     });
   });
 }

@@ -36,16 +36,29 @@ export default function CredentialsPage() {
 
   const credentials: Credential[] = data?.credentials || [];
 
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
   const handleSave = async () => {
     if (!editKey || !editValue.trim()) return;
     setSaving(true);
+    setStatusMessage(null);
     try {
       await updateCredentials({ [editKey]: editValue.trim() });
       setEditKey(null);
       setEditValue("");
-      setTimeout(() => refetch(), 1000);
+      setStatusMessage("Credential saved. Services are restarting...");
+      setTimeout(() => { refetch(); setStatusMessage(null); }, 5000);
     } catch (e: any) {
-      alert(e.message || "Failed to update credential");
+      // A 504 timeout is expected — the credential was likely saved but
+      // the container restart took longer than the proxy timeout.
+      if (e.message?.includes("504") || e.message?.includes("timed out")) {
+        setEditKey(null);
+        setEditValue("");
+        setStatusMessage("Credential saved. Services are restarting (this may take ~30s)...");
+        setTimeout(() => { refetch(); setStatusMessage(null); }, 8000);
+      } else {
+        alert(e.message || "Failed to update credential");
+      }
     } finally {
       setSaving(false);
     }
@@ -75,6 +88,13 @@ export default function CredentialsPage() {
         Manage API keys for LLM providers. Changes restart the Alfred worker
         automatically.
       </p>
+
+      {statusMessage && (
+        <div className="mb-4 flex items-center gap-2 rounded-sm border border-gold/30 bg-gold/5 px-4 py-3">
+          <Loader2 className="h-4 w-4 animate-spin text-gold" />
+          <p className="text-sm text-gold">{statusMessage}</p>
+        </div>
+      )}
 
       {isLoading && (
         <div className="flex items-center gap-2 py-8">

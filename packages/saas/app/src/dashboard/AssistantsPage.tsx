@@ -685,8 +685,8 @@ function AgentModelTab({
     try {
       const result = await updateAgentModel({ agentId, model: modelId });
       setMessage(result?.message || "Model updated successfully");
-      // Backend waits 1.5s for OpenClaw flush; delay refetch to avoid reading stale cache
-      setTimeout(() => { refetchAgent(); onSaved(); }, 1000);
+      // Delay refetch to allow OpenClaw's async config flush to complete
+      setTimeout(() => { refetchAgent(); onSaved(); }, 3000);
     } catch (e: any) {
       setMessage(e.message || "Failed to update model");
     } finally {
