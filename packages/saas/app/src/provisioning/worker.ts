@@ -98,7 +98,7 @@ export async function provisionInstanceJob(
           "fsn1",
         ],
         {
-          timeout: 600_000, // 10 minutes
+          timeout: 1_200_000, // 20 minutes
           env: {
             ...process.env,
             NODE_NO_WARNINGS: "1",
