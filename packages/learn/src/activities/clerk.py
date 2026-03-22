@@ -39,38 +39,35 @@ FILE PATH (try in order):
 2. {rel_path}
 IMPORTANT: Read the file at one of these paths to analyze its full content. Use the read tool for text files, or the pdf tool for PDFs. Do NOT rely solely on the metadata below — the file itself is the primary source of truth."""
 
-    prompt = f"""You are a butler's clerk. Analyze this raw event from the {source} stream.
+    prompt = f"""You are a classification clerk. Your job: read the file, classify it, return JSON.
 
-Classify it as exactly one of: task, event, note, conversation, braindump, noise.
+STEP 1: Read the file using the pdf tool (for PDFs) or read tool (for text files).
+STEP 2: Based on the file content, classify and extract information.
+STEP 3: Return ONLY a JSON object. No explanation, no prose, no markdown.
+{file_instruction}
 
-Extract:
-- title (concise, descriptive)
-- entities (people, organizations, places mentioned)
-- action_items (if any — concrete next steps)
-- dates (any dates/deadlines mentioned)
-- tags (topical keywords, max 5)
+Classify as exactly one of: task, event, note, conversation, braindump, noise.
 
-If the content is trivial, automated, or contains no meaningful information, classify as "noise".
-
-Return JSON only:
+Your ENTIRE response must be valid JSON matching this schema:
 {{
   "type": "task|event|note|conversation|braindump|noise",
-  "title": "...",
+  "title": "concise descriptive title",
   "entities": [{{"name": "...", "type": "person|org|place"}}],
-  "action_items": ["..."],
-  "dates": ["..."],
-  "tags": ["..."],
-  "summary": "One sentence summary"
+  "action_items": ["concrete next steps if any"],
+  "dates": ["any dates or deadlines mentioned"],
+  "tags": ["topical keywords, max 5"],
+  "summary": "One sentence summary of what this file contains"
 }}
-{file_instruction}
 
 METADATA:
 {json.dumps(metadata, indent=2)}
 
 SUMMARY: {summary}
 
-RAW CONTENT:
-{raw_content}"""
+RAW EVENT:
+{raw_content}
+
+CRITICAL: Your final message must contain ONLY the JSON object above. No other text."""
 
     return await _call_clerk(prompt)
 
@@ -480,6 +477,7 @@ async def _call_clerk(prompt: str) -> dict[str, Any]:
                     "agentId": config.clerk_agent_id,
                     "mode": "run",
                     "cleanup": "keep",
+                    "sandbox": "inherit",
                     "runTimeoutSeconds": 240,
                 },
             },
