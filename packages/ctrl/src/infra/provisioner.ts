@@ -24,6 +24,18 @@ import bootstrapTemplate from "../templates/bootstrap-openclaw.sh.njk";
 import cloudflaredConfigTemplate from "../templates/cloudflared-config.yaml.njk";
 import openclawConfigTemplate from "../templates/openclaw-config.json.njk";
 import workflowAuthorSkill from "../templates/skills/workflow-author.md";
+// Vault seed — skill graph files
+import vaultSkillIndex from "../templates/vault-seed/skill/index.md";
+import vaultSkillNoiseFiltering from "../templates/vault-seed/skill/input-noise-filtering.md";
+import vaultSkillEntityExtraction from "../templates/vault-seed/skill/input-entity-extraction.md";
+import vaultSkillSummarize from "../templates/vault-seed/skill/execution-summarize.md";
+import vaultSkillResearch from "../templates/vault-seed/skill/execution-research.md";
+import vaultSkillPropagation from "../templates/vault-seed/skill/propagation-task-creation.md";
+import vaultSkillPreferenceOwner from "../templates/vault-seed/skill/preference-owner.md.njk";
+// Vault seed — templates
+import vaultTemplateTriage from "../templates/vault-seed/_templates/triage.md";
+import vaultTemplateTask from "../templates/vault-seed/_templates/task.md";
+import vaultTemplateSkill from "../templates/vault-seed/_templates/skill.md";
 import workspaceAgents from "../templates/workspace/AGENTS.md";
 import workspaceSoul from "../templates/workspace/SOUL.md";
 import workspaceMemory from "../templates/workspace/MEMORY.md";
@@ -373,6 +385,38 @@ export async function provision(
       ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, renderedUser, `${workspaceBasePath}/USER.md`, 0o644, undefined, hostKeyOpts),
     ]);
     log("Workspace files uploaded");
+
+    // Seed vault with skill graph, templates, and folder structure
+    log("Seeding vault with skill graph + templates...");
+    const vaultPath = "/mnt/encrypted/vault";
+    const renderedPreference = nunjucks.renderString(vaultSkillPreferenceOwner, {
+      customer_name: config.customer_name,
+    });
+    // Create vault directories
+    await ssh.exec(
+      server.public_net.ipv4.ip,
+      keyPair.privateKeyPath,
+      `mkdir -p ${vaultPath}/skill ${vaultPath}/triage ${vaultPath}/task ${vaultPath}/_templates`,
+      undefined,
+      hostKeyOpts,
+    );
+    // Upload skill files
+    await Promise.all([
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultSkillIndex, `${vaultPath}/skill/index.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultSkillNoiseFiltering, `${vaultPath}/skill/input-noise-filtering.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultSkillEntityExtraction, `${vaultPath}/skill/input-entity-extraction.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultSkillSummarize, `${vaultPath}/skill/execution-summarize.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultSkillResearch, `${vaultPath}/skill/execution-research.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultSkillPropagation, `${vaultPath}/skill/propagation-task-creation.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, renderedPreference, `${vaultPath}/skill/preference-owner.md`, 0o644, undefined, hostKeyOpts),
+    ]);
+    // Upload vault templates
+    await Promise.all([
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultTemplateTriage, `${vaultPath}/_templates/triage.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultTemplateTask, `${vaultPath}/_templates/task.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultTemplateSkill, `${vaultPath}/_templates/skill.md`, 0o644, undefined, hostKeyOpts),
+    ]);
+    log("Vault seed complete: 7 skills, 3 templates, 3 directories");
 
     // Upload alfred-inbox hook for OpenClaw (captures chat sessions → vault inbox)
     log("Uploading alfred-inbox hook...");
