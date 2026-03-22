@@ -5,6 +5,7 @@ All vault writes go through alfred-ctrl API — NEVER direct filesystem writes.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 import httpx
@@ -17,7 +18,11 @@ class VaultClient:
 
     def __init__(self, config: Config) -> None:
         self._base = config.alfred_ctrl_url
-        self._client = httpx.AsyncClient(base_url=self._base, timeout=30.0)
+        api_key = os.environ.get("AAS_API_KEY", "")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._client = httpx.AsyncClient(
+            base_url=self._base, timeout=30.0, headers=headers
+        )
 
     async def close(self) -> None:
         await self._client.aclose()
