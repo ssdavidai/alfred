@@ -483,9 +483,27 @@ async def _call_clerk(prompt: str) -> dict[str, Any]:
 
     if isinstance(content, str):
         content = content.strip()
-        # Handle markdown code blocks
-        if content.startswith("```"):
-            lines = content.split("\n")
-            content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
-        return json.loads(content)
+        # Try direct JSON parse first
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            pass
+        # Strip markdown code fences
+        if "```" in content:
+            import re
+            match = re.search(r"```(?:json)?\s*\n?([\s\S]*?)\n?```", content)
+            if match:
+                try:
+                    return json.loads(match.group(1).strip())
+                except json.JSONDecodeError:
+                    pass
+        # Try to find JSON object in the response
+        first_brace = content.find("{")
+        last_brace = content.rfind("}")
+        if first_brace != -1 and last_brace > first_brace:
+            try:
+                return json.loads(content[first_brace:last_brace + 1])
+            except json.JSONDecodeError:
+                pass
+        raise ValueError(f"Could not parse JSON from Clerk response: {content[:200]}")
     return content
