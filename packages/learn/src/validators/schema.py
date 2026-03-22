@@ -6,12 +6,12 @@ from dataclasses import dataclass, field
 
 # Valid vault record types produced by classification
 VALID_CLASSIFICATION_TYPES = frozenset({
-    "task", "event", "note", "conversation", "braindump", "noise",
+    "triage", "event", "note", "conversation", "braindump", "noise",
 })
 
 # Valid vault record types overall
 VALID_VAULT_TYPES = frozenset({
-    "task", "event", "note", "conversation", "braindump",
+    "triage", "task", "skill", "event", "note", "conversation", "braindump",
     "session", "person", "org", "place",
     "observation", "instinct", "reflection", "index",
     "input",

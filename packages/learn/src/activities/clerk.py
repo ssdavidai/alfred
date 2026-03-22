@@ -45,11 +45,18 @@ STEP 2: Based on the file content, classify and extract information.
 STEP 3: Return ONLY a JSON object. No explanation, no prose, no markdown.
 {file_instruction}
 
-Classify as exactly one of: task, event, note, conversation, braindump, noise.
+Classify as exactly one of: triage, event, note, conversation, braindump, noise.
+
+- triage: something actionable or requiring human review, but you lack context to handle it
+- event: a calendar event, meeting, or time-bound occurrence
+- note: reference material, documentation, knowledge worth keeping
+- conversation: a chat or email thread
+- braindump: unstructured stream of thought, ideas, or notes
+- noise: trivial, automated, or contains no meaningful information
 
 Your ENTIRE response must be valid JSON matching this schema:
 {{
-  "type": "task|event|note|conversation|braindump|noise",
+  "type": "triage|event|note|conversation|braindump|noise",
   "title": "concise descriptive title",
   "entities": [{{"name": "...", "type": "person|org|place"}}],
   "action_items": ["concrete next steps if any"],

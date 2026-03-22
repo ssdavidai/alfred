@@ -163,7 +163,7 @@ async def fetch_unassigned_records() -> list[dict[str, Any]]:
     client = VaultClient(config)
     try:
         records = []
-        for rtype in ("task", "event", "note", "conversation"):
+        for rtype in ("triage", "event", "note", "conversation"):
             found = await client.list_records(rtype, limit=50)
             for r in found:
                 if not r.get("session_id"):
@@ -236,17 +236,17 @@ async def collect_daily_activity() -> dict[str, Any]:
     config = load_config()
     client = VaultClient(config)
     try:
-        tasks = await client.list_records("task", limit=50)
+        triages = await client.list_records("triage", limit=50)
         events = await client.list_records("event", limit=50)
         notes = await client.list_records("note", limit=50)
         sessions = await client.list_records("session", limit=20)
 
         return {
-            "tasks": tasks,
+            "triages": triages,
             "events": events,
             "notes": notes,
             "sessions": sessions,
-            "task_count": len(tasks),
+            "triage_count": len(triages),
             "event_count": len(events),
             "note_count": len(notes),
             "session_count": len(sessions),
@@ -524,7 +524,7 @@ async def fetch_distiller_learnings() -> list[dict[str, Any]]:
     config = load_config()
     client = VaultClient(config)
     try:
-        tasks = await client.list_records("task", status="completed", limit=100)
+        tasks = await client.list_records("triage", status="completed", limit=100)
         learnings = []
         for task in tasks:
             dl = task.get("distiller_learnings") or task.get("distiller_signals")
@@ -546,7 +546,7 @@ async def fetch_janitor_flags() -> list[dict[str, Any]]:
     client = VaultClient(config)
     try:
         flags = []
-        for rtype in ("task", "event", "note", "conversation"):
+        for rtype in ("triage", "event", "note", "conversation"):
             records = await client.list_records(rtype, limit=50)
             for r in records:
                 janitor_note = r.get("janitor_note")
