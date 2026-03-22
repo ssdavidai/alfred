@@ -80,7 +80,7 @@ class EventProcessorWorkflow:
                 classification = await workflow.execute_activity(
                     classify_event,
                     args=[event, metadata],
-                    start_to_close_timeout=timedelta(seconds=60),
+                    start_to_close_timeout=timedelta(seconds=300),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
 

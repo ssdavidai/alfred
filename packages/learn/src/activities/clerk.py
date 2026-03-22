@@ -469,7 +469,7 @@ async def _call_clerk(prompt: str) -> dict[str, Any]:
         url = f"{config.openclaw_gateway_url}/v1/chat/completions"
         headers = {"Authorization": f"Bearer {config.gateway_token()}"}
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=280.0) as client:
         resp = await client.post(
             url,
             headers=headers,
