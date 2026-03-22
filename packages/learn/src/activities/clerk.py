@@ -470,7 +470,7 @@ async def _call_clerk(prompt: str) -> dict[str, Any]:
                 "x-openclaw-agent-id": config.clerk_agent_id,
             },
             json={
-                "model": config.clerk_model,
+                "model": "openclaw",
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.1,
             },
