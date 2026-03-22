@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "openrouter/qwen/qwen3.5-35b-a3b"
+        "primary": "openrouter/google/gemini-2.0-flash-exp:free"
       },
       "heartbeat": {
         "every": "4h",
@@ -16,45 +16,45 @@
         }
       },
       "subagents": {
-        "model": "openrouter/qwen/qwen3.5-35b-a3b"
+        "model": "openrouter/google/gemini-2.0-flash-exp:free"
       }
     },
     "list": [
       {
         "id": "main",
         "name": "Alfred",
-        "model": "openrouter/qwen/qwen3.5-35b-a3b",
+        "model": "openrouter/google/gemini-2.0-flash-exp:free",
         "workspace": "/home/node/.openclaw/workspace",
         "subagents": { "allowAgents": ["*"] }
       },
       {
         "id": "learn-clerk",
         "name": "Learn Clerk",
-        "model": "openrouter/qwen/qwen3.5-35b-a3b",
+        "model": "openrouter/google/gemini-2.0-flash-exp:free",
         "workspace": "/home/node/.openclaw/workspace"
       },
       {
         "id": "vault-curator",
         "name": "Vault Curator",
-        "model": "openrouter/qwen/qwen3.5-35b-a3b",
+        "model": "openrouter/google/gemini-2.0-flash-exp:free",
         "workspace": "/home/node/.openclaw/workspace"
       },
       {
         "id": "vault-distiller",
         "name": "Vault Distiller",
-        "model": "openrouter/qwen/qwen3.5-35b-a3b",
+        "model": "openrouter/google/gemini-2.0-flash-exp:free",
         "workspace": "/home/node/.openclaw/workspace"
       },
       {
         "id": "vault-janitor",
         "name": "Vault Janitor",
-        "model": "openrouter/qwen/qwen3.5-9b",
+        "model": "openrouter/google/gemini-2.0-flash-exp:free",
         "workspace": "/home/node/.openclaw/workspace"
       },
       {
         "id": "vault-surveyor",
         "name": "Vault Surveyor",
-        "model": "openrouter/qwen/qwen3.5-9b",
+        "model": "openrouter/google/gemini-2.0-flash-exp:free",
         "workspace": "/home/node/.openclaw/workspace"
       }
     ]
