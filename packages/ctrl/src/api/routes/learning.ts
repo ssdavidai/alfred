@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
-import { dockerComposeCmd } from "../helpers.js";
+import { dockerComposeCmd, dockerExec, ALFRED_CMD } from "../helpers.js";
 
 const VAULT_PATH = "/mnt/encrypted/vault";
 const ALFRED_DATA = "/mnt/encrypted/alfred";
@@ -108,6 +108,239 @@ function setEnvVar(key: string, value: string): void {
 
 function sanitizeId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_.-]/g, "_");
+}
+
+// ---------------------------------------------------------------------------
+// Curator integration helpers
+// ---------------------------------------------------------------------------
+
+interface RoutingContext {
+  assigned_to?: string;
+  process?: string;
+  instinct_name?: string;
+  confidence_score?: number;
+}
+
+interface CuratorResult {
+  processed: boolean;
+  note_path?: string;
+  entities_created?: string[];
+  entities_linked?: string[];
+  observation_path?: string;
+  error?: string;
+}
+
+/**
+ * Escape a string for safe YAML value output. Wraps in single quotes
+ * if the value contains YAML-sensitive characters.
+ */
+function yamlEscape(value: string): string {
+  if (/[:\n\r#'"{}[\],&*!|>%@`]/.test(value) || value.trim() !== value) {
+    return `'${value.replace(/'/g, "''")}'`;
+  }
+  return value;
+}
+
+/**
+ * Validate that a vault-relative path is safe (no traversal, stays within vault).
+ */
+function assertSafePath(vaultRelPath: string): void {
+  const resolved = path.resolve(VAULT_PATH, vaultRelPath);
+  if (!resolved.startsWith(VAULT_PATH + path.sep) && resolved !== VAULT_PATH) {
+    throw new ValidationError(`Path traversal not allowed: ${vaultRelPath}`);
+  }
+  if (path.isAbsolute(vaultRelPath) || vaultRelPath.includes("..")) {
+    throw new ValidationError(`Invalid path: ${vaultRelPath}`);
+  }
+}
+
+/**
+ * Write raw content into inbox/ with routing metadata in frontmatter,
+ * then trigger the Curator to process it.
+ */
+async function routeViaCurator(
+  inputPath: string,
+  destination: string,
+  routingContext: RoutingContext,
+): Promise<CuratorResult> {
+  // Validate paths
+  assertSafePath(inputPath);
+  assertSafePath(destination);
+
+  // 1. Read the raw input file
+  const fullInputPath = path.join(VAULT_PATH, inputPath);
+  let rawContent: string;
+  try {
+    rawContent = fs.readFileSync(fullInputPath, "utf-8");
+  } catch {
+    throw new NotFoundError(`Input not found: ${inputPath}`);
+  }
+
+  // 2. Build routing metadata — merge into existing frontmatter
+  const { frontmatter: existingFm, body: existingBody } = parseFrontmatter(rawContent);
+
+  // Remove any existing alfred_routing to avoid duplicates
+  delete existingFm["alfred_routing"];
+
+  const fmLines = ["---"];
+  for (const [k, v] of Object.entries(existingFm)) {
+    fmLines.push(`${k}: ${yamlEscape(v)}`);
+  }
+  // Append routing block
+  fmLines.push("alfred_routing:");
+  fmLines.push(`  destination: ${yamlEscape(destination)}`);
+  if (routingContext.assigned_to) {
+    fmLines.push(`  assigned_to: ${yamlEscape(routingContext.assigned_to)}`);
+  }
+  if (routingContext.process) {
+    fmLines.push(`  process: ${yamlEscape(routingContext.process)}`);
+  }
+  if (routingContext.instinct_name) {
+    fmLines.push(`  instinct: ${yamlEscape(routingContext.instinct_name)}`);
+  }
+  if (routingContext.confidence_score !== undefined) {
+    fmLines.push(`  confidence: ${routingContext.confidence_score}`);
+  }
+  fmLines.push(`  routed_by: ${routingContext.instinct_name ? "auto-judgment" : "human"}`);
+  fmLines.push("---");
+  const enrichedContent = fmLines.join("\n") + "\n" + existingBody;
+
+  // 3. Write to inbox/ with a collision-resistant name
+  const inboxDir = path.join(VAULT_PATH, "inbox");
+  fs.mkdirSync(inboxDir, { recursive: true });
+  const stem = path.basename(inputPath, path.extname(inputPath));
+  const ext = path.extname(inputPath) || ".md";
+  const uniqueSuffix = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const inboxFileName = `${stem}-${uniqueSuffix}${ext}`;
+  const inboxPath = path.join(inboxDir, inboxFileName);
+  fs.writeFileSync(inboxPath, enrichedContent, "utf-8");
+
+  // 4. Trigger Curator to process this specific file
+  //    Use --limit 1 scoped to our unique filename to avoid processing other inbox items
+  const inboxContainerPath = path.posix.join("/vault", "inbox", inboxFileName);
+  let curatorOutput: string;
+  try {
+    curatorOutput = await dockerExec("alfred", [...ALFRED_CMD, "process", "--limit", "1"], {
+      ALFRED_VAULT_PATH: "/vault",
+    });
+  } catch (err) {
+    // Curator failed — clean up inbox file, let caller handle fallback
+    try { fs.unlinkSync(inboxPath); } catch { /* ignore */ }
+    const msg = err instanceof Error ? err.message : String(err);
+    return { processed: false, error: `curator_failed: ${msg}` };
+  }
+
+  // 5. Check if our inbox file was actually consumed by Curator
+  const inboxConsumed = !fs.existsSync(inboxPath);
+  if (!inboxConsumed) {
+    // Curator processed something else or skipped our file — don't delete original
+    try { fs.unlinkSync(inboxPath); } catch { /* ignore */ }
+    return { processed: false, error: "curator_did_not_consume_file" };
+  }
+
+  // 6. Only delete original after confirming Curator consumed the inbox file
+  try { fs.unlinkSync(fullInputPath); } catch { /* may already be gone */ }
+
+  // 7. Build result — parse curator output for entity info
+  const result: CuratorResult = { processed: true };
+
+  // Try to extract structured info from curator output (JSONL mutation log lines)
+  const lines = curatorOutput.trim().split("\n").filter(Boolean);
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line);
+      if (entry.op === "create" && entry.path) {
+        if (!result.entities_created) result.entities_created = [];
+        result.entities_created.push(entry.path);
+        // The first create is usually the main note
+        if (!result.note_path) result.note_path = entry.path;
+      }
+      if (entry.op === "edit" && entry.path) {
+        if (!result.entities_linked) result.entities_linked = [];
+        result.entities_linked.push(entry.path);
+      }
+    } catch {
+      // Non-JSON output lines — ignore
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Write an observation record enriched with Curator results.
+ */
+function writeRoutingObservation(
+  inputPath: string,
+  destination: string,
+  routingContext: RoutingContext,
+  curatorResult: CuratorResult,
+): string {
+  const obsDir = path.join(VAULT_PATH, "observation");
+  fs.mkdirSync(obsDir, { recursive: true });
+  const ts = new Date().toISOString();
+  const obsName = `route-${sanitizeId(path.basename(inputPath, ".md"))}-${ts.replace(/[:.]/g, "-")}`;
+
+  const routedBy = routingContext.instinct_name ? "alfred" : "user";
+  const entitiesCreated = curatorResult.entities_created || [];
+  const entitiesLinked = curatorResult.entities_linked || [];
+
+  const obsMd = [
+    "---",
+    `type: observation`,
+    `status: unprocessed`,
+    `name: ${yamlEscape(obsName)}`,
+    `created: ${ts}`,
+    `source: ${routingContext.instinct_name ? "auto-judgment" : "api-route"}`,
+    `input_ref: ${yamlEscape(inputPath)}`,
+    `destination: ${yamlEscape(destination)}`,
+    `routed_by: ${routedBy}`,
+    `confidence: ${routingContext.instinct_name ? "machine" : "human"}`,
+  ];
+
+  if (routingContext.instinct_name) {
+    obsMd.push(`instinct: ${yamlEscape(routingContext.instinct_name)}`);
+  }
+  if (routingContext.confidence_score !== undefined) {
+    obsMd.push(`confidence_score: ${routingContext.confidence_score}`);
+  }
+  if (routingContext.process) {
+    obsMd.push(`process: ${yamlEscape(routingContext.process)}`);
+  }
+  if (routingContext.assigned_to) {
+    obsMd.push(`assigned_to: ${yamlEscape(routingContext.assigned_to)}`);
+  }
+
+  obsMd.push(
+    `curator_processed: ${curatorResult.processed}`,
+    `entities_created: [${entitiesCreated.map((e) => `"${yamlEscape(e)}"`).join(", ")}]`,
+    `entities_linked: [${entitiesLinked.map((e) => `"${yamlEscape(e)}"`).join(", ")}]`,
+  );
+
+  if (curatorResult.note_path) {
+    obsMd.push(`note_path: ${yamlEscape(curatorResult.note_path)}`);
+  }
+
+  obsMd.push("---", "");
+
+  if (curatorResult.processed) {
+    obsMd.push(
+      `Routed ${inputPath} to ${destination} and processed via Curator.`,
+      "",
+      `Created note: ${curatorResult.note_path || "unknown"}`,
+      `Entities created: ${entitiesCreated.length}`,
+      `Entities linked: ${entitiesLinked.length}`,
+    );
+  } else {
+    obsMd.push(
+      `Routed ${inputPath} to ${destination} (Curator unavailable — raw move).`,
+      "",
+      `Error: ${curatorResult.error || "unknown"}`,
+    );
+  }
+
+  fs.writeFileSync(path.join(obsDir, `${obsName}.md`), obsMd.join("\n") + "\n", "utf-8");
+  return `observation/${obsName}.md`;
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +525,67 @@ export function registerLearningRoutes(): void {
     sendJson(res, 200, { items: unrouted, total: unrouted.length });
   });
 
-  // POST /api/v1/learning/route — route an input to a destination
+  // POST /api/v1/curator/route-and-process — route input via Curator for structured processing
+  addRoute("POST", "/api/v1/curator/route-and-process", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.input_path !== "string" || typeof b.destination !== "string") {
+      throw new ValidationError("input_path and destination are required");
+    }
+
+    const inputPath = b.input_path as string;
+    const destination = b.destination as string;
+    const routingContext = (b.routing_context || {}) as RoutingContext;
+
+    // Attempt Curator processing
+    let curatorResult = await routeViaCurator(inputPath, destination, routingContext);
+
+    // Fallback: if Curator failed, do a raw file move
+    let fallbackMoved = false;
+    if (!curatorResult.processed) {
+      const fullInputPath = path.join(VAULT_PATH, inputPath);
+      try {
+        const destDir = path.join(VAULT_PATH, destination);
+        fs.mkdirSync(destDir, { recursive: true });
+        const destPath = path.join(destDir, path.basename(inputPath));
+        fs.renameSync(fullInputPath, destPath);
+        curatorResult = {
+          processed: false,
+          note_path: path.join(destination, path.basename(inputPath)),
+          error: curatorResult.error,
+        };
+        fallbackMoved = true;
+      } catch (moveErr) {
+        // Both Curator and fallback move failed
+        const moveErrMsg = moveErr instanceof Error ? moveErr.message : String(moveErr);
+        curatorResult.error = `${curatorResult.error}; fallback_move_failed: ${moveErrMsg}`;
+      }
+    }
+
+    // Write enriched observation
+    const observationPath = writeRoutingObservation(
+      inputPath, destination, routingContext, curatorResult,
+    );
+
+    // If neither Curator nor fallback succeeded, return 500
+    if (!curatorResult.processed && !fallbackMoved) {
+      sendJson(res, 500, {
+        processed: false,
+        error: curatorResult.error || "routing_failed",
+        observation_path: observationPath,
+      });
+      return;
+    }
+
+    sendJson(res, 200, {
+      processed: curatorResult.processed,
+      note_path: curatorResult.note_path || null,
+      entities_created: curatorResult.entities_created || [],
+      entities_linked: curatorResult.entities_linked || [],
+      observation_path: observationPath,
+    });
+  });
+
+  // POST /api/v1/learning/route — route an input to a destination (with Curator processing)
   addRoute("POST", "/api/v1/learning/route", async ({ res, body }) => {
     const b = body as Record<string, unknown> | undefined;
     if (!b || typeof b.input_id !== "string" || typeof b.destination !== "string") {
@@ -302,49 +595,54 @@ export function registerLearningRoutes(): void {
     const inputId = b.input_id as string;
     const destination = b.destination as string;
 
-    // Read the input record
-    const inputPath = path.join(VAULT_PATH, inputId);
-    let content: string;
+    // Validate paths
+    assertSafePath(inputId);
+    assertSafePath(destination);
+
+    // Try Curator-backed processing first
+    const routingContext: RoutingContext = {};
+    let curatorResult: CuratorResult;
     try {
-      content = fs.readFileSync(inputPath, "utf-8");
-    } catch {
-      throw new NotFoundError(`Input not found: ${inputId}`);
+      curatorResult = await routeViaCurator(inputId, destination, routingContext);
+    } catch (err) {
+      // If input not found, re-throw as NotFoundError
+      if (err instanceof NotFoundError) throw err;
+      // Otherwise, Curator integration failed — set up for fallback
+      curatorResult = {
+        processed: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
     }
 
-    const { frontmatter: fm } = parseFrontmatter(content);
+    // Fallback: if Curator failed, do a raw file move (original behavior)
+    if (!curatorResult.processed) {
+      const inputPath = path.join(VAULT_PATH, inputId);
+      try {
+        const content = fs.readFileSync(inputPath, "utf-8");
+        // Only move if file still exists (wasn't consumed by failed curator attempt)
+        const destDir = path.join(VAULT_PATH, destination);
+        fs.mkdirSync(destDir, { recursive: true });
+        const destPath = path.join(destDir, path.basename(inputId));
+        fs.renameSync(inputPath, destPath);
+        void content; // validated file existed
+      } catch {
+        // File may have already been moved or cleaned up
+      }
+    }
 
-    // Move the file to destination directory
-    const destDir = path.join(VAULT_PATH, destination);
-    fs.mkdirSync(destDir, { recursive: true });
-    const destPath = path.join(destDir, path.basename(inputId));
-    fs.renameSync(inputPath, destPath);
-
-    // Write an observation record for the routing action
-    const obsDir = path.join(VAULT_PATH, "observation");
-    fs.mkdirSync(obsDir, { recursive: true });
-    const ts = new Date().toISOString();
-    const obsName = `route-${sanitizeId(path.basename(inputId, ".md"))}-${ts.replace(/[:.]/g, "-")}`;
-    const obsMd = [
-      "---",
-      `type: observation`,
-      `status: unprocessed`,
-      `name: '${obsName}'`,
-      `created: ${ts}`,
-      `source: api-route`,
-      `input_ref: ${inputId}`,
-      `destination: ${destination}`,
-      "---",
-      "",
-      `Routed ${inputId} to ${destination}.`,
-      "",
-      `Original type: ${fm.type || "unknown"}`,
-      `Original status: ${fm.status || "unknown"}`,
-    ].join("\n");
-    fs.writeFileSync(path.join(obsDir, `${obsName}.md`), obsMd, "utf-8");
+    // Write enriched observation
+    const observationPath = writeRoutingObservation(
+      inputId, destination, routingContext, curatorResult,
+    );
 
     sendJson(res, 200, {
       message: `Routed ${inputId} to ${destination}`,
-      observation: `observation/${obsName}.md`,
+      processed: curatorResult.processed,
+      note_path: curatorResult.note_path || null,
+      entities_created: curatorResult.entities_created || [],
+      entities_linked: curatorResult.entities_linked || [],
+      observation: observationPath,
+      observation_path: observationPath,  // normalized key for compatibility
     });
   });
 

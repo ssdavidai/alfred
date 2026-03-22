@@ -46,17 +46,39 @@ async def attempt_judgment(
             routing_rule = best.instinct.get("routing_rule", {})
             destination = routing_rule.get("destination", best.instinct.get("routing_destination", ""))
             if destination:
-                # Record machine observation
-                await client.write_record(
-                    "observation",
-                    f"auto-route-{event.get('id', '')[:8]}",
-                    _build_machine_observation_content(event, best),
+                # Route via Curator for structured processing
+                routing_context = {
+                    "assigned_to": routing_rule.get("default_assignee", ""),
+                    "process": routing_rule.get("process", ""),
+                    "instinct_name": best.instinct.get("name", ""),
+                    "confidence_score": best.score,
+                }
+                curator_result = await _execute_route_inline(
+                    client, event, destination, routing_context,
                 )
+                # Only report routed if Curator succeeded or fallback moved the file
+                actually_routed = (
+                    curator_result.get("processed", False)
+                    or curator_result.get("fallback", False)
+                    or curator_result.get("observation_path")
+                    or curator_result.get("observation")
+                    or curator_result.get("note_path")
+                )
+                if not actually_routed and curator_result.get("error"):
+                    return {
+                        "routed": False,
+                        "reason": "route_failed",
+                        "error": curator_result.get("error"),
+                        "best_score": best.score,
+                        "best_instinct": best.instinct.get("name", ""),
+                    }
                 return {
                     "routed": True,
                     "destination": destination,
                     "score": best.score,
                     "instinct": best.instinct.get("name", ""),
+                    "curator_processed": curator_result.get("processed", False),
+                    "note_path": curator_result.get("note_path"),
                 }
 
         return {
@@ -112,63 +134,104 @@ async def score_instincts(
 async def execute_route(
     input_event: dict[str, Any],
     destination: str,
-) -> None:
-    """Execute a routing decision — move input to destination via alfred-ctrl API."""
+    routing_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Execute a routing decision — hand to Curator for structured processing.
+
+    Calls the curator/route-and-process endpoint which:
+    1. Injects routing metadata into the inbox file
+    2. Triggers the Curator to create structured records
+    3. Returns entities created/linked info
+
+    Falls back to raw file move if Curator is unavailable.
+    """
     config = load_config()
     client = VaultClient(config)
     try:
-        path = input_event.get("path", "")
-        if path:
-            # Move the file via the alfred-ctrl learning/route endpoint
+        input_path = input_event.get("path", "")
+        if not input_path:
+            return {"processed": False, "reason": "no_path"}
+
+        resp = await client._client.post(
+            "/api/v1/curator/route-and-process",
+            json={
+                "input_path": input_path,
+                "destination": destination,
+                "routing_context": routing_context or {},
+            },
+            timeout=120.0,  # Curator processing takes longer
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        # Fallback: try the old route endpoint for raw file move
+        activity.logger.warning(
+            "Curator route-and-process failed, falling back to raw route: %s",
+            exc,
+        )
+        try:
             resp = await client._client.post(
                 "/api/v1/learning/route",
-                json={"input_id": path, "destination": destination},
+                json={"input_id": input_path, "destination": destination},
             )
             resp.raise_for_status()
+            result = resp.json()
+            result["processed"] = False
+            result["fallback"] = True
+            # Normalize observation key for downstream compatibility
+            if "observation" in result and "observation_path" not in result:
+                result["observation_path"] = result["observation"]
+            return result
+        except Exception as fallback_exc:
+            activity.logger.error("Fallback route also failed: %s", fallback_exc)
+            return {"processed": False, "error": str(fallback_exc)}
     finally:
         await client.close()
 
 
-def _build_machine_observation_content(
+async def _execute_route_inline(
+    client: VaultClient,
     event: dict[str, Any],
-    best_score: Any,
-) -> str:
-    """Build observation content for a machine-routed event."""
-    from datetime import datetime, timezone
+    destination: str,
+    routing_context: dict[str, Any],
+) -> dict[str, Any]:
+    """Route via Curator inline (used by attempt_judgment which already has a client).
 
-    now = datetime.now(timezone.utc).isoformat()
-    instinct = best_score.instinct
-    score = best_score.score
+    Falls back to old route endpoint if Curator is unavailable.
+    """
+    input_path = event.get("path", "")
+    if not input_path:
+        return {"processed": False, "reason": "no_path"}
 
-    # Extract routing rule from rich instinct schema, fall back to legacy
-    routing_rule = instinct.get("routing_rule", {})
-    destination = routing_rule.get("destination", instinct.get("routing_destination", ""))
-    process = routing_rule.get("process", "")
-    assignee = routing_rule.get("default_assignee", "")
-
-    return f"""---
-type: observation
-created: {now}
-status: unprocessed
-input_ref: "{event.get("id", "")}"
-input_type: {event.get("stream_type", "other")}
-input_source: auto-judgment
-routing_decision:
-  destination: "{destination}"
-  process: "{process}"
-  assigned_to: "{assignee}"
-reasoning: "Auto-routed by instinct '{instinct.get("name", "")}' with score {score:.2f}"
-considered_alternatives: []
-signals:
-  domain_patterns: []
-  keyword_patterns: []
-  input_types: []
-  attachment_patterns: []
-confidence: machine
-routed_by: alfred
-source: chat
-source_session: ""
-created_by: ""
-tags: []
----
-"""
+    try:
+        resp = await client._client.post(
+            "/api/v1/curator/route-and-process",
+            json={
+                "input_path": input_path,
+                "destination": destination,
+                "routing_context": routing_context,
+            },
+            timeout=120.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as exc:
+        activity.logger.warning(
+            "Curator route-and-process failed in attempt_judgment, falling back: %s",
+            exc,
+        )
+        try:
+            resp = await client._client.post(
+                "/api/v1/learning/route",
+                json={"input_id": input_path, "destination": destination},
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            result["processed"] = False
+            result["fallback"] = True
+            # Normalize observation key for downstream compatibility
+            if "observation" in result and "observation_path" not in result:
+                result["observation_path"] = result["observation"]
+            return result
+        except Exception:
+            return {"processed": False, "error": str(exc)}

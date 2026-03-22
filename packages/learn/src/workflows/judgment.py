@@ -79,19 +79,43 @@ class JudgmentWorkflow:
             best = scores[0] if scores else None
 
             if best and should_route_autonomously(best["score"], best["instinct"]):
-                destination = best["instinct"].get("routing_destination", "")
-                # Route autonomously
-                await workflow.execute_activity(
-                    execute_route,
-                    args=[inp, destination],
-                    start_to_close_timeout=timedelta(seconds=30),
-                )
-                # Record observation (machine-routed)
                 instinct = best["instinct"]
                 score = best["score"]
                 breakdown = best.get("breakdown", {})
                 routing_rule = instinct.get("routing_rule", {})
+                destination = routing_rule.get(
+                    "destination", instinct.get("routing_destination", ""),
+                )
 
+                # Build routing context for Curator
+                routing_context = {
+                    "assigned_to": routing_rule.get("default_assignee", ""),
+                    "process": routing_rule.get("process", ""),
+                    "instinct_name": instinct.get("name", ""),
+                    "confidence_score": score,
+                }
+
+                # Route via Curator (creates structured records)
+                route_result: dict[str, Any] = await workflow.execute_activity(
+                    execute_route,
+                    args=[inp, destination, routing_context],
+                    start_to_close_timeout=timedelta(seconds=120),
+                )
+
+                # If routing completely failed, escalate instead of silently dropping
+                route_error = route_result.get("error")
+                no_path = route_result.get("reason") == "no_path"
+                if not route_result.get("processed", False) and not route_result.get("fallback", False) and (route_error or no_path):
+                    await workflow.execute_activity(
+                        escalate_to_user,
+                        args=[inp, best],
+                        start_to_close_timeout=timedelta(seconds=15),
+                    )
+                    escalated += 1
+                    continue
+
+                # Record observation enriched with Curator results
+                curator_processed = route_result.get("processed", False)
                 observation = {
                     "input_type": inp.get("stream_type", "other"),
                     "input_source": "auto-judgment",
@@ -104,6 +128,11 @@ class JudgmentWorkflow:
                     "reasoning": (
                         f"Auto-routed by instinct '{instinct.get('name', '')}'"
                         f" with score {score:.2f}"
+                        + (
+                            f" — Curator created {len(route_result.get('entities_created', []))} entities"
+                            if curator_processed
+                            else " — Curator unavailable, raw move"
+                        )
                     ),
                     "signals": {
                         "domain_patterns": breakdown.get("domain", []),
@@ -114,11 +143,15 @@ class JudgmentWorkflow:
                     "confidence": "machine",
                     "routed_by": "alfred",
                 }
-                await workflow.execute_activity(
-                    write_observation_record,
-                    args=[observation],
-                    start_to_close_timeout=timedelta(seconds=30),
-                )
+
+                # Only write observation via vault activity if the route-and-process
+                # endpoint didn't already write one (it does for the new endpoint)
+                if not (route_result.get("observation_path") or route_result.get("observation")):
+                    await workflow.execute_activity(
+                        write_observation_record,
+                        args=[observation],
+                        start_to_close_timeout=timedelta(seconds=30),
+                    )
                 routed += 1
             else:
                 # Escalate — notify main Alfred
