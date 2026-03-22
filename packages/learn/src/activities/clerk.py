@@ -454,21 +454,31 @@ Return JSON only:
 
 
 async def _call_clerk(prompt: str) -> dict[str, Any]:
-    """Send a prompt to the OpenClaw gateway via chat completions (synchronous).
+    """Send a prompt to the LLM inference endpoint (synchronous).
 
-    Uses /v1/chat/completions which returns the full response inline,
-    unlike /tools/invoke + sessions_spawn which is fire-and-forget.
+    Uses CLERK_BASE_URL for direct Ollama/vLLM access, or falls back
+    to OpenClaw gateway /v1/chat/completions.
     """
     config = load_config()
-    token = config.gateway_token()
+
+    base_url = os.environ.get("CLERK_BASE_URL", "")
+    if base_url:
+        # Direct inference (Ollama, vLLM, etc.) — no OpenClaw overhead
+        url = f"{base_url.rstrip('/')}/v1/chat/completions"
+        headers = {"Content-Type": "application/json"}
+    else:
+        # Fallback: OpenClaw gateway
+        url = f"{config.openclaw_gateway_url}/v1/chat/completions"
+        token = config.gateway_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "x-openclaw-agent-id": config.clerk_agent_id,
+        }
 
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
-            f"{config.openclaw_gateway_url}/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "x-openclaw-agent-id": config.clerk_agent_id,
-            },
+            url,
+            headers=headers,
             json={
                 "model": config.clerk_model,
                 "messages": [{"role": "user", "content": prompt}],
