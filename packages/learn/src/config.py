@@ -32,6 +32,7 @@ class Config:
 
     # Clerk agent
     clerk_agent_id: str = field(default_factory=lambda: os.environ.get("CLERK_AGENT_ID", "learn-clerk"))
+    clerk_model: str = field(default_factory=lambda: os.environ.get("CLERK_MODEL", "openrouter/qwen/qwen3.5-35b-a3b"))
 
     # Processing limits
     max_events_per_run: int = 20

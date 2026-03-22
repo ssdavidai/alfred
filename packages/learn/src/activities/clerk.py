@@ -454,33 +454,32 @@ Return JSON only:
 
 
 async def _call_clerk(prompt: str) -> dict[str, Any]:
-    """Send a prompt to the OpenClaw gateway and parse JSON response."""
+    """Send a prompt to the OpenClaw gateway via chat completions (synchronous).
+
+    Uses /v1/chat/completions which returns the full response inline,
+    unlike /tools/invoke + sessions_spawn which is fire-and-forget.
+    """
     config = load_config()
     token = config.gateway_token()
 
-    async with httpx.AsyncClient(timeout=90.0) as client:
+    async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
-            f"{config.openclaw_gateway_url}/tools/invoke",
+            f"{config.openclaw_gateway_url}/v1/chat/completions",
             headers={"Authorization": f"Bearer {token}"},
             json={
-                "tool": "sessions_spawn",
-                "args": {
-                    "task": prompt,
-                    "agentId": config.clerk_agent_id,
-                    "cleanup": "delete",
-                    "runTimeoutSeconds": 120,
-                },
+                "model": config.clerk_model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
             },
         )
         resp.raise_for_status()
         data = resp.json()
 
-    # Handle /tools/invoke response format
-    # The response is typically {"result": {...}} or may have the content directly
-    if "result" in data:
-        content = data["result"]
-    else:
-        content = data.get("content", "") or data.get("response", "") or ""
+    # Extract the assistant's message content
+    content = ""
+    choices = data.get("choices", [])
+    if choices:
+        content = choices[0].get("message", {}).get("content", "")
 
     if isinstance(content, str):
         content = content.strip()
