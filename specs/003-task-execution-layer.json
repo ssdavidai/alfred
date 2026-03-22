@@ -1,0 +1,407 @@
+{
+  "spec_id": "003",
+  "title": "Task Execution Layer + Triage Rename",
+  "version": "0.1",
+  "date": "2026-03-22",
+  "status": "draft",
+  "author": "David Szabo-Stuban + Alfred",
+  "inspiration": "NTP-OS (neoterragroup/ntpos)",
+  "depends_on": ["v0.2.0"],
+  "phases": [
+    {
+      "id": "phase-1",
+      "name": "Triage Rename",
+      "status": "pending",
+      "estimate_hours": 2.5,
+      "description": "Rename existing 'task' classification type to 'triage'. Non-breaking change — no existing data to migrate.",
+      "items": [
+        {
+          "id": "1.1",
+          "title": "Update VALID_CLASSIFICATION_TYPES: task → triage",
+          "file": "packages/learn/src/validators/schema.py",
+          "status": "pending",
+          "breaking": false
+        },
+        {
+          "id": "1.2",
+          "title": "Update VALID_VAULT_TYPES: rename task→triage, add task (new), add skill",
+          "file": "packages/learn/src/validators/schema.py",
+          "status": "pending",
+          "breaking": false
+        },
+        {
+          "id": "1.3",
+          "title": "Update Clerk prompt: classification options include triage not task",
+          "file": "packages/learn/src/activities/clerk.py",
+          "status": "pending",
+          "breaking": false
+        },
+        {
+          "id": "1.4",
+          "title": "Update write_vault_record: handle triage type → triage/ folder",
+          "file": "packages/learn/src/activities/vault.py",
+          "status": "pending",
+          "breaking": false
+        },
+        {
+          "id": "1.5",
+          "title": "Create _templates/triage.md in Curator repo",
+          "file": "alfred/vault-seed/_templates/triage.md",
+          "status": "pending",
+          "repo": "alfred",
+          "breaking": false
+        },
+        {
+          "id": "1.6",
+          "title": "Add triage/ and skill/ folders to vault provisioner",
+          "file": "packages/ctrl/src/templates/bootstrap-openclaw.sh.njk",
+          "status": "pending",
+          "breaking": false
+        },
+        {
+          "id": "1.7",
+          "title": "Update documentation (CHANGELOG, vault-schema)",
+          "status": "pending",
+          "breaking": false
+        },
+        {
+          "id": "1.8",
+          "title": "Deploy + verify on David's tenant",
+          "status": "pending",
+          "breaking": false
+        }
+      ]
+    },
+    {
+      "id": "phase-2",
+      "name": "Skill Graph Foundation",
+      "status": "pending",
+      "estimate_hours": 2.5,
+      "description": "Introduce skill/ vault type — plain English methodology files that teach the AI how to approach work. Seeded for new tenants, manually created for existing.",
+      "items": [
+        {
+          "id": "2.1",
+          "title": "Create _templates/skill.md template",
+          "file": "alfred/vault-seed/_templates/skill.md",
+          "status": "pending",
+          "repo": "alfred"
+        },
+        {
+          "id": "2.2",
+          "title": "Create seed skill files for David's tenant",
+          "status": "pending",
+          "details": [
+            "skill/index.md — entry point, lists all skills by domain",
+            "skill/input-noise-filtering.md — what counts as noise",
+            "skill/input-entity-extraction.md — how to extract people/orgs/places",
+            "skill/execution-summarize.md — how to summarize a document",
+            "skill/preference-david.md — David's communication style, priorities"
+          ]
+        },
+        {
+          "id": "2.3",
+          "title": "Add skill to VALID_VAULT_TYPES",
+          "file": "packages/learn/src/validators/schema.py",
+          "status": "pending"
+        },
+        {
+          "id": "2.4",
+          "title": "Ensure qmd indexes skill/ folder",
+          "status": "pending",
+          "notes": "Check OpenClaw qmd memory config includes skill/ path pattern"
+        },
+        {
+          "id": "2.5",
+          "title": "Deploy skill seed via provisioner for new tenants",
+          "file": "packages/ctrl/src/infra/provisioner.ts",
+          "status": "pending"
+        }
+      ]
+    },
+    {
+      "id": "phase-3",
+      "name": "Task Execution Primitive",
+      "status": "pending",
+      "estimate_hours": 3.5,
+      "description": "Introduce task as a proper execution unit — an atomic piece of work with owner, tier, skill reference, and lifecycle. Includes CRUD via ctrl-api.",
+      "items": [
+        {
+          "id": "3.1",
+          "title": "Create new _templates/task.md with execution-primitive schema",
+          "file": "alfred/vault-seed/_templates/task.md",
+          "status": "pending",
+          "repo": "alfred"
+        },
+        {
+          "id": "3.2",
+          "title": "Add task CRUD endpoints to ctrl-api",
+          "file": "packages/ctrl/src/api/routes/tasks.ts",
+          "status": "pending",
+          "details": [
+            "POST /api/v1/tasks — create a task",
+            "GET /api/v1/tasks?status=queued&owner=alfred — query tasks",
+            "PATCH /api/v1/tasks/:id — update status/fields",
+            "GET /api/v1/tasks/:id — read single task"
+          ]
+        },
+        {
+          "id": "3.3",
+          "title": "Add task (new meaning) to VALID_VAULT_TYPES",
+          "file": "packages/learn/src/validators/schema.py",
+          "status": "pending"
+        },
+        {
+          "id": "3.4",
+          "title": "Implement fetch_queued_tasks activity",
+          "file": "packages/learn/src/activities/tasks.py",
+          "status": "pending",
+          "description": "Query vault via ctrl-api for type:task, status:queued, owner:alfred"
+        },
+        {
+          "id": "3.5",
+          "title": "Implement check_task_prerequisites activity",
+          "file": "packages/learn/src/activities/tasks.py",
+          "status": "pending",
+          "description": "Check depends_on (all done?), run_after (past?), requires_approval (approved?)"
+        },
+        {
+          "id": "3.6",
+          "title": "Implement update_task_status activity",
+          "file": "packages/learn/src/activities/tasks.py",
+          "status": "pending",
+          "description": "PATCH task frontmatter status field via ctrl-api"
+        },
+        {
+          "id": "3.7",
+          "title": "Implement assemble_task_context activity",
+          "file": "packages/learn/src/activities/tasks.py",
+          "status": "pending",
+          "description": "Read skill file + initiative + recent observations → build execution prompt"
+        },
+        {
+          "id": "3.8",
+          "title": "Implement execute_task activity",
+          "file": "packages/learn/src/activities/tasks.py",
+          "status": "pending",
+          "description": "sessions_spawn with assembled prompt + poll sessions_history for result. Reuse _call_clerk pattern."
+        },
+        {
+          "id": "3.9",
+          "title": "Implement complete_task activity",
+          "file": "packages/learn/src/activities/tasks.py",
+          "status": "pending",
+          "description": "Mark status=done, write outcome to task body, record execution metadata"
+        },
+        {
+          "id": "3.10",
+          "title": "Deploy + verify with manual task creation",
+          "status": "pending"
+        }
+      ]
+    },
+    {
+      "id": "phase-4",
+      "name": "Task Runner Workflow",
+      "status": "pending",
+      "estimate_hours": 3.5,
+      "description": "Temporal workflow that polls for queued tasks and executes them. Runs every 2 minutes alongside EventProcessor.",
+      "items": [
+        {
+          "id": "4.1",
+          "title": "Create TaskRunnerWorkflow",
+          "file": "packages/learn/src/workflows/task_runner.py",
+          "status": "pending"
+        },
+        {
+          "id": "4.2",
+          "title": "Register Temporal schedule (every 2 min)",
+          "file": "packages/learn/scripts/register_schedules.py",
+          "status": "pending"
+        },
+        {
+          "id": "4.3",
+          "title": "Add to worker.py ALL_WORKFLOWS and all new activities",
+          "file": "packages/learn/src/worker.py",
+          "status": "pending"
+        },
+        {
+          "id": "4.4",
+          "title": "Implement write_task_artifacts activity",
+          "file": "packages/learn/src/activities/tasks.py",
+          "status": "pending",
+          "description": "Write any produced files to vault (artifacts, notes, etc.)"
+        },
+        {
+          "id": "4.5",
+          "title": "Implement propagate_task_completion activity",
+          "file": "packages/learn/src/activities/tasks.py",
+          "status": "pending",
+          "description": "Determine if follow-up tasks needed based on skill graph and output"
+        },
+        {
+          "id": "4.6",
+          "title": "E2E test: manual task → runner → executes → output in vault",
+          "status": "pending"
+        },
+        {
+          "id": "4.7",
+          "title": "Deploy + verify on David's tenant",
+          "status": "pending"
+        }
+      ]
+    },
+    {
+      "id": "phase-5",
+      "name": "Instinct Execution Blocks",
+      "status": "pending",
+      "estimate_hours": 3.5,
+      "description": "Extend instincts with execution blocks so matched instincts can automatically create tasks. Includes discretion gate for new/uncertain instincts.",
+      "items": [
+        {
+          "id": "5.1",
+          "title": "Extend instinct schema with execution block",
+          "file": "packages/learn/src/validators/schema.py",
+          "status": "pending",
+          "description": "Add execution fields: enabled, tier, agent_id, skill_entry, budget_turns, requires_approval, task_title_template"
+        },
+        {
+          "id": "5.2",
+          "title": "Update attempt_judgment to create tasks when execution block present",
+          "file": "packages/learn/src/activities/judge.py",
+          "status": "pending",
+          "description": "When instinct matches and has execution.enabled=true, create a task record in vault"
+        },
+        {
+          "id": "5.3",
+          "title": "Implement discretion gate (requires_approval logic)",
+          "file": "packages/learn/src/activities/tasks.py",
+          "status": "pending",
+          "description": "New instincts (<10 obs) force approval. Mature instincts (50+ obs, >0.75 score) auto-execute."
+        },
+        {
+          "id": "5.4",
+          "title": "Update instinct template with execution block",
+          "file": "alfred/vault-seed/_templates/instinct.md",
+          "status": "pending",
+          "repo": "alfred"
+        },
+        {
+          "id": "5.5",
+          "title": "Create test instinct with execution block on David's tenant",
+          "status": "pending"
+        },
+        {
+          "id": "5.6",
+          "title": "E2E: inbox → classify → instinct match → task → execute → artifact",
+          "status": "pending"
+        },
+        {
+          "id": "5.7",
+          "title": "Deploy + verify",
+          "status": "pending"
+        }
+      ]
+    },
+    {
+      "id": "phase-6",
+      "name": "Propagation (Future)",
+      "status": "deferred",
+      "estimate_hours": 5,
+      "description": "When tasks complete, determine what else needs to change. Never does work directly — only creates more tasks. Deferred until phases 1-5 are stable.",
+      "items": [
+        {
+          "id": "6.1",
+          "title": "Design propagation rules (what triggers what)",
+          "status": "pending"
+        },
+        {
+          "id": "6.2",
+          "title": "Implement PropagationWorkflow",
+          "status": "pending"
+        },
+        {
+          "id": "6.3",
+          "title": "Task completion triggers: situation updates, parent rollup, follow-up tasks",
+          "status": "pending"
+        },
+        {
+          "id": "6.4",
+          "title": "Skill graph guides propagation decisions",
+          "status": "pending"
+        }
+      ]
+    }
+  ],
+  "vault_changes": {
+    "renamed": {
+      "task": {
+        "old_meaning": "Low-confidence item needing human review (triage request)",
+        "new_name": "triage",
+        "migration": "No data migration needed — 0 existing records on any tenant"
+      }
+    },
+    "new_types": {
+      "task": {
+        "meaning": "Execution primitive — atomic unit of work with owner, tier, skill reference, lifecycle",
+        "folder": "task/",
+        "date_organized": true
+      },
+      "skill": {
+        "meaning": "Reasoning methodology — plain English files teaching AI how to approach work",
+        "folder": "skill/",
+        "date_organized": false
+      },
+      "triage": {
+        "meaning": "Low-confidence classification needing human review",
+        "folder": "triage/",
+        "date_organized": true
+      }
+    },
+    "unchanged": [
+      "inbox", "observation", "intuition", "reflection", "note", "event",
+      "conversation", "noise", "person", "org", "session", "run", "process",
+      "project", "input", "account", "asset", "assumption", "constraint",
+      "contradiction", "decision", "location", "synthesis", "view", "dashboard"
+    ]
+  },
+  "key_decisions": [
+    {
+      "decision": "Rename task → triage",
+      "rationale": "Current 'task' is a passive triage request. Real tasks are execution units. Clean semantic split.",
+      "alternatives_considered": ["review", "intake", "pending"],
+      "chosen": "triage"
+    },
+    {
+      "decision": "Skills are vault content, not code",
+      "rationale": "NTP-OS pattern — skills teach methodology, data carries specifics. Editable in Obsidian, no deployment needed.",
+      "alternatives_considered": ["Hardcoded prompts", "JSON config files"],
+      "chosen": "Markdown files in vault skill/ folder"
+    },
+    {
+      "decision": "Task Runner as separate Temporal workflow",
+      "rationale": "Clean separation from EventProcessor. Different concerns: EP classifies, TR executes. Different failure modes and timeouts.",
+      "alternatives_considered": ["Inline execution in EventProcessor", "Standalone cron"],
+      "chosen": "Separate Temporal workflow on 2-min schedule"
+    },
+    {
+      "decision": "Tiered execution (1/2/3)",
+      "rationale": "NTP-OS pattern — match AI capability to work complexity. Tier 1 is cheap/fast, Tier 3 is expensive/powerful. Avoids burning expensive models on simple tasks.",
+      "alternatives_considered": ["Single tier", "Model-per-task"],
+      "chosen": "3 tiers with configurable model per tier"
+    },
+    {
+      "decision": "Propagation deferred to Phase 6",
+      "rationale": "Core execution loop (phases 1-5) must be stable before adding cascading effects. Propagation without guardrails can create runaway task loops.",
+      "alternatives_considered": ["Build propagation first"],
+      "chosen": "Defer until phases 1-5 proven"
+    }
+  ],
+  "metrics": {
+    "total_items": 37,
+    "completed": 0,
+    "pending": 37,
+    "deferred": 4,
+    "total_estimate_hours": 20.5,
+    "phases_count": 6
+  }
+}
