@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "openrouter/google/gemini-2.0-flash-exp:free"
+        "primary": "openrouter/meta-llama/llama-3.3-70b-instruct:free"
       },
       "heartbeat": {
         "every": "4h",
@@ -16,45 +16,45 @@
         }
       },
       "subagents": {
-        "model": "openrouter/google/gemini-2.0-flash-exp:free"
+        "model": "openrouter/meta-llama/llama-3.3-70b-instruct:free"
       }
     },
     "list": [
       {
         "id": "main",
         "name": "Alfred",
-        "model": "openrouter/google/gemini-2.0-flash-exp:free",
+        "model": "openrouter/meta-llama/llama-3.3-70b-instruct:free",
         "workspace": "/home/node/.openclaw/workspace",
         "subagents": { "allowAgents": ["*"] }
       },
       {
         "id": "learn-clerk",
         "name": "Learn Clerk",
-        "model": "openrouter/google/gemini-2.0-flash-exp:free",
+        "model": "openrouter/meta-llama/llama-3.3-70b-instruct:free",
         "workspace": "/home/node/.openclaw/workspace"
       },
       {
         "id": "vault-curator",
         "name": "Vault Curator",
-        "model": "openrouter/google/gemini-2.0-flash-exp:free",
+        "model": "openrouter/meta-llama/llama-3.3-70b-instruct:free",
         "workspace": "/home/node/.openclaw/workspace"
       },
       {
         "id": "vault-distiller",
         "name": "Vault Distiller",
-        "model": "openrouter/google/gemini-2.0-flash-exp:free",
+        "model": "openrouter/meta-llama/llama-3.3-70b-instruct:free",
         "workspace": "/home/node/.openclaw/workspace"
       },
       {
         "id": "vault-janitor",
         "name": "Vault Janitor",
-        "model": "openrouter/google/gemini-2.0-flash-exp:free",
+        "model": "openrouter/meta-llama/llama-3.3-70b-instruct:free",
         "workspace": "/home/node/.openclaw/workspace"
       },
       {
         "id": "vault-surveyor",
         "name": "Vault Surveyor",
-        "model": "openrouter/google/gemini-2.0-flash-exp:free",
+        "model": "openrouter/meta-llama/llama-3.3-70b-instruct:free",
         "workspace": "/home/node/.openclaw/workspace"
       }
     ]
