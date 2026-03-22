@@ -41,6 +41,11 @@ INTERVAL_SCHEDULES = [
         "workflow": "JudgmentWorkflow",
         "interval": timedelta(minutes=2),
     },
+    {
+        "id": "al-task-runner",
+        "workflow": "TaskRunnerWorkflow",
+        "interval": timedelta(minutes=2),
+    },
 ]
 
 CALENDAR_SCHEDULES = [

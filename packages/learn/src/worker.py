@@ -18,6 +18,7 @@ from src.workflows.learning import LearningWorkflow
 from src.workflows.reflection import ReflectionWorkflow
 from src.workflows.judgment import JudgmentWorkflow
 from src.workflows.media_ingestion import MediaIngestionWorkflow
+from src.workflows.task_runner import TaskRunnerWorkflow
 
 # Activities — clerk
 from src.activities.clerk import (
@@ -107,6 +108,18 @@ from src.activities.judge import (
 # Activities — braindump
 from src.activities.braindump import detect_braindump, extract_braindump
 
+# Activities — tasks
+from src.activities.tasks import (
+    assemble_task_context,
+    check_task_prerequisites,
+    complete_task,
+    execute_task,
+    fetch_queued_tasks,
+    propagate_task_completion,
+    update_task_status,
+    write_task_artifacts,
+)
+
 # Activities — media
 from src.activities.media import (
     detect_file_type,
@@ -130,6 +143,7 @@ ALL_WORKFLOWS = [
     ReflectionWorkflow,
     JudgmentWorkflow,
     MediaIngestionWorkflow,
+    TaskRunnerWorkflow,
 ]
 
 ALL_ACTIVITIES = [
@@ -197,6 +211,15 @@ ALL_ACTIVITIES = [
     fetch_unrouted_inputs,
     load_intuition_index,
     score_instincts,
+    # Tasks
+    assemble_task_context,
+    check_task_prerequisites,
+    complete_task,
+    execute_task,
+    fetch_queued_tasks,
+    propagate_task_completion,
+    update_task_status,
+    write_task_artifacts,
     # Braindump
     detect_braindump,
     extract_braindump,
