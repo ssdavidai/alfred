@@ -21,15 +21,58 @@ from src.utils.vault_client import VaultClient
 
 @activity.defn
 async def fetch_queued_tasks() -> list[dict[str, Any]]:
-    """Fetch vault tasks with status=queued and owner=alfred."""
+    """Fetch vault tasks with status=queued.
+
+    Reads each task's full content to get frontmatter fields (owner, tier, etc.)
+    then filters to AI-owned tasks only.
+    """
     config = load_config()
     client = VaultClient(config)
     try:
-        tasks = await client.list_records("task", status="queued")
-        # Filter to AI-owned tasks only
-        return [t for t in tasks if t.get("owner", "").lower() in ("alfred", "ai")]
+        task_stubs = await client.list_records("task", status="queued")
+        tasks = []
+        for stub in task_stubs:
+            path = stub.get("path", "")
+            if not path:
+                continue
+            # Read full record to get all frontmatter fields
+            full = await client.read_record(path)
+            content = full.get("content", "")
+            if content:
+                fm = _parse_frontmatter(content)
+                fm["path"] = path
+                fm["body"] = _extract_body(content)
+                owner = fm.get("owner", "").lower().strip('"').strip("'")
+                if owner in ("alfred", "ai", "learn-clerk"):
+                    tasks.append(fm)
+        return tasks
     finally:
         await client.close()
+
+
+def _parse_frontmatter(content: str) -> dict[str, Any]:
+    """Parse YAML frontmatter from markdown content."""
+    import yaml
+
+    if not content.startswith("---"):
+        return {}
+    parts = content.split("---", 2)
+    if len(parts) < 3:
+        return {}
+    try:
+        return yaml.safe_load(parts[1]) or {}
+    except Exception:
+        return {}
+
+
+def _extract_body(content: str) -> str:
+    """Extract body text after frontmatter."""
+    if not content.startswith("---"):
+        return content
+    parts = content.split("---", 2)
+    if len(parts) >= 3:
+        return parts[2].strip()
+    return ""
 
 
 @activity.defn
@@ -52,7 +95,10 @@ async def check_task_prerequisites(task: dict[str, Any]) -> bool:
             pass
 
     # Check requires_approval
-    if task.get("requires_approval") and not task.get("approved"):
+    req_approval = task.get("requires_approval", False)
+    if isinstance(req_approval, str):
+        req_approval = req_approval.lower() not in ("false", "no", "0", "")
+    if req_approval and not task.get("approved"):
         return False
 
     # Check depends_on
