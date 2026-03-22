@@ -72,6 +72,16 @@ async def attempt_judgment(
                         "best_score": best.score,
                         "best_instinct": best.instinct.get("name", ""),
                     }
+
+                # Check for execution block — create task if present
+                task_path = None
+                execution = best.instinct.get("execution", {})
+                if execution.get("enabled"):
+                    task_path = await _create_execution_task(
+                        client, event, metadata, classification,
+                        best.instinct, execution, best.score,
+                    )
+
                 return {
                     "routed": True,
                     "destination": destination,
@@ -79,6 +89,7 @@ async def attempt_judgment(
                     "instinct": best.instinct.get("name", ""),
                     "curator_processed": curator_result.get("processed", False),
                     "note_path": curator_result.get("note_path"),
+                    "task_created": task_path,
                 }
 
         return {
@@ -235,3 +246,91 @@ async def _execute_route_inline(
             return result
         except Exception:
             return {"processed": False, "error": str(exc)}
+
+
+async def _create_execution_task(
+    client: VaultClient,
+    event: dict[str, Any],
+    metadata: dict[str, Any],
+    classification: dict[str, Any],
+    instinct: dict[str, Any],
+    execution: dict[str, Any],
+    score: float,
+) -> str | None:
+    """Create an execution task in the vault when an instinct has an execution block.
+
+    Applies discretion gate:
+    - New instincts (<10 observations) → requires_approval forced true
+    - Established (10-50 obs) → use instinct's requires_approval setting
+    - Mature (50+ obs, score >0.75) → requires_approval defaults false
+
+    Returns the created task path, or None on failure.
+    """
+    from datetime import datetime, timezone
+
+    from src.activities.vault import slugify, vault_record_path
+
+    now = datetime.now(timezone.utc)
+    obs_count = instinct.get("observation_count", 0)
+    instinct_name = instinct.get("name", "unknown")
+
+    # Discretion gate
+    requires_approval = execution.get("requires_approval", True)
+    if obs_count < 10:
+        requires_approval = True  # Force for new instincts
+    elif obs_count >= 50 and score > 0.75:
+        requires_approval = execution.get("requires_approval", False)
+
+    # Build title from template or classification
+    title_template = execution.get("task_title_template", "{title}")
+    title = title_template.format(
+        title=classification.get("title", metadata.get("filename", "Untitled")),
+        type=classification.get("type", "unknown"),
+    )
+
+    tier = execution.get("tier", 2)
+    agent_id = execution.get("agent_id", "learn-clerk")
+    skill_entry = execution.get("skill_entry", "")
+    budget = execution.get("budget_turns", 25)
+
+    content = f"""---
+type: task
+status: queued
+title: "{title}"
+owner: "alfred"
+tier: {tier}
+agent_id: "{agent_id}"
+skill_entry: "{skill_entry}"
+budget_turns: {budget}
+requires_approval: {str(requires_approval).lower()}
+source_event: "{event.get('id', '')}"
+source_instinct: "{instinct.get('path', '')}"
+initiative: ""
+created: "{now.isoformat()}"
+created_by: judgment
+priority: medium
+tags: [auto-created]
+---
+
+# {title}
+
+Auto-created by judgment from instinct: {instinct_name}
+Confidence score: {score:.2f}
+Observation count: {obs_count}
+
+## Source
+- Event: {event.get('id', '')}
+- Classification: {classification.get('type', '')} — {classification.get('summary', '')}
+"""
+
+    try:
+        name = vault_record_path("task", slugify(title), now)
+        path = await client.write_record("task", name, content)
+        activity.logger.info(
+            "Created execution task: %s (approval=%s, tier=%d, instinct=%s)",
+            path, requires_approval, tier, instinct_name,
+        )
+        return path
+    except Exception as exc:
+        activity.logger.error("Failed to create execution task: %s", exc)
+        return None

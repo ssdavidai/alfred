@@ -123,7 +123,7 @@
     {
       "id": "phase-3",
       "name": "Task Execution Primitive",
-      "status": "pending",
+      "status": "done",
       "estimate_hours": 3.5,
       "description": "Introduce task as a proper execution unit \u2014 an atomic piece of work with owner, tier, skill reference, and lifecycle. Includes CRUD via ctrl-api.",
       "items": [
@@ -131,14 +131,14 @@
           "id": "3.1",
           "title": "Create new _templates/task.md with execution-primitive schema",
           "file": "alfred/vault-seed/_templates/task.md",
-          "status": "pending",
+          "status": "done",
           "repo": "alfred"
         },
         {
           "id": "3.2",
           "title": "Add task CRUD endpoints to ctrl-api",
           "file": "packages/ctrl/src/api/routes/tasks.ts",
-          "status": "pending",
+          "status": "done",
           "details": [
             "POST /api/v1/tasks \u2014 create a task",
             "GET /api/v1/tasks?status=queued&owner=alfred \u2014 query tasks",
@@ -150,48 +150,48 @@
           "id": "3.3",
           "title": "Add task (new meaning) to VALID_VAULT_TYPES",
           "file": "packages/learn/src/validators/schema.py",
-          "status": "pending"
+          "status": "done"
         },
         {
           "id": "3.4",
           "title": "Implement fetch_queued_tasks activity",
           "file": "packages/learn/src/activities/tasks.py",
-          "status": "pending",
+          "status": "done",
           "description": "Query vault via ctrl-api for type:task, status:queued, owner:alfred"
         },
         {
           "id": "3.5",
           "title": "Implement check_task_prerequisites activity",
           "file": "packages/learn/src/activities/tasks.py",
-          "status": "pending",
+          "status": "done",
           "description": "Check depends_on (all done?), run_after (past?), requires_approval (approved?)"
         },
         {
           "id": "3.6",
           "title": "Implement update_task_status activity",
           "file": "packages/learn/src/activities/tasks.py",
-          "status": "pending",
+          "status": "done",
           "description": "PATCH task frontmatter status field via ctrl-api"
         },
         {
           "id": "3.7",
           "title": "Implement assemble_task_context activity",
           "file": "packages/learn/src/activities/tasks.py",
-          "status": "pending",
+          "status": "done",
           "description": "Read skill file + initiative + recent observations \u2192 build execution prompt"
         },
         {
           "id": "3.8",
           "title": "Implement execute_task activity",
           "file": "packages/learn/src/activities/tasks.py",
-          "status": "pending",
+          "status": "done",
           "description": "sessions_spawn with assembled prompt + poll sessions_history for result. Reuse _call_clerk pattern."
         },
         {
           "id": "3.9",
           "title": "Implement complete_task activity",
           "file": "packages/learn/src/activities/tasks.py",
-          "status": "pending",
+          "status": "done",
           "description": "Mark status=done, write outcome to task body, record execution metadata"
         },
         {
@@ -204,7 +204,7 @@
     {
       "id": "phase-4",
       "name": "Task Runner Workflow",
-      "status": "pending",
+      "status": "done",
       "estimate_hours": 3.5,
       "description": "Temporal workflow that polls for queued tasks and executes them. Runs every 2 minutes alongside EventProcessor.",
       "items": [
@@ -212,32 +212,32 @@
           "id": "4.1",
           "title": "Create TaskRunnerWorkflow",
           "file": "packages/learn/src/workflows/task_runner.py",
-          "status": "pending"
+          "status": "done"
         },
         {
           "id": "4.2",
           "title": "Register Temporal schedule (every 2 min)",
           "file": "packages/learn/scripts/register_schedules.py",
-          "status": "pending"
+          "status": "done"
         },
         {
           "id": "4.3",
           "title": "Add to worker.py ALL_WORKFLOWS and all new activities",
           "file": "packages/learn/src/worker.py",
-          "status": "pending"
+          "status": "done"
         },
         {
           "id": "4.4",
           "title": "Implement write_task_artifacts activity",
           "file": "packages/learn/src/activities/tasks.py",
-          "status": "pending",
+          "status": "done",
           "description": "Write any produced files to vault (artifacts, notes, etc.)"
         },
         {
           "id": "4.5",
           "title": "Implement propagate_task_completion activity",
           "file": "packages/learn/src/activities/tasks.py",
-          "status": "pending",
+          "status": "done",
           "description": "Determine if follow-up tasks needed based on skill graph and output"
         },
         {
@@ -255,7 +255,7 @@
     {
       "id": "phase-5",
       "name": "Instinct Execution Blocks",
-      "status": "pending",
+      "status": "done",
       "estimate_hours": 3.5,
       "description": "Extend instincts with execution blocks so matched instincts can automatically create tasks. Includes discretion gate for new/uncertain instincts.",
       "items": [
@@ -263,28 +263,28 @@
           "id": "5.1",
           "title": "Extend instinct schema with execution block",
           "file": "packages/learn/src/validators/schema.py",
-          "status": "pending",
+          "status": "done",
           "description": "Add execution fields: enabled, tier, agent_id, skill_entry, budget_turns, requires_approval, task_title_template"
         },
         {
           "id": "5.2",
           "title": "Update attempt_judgment to create tasks when execution block present",
           "file": "packages/learn/src/activities/judge.py",
-          "status": "pending",
+          "status": "done",
           "description": "When instinct matches and has execution.enabled=true, create a task record in vault"
         },
         {
           "id": "5.3",
           "title": "Implement discretion gate (requires_approval logic)",
           "file": "packages/learn/src/activities/tasks.py",
-          "status": "pending",
+          "status": "done",
           "description": "New instincts (<10 obs) force approval. Mature instincts (50+ obs, >0.75 score) auto-execute."
         },
         {
           "id": "5.4",
           "title": "Update instinct template with execution block",
           "file": "alfred/vault-seed/_templates/instinct.md",
-          "status": "pending",
+          "status": "done",
           "repo": "alfred"
         },
         {
@@ -436,8 +436,8 @@
   ],
   "metrics": {
     "total_items": 37,
-    "completed": 13,
-    "pending": 28,
+    "completed": 31,
+    "pending": 10,
     "deferred": 4,
     "total_estimate_hours": 20.5,
     "phases_count": 6
