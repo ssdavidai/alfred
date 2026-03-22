@@ -965,21 +965,91 @@ export async function deployApi(
     0o644
   );
 
-  log("Restarting alfred-api service...");
-  await ssh.exec(
-    instance.ip_address,
-    sshKeyPath,
-    "sudo systemctl restart alfred-api"
-  );
+  // Check if tenant has the ctrl-api Docker service. If not, upgrade their
+  // compose file and migrate from systemd to Docker.
+  log("Checking for ctrl-api service...");
+  let hasCtrlApi = false;
+  try {
+    const composeCheck = await ssh.exec(
+      instance.ip_address,
+      sshKeyPath,
+      `grep -c "ctrl-api:" ${DEFAULTS.dockerComposeDir}/docker-compose.yaml`
+    );
+    hasCtrlApi = parseInt(composeCheck.stdout.trim(), 10) > 0;
+  } catch { /* grep returns 1 if no match */ }
 
-  log("Verifying service is active...");
-  const check = await ssh.exec(
-    instance.ip_address,
-    sshKeyPath,
-    "sleep 1 && systemctl is-active alfred-api"
-  );
-  if (check.stdout.trim() !== "active") {
-    throw new Error(`alfred-api not active: ${check.stdout.trim()} ${check.stderr.trim()}`);
+  if (!hasCtrlApi) {
+    log("Upgrading compose file to include ctrl-api service...");
+    const composeYaml = nunjucks.renderString(dockerComposeTemplate, {});
+    await ssh.upload(
+      instance.ip_address,
+      sshKeyPath,
+      composeYaml,
+      `${DEFAULTS.dockerComposeDir}/docker-compose.yaml`,
+      0o600
+    );
+
+    // Stop the systemd service (ctrl-api Docker service takes over)
+    log("Stopping systemd alfred-api...");
+    try {
+      await ssh.exec(instance.ip_address, sshKeyPath,
+        "sudo systemctl stop alfred-api 2>/dev/null; sudo systemctl disable alfred-api 2>/dev/null; true"
+      );
+    } catch { /* may not exist */ }
+
+    // Start the new ctrl-api + update alfred-learn CTRL_URL
+    log("Starting ctrl-api Docker service...");
+    await ssh.exec(
+      instance.ip_address,
+      sshKeyPath,
+      `cd ${DEFAULTS.dockerComposeDir} && docker compose up -d --remove-orphans`
+    );
+  } else {
+    // Restart the ctrl-api Docker service to pick up new api.mjs
+    log("Restarting ctrl-api...");
+    try {
+      await ssh.exec(
+        instance.ip_address,
+        sshKeyPath,
+        `cd ${DEFAULTS.dockerComposeDir} && docker compose restart ctrl-api`
+      );
+    } catch (dockerErr) {
+      // Fallback: start if not running
+      log(`Restart failed, trying up: ${dockerErr}`);
+      await ssh.exec(
+        instance.ip_address,
+        sshKeyPath,
+        `cd ${DEFAULTS.dockerComposeDir} && docker compose up -d ctrl-api`
+      );
+    }
+  }
+
+  // Verify API is responding
+  log("Verifying API...");
+  try {
+    const dockerCheck = await ssh.exec(
+      instance.ip_address,
+      sshKeyPath,
+      `sleep 3 && cd ${DEFAULTS.dockerComposeDir} && docker compose ps ctrl-api --format json | head -1`
+    );
+    const parsed = JSON.parse(dockerCheck.stdout.trim());
+    if (parsed.State !== "running") {
+      throw new Error(`ctrl-api container state: ${parsed.State}`);
+    }
+  } catch (verifyErr) {
+    // Last resort: try systemd
+    log(`Docker verification failed (${verifyErr}), trying systemd fallback...`);
+    try {
+      await ssh.exec(instance.ip_address, sshKeyPath, "sudo systemctl start alfred-api");
+      const check = await ssh.exec(instance.ip_address, sshKeyPath,
+        "sleep 1 && systemctl is-active alfred-api"
+      );
+      if (check.stdout.trim() !== "active") {
+        throw new Error(`systemd fallback also failed: ${check.stdout.trim()}`);
+      }
+    } catch (systemdErr) {
+      throw new Error(`API unhealthy — Docker and systemd fallback both failed: ${systemdErr}`);
+    }
   }
 
   insertEvent(instanceId, "api_deployed", "Tenant API updated");

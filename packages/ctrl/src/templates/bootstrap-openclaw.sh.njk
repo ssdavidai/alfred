@@ -91,6 +91,7 @@ echo "[bootstrap] Exposing Temporal UI via Tailscale (admin only)..."
 sudo tailscale serve --bg --https 8233 http://localhost:8233
 
 echo "[bootstrap] Exposing tenant API via Tailscale (admin + SaaS proxy)..."
+# ctrl-api Docker service listens on 127.0.0.1:3100 (port mapping).
 # Use tls-terminated-tcp so raw HTTP (including WebSocket upgrade headers) passes
 # through to the ctrl API. The --https mode acts as a Layer 7 reverse proxy that
 # strips Connection/Upgrade headers, breaking WebSocket.

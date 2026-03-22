@@ -211,13 +211,18 @@ runcmd:
   - chmod +x /opt/alfred/healthcheck.sh
   - chown deploy:deploy /opt/alfred/healthcheck.sh
 
-  # --- Alfred tenant API systemd service ---
+  # --- Alfred tenant API systemd service (legacy fallback) ---
+  # Primary API now runs as ctrl-api Docker service (same compose network
+  # as alfred-learn and alfred-worker). Systemd service kept as fallback
+  # for direct host access and existing tenant compatibility.
   - |
     cat > /etc/systemd/system/alfred-api.service << 'API_SVC'
     [Unit]
-    Description=Alfred Tenant API
+    Description=Alfred Tenant API (legacy fallback)
     After=docker.service alfred-luks.service
     Wants=docker.service
+    # Disabled by default on new provisions — ctrl-api Docker service is primary
+    ConditionPathExists=!/opt/alfred/compose/docker-compose.yaml
 
     [Service]
     Type=simple

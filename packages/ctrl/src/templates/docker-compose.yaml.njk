@@ -68,6 +68,8 @@ services:
     depends_on:
       openclaw:
         condition: service_healthy
+      ctrl-api:
+        condition: service_healthy
       init:
         condition: service_completed_successfully
     volumes:
@@ -76,6 +78,7 @@ services:
       - /mnt/encrypted/openclaw:/root/.openclaw
     environment:
       - OPENCLAW_GATEWAY_URL=ws://openclaw:18789
+      - ALFRED_CTRL_URL=http://ctrl-api:3100
     env_file:
       - .env
     entrypoint: ["bash", "-c", "rm -f /app/data/alfred.pid && set -a && [ -f /app/data/.env ] && source /app/data/.env; [ -f /app/data/.gateway-token ] && export OPENCLAW_GATEWAY_TOKEN=$(cat /app/data/.gateway-token); set +a && exec alfred --config /app/data/config.yaml up --foreground"]
@@ -88,6 +91,41 @@ services:
     mem_limit: 2g
     pids_limit: 256
 
+  ctrl-api:
+    image: node:22-slim
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - /opt/alfred/api.mjs:/app/api.mjs:ro
+      - /opt/alfred:/opt/alfred
+      - /mnt/encrypted/vault:/mnt/encrypted/vault
+      - /mnt/encrypted/alfred:/mnt/encrypted/alfred
+      - /mnt/encrypted/openclaw:/mnt/encrypted/openclaw
+      - /opt/alfred/compose:/opt/alfred/compose
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
+    working_dir: /opt/alfred/compose
+    command: ["node", "/app/api.mjs"]
+    env_file:
+      - .env
+    environment:
+      - AAS_HOST=0.0.0.0
+      - AAS_PORT=3100
+      - NODE_ENV=production
+    ports:
+      - "127.0.0.1:3100:3100"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3100/api/v1/learning/status',{headers:{Authorization:'Bearer '+(process.env.AAS_API_KEY||'')}}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    mem_limit: 512m
+    pids_limit: 64
+
   alfred-learn:
     image: ssdavidai00/alfred-learn:latest
     depends_on:
@@ -95,11 +133,11 @@ services:
         condition: service_healthy
       openclaw:
         condition: service_healthy
+      ctrl-api:
+        condition: service_healthy
     volumes:
       - /mnt/encrypted/vault:/vault
       - /mnt/encrypted/alfred:/alfred-data
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
       - TEMPORAL_HOST=temporal:7233
       - OPENCLAW_GATEWAY_URL=http://openclaw:18789
@@ -107,7 +145,7 @@ services:
       - VAULT_PATH=/vault
       - TASK_QUEUE=alfred-learn
       - ALFRED_LEARN_ENABLED=${ALFRED_LEARN_ENABLED:-true}
-      - ALFRED_CTRL_URL=http://host.docker.internal:3100
+      - ALFRED_CTRL_URL=http://ctrl-api:3100
     env_file:
       - .env
     restart: unless-stopped
