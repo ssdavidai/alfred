@@ -115,8 +115,9 @@ async def register_all() -> None:
             )
             logger.info("Created schedule: %s → %s", schedule_id, workflow_name)
         except Exception as e:
-            if "already exists" in str(e).lower():
-                logger.info("Schedule already exists: %s", schedule_id)
+            err = str(e).lower()
+            if "already" in err or "running" in err or "exists" in err:
+                logger.info("Schedule already exists: %s (skipping)", schedule_id)
             else:
                 logger.error("Failed to create schedule %s: %s", schedule_id, e)
                 raise
