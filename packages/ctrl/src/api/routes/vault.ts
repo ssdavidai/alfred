@@ -366,6 +366,19 @@ export function registerVaultRoutes(): void {
       throw new ValidationError("type and name are required");
     }
 
+    // If raw content is provided, write the file directly
+    if (typeof b.content === "string") {
+      const name = b.name as string;
+      // name may already include type prefix and .md extension
+      const filePath = name.endsWith(".md") ? name : `${b.type as string}/${name}.md`;
+      const fullPath = path.resolve(VAULT_PATH, filePath);
+      // Ensure parent directories exist
+      await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
+      await fs.promises.writeFile(fullPath, b.content, "utf-8");
+      sendJson(res, 201, { path: filePath });
+      return;
+    }
+
     const args = [...ALFRED_CMD, "vault", "create", b.type as string, b.name as string];
     if (b.fields && typeof b.fields === "object") {
       for (const [k, v] of Object.entries(b.fields as Record<string, string>)) {
