@@ -564,6 +564,20 @@ os.remove('/tmp/openclaw-tenant-config.json')
       await fs.writeFile(path.join(backupDir, "luks.key"), luksKey, {
         mode: 0o600,
       });
+      // Ensure deploy user can read backup files (provisioner runs as root
+      // in Docker, but aas CLI runs as deploy on the host)
+      const deployUid = process.env.DEPLOY_UID ?? "1000";
+      const deployGid = process.env.DEPLOY_GID ?? "1000";
+      try {
+        const { execFile: execFileCb } = await import("child_process");
+        const { promisify } = await import("util");
+        await promisify(execFileCb)("chown", ["-R", `${deployUid}:${deployGid}`, backupDir]);
+      } catch (chownErr: unknown) {
+        const msg = chownErr instanceof Error ? chownErr.message : String(chownErr);
+        if (!msg.includes("Operation not permitted")) {
+          log(`Warning: could not chown backup directory: ${msg}`);
+        }
+      }
       log("LUKS keyfile backed up locally");
     } catch (e) {
       log(`Warning: could not backup LUKS key: ${e}`);

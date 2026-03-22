@@ -104,5 +104,28 @@ echo "[bootstrap] Starting all services..."
 cd "${COMPOSE_DIR}"
 docker compose up -d
 
+# Verify dependent containers actually started (race condition: they may
+# stay in Created state if Docker healthcheck timing is off)
+echo "[bootstrap] Checking for containers stuck in Created state..."
+sleep 5
+CREATED=$(docker compose ps -a --format json | jq -r 'select(.State == "created") | .Service // .Name' 2>/dev/null | tr '\n' ' ')
+
+if [ -n "$CREATED" ]; then
+  echo "[bootstrap] WARNING: Containers stuck in Created state: ${CREATED}"
+  echo "[bootstrap] Retrying docker compose up -d..."
+  docker compose up -d
+  sleep 5
+  # Final check
+  STILL_CREATED=$(docker compose ps -a --format json | jq -r 'select(.State == "created") | .Service // .Name' 2>/dev/null | tr '\n' ' ')
+  if [ -n "$STILL_CREATED" ]; then
+    echo "[bootstrap] ERROR: Containers still not started after retry: ${STILL_CREATED}"
+    exit 1
+  else
+    echo "[bootstrap] All containers started after retry"
+  fi
+else
+  echo "[bootstrap] All containers started"
+fi
+
 echo "[bootstrap] Bootstrap complete!"
 echo "[bootstrap] Dashboard: https://${TS_HOSTNAME}"

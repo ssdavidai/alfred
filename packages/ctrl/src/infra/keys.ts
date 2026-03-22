@@ -33,6 +33,21 @@ export async function generateKeyPair(instanceId: number): Promise<KeyPair> {
     `alfred-ctrl-${instanceId}`,
   ]);
 
+  // Ensure the deploy user can read the keys (provisioner may run as root
+  // inside Docker, but the aas CLI runs as deploy on the host).
+  // Use numeric UID 1000 (standard first non-root user on Ubuntu/Debian VMs).
+  const deployUid = process.env.DEPLOY_UID ?? "1000";
+  const deployGid = process.env.DEPLOY_GID ?? "1000";
+  try {
+    await execFileAsync("chown", ["-R", `${deployUid}:${deployGid}`, keyDir]);
+  } catch (err: unknown) {
+    // Not running as root — keys are already owned by current user
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!msg.includes("Operation not permitted")) {
+      console.warn(`Warning: could not chown key directory: ${msg}`);
+    }
+  }
+
   const publicKey = await fs.readFile(publicKeyPath, "utf-8");
   return {
     publicKey: publicKey.trim(),
