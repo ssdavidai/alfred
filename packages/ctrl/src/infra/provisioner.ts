@@ -1074,9 +1074,13 @@ with open(p) as f: cfg = json.load(f)
 # Sync gateway token to shared file for alfred-learn
 t = cfg.get('gateway',{}).get('auth',{}).get('token','')
 if t: open('/mnt/encrypted/alfred/.gateway-token','w').write(t)
-# Ensure subagent spawning is allowed via /tools/invoke
-tools = cfg.setdefault('gateway',{}).setdefault('tools',{})
-tools.setdefault('subagents', {})['allowAgents'] = ['*']
+# Ensure subagent spawning is allowed (per-agent subagents.allowAgents)
+for agent in cfg.get('agents',{}).get('list',[]):
+    if agent.get('id') == 'main':
+        agent.setdefault('subagents', {})['allowAgents'] = ['*']
+# Remove invalid keys that crash OpenClaw
+cfg.get('gateway',{}).get('tools',{}).pop('subagents', None)
+cfg.get('agents',{}).get('defaults',{}).get('subagents',{}).pop('allowAgents', None)
 with open(p, 'w') as f: json.dump(cfg, f, indent=2)
 "`,
     );
