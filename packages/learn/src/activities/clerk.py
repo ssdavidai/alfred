@@ -455,39 +455,102 @@ Return JSON only:
 
 
 async def _call_clerk(prompt: str) -> dict[str, Any]:
-    """Call the LLM directly via OpenAI-compatible API.
+    """Spawn a Clerk subagent via OpenClaw sessions_spawn, poll for result.
 
-    Uses CLERK_BASE_URL (Ollama/vLLM) or falls back to OpenClaw chat completions.
+    The subagent has full tool access (read, pdf, exec, etc.) so it can
+    actually inspect files in the vault.  Uses sessions_history polling
+    with cleanup=keep so the response is available after completion.
     """
+    import asyncio
+
     config = load_config()
-    base_url = os.environ.get("CLERK_BASE_URL", "")
+    token = config.gateway_token()
+    base = config.openclaw_gateway_url
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    if base_url:
-        url = f"{base_url.rstrip('/')}/v1/chat/completions"
-        headers: dict[str, str] = {}
-    else:
-        url = f"{config.openclaw_gateway_url}/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {config.gateway_token()}"}
-
-    async with httpx.AsyncClient(timeout=280.0) as client:
-        resp = await client.post(
-            url,
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # 1. Spawn the clerk subagent
+        spawn_resp = await client.post(
+            f"{base}/tools/invoke",
             headers=headers,
             json={
-                "model": config.clerk_model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
+                "tool": "sessions_spawn",
+                "args": {
+                    "task": prompt,
+                    "agentId": config.clerk_agent_id,
+                    "mode": "run",
+                    "cleanup": "keep",
+                    "runTimeoutSeconds": 240,
+                },
             },
         )
-        resp.raise_for_status()
-        data = resp.json()
+        spawn_resp.raise_for_status()
+        spawn_data = spawn_resp.json()
 
-    content = ""
-    choices = data.get("choices", [])
-    if choices:
-        content = choices[0].get("message", {}).get("content", "")
+        # Extract session key
+        result = spawn_data.get("result", {})
+        content_list = result.get("content", [])
+        session_key = None
+        for item in content_list:
+            if isinstance(item, dict) and item.get("type") == "text":
+                try:
+                    inner = json.loads(item["text"])
+                    session_key = inner.get("childSessionKey")
+                except (json.JSONDecodeError, KeyError):
+                    pass
 
-    return _extract_json(content)
+        if not session_key:
+            raise ValueError(f"Could not get session key from spawn: {spawn_data}")
+
+    # 2. Poll sessions_history until assistant response appears
+    # Use a fresh client with longer timeout for polling phase
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for attempt in range(28):  # 28 × 10s = 280s max
+            await asyncio.sleep(10)
+            try:
+                hist_resp = await client.post(
+                    f"{base}/tools/invoke",
+                    headers=headers,
+                    json={
+                        "tool": "sessions_history",
+                        "args": {
+                            "sessionKey": session_key,
+                            "limit": 5,
+                        },
+                    },
+                )
+                if hist_resp.status_code != 200:
+                    continue
+                hist_data = hist_resp.json()
+            except Exception:
+                continue
+
+            # Navigate to messages array
+            hist_result = hist_data.get("result", {})
+            hist_content = hist_result.get("content", [])
+            messages = []
+            for item in hist_content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    try:
+                        parsed = json.loads(item["text"])
+                        messages = parsed.get("messages", [])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+            # Look for assistant response
+            for msg in messages:
+                if msg.get("role") == "assistant":
+                    # Extract text content from the message
+                    msg_content = msg.get("content", "")
+                    if isinstance(msg_content, list):
+                        # Content is array of parts
+                        for part in msg_content:
+                            if isinstance(part, dict) and part.get("type") == "text":
+                                return _extract_json(part["text"])
+                    elif isinstance(msg_content, str):
+                        return _extract_json(msg_content)
+
+    raise TimeoutError(f"Clerk subagent did not respond within 280s: {session_key}")
 
 
 def _extract_json(content: str) -> dict[str, Any]:
