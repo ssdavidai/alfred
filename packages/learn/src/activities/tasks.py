@@ -37,17 +37,42 @@ async def fetch_queued_tasks() -> list[dict[str, Any]]:
                 continue
             # Read full record to get all frontmatter fields
             full = await client.read_record(path)
-            content = full.get("content", "")
-            if content:
-                fm = _parse_frontmatter(content)
-                fm["path"] = path
-                fm["body"] = _extract_body(content)
-                owner = fm.get("owner", "").lower().strip('"').strip("'")
-                if owner in ("alfred", "ai", "learn-clerk"):
-                    tasks.append(fm)
+            # API returns {path, frontmatter: {...}, body: "..."}
+            fm = full.get("frontmatter", {})
+            if not fm:
+                # Fallback: try parsing raw content
+                content = full.get("content", "")
+                if content:
+                    fm = _parse_frontmatter(content)
+            fm["path"] = path
+            fm["body"] = full.get("body", "")
+            owner = str(fm.get("owner", "")).lower().strip('"').strip("'")
+            if owner in ("alfred", "ai", "learn-clerk"):
+                tasks.append(fm)
         return tasks
     finally:
         await client.close()
+
+
+def _reconstruct_markdown(record: dict[str, Any]) -> str:
+    """Reconstruct raw markdown from API response.
+
+    API returns {frontmatter: {...}, body: "..."} or {content: "..."}.
+    """
+    # Try raw content first
+    content = record.get("content", "")
+    if content and content.startswith("---"):
+        return content
+
+    # Reconstruct from frontmatter + body
+    fm = record.get("frontmatter", {})
+    body = record.get("body", "")
+    if fm:
+        import yaml
+        fm_str = yaml.dump(fm, default_flow_style=False, allow_unicode=True).strip()
+        return f"---\n{fm_str}\n---\n\n{body}"
+
+    return body or content
 
 
 def _parse_frontmatter(content: str) -> dict[str, Any]:
@@ -128,14 +153,13 @@ async def update_task_status(task: dict[str, Any], new_status: str) -> None:
             return
 
         existing = await client.read_record(path)
-        raw = existing.get("content", "")
+        raw = _reconstruct_markdown(existing)
         if not raw:
             return
 
-        # Update frontmatter
         from src.activities.vault import _apply_frontmatter_updates
         updated = _apply_frontmatter_updates(raw, {"status": new_status})
-        await client.update_record(path, updated)
+        await client.write_record("task", path, updated)
     finally:
         await client.close()
 
@@ -166,7 +190,7 @@ async def assemble_task_context(task: dict[str, Any]) -> str:
         if skill_entry:
             try:
                 skill = await client.read_record(skill_entry)
-                skill_content = skill.get("content", "")
+                skill_content = _reconstruct_markdown(skill)
                 if skill_content:
                     parts.append("## Skill Methodology")
                     parts.append(skill_content)
@@ -180,7 +204,7 @@ async def assemble_task_context(task: dict[str, Any]) -> str:
         if initiative:
             try:
                 init_data = await client.read_record(initiative)
-                init_content = init_data.get("content", "")
+                init_content = _reconstruct_markdown(init_data)
                 if init_content:
                     parts.append("## Initiative Context")
                     parts.append(init_content)
@@ -377,7 +401,7 @@ async def complete_task(task: dict[str, Any], result: dict[str, Any]) -> None:
             return
 
         existing = await client.read_record(path)
-        raw = existing.get("content", "")
+        raw = _reconstruct_markdown(existing)
         if not raw:
             return
 
@@ -399,7 +423,7 @@ async def complete_task(task: dict[str, Any], result: dict[str, Any]) -> None:
         outcome = f"\n\n---\n**Outcome ({now[:10]}):** {summary}\n"
         updated += outcome
 
-        await client.update_record(path, updated)
+        await client.write_record("task", path, updated)
     finally:
         await client.close()
 
