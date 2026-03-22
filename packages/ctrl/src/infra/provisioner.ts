@@ -511,7 +511,8 @@ os.remove('/tmp/openclaw-tenant-config.json')
       );
     }
 
-    // Extract gateway token from OpenClaw config
+    // Extract gateway token from OpenClaw config and write to shared .gateway-token file
+    // so alfred-learn (and other services) can authenticate with the gateway.
     try {
       const tokenResult = await ssh.exec(
         server.public_net.ipv4.ip,
@@ -523,6 +524,14 @@ os.remove('/tmp/openclaw-tenant-config.json')
       const gatewayToken = tokenResult.stdout.trim();
       if (gatewayToken) {
         updateInstance(instance.id, { gateway_token: gatewayToken });
+        // Write gateway token to shared file for alfred-learn / worker access
+        await ssh.exec(
+          server.public_net.ipv4.ip,
+          keyPair.privateKeyPath,
+          `printf '%s' '${gatewayToken}' > /mnt/encrypted/alfred/.gateway-token && chmod 644 /mnt/encrypted/alfred/.gateway-token`,
+          undefined,
+          hostKeyOpts,
+        );
         const hostname = tsHostname ?? instance.ip_address;
         log(`Gateway URL: https://${hostname}/?token=${gatewayToken}`);
       }
@@ -1050,6 +1059,19 @@ export async function deployApi(
     } catch (systemdErr) {
       throw new Error(`API unhealthy — Docker and systemd fallback both failed: ${systemdErr}`);
     }
+  }
+
+  // Sync gateway token: ensure .gateway-token matches OpenClaw config
+  // so alfred-learn can authenticate with the gateway
+  log("Syncing gateway token...");
+  try {
+    await ssh.exec(
+      instance.ip_address,
+      sshKeyPath,
+      `python3 -c "import json; t=json.load(open('/mnt/encrypted/openclaw/openclaw.json'))['gateway']['auth']['token']; open('/mnt/encrypted/alfred/.gateway-token','w').write(t)"`,
+    );
+  } catch (tokenErr) {
+    log(`Warning: could not sync gateway token: ${tokenErr}`);
   }
 
   insertEvent(instanceId, "api_deployed", "Tenant API updated");
