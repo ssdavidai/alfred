@@ -27,11 +27,16 @@ async def clerk_classify(event: dict[str, Any], metadata: dict[str, Any]) -> dic
     file_path = raw.get("path", "") or metadata.get("original_path", "")
     file_instruction = ""
     if file_path:
-        # Resolve to absolute vault path for the Clerk subagent
-        abs_path = file_path if file_path.startswith("/") else f"/vault/{file_path}"
+        # OpenClaw mounts vault at workspace/vault — resolve relative paths there
+        rel_path = file_path.lstrip("/")
+        if rel_path.startswith("vault/"):
+            rel_path = rel_path[len("vault/"):]
+        # Provide both possible paths so the Clerk can find the file
         file_instruction = f"""
-FILE PATH: {abs_path}
-IMPORTANT: Read the file at the path above to analyze its full content. Use the read tool (or pdf tool for PDFs) to access it. Do NOT rely solely on the metadata below — the file itself is the primary source."""
+FILE PATH (try in order):
+1. vault/{rel_path}
+2. {rel_path}
+IMPORTANT: Read the file at one of these paths to analyze its full content. Use the read tool for text files, or the pdf tool for PDFs. Do NOT rely solely on the metadata below — the file itself is the primary source of truth."""
 
     prompt = f"""You are a butler's clerk. Analyze this raw event from the {source} stream.
 

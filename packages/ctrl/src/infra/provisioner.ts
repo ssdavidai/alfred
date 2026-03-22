@@ -1061,17 +1061,27 @@ export async function deployApi(
     }
   }
 
-  // Sync gateway token: ensure .gateway-token matches OpenClaw config
-  // so alfred-learn can authenticate with the gateway
-  log("Syncing gateway token...");
+  // Sync gateway config: token + subagent permissions
+  log("Syncing gateway config...");
   try {
     await ssh.exec(
       instance.ip_address,
       sshKeyPath,
-      `python3 -c "import json; t=json.load(open('/mnt/encrypted/openclaw/openclaw.json'))['gateway']['auth']['token']; open('/mnt/encrypted/alfred/.gateway-token','w').write(t)"`,
+      `python3 -c "
+import json
+p = '/mnt/encrypted/openclaw/openclaw.json'
+with open(p) as f: cfg = json.load(f)
+# Sync gateway token to shared file for alfred-learn
+t = cfg.get('gateway',{}).get('auth',{}).get('token','')
+if t: open('/mnt/encrypted/alfred/.gateway-token','w').write(t)
+# Ensure subagent spawning is allowed via /tools/invoke
+tools = cfg.setdefault('gateway',{}).setdefault('tools',{})
+tools.setdefault('subagents', {})['allowAgents'] = ['*']
+with open(p, 'w') as f: json.dump(cfg, f, indent=2)
+"`,
     );
-  } catch (tokenErr) {
-    log(`Warning: could not sync gateway token: ${tokenErr}`);
+  } catch (syncErr) {
+    log(`Warning: could not sync gateway config: ${syncErr}`);
   }
 
   insertEvent(instanceId, "api_deployed", "Tenant API updated");
