@@ -465,7 +465,10 @@ async def _call_clerk(prompt: str) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
             f"{config.openclaw_gateway_url}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "x-openclaw-agent-id": config.clerk_agent_id,
+            },
             json={
                 "model": config.clerk_model,
                 "messages": [{"role": "user", "content": prompt}],
