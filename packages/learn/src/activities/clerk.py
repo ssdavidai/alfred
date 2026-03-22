@@ -19,8 +19,19 @@ from src.config import load_config
 async def clerk_classify(event: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
     """Ask the Clerk to classify a stream event."""
     source = event.get("stream_type", "unknown")
-    raw_content = json.dumps(event.get("raw", {}), indent=2)
+    raw = event.get("raw", {})
+    raw_content = json.dumps(raw, indent=2)
     summary = event.get("summary", "")
+
+    # Build file access instructions if a vault path is available
+    file_path = raw.get("path", "") or metadata.get("original_path", "")
+    file_instruction = ""
+    if file_path:
+        # Resolve to absolute vault path for the Clerk subagent
+        abs_path = file_path if file_path.startswith("/") else f"/vault/{file_path}"
+        file_instruction = f"""
+FILE PATH: {abs_path}
+IMPORTANT: Read the file at the path above to analyze its full content. Use the read tool (or pdf tool for PDFs) to access it. Do NOT rely solely on the metadata below — the file itself is the primary source."""
 
     prompt = f"""You are a butler's clerk. Analyze this raw event from the {source} stream.
 
@@ -45,6 +56,7 @@ Return JSON only:
   "tags": ["..."],
   "summary": "One sentence summary"
 }}
+{file_instruction}
 
 METADATA:
 {json.dumps(metadata, indent=2)}
