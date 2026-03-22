@@ -1,6 +1,6 @@
 ---
 name: alfred-inbox
-description: "Buffers OpenClaw chat messages and flushes conversations to the vault inbox for curator processing"
+description: "Buffers OpenClaw chat messages and flushes conversations as stream events for the alfred-learn pipeline"
 homepage: https://alfred.black
 metadata:
   {
@@ -19,16 +19,19 @@ metadata:
 # Alfred Inbox Hook
 
 Captures user and assistant messages from the `main` agent and writes
-batched conversation transcripts to the vault inbox directory.
+batched conversation transcripts as stream events to the
+`system-openclaw-sessions` stream.
+
+The EventProcessor → Judgment → Curator pipeline then classifies, routes,
+and structures these conversations into vault records automatically.
 
 ## Flush strategy
 
 - After **10 conversation turns** (user + assistant pairs), OR
 - After **5 minutes of silence** since the last message
 
-Each flush writes the full buffered conversation as a Markdown file with
-YAML frontmatter. The curator then processes it into a vault conversation
-record.
+Each flush writes a stream event containing the buffered messages.
+The alfred-learn pipeline processes it into structured vault records.
 
 ## Configuration
 

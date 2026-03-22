@@ -1,12 +1,16 @@
 /**
- * alfred-inbox hook — buffers chat messages and flushes to vault inbox.
+ * alfred-inbox hook — buffers chat messages and flushes as stream events.
+ *
+ * Conversations are written to the system-openclaw-sessions stream.
+ * The EventProcessor → Judgment → Curator pipeline handles classification,
+ * routing, and structured record creation.
  *
  * Flush triggers:
  *   1. 10 conversation turns (configurable via flushTurns)
  *   2. 5 minutes idle since last message (configurable via flushIdleMs)
  */
 
-import { writeFileSync, appendFileSync, mkdirSync, existsSync } from "node:fs";
+import { appendFileSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -44,57 +48,23 @@ function clearSession(sessionKey) {
   sessions.delete(sessionKey);
 }
 
-function buildMarkdown(session, sessionKey) {
-  const msgs = session.messages;
-  if (msgs.length === 0) return null;
-
-  const firstUserMsg = msgs.find((m) => m.role === "user");
-  const preview = firstUserMsg
-    ? firstUserMsg.content.slice(0, 60).replace(/[\r\n]+/g, " ")
-    : "chat";
-  const ts = new Date().toISOString();
-  const lines = msgs.map((m) => {
-    const label = m.role === "user" ? "User" : "Assistant";
-    return `**${label}:**\n${m.content}\n`;
-  });
-
-  const frontmatter = [
-    "---",
-    `title: 'OpenClaw Chat — ${preview.replace(/'/g, "''")}'`,
-    `source: openclaw`,
-    `session_key: ${sessionKey}`,
-    `harvested_at: ${ts}`,
-    `message_count: ${msgs.length}`,
-    "---",
-    "",
-  ].join("\n");
-
-  return frontmatter + lines.join("\n---\n\n");
-}
-
 function flush(sessionKey, workspaceDir) {
   const session = sessions.get(sessionKey);
   if (!session || session.messages.length === 0) return;
 
-  const md = buildMarkdown(session, sessionKey);
-  if (!md) return;
-
-  const inboxDir = join(workspaceDir, "vault", "inbox");
-  if (!existsSync(inboxDir)) {
-    mkdirSync(inboxDir, { recursive: true });
-  }
-
-  const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  const safeKey = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const filename = `openclaw-chat-${safeKey}-${ts}.md`;
-
-  writeFileSync(join(inboxDir, filename), md, "utf-8");
-
-  // Also append a StreamEvent to the system-openclaw-sessions stream
+  // Append a StreamEvent to the system-openclaw-sessions stream.
+  // The EventProcessor → Judgment → Curator pipeline handles classification,
+  // routing, and structured record creation. No direct inbox write needed.
   const streamsDir = join(workspaceDir, "..", "alfred", "streams");
   if (!existsSync(streamsDir)) {
     mkdirSync(streamsDir, { recursive: true });
   }
+
+  const firstUserMsg = session.messages.find((m) => m.role === "user");
+  const preview = firstUserMsg
+    ? firstUserMsg.content.slice(0, 60).replace(/[\r\n]+/g, " ")
+    : "chat";
+
   const streamEvent = {
     id: randomUUID(),
     stream_id: "system-openclaw-sessions",
@@ -106,7 +76,7 @@ function flush(sessionKey, workspaceDir) {
       messages: session.messages,
       turns: session.turns,
     },
-    summary: `Chat session \u2014 ${session.turns} turns`,
+    summary: `Chat session — ${session.turns} turns: ${preview}`,
   };
   const streamPath = join(streamsDir, "system-openclaw-sessions.jsonl");
   appendFileSync(streamPath, JSON.stringify(streamEvent) + "\n", "utf-8");

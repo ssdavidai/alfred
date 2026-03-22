@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, ConflictError, NotFoundError } from "../errors.js";
 
 const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
+const VAULT_PATH = "/mnt/encrypted/vault";
 const PROCESSED_EVENTS_PATH = path.join(STREAMS_DIR, "processed-events.json");
 
 // Ensure streams directory exists
@@ -52,6 +54,17 @@ const SYSTEM_STREAMS: StreamMeta[] = [
     name: "OpenClaw Chats",
     type: "system",
     source: "openclaw-sessions",
+    enabled: true,
+    status: "idle",
+    last_event_at: null,
+    event_count: 0,
+    system: true,
+  },
+  {
+    id: "system-inbox",
+    name: "Inbox Uploads",
+    type: "system",
+    source: "inbox",
     enabled: true,
     status: "idle",
     last_event_at: null,
@@ -198,6 +211,131 @@ export function registerStreamRoutes(): void {
     }
   }
   if (changed) saveStreamsMeta(streams);
+
+  // ---------------------------------------------------------------------------
+  // Inbox → Stream bridge
+  // ---------------------------------------------------------------------------
+
+  // POST /api/v1/streams/inbox/scan — scan inbox for new files and ingest them as stream events
+  addRoute("POST", "/api/v1/streams/inbox/scan", async ({ res }) => {
+    const inboxDir = path.join(VAULT_PATH, "inbox");
+    const skipNames = new Set([".DS_Store", ".gitkeep", "Thumbs.db", ".gitignore"]);
+
+    let files: string[];
+    try {
+      files = fs.readdirSync(inboxDir).filter((f) => {
+        if (f.startsWith(".") || skipNames.has(f)) return false;
+        const full = path.join(inboxDir, f);
+        try { return fs.statSync(full).isFile(); } catch { return false; }
+      });
+    } catch {
+      files = [];
+    }
+
+    // Build set of existing source_refs in one pass (avoid O(files × events))
+    const existingRefs = new Set<string>();
+    const streamPath = getStreamEventsPath("system-inbox");
+    try {
+      const content = fs.readFileSync(streamPath, "utf-8");
+      for (const line of content.trim().split("\n")) {
+        if (!line) continue;
+        try {
+          const evt = JSON.parse(line);
+          if (evt.source_ref) existingRefs.add(evt.source_ref);
+        } catch { /* skip malformed lines */ }
+      }
+    } catch { /* stream file may not exist yet */ }
+
+    const ingested: Array<{ filename: string; event_id: string }> = [];
+    const skipped: Array<{ filename: string; reason: string }> = [];
+
+    const MAX_PREVIEW_BYTES = 4096; // only read first 4KB for preview/frontmatter
+
+    for (const filename of files) {
+      const fullPath = path.join(inboxDir, filename);
+
+      // Check if this file was already ingested (by source_ref)
+      const sourceRef = `inbox:${filename}`;
+      if (existingRefs.has(sourceRef)) {
+        skipped.push({ filename, reason: "already_ingested" });
+        continue;
+      }
+
+      // Read only the first bytes for preview — avoid loading large/binary files fully
+      let preview = "";
+      let fileSize = 0;
+      let isText = filename.endsWith(".md") || filename.endsWith(".txt") || filename.endsWith(".yaml") || filename.endsWith(".yml") || filename.endsWith(".json");
+      try {
+        const stat = fs.statSync(fullPath);
+        fileSize = stat.size;
+        if (isText || fileSize < 100_000) {
+          // For text files or small files, read a preview chunk
+          const fd = fs.openSync(fullPath, "r");
+          const buf = Buffer.alloc(Math.min(MAX_PREVIEW_BYTES, fileSize));
+          fs.readSync(fd, buf, 0, buf.length, 0);
+          fs.closeSync(fd);
+          preview = buf.toString("utf-8");
+        }
+      } catch {
+        skipped.push({ filename, reason: "unreadable" });
+        continue;
+      }
+
+      // Parse frontmatter if present (handle both LF and CRLF)
+      let summary = `Inbox file: ${filename}`;
+      if (preview) {
+        const fmMatch = preview.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+        if (fmMatch) {
+          const titleMatch = fmMatch[1].match(/^(?:title|name|subject)\s*:\s*['"]?(.+?)['"]?\s*$/m);
+          if (titleMatch) {
+            summary = titleMatch[1];
+          }
+        }
+      }
+
+      // Create stream event
+      const stat = fs.statSync(fullPath);
+      const event: StreamEvent = {
+        id: crypto.randomUUID(),
+        stream_id: "system-inbox",
+        stream_type: "inbox-upload",
+        received_at: stat.mtime.toISOString(),
+        source_ref: sourceRef,
+        raw: {
+          filename,
+          path: path.join("inbox", filename),
+          content_preview: preview.slice(0, 2000),
+          content_length: fileSize,
+          mime_type: isText ? "text/markdown" : "application/octet-stream",
+        },
+        summary,
+        metadata: {
+          original_path: path.join("inbox", filename),
+        },
+      };
+
+      appendEvent("system-inbox", event);
+      existingRefs.add(sourceRef); // track within this scan too
+      ingested.push({ filename, event_id: event.id });
+    }
+
+    // Update stream meta
+    if (ingested.length > 0) {
+      const meta = loadStreamsMeta();
+      const idx = meta.findIndex((s) => s.id === "system-inbox");
+      if (idx >= 0) {
+        meta[idx].last_event_at = new Date().toISOString();
+        meta[idx].event_count = (meta[idx].event_count || 0) + ingested.length;
+        saveStreamsMeta(meta);
+      }
+    }
+
+    sendJson(res, 200, {
+      ingested: ingested.length,
+      skipped: skipped.length,
+      details: { ingested, skipped },
+    });
+  });
 
   // POST /api/v1/streams/system/openclaw-sessions/report — harvest activity reports stats
   addRoute("POST", "/api/v1/streams/system/openclaw-sessions/report", async ({ res, body }) => {

@@ -1,6 +1,41 @@
+import http from "node:http";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { dockerExec, dockerComposeCmd, ALFRED_CMD } from "../helpers.js";
+
+/**
+ * Trigger inbox → stream scan before Curator processing.
+ * This ensures inbox files are ingested as stream events so alfred-learn
+ * can classify, route, and learn from them.
+ */
+async function bridgeInboxToStreams(): Promise<void> {
+  const hostname = process.env.AAS_HOST ?? "localhost";
+  const portEnv = process.env.AAS_PORT;
+  const port = portEnv !== undefined ? Number.parseInt(portEnv, 10) : 3100;
+  const effectivePort = Number.isNaN(port) ? 3100 : port;
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (process.env.AAS_API_KEY) {
+    headers.Authorization = `Bearer ${process.env.AAS_API_KEY}`;
+  }
+
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        hostname,
+        port: effectivePort,
+        path: "/api/v1/streams/inbox/scan",
+        method: "POST",
+        headers,
+        timeout: 10000,
+      },
+      () => resolve(),
+    );
+    req.on("error", () => resolve()); // best-effort, don't block processing
+    req.on("timeout", () => { req.destroy(); resolve(); });
+    req.end();
+  });
+}
 
 export function registerWorkerRoutes(): void {
   // Overall daemon status
@@ -43,8 +78,11 @@ export function registerWorkerRoutes(): void {
     }
   });
 
-  // Process inbox
+  // Process inbox — bridge to streams first so alfred-learn sees the files
   addRoute("POST", "/api/v1/workers/process", async ({ res, body }) => {
+    // Bridge inbox files to the system-inbox stream (best-effort)
+    await bridgeInboxToStreams();
+
     const b = body as Record<string, unknown> | undefined;
     const args = [...ALFRED_CMD, "process"];
     if (b?.limit) args.push("--limit", String(b.limit));
