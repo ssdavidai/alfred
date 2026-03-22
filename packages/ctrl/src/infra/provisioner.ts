@@ -1076,11 +1076,24 @@ t = cfg.get('gateway',{}).get('auth',{}).get('token','')
 if t: open('/mnt/encrypted/alfred/.gateway-token','w').write(t)
 # Ensure subagent spawning is allowed (per-agent subagents.allowAgents)
 for agent in cfg.get('agents',{}).get('list',[]):
-    if agent.get('id') == 'main':
-        agent.setdefault('subagents', {})['allowAgents'] = ['*']
+    sa = agent.setdefault('subagents', {})
+    sa['allowAgents'] = ['*']
 # Remove invalid keys that crash OpenClaw
 cfg.get('gateway',{}).get('tools',{}).pop('subagents', None)
 cfg.get('agents',{}).get('defaults',{}).get('subagents',{}).pop('allowAgents', None)
+# Ensure gateway tools allow list includes session tools
+gt = cfg.setdefault('gateway',{}).setdefault('tools',{})
+required = ['sessions_send','sessions_spawn','sessions_history','sessions_list']
+allow = gt.get('allow',[])
+for t in required:
+    if t not in allow: allow.append(t)
+gt['allow'] = allow
+# Ensure cross-agent session visibility (required for Clerk polling)
+tools = cfg.setdefault('tools', {})
+tools.setdefault('sessions', {})['visibility'] = 'all'
+a2a = tools.setdefault('agentToAgent', {})
+a2a['enabled'] = True
+a2a.setdefault('allow', ['*'])
 with open(p, 'w') as f: json.dump(cfg, f, indent=2)
 "`,
     );

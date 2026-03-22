@@ -30,9 +30,8 @@ class Config:
     # Tenant timezone (IANA, e.g. "America/New_York") — used by daily schedules
     tenant_timezone: str = field(default_factory=lambda: os.environ.get("TENANT_TIMEZONE", "UTC"))
 
-    # Clerk agent
+    # Clerk agent (model comes from OpenClaw agent config, not env)
     clerk_agent_id: str = field(default_factory=lambda: os.environ.get("CLERK_AGENT_ID", "learn-clerk"))
-    clerk_model: str = field(default_factory=lambda: os.environ.get("CLERK_MODEL", "dgx-spark/qwen3.5:35b"))
 
     # Processing limits
     max_events_per_run: int = 20
