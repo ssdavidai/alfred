@@ -12,7 +12,7 @@ export const DEFAULTS = {
   cloudflaredDir: "/etc/cloudflared",
   sshUser: "deploy",
   cloudflareDomain: "alfred.black",
-  cloudInitTimeout: 300_000, // 5 minutes
+  cloudInitTimeout: 600_000, // 10 minutes
   healthInterval: 60_000, // 1 minute
 } as const;
 
