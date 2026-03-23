@@ -123,7 +123,10 @@ export function registerTerminalStatusRoute(app: Application): void {
 
       // Test 3: WebSocket connection attempt
       try {
-        const wsUrl = `wss://${hostname}:3100/terminal`;
+        const wsBase = instance.subdomainUrl
+          ? instance.subdomainUrl.replace(/\/$/, "").replace(/^https:/, "wss:").replace(/^http:/, "ws:")
+          : `wss://${hostname}:3100`;
+        const wsUrl = `${wsBase}/terminal`;
         const wsResult = await new Promise<Record<string, unknown>>((resolve) => {
           const timer = setTimeout(() => {
             testWs.close();
@@ -215,7 +218,12 @@ export function attachTerminalProxy(server: HttpServer): void {
       }
 
       const tenantApiKey = decryptApiKey(instance.apiKey);
-      const upstreamUrl = `wss://${instance.tailscaleHostname}:3100/terminal`;
+      // Route through Cloudflare tunnel (subdomainUrl) since the Wasp
+      // container runs on a Docker bridge network without Tailscale access.
+      const baseUrl = instance.subdomainUrl
+        ? instance.subdomainUrl.replace(/\/$/, "").replace(/^https:/, "wss:").replace(/^http:/, "ws:")
+        : `wss://${instance.tailscaleHostname}:3100`;
+      const upstreamUrl = `${baseUrl}/terminal`;
 
       console.log("[terminal-proxy] connecting upstream to", instance.tailscaleHostname);
 
