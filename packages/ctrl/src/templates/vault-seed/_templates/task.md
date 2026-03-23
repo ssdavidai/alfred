@@ -8,7 +8,7 @@ agent_id: "learn-clerk"
 skill_entry: "" # vault path to skill file
 budget_turns: 25
 requires_approval: false
-initiative: "" # link to project/initiative
+matter: "" # link to matter (ongoing concern grouping related work)
 source_event: ""
 source_instinct: ""
 depends_on: []

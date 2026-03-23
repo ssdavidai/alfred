@@ -305,7 +305,7 @@ budget_turns: {budget}
 requires_approval: {str(requires_approval).lower()}
 source_event: "{event.get('id', '')}"
 source_instinct: "{instinct.get('path', '')}"
-initiative: ""
+matter: ""
 created: "{now.isoformat()}"
 created_by: judgment
 priority: medium

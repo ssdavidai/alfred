@@ -19,9 +19,9 @@ with workflow.unsafe.imports_passed_through():
         assemble_task_context,
         check_task_prerequisites,
         complete_task,
+        evaluate_consequentials,
         execute_task,
         fetch_queued_tasks,
-        propagate_task_completion,
         update_task_status,
         write_task_artifacts,
     )
@@ -105,11 +105,11 @@ class TaskRunnerWorkflow:
                     start_to_close_timeout=timedelta(seconds=30),
                 )
 
-                # 8. Propagate — create follow-up tasks
+                # 8. Evaluate consequentials — ledger entry, matter resolution, follow-up errands
                 follow_up_paths: list[str] = await workflow.execute_activity(
-                    propagate_task_completion,
+                    evaluate_consequentials,
                     args=[task, exec_result],
-                    start_to_close_timeout=timedelta(seconds=60),
+                    start_to_close_timeout=timedelta(seconds=120),
                 )
 
                 result.created_follow_ups += len(follow_up_paths)

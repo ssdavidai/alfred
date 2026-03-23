@@ -306,30 +306,30 @@
     },
     {
       "id": "phase-6",
-      "name": "Propagation (Future)",
-      "status": "deferred",
+      "name": "Consequentials",
+      "status": "done",
       "estimate_hours": 5,
-      "description": "When tasks complete, determine what else needs to change. Never does work directly \u2014 only creates more tasks. Deferred until phases 1-5 are stable.",
+      "description": "When tasks complete, evaluate consequentials: write ledger entries, check matter resolution, LLM-evaluate follow-up errands. Never does work directly — only records and creates more tasks.",
       "items": [
         {
           "id": "6.1",
-          "title": "Design propagation rules (what triggers what)",
-          "status": "pending"
+          "title": "Add matter + ledger_entry vault types to schema, ctrl-api, provisioner",
+          "status": "done"
         },
         {
           "id": "6.2",
-          "title": "Implement PropagationWorkflow",
-          "status": "pending"
+          "title": "Rename initiative → matter across task activities and judgment",
+          "status": "done"
         },
         {
           "id": "6.3",
-          "title": "Task completion triggers: situation updates, parent rollup, follow-up tasks",
-          "status": "pending"
+          "title": "Implement write_ledger_entry activity (completion records)",
+          "status": "done"
         },
         {
           "id": "6.4",
-          "title": "Skill graph guides propagation decisions",
-          "status": "pending"
+          "title": "Expand propagate_task_completion → evaluate_consequentials",
+          "status": "done"
         }
       ]
     }

@@ -16,6 +16,7 @@ const KNOWN_TYPES = [
   "session", "decision",
   "assumption", "constraint", "contradiction", "synthesis",
   "observation", "instinct",
+  "matter", "ledger_entry",
 ];
 
 const STATUS_BY_TYPE: Record<string, string[]> = {
@@ -39,6 +40,8 @@ const STATUS_BY_TYPE: Record<string, string[]> = {
   synthesis: ["draft", "active", "superseded"],
   observation: ["unprocessed", "processed", "invalid"],
   instinct: ["active", "proposed", "deprecated", "merged"],
+  matter: ["active", "resolved", "abandoned"],
+  ledger_entry: ["active"],
 };
 
 const TYPE_DIRECTORY: Record<string, string> = {
@@ -61,6 +64,8 @@ const TYPE_DIRECTORY: Record<string, string> = {
   synthesis: "synthesis",
   observation: "observation",
   instinct: "intuition/instincts",
+  matter: "matter",
+  ledger_entry: "ledger_entry",
 };
 
 const LIST_FIELDS = [

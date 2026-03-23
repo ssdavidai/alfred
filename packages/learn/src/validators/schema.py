@@ -14,7 +14,7 @@ VALID_VAULT_TYPES = frozenset({
     "triage", "task", "skill", "event", "note", "conversation", "braindump",
     "session", "person", "org", "place",
     "observation", "instinct", "reflection", "index",
-    "input",
+    "input", "matter", "ledger_entry",
 })
 
 # Valid observation statuses

@@ -113,10 +113,11 @@ from src.activities.tasks import (
     assemble_task_context,
     check_task_prerequisites,
     complete_task,
+    evaluate_consequentials,
     execute_task,
     fetch_queued_tasks,
-    propagate_task_completion,
     update_task_status,
+    write_ledger_entry,
     write_task_artifacts,
 )
 
@@ -215,10 +216,11 @@ ALL_ACTIVITIES = [
     assemble_task_context,
     check_task_prerequisites,
     complete_task,
+    evaluate_consequentials,
     execute_task,
     fetch_queued_tasks,
-    propagate_task_completion,
     update_task_status,
+    write_ledger_entry,
     write_task_artifacts,
     # Braindump
     detect_braindump,

@@ -36,6 +36,8 @@ import vaultSkillPreferenceOwner from "../templates/vault-seed/skill/preference-
 import vaultTemplateTriage from "../templates/vault-seed/_templates/triage.md";
 import vaultTemplateTask from "../templates/vault-seed/_templates/task.md";
 import vaultTemplateSkill from "../templates/vault-seed/_templates/skill.md";
+import vaultTemplateMatter from "../templates/vault-seed/_templates/matter.md";
+import vaultTemplateLedgerEntry from "../templates/vault-seed/_templates/ledger_entry.md";
 import workspaceAgents from "../templates/workspace/AGENTS.md";
 import workspaceSoul from "../templates/workspace/SOUL.md";
 import workspaceMemory from "../templates/workspace/MEMORY.md";
@@ -396,7 +398,7 @@ export async function provision(
     await ssh.exec(
       server.public_net.ipv4.ip,
       keyPair.privateKeyPath,
-      `mkdir -p ${vaultPath}/skill ${vaultPath}/triage ${vaultPath}/task ${vaultPath}/_templates`,
+      `mkdir -p ${vaultPath}/skill ${vaultPath}/triage ${vaultPath}/task ${vaultPath}/matter ${vaultPath}/ledger_entry ${vaultPath}/_templates`,
       undefined,
       hostKeyOpts,
     );
@@ -415,8 +417,10 @@ export async function provision(
       ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultTemplateTriage, `${vaultPath}/_templates/triage.md`, 0o644, undefined, hostKeyOpts),
       ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultTemplateTask, `${vaultPath}/_templates/task.md`, 0o644, undefined, hostKeyOpts),
       ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultTemplateSkill, `${vaultPath}/_templates/skill.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultTemplateMatter, `${vaultPath}/_templates/matter.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, vaultTemplateLedgerEntry, `${vaultPath}/_templates/ledger_entry.md`, 0o644, undefined, hostKeyOpts),
     ]);
-    log("Vault seed complete: 7 skills, 3 templates, 3 directories");
+    log("Vault seed complete: 7 skills, 5 templates, 5 directories");
 
     // Upload alfred-inbox hook for OpenClaw (captures chat sessions → vault inbox)
     log("Uploading alfred-inbox hook...");

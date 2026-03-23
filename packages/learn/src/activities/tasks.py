@@ -199,15 +199,15 @@ async def assemble_task_context(task: dict[str, Any]) -> str:
                 parts.append(f"## Skill: {skill_entry} (not found)")
                 parts.append("")
 
-        # 3. Initiative/project context
-        initiative = task.get("initiative", "")
-        if initiative:
+        # 3. Matter context (ongoing concern grouping related work)
+        matter = task.get("matter", task.get("initiative", ""))
+        if matter:
             try:
-                init_data = await client.read_record(initiative)
-                init_content = _reconstruct_markdown(init_data)
-                if init_content:
-                    parts.append("## Initiative Context")
-                    parts.append(init_content)
+                matter_data = await client.read_record(matter)
+                matter_content = _reconstruct_markdown(matter_data)
+                if matter_content:
+                    parts.append("## Matter Context")
+                    parts.append(matter_content)
                     parts.append("")
             except Exception:
                 pass
@@ -428,18 +428,81 @@ async def complete_task(task: dict[str, Any], result: dict[str, Any]) -> None:
         await client.close()
 
 
+def _sanitize_yaml_scalar(value: str) -> str:
+    """Escape a string for safe use inside a quoted YAML scalar.
+
+    Replaces double quotes and newlines so interpolation into
+    frontmatter like  title: "{value}"  won't break YAML parsing.
+    """
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", " ")
+        .replace("\r", "")
+    )
+
+
 @activity.defn
-async def propagate_task_completion(
+async def write_ledger_entry(
+    task: dict[str, Any], result: dict[str, Any]
+) -> str:
+    """Write a ledger entry to vault recording task completion.
+
+    Ledger entries are the completion record — what was done, by whom,
+    and what it affected.
+
+    Returns the created ledger entry path.
+    """
+    config = load_config()
+    client = VaultClient(config)
+    try:
+        from src.activities.vault import vault_record_path, slugify
+
+        now = datetime.now(timezone.utc)
+        title = _sanitize_yaml_scalar(
+            task.get("title", task.get("name", "Untitled Task"))
+        )
+        matter = task.get("matter", task.get("initiative", ""))
+        summary = _sanitize_yaml_scalar(result.get("summary", "No summary"))
+
+        content = f"""---
+type: ledger_entry
+title: "Completed: {title}"
+source_task: "{task.get('path', '')}"
+matter: "{matter}"
+summary: "{summary}"
+entities_affected: []
+created: "{now.isoformat()}"
+tags: [consequential]
+---
+
+# Completed: {title}
+
+{summary}
+"""
+        name = vault_record_path("ledger_entry", slugify(f"completed-{title}"), now)
+        path = await client.write_record("ledger_entry", name, content)
+        return path
+    finally:
+        await client.close()
+
+
+@activity.defn
+async def evaluate_consequentials(
     task: dict[str, Any], result: dict[str, Any]
 ) -> list[str]:
-    """Create follow-up tasks from task execution results.
+    """Evaluate what follows from task completion.
+
+    Performs three consequential checks:
+    a) Write a ledger entry recording the completion
+    b) Check if the task's matter is fully resolved (all tasks done)
+    c) Use LLM to evaluate whether follow-up errands are needed
+       (only if result doesn't already include follow_up_tasks)
+    d) Create any follow-up tasks with matter linked to parent
 
     Returns list of created task paths.
     """
-    follow_ups = result.get("follow_up_tasks", [])
-    if not follow_ups:
-        return []
-
     config = load_config()
     client = VaultClient(config)
     created_paths: list[str] = []
@@ -447,37 +510,258 @@ async def propagate_task_completion(
         from src.activities.vault import vault_record_path, slugify
 
         now = datetime.now(timezone.utc)
+        matter = task.get("matter", task.get("initiative", ""))
+
+        # (a) Write ledger entry via dedicated activity (single source of truth)
+        await write_ledger_entry(task, result)
+
+        # (b) Check if matter is fully resolved
+        if matter:
+            try:
+                # Use explicit high limit to avoid missing sibling tasks
+                # due to the default pagination limit (100).
+                matter_tasks = await client.list_records("task", limit=1000)
+                all_done = True
+                for mt in matter_tasks:
+                    mt_path = mt.get("path", "")
+                    if mt_path == task.get("path", ""):
+                        continue  # skip the task we just completed
+                    # Use frontmatter from listing stub if available
+                    # to avoid N+1 read_record calls.
+                    mt_fm = mt.get("frontmatter")
+                    if mt_fm is None:
+                        mt_full = await client.read_record(mt_path)
+                        mt_fm = mt_full.get("frontmatter", {})
+                    mt_matter = mt_fm.get("matter", mt_fm.get("initiative", ""))
+                    if mt_matter == matter:
+                        mt_status = str(mt_fm.get("status", ""))
+                        if mt_status not in ("done", "cancelled"):
+                            all_done = False
+                            break
+                if all_done:
+                    # Update matter status to resolved
+                    matter_rec = await client.read_record(matter)
+                    raw = _reconstruct_markdown(matter_rec)
+                    if raw:
+                        from src.activities.vault import _apply_frontmatter_updates
+                        updated = _apply_frontmatter_updates(
+                            raw, {"status": "resolved"}
+                        )
+                        # Extract type from matter path
+                        matter_type = matter.split("/")[0] if "/" in matter else "matter"
+                        await client.write_record(matter_type, matter, updated)
+                        activity.logger.info(
+                            "Matter resolved — all tasks done: %s", matter
+                        )
+            except Exception as exc:
+                activity.logger.warning(
+                    "Failed to check matter resolution: %s", exc
+                )
+
+        # (c) LLM evaluation for follow-up errands (only if none provided)
+        follow_ups = result.get("follow_up_tasks", [])
+        if not follow_ups:
+            try:
+                follow_ups = await _llm_evaluate_consequentials(
+                    config, task, result
+                )
+            except Exception as exc:
+                activity.logger.warning(
+                    "LLM consequentials evaluation failed: %s", exc
+                )
+
+        # (d) Create follow-up tasks (errands) with matter linked
         for fu in follow_ups:
-            title = fu.get("title", "Follow-up")
-            owner = fu.get("owner", "human")
+            fu_title = _sanitize_yaml_scalar(fu.get("title", "Follow-up"))
+            owner = _sanitize_yaml_scalar(fu.get("owner", "human"))
             reason = fu.get("reason", "")
 
             content = f"""---
 type: task
 status: queued
-title: "{title}"
+title: "{fu_title}"
 owner: "{owner}"
 tier: 2
 source_task: "{task.get('path', '')}"
+matter: "{matter}"
 created: "{now.isoformat()}"
-created_by: propagation
+created_by: consequential
 priority: medium
 tags: [follow-up]
 ---
 
-# {title}
+# {fu_title}
 
 {reason}
 
-Created by propagation from: [[{task.get('path', '')}]]
+Created as consequential errand from: [[{task.get('path', '')}]]
 """
-            name = vault_record_path("task", slugify(title), now)
+            name = vault_record_path("task", slugify(fu_title), now)
             path = await client.write_record("task", name, content)
             created_paths.append(path)
 
         return created_paths
     finally:
         await client.close()
+
+
+async def _llm_evaluate_consequentials(
+    config: Any,
+    task: dict[str, Any],
+    result: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Ask the LLM whether follow-up errands are needed after task completion.
+
+    Uses OpenClaw sessions_spawn in run mode with a short timeout.
+    Returns a list of follow-up task dicts or empty list.
+    """
+    token = config.gateway_token()
+    base = config.openclaw_gateway_url
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    title = task.get("title", task.get("name", "Untitled"))
+    summary = result.get("summary", "")
+    output = result.get("output", "")
+    skill_entry = task.get("skill_entry", "")
+
+    prompt = f"""A task has just been completed. Evaluate whether consequential errands need attention.
+
+## Completed Task
+- Title: {title}
+- Skill: {skill_entry or "none"}
+- Summary: {summary}
+
+## Execution Result
+{output[:2000]}
+
+## Question
+Based on this completed work, are there consequential errands that need attention?
+Consider: follow-up communications, status updates, dependent work, verification steps.
+Only suggest errands that are genuinely necessary — do not create busywork.
+
+Return ONLY a JSON object:
+{{"follow_up_tasks": [{{"title": "...", "owner": "alfred|human", "reason": "..."}}]}}
+
+If no follow-ups are needed, return: {{"follow_up_tasks": []}}"""
+
+    async with httpx.AsyncClient(timeout=30.0) as http_client:
+        spawn_resp = await http_client.post(
+            f"{base}/tools/invoke",
+            headers=headers,
+            json={
+                "tool": "sessions_spawn",
+                "args": {
+                    "task": prompt,
+                    "agentId": config.clerk_agent_id,
+                    "mode": "run",
+                    "cleanup": "keep",
+                    "sandbox": "inherit",
+                    "runTimeoutSeconds": 60,
+                },
+            },
+        )
+        spawn_resp.raise_for_status()
+        spawn_data = spawn_resp.json()
+
+        # Extract session key
+        content_list = spawn_data.get("result", {}).get("content", [])
+        session_key = None
+        for item in content_list:
+            if isinstance(item, dict) and item.get("type") == "text":
+                try:
+                    inner = json.loads(item["text"])
+                    session_key = inner.get("childSessionKey")
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+        if not session_key:
+            return []
+
+    # Poll for result (shorter timeout for consequentials evaluation)
+    async with httpx.AsyncClient(timeout=15.0) as http_client:
+        for _ in range(12):
+            await asyncio.sleep(5)
+            try:
+                hist_resp = await http_client.post(
+                    f"{base}/tools/invoke",
+                    headers=headers,
+                    json={
+                        "tool": "sessions_history",
+                        "args": {"sessionKey": session_key, "limit": 5},
+                    },
+                )
+                if hist_resp.status_code != 200:
+                    continue
+                hist_data = hist_resp.json()
+            except Exception:
+                continue
+
+            hist_content = hist_data.get("result", {}).get("content", [])
+            for item in hist_content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    try:
+                        parsed = json.loads(item["text"])
+                        messages = parsed.get("messages", [])
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                    for msg in messages:
+                        if msg.get("role") != "assistant":
+                            continue
+                        msg_content = msg.get("content", "")
+                        text = ""
+                        if isinstance(msg_content, list):
+                            for part in msg_content:
+                                if isinstance(part, dict) and part.get("type") == "text":
+                                    text = part["text"]
+                                    break
+                        elif isinstance(msg_content, str):
+                            text = msg_content
+
+                        if text:
+                            extracted = _extract_follow_ups(text)
+                            if extracted is not None:
+                                return extracted
+
+    return []
+
+
+def _extract_follow_ups(text: str) -> list[dict[str, Any]] | None:
+    """Extract follow_up_tasks from LLM response text."""
+    # Try direct JSON parse
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict) and "follow_up_tasks" in data:
+            return data["follow_up_tasks"]
+    except json.JSONDecodeError:
+        pass
+
+    # Try extracting JSON from markdown fences
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        try:
+            data = json.loads("\n".join(lines))
+            if isinstance(data, dict) and "follow_up_tasks" in data:
+                return data["follow_up_tasks"]
+        except json.JSONDecodeError:
+            pass
+
+    # Try finding JSON in text
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            data = json.loads(text[start : end + 1])
+            if isinstance(data, dict) and "follow_up_tasks" in data:
+                return data["follow_up_tasks"]
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 def _extract_task_result(text: str, task_title: str) -> dict[str, Any]:

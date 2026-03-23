@@ -499,13 +499,15 @@ vault/
 - [ ] 5.6 E2E test: inbox file → classify → match instinct → create task → execute → artifact
 - [ ] 5.7 Deploy + verify
 
-### Phase 6: Propagation (Future)
-**Estimated effort:** 4-6 hours (deferred)
+### Phase 6: Consequentials
+**Estimated effort:** 4-6 hours (done)
 
-- [ ] 6.1 Design propagation rules (what triggers what)
-- [ ] 6.2 Implement `PropagationWorkflow`
-- [ ] 6.3 Task completion triggers: situation updates, parent rollup, follow-up tasks
-- [ ] 6.4 Skill graph guides propagation decisions
+- [x] 6.1 Add matter + ledger_entry vault types to schema, ctrl-api, provisioner
+- [x] 6.2 Rename initiative → matter across task activities and judgment
+- [x] 6.3 Implement write_ledger_entry activity (completion records)
+- [x] 6.4 Expand propagate_task_completion → evaluate_consequentials (ledger entry, matter resolution, LLM-driven follow-up errands)
+- [x] 6.5 Update TaskRunnerWorkflow to use evaluate_consequentials (120s timeout)
+- [x] 6.6 Create vault templates for matter.md and ledger_entry.md
 
 ---
 
