@@ -3,5 +3,8 @@ credentials-file: /etc/cloudflared/credentials.json
 
 ingress:
   - hostname: {{ subdomain }}.{{ domain }}
+    path: /api/v1/*
+    service: http://localhost:3100
+  - hostname: {{ subdomain }}.{{ domain }}
     service: http://localhost:18789
   - service: http_status:404

@@ -35,7 +35,12 @@ export async function proxyToTenant(
   }
 
   const apiKey = decryptApiKey(instance.apiKey);
-  const url = buildUrl(instance.tailscaleHostname, options.path, options.query);
+  // Route through Cloudflare tunnel (subdomainUrl) since the Wasp
+  // container runs on a Docker bridge network without Tailscale access.
+  // The CF tunnel routes /api/v1/* to ctrl-api on port 3100.
+  const url = instance.subdomainUrl
+    ? buildSubdomainUrl(instance.subdomainUrl, options.path, options.query)
+    : buildUrl(instance.tailscaleHostname, options.path, options.query);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs || TENANT_API_TIMEOUT);
@@ -87,6 +92,18 @@ function buildUrl(
   query?: Record<string, string>,
 ): string {
   const base = `https://${hostname}:3100${path}`;
+  if (!query || Object.keys(query).length === 0) return base;
+  const params = new URLSearchParams(query);
+  return `${base}?${params.toString()}`;
+}
+
+function buildSubdomainUrl(
+  subdomainUrl: string,
+  path: string,
+  query?: Record<string, string>,
+): string {
+  // Route through Cloudflare tunnel: https://tenant.alfred.black/api/v1/...
+  const base = `${subdomainUrl.replace(/\/$/, "")}${path}`;
   if (!query || Object.keys(query).length === 0) return base;
   const params = new URLSearchParams(query);
   return `${base}?${params.toString()}`;
