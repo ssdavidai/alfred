@@ -16,6 +16,11 @@ export function createInstance(
   location: string
 ): Instance {
   const db = getDb();
+  // Remove any previously destroyed instance with the same name
+  // (Hetzner reuses names across provision/destroy cycles).
+  db.prepare(
+    `DELETE FROM instances WHERE customer_name = ? AND status = 'destroyed'`
+  ).run(customer_name);
   const stmt = db.prepare(
     `INSERT INTO instances (customer_name, server_type, location)
      VALUES (?, ?, ?)
