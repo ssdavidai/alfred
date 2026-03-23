@@ -509,6 +509,35 @@ os.remove('/tmp/openclaw-tenant-config.json')
     );
     log("OpenClaw configured");
 
+    // --- Pre-deploy tenant API (must exist before bootstrap starts ctrl-api) ---
+    {
+      const preApiMjsPath = path.join(process.cwd(), "dist", "api.mjs");
+      const preApiKey = crypto.randomBytes(32).toString("hex");
+      try {
+        log("Pre-deploying api.mjs for ctrl-api...");
+        await ssh.upload(
+          server.public_net.ipv4.ip,
+          keyPair.privateKeyPath,
+          (await fs.readFile(preApiMjsPath, "utf-8")),
+          `${DEFAULTS.alfredBasePath}/api.mjs`,
+          0o644,
+          undefined,
+          hostKeyOpts,
+        );
+        await ssh.exec(
+          server.public_net.ipv4.ip,
+          keyPair.privateKeyPath,
+          `echo 'AAS_API_KEY=${preApiKey}' >> ${DEFAULTS.dockerComposeDir}/.env`,
+          undefined,
+          hostKeyOpts,
+        );
+        updateInstance(instance.id, { api_key: preApiKey });
+        log("api.mjs + AAS_API_KEY ready");
+      } catch (e) {
+        log(`Warning: pre-deploy api.mjs failed: ${e}`);
+      }
+    }
+
     // --- Bootstrap OpenClaw + Tailscale ---
     setStep("bootstrap_openclaw");
     updateInstance(instance.id, { status: "bootstrapping" });
@@ -779,45 +808,22 @@ os.remove('/tmp/openclaw-tenant-config.json')
       log("Skipping Cloudflare Tunnel setup (not configured)");
     }
 
-    // --- Deploy tenant API ---
+    // --- Finalize tenant API (already pre-deployed before bootstrap) ---
     setStep("deploy_api");
-    log("Deploying tenant API...");
-    const apiKey = crypto.randomBytes(32).toString("hex");
-    const apiMjsPath = path.join(process.cwd(), "dist", "api.mjs");
+    log("Finalizing tenant API...");
     try {
-      await ssh.upload(
-        server.public_net.ipv4.ip,
-        keyPair.privateKeyPath,
-        (await fs.readFile(apiMjsPath, "utf-8")),
-        `${DEFAULTS.alfredBasePath}/api.mjs`,
-        0o644,
-        undefined,
-        hostKeyOpts,
-      );
-
-      // Append API key to .env
+      // Restart ctrl-api to pick up any post-bootstrap config changes
       await ssh.exec(
         server.public_net.ipv4.ip,
         keyPair.privateKeyPath,
-        `echo 'AAS_API_KEY=${apiKey}' >> ${DEFAULTS.dockerComposeDir}/.env`,
+        `cd ${DEFAULTS.dockerComposeDir} && docker compose restart ctrl-api 2>/dev/null || true`,
         undefined,
         hostKeyOpts,
       );
-
-      // Enable and start the API service
-      await ssh.exec(
-        server.public_net.ipv4.ip,
-        keyPair.privateKeyPath,
-        "sudo systemctl enable --now alfred-api.service",
-        undefined,
-        hostKeyOpts,
-      );
-
-      updateInstance(instance.id, { api_key: apiKey });
       insertEvent(instance.id, "api_deployed", "Tenant API deployed");
-      log("Tenant API deployed and running");
+      log("Tenant API finalized");
     } catch (e) {
-      log(`Warning: tenant API deployment failed: ${e}`);
+      log(`Warning: tenant API finalization failed: ${e}`);
     }
 
     // --- Health check ---
