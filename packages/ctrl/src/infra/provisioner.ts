@@ -359,6 +359,14 @@ export async function provision(
       undefined,
       hostKeyOpts,
     );
+    // Ensure OpenClaw workspace directory exists (init container may not create it)
+    await ssh.exec(
+      server.public_net.ipv4.ip,
+      keyPair.privateKeyPath,
+      `mkdir -p /mnt/encrypted/openclaw/workspace`,
+      undefined,
+      hostKeyOpts,
+    );
     // Upload workflow authoring skill to OpenClaw workspace
     log("Uploading workflow-author skill...");
     await ssh.upload(
