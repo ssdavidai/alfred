@@ -194,12 +194,16 @@ export const deleteUserById: DeleteUserById<DeleteUserByIdInput, void> = async (
     throw new HttpError(400, "You cannot delete your own account");
   }
 
-  // Delete related records in FK order, then the user
+  // Delete related records in FK order, then the user.
+  // Every table with a userId FK must be cleared here.
   await prisma.$transaction([
+    prisma.streamEvent.deleteMany({ where: { userId: id } }),
+    prisma.stream.deleteMany({ where: { userId: id } }),
     context.entities.ApiKey.deleteMany({ where: { userId: id } }),
     context.entities.ContactFormMessage.deleteMany({ where: { userId: id } }),
     context.entities.ProvisioningJob.deleteMany({ where: { userId: id } }),
     context.entities.Instance.deleteMany({ where: { userId: id } }),
+    prisma.auth.deleteMany({ where: { userId: id } }),
     context.entities.User.delete({ where: { id } }),
   ]);
 };

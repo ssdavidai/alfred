@@ -23,6 +23,20 @@ export const getProvisioningStatus: GetProvisioningStatus<
     orderBy: { createdAt: "desc" },
   });
 
+  // Reconcile: if the instance is gone but the job still says "running",
+  // the provisioner was interrupted (e.g. container restart). Report as failed
+  // so the UI doesn't show a forever-spinning progress bar.
+  let jobStatus = job?.status ?? null;
+  let jobError = job?.error ?? null;
+  if (
+    job &&
+    job.status === "running" &&
+    (!instance || instance.status === "destroyed" || instance.status === "error")
+  ) {
+    jobStatus = "failed";
+    jobError = job.error || "Provisioning was interrupted — please retry";
+  }
+
   return {
     instance: instance
       ? {
@@ -35,10 +49,10 @@ export const getProvisioningStatus: GetProvisioningStatus<
     job: job
       ? {
           id: job.id,
-          status: job.status,
+          status: jobStatus,
           currentStep: job.currentStep,
           logs: job.logs,
-          error: job.error,
+          error: jobError,
           startedAt: job.startedAt?.toISOString() ?? null,
           completedAt: job.completedAt?.toISOString() ?? null,
         }
@@ -69,8 +83,23 @@ export const reprovisionInstance: ReprovisionInstance<
     where: { userId: user.id },
   });
 
-  if (!instance || !["destroyed", "error"].includes(instance.status)) {
+  if (
+    !instance ||
+    !["destroyed", "error", "provisioning"].includes(instance.status)
+  ) {
     throw new HttpError(400, "No failed instance to reprovision");
+  }
+
+  // If instance is "provisioning", only allow reprovision if the job is
+  // actually dead (failed/completed, or "running" with no active process —
+  // the worker's orphan recovery will have marked it failed by now).
+  if (instance.status === "provisioning") {
+    const activeJob = await context.entities.ProvisioningJob.findFirst({
+      where: { instanceId: instance.id, status: "running" },
+    });
+    if (activeJob) {
+      throw new HttpError(409, "Provisioning is still in progress");
+    }
   }
 
   // Clean up old jobs and destroyed instance

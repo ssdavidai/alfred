@@ -37,10 +37,40 @@ function detectStep(line: string): string | null {
   return null;
 }
 
+// Track active provisioning child PIDs so we can distinguish
+// genuinely running jobs from orphans left by a container restart.
+const activeProvisionPids = new Set<string>();
+
 export async function provisionInstanceJob(
   _args: unknown,
   context: any,
 ): Promise<void> {
+  // Recover orphaned jobs: if a job is "running" but we have no active
+  // child process for it, the container was restarted mid-provisioning.
+  const runningJobs = await context.entities.ProvisioningJob.findMany({
+    where: { status: "running" },
+  });
+  for (const orphan of runningJobs) {
+    if (!activeProvisionPids.has(orphan.id)) {
+      console.error(
+        `[provision] Recovering orphaned job ${orphan.id} (was on step: ${orphan.currentStep})`,
+      );
+      await context.entities.ProvisioningJob.update({
+        where: { id: orphan.id },
+        data: {
+          status: "failed",
+          error: `Interrupted by server restart (was on step: ${orphan.currentStep})`,
+          completedAt: new Date(),
+        },
+      });
+      // Also mark the instance as error so auto-reprovision can kick in
+      await context.entities.Instance.updateMany({
+        where: { id: orphan.instanceId, status: "provisioning" },
+        data: { status: "error" },
+      });
+    }
+  }
+
   // Find pending provisioning jobs
   const pendingJobs = await context.entities.ProvisioningJob.findMany({
     where: { status: "pending" },
@@ -51,6 +81,9 @@ export async function provisionInstanceJob(
   if (pendingJobs.length === 0) return;
 
   const job = pendingJobs[0];
+
+  // Track this job as actively running in this process
+  activeProvisionPids.add(job.id);
 
   // Mark job as running
   await context.entities.ProvisioningJob.update({
@@ -223,6 +256,7 @@ export async function provisionInstanceJob(
     }
 
     console.info(`Provisioning completed for ${instance.customerName}`);
+    activeProvisionPids.delete(job.id);
   } catch (error: any) {
     console.error(
       `Provisioning failed for ${instance.customerName}:`,
@@ -244,6 +278,7 @@ export async function provisionInstanceJob(
         completedAt: new Date(),
       },
     });
+    activeProvisionPids.delete(job.id);
   }
 }
 
