@@ -116,30 +116,45 @@ export async function provisionInstanceJob(
       `Starting provisioning for ${instance.customerName} (${instance.serverType})`,
     );
 
-    // Use spawn instead of execFileAsync for streaming output
-    const exitCode = await new Promise<number>((resolve, reject) => {
-      const child = spawn(
-        process.execPath,
-        [
-          "--experimental-sqlite",
-          ALFRED_CTRL_PATH,
-          "provision",
-          instance.customerName,
-          "--type",
-          instance.serverType,
-          "--location",
-          "fsn1",
-        ],
-        {
-          timeout: 1_200_000, // 20 minutes
-          env: {
-            ...process.env,
-            NODE_NO_WARNINGS: "1",
-          },
-          cwd: process.env.ALFRED_CTRL_CWD || "/opt/alfred-saas/alfred-ctrl",
-          stdio: ["ignore", "pipe", "pipe"],
-        },
+    // Try multiple Hetzner locations in order of preference.
+    // If placement fails (resource_unavailable), destroy the partial
+    // instance and retry with the next location.
+    const LOCATIONS = ["fsn1", "nbg1", "hel1"];
+    let finalExitCode = 1;
+    let lastStderr = "";
+
+    for (const location of LOCATIONS) {
+      logs.push(`Trying location: ${location}`);
+      console.info(
+        `[provision:${instance.customerName}] Trying location: ${location}`,
       );
+      lastStderr = "";
+
+      // Use spawn instead of execFileAsync for streaming output
+      finalExitCode = await new Promise<number>((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          [
+            "--experimental-sqlite",
+            ALFRED_CTRL_PATH,
+            "provision",
+            instance.customerName,
+            "--type",
+            instance.serverType,
+            "--location",
+            location,
+          ],
+          {
+            timeout: 1_200_000, // 20 minutes
+            env: {
+              ...process.env,
+              NODE_NO_WARNINGS: "1",
+            },
+            cwd:
+              process.env.ALFRED_CTRL_CWD || "/opt/alfred-saas/alfred-ctrl",
+            stdio: ["ignore", "pipe", "pipe"],
+          },
+        );
 
       let lineBuffer = "";
 
@@ -173,6 +188,7 @@ export async function provisionInstanceJob(
       child.stderr.on("data", (chunk: Buffer) => {
         const text = chunk.toString().trim();
         if (text) {
+          lastStderr += text;
           logs.push(`[stderr] ${text}`);
           console.error(`[provision:${instance.customerName}] ${text}`);
         }
@@ -187,9 +203,55 @@ export async function provisionInstanceJob(
       });
     });
 
-    if (exitCode !== 0) {
+      // If placement failed, destroy partial resources and try next location
+      if (
+        finalExitCode !== 0 &&
+        lastStderr.includes("resource_unavailable") &&
+        location !== LOCATIONS[LOCATIONS.length - 1]
+      ) {
+        logs.push(
+          `Location ${location} unavailable, cleaning up and trying next...`,
+        );
+        console.info(
+          `[provision:${instance.customerName}] ${location} unavailable, trying next location`,
+        );
+        try {
+          // Pipe "y" to confirm destroy prompt
+          const destroyChild = spawn(
+            process.execPath,
+            [
+              "--experimental-sqlite",
+              ALFRED_CTRL_PATH,
+              "destroy",
+              instance.customerName,
+            ],
+            {
+              timeout: 60_000,
+              env: { ...process.env, NODE_NO_WARNINGS: "1" },
+              cwd:
+                process.env.ALFRED_CTRL_CWD || "/opt/alfred-saas/alfred-ctrl",
+              stdio: ["pipe", "pipe", "pipe"],
+            },
+          );
+          destroyChild.stdin?.write("y\n");
+          destroyChild.stdin?.end();
+          await new Promise<void>((res) =>
+            destroyChild.on("close", () => res()),
+          );
+        } catch (e: any) {
+          console.error(
+            `[provision:${instance.customerName}] Cleanup failed: ${e.message}`,
+          );
+        }
+        continue; // try next location
+      }
+
+      break; // success or non-placement error — stop retrying
+    } // end LOCATIONS loop
+
+    if (finalExitCode !== 0) {
       throw new Error(
-        `Provisioning exited with code ${exitCode}. Last log: ${logs[logs.length - 1] || "no output"}`,
+        `Provisioning exited with code ${finalExitCode}. Last log: ${logs[logs.length - 1] || "no output"}`,
       );
     }
 
