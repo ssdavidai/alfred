@@ -107,7 +107,7 @@ services:
       - /usr/bin/docker:/usr/bin/docker:ro
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
     working_dir: /opt/alfred/compose
-    command: ["node", "/app/api.mjs"]
+    command: ["bash", "-c", "apt-get update -qq && apt-get install -y -qq procps jq >/dev/null 2>&1; exec node /app/api.mjs"]
     env_file:
       - .env
     environment:
