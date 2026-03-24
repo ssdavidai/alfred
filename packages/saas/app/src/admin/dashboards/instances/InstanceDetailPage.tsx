@@ -177,7 +177,7 @@ export default function InstanceDetailPage() {
                   />
                 </>
               )}
-              {instance.status !== "destroyed" && instance.status !== "destroying" && (
+              {instance.status !== "destroyed" && (
                 <ActionButton
                   icon={Trash2}
                   label="Destroy"
