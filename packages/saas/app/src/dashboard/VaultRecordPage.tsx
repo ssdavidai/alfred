@@ -3,7 +3,7 @@ import { useQuery, getVaultRecord } from "wasp/client/operations";
 import DashboardLayout from "./DashboardLayout";
 import { Card, CardContent, CardTitle } from "../client/components/ui/card";
 import { Button } from "../client/components/ui/button";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Home } from "lucide-react";
 
 export default function VaultRecordPage() {
   const { "*": path } = useParams();
@@ -15,13 +15,20 @@ export default function VaultRecordPage() {
 
   return (
     <DashboardLayout>
-      <div className="mb-6">
-        <Link to="/dashboard/vault">
-          <Button variant="ghost" size="sm">
+      <div className="mb-6 flex flex-wrap items-center gap-2">
+        <Button asChild variant="ghost" size="sm">
+          <Link to="/dashboard">
+            <Home className="mr-2 h-4 w-4" />
+            Back to Dashboard
+          </Link>
+        </Button>
+        <span className="text-muted-foreground">/</span>
+        <Button asChild variant="ghost" size="sm">
+          <Link to="/dashboard/vault">
             <ArrowLeft className="mr-2 h-4 w-4" />
             Back to Vault
-          </Button>
-        </Link>
+          </Link>
+        </Button>
       </div>
 
       {isLoading && (
