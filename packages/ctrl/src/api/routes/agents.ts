@@ -83,7 +83,8 @@ async function getAgentModelStatus(agentDef: typeof AGENTS[number]): Promise<Rec
       "agent_model = None",
       "for a in agents:",
       "  if a.get('id') == aid:",
-      "    agent_model = a.get('model')",
+      "    m = a.get('model')",
+      "    agent_model = m.get('primary') if isinstance(m, dict) else m",
       "    break",
       "print(json.dumps({'model': agent_model, 'default': defaults.get('primary')}))",
     ].join("\n");
@@ -226,7 +227,7 @@ export function registerAgentRoutes(): void {
       "found = False",
       "for a in agents:",
       "  if a.get('id') == aid:",
-      "    a['model'] = model",
+      "    a['model'] = {'primary': model}",
       "    found = True",
       "    break",
       "if not found:",
@@ -244,11 +245,12 @@ export function registerAgentRoutes(): void {
       throw new ValidationError(parsed.error);
     }
 
-    // Reload OpenClaw gateway config by sending SIGHUP
+    // Restart OpenClaw to pick up the new model config
     try {
-      await dockerExec("openclaw", ["kill", "-s", "SIGHUP", "1"]);
+      const { dockerComposeCmd } = await import("../helpers.js");
+      await dockerComposeCmd(["restart", "openclaw"]);
     } catch {
-      // SIGHUP may not be supported; gateway will pick up changes on next request
+      // Best effort — gateway may pick up changes on next request
     }
 
     sendJson(res, 200, {
