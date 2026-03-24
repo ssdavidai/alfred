@@ -21,6 +21,15 @@ const DEFAULT_PASSWORD = "password123";
 let page: Page;
 let testUser: User;
 
+async function clearRoute(pattern: string) {
+  try {
+    await page.unroute(pattern);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`No existing route found for ${pattern}: ${message}`);
+  }
+}
+
 // Run tests sequentially — each step depends on the previous one.
 test.describe.configure({ mode: "serial" });
 
@@ -207,7 +216,7 @@ test("6. Provisioning completes and user is redirected to dashboard", async () =
 
 test("7. Dashboard loads with correct content", async () => {
   // Mock getDashboardData to avoid needing a real tenant instance
-  await page.unroute("**/operations/get-dashboard-data").catch(() => {});
+  await clearRoute("**/operations/get-dashboard-data");
   await page.route("**/operations/get-dashboard-data", async (route) => {
     await route.fulfill({
       status: 200,
@@ -263,7 +272,7 @@ test("7. Dashboard loads with correct content", async () => {
 });
 
 test("7b. Dashboard avoids misleading zero-state summary values while data is unavailable", async () => {
-  await page.unroute("**/operations/get-dashboard-data").catch(() => {});
+  await clearRoute("**/operations/get-dashboard-data");
   await page.route("**/operations/get-dashboard-data", async (route) => {
     await route.fulfill({
       status: 200,

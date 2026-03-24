@@ -27,9 +27,10 @@ export default function TopBar({
 }: TopBarProps) {
   const [uploadOpen, setUploadOpen] = useState(false);
 
-  const healthStatus = data.health?.status;
+  const healthStatus = data.health?.status ?? null;
   const isHealthLoading = !data.health;
   const isOk = healthStatus === "ok";
+  const healthLabel = healthStatus?.toUpperCase() ?? "UNKNOWN";
   const totalRecords = data.vault?.total_records;
   const inboxCount = data.inbox?.count;
   const isVaultLoading = !data.vault;
@@ -37,10 +38,10 @@ export default function TopBar({
 
   const runningContainers = containers?.filter(
     (c: any) => c.State === "running" && c.Service !== "init",
-  ).length;
+  ).length ?? 0;
   const totalContainers = containers?.filter(
     (c: any) => c.Service !== "init",
-  ).length;
+  ).length ?? 0;
 
   const pairedCount = data.devices?.paired;
   const pendingCount = data.devices?.pending;
@@ -73,7 +74,7 @@ export default function TopBar({
                   : "text-amber-500"
             }
           >
-            {isHealthLoading ? "Loading" : isOk ? "OK" : healthStatus.toUpperCase()}
+            {isHealthLoading ? "Loading" : isOk ? "OK" : healthLabel}
           </span>
         </button>
 
