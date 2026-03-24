@@ -90,6 +90,8 @@ services:
       - ALL
     cap_add:
       - DAC_OVERRIDE
+      - FOWNER
+      - CHOWN
     mem_limit: 2g
     pids_limit: 256
 
