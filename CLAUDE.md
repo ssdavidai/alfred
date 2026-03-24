@@ -139,3 +139,11 @@ Python + Temporal Docker container providing Alfred Black's self-improving intel
 **Docker image tags** (unchanged): `ssdavidai00/alfred-openclaw:latest`, `ssdavidai00/alfred-learn:latest`
 
 **Deploy SaaS host infra:** Files in `deploy/` — Caddyfile, docker-compose.yaml, cloud-init.yaml, clickhouse configs, systemd service.
+
+---
+
+## Engineering References
+
+- `TOPOLOGY.md` — service connection map (ports, protocols, env vars)
+- Each package has a `CONTRACT.md` — what it provides and requires
+- `scripts/smoke-test.sh` — post-deploy tenant verification

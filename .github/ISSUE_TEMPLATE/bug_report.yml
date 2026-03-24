@@ -1,0 +1,61 @@
+name: Bug Report
+description: Report a bug in Alfred Black
+labels: ["type:bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the bug.
+      placeholder: What happened? What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction Steps
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Go to '...'
+        2. Run '...'
+        3. See error
+    validations:
+      required: true
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      description: Which package is affected?
+      options:
+        - saas
+        - ctrl
+        - learn
+        - openclaw
+        - deploy
+        - unknown
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: How severe is this bug?
+      options:
+        - P0 — Service down or data loss
+        - P1 — Major feature broken
+        - P2 — Minor feature broken or workaround exists
+        - P3 — Cosmetic or low impact
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context
+      description: Logs, screenshots, environment details, etc.
+      placeholder: Paste relevant logs or context here.
+    validations:
+      required: false

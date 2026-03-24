@@ -1,0 +1,52 @@
+name: Task
+description: A technical task, improvement, or feature request
+labels: []
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What needs to be done and why.
+      placeholder: Describe the task clearly.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: How do we know this is done?
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package
+      description: Which package does this affect?
+      options:
+        - saas
+        - ctrl
+        - learn
+        - openclaw
+        - deploy
+        - cross-cutting
+    validations:
+      required: true
+
+  - type: dropdown
+    id: effort
+    attributes:
+      label: Effort Estimate
+      description: Rough size of this task.
+      options:
+        - XS (< 1 hour)
+        - S (1-4 hours)
+        - M (half day to full day)
+        - L (multi-day)
+        - XL (needs breakdown)
+    validations:
+      required: false
