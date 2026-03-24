@@ -7,6 +7,7 @@ const CONFIG_PATH = "/mnt/encrypted/alfred/config.yaml";
 
 const AGENTS = [
   { id: "main", label: "Alfred", description: "Default agent for device interactions", agentDir: "/home/node/.openclaw/agents/main/agent" },
+  { id: "learn-clerk", label: "Clerk", description: "Stateless LLM worker for learning workflows", agentDir: "/home/node/.openclaw/agents/learn-clerk/agent" },
   { id: "vault-curator", label: "Curator", description: "Processes inbox into structured vault records", agentDir: "/home/node/.openclaw/agents/vault-curator/agent" },
   { id: "vault-janitor", label: "Janitor", description: "Fixes structural vault issues", agentDir: "/home/node/.openclaw/agents/vault-janitor/agent" },
   { id: "vault-distiller", label: "Distiller", description: "Extracts latent knowledge from records", agentDir: "/home/node/.openclaw/agents/vault-distiller/agent" },

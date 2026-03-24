@@ -115,6 +115,7 @@ const ASSISTANT_LABELS: Record<string, { name: string; description: string }> = 
 
 const AGENT_TABS = [
   { id: "main", label: "Alfred" },
+  { id: "learn-clerk", label: "Clerk" },
   { id: "vault-curator", label: "Curator" },
   { id: "vault-janitor", label: "Janitor" },
   { id: "vault-distiller", label: "Distiller" },
