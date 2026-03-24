@@ -166,16 +166,23 @@ export function registerCredentialRoutes(): void {
 
     patchEnv(updates);
 
-    // Respond immediately, then restart containers in the background.
-    // docker compose up -d can take 30s+ waiting for health checks,
-    // which exceeds the SaaS proxy timeout (15s).
+    // Respond immediately, then restart only the containers that need
+    // the new API keys. CRITICAL: ctrl-api also uses env_file: .env,
+    // so `docker compose up -d` would recreate ALL containers including
+    // ctrl-api itself — causing a 502 cascade. Instead, selectively
+    // recreate only openclaw and alfred using --no-deps to prevent
+    // Docker Compose from also recreating their dependencies (ctrl-api).
     sendJson(res, 200, {
       message: "Credentials updated. Services are restarting (may take ~30s).",
-      restarted: ["alfred", "openclaw"],
+      restarted: ["openclaw", "alfred"],
     });
 
-    // Fire-and-forget restart
-    dockerComposeCmd(["up", "-d", "alfred", "openclaw"]).catch((err) => {
+    // Fire-and-forget: recreate only openclaw and alfred with new env.
+    // --no-deps prevents Docker from touching ctrl-api or temporal.
+    // Sequential: openclaw must be healthy before alfred can start.
+    dockerComposeCmd(["up", "-d", "--no-deps", "--force-recreate", "openclaw"]).then(() =>
+      dockerComposeCmd(["up", "-d", "--no-deps", "--force-recreate", "alfred"])
+    ).catch((err) => {
       console.error("Background container restart failed:", err);
     });
   });

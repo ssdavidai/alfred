@@ -314,7 +314,7 @@ export function registerAdminRoutes(): void {
     // Respond immediately, recreate in background
     sendJson(res, 200, { message: "Compose updated. OpenClaw recreating in background.", changes });
 
-    dockerComposeCmd(["up", "-d", "--force-recreate", "openclaw"]).catch((err) => {
+    dockerComposeCmd(["up", "-d", "--no-deps", "--force-recreate", "openclaw"]).catch((err) => {
       console.error("Failed to recreate openclaw after compose fix:", err);
     });
   });
