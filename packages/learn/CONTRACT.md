@@ -87,7 +87,7 @@ From `src/utils/vault_client.py`:
 | `OPENCLAW_GATEWAY_TOKEN_FILE` | yes | `/alfred-data/.gateway-token` | Path to gateway auth token |
 | `VAULT_PATH` | yes | `/vault` | Vault mount path |
 | `TASK_QUEUE` | yes | `alfred-learn` | Temporal task queue name |
-| `ALFRED_CTRL_URL` | yes | `http://ctrl-api:3100` | alfred-ctrl API base URL |
+| `ALFRED_CTRL_URL` | yes | `http://ctrl-api:3100` (set by docker-compose; code default is `http://host.docker.internal:3100`) | alfred-ctrl API base URL |
 | `ALFRED_LEARN_ENABLED` | no | `true` | Feature flag to disable learn |
 | `ALFRED_DATA_DIR` | no | `/alfred-data` | Runtime data directory |
 | `TENANT_TIMEZONE` | no | `UTC` | IANA timezone for daily schedules |
@@ -98,7 +98,7 @@ From `src/utils/vault_client.py`:
 
 | Dependency | Version | Notes |
 |-----------|---------|-------|
-| Python | 3.12 | Base image: `python:3.11-slim-bookworm` (alfred-worker) |
+| Python | 3.12 | Dockerfile not yet created (CI expects `packages/learn/Dockerfile`) |
 | temporalio SDK | — | Temporal workflow/activity SDK |
 | httpx | — | Async HTTP client for ctrl API |
 | pyyaml | — | YAML parsing |

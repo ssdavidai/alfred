@@ -15,7 +15,7 @@ Single Hetzner VM running the SaaS application and analytics.
 | Wasp app (`alfred-saas`) | 127.0.0.1:3000 | HTTP | SaaS web app (auth, billing, dashboard) |
 | Plausible | 127.0.0.1:8000 | HTTP | Analytics dashboard |
 | PostgreSQL | 127.0.0.1:5432 | TCP | SaaS database (`alfred_saas`) |
-| ClickHouse | 127.0.0.1:8123 | HTTP | Plausible events (internal only) |
+| ClickHouse | (no host port) | HTTP | Plausible events (container-internal only, accessed by Plausible via Docker network) |
 
 **Domains** (Caddy terminates TLS):
 
@@ -76,8 +76,8 @@ cascading to ctrl-api.
 | Volume Path (host) | Container Mount | Used By |
 |-------------------|----------------|---------|
 | `/mnt/encrypted/vault` | `/vault` (ro for learn) | init, openclaw, alfred, alfred-learn |
-| `/mnt/encrypted/openclaw` | `/home/node/.openclaw` or `/openclaw-state` | init, openclaw, alfred |
-| `/mnt/encrypted/alfred` | `/alfred-data` | init, openclaw, alfred, alfred-learn |
+| `/mnt/encrypted/openclaw` | `/home/node/.openclaw` (openclaw), `/openclaw-state` (init), `/root/.openclaw` (alfred) | init, openclaw, alfred |
+| `/mnt/encrypted/alfred` | `/alfred-data` (init, openclaw, alfred-learn), `/app/data` (alfred) | init, openclaw, alfred, alfred-learn |
 | `/mnt/encrypted/temporal` | `/data` | temporal |
 
 **Source files:** `packages/ctrl/src/templates/docker-compose.yaml.njk`
@@ -145,8 +145,8 @@ GitHub Actions
 |-------|----------|----------|---------|
 | `ssdavidai00/alfred-openclaw:latest` | Docker Hub | `.github/workflows/build-openclaw.yml` | No — uses `:latest` |
 | `ssdavidai00/alfred-learn:latest` | Docker Hub | `.github/workflows/build-learn.yml` | No — uses `:latest` |
-| `ssdavidai00/alfred-worker:latest` | Docker Hub | `.github/workflows/build-openclaw.yml` | No — uses `:latest` |
-| `ssdavidai00/alfred-init:latest` | Docker Hub | `.github/workflows/build-openclaw.yml` | No — uses `:latest` |
+| `ssdavidai00/alfred-worker:latest` | Docker Hub | `.github/workflows/build-alfred.yml` | No — uses `:latest` |
+| `ssdavidai00/alfred-init:latest` | Docker Hub | `.github/workflows/build-alfred.yml` | No — uses `:latest` |
 | `temporalio/temporal:latest` | Docker Hub | upstream | No — uses `:latest` |
 | `postgres:16-alpine` | Docker Hub | upstream | Partial — major version pinned |
 | `clickhouse/clickhouse-server:24.12-alpine` | Docker Hub | upstream | Yes — minor version pinned |

@@ -36,12 +36,28 @@ Fleet management tool (runs locally or on SaaS host):
 
 | Command | Purpose |
 |---------|---------|
-| `provision <name>` | 15-step provisioning orchestrator |
+| `provision <name>` | 17-step provisioning orchestrator |
 | `destroy <name>` | Tear down instance + Hetzner resources |
-| `health` | SSH-based health checks across fleet |
-| `deploy-api <name>` | Deploy ctrl API to a tenant |
-| `update [--all]` | Rolling Docker image update |
+| `health [name]` | SSH-based health checks across fleet |
+| `deploy-api [name]` | Deploy ctrl API to a tenant |
+| `update [name]` | Rolling Docker image update (--all for fleet) |
 | `list` | List all managed instances |
+| `ssh <name>` | SSH into an instance |
+| `run <name> <cmd>` | Run a command on an instance via SSH |
+| `rollback <name>` | Rollback to last healthy image |
+| `repair-tunnel [name]` | Repair Cloudflare Tunnel on instance(s) |
+| `logs <name>` | Tail docker compose logs via SSH |
+| `info <name>` | Show all instance fields |
+| `events <name>` | Show events for an instance |
+| `devices <name>` | List OpenClaw devices |
+| `device-approve <name> <requestId>` | Approve a pending device |
+| `device-reject <name> <requestId>` | Reject a pending device |
+| `device-remove <name> <deviceId>` | Remove a paired device |
+| `openclaw <name>` | Launch OpenClaw TUI via SSH |
+| `alfred-tui <name>` | Launch Alfred TUI via SSH |
+| `alfred-logs <name>` | Tail alfred container logs |
+| `temporal-ui <name>` | Print Temporal UI URL |
+| `api-key <name>` | Retrieve tenant API key |
 | (no args) | Interactive TUI dashboard |
 
 ### SSH-Based Health Monitoring
@@ -53,23 +69,25 @@ Periodic background checks via SSH into each tenant:
 - cloudflared service status
 - Results stored in SQLite, webhook alerts on status changes
 
-### 15-Step Provisioning Orchestrator
+### 17-Step Provisioning Orchestrator
 
-1. Generate Ed25519 keypair
-2. Upload SSH key to Hetzner
-3. Ensure shared firewall
-4. Create encrypted volume
-5. Render cloud-init template
-6. Create Hetzner server
-7. Wait for cloud-init completion
-8. Upload secrets via SSH
-9. Upload docker-compose
-10. Start Docker containers
-11. Bootstrap OpenClaw + Tailscale
-12. Register OpenClaw agents
-13. Set default model
-14. Backup LUKS key
-15. Run health check
+1. `generate_keypair` — Generate Ed25519 keypair
+2. `upload_ssh_key` — Upload SSH key to Hetzner
+3. `ensure_firewall` — Ensure shared firewall
+4. `create_volume` — Create encrypted volume
+5. `render_cloud_init` — Render cloud-init template
+6. `create_server` — Create Hetzner server
+7. `wait_cloud_init` — Wait for cloud-init completion
+8. `upload_env` — Upload secrets via SSH
+9. `configure_backups` — Configure restic backup credentials
+10. `upload_compose` — Upload docker-compose
+11. `start_containers` — Start Docker containers
+12. `bootstrap_openclaw` — Bootstrap OpenClaw + Tailscale
+13. `backup_luks_key` — Backup LUKS key
+14. `deploy_api` — Deploy ctrl API to tenant
+15. `setup_tunnel` — Configure Cloudflare Tunnel
+16. `health_check` — Run health check
+17. `done` — Mark provisioning complete
 
 ---
 
@@ -118,4 +136,4 @@ Periodic background checks via SSH into each tenant:
 | Consumer | Connection | What It Uses |
 |----------|-----------|-------------|
 | `alfred-saas` | HTTPS over Tailscale → :3100 | All `/api/v1/*` routes |
-| `alfred-learn` | http://host.docker.internal:3100 | vault, streams, learning, notifications routes |
+| `alfred-learn` | http://ctrl-api:3100 | vault, streams, learning, notifications routes |
