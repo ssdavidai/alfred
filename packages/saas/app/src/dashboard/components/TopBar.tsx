@@ -8,12 +8,13 @@ import {
   FolderOpen,
   Bot,
   Smartphone,
+  Loader2,
 } from "lucide-react";
 import FileUploadDialog from "./FileUploadDialog";
 
 interface TopBarProps {
   data: any;
-  containers: any[];
+  containers: any[] | null;
   activePanel: string | null;
   onPanelToggle: (panel: string | null) => void;
 }
@@ -26,20 +27,24 @@ export default function TopBar({
 }: TopBarProps) {
   const [uploadOpen, setUploadOpen] = useState(false);
 
-  const healthStatus = data.health?.status || "unknown";
+  const healthStatus = data.health?.status;
+  const isHealthLoading = !data.health;
   const isOk = healthStatus === "ok";
-  const totalRecords = data.vault?.total_records ?? 0;
-  const inboxCount = data.inbox?.count ?? 0;
+  const totalRecords = data.vault?.total_records;
+  const inboxCount = data.inbox?.count;
+  const isVaultLoading = !data.vault;
+  const isServicesLoading = !containers;
 
-  const runningContainers = containers.filter(
+  const runningContainers = containers?.filter(
     (c: any) => c.State === "running" && c.Service !== "init",
   ).length;
-  const totalContainers = containers.filter(
+  const totalContainers = containers?.filter(
     (c: any) => c.Service !== "init",
   ).length;
 
-  const pairedCount = data.devices?.paired ?? 0;
-  const pendingCount = data.devices?.pending ?? 0;
+  const pairedCount = data.devices?.paired;
+  const pendingCount = data.devices?.pending;
+  const isDevicesLoading = !data.devices;
 
   const subdomainUrl = data.instance?.subdomainUrl ?? null;
   const gatewayToken = data.gatewayToken ?? null;
@@ -50,15 +55,25 @@ export default function TopBar({
         {/* Health */}
         <button
           className="flex items-center gap-2 px-4 py-2.5 font-mono text-xs transition-colors hover:bg-gold/5"
-          title={`Health: ${healthStatus}`}
+          title={isHealthLoading ? "Loading health" : `Health: ${healthStatus}`}
         >
-          {isOk ? (
+          {isHealthLoading ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-gold" />
+          ) : isOk ? (
             <CheckCircle className="h-3.5 w-3.5 text-green-500" />
           ) : (
             <AlertCircle className="h-3.5 w-3.5 text-amber-500" />
           )}
-          <span className={isOk ? "text-green-500" : "text-amber-500"}>
-            {isOk ? "OK" : healthStatus.toUpperCase()}
+          <span
+            className={
+              isHealthLoading
+                ? "text-muted-foreground"
+                : isOk
+                  ? "text-green-500"
+                  : "text-amber-500"
+            }
+          >
+            {isHealthLoading ? "Loading" : isOk ? "OK" : healthStatus.toUpperCase()}
           </span>
         </button>
 
@@ -70,8 +85,8 @@ export default function TopBar({
           className="flex items-center gap-2 px-4 py-2.5 font-mono text-xs text-muted-foreground transition-colors hover:bg-gold/5 hover:text-cream"
         >
           <FolderOpen className="h-3.5 w-3.5 text-gold/70" />
-          <span>{totalRecords} records</span>
-          {inboxCount > 0 && (
+          <span>{isVaultLoading ? "Loading records..." : `${totalRecords} records`}</span>
+          {!isVaultLoading && (inboxCount ?? 0) > 0 && (
             <span className="rounded-full bg-gold/15 px-1.5 py-0.5 text-[0.6rem] text-gold">
               {inboxCount} inbox
             </span>
@@ -87,7 +102,9 @@ export default function TopBar({
         >
           <Bot className="h-3.5 w-3.5 text-gold/70" />
           <span>
-            {totalContainers > 0
+            {isServicesLoading
+              ? "Loading services..."
+              : (totalContainers ?? 0) > 0
               ? `${runningContainers}/${totalContainers} up`
               : "..."}
           </span>
@@ -107,8 +124,8 @@ export default function TopBar({
           }
         >
           <Smartphone className="h-3.5 w-3.5 text-gold/70" />
-          <span>{pairedCount} paired</span>
-          {pendingCount > 0 && (
+          <span>{isDevicesLoading ? "Loading devices..." : `${pairedCount} paired`}</span>
+          {!isDevicesLoading && (pendingCount ?? 0) > 0 && (
             <span className="rounded-full bg-gold/20 px-1.5 py-0.5 text-[0.6rem] font-medium text-gold">
               PENDING: {pendingCount}
             </span>

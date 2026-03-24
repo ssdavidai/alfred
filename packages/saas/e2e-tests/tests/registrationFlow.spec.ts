@@ -207,13 +207,14 @@ test("6. Provisioning completes and user is redirected to dashboard", async () =
 
 test("7. Dashboard loads with correct content", async () => {
   // Mock getDashboardData to avoid needing a real tenant instance
+  await page.unroute("**/operations/get-dashboard-data").catch(() => {});
   await page.route("**/operations/get-dashboard-data", async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
         containers: [],
-        vault: { total: 0, types: {} },
+        vault: { total_records: 0, types: {} },
         stats: {},
       }),
     });
@@ -259,6 +260,40 @@ test("7. Dashboard loads with correct content", async () => {
   await expect(page.getByRole("link", { name: "Home" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Vault" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Services" })).toBeVisible();
+});
+
+test("7b. Dashboard avoids misleading zero-state summary values while data is unavailable", async () => {
+  await page.unroute("**/operations/get-dashboard-data").catch(() => {});
+  await page.route("**/operations/get-dashboard-data", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        health: null,
+        vault: null,
+        inbox: null,
+        devices: null,
+        containers: null,
+        instance: {
+          status: "running",
+          tier: "PREMIUM",
+          tailscaleHostname: null,
+          subdomainUrl: null,
+        },
+        gatewayToken: null,
+      }),
+    });
+  });
+
+  await page.goto("/dashboard");
+  await page.waitForURL("**/dashboard");
+
+  await expect(page.getByText("Loading records...")).toBeVisible();
+  await expect(page.getByText("Loading services...")).toBeVisible();
+  await expect(page.getByText("Loading devices...")).toBeVisible();
+  await expect(page.getByText("0 records")).not.toBeVisible();
+  await expect(page.getByText("0 paired")).not.toBeVisible();
+  await expect(page.getByText("UNKNOWN")).not.toBeVisible();
 });
 
 test("8. Account page shows active subscription status", async () => {

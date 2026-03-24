@@ -115,11 +115,13 @@ export const getDashboardData: GetDashboardData<void, any> = async (
   const pending = Array.isArray(devicesRaw?.pending) ? devicesRaw.pending.length : 0;
 
   // Full container list
-  const containers = Array.isArray(containersRaw?.containers)
-    ? containersRaw.containers
-    : Array.isArray(containersRaw)
-      ? containersRaw
-      : [];
+  const containers = containersRaw
+    ? Array.isArray(containersRaw?.containers)
+      ? containersRaw.containers
+      : Array.isArray(containersRaw)
+        ? containersRaw
+        : []
+    : null;
 
   // Gateway token for OpenClaw UI link
   const gatewayToken: string | null =
@@ -134,8 +136,8 @@ export const getDashboardData: GetDashboardData<void, any> = async (
       tailscaleHostname: instance!.tailscaleHostname ?? null,
       subdomainUrl: (instance as any).subdomainUrl ?? null,
     },
-    inbox: { count: inboxFiles.length },
-    devices: { paired, pending },
+    inbox: inboxRaw ? { count: inboxFiles.length } : null,
+    devices: devicesRaw ? { paired, pending } : null,
     containers,
     gatewayToken,
   };

@@ -3,6 +3,7 @@ import {
   useQuery,
   getDashboardData,
 } from "wasp/client/operations";
+import { Loader2 } from "lucide-react";
 import DashboardLayout from "./DashboardLayout";
 import { Card, CardContent, CardTitle } from "../client/components/ui/card";
 import { Switch } from "../client/components/ui/switch";
@@ -29,7 +30,8 @@ export default function DashboardPage() {
   });
 
   // Containers from dashboard data
-  const containers: any[] = data?.containers ?? [];
+  const containers: any[] | null = data?.containers ?? null;
+  const showInitialLoadingState = isLoading && !data;
 
   return (
     <DashboardLayout>
@@ -40,15 +42,18 @@ export default function DashboardPage() {
         </h1>
       </div>
 
-      {isLoading && (
-        <p className="font-sans text-sm font-light text-muted-foreground">
-          Loading dashboard...
-        </p>
-      )}
-
       {error && (
         <div className="rounded-sm border border-destructive/30 bg-destructive/10 p-4 text-destructive">
           <p className="font-sans text-sm font-light">{error.message}</p>
+        </div>
+      )}
+
+      {showInitialLoadingState && (
+        <div className="flex items-center gap-3 rounded-sm border border-gold-dim/20 bg-black/20 px-4 py-3 text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin text-gold" />
+          <p className="font-mono text-xs uppercase tracking-[0.2em]">
+            Loading dashboard...
+          </p>
         </div>
       )}
 
