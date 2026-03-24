@@ -1,6 +1,6 @@
 # Alfred Learn
 
-Alfred Learn is the self-improving intelligence layer for [Alfred Black](https://github.com/ssdavidai/alfred-ctrl). It watches what flows through Streams — conversations, webhooks, incoming data — processes raw events into structured vault records, and over time learns how each tenant organises their world so it can do it autonomously. Two layers do the work: a **Processor** that classifies and files incoming events, and an **Intuition Engine** that observes how the user routes things, builds pattern memory, and gradually takes over routine decisions. The system starts knowing nothing and earns its autonomy through observation.
+Alfred Learn is the self-improving intelligence layer for [Alfred Black control plane](../ctrl). It watches what flows through Streams — conversations, webhooks, incoming data — processes raw events into structured vault records, and over time learns how each tenant organises their world so it can do it autonomously. Two layers do the work: a **Processor** that classifies and files incoming events, and an **Intuition Engine** that observes how the user routes things, builds pattern memory, and gradually takes over routine decisions. The system starts knowing nothing and earns its autonomy through observation.
 
 ---
 
@@ -20,7 +20,7 @@ Alfred Learn is the self-improving intelligence layer for [Alfred Black](https:/
 │                                                                   │
 │  ┌───────────┐  ┌──────────┐  ┌────────────┐  ┌──────────────┐  │
 │  │  OPENCLAW  │  │ TEMPORAL  │  │ ALFRED-CTRL│  │ ALFRED-LEARN │  │
-│  │  :18789    │  │ :7233     │  │ :3100      │  │  (this repo) │  │
+│  │  :18789    │  │ :7233     │  │ :3100      │  │(packages/learn)│  │
 │  └─────┬─────┘  └────┬─────┘  └─────┬──────┘  └──────┬───────┘  │
 │        │              │              │                 │          │
 │        │  Schedules ──┘    Vault API─┘     Workflows ──┘          │
@@ -155,8 +155,8 @@ All configuration is via environment variables.
 
 ```bash
 # Clone
-git clone https://github.com/ssdavidai/alfred-learn.git
-cd alfred-learn
+git clone https://github.com/ssdavidai/alfred-platform.git
+cd alfred-platform/packages/learn
 
 # Virtual environment
 python3.12 -m venv .venv
