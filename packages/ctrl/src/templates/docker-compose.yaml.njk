@@ -77,11 +77,11 @@ services:
       - /mnt/encrypted/alfred:/app/data
       - /mnt/encrypted/openclaw:/root/.openclaw
     environment:
-      - OPENCLAW_GATEWAY_URL=ws://localhost:18789
+      - OPENCLAW_GATEWAY_URL=http://openclaw:18789
       - ALFRED_CTRL_URL=http://ctrl-api:3100
     env_file:
       - .env
-    entrypoint: ["bash", "-c", "node -e \"require('net').createServer(s=>{const c=require('net').connect(18789,'openclaw');s.pipe(c);c.pipe(s);s.on('error',()=>c.destroy());c.on('error',()=>s.destroy())}).listen(18789,'127.0.0.1')\" & sleep 1 && rm -f /app/data/alfred.pid && set -a && [ -f /app/data/.env ] && source /app/data/.env; [ -f /app/data/.gateway-token ] && export OPENCLAW_GATEWAY_TOKEN=$(cat /app/data/.gateway-token); set +a && exec alfred --config /app/data/config.yaml up --foreground"]
+    entrypoint: ["bash", "-c", "rm -f /app/data/alfred.pid && set -a && [ -f /app/data/.env ] && source /app/data/.env; [ -f /app/data/.gateway-token ] && export OPENCLAW_GATEWAY_TOKEN=$(cat /app/data/.gateway-token); set +a && exec alfred --config /app/data/config.yaml up --foreground"]
     command: []
     restart: unless-stopped
     security_opt:

@@ -1,36 +1,179 @@
-#!/usr/bin/env bash
-# openclaw-wrapper — bridges Alfred's backend CLI calls to OpenClaw agent execution.
-#
-# Alfred calls:  openclaw-wrapper [--agent <id>] [--workspace <path>] <prompt>
-# OpenClaw:      openclaw agent --message "<prompt>" --agent <id> --workspace <path> --json
+#!/usr/bin/env python3
+"""
+openclaw-wrapper — runs OpenClaw agents via the gateway sessions_spawn HTTP API.
 
-set -euo pipefail
+Replaces the previous bash script that ran a local OpenClaw CLI inside the
+alfred container.  Now calls the gateway directly over HTTP, which gives
+agents full tool access (read, write, exec) and avoids the ws:// security
+check, version mismatch warnings, and TCP proxy hacks.
 
-AGENT_ID=""
-WORKSPACE=""
-PROMPT=""
+Alfred calls:  openclaw-wrapper [--agent <id>] [--workspace <path>] <prompt>
+We call:        POST http://openclaw:18789/tools/invoke  (sessions_spawn)
+Then poll:      POST http://openclaw:18789/tools/invoke  (sessions_history)
+"""
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --agent)
-            AGENT_ID="$2"
-            shift 2
-            ;;
-        --workspace)
-            WORKSPACE="$2"
-            shift 2
-            ;;
-        *)
-            PROMPT="$1"
-            shift
-            ;;
-    esac
-done
+import json
+import os
+import sys
+import time
+import urllib.request
+import urllib.error
 
-ARGS=(agent --message "$PROMPT")
-[[ -n "$AGENT_ID" ]] && ARGS+=(--agent "$AGENT_ID")
-[[ -n "$WORKSPACE" ]] && ARGS+=(--workspace "$WORKSPACE")
-ARGS+=(--json)
 
-# Do NOT suppress stderr — we need to see errors for debugging
-exec openclaw "${ARGS[@]}"
+def resolve_gateway():
+    """Resolve gateway URL and auth token from environment."""
+    url = os.environ.get("OPENCLAW_GATEWAY_URL", "http://openclaw:18789")
+    # Normalize ws:// to http:// for HTTP API calls
+    url = url.replace("ws://", "http://").replace("wss://", "https://")
+
+    token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+    if not token:
+        token_file = os.environ.get("OPENCLAW_GATEWAY_TOKEN_FILE", "")
+        if token_file and os.path.exists(token_file):
+            token = open(token_file).read().strip()
+
+    return url, token
+
+
+def invoke_tool(gateway_url, token, tool, args, timeout=30):
+    """Call POST /tools/invoke on the OpenClaw gateway."""
+    payload = json.dumps({"tool": tool, "args": args}).encode()
+    req = urllib.request.Request(
+        f"{gateway_url}/tools/invoke",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def extract_session_key(spawn_data):
+    """Extract childSessionKey from sessions_spawn response."""
+    result = spawn_data.get("result", {})
+    content_list = result.get("content", [])
+    for item in content_list:
+        if isinstance(item, dict) and item.get("type") == "text":
+            try:
+                inner = json.loads(item["text"])
+                key = inner.get("childSessionKey")
+                if key:
+                    return key
+            except (json.JSONDecodeError, KeyError):
+                pass
+    return None
+
+
+def extract_last_assistant_message(hist_data):
+    """Extract the last assistant message text from sessions_history response."""
+    result = hist_data.get("result", {})
+    content_list = result.get("content", [])
+    messages = []
+    for item in content_list:
+        if isinstance(item, dict) and item.get("type") == "text":
+            try:
+                parsed = json.loads(item["text"])
+                messages = parsed.get("messages", [])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    # Walk messages in reverse to find the last assistant message
+    for msg in reversed(messages):
+        if msg.get("role") == "assistant":
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        return part["text"]
+            elif isinstance(content, str):
+                return content
+    return None
+
+
+def main():
+    agent_id = ""
+    workspace = ""
+    prompt = ""
+
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--agent":
+            agent_id = args[i + 1]
+            i += 2
+        elif args[i] == "--workspace":
+            workspace = args[i + 1]
+            i += 2
+        else:
+            prompt = args[i]
+            i += 1
+
+    if not prompt:
+        print("Error: no prompt provided", file=sys.stderr)
+        sys.exit(1)
+
+    gateway_url, token = resolve_gateway()
+
+    if not token:
+        print("Error: no gateway token found", file=sys.stderr)
+        sys.exit(1)
+
+    # Step 1: Spawn the agent session
+    try:
+        spawn_data = invoke_tool(
+            gateway_url,
+            token,
+            "sessions_spawn",
+            {
+                "task": prompt,
+                "agentId": agent_id or "main",
+                "mode": "run",
+                "cleanup": "keep",
+                "sandbox": "inherit",
+                "runTimeoutSeconds": 480,
+            },
+            timeout=30,
+        )
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"sessions_spawn failed ({e.code}): {body}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"sessions_spawn error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    session_key = extract_session_key(spawn_data)
+    if not session_key:
+        print(f"No session key in response: {json.dumps(spawn_data)}", file=sys.stderr)
+        sys.exit(1)
+
+    # Step 2: Poll sessions_history for the result
+    max_attempts = 60  # 60 * 10s = 600s max (matches wrapper timeout)
+    for attempt in range(max_attempts):
+        time.sleep(10)
+        try:
+            hist_data = invoke_tool(
+                gateway_url,
+                token,
+                "sessions_history",
+                {"sessionKey": session_key, "limit": 10},
+                timeout=15,
+            )
+        except Exception:
+            continue
+
+        text = extract_last_assistant_message(hist_data)
+        if text:
+            # Return the agent's response on stdout
+            print(text)
+            sys.exit(0)
+
+    print("Timed out waiting for agent response", file=sys.stderr)
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
