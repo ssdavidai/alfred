@@ -7,6 +7,8 @@ on:
       - 'packages/openclaw/init/**'
       - 'packages/openclaw/dockerfiles/alfred.Dockerfile'
       - 'packages/openclaw/config.yaml.tpl'
+      - 'packages/openclaw/openclaw-wrapper'
+      - 'packages/openclaw/patches/**'
   workflow_dispatch:
 
 concurrency:
