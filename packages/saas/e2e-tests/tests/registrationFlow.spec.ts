@@ -42,9 +42,17 @@ test("2. User navigates to signup and creates an account", async () => {
   await page.goto("/signup");
   await page.waitForURL("**/signup");
 
+  const emailInput = page.locator('input[name="email"]');
+  const passwordInput = page.locator('input[name="password"]');
+
+  await expect(emailInput).toHaveCSS("background-color", "rgb(10, 10, 10)");
+  await expect(emailInput).toHaveCSS("color", "rgb(232, 228, 222)");
+  await expect(passwordInput).toHaveCSS("background-color", "rgb(10, 10, 10)");
+  await expect(passwordInput).toHaveCSS("color", "rgb(232, 228, 222)");
+
   // Fill in the Wasp auth SignupForm
-  await page.fill('input[name="email"]', testUser.email);
-  await page.fill('input[name="password"]', DEFAULT_PASSWORD);
+  await emailInput.fill(testUser.email);
+  await passwordInput.fill(DEFAULT_PASSWORD);
   await page.click('button:has-text("Sign up")');
 
   // Wait for the signup API to return successfully
