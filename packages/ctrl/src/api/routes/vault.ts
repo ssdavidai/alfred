@@ -8,7 +8,7 @@ const VAULT_PATH = "/mnt/encrypted/vault";
 const INBOX_PATH = `${VAULT_PATH}/inbox`;
 const VAULT_ENV = { ALFRED_VAULT_PATH: "/vault" };
 
-const IGNORE_DIRS = new Set(["_templates", "_bases", "_docs", ".obsidian", "view", "inbox", "dashboard"]);
+const IGNORE_DIRS = new Set(["_templates", "_bases", "_docs", ".obsidian", "view", "dashboard"]);
 
 const KNOWN_TYPES = [
   "person", "org", "project", "task", "event", "note", "location",
