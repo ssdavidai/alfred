@@ -2,6 +2,8 @@ import { expect, test, type Page } from "@playwright/test";
 import { createRandomUser, type User } from "./utils";
 
 const DEFAULT_PASSWORD = "password123";
+const DARK_INPUT_BACKGROUND = "rgb(10, 10, 10)";
+const LIGHT_INPUT_TEXT = "rgb(232, 228, 222)";
 
 /**
  * E2E test for the full happy-path registration flow:
@@ -45,10 +47,10 @@ test("2. User navigates to signup and creates an account", async () => {
   const emailInput = page.locator('input[name="email"]');
   const passwordInput = page.locator('input[name="password"]');
 
-  await expect(emailInput).toHaveCSS("background-color", "rgb(10, 10, 10)");
-  await expect(emailInput).toHaveCSS("color", "rgb(232, 228, 222)");
-  await expect(passwordInput).toHaveCSS("background-color", "rgb(10, 10, 10)");
-  await expect(passwordInput).toHaveCSS("color", "rgb(232, 228, 222)");
+  await expect(emailInput).toHaveCSS("background-color", DARK_INPUT_BACKGROUND);
+  await expect(emailInput).toHaveCSS("color", LIGHT_INPUT_TEXT);
+  await expect(passwordInput).toHaveCSS("background-color", DARK_INPUT_BACKGROUND);
+  await expect(passwordInput).toHaveCSS("color", LIGHT_INPUT_TEXT);
 
   // Fill in the Wasp auth SignupForm
   await emailInput.fill(testUser.email);
