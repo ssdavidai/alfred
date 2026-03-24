@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# openclaw-wrapper — translates Alfred's backend CLI invocation to OpenClaw's format.
+# openclaw-wrapper — bridges Alfred's backend CLI calls to OpenClaw agent execution.
 #
-# Alfred calls:  <command> [args...] --workspace <path> <prompt>
-# OpenClaw expects: openclaw agent --message "<prompt>" --workspace <path> --json
-#
-# This wrapper bridges the two conventions.
+# Alfred calls:  openclaw-wrapper [--agent <id>] [--workspace <path>] <prompt>
+# OpenClaw:      openclaw agent --message "<prompt>" --agent <id> --workspace <path> --json
 
 set -euo pipefail
 
+AGENT_ID=""
 WORKSPACE=""
 PROMPT=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --agent)
+            AGENT_ID="$2"
+            shift 2
+            ;;
         --workspace)
             WORKSPACE="$2"
             shift 2
@@ -25,9 +28,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 ARGS=(agent --message "$PROMPT")
-if [[ -n "$WORKSPACE" ]]; then
-    ARGS+=(--workspace "$WORKSPACE")
-fi
+[[ -n "$AGENT_ID" ]] && ARGS+=(--agent "$AGENT_ID")
+[[ -n "$WORKSPACE" ]] && ARGS+=(--workspace "$WORKSPACE")
 ARGS+=(--json)
 
-exec openclaw "${ARGS[@]}" 2>/dev/null
+# Do NOT suppress stderr — we need to see errors for debugging
+exec openclaw "${ARGS[@]}"
