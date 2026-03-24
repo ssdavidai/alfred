@@ -73,10 +73,45 @@ function readEnv(): Record<string, string> {
   return env;
 }
 
-/** Write key-value map back to .env. */
-function writeEnv(env: Record<string, string>): void {
-  const lines = Object.entries(env).map(([k, v]) => `${k}=${v}`);
-  fs.writeFileSync(ENV_PATH, lines.join("\n") + "\n", "utf-8");
+/**
+ * Surgically update specific keys in the .env file, preserving all
+ * comments, blank lines, ordering, and unrelated keys.
+ * Set a value to null to remove that key.
+ */
+function patchEnv(updates: Record<string, string | null>): void {
+  let lines: string[];
+  try {
+    lines = fs.readFileSync(ENV_PATH, "utf-8").split("\n");
+  } catch {
+    lines = [];
+  }
+
+  const remaining = new Map(Object.entries(updates));
+
+  // Update or remove existing lines
+  const result = lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) return line;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx < 0) return line;
+    const key = trimmed.slice(0, eqIdx).trim();
+    if (!remaining.has(key)) return line;
+    const newValue = remaining.get(key);
+    remaining.delete(key);
+    if (newValue === null) return null; // remove line
+    return `${key}=${newValue}`;
+  }).filter((line): line is string => line !== null);
+
+  // Append any new keys not already in the file
+  for (const [key, value] of remaining) {
+    if (value !== null) {
+      result.push(`${key}=${value}`);
+    }
+  }
+
+  // Ensure trailing newline
+  const content = result.join("\n");
+  fs.writeFileSync(ENV_PATH, content.endsWith("\n") ? content : content + "\n", "utf-8");
 }
 
 export function registerCredentialRoutes(): void {
@@ -117,20 +152,19 @@ export function registerCredentialRoutes(): void {
       }
     }
 
-    const env = readEnv();
-
+    const updates: Record<string, string | null> = {};
     for (const [key, value] of Object.entries(b)) {
       if (value === null) {
-        delete env[key];
+        updates[key] = null;
       } else {
         if (typeof value !== "string") {
           throw new ValidationError(`Value for ${key} must be a string or null`);
         }
-        env[key] = value;
+        updates[key] = value;
       }
     }
 
-    writeEnv(env);
+    patchEnv(updates);
 
     // Respond immediately, then restart containers in the background.
     // docker compose up -d can take 30s+ waiting for health checks,

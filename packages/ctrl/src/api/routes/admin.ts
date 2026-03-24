@@ -83,7 +83,7 @@ export function registerAdminRoutes(): void {
     sendJson(res, 200, { env });
   });
 
-  // Update .env (merge keys, null deletes)
+  // Update .env (surgical patch — preserves comments, blank lines, ordering)
   addRoute("PATCH", "/api/v1/admin/config/env", async ({ res, body }) => {
     const b = body as Record<string, string | null> | undefined;
     if (!b || typeof b !== "object") throw new ValidationError("Request body must be an object of key-value pairs");
@@ -91,30 +91,38 @@ export function registerAdminRoutes(): void {
     // Prevent overwriting the API key
     if ("AAS_API_KEY" in b) throw new ValidationError("Cannot modify AAS_API_KEY via API");
 
-    const existing: Record<string, string> = {};
+    let lines: string[];
     try {
-      const content = fs.readFileSync(ENV_PATH, "utf-8");
-      for (const line of content.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#")) continue;
-        const eqIdx = trimmed.indexOf("=");
-        if (eqIdx < 0) continue;
-        existing[trimmed.slice(0, eqIdx).trim()] = trimmed.slice(eqIdx + 1).trim();
-      }
+      lines = fs.readFileSync(ENV_PATH, "utf-8").split("\n");
     } catch {
-      // file doesn't exist yet
+      lines = [];
     }
 
-    for (const [key, value] of Object.entries(b)) {
-      if (value === null) {
-        delete existing[key];
-      } else {
-        existing[key] = value;
+    const remaining = new Map(Object.entries(b));
+
+    // Update or remove existing lines
+    const result = lines.map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) return line;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx < 0) return line;
+      const key = trimmed.slice(0, eqIdx).trim();
+      if (!remaining.has(key)) return line;
+      const newValue = remaining.get(key);
+      remaining.delete(key);
+      if (newValue === null) return null; // remove line
+      return `${key}=${newValue}`;
+    }).filter((line): line is string => line !== null);
+
+    // Append any new keys not already in the file
+    for (const [key, value] of remaining) {
+      if (value !== null) {
+        result.push(`${key}=${value}`);
       }
     }
 
-    const lines = Object.entries(existing).map(([k, v]) => `${k}=${v}`);
-    fs.writeFileSync(ENV_PATH, lines.join("\n") + "\n", "utf-8");
+    const content = result.join("\n");
+    fs.writeFileSync(ENV_PATH, content.endsWith("\n") ? content : content + "\n", "utf-8");
     sendJson(res, 200, { message: "Environment updated", keys: Object.keys(b) });
   });
 
