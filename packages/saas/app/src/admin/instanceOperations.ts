@@ -117,8 +117,8 @@ export const adminDestroyInstance = async (
   requireAdmin(context);
   const instance = await getInstanceById(context, args.instanceId);
 
-  if (instance.status === "destroyed" || instance.status === "destroying") {
-    throw new HttpError(400, `Instance is already ${instance.status}`);
+  if (instance.status === "destroyed") {
+    throw new HttpError(400, `Instance is already destroyed`);
   }
 
   await context.entities.Instance.update({
@@ -126,7 +126,7 @@ export const adminDestroyInstance = async (
     data: { status: "destroying" },
   });
 
-  // Trigger the destroy job
+  // Trigger the destroy job (safe to re-submit if already "destroying")
   await destroyInstance.submit({});
 
   return { success: true, message: `Instance ${instance.customerName} marked for destruction` };

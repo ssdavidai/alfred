@@ -41,6 +41,13 @@ export async function destroyInstanceJob(
         `Failed to destroy ${instance.customerName}:`,
         error.message,
       );
+      // Reset status so the admin can retry — don't leave it stuck at "destroying"
+      try {
+        await context.entities.Instance.update({
+          where: { id: instance.id },
+          data: { status: "error" },
+        });
+      } catch (_) { /* best effort */ }
     }
   }
 }
