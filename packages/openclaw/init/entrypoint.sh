@@ -99,14 +99,10 @@ EOF
 fi
 
 # --- 6. Fix permissions ---
-# OpenClaw runs as uid 1000 (node user), but the alfred container runs as root
-# with ALL capabilities dropped (including DAC_OVERRIDE).  Without DAC_OVERRIDE,
-# root cannot bypass filesystem permission checks.  All shared volumes must be
-# world-accessible so every container can read and write regardless of uid.
+# OpenClaw runs as uid 1000 (node user).  The alfred container runs as root
+# with cap_add: DAC_OVERRIDE so it can access uid-1000-owned files.
 chown -R 1000:1000 /openclaw-state 2>/dev/null || true
 chown -R 1000:1000 /vault 2>/dev/null || true
-chmod -R a+rwX /openclaw-state 2>/dev/null || true
-chmod -R a+rwX /vault 2>/dev/null || true
 
 # Alfred data needs to be writable by all containers
 mkdir -p /alfred-data
