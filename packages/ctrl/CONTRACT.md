@@ -9,7 +9,9 @@
 
 ### HTTP API (port 3100)
 
-Tenant-local API server consumed by the SaaS dashboard. All routes under `/api/v1/` prefix.
+Tenant-local API server running as `ctrl-api` Docker container (`node:22-slim`).
+Mounts the host Docker socket to manage other containers. Consumed by the SaaS
+dashboard via Tailscale proxy. All routes under `/api/v1/` prefix.
 
 | Route Module | Key Endpoints |
 |-------------|---------------|

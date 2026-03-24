@@ -46,7 +46,7 @@ Self-improving intelligence layer: observation → instinct → reflection cycle
 |---------|---------|----------|---------|
 | Temporal | `temporal:7233` | gRPC | `TEMPORAL_HOST` |
 | OpenClaw gateway | `http://openclaw:18789` | HTTP | `OPENCLAW_GATEWAY_URL` |
-| alfred-ctrl API | `http://host.docker.internal:3100` | HTTP | `ALFRED_CTRL_URL` |
+| alfred-ctrl API | `http://ctrl-api:3100` | HTTP | `ALFRED_CTRL_URL` |
 
 ### alfred-ctrl API Endpoints Consumed
 
@@ -87,7 +87,7 @@ From `src/utils/vault_client.py`:
 | `OPENCLAW_GATEWAY_TOKEN_FILE` | yes | `/alfred-data/.gateway-token` | Path to gateway auth token |
 | `VAULT_PATH` | yes | `/vault` | Vault mount path |
 | `TASK_QUEUE` | yes | `alfred-learn` | Temporal task queue name |
-| `ALFRED_CTRL_URL` | yes | `http://host.docker.internal:3100` | alfred-ctrl API base URL |
+| `ALFRED_CTRL_URL` | yes | `http://ctrl-api:3100` | alfred-ctrl API base URL |
 | `ALFRED_LEARN_ENABLED` | no | `true` | Feature flag to disable learn |
 | `ALFRED_DATA_DIR` | no | `/alfred-data` | Runtime data directory |
 | `TENANT_TIMEZONE` | no | `UTC` | IANA timezone for daily schedules |

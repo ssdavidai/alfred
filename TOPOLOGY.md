@@ -41,27 +41,33 @@ Each subscriber gets a dedicated Hetzner VPS (cx53) with this stack. All service
 | `openclaw` | `ssdavidai00/alfred-openclaw:latest` | 127.0.0.1:18789 | HTTP/WS | AI gateway (tools, agents, WebSocket) |
 | `alfred` | `ssdavidai00/alfred-worker:latest` | — (no port) | — | Vault worker daemons |
 | `alfred-learn` | `ssdavidai00/alfred-learn:latest` | — (no port) | — | Temporal worker (intelligence layer) |
-| `alfred-ctrl` | (not Docker — systemd) | 127.0.0.1:3100 | HTTP | Tenant API server |
+| `ctrl-api` | `node:22-slim` | 127.0.0.1:3100 | HTTP | Tenant API server (Docker container, mounts host Docker socket) |
 
 **Startup Order:**
 
 ```
 init (one-shot, must complete successfully)
   ↓
-temporal (must be healthy) + openclaw (must be healthy, also waits for init)
+ctrl-api (waits for init) + temporal (must be healthy) + openclaw (must be healthy, also waits for init)
   ↓
-alfred (waits for openclaw healthy + init complete)
-alfred-learn (waits for temporal healthy + openclaw healthy)
+alfred (waits for openclaw healthy + ctrl-api healthy + init complete)
+alfred-learn (waits for temporal healthy + openclaw healthy + ctrl-api healthy)
 ```
+
+**CAUTION:** `ctrl-api` shares `env_file: .env` with all other services. Running
+`docker compose up -d` after an `.env` change will recreate ctrl-api too. Always
+use `--no-deps --force-recreate <service>` to restart individual services without
+cascading to ctrl-api.
 
 **Internal Connections:**
 
 | From | To | Address | Protocol | Env Var |
 |------|----|---------|----------|---------|
 | `alfred` | `openclaw` | ws://openclaw:18789 | WebSocket | `OPENCLAW_GATEWAY_URL` |
+| `alfred` | `ctrl-api` | http://ctrl-api:3100 | HTTP | `ALFRED_CTRL_URL` |
 | `alfred-learn` | `temporal` | temporal:7233 | gRPC | `TEMPORAL_HOST` |
 | `alfred-learn` | `openclaw` | http://openclaw:18789 | HTTP | `OPENCLAW_GATEWAY_URL` |
-| `alfred-learn` | `alfred-ctrl` | http://host.docker.internal:3100 | HTTP | `ALFRED_CTRL_URL` |
+| `alfred-learn` | `ctrl-api` | http://ctrl-api:3100 | HTTP | `ALFRED_CTRL_URL` |
 | `openclaw` | gateway token | /alfred-data/.gateway-token | file | `OPENCLAW_GATEWAY_TOKEN_FILE` |
 | `alfred-learn` | gateway token | /alfred-data/.gateway-token | file | `OPENCLAW_GATEWAY_TOKEN_FILE` |
 
