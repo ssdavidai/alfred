@@ -43,6 +43,14 @@ All in `.github/workflows/`, triggered by path filters on push to `main`:
 | `build-learn.yml` | `packages/learn/**` | Test + build Docker image → DockerHub |
 | `build-openclaw.yml` | `packages/openclaw/**` | Build Docker image → DockerHub |
 
+## Deploy Batching Policy
+
+- One PR per logical change. Keep bug fixes and features isolated so each deploy maps cleanly to a single intent.
+- After pushing a change that triggers CI, wait for the deploy workflow to complete before pushing the next change.
+- Verify the deploy worked (for example with `scripts/smoke-test.sh` or a manual check) before moving on to another change.
+- If a deploy breaks, revert the specific breaking change instead of stacking rapid follow-up fixes on top of it.
+- AI agent sessions must not batch multiple unrelated fixes into rapid-fire pushes.
+
 ## Architecture (Three Planes)
 
 **SaaS Plane** (`packages/saas`): Wasp 0.19 + Prisma + Polar.sh payments. Runs on a single Hetzner VM. Handles auth, billing, provisioning orchestration, and proxies all API calls to tenants via Tailscale.
