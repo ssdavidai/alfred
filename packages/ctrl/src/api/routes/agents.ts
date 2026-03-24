@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
-import { execAsync, dockerExec, OPENCLAW_CMD } from "../helpers.js";
+import { execAsync, dockerExec, dockerComposeCmd, OPENCLAW_CMD } from "../helpers.js";
 
 const CONFIG_PATH = "/mnt/encrypted/alfred/config.yaml";
 
@@ -247,7 +247,6 @@ export function registerAgentRoutes(): void {
 
     // Restart OpenClaw to pick up the new model config
     try {
-      const { dockerComposeCmd } = await import("../helpers.js");
       await dockerComposeCmd(["restart", "openclaw"]);
     } catch {
       // Best effort — gateway may pick up changes on next request
