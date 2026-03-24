@@ -47,7 +47,7 @@ All in `.github/workflows/`, triggered by path filters on push to `main`:
 
 - One PR per logical change. Keep bug fixes and features isolated so each deploy maps cleanly to a single intent.
 - After pushing a change that triggers CI, wait for the deploy workflow to complete before pushing the next change.
-- Verify the deploy worked (for example with `scripts/smoke-test.sh` or a manual check) before moving on to another change.
+- Verify the deploy worked (e.g., with `scripts/smoke-test.sh` or a manual check) before moving on to another change.
 - If a deploy breaks, revert the specific breaking change instead of stacking rapid follow-up fixes on top of it.
 - AI agent sessions must not batch multiple unrelated fixes into rapid-fire pushes.
 
