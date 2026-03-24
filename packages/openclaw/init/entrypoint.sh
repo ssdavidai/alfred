@@ -102,8 +102,13 @@ fi
 # OpenClaw runs as uid 1000 (node user)
 chown -R 1000:1000 /openclaw-state 2>/dev/null || true
 chown -R 1000:1000 /vault 2>/dev/null || true
+# openclaw-state must be world-accessible: the alfred container runs as root
+# but drops ALL capabilities (including DAC_OVERRIDE), so it cannot read or
+# write uid-1000-owned directories unless "other" bits allow it.  The alfred
+# worker needs write access to clear OpenClaw agent session files.
+chmod -R a+rwX /openclaw-state 2>/dev/null || true
 
-# Alfred data needs to be writable
+# Alfred data needs to be writable by all containers
 mkdir -p /alfred-data
 chmod -R 777 /alfred-data 2>/dev/null || true
 
