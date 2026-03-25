@@ -1,6 +1,6 @@
 # Alfred Learn — Production Specification
 
-**Repo:** `ssdavidai/alfred-learn`
+**Monorepo path:** `packages/learn`
 **Created:** 2026-03-02
 **Status:** Final — ready for build
 **Tier:** All plans (Premium + Black)
@@ -767,7 +767,7 @@ New service in `docker-compose.yaml.njk`:
     pids_limit: 128
 ```
 
-### Repo Structure: `ssdavidai/alfred-learn`
+### Package Structure: `packages/learn`
 
 ```
 alfred-learn/
@@ -1050,14 +1050,14 @@ function flush(sessionKey, workspaceDir) {
 
 Deployed alongside alfred-inbox in the hooks directory. Watches for routing patterns in Alfred's responses and queues observations.
 
-File: `hooks/alfred-learn-observer/handler.js` (in alfred-learn repo, copied to alfred-ctrl hooks during deploy)
+File: `hooks/alfred-learn-observer/handler.js` (maintained with Alfred Learn changes and deployed into `packages/ctrl` hooks)
 
 ---
 
 ## Build Phases
 
 ### Phase 1: Core Infrastructure
-1. Create `ssdavidai/alfred-learn` repo with project structure
+1. Create the `packages/learn` package structure in the monorepo
 2. `config.py` — env vars, defaults, vault paths
 3. `utils/vault_client.py` — HTTP client for alfred-ctrl API
 4. `utils/jsonl.py` — JSONL helpers
