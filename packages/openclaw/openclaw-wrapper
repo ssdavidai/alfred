@@ -96,8 +96,12 @@ def extract_last_assistant_message(hist_data):
 def main():
     agent_id = ""
     workspace = ""
+    session_id = ""
     prompt = ""
 
+    # The alfred Python code calls:
+    #   openclaw-wrapper agent --agent <id> --session-id <sid> --message "<prompt>" --local --json
+    # We need to parse all these flags properly.
     args = sys.argv[1:]
     i = 0
     while i < len(args):
@@ -107,13 +111,36 @@ def main():
         elif args[i] == "--workspace":
             workspace = args[i + 1]
             i += 2
+        elif args[i] == "--message":
+            prompt = args[i + 1]
+            i += 2
+        elif args[i] == "--session-id":
+            session_id = args[i + 1]
+            i += 2
+        elif args[i] in ("--local", "--json", "agent"):
+            # Flags we accept but don't use (handled by gateway)
+            i += 1
         else:
-            prompt = args[i]
+            # Fallback: treat as prompt if --message wasn't used
+            if not prompt:
+                prompt = args[i]
             i += 1
 
     if not prompt:
         print("Error: no prompt provided", file=sys.stderr)
         sys.exit(1)
+
+    # The curator pipeline writes the prompt to a temp file and passes
+    # "--message 'Follow the instructions in /tmp/...'". Since sessions_spawn
+    # runs in the openclaw container (different filesystem), we need to read
+    # the file and pass the content directly.
+    if prompt.startswith("Follow the instructions in "):
+        file_path = prompt.split("Follow the instructions in ", 1)[1].strip()
+        try:
+            prompt = open(file_path).read()
+        except FileNotFoundError:
+            print(f"Error: prompt file not found: {file_path}", file=sys.stderr)
+            sys.exit(1)
 
     gateway_url, token = resolve_gateway()
 
