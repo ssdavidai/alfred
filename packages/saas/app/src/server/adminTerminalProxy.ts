@@ -1,23 +1,35 @@
 /**
- * Admin Godmode Terminal Proxy — bridges browser WebSocket to the SaaS host
- * ctrl-api's /godmode-ssh endpoint for direct SSH access to tenant hosts.
+ * Admin Godmode Terminal — direct SSH to tenant hosts from the admin dashboard.
  *
- * Flow: Browser WS → /api/admin-terminal → this proxy → ctrl /godmode-ssh → SSH → tenant
+ * The Wasp container has ctrl mounted at /app/alfred-ctrl/ which includes:
+ * - data/alfred-ctrl.db (SQLite with instance IPs and SSH key paths)
+ * - data/ssh_keys/<id>/id_ed25519 (SSH private keys)
  *
- * Auth: Wasp session token (must be admin user)
- * Config: CTRL_SAAS_HOST_URL (internal URL of ctrl-api on SaaS host)
- *         GODMODE_API_KEY (shared secret between Wasp and ctrl)
+ * Flow: Browser WS → /api/admin-terminal → this handler → spawn ssh → tenant host
+ *
+ * No intermediate ctrl-api needed. No env vars to configure.
+ * Auth: Wasp session token (must be admin user).
  */
 
 import type { Server as HttpServer, IncomingMessage } from "http";
 import type { Duplex } from "stream";
 import type { Application, Request, Response } from "express";
+import { spawn, execSync, type ChildProcess } from "child_process";
+import { existsSync } from "fs";
 import { WebSocketServer, WebSocket } from "ws";
 import { prisma } from "wasp/server";
 import { getSessionAndUserFromBearerToken } from "wasp/auth/session";
 
-const CTRL_URL = process.env.CTRL_SAAS_HOST_URL || "http://host.docker.internal:3100";
-const GODMODE_KEY = process.env.GODMODE_API_KEY || "";
+const MSG_DATA = 0x00;
+const MSG_CONTROL = 0x01;
+const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const CTRL_DATA_DIR = process.env.ALFRED_CTRL_PATH
+  ? process.env.ALFRED_CTRL_PATH.replace(/\/dist\/index\.mjs$/, "/data")
+  : "/app/alfred-ctrl/data";
+const CTRL_DB_PATH = `${CTRL_DATA_DIR}/alfred-ctrl.db`;
+
+// One active session per instance
+const activeSessions = new Map<string, WebSocket>();
 
 async function getAdminFromRequest(
   req: IncomingMessage,
@@ -27,14 +39,33 @@ async function getAdminFromRequest(
   return { userId: result.user.id, isAdmin: !!(result.user as any).isAdmin };
 }
 
+/**
+ * Look up the ctrl SQLite DB to get the integer instance ID (for SSH key path)
+ * and the IP address. Uses the sqlite3 CLI since we can't import node:sqlite
+ * in the Wasp build.
+ */
+function lookupCtrlInstance(customerName: string): { id: number; ip: string } | null {
+  if (!existsSync(CTRL_DB_PATH)) return null;
+  try {
+    const result = execSync(
+      `sqlite3 -json "${CTRL_DB_PATH}" "SELECT id, ip_address, tailscale_ip FROM instances WHERE customer_name = '${customerName.replace(/'/g, "''")}' LIMIT 1"`,
+      { encoding: "utf-8", timeout: 5000 },
+    ).trim();
+    const rows = JSON.parse(result || "[]");
+    if (!rows.length) return null;
+    const row = rows[0];
+    return {
+      id: row.id,
+      ip: row.tailscale_ip || row.ip_address,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function registerAdminTerminalStatusRoute(app: Application): void {
   app.get("/api/admin-terminal-status", async (req: Request, res: Response) => {
     try {
-      if (!GODMODE_KEY) {
-        res.json({ ok: false, error: "not_configured", message: "GODMODE_API_KEY not set" });
-        return;
-      }
-
       const admin = await getAdminFromRequest(req as unknown as IncomingMessage);
       if (!admin || !admin.isAdmin) {
         res.status(403).json({ ok: false, error: "forbidden", message: "Admin access required" });
@@ -47,21 +78,30 @@ export function registerAdminTerminalStatusRoute(app: Application): void {
         return;
       }
 
-      const instance = await prisma.instance.findUnique({
-        where: { id: instanceId },
-      });
-
+      const instance = await prisma.instance.findUnique({ where: { id: instanceId } });
       if (!instance) {
         res.json({ ok: false, error: "not_found", message: "Instance not found" });
         return;
       }
-
       if (instance.status !== "running") {
         res.json({ ok: false, error: "not_running", message: `Instance is ${instance.status}` });
         return;
       }
 
-      res.json({ ok: true, instanceName: instance.customerName });
+      // Check SSH key availability
+      const ctrl = lookupCtrlInstance(instance.customerName);
+      if (!ctrl) {
+        res.json({ ok: false, error: "no_ctrl_data", message: "Instance not found in ctrl database" });
+        return;
+      }
+
+      const keyPath = `${CTRL_DATA_DIR}/ssh_keys/${ctrl.id}/id_ed25519`;
+      if (!existsSync(keyPath)) {
+        res.json({ ok: false, error: "no_ssh_key", message: "SSH key not found for this instance" });
+        return;
+      }
+
+      res.json({ ok: true, instanceName: instance.customerName, ip: ctrl.ip });
     } catch (err: any) {
       console.error("[admin-terminal-status] error:", err);
       res.status(500).json({ ok: false, error: "internal", message: err.message });
@@ -70,12 +110,7 @@ export function registerAdminTerminalStatusRoute(app: Application): void {
 }
 
 export function attachAdminTerminalProxy(server: HttpServer): void {
-  if (!GODMODE_KEY) {
-    console.log("[admin-terminal] GODMODE_API_KEY not set — admin terminal disabled");
-    return;
-  }
-
-  console.log("[admin-terminal] attaching admin terminal proxy");
+  console.log("[admin-terminal] attaching godmode SSH handler");
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", async (req: IncomingMessage, socket: Duplex, head: Buffer) => {
@@ -85,7 +120,6 @@ export function attachAdminTerminalProxy(server: HttpServer): void {
     console.log("[admin-terminal] upgrade request received");
 
     try {
-      // Auth via Wasp session token in query param
       const token = url.searchParams.get("token");
       if (token) {
         req.headers.authorization = `Bearer ${token}`;
@@ -93,7 +127,6 @@ export function attachAdminTerminalProxy(server: HttpServer): void {
 
       const admin = await getAdminFromRequest(req);
       if (!admin || !admin.isAdmin) {
-        console.log("[admin-terminal] auth failed — not admin");
         socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
         socket.destroy();
         return;
@@ -106,91 +139,144 @@ export function attachAdminTerminalProxy(server: HttpServer): void {
         return;
       }
 
-      const instance = await prisma.instance.findUnique({
-        where: { id: instanceId },
-      });
-
+      const instance = await prisma.instance.findUnique({ where: { id: instanceId } });
       if (!instance || instance.status !== "running") {
         socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
         socket.destroy();
         return;
       }
 
-      // Connect to the SaaS host's ctrl-api godmode endpoint
-      const ctrlWsUrl = CTRL_URL.replace(/^https:/, "wss:").replace(/^http:/, "ws:");
-      const upstreamUrl = `${ctrlWsUrl}/godmode-ssh?name=${encodeURIComponent(instance.customerName)}&token=${encodeURIComponent(GODMODE_KEY)}`;
+      // Check for existing session
+      const existing = activeSessions.get(instance.customerName);
+      if (existing && existing.readyState === WebSocket.OPEN) {
+        socket.write("HTTP/1.1 409 Conflict\r\n\r\n");
+        socket.destroy();
+        return;
+      }
 
-      console.log(`[admin-terminal] connecting to godmode for ${instance.customerName}`);
+      // Look up ctrl DB for SSH key path and IP
+      const ctrl = lookupCtrlInstance(instance.customerName);
+      if (!ctrl) {
+        socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+        socket.destroy();
+        return;
+      }
 
-      wss.handleUpgrade(req, socket, head, (browserWs: InstanceType<typeof WebSocket>) => {
-        const upstreamWs = new WebSocket(upstreamUrl);
+      const keyPath = `${CTRL_DATA_DIR}/ssh_keys/${ctrl.id}/id_ed25519`;
+      if (!existsSync(keyPath)) {
+        socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+        socket.destroy();
+        return;
+      }
 
-        let browserClosed = false;
-        let upstreamClosed = false;
+      wss.handleUpgrade(req, socket, head, (ws: InstanceType<typeof WebSocket>) => {
+        activeSessions.set(instance.customerName, ws);
 
-        function sendControlToBrowser(msg: Record<string, unknown>) {
-          if (browserClosed || browserWs.readyState !== WebSocket.OPEN) return;
-          const json = JSON.stringify(msg);
-          const encoded = new TextEncoder().encode(json);
-          const buf = new Uint8Array(1 + encoded.length);
-          buf[0] = 0x01; // MSG_CONTROL
-          buf.set(encoded, 1);
-          browserWs.send(buf);
+        let idleTimer: ReturnType<typeof setTimeout>;
+        let proc: ChildProcess | null = null;
+        let termCols = 80;
+        let termRows = 24;
+
+        function resetIdle() {
+          clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => cleanup("idle timeout (30 min)"), IDLE_TIMEOUT_MS);
         }
 
-        function cleanupBoth(reason?: string) {
-          if (reason) {
-            sendControlToBrowser({ type: "disconnect", reason });
+        function cleanup(reason: string) {
+          clearTimeout(idleTimer);
+          if (proc) {
+            proc.kill("SIGKILL");
+            proc = null;
           }
-          if (!browserClosed && browserWs.readyState === WebSocket.OPEN) {
-            browserWs.close();
+          if (ws.readyState === WebSocket.OPEN) {
+            const msg = JSON.stringify({ type: "disconnect", reason });
+            const buf = Buffer.alloc(1 + Buffer.byteLength(msg));
+            buf[0] = MSG_CONTROL;
+            buf.write(msg, 1);
+            ws.send(buf, () => ws.close());
           }
-          if (!upstreamClosed && upstreamWs.readyState === WebSocket.OPEN) {
-            upstreamWs.close();
-          }
+          activeSessions.delete(instance.customerName);
         }
 
-        upstreamWs.on("open", () => {
-          console.log(`[admin-terminal] godmode connected for ${instance.customerName}`);
-          browserWs.on("message", (data: Buffer, isBinary: boolean) => {
-            if (upstreamWs.readyState === WebSocket.OPEN) {
-              upstreamWs.send(data, { binary: isBinary });
-            }
-          });
+        // Spawn SSH with PTY via script(1)
+        const sshCmd = [
+          `ssh -i ${keyPath}`,
+          "-o StrictHostKeyChecking=accept-new",
+          "-o ServerAliveInterval=30",
+          `-tt deploy@${ctrl.ip} bash`,
+        ].join(" ");
 
-          upstreamWs.on("message", (data: Buffer, isBinary: boolean) => {
-            if (browserWs.readyState === WebSocket.OPEN) {
-              browserWs.send(data, { binary: isBinary });
-            }
-          });
+        proc = spawn("script", ["-q", "-c", sshCmd, "/dev/null"], {
+          stdio: ["pipe", "pipe", "pipe"],
+          env: {
+            ...process.env,
+            COLUMNS: String(termCols),
+            LINES: String(termRows),
+            TERM: "xterm-256color",
+          },
         });
 
-        upstreamWs.on("error", (err: any) => {
-          const detail = `Godmode upstream error: ${err.message}`;
-          console.error("[admin-terminal]", detail);
-          cleanupBoth(detail);
+        proc.stdout!.on("data", (chunk: Buffer) => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          const buf = Buffer.alloc(1 + chunk.length);
+          buf[0] = MSG_DATA;
+          chunk.copy(buf, 1);
+          ws.send(buf);
+          resetIdle();
         });
 
-        upstreamWs.on("unexpected-response", (_req: any, httpRes: any) => {
-          const detail = `Godmode rejected: HTTP ${httpRes.statusCode}`;
-          console.error("[admin-terminal]", detail);
-          cleanupBoth(detail);
+        proc.stderr!.on("data", (chunk: Buffer) => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          const buf = Buffer.alloc(1 + chunk.length);
+          buf[0] = MSG_DATA;
+          chunk.copy(buf, 1);
+          ws.send(buf);
+          resetIdle();
         });
 
-        upstreamWs.on("close", (code, reason) => {
-          console.log("[admin-terminal] upstream closed:", code, reason?.toString());
-          upstreamClosed = true;
-          cleanupBoth(reason?.toString() || `SSH closed (code: ${code})`);
+        proc.on("exit", (code) => cleanup(`SSH exited (${code})`));
+        proc.on("error", (err) => cleanup(`SSH error: ${err.message}`));
+
+        resetIdle();
+
+        // Handle incoming messages
+        ws.on("message", (data: Buffer) => {
+          if (!Buffer.isBuffer(data) || data.length < 1) return;
+          resetIdle();
+          const type = data[0];
+          const payload = data.subarray(1);
+
+          if (type === MSG_DATA) {
+            if (proc?.stdin?.writable) proc.stdin.write(payload);
+          } else if (type === MSG_CONTROL) {
+            try {
+              const msg = JSON.parse(payload.toString());
+              if (msg.type === "resize" && msg.cols > 0 && msg.rows > 0) {
+                termCols = msg.cols;
+                termRows = msg.rows;
+                if (proc?.stdin?.writable) {
+                  proc.stdin.write(`stty cols ${msg.cols} rows ${msg.rows} 2>/dev/null\n`);
+                }
+              }
+            } catch { /* ignore */ }
+          }
         });
 
-        browserWs.on("close", () => {
-          browserClosed = true;
-          cleanupBoth();
-        });
+        ws.on("close", () => cleanup("client disconnected"));
+        ws.on("error", () => cleanup("websocket error"));
 
-        browserWs.on("error", () => {
-          cleanupBoth();
+        // Send connected control message
+        const connMsg = JSON.stringify({
+          type: "connected",
+          instance: instance.customerName,
+          ip: ctrl.ip,
         });
+        const connBuf = Buffer.alloc(1 + Buffer.byteLength(connMsg));
+        connBuf[0] = MSG_CONTROL;
+        connBuf.write(connMsg, 1);
+        ws.send(connBuf);
+
+        console.log(`[admin-terminal] SSH session opened: ${instance.customerName} → deploy@${ctrl.ip}`);
       });
     } catch (err) {
       console.error("[admin-terminal] error:", err);
