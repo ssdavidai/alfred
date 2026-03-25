@@ -186,6 +186,11 @@ def main():
             break  # success
         except urllib.error.HTTPError as e:
             body = e.read().decode() if e.fp else ""
+            # Retry on 401/503 — gateway may still be initializing auth
+            if e.code in (401, 503) and attempt < 5:
+                print(f"[openclaw-wrapper] retry {attempt+1}/5: HTTP {e.code}", file=sys.stderr)
+                time.sleep(5)
+                continue
             print(f"sessions_spawn failed ({e.code}): {body}", file=sys.stderr)
             sys.exit(1)
         except Exception as e:
