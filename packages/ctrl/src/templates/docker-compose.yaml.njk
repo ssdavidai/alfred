@@ -39,6 +39,7 @@ services:
       - /mnt/encrypted/openclaw:/home/node/.openclaw
       - /mnt/encrypted/vault:/home/node/.openclaw/workspace/vault
       - /mnt/encrypted/alfred:/alfred-data
+      - shared_tmp:/tmp
     ports:
       - "127.0.0.1:18789:18789"
     environment:
@@ -76,6 +77,7 @@ services:
       - /mnt/encrypted/vault:/vault
       - /mnt/encrypted/alfred:/app/data
       - /mnt/encrypted/openclaw:/root/.openclaw
+      - shared_tmp:/tmp
     environment:
       - OPENCLAW_GATEWAY_URL=http://openclaw:18789
       - ALFRED_CTRL_URL=http://ctrl-api:3100
@@ -159,3 +161,6 @@ services:
       - ALL
     mem_limit: 1g
     pids_limit: 128
+
+volumes:
+  shared_tmp:
