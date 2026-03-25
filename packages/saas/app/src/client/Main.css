@@ -137,9 +137,14 @@
   font-family: 'DM Sans', -apple-system, sans-serif !important;
 }
 
-/* Text inputs */
-[class*="formInput"] {
+/* Text inputs — double selector for specificity over Wasp's auth CSS modules */
+[class*="formInput"],
+input[class*="formInput"],
+form input[type="email"],
+form input[type="password"],
+form input[type="text"] {
   background: #0A0A0A !important;
+  background-color: #0A0A0A !important;
   border: none !important;
   border-bottom: 1px solid rgba(184, 151, 106, 0.3) !important;
   border-radius: 0 !important;
