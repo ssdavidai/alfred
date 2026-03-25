@@ -31,6 +31,14 @@ def resolve_gateway():
         token_file = os.environ.get("OPENCLAW_GATEWAY_TOKEN_FILE", "")
         if token_file and os.path.exists(token_file):
             token = open(token_file).read().strip()
+    if not token:
+        # Hardcoded fallback — the alfred container mounts /mnt/encrypted/alfred
+        # at /app/data, and the init container writes the token there
+        for path in ["/app/data/.gateway-token", "/alfred-data/.gateway-token"]:
+            if os.path.exists(path):
+                token = open(path).read().strip()
+                if token:
+                    break
 
     return url, token
 
