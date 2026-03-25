@@ -64,7 +64,8 @@ jobs:
           # - openssh-keygen: alfred-ctrl keypair generation
           # - openssh-client: Godmode SSH to tenants
           # - sqlite: read ctrl SQLite DB for instance lookups
-          sed -i 's/RUN apk add --no-cache python3$/RUN apk add --no-cache python3 openssh-keygen openssh-client sqlite/' packages/saas/app/.wasp/build/Dockerfile
+          # - util-linux: provides script(1) for PTY in Godmode SSH
+          sed -i 's/RUN apk add --no-cache python3$/RUN apk add --no-cache python3 openssh-keygen openssh-client sqlite util-linux/' packages/saas/app/.wasp/build/Dockerfile
 
       - name: Deploy server build to VM
         run: |
