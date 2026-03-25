@@ -139,12 +139,14 @@ export function attachAdminTerminalProxy(server: HttpServer): void {
         return;
       }
 
-      const instance = await prisma.instance.findUnique({ where: { id: instanceId } });
-      if (!instance || instance.status !== "running") {
+      const instanceRow = await prisma.instance.findUnique({ where: { id: instanceId } });
+      if (!instanceRow || instanceRow.status !== "running") {
         socket.write("HTTP/1.1 503 Service Unavailable\r\n\r\n");
         socket.destroy();
         return;
       }
+
+      const instance = instanceRow; // non-null guaranteed by check above
 
       // Check for existing session
       const existing = activeSessions.get(instance.customerName);
