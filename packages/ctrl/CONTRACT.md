@@ -110,6 +110,10 @@ Periodic background checks via SSH into each tenant:
 | `data/alfred-ctrl.db` | read/write | SQLite database (auto-created) |
 | `data/ssh_keys/<id>/` | read/write | Per-instance SSH keypairs + LUKS backups |
 
+### Docker Volumes (tenant compose stack)
+
+The generated `docker-compose.yaml` defines a `shared_tmp` Docker volume mounted as `/tmp` in both the `openclaw` and `alfred` containers. This allows the alfred worker to write prompt files to `/tmp` that the `openclaw-wrapper` reads before sending to the gateway via HTTP.
+
 ### Environment Variables
 
 **API server (on tenant):**

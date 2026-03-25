@@ -17,21 +17,23 @@ OpenClaw gateway server exposing HTTP and WebSocket interfaces.
 |----------|----------|---------|
 | `GET /health` | HTTP | Health check |
 | `POST /tools/invoke` | HTTP | Tool invocation |
-| WebSocket at :18789 | WS | Agent connections (alfred worker) |
+| WebSocket at :18789 | WS | User/device agent connections |
 
 Built from: `dockerfiles/openclaw.Dockerfile`
 Base: `node:22-bookworm` + OpenClaw (git clone, unpinned)
 
 **2. `ssdavidai00/alfred-worker` — Vault Worker**
 
-Alfred daemon process — connects to OpenClaw gateway, runs vault tools (curator, janitor, distiller).
+Alfred daemon process — spawns OpenClaw agents via the gateway's HTTP API using the `openclaw-wrapper` script (Python). Runs vault tools (curator, janitor, distiller).
 
 | Connection | Address | Protocol |
 |-----------|---------|----------|
-| OpenClaw gateway | ws://openclaw:18789 | WebSocket |
+| OpenClaw gateway | http://openclaw:18789 | HTTP (`POST /tools/invoke`) |
+
+The `openclaw-wrapper` replaces the previous approach of running a local OpenClaw CLI over WebSocket. It calls `sessions_spawn` to start an agent, then polls `sessions_history` for the result. Both the `alfred` and `openclaw` containers share a `shared_tmp` Docker volume at `/tmp` so the wrapper can read prompt files written by the alfred daemons.
 
 Built from: `dockerfiles/alfred.Dockerfile`
-Base: `python:3.11-slim-bookworm` + Node.js 22 + OpenClaw CLI + Alfred (git clone, unpinned)
+Base: `python:3.11-slim-bookworm` + Node.js 22 + `openclaw-wrapper` + Alfred (git clone, unpinned)
 
 **3. `ssdavidai00/alfred-init` — Init Container**
 
@@ -63,6 +65,7 @@ All three images run as Docker containers within the tenant Docker Compose stack
 | `/mnt/encrypted/vault` | `/vault` or `/home/node/.openclaw/workspace/vault` | all three | read/write |
 | `/mnt/encrypted/openclaw` | `/home/node/.openclaw` or `/openclaw-state` | openclaw, init, alfred | read/write |
 | `/mnt/encrypted/alfred` | `/alfred-data` or `/app/data` | all three | read/write |
+| `shared_tmp` (Docker volume) | `/tmp` | openclaw, alfred | read/write |
 
 ### Environment Variables
 
@@ -77,7 +80,7 @@ All three images run as Docker containers within the tenant Docker Compose stack
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `OPENCLAW_GATEWAY_URL` | yes | `ws://openclaw:18789` | OpenClaw WebSocket address |
+| `OPENCLAW_GATEWAY_URL` | yes | `http://openclaw:18789` | OpenClaw HTTP gateway address |
 | LLM provider key (via `.env`) | yes | — | Passed through to OpenClaw |
 
 **Init container:**
@@ -97,6 +100,6 @@ All three images run as Docker containers within the tenant Docker Compose stack
 
 | Consumer | Connection | What It Uses |
 |----------|-----------|-------------|
-| `alfred` (worker) | ws://openclaw:18789 | WebSocket gateway |
-| `alfred-learn` | http://openclaw:18789 | HTTP gateway (tools, health) |
+| `alfred` (worker) | http://openclaw:18789 | HTTP gateway (`POST /tools/invoke` → `sessions_spawn` / `sessions_history`) |
+| `alfred-learn` | http://openclaw:18789 | HTTP gateway (`POST /tools/invoke` → `sessions_spawn` / `sessions_history`) |
 | Users (via Cloudflare Tunnel) | https://{subdomain}.{domain} → :18789 | HTTP/WS gateway |
