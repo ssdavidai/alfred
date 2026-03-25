@@ -160,28 +160,41 @@ def main():
         print("Error: no gateway token found", file=sys.stderr)
         sys.exit(1)
 
-    # Step 1: Spawn the agent session
-    try:
-        spawn_data = invoke_tool(
-            gateway_url,
-            token,
-            "sessions_spawn",
-            {
-                "task": prompt,
-                "agentId": agent_id or "main",
-                "mode": "run",
-                "cleanup": "keep",
-                "sandbox": "inherit",
-                "runTimeoutSeconds": 480,
-            },
-            timeout=30,
-        )
-    except urllib.error.HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        print(f"sessions_spawn failed ({e.code}): {body}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"sessions_spawn error: {e}", file=sys.stderr)
+    # Step 1: Spawn the agent session (with retry for gateway startup)
+    spawn_data = None
+    last_error = None
+    for attempt in range(6):  # 6 attempts, ~30s total
+        try:
+            spawn_data = invoke_tool(
+                gateway_url,
+                token,
+                "sessions_spawn",
+                {
+                    "task": prompt,
+                    "agentId": agent_id or "main",
+                    "mode": "run",
+                    "cleanup": "keep",
+                    "sandbox": "inherit",
+                    "runTimeoutSeconds": 480,
+                },
+                timeout=30,
+            )
+            break  # success
+        except urllib.error.HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            print(f"sessions_spawn failed ({e.code}): {body}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            last_error = e
+            if attempt < 5:
+                print(f"[openclaw-wrapper] retry {attempt+1}/5: {e}", file=sys.stderr)
+                time.sleep(5)
+            else:
+                print(f"sessions_spawn error after 6 attempts: {e}", file=sys.stderr)
+                sys.exit(1)
+
+    if spawn_data is None:
+        print(f"sessions_spawn failed: {last_error}", file=sys.stderr)
         sys.exit(1)
 
     session_key = extract_session_key(spawn_data)
