@@ -10,6 +10,7 @@ import {
   Server,
   Smartphone,
   Square,
+  TerminalSquare,
   Trash2,
   XCircle,
 } from "lucide-react";
@@ -25,6 +26,7 @@ import {
 } from "../../../client/components/ui/dialog";
 import { Input } from "../../../client/components/ui/input";
 import { useParams } from "react-router-dom";
+import GodmodeTerminal from "../../components/GodmodeTerminal";
 import {
   useQuery,
   useAction,
@@ -54,7 +56,7 @@ const statusColors: Record<string, string> = {
 export default function InstanceDetailPage() {
   const { data: user } = useAuth();
   const { instanceId } = useParams<{ instanceId: string }>();
-  const [activeTab, setActiveTab] = useState<"overview" | "health" | "devices">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "health" | "devices" | "terminal">("overview");
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [destroyOpen, setDestroyOpen] = useState(false);
   const [destroyConfirmText, setDestroyConfirmText] = useState("");
@@ -104,6 +106,7 @@ export default function InstanceDetailPage() {
     { id: "overview" as const, label: "Overview", icon: Server },
     { id: "health" as const, label: "Health & Containers", icon: Activity },
     { id: "devices" as const, label: "Devices", icon: Smartphone },
+    { id: "terminal" as const, label: "Godmode SSH", icon: TerminalSquare },
   ];
 
   return (
@@ -248,6 +251,16 @@ export default function InstanceDetailPage() {
                 }
                 onRefresh={refetchDevices}
               />
+            )}
+            {activeTab === "terminal" && (
+              instance.status === "running" ? (
+                <GodmodeTerminal instanceId={instance.id} instanceName={instance.customerName} />
+              ) : (
+                <div className="rounded border border-amber-900/30 bg-amber-950/10 p-6 text-center">
+                  <p className="font-mono text-sm text-amber-400">Instance must be running to use Godmode SSH.</p>
+                  <p className="mt-1 text-xs text-muted-foreground">Current status: {instance.status}</p>
+                </div>
+              )
             )}
 
             {/* Destroy Confirmation Dialog */}

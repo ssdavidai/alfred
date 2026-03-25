@@ -70,7 +70,11 @@ const apiBuildOptions = {
   outfile: "dist/api.mjs",
   banner: { js: "#!/usr/bin/env node\nimport{createRequire}from'module';const require=createRequire(import.meta.url);" },
   external: nodeBuiltins,
-  loader: {},
+  loader: {
+    ".sql": "text",
+    ".njk": "text",
+    ".md": "text",
+  },
   sourcemap: true,
   minify: false,
 };

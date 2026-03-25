@@ -18,6 +18,7 @@ if (fs.existsSync(envPath)) {
 import { setApiKey } from "./auth.js";
 import { createApiServer } from "./server.js";
 import { attachTerminalUpgrade } from "./routes/terminal.js";
+import { attachGodmodeSshUpgrade } from "./routes/godmode.js";
 
 const apiKey = process.env.AAS_API_KEY;
 if (!apiKey) {
@@ -36,6 +37,9 @@ const server = createApiServer();
 attachTerminalUpgrade(server);
 (globalThis as any).__terminalReady = true;
 console.log("Terminal WebSocket endpoint attached");
+
+// Attach Godmode SSH upgrade handler (SaaS host only, requires GODMODE_API_KEY)
+attachGodmodeSshUpgrade(server);
 
 server.listen(port, host, () => {
   console.log(`Alfred tenant API listening on http://${host}:${port}`);
