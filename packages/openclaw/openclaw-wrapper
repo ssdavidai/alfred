@@ -152,6 +152,10 @@ def main():
 
     gateway_url, token = resolve_gateway()
 
+    # Debug: log what we resolved (visible in alfred container logs)
+    token_preview = f"{token[:8]}...{token[-4:]}" if len(token) > 12 else "(empty)"
+    print(f"[openclaw-wrapper] gateway={gateway_url} token={token_preview} agent={agent_id} prompt_len={len(prompt)}", file=sys.stderr)
+
     if not token:
         print("Error: no gateway token found", file=sys.stderr)
         sys.exit(1)
