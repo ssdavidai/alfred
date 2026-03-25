@@ -60,8 +60,11 @@ jobs:
 
       - name: Patch Dockerfile for provisioning deps
         run: |
-          # Add openssh-keygen to production stage (needed by alfred-ctrl for keypair generation)
-          sed -i 's/RUN apk add --no-cache python3$/RUN apk add --no-cache python3 openssh-keygen/' packages/saas/app/.wasp/build/Dockerfile
+          # Add packages to production stage:
+          # - openssh-keygen: alfred-ctrl keypair generation
+          # - openssh-client: Godmode SSH to tenants
+          # - sqlite: read ctrl SQLite DB for instance lookups
+          sed -i 's/RUN apk add --no-cache python3$/RUN apk add --no-cache python3 openssh-keygen openssh-client sqlite/' packages/saas/app/.wasp/build/Dockerfile
 
       - name: Deploy server build to VM
         run: |
