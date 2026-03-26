@@ -3,7 +3,19 @@ import { useQuery, getContainerLogs, getActivityFeed } from "wasp/client/operati
 import DashboardLayout from "./DashboardLayout";
 import { Card, CardContent } from "../client/components/ui/card";
 import { Button } from "../client/components/ui/button";
-import { ScrollText, RefreshCw, Activity, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { ScrollText, RefreshCw, Activity, AlertTriangle, CheckCircle2, WifiOff } from "lucide-react";
+
+function isTenantUnreachable(error: any): boolean {
+  if (!error) return false;
+  const msg: string = (error.message || "").toLowerCase();
+  return (
+    msg.includes("failed to reach tenant") ||
+    msg.includes("timed out") ||
+    msg.includes("internal tenant error") ||
+    msg.includes("status code 502") ||
+    msg.includes("status code 504")
+  );
+}
 
 const SERVICES = [
   { value: "alfred", label: "Alfred Worker" },
@@ -60,7 +72,15 @@ function ActivityView() {
     refetchInterval: 10_000,
   });
   const bottomRef = useRef<HTMLDivElement>(null);
-  const items: ActivityItem[] = Array.isArray(data?.items) ? data.items : [];
+  const liveItems: ActivityItem[] = Array.isArray(data?.items) ? data.items : [];
+  const [cachedItems, setCachedItems] = useState<ActivityItem[]>([]);
+
+  useEffect(() => {
+    if (liveItems.length > 0) setCachedItems(liveItems);
+  }, [liveItems.length]);
+
+  const isStale = !!error && cachedItems.length > 0 && liveItems.length === 0;
+  const items = liveItems.length > 0 ? liveItems : (error ? cachedItems : []);
 
   useEffect(() => {
     if (bottomRef.current) {
@@ -83,8 +103,23 @@ function ActivityView() {
       </div>
 
       {error && (
-        <div className="bg-destructive/10 text-destructive mb-4 rounded-sm p-4">
-          <p>{error.message}</p>
+        <div className={`mb-4 flex items-center gap-3 rounded-sm border px-4 py-3 ${
+          isTenantUnreachable(error)
+            ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+            : "border-destructive/30 bg-destructive/10 text-destructive"
+        }`}>
+          <WifiOff className="h-4 w-4 flex-shrink-0" />
+          <p className="flex-1 font-sans text-sm font-light">
+            {isTenantUnreachable(error)
+              ? isStale
+                ? "Tenant unreachable — showing last known activity"
+                : "Tenant unreachable — try again or contact support"
+              : error.message}
+          </p>
+          <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isLoading}>
+            <RefreshCw className={`mr-2 h-3.5 w-3.5 ${isLoading ? "animate-spin" : ""}`} />
+            Retry
+          </Button>
         </div>
       )}
 
@@ -140,11 +175,17 @@ function RawLogsView() {
     tail,
   });
 
-  const lines: string[] = data?.logs
-    ? data.logs
-        .split("\n")
-        .filter((l: string) => l.trim() !== "")
+  const liveLines: string[] = data?.logs
+    ? data.logs.split("\n").filter((l: string) => l.trim() !== "")
     : [];
+  const [cachedLines, setCachedLines] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (liveLines.length > 0) setCachedLines(liveLines);
+  }, [liveLines.length]);
+
+  const isStale = !!error && cachedLines.length > 0 && liveLines.length === 0;
+  const lines = liveLines.length > 0 ? liveLines : (error ? cachedLines : []);
 
   useEffect(() => {
     if (bottomRef.current) {
@@ -188,8 +229,23 @@ function RawLogsView() {
       </div>
 
       {error && (
-        <div className="bg-destructive/10 text-destructive mb-4 rounded-sm p-4">
-          <p>{error.message}</p>
+        <div className={`mb-4 flex items-center gap-3 rounded-sm border px-4 py-3 ${
+          isTenantUnreachable(error)
+            ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+            : "border-destructive/30 bg-destructive/10 text-destructive"
+        }`}>
+          <WifiOff className="h-4 w-4 flex-shrink-0" />
+          <p className="flex-1 font-sans text-sm font-light">
+            {isTenantUnreachable(error)
+              ? isStale
+                ? `Tenant unreachable — showing last known logs for ${service}`
+                : "Tenant unreachable — try again or contact support"
+              : error.message}
+          </p>
+          <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isLoading}>
+            <RefreshCw className={`mr-2 h-3.5 w-3.5 ${isLoading ? "animate-spin" : ""}`} />
+            Retry
+          </Button>
         </div>
       )}
 
