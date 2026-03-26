@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+        "primary": "openrouter/x-ai/grok-4.1-fast"
       },
       "heartbeat": {
         "every": "4h",
@@ -16,45 +16,45 @@
         }
       },
       "subagents": {
-        "model": "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+        "model": "openrouter/x-ai/grok-4.1-fast"
       }
     },
     "list": [
       {
         "id": "main",
         "name": "Alfred",
-        "model": {"primary": "openrouter/nvidia/nemotron-3-super-120b-a12b:free"},
+        "model": {"primary": "openrouter/x-ai/grok-4.1-fast"},
         "workspace": "/home/node/.openclaw/workspace",
         "subagents": { "allowAgents": ["*"] }
       },
       {
         "id": "learn-clerk",
         "name": "Learn Clerk",
-        "model": {"primary": "openrouter/nvidia/nemotron-3-super-120b-a12b:free"},
+        "model": {"primary": "openrouter/x-ai/grok-4.1-fast"},
         "workspace": "/home/node/.openclaw/workspace"
       },
       {
         "id": "vault-curator",
         "name": "Vault Curator",
-        "model": {"primary": "openrouter/nvidia/nemotron-3-super-120b-a12b:free"},
+        "model": {"primary": "openrouter/x-ai/grok-4.1-fast"},
         "workspace": "/home/node/.openclaw/workspace"
       },
       {
         "id": "vault-distiller",
         "name": "Vault Distiller",
-        "model": {"primary": "openrouter/nvidia/nemotron-3-super-120b-a12b:free"},
+        "model": {"primary": "openrouter/x-ai/grok-4.1-fast"},
         "workspace": "/home/node/.openclaw/workspace"
       },
       {
         "id": "vault-janitor",
         "name": "Vault Janitor",
-        "model": {"primary": "openrouter/nvidia/nemotron-3-super-120b-a12b:free"},
+        "model": {"primary": "openrouter/x-ai/grok-4.1-fast"},
         "workspace": "/home/node/.openclaw/workspace"
       },
       {
         "id": "vault-surveyor",
         "name": "Vault Surveyor",
-        "model": {"primary": "openrouter/nvidia/nemotron-3-super-120b-a12b:free"},
+        "model": {"primary": "openrouter/x-ai/grok-4.1-fast"},
         "workspace": "/home/node/.openclaw/workspace"
       }
     ]
