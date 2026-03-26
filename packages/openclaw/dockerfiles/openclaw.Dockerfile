@@ -40,8 +40,8 @@ RUN chown -R node:node /app
 # Copy the entire bun+qmd install to /opt/bun (world-readable).
 RUN cp -a /root/.bun /opt/bun && \
     chmod -R a+rX /opt/bun && \
-    chmod a+x /opt/bun/install/global/node_modules/qmd/qmd && \
-    ln -sf /opt/bun/install/global/node_modules/qmd/qmd /usr/local/bin/qmd && \
+    QMD_BIN=$(find /opt/bun -name qmd -type f 2>/dev/null | head -1) && \
+    if [ -n "$QMD_BIN" ]; then chmod a+x "$QMD_BIN" && ln -sf "$QMD_BIN" /usr/local/bin/qmd; fi && \
     ln -sf /opt/bun/bin/bun /usr/local/bin/bun
 
 # Pre-download qmd GGUF models into node user's cache so the first
