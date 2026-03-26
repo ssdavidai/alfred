@@ -661,6 +661,39 @@ export function registerVaultRoutes(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Exported helpers for combined dashboard endpoint
+// ---------------------------------------------------------------------------
+
+export function getVaultContextData(): {
+  records_by_type: Record<string, Array<{ path: string; name: string; status: string }>>;
+  total: number;
+} {
+  const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+  const byType: Record<string, Array<{ path: string; name: string; status: string }>> = {};
+  for (const relPath of files) {
+    const rec = readRecord(relPath);
+    if (!rec) continue;
+    const recType = String(rec.fm.type || "");
+    if (!recType) continue;
+    const display = relPath.replace(/\\/g, "/").replace(/\.md$/, "");
+    byType[recType] = byType[recType] || [];
+    byType[recType].push({ path: display, name: rec.stem, status: String(rec.fm.status || "") });
+  }
+  return {
+    records_by_type: byType,
+    total: Object.values(byType).reduce((s, a) => s + a.length, 0),
+  };
+}
+
+export function getInboxFiles(): string[] {
+  try {
+    return fs.readdirSync(INBOX_PATH).filter((f: string) => !f.startsWith("."));
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Simple glob-to-regex converter for vault search
 // ---------------------------------------------------------------------------
 

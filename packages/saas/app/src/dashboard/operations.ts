@@ -69,29 +69,15 @@ export const getDashboardData: GetDashboardData<void, any> = async (
 ) => {
   const instance = await getUserInstance(context);
 
-  // Fetch all data sources independently so one failure doesn't break others
-  const [healthResult, vaultResult, inboxResult, devicesResult, containersResult, openclawCfgResult] =
-    await Promise.allSettled([
-      proxyToTenant(instance, { path: "/api/v1/admin/health" }),
-      proxyToTenant(instance, { path: "/api/v1/vault/context" }),
-      proxyToTenant(instance, { path: "/api/v1/vault/inbox" }),
-      proxyToTenant(instance, { path: "/api/v1/devices" }),
-      proxyToTenant(instance, { path: "/api/v1/admin/containers" }),
-      proxyToTenant(instance, { path: "/api/v1/admin/config/openclaw" }),
-    ]);
+  // Single aggregated endpoint — one tunnel round-trip instead of six
+  const raw = await proxyToTenant(instance, { path: "/api/v1/admin/dashboard" });
 
-  const healthRaw =
-    healthResult.status === "fulfilled" ? healthResult.value : null;
-  const vaultRaw =
-    vaultResult.status === "fulfilled" ? vaultResult.value : null;
-  const inboxRaw =
-    inboxResult.status === "fulfilled" ? inboxResult.value : null;
-  const devicesRaw =
-    devicesResult.status === "fulfilled" ? devicesResult.value : null;
-  const containersRaw =
-    containersResult.status === "fulfilled" ? containersResult.value : null;
-  const openclawCfgRaw =
-    openclawCfgResult.status === "fulfilled" ? openclawCfgResult.value : null;
+  const healthRaw = raw?.health ?? null;
+  const vaultRaw = raw?.vault ?? null;
+  const inboxRaw = raw?.inbox ?? null;
+  const devicesRaw = raw?.devices ?? null;
+  const containersRaw = raw?.containers ?? null;
+  const openclawCfgRaw = raw?.openclawCfg ?? null;
 
   // Build health object with derived status
   const health = healthRaw

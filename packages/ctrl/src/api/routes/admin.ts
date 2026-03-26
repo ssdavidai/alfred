@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
-import { dockerComposeCmd, execAsync, sudoExec, parseJsonLines, validateServiceName, COMPOSE_DIR } from "../helpers.js";
+import { dockerComposeCmd, dockerExec, execAsync, sudoExec, parseJsonLines, validateServiceName, COMPOSE_DIR, OPENCLAW_CMD } from "../helpers.js";
+import { getVaultContextData, getInboxFiles } from "./vault.js";
 import { parseActivityFeed } from "../activity.js";
 
 const ENV_PATH = `${COMPOSE_DIR}/.env`;
@@ -179,6 +180,36 @@ export function registerAdminRoutes(): void {
     if (!hostname) throw new ValidationError("Could not determine Tailscale hostname");
     await sudoExec("tailscale", ["cert", hostname]);
     sendJson(res, 200, { message: `Certificate regenerated for ${hostname}` });
+  });
+
+  // --- Combined dashboard endpoint (single round-trip) ---
+
+  addRoute("GET", "/api/v1/admin/dashboard", async ({ res }) => {
+    // Run all async operations in parallel to minimise total wait time
+    const [healthResult, containersResult, devicesResult] = await Promise.allSettled([
+      execAsync("/opt/alfred/healthcheck.sh", []).then(r => JSON.parse(r.stdout.trim())),
+      dockerComposeCmd(["ps", "--format", "json"]).then(s => parseJsonLines(s)),
+      dockerExec("openclaw", [...OPENCLAW_CMD, "devices", "list", "--json"]).then(s => JSON.parse(s)),
+    ]);
+
+    // Fast synchronous reads
+    const vaultRaw = getVaultContextData();
+    const inboxFiles = getInboxFiles();
+    let openclawCfg: unknown = {};
+    try {
+      openclawCfg = JSON.parse(fs.readFileSync(OPENCLAW_JSON_PATH, "utf-8"));
+    } catch {
+      // file may not exist yet
+    }
+
+    sendJson(res, 200, {
+      health: healthResult.status === "fulfilled" ? healthResult.value : null,
+      containers: containersResult.status === "fulfilled" ? containersResult.value : null,
+      devices: devicesResult.status === "fulfilled" ? devicesResult.value : null,
+      vault: vaultRaw,
+      inbox: { files: inboxFiles },
+      openclawCfg,
+    });
   });
 
   // --- Health ---
