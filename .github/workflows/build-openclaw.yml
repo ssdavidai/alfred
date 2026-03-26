@@ -26,13 +26,19 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Compute image tag
+        id: image_tag
+        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push openclaw image
         uses: docker/build-push-action@v6
         with:
           context: packages/openclaw
           file: packages/openclaw/dockerfiles/openclaw.Dockerfile
           push: true
-          tags: ssdavidai00/alfred-openclaw:latest
+          tags: |
+            ssdavidai00/alfred-openclaw:latest
+            ssdavidai00/alfred-openclaw:sha-${{ steps.image_tag.outputs.short_sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
