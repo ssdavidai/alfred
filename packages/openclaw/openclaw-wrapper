@@ -208,8 +208,11 @@ def main():
 
     session_key = extract_session_key(spawn_data)
     if not session_key:
+        # Spawn returned but no session key — soft failure.  Exit 0 so the
+        # curator daemon still marks the file as processed (issue #107).
         print(f"No session key in response: {json.dumps(spawn_data)}", file=sys.stderr)
-        sys.exit(1)
+        print('{"error": "no_session_key", "message": "sessions_spawn did not return a childSessionKey"}')
+        sys.exit(0)
 
     # Step 2: Poll sessions_history for the result
     max_attempts = 60  # 60 * 10s = 600s max (matches wrapper timeout)
@@ -232,8 +235,14 @@ def main():
             print(text)
             sys.exit(0)
 
+    # Timeout is a soft failure — the agent may have done useful work (created
+    # files, written to the vault) even though we never got a final response.
+    # Exit 0 so the curator daemon does NOT skip mark_processed.  If we exit 1
+    # here, the daemon's pipeline sees a non-zero exit, the pipeline may raise,
+    # and the file stays in inbox forever (issue #107).
     print("Timed out waiting for agent response", file=sys.stderr)
-    sys.exit(1)
+    print('{"error": "timeout", "message": "Agent session timed out before returning a response"}')
+    sys.exit(0)
 
 
 if __name__ == "__main__":
