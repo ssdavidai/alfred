@@ -550,7 +550,8 @@ action regenerateWebhookToken {
 
 action submitAccessRequest {
   fn: import { submitAccessRequest } from "@src/landing-page/operations",
-  entities: []
+  entities: [],
+  auth: false
 }
 
 // ============================================================
