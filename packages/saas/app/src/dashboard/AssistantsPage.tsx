@@ -473,7 +473,7 @@ export function AssistantsContent() {
 
   return (
     <>
-      <h1 className="font-serif mb-6 text-2xl font-light text-cream">Services</h1>
+      <h2 className="font-serif mb-6 text-2xl font-light text-cream">Services</h2>
 
       {isLoading && (
         <p className="text-muted-foreground">Loading assistant status...</p>

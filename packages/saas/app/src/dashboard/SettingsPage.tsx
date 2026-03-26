@@ -1,4 +1,4 @@
-import { useState, Suspense } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useAuth } from "wasp/client/auth";
 import { useSearchParams } from "react-router-dom";
 import {
@@ -73,6 +73,13 @@ export default function SettingsPage() {
   const tabParam = searchParams.get("tab") || "services";
   const activeTab = VALID_TAB_IDS.has(tabParam) ? tabParam : "services";
 
+  // Redirect invalid tab params to the default
+  useEffect(() => {
+    if (tabParam && !VALID_TAB_IDS.has(tabParam)) {
+      setSearchParams({ tab: "services" }, { replace: true });
+    }
+  }, [tabParam, setSearchParams]);
+
   const setActiveTab = (tab: string) => {
     setSearchParams({ tab }, { replace: true });
   };
@@ -82,11 +89,13 @@ export default function SettingsPage() {
       <h1 className="font-serif mb-6 text-2xl font-light text-cream">Settings</h1>
 
       {/* Tab navigation */}
-      <div className="mb-6 flex gap-1 overflow-x-auto border-b border-gold-dim/40 pb-px">
+      <div role="tablist" className="mb-6 flex gap-1 overflow-x-auto border-b border-gold-dim/40 pb-px">
         {SETTINGS_TABS.map((tab) => (
           <button
             key={tab.id}
             type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={cn(
               "flex items-center gap-2 whitespace-nowrap px-4 py-2.5 font-mono text-xs uppercase tracking-wider transition-colors",

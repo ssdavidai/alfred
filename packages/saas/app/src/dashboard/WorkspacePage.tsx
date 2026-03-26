@@ -74,9 +74,9 @@ export function WorkspaceContent() {
 
   return (
     <>
-      <h1 className="font-serif mb-2 text-2xl font-light text-cream">
+      <h2 className="font-serif mb-2 text-2xl font-light text-cream">
         Workspace
-      </h1>
+      </h2>
       <p className="text-muted-foreground mb-6 text-sm">
         Edit the files that define how Alfred thinks and behaves.
       </p>

@@ -82,9 +82,9 @@ export function CredentialsContent() {
 
   return (
     <>
-      <h1 className="font-serif mb-2 text-2xl font-light text-cream">
+      <h2 className="font-serif mb-2 text-2xl font-light text-cream">
         Credentials
-      </h1>
+      </h2>
       <p className="text-muted-foreground mb-6 text-sm">
         Manage API keys for LLM providers. Changes restart the Alfred worker
         automatically.

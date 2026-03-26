@@ -290,7 +290,7 @@ export function LogsContent() {
   return (
     <>
       <div className="mb-6 flex items-center justify-between">
-        <h1 className="font-serif text-2xl font-light text-cream">Logs</h1>
+        <h2 className="font-serif text-2xl font-light text-cream">Logs</h2>
         <div className="flex items-center rounded-sm border border-border">
           <button
             className={`px-4 py-1.5 text-sm transition-colors ${

@@ -9,7 +9,7 @@ export function TerminalContent() {
       <div className="mb-6 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <TerminalSquare className="h-5 w-5 text-gold" />
-          <h1 className="font-serif text-2xl font-light text-cream">Terminal</h1>
+          <h2 className="font-serif text-2xl font-light text-cream">Terminal</h2>
         </div>
         <span className="font-mono text-[0.58rem] uppercase tracking-[0.3em] text-muted-foreground">
           OpenClaw Shell
