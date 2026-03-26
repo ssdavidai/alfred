@@ -38,7 +38,7 @@ Each subscriber gets a dedicated Hetzner VPS (cx53) with this stack. All service
 | `init` | `ssdavidai00/alfred-init:latest` | — (one-shot) | — | Scaffold vault, copy skills, generate config, create gateway token |
 | `temporal` | `temporalio/temporal:latest` | 127.0.0.1:7233 | gRPC | Workflow engine |
 | `temporal` (UI) | (same) | 127.0.0.1:8233 | HTTP | Temporal Web UI |
-| `openclaw` | `ssdavidai00/alfred-openclaw:latest` | 127.0.0.1:18789 | HTTP/WS | AI gateway (tools, agents, WebSocket) |
+| `openclaw` | `ssdavidai00/alfred-openclaw:latest` | 127.0.0.1:18789 | HTTP/WS | AI gateway (tools, agents, sessions) |
 | `alfred` | `ssdavidai00/alfred-worker:latest` | — (no port) | — | Vault worker daemons |
 | `alfred-learn` | `ssdavidai00/alfred-learn:latest` | — (no port) | — | Temporal worker (intelligence layer) |
 | `ctrl-api` | `node:22-slim` | 127.0.0.1:3100 | HTTP | Tenant API server (Docker container, mounts host Docker socket) |
@@ -63,7 +63,7 @@ cascading to ctrl-api.
 
 | From | To | Address | Protocol | Env Var |
 |------|----|---------|----------|---------|
-| `alfred` | `openclaw` | ws://openclaw:18789 | WebSocket | `OPENCLAW_GATEWAY_URL` |
+| `alfred` | `openclaw` | http://openclaw:18789 | HTTP | `OPENCLAW_GATEWAY_URL` |
 | `alfred` | `ctrl-api` | http://ctrl-api:3100 | HTTP | `ALFRED_CTRL_URL` |
 | `alfred-learn` | `temporal` | temporal:7233 | gRPC | `TEMPORAL_HOST` |
 | `alfred-learn` | `openclaw` | http://openclaw:18789 | HTTP | `OPENCLAW_GATEWAY_URL` |
@@ -79,6 +79,7 @@ cascading to ctrl-api.
 | `/mnt/encrypted/openclaw` | `/home/node/.openclaw` (openclaw), `/openclaw-state` (init), `/root/.openclaw` (alfred) | init, openclaw, alfred |
 | `/mnt/encrypted/alfred` | `/alfred-data` (init, openclaw, alfred-learn), `/app/data` (alfred) | init, openclaw, alfred, alfred-learn |
 | `/mnt/encrypted/temporal` | `/data` | temporal |
+| `shared_tmp` (Docker volume) | `/tmp` | openclaw, alfred |
 
 **Source files:** `packages/ctrl/src/templates/docker-compose.yaml.njk`
 
