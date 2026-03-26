@@ -1,5 +1,4 @@
-import { useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { Navigate } from "react-router-dom";
 
 /**
  * InboxPage now redirects to the Vault browser.
@@ -7,11 +6,5 @@ import { useNavigate } from "react-router-dom";
  * This redirect preserves backward compatibility for bookmarks and links.
  */
 export default function InboxPage() {
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    navigate("/dashboard/vault", { replace: true });
-  }, [navigate]);
-
-  return null;
+  return <Navigate to="/dashboard/vault" replace />;
 }
