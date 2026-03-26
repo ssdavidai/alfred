@@ -206,6 +206,24 @@ export const getVaultRecords: GetVaultRecords<
   }
 
   if (args.type) {
+    // Inbox is a special folder backed by /api/v1/vault/inbox instead of /list
+    if (args.type === "inbox") {
+      const inboxData: any = await proxyToTenant(instance, {
+        path: "/api/v1/vault/inbox",
+      });
+      const files: string[] = Array.isArray(inboxData?.files)
+        ? inboxData.files.filter((f: string) => f !== "processed")
+        : [];
+      return {
+        results: files.map((f: string) => ({
+          name: f.replace(/\.md$/, "").replace(/[-_]/g, " "),
+          path: `inbox/${f}`,
+          type: "inbox",
+        })),
+        count: files.length,
+      };
+    }
+
     const data: any = await proxyToTenant(instance, {
       path: `/api/v1/vault/list/${args.type}`,
     });

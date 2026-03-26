@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery, getVaultRecords } from "wasp/client/operations";
+import { useQuery, getVaultRecords, getInboxItems } from "wasp/client/operations";
 import DashboardLayout from "./DashboardLayout";
 import { Card, CardContent } from "../client/components/ui/card";
 import { Input } from "../client/components/ui/input";
@@ -15,10 +15,18 @@ import {
 } from "lucide-react";
 
 const VAULT_TYPES = [
-  "person", "org", "project", "task", "event", "note",
-  "location", "process", "account", "asset", "conversation",
-  "input", "run", "session", "decision", "assumption",
-  "constraint", "contradiction", "synthesis",
+  // Standing entities
+  "person", "org", "project", "location", "account", "asset", "process", "matter",
+  // Activity records
+  "conversation", "note", "task", "triage", "event", "session", "input", "run", "ledger_entry",
+  // Execution
+  "skill",
+  // Learning
+  "assumption", "decision", "constraint", "contradiction", "synthesis",
+  // Intuition
+  "observation", "instinct", "reflection",
+  // Special folders
+  "inbox",
 ];
 
 /** Normalize the path so it always ends with .md (context strips it, list/search keep it). */
@@ -41,6 +49,13 @@ export default function VaultBrowserPage() {
     error: contextError,
   } = useQuery(getVaultRecords, {});
 
+  // Fetch inbox item count for the folder tree
+  const { data: inboxData } = useQuery(getInboxItems);
+  const inboxCount = useMemo(() => {
+    if (!inboxData?.files) return 0;
+    return (inboxData.files as string[]).filter((f: string) => f !== "processed").length;
+  }, [inboxData]);
+
   // Fetch search results when a search is active
   const {
     data: searchData,
@@ -49,6 +64,16 @@ export default function VaultBrowserPage() {
     getVaultRecords,
     { query: activeQuery || undefined },
     { enabled: !!activeQuery },
+  );
+
+  // Fetch records for the selected folder (used for inbox and types not in context)
+  const {
+    data: folderData,
+    isLoading: folderLoading,
+  } = useQuery(
+    getVaultRecords,
+    { type: selectedFolder || undefined },
+    { enabled: !!selectedFolder && !activeQuery },
   );
 
   const isSearching = !!activeQuery;
@@ -66,10 +91,10 @@ export default function VaultBrowserPage() {
   const folderCounts: Record<string, number> = useMemo(() => {
     const counts: Record<string, number> = {};
     for (const type of VAULT_TYPES) {
-      counts[type] = recordsByType[type]?.length ?? 0;
+      counts[type] = type === "inbox" ? inboxCount : (recordsByType[type]?.length ?? 0);
     }
     return counts;
-  }, [recordsByType]);
+  }, [recordsByType, inboxCount]);
 
   // Total record count
   const totalCount = useMemo(() => {
@@ -84,11 +109,18 @@ export default function VaultBrowserPage() {
       }
       return [];
     }
-    if (selectedFolder && recordsByType[selectedFolder]) {
-      return recordsByType[selectedFolder].map((r: any) => ({ ...r, type: selectedFolder }));
+    if (selectedFolder) {
+      // Use context data if available, otherwise use on-demand folder query
+      if (recordsByType[selectedFolder]) {
+        return recordsByType[selectedFolder].map((r: any) => ({ ...r, type: selectedFolder }));
+      }
+      if (folderData?.results && Array.isArray(folderData.results)) {
+        return folderData.results;
+      }
+      return [];
     }
     return null;
-  }, [isSearching, searchData, selectedFolder, recordsByType]);
+  }, [isSearching, searchData, selectedFolder, recordsByType, folderData]);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -122,7 +154,7 @@ export default function VaultBrowserPage() {
     setSearchQuery("");
   };
 
-  const isLoading = contextLoading || searchLoading;
+  const isLoading = contextLoading || searchLoading || folderLoading;
 
   return (
     <DashboardLayout>
