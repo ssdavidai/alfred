@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16.6-alpine
     restart: always
     environment:
       POSTGRES_USER: postgres
@@ -31,7 +31,7 @@ services:
 
   # --- Plausible Analytics CE ---
   plausible_db:
-    image: postgres:16-alpine
+    image: postgres:16.6-alpine
     restart: always
     volumes:
       - plausible_db_data:/var/lib/postgresql/data
