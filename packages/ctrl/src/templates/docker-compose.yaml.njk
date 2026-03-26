@@ -1,3 +1,8 @@
+# Image tag strategy: all custom images intentionally use :latest.
+# Version management is handled by the alfred-update.timer systemd unit on each tenant,
+# which runs `docker compose pull && docker compose up -d` on a schedule.
+# This rolling update mechanism ensures tenants stay current without manual intervention.
+# Pinning to SHA or semver tags here would require reprovisioning or manual ssh to update each tenant.
 services:
   init:
     image: ssdavidai00/alfred-init:latest
@@ -9,6 +14,7 @@ services:
       - .env
 
   temporal:
+    # temporalio/temporal is also kept at :latest so alfred-update.timer picks up patch releases automatically.
     image: temporalio/temporal:latest
     command: ["server", "start-dev", "--db-filename", "/data/temporal.db", "--ip", "0.0.0.0", "--port", "7233", "--ui-port", "8233"]
     volumes:
