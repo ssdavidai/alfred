@@ -853,8 +853,8 @@ os.remove('/tmp/openclaw-tenant-config.json')
         } else {
           log(`Warning: subdomain returned HTTP ${res.status}`);
         }
-      } catch (e) {
-        log(`Warning: subdomain not yet reachable (may take a few minutes for DNS propagation): ${e}`);
+      } catch {
+        log(`Warning: subdomain not yet reachable — DNS propagation may take a few minutes`);
       }
     }
 
