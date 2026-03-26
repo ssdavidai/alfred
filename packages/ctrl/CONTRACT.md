@@ -15,7 +15,7 @@ dashboard via Tailscale proxy. All routes under `/api/v1/` prefix.
 
 | Route Module | Key Endpoints |
 |-------------|---------------|
-| `vault` | `POST /records`, `GET /records/{path}`, `PATCH /records/{path}`, `GET /list/{type}`, `GET /search` |
+| `vault` | `POST /records`, `GET /records/{path}`, `PATCH /records/{path}`, `GET /list/{type}`, `GET /search`, `GET /inbox`, `POST /inbox` |
 | `streams` | `GET /events`, `POST /events/{id}/processed`, `POST /events/{id}/quarantine` |
 | `learning` | `GET /queue` |
 | `workers` | Start/stop/restart Docker containers |
@@ -105,6 +105,7 @@ Periodic background checks via SSH into each tenant:
 | Path | Access | Purpose |
 |------|--------|---------|
 | `/mnt/encrypted/vault` | read/write | Vault data (markdown records) |
+| `/mnt/encrypted/vault/inbox` | read/write | Inbox folder (user-submitted items; not in IGNORE_DIRS) |
 | `/mnt/encrypted/alfred` | read/write | Alfred runtime data |
 | `/mnt/encrypted/openclaw` | read/write | OpenClaw state |
 | `data/alfred-ctrl.db` | read/write | SQLite database (auto-created) |
