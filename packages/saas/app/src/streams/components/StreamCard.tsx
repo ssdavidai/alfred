@@ -216,7 +216,7 @@ export default function StreamCard({
                     onClick={() => onDelete(stream.id)}
                   >
                     <Trash2 className="mr-2 h-3 w-3" />
-                    Delete Stream
+                    Disconnect Integration
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>

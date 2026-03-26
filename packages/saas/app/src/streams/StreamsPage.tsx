@@ -87,14 +87,6 @@ const INTEGRATIONS: IntegrationDef[] = [
   },
 ];
 
-const SOURCE_TO_TYPE: Record<string, string> = {
-  openclaw: "scheduled",
-  gmail: "scheduled",
-  omi: "realtime",
-  polar: "webhook",
-  github: "webhook",
-  custom: "webhook",
-};
 
 export default function StreamsPage() {
   const { data: streams, isLoading, error, refetch } = useQuery(getStreams);
@@ -171,7 +163,7 @@ export default function StreamsPage() {
     try {
       await createStream({
         name: newName.trim(),
-        type: SOURCE_TO_TYPE[selectedIntegration.value] || "webhook",
+        type: selectedIntegration.type || "webhook",
         source: selectedIntegration.value,
       });
       closeConnectDialog();
@@ -228,7 +220,7 @@ export default function StreamsPage() {
       </p>
 
       {/* Integration source health overview */}
-      {streams && streams.length > 0 && (
+      {streams && !isLoading && (
         <div className="mb-6 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
           {sourceStats.map((stat) => {
             const Icon = stat.icon;
@@ -410,7 +402,7 @@ export default function StreamsPage() {
                     placeholder={`e.g. ${selectedIntegration?.label} Primary`}
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleConnect()}
+                    onKeyDown={(e) => e.key === "Enter" && !creating && handleConnect()}
                     autoFocus
                   />
                 </div>
