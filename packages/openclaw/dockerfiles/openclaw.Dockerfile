@@ -40,6 +40,7 @@ RUN chown -R node:node /app
 # Copy the entire bun+qmd install to /opt/bun (world-readable).
 RUN cp -a /root/.bun /opt/bun && \
     chmod -R a+rX /opt/bun && \
+    chmod a+x /opt/bun/install/global/node_modules/qmd/qmd && \
     ln -sf /opt/bun/install/global/node_modules/qmd/qmd /usr/local/bin/qmd && \
     ln -sf /opt/bun/bin/bun /usr/local/bin/bun
 
