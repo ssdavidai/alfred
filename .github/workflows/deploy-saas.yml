@@ -6,6 +6,8 @@ on:
       - 'packages/saas/**'
       - 'packages/ctrl/**'
       - 'deploy/**'
+      - '.github/workflows/deploy-saas.yml'
+  workflow_dispatch:
 concurrency:
   group: deploy-saas
   cancel-in-progress: false
