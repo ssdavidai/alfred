@@ -6,8 +6,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /setup
 
-# Clone Alfred repo and install so _bundled/ (scaffold + skills) is populated
-RUN git clone --depth 1 https://github.com/ssdavidai/alfred.git /alfred-src
+# Clone Alfred repo at pinned SHA (override via --build-arg ALFRED_SHA=<sha>)
+ARG ALFRED_SHA=ALFRED_SHA_PLACEHOLDER
+RUN git init /alfred-src && \
+    git -C /alfred-src fetch --depth 1 https://github.com/ssdavidai/alfred.git ${ALFRED_SHA} && \
+    git -C /alfred-src checkout FETCH_HEAD
 RUN pip install --no-cache-dir --no-deps /alfred-src
 
 COPY init/entrypoint.sh ./entrypoint.sh
