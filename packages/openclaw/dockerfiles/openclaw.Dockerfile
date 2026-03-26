@@ -53,6 +53,11 @@ RUN mkdir -p /home/node/.cache/qmd && \
     chown -R node:node /home/node/.cache && \
     su node -c "qmd status" 2>/dev/null || true
 
+# Install Python + alfred-vault CLI (agents use `alfred vault` commands via sessions_spawn)
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip && \
+    pip install --no-cache-dir --break-system-packages alfred-vault && \
+    rm -rf /var/lib/apt/lists/*
+
 # CLI wrappers for interactive shells
 RUN printf '#!/bin/sh\nexec node /app/openclaw.mjs "$@"\n' > /usr/local/bin/openclaw && \
     chmod +x /usr/local/bin/openclaw
