@@ -52,4 +52,10 @@ export const AGENT_CONFIG = [
     color: "#6BA8B8",
     preferredTypes: ["person", "org", "event", "location"],
   },
+  {
+    key: "clerk",
+    label: "CLERK",
+    color: "#C47A8A",
+    preferredTypes: ["session", "run"],
+  },
 ] as const;

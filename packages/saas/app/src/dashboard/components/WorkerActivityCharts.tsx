@@ -197,7 +197,7 @@ export default function WorkerActivityCharts() {
           </CardTitle>
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
           {AGENT_CONFIG.map((agent) => {
             const values = buckets[agent.key];
             const lastActiveMs = getLastActiveMs(items, agent.key);

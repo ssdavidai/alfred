@@ -13,12 +13,6 @@ import VaultGraph from "./components/VaultGraph";
 import VaultCompositionChart from "./components/VaultCompositionChart";
 import ActivityFeed from "./components/ActivityFeed";
 import WorkerActivityCharts from "./components/WorkerActivityCharts";
-import TasksSection from "./components/TasksSection";
-import ChoresSection from "./components/ChoresSection";
-import RemindersSection from "./components/RemindersSection";
-import RulesSection from "./components/RulesSection";
-import StreamsSection from "./components/StreamsSection";
-import IntuitionSection from "./components/IntuitionSection";
 
 export default function DashboardPage() {
   const [graphVisible, setGraphVisible] = useState(true);
@@ -91,16 +85,6 @@ export default function DashboardPage() {
 
           {/* Activity Feed — full width */}
           <ActivityFeed />
-
-          {/* Coming Soon sections — 2-column grid */}
-          <div className="grid gap-6 lg:grid-cols-2">
-            <TasksSection />
-            <ChoresSection />
-            <RemindersSection />
-            <RulesSection />
-          </div>
-          <StreamsSection />
-          <IntuitionSection />
 
           {/* Vault Composition (standalone at bottom) */}
           {data.vault?.types &&
