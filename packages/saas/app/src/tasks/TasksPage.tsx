@@ -326,7 +326,8 @@ function TaskRow({
           <Badge text={task.status} colorClass={statusClass} />
           <div className="flex-shrink-0">
             <Select
-              value={task.status}
+              // Normalize legacy "todo" → "queued" for pre-Spec 003 vault records
+              value={task.status === "todo" ? "queued" : task.status}
               onValueChange={(val) => onStatusChange(task.path, val)}
               disabled={isUpdating}
             >
@@ -473,7 +474,7 @@ function TaskDetail({ path, onRefetch }: { path: string; onRefetch: () => void }
             <p className="font-mono text-[0.7rem] text-purple-400/80">{fm.source_instinct}</p>
           </div>
         )}
-        {fm.budget_turns && (
+        {fm.budget_turns != null && (
           <div>
             <FieldLabel>Budget</FieldLabel>
             <p className="font-mono text-[0.7rem] text-cream/80">{fm.budget_turns} turns</p>
