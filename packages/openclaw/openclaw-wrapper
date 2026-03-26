@@ -12,8 +12,10 @@ We call:        POST http://openclaw:18789/tools/invoke  (sessions_spawn)
 Then poll:      POST http://openclaw:18789/tools/invoke  (sessions_history)
 """
 
+import glob
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -79,8 +81,8 @@ def extract_session_key(spawn_data):
     return None
 
 
-def extract_last_assistant_message(hist_data):
-    """Extract the last assistant message text from sessions_history response."""
+def _get_messages(hist_data):
+    """Parse messages list from sessions_history response."""
     result = hist_data.get("result", {})
     content_list = result.get("content", [])
     messages = []
@@ -91,6 +93,12 @@ def extract_last_assistant_message(hist_data):
                 messages = parsed.get("messages", [])
             except (json.JSONDecodeError, TypeError):
                 pass
+    return messages
+
+
+def extract_last_assistant_message(hist_data):
+    """Extract the last assistant message text from sessions_history response."""
+    messages = _get_messages(hist_data)
 
     # Walk messages in reverse to find the last assistant message
     for msg in reversed(messages):
@@ -105,11 +113,104 @@ def extract_last_assistant_message(hist_data):
     return None
 
 
+def extract_manifest_from_history(hist_data):
+    """Try to extract manifest JSON from tool-use calls in the conversation.
+
+    When the agent writes the manifest via 'cat > /tmp/...' or a Write tool,
+    the command input contains the full JSON.  We search assistant messages
+    for tool_use blocks whose input contains 'entities' and a manifest-like
+    JSON structure, then extract the JSON.
+    """
+    messages = _get_messages(hist_data)
+    manifest_pattern = re.compile(r'/tmp/alfred-curator-[0-9a-f]+-manifest\.json')
+
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            # Look for tool_use blocks (e.g. Bash/exec tool calls)
+            if part.get("type") == "tool_use":
+                inp = part.get("input", {})
+                # The Bash/exec tool typically has a "command" field
+                cmd_text = ""
+                if isinstance(inp, dict):
+                    cmd_text = inp.get("command", "") or inp.get("content", "") or str(inp)
+                elif isinstance(inp, str):
+                    cmd_text = inp
+
+                # Check if this tool call writes the manifest file
+                if manifest_pattern.search(cmd_text) and '"entities"' in cmd_text:
+                    # Extract the JSON from the heredoc or command text
+                    m = re.search(r'\{[^{}]*"entities"\s*:\s*\[', cmd_text)
+                    if m:
+                        start = m.start()
+                        depth = 0
+                        for i in range(start, len(cmd_text)):
+                            if cmd_text[i] == '{':
+                                depth += 1
+                            elif cmd_text[i] == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    candidate = cmd_text[start:i + 1]
+                                    try:
+                                        data = json.loads(candidate)
+                                        if isinstance(data.get("entities"), list):
+                                            return candidate
+                                    except json.JSONDecodeError:
+                                        continue
+                                    break
+    return None
+
+
+_MANIFEST_DELIMITER = "\n---ALFRED_MANIFEST_JSON---\n"
+
+
+def collect_manifest_files(explicit_path=None):
+    """Read curator manifest JSON files from /tmp and return their contents.
+
+    If *explicit_path* is given (via --manifest-path), read only that file.
+    Otherwise fall back to globbing /tmp/alfred-curator-*-manifest.json for
+    backwards compatibility.
+
+    The pipeline generates a unique manifest_path and embeds it in the
+    prompt.  The agent writes the JSON there inside the openclaw container.
+    Both containers share a Docker volume at /tmp, so the file is visible
+    here.  We read it and relay the contents on stdout so the pipeline can
+    parse it even if the direct file read fails (e.g. due to sandbox
+    isolation or a race condition).
+
+    Does NOT delete the file — the pipeline handles its own cleanup.
+    """
+    paths = []
+    if explicit_path:
+        paths = [explicit_path]
+    else:
+        paths = sorted(glob.glob("/tmp/alfred-curator-*-manifest.json"))
+
+    results = []
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content:
+                results.append(content)
+                print(f"[openclaw-wrapper] read manifest: {path} ({len(content)} bytes)", file=sys.stderr)
+        except OSError:
+            pass
+    return results
+
+
 def main():
     agent_id = ""
     workspace = ""
     session_id = ""
     prompt = ""
+    manifest_path = ""
 
     # The alfred Python code calls:
     #   openclaw-wrapper agent --agent <id> --session-id <sid> --message "<prompt>" --local --json
@@ -128,6 +229,9 @@ def main():
             i += 2
         elif args[i] == "--session-id":
             session_id = args[i + 1]
+            i += 2
+        elif args[i] == "--manifest-path":
+            manifest_path = args[i + 1]
             i += 2
         elif args[i] in ("--local", "--json", "agent"):
             # Flags we accept but don't use (handled by gateway)
@@ -153,6 +257,15 @@ def main():
         except FileNotFoundError:
             print(f"Error: prompt file not found: {file_path}", file=sys.stderr)
             sys.exit(1)
+
+    # If no explicit --manifest-path, try to extract it from the prompt text.
+    # The pipeline embeds a line like:
+    #   **Write the JSON to this exact file path:** `/tmp/alfred-curator-<id>-manifest.json`
+    if not manifest_path:
+        m = re.search(r'/tmp/alfred-curator-[0-9a-f]+-manifest\.json', prompt)
+        if m:
+            manifest_path = m.group(0)
+            print(f"[openclaw-wrapper] extracted manifest_path from prompt: {manifest_path}", file=sys.stderr)
 
     gateway_url, token = resolve_gateway()
 
@@ -233,6 +346,29 @@ def main():
         if text:
             # Return the agent's response on stdout
             print(text)
+
+            # Append manifest JSON so the pipeline can parse it from stdout.
+            # Three sources, in priority order:
+            #
+            # 1. The manifest FILE on the shared /tmp volume (agent wrote it
+            #    via cat/Write tool; visible because shared_tmp Docker volume)
+            # 2. The manifest JSON extracted from the agent's tool-use calls
+            #    in the conversation history (works even when the file write
+            #    landed in an isolated sandbox and is not on the shared volume)
+            # 3. Nothing — the pipeline will attempt its own regex parse of
+            #    stdout, which may or may not succeed.
+            manifests = collect_manifest_files(manifest_path or None)
+            if not manifests:
+                # Fallback: extract from conversation history tool calls
+                hist_manifest = extract_manifest_from_history(hist_data)
+                if hist_manifest:
+                    manifests = [hist_manifest]
+                    print("[openclaw-wrapper] manifest extracted from conversation history", file=sys.stderr)
+
+            for m in manifests:
+                print(_MANIFEST_DELIMITER, end="")
+                print(m)
+
             sys.exit(0)
 
     # Timeout is a soft failure — the agent may have done useful work (created
