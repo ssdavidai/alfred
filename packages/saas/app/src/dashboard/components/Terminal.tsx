@@ -173,6 +173,20 @@ export default function Terminal() {
       ws.send(msg.buffer);
     });
 
+    // Intercept paste events to send full text as a single write,
+    // preventing xterm.js from splitting on newlines.
+    const handlePaste = (e: ClipboardEvent) => {
+      e.preventDefault();
+      const text = e.clipboardData?.getData("text");
+      if (!text || ws.readyState !== WebSocket.OPEN) return;
+      const encoded = new TextEncoder().encode(text);
+      const msg = new Uint8Array(1 + encoded.length);
+      msg[0] = MSG_DATA;
+      msg.set(encoded, 1);
+      ws.send(msg.buffer);
+    };
+    containerRef.current.addEventListener("paste", handlePaste);
+
     // Handle resize
     const handleResize = () => {
       fitAddon.fit();
@@ -197,6 +211,7 @@ export default function Terminal() {
 
     return () => {
       resizeObserver.disconnect();
+      containerRef.current?.removeEventListener("paste", handlePaste);
       ws.close();
       term.dispose();
     };
