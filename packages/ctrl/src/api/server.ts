@@ -16,6 +16,7 @@ import { registerStreamRoutes } from "./routes/streams.js";
 import { registerLearningRoutes } from "./routes/learning.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
 import { registerModelRoutes } from "./routes/models.js";
+import { registerWorkspaceRoutes } from "./routes/workspace.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -88,6 +89,7 @@ export function createApiServer(): http.Server {
   registerLearningRoutes();
   registerNotificationRoutes();
   registerModelRoutes();
+  registerWorkspaceRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
