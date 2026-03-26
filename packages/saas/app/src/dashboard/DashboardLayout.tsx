@@ -6,13 +6,10 @@ import ProvisioningProgress from "../provisioning/ProvisioningProgress";
 import {
   Home,
   FolderOpen,
-  Bot,
   Radio,
-  ScrollText,
   Settings,
   Menu,
   X,
-  KeyRound,
   Shield,
   LayoutDashboard,
   Sheet,
@@ -20,10 +17,7 @@ import {
   Cog,
   LogOut,
   Loader2,
-  FileCode,
   Brain,
-  ClipboardList,
-  TerminalSquare,
 } from "lucide-react";
 import { cn } from "../client/utils";
 
@@ -35,15 +29,9 @@ interface NavItem {
 
 const dashboardNavItems: NavItem[] = [
   { path: "/dashboard", label: "Home", icon: Home },
-  { path: "/dashboard/tasks", label: "Tasks", icon: ClipboardList },
-  { path: "/dashboard/vault", label: "Vault", icon: FolderOpen },
   { path: "/dashboard/streams", label: "Streams", icon: Radio },
-  { path: "/dashboard/intuition", label: "Intuition", icon: Brain },
-  { path: "/dashboard/assistants", label: "Services", icon: Bot },
-  { path: "/dashboard/credentials", label: "Credentials", icon: KeyRound },
-  { path: "/dashboard/workspace", label: "Workspace", icon: FileCode },
-  { path: "/dashboard/terminal", label: "Terminal", icon: TerminalSquare },
-  { path: "/dashboard/logs", label: "Logs", icon: ScrollText },
+  { path: "/dashboard/vault", label: "Vault", icon: FolderOpen },
+  { path: "/dashboard/tasks", label: "Intelligence", icon: Brain },
   { path: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
 
