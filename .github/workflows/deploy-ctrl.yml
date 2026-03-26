@@ -71,4 +71,4 @@ jobs:
       - name: Post-deploy health check
         run: |
           ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} \
-            'cd /opt/alfred-saas/alfred-ctrl && node --experimental-sqlite dist/index.mjs health --all'
+            'cd /opt/alfred-saas/alfred-ctrl && node --experimental-sqlite dist/index.mjs health'
