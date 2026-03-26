@@ -11,7 +11,7 @@
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
     "start": "node dist/index.mjs",
-    "test": "node --test tests/*.test.ts"
+    "test": "node --import tsx/esm --test tests/*.test.ts"
   },
   "dependencies": {
     "commander": "^13.1.0",
@@ -28,6 +28,7 @@
     "@types/ssh2": "^1.15.4",
     "@types/ws": "^8.5.13",
     "esbuild": "^0.24.2",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }
 }
