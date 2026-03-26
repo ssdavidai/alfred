@@ -29,7 +29,7 @@ interface NavItem {
 
 const dashboardNavItems: NavItem[] = [
   { path: "/dashboard", label: "Home", icon: Home },
-  { path: "/dashboard/streams", label: "Streams", icon: Radio },
+  { path: "/dashboard/streams", label: "Integrations", icon: Radio },
   { path: "/dashboard/vault", label: "Vault", icon: FolderOpen },
   { path: "/dashboard/tasks", label: "Intelligence", icon: Brain },
   { path: "/dashboard/settings", label: "Settings", icon: Settings },

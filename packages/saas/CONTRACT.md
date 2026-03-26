@@ -77,6 +77,21 @@ Managed by Wasp/Prisma. Key model:
 |-------|---------|
 | `User` | Auth, profile |
 | `Instance` | Tenant VPS record (tailscaleHostname, apiKey, status) |
+| `Stream` | Integration connection (source, type, webhookToken, status) |
+| `StreamEvent` | Events received from integrations |
+
+### Integrations (Streams)
+
+The Integrations page (`/dashboard/streams`) is the primary data input hub for Alfred. Users connect external services (Gmail, GitHub, Polar, Omi, OpenClaw, Custom) that stream events into the intelligence pipeline:
+
+```
+Integrations → EventProcessor → Classification → Judgment → Task execution
+```
+
+Each integration creates a `Stream` with:
+- Source-specific type (scheduled, webhook, or realtime)
+- Health status and event counts per source
+- Webhook URL for inbound event delivery (webhook type)
 
 ### Consumed By
 
@@ -84,3 +99,4 @@ Managed by Wasp/Prisma. Key model:
 |----------|-------------|
 | End users (browser) | Web app at alfred.black |
 | Polar.sh | Webhook callbacks at `/webhooks/*` |
+| External services | Integration webhook endpoints at `/webhooks/:token` |

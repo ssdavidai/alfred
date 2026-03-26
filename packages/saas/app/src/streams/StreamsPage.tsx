@@ -20,44 +20,85 @@ import {
   DialogFooter,
 } from "../client/components/ui/dialog";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../client/components/ui/select";
-import { Plus, Radio, Loader2 } from "lucide-react";
+  Activity,
+  Mail,
+  Smartphone,
+  ShoppingBag,
+  GitBranch,
+  Zap,
+  Plus,
+  Radio,
+  Loader2,
+  ArrowLeft,
+} from "lucide-react";
 import StreamCard from "./components/StreamCard";
 import EventLog from "./components/EventLog";
 
-const STREAM_SOURCES = [
-  { value: "openclaw", label: "OpenClaw Sessions" },
-  { value: "gmail", label: "Gmail" },
-  { value: "omi", label: "Omi Ambient" },
-  { value: "polar", label: "Polar Payments" },
-  { value: "github", label: "GitHub" },
-  { value: "custom", label: "Custom" },
+interface IntegrationDef {
+  value: string;
+  label: string;
+  description: string;
+  type: string;
+  icon: React.ComponentType<{ className?: string }>;
+}
+
+const INTEGRATIONS: IntegrationDef[] = [
+  {
+    value: "openclaw",
+    label: "OpenClaw Sessions",
+    description: "Capture AI gateway sessions and model interactions automatically.",
+    type: "scheduled",
+    icon: Activity,
+  },
+  {
+    value: "gmail",
+    label: "Gmail",
+    description: "Monitor your inbox for important emails and actionable messages.",
+    type: "scheduled",
+    icon: Mail,
+  },
+  {
+    value: "omi",
+    label: "Omi Ambient",
+    description: "Stream real-time ambient data from your Omi wearable device.",
+    type: "realtime",
+    icon: Smartphone,
+  },
+  {
+    value: "polar",
+    label: "Polar Payments",
+    description: "Track payment events, subscriptions, and billing activity.",
+    type: "webhook",
+    icon: ShoppingBag,
+  },
+  {
+    value: "github",
+    label: "GitHub",
+    description: "Receive push events, pull requests, and issue updates via webhooks.",
+    type: "webhook",
+    icon: GitBranch,
+  },
+  {
+    value: "custom",
+    label: "Custom",
+    description: "Connect any service that can send webhooks to a unique URL.",
+    type: "webhook",
+    icon: Zap,
+  },
 ];
 
-const SOURCE_TO_TYPE: Record<string, string> = {
-  openclaw: "scheduled",
-  gmail: "scheduled",
-  omi: "realtime",
-  polar: "webhook",
-  github: "webhook",
-  custom: "webhook",
-};
 
 export default function StreamsPage() {
   const { data: streams, isLoading, error, refetch } = useQuery(getStreams);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [selectedStreamId, setSelectedStreamId] = useState<string | null>(null);
-  const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [showConnectDialog, setShowConnectDialog] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
 
-  // Create form state
+  // Integration connect flow state
+  const [connectStep, setConnectStep] = useState<"pick" | "name">("pick");
+  const [selectedIntegration, setSelectedIntegration] = useState<IntegrationDef | null>(null);
   const [newName, setNewName] = useState("");
-  const [newSource, setNewSource] = useState("custom");
   const [creating, setCreating] = useState(false);
 
   const handlePause = async (id: string) => {
@@ -110,18 +151,22 @@ export default function StreamsPage() {
     }
   };
 
-  const handleCreate = async () => {
-    if (!newName.trim()) return;
+  const handleSelectIntegration = (integration: IntegrationDef) => {
+    setSelectedIntegration(integration);
+    setNewName(integration.label);
+    setConnectStep("name");
+  };
+
+  const handleConnect = async () => {
+    if (!newName.trim() || !selectedIntegration) return;
     setCreating(true);
     try {
       await createStream({
         name: newName.trim(),
-        type: SOURCE_TO_TYPE[newSource] || "webhook",
-        source: newSource,
+        type: selectedIntegration.type || "webhook",
+        source: selectedIntegration.value,
       });
-      setShowCreateDialog(false);
-      setNewName("");
-      setNewSource("custom");
+      closeConnectDialog();
       refetch();
     } catch (err: any) {
       console.error("Create failed:", err);
@@ -129,6 +174,22 @@ export default function StreamsPage() {
       setCreating(false);
     }
   };
+
+  const closeConnectDialog = () => {
+    setShowConnectDialog(false);
+    setConnectStep("pick");
+    setSelectedIntegration(null);
+    setNewName("");
+  };
+
+  // Compute per-source health summary
+  const sourceStats = INTEGRATIONS.map((integration) => {
+    const sourceStreams = streams?.filter((s: any) => s.source === integration.value) ?? [];
+    const totalEvents = sourceStreams.reduce((sum: number, s: any) => sum + (s._count?.events ?? 0), 0);
+    const hasError = sourceStreams.some((s: any) => s.status === "error");
+    const activeCount = sourceStreams.filter((s: any) => s.enabled && s.status !== "paused").length;
+    return { ...integration, connected: sourceStreams.length, totalEvents, hasError, activeCount };
+  });
 
   const selectedStream = streams?.find((s: any) => s.id === selectedStreamId);
 
@@ -138,30 +199,71 @@ export default function StreamsPage() {
         <div className="flex items-center gap-3">
           <Radio className="h-5 w-5 text-gold" />
           <h1 className="font-serif text-2xl font-light text-cream">
-            Streams
+            Integrations
           </h1>
         </div>
         <Button
           variant="outline"
           size="sm"
           className="gap-1.5 font-mono text-xs"
-          onClick={() => setShowCreateDialog(true)}
+          onClick={() => setShowConnectDialog(true)}
         >
           <Plus className="h-3.5 w-3.5" />
-          Add Stream
+          Connect Integration
         </Button>
       </div>
 
       <p className="text-muted-foreground mb-6 text-sm">
-        Data pipelines that capture events from external sources and deliver
-        them to Alfred's inbox.
+        Connect apps and services to feed data into Alfred's intelligence
+        pipeline. Each integration streams events that Alfred can learn from
+        and act on.
       </p>
+
+      {/* Integration source health overview */}
+      {streams && !isLoading && (
+        <div className="mb-6 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+          {sourceStats.map((stat) => {
+            const Icon = stat.icon;
+            return (
+              <div
+                key={stat.value}
+                className="rounded-sm border border-gold-dim/20 bg-black/20 px-3 py-2.5 text-center"
+              >
+                <Icon className="mx-auto mb-1.5 h-4 w-4 text-muted-foreground/60" />
+                <p className="font-mono text-[0.6rem] font-medium uppercase tracking-wider text-cream/80">
+                  {stat.label}
+                </p>
+                {stat.connected > 0 ? (
+                  <div className="mt-1 flex items-center justify-center gap-1.5">
+                    <span
+                      className={`inline-block h-1.5 w-1.5 rounded-full ${
+                        stat.hasError
+                          ? "bg-red-500"
+                          : stat.activeCount > 0
+                            ? "bg-green-500"
+                            : "bg-[#8A8680]/40"
+                      }`}
+                    />
+                    <span className="font-mono text-[0.55rem] text-muted-foreground/50">
+                      {stat.totalEvents} events
+                    </span>
+                  </div>
+                ) : (
+                  <p className="mt-1 font-mono text-[0.55rem] text-muted-foreground/30">
+                    not connected
+                  </p>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {isLoading && (
         <div className="flex items-center gap-2 py-8">
           <Loader2 className="h-5 w-5 animate-spin text-gold" />
           <span className="text-muted-foreground text-sm">
-            Loading streams...
+            Loading integrations...
           </span>
         </div>
       )}
@@ -176,11 +278,20 @@ export default function StreamsPage() {
         <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-8 text-center">
           <Radio className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
           <p className="font-mono text-sm text-muted-foreground">
-            No streams configured yet
+            No integrations connected yet
           </p>
           <p className="mt-1 font-mono text-xs text-muted-foreground/50">
-            Add a stream to start capturing events from external sources
+            Connect an app to start streaming events into Alfred
           </p>
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-4 gap-1.5 font-mono text-xs"
+            onClick={() => setShowConnectDialog(true)}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Connect Your First Integration
+          </Button>
         </div>
       )}
 
@@ -190,6 +301,7 @@ export default function StreamsPage() {
             <StreamCard
               key={stream.id}
               stream={stream}
+              sourceIcon={INTEGRATIONS.find((i) => i.value === stream.source)?.icon}
               onPause={handlePause}
               onResume={handleResume}
               onDelete={(id) => {
@@ -216,85 +328,111 @@ export default function StreamsPage() {
         </div>
       )}
 
-      {/* Create Stream Dialog */}
+      {/* Connect Integration Dialog */}
       <Dialog
-        open={showCreateDialog}
+        open={showConnectDialog}
         onOpenChange={(open) => {
-          if (!open) {
-            setShowCreateDialog(false);
-            setNewName("");
-            setNewSource("custom");
-          }
+          if (!open) closeConnectDialog();
         }}
       >
-        <DialogContent className="border-gold-dim bg-[#0A0A0A]">
-          <DialogHeader>
-            <DialogTitle className="text-cream font-serif font-light">
-              Add Stream
-            </DialogTitle>
-            <DialogDescription>
-              Configure a new data pipeline to capture events from an external
-              source.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <div>
-              <label className="mb-1.5 block font-mono text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-                Source
-              </label>
-              <Select value={newSource} onValueChange={setNewSource}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent className="border-gold-dim bg-[#0A0A0A]">
-                  {STREAM_SOURCES.map((s) => (
-                    <SelectItem key={s.value} value={s.value}>
-                      {s.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <label className="mb-1.5 block font-mono text-[0.65rem] uppercase tracking-wider text-muted-foreground">
-                Name
-              </label>
-              <Input
-                placeholder="e.g. Gmail Primary, Polar Payments"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-                autoFocus
-              />
-            </div>
-            <div className="rounded-sm border border-gold-dim/20 bg-black/20 px-3 py-2">
-              <p className="font-mono text-[0.6rem] text-muted-foreground">
-                Type:{" "}
-                <span className="text-cream">
-                  {SOURCE_TO_TYPE[newSource] || "webhook"}
-                </span>
-              </p>
-              {(SOURCE_TO_TYPE[newSource] || "webhook") === "webhook" && (
-                <p className="mt-1 font-mono text-[0.55rem] text-muted-foreground/50">
-                  A unique webhook URL will be generated after creation
-                </p>
-              )}
-            </div>
-            <DialogFooter>
-              <Button
-                variant="outline"
-                onClick={() => setShowCreateDialog(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                onClick={handleCreate}
-                disabled={creating || !newName.trim()}
-              >
-                {creating ? "Creating..." : "Create Stream"}
-              </Button>
-            </DialogFooter>
-          </div>
+        <DialogContent className="border-gold-dim bg-[#0A0A0A] sm:max-w-lg">
+          {connectStep === "pick" ? (
+            <>
+              <DialogHeader>
+                <DialogTitle className="text-cream font-serif font-light">
+                  Connect Integration
+                </DialogTitle>
+                <DialogDescription>
+                  Choose a service to connect. Alfred will start receiving events
+                  from the integration automatically.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid grid-cols-2 gap-2 py-2">
+                {INTEGRATIONS.map((integration) => {
+                  const Icon = integration.icon;
+                  return (
+                    <button
+                      key={integration.value}
+                      type="button"
+                      className="group flex flex-col items-start gap-2 rounded-sm border border-gold-dim/20 bg-black/20 p-3 text-left transition-colors hover:border-gold-dim/60 hover:bg-black/40"
+                      onClick={() => handleSelectIntegration(integration)}
+                    >
+                      <div className="flex items-center gap-2">
+                        <Icon className="h-4 w-4 text-gold/70 group-hover:text-gold" />
+                        <span className="font-mono text-xs font-medium uppercase tracking-wider text-cream">
+                          {integration.label}
+                        </span>
+                      </div>
+                      <p className="font-mono text-[0.6rem] leading-relaxed text-muted-foreground/60">
+                        {integration.description}
+                      </p>
+                      <span className="mt-auto inline-block rounded-sm bg-gold/10 px-1.5 py-0.5 font-mono text-[0.5rem] uppercase tracking-wider text-gold/60">
+                        {integration.type}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          ) : (
+            <>
+              <DialogHeader>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="text-muted-foreground transition-colors hover:text-cream"
+                    onClick={() => setConnectStep("pick")}
+                  >
+                    <ArrowLeft className="h-4 w-4" />
+                  </button>
+                  <DialogTitle className="text-cream font-serif font-light">
+                    Connect {selectedIntegration?.label}
+                  </DialogTitle>
+                </div>
+                <DialogDescription>
+                  {selectedIntegration?.description}
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div>
+                  <label className="mb-1.5 block font-mono text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+                    Integration Name
+                  </label>
+                  <Input
+                    placeholder={`e.g. ${selectedIntegration?.label} Primary`}
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && !creating && handleConnect()}
+                    autoFocus
+                  />
+                </div>
+                <div className="rounded-sm border border-gold-dim/20 bg-black/20 px-3 py-2">
+                  <p className="font-mono text-[0.6rem] text-muted-foreground">
+                    Type:{" "}
+                    <span className="text-cream">
+                      {selectedIntegration?.type}
+                    </span>
+                  </p>
+                  {selectedIntegration?.type === "webhook" && (
+                    <p className="mt-1 font-mono text-[0.55rem] text-muted-foreground/50">
+                      A unique webhook URL will be generated after connecting
+                    </p>
+                  )}
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={closeConnectDialog}>
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleConnect}
+                    disabled={creating || !newName.trim()}
+                  >
+                    {creating ? "Connecting..." : "Connect"}
+                  </Button>
+                </DialogFooter>
+              </div>
+            </>
+          )}
         </DialogContent>
       </Dialog>
 
@@ -308,11 +446,11 @@ export default function StreamsPage() {
         <DialogContent className="border-gold-dim bg-[#0A0A0A]">
           <DialogHeader>
             <DialogTitle className="text-cream font-serif font-light">
-              Delete Stream
+              Disconnect Integration
             </DialogTitle>
             <DialogDescription>
-              This will permanently delete this stream and all its events. This
-              action cannot be undone.
+              This will permanently remove this integration and all its events.
+              This action cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -329,7 +467,7 @@ export default function StreamsPage() {
               }
               disabled={!!actionLoading}
             >
-              {actionLoading ? "Deleting..." : "Delete"}
+              {actionLoading ? "Disconnecting..." : "Disconnect"}
             </Button>
           </DialogFooter>
         </DialogContent>

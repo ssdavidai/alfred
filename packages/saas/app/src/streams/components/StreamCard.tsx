@@ -30,6 +30,7 @@ interface StreamCardProps {
     errorMessage: string | null;
     _count?: { events: number };
   };
+  sourceIcon?: React.ComponentType<{ className?: string }>;
   onPause: (id: string) => void;
   onResume: (id: string) => void;
   onDelete: (id: string) => void;
@@ -51,6 +52,7 @@ function timeAgo(dateStr: string): string {
 
 export default function StreamCard({
   stream,
+  sourceIcon: SourceIcon,
   onPause,
   onResume,
   onDelete,
@@ -78,6 +80,9 @@ export default function StreamCard({
       <CardContent className="p-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3 min-w-0 flex-1">
+            {SourceIcon && (
+              <SourceIcon className="h-4 w-4 flex-shrink-0 text-gold/60" />
+            )}
             <div
               className={`h-2.5 w-2.5 flex-shrink-0 rounded-full ${
                 stream.status === "error"
@@ -211,7 +216,7 @@ export default function StreamCard({
                     onClick={() => onDelete(stream.id)}
                   >
                     <Trash2 className="mr-2 h-3 w-3" />
-                    Delete Stream
+                    Disconnect Integration
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
