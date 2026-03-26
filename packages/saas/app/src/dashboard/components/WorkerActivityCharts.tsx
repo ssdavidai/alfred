@@ -75,9 +75,10 @@ function getLastActiveMs(items: ActivityItem[], workerKey: string): number {
 
 /** Status dot color based on recency. */
 function getStatusColor(lastActiveMs: number): string {
-  if (lastActiveMs < 10 * 60_000) return "#22c55e"; // green — < 10 min
+  if (lastActiveMs === Infinity) return "#6b7280"; // gray — never active (idle/fresh)
+  if (lastActiveMs < 10 * 60_000) return "#22c55e"; // green — < 10 min (running)
   if (lastActiveMs < 60 * 60_000) return "#f59e0b"; // amber — < 1 hour
-  return "#ef4444"; // red — > 1 hour or no activity
+  return "#ef4444"; // red — > 1 hour (stopped/error)
 }
 
 /** ASCII activity preview: one char per bucket. */
