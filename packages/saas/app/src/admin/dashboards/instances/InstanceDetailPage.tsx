@@ -58,6 +58,7 @@ export default function InstanceDetailPage() {
   const { instanceId } = useParams<{ instanceId: string }>();
   const [activeTab, setActiveTab] = useState<"overview" | "health" | "devices" | "terminal">("overview");
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [destroyOpen, setDestroyOpen] = useState(false);
   const [destroyConfirmText, setDestroyConfirmText] = useState("");
 
@@ -88,15 +89,29 @@ export default function InstanceDetailPage() {
   if (!user) return null;
   if (!user.isAdmin) return <Navigate to="/" replace />;
 
+  const tenantDown =
+    instance?.lastHealthStatus === "down" ||
+    instance?.lastHealthStatus === "unreachable";
+
   async function handleAction(name: string, fn: () => Promise<any>) {
     if (!confirm(`Are you sure you want to ${name}?`)) return;
     setActionLoading(name);
+    setActionError(null);
     try {
       const result = await fn();
       if (result?.message) alert(result.message);
       refetchDetail();
     } catch (err: any) {
-      alert(`Error: ${err.message}`);
+      const msg: string = err.message || "An unexpected error occurred";
+      const isConnectivity =
+        msg.includes("Failed to reach tenant") ||
+        msg.includes("timed out") ||
+        msg.includes("Internal tenant error");
+      setActionError(
+        isConnectivity
+          ? "Cannot reach the tenant — the service may be down. Use Godmode SSH to recover manually."
+          : `Failed to ${name}: ${msg}`,
+      );
     } finally {
       setActionLoading(null);
     }
@@ -142,6 +157,29 @@ export default function InstanceDetailPage() {
 
         {instance && (
           <>
+            {/* Tenant unreachable warning */}
+            {(instance.lastHealthStatus === "down" || instance.lastHealthStatus === "unreachable") && (
+              <div className="mb-4 flex items-center gap-2 rounded-lg border border-amber-800 bg-amber-950/20 p-3 text-sm text-amber-300">
+                <XCircle className="size-4 shrink-0" />
+                Tenant is <span className="font-mono font-medium">{instance.lastHealthStatus}</span> — service actions are disabled. Use the Godmode SSH terminal to recover.
+              </div>
+            )}
+
+            {/* Action error banner */}
+            {actionError && (
+              <div className="mb-4 flex items-start gap-3 rounded-lg border border-red-800 bg-red-950/30 p-3 text-sm text-red-300">
+                <XCircle className="mt-0.5 size-4 shrink-0" />
+                <span className="flex-1">{actionError}</span>
+                <button
+                  onClick={() => setActionError(null)}
+                  className="shrink-0 text-red-400 hover:text-red-200"
+                  aria-label="Dismiss"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
             {/* Action bar */}
             <div className="mb-6 flex flex-wrap gap-2">
               {(instance.status === "error" || instance.status === "provisioning" || instance.status === "destroyed") && (
@@ -158,24 +196,28 @@ export default function InstanceDetailPage() {
                     icon={RotateCcw}
                     label="Restart Alfred"
                     loading={actionLoading === "restart-alfred"}
+                    disabled={tenantDown}
                     onClick={() => handleAction("restart-alfred", () => triggerAction({ instanceId: instance.id, action: "restart", service: "alfred" }))}
                   />
                   <ActionButton
                     icon={Square}
                     label="Stop Alfred"
                     loading={actionLoading === "stop-alfred"}
+                    disabled={tenantDown}
                     onClick={() => handleAction("stop-alfred", () => triggerAction({ instanceId: instance.id, action: "stop", service: "alfred" }))}
                   />
                   <ActionButton
                     icon={Play}
                     label="Start Alfred"
                     loading={actionLoading === "start-alfred"}
+                    disabled={tenantDown}
                     onClick={() => handleAction("start-alfred", () => triggerAction({ instanceId: instance.id, action: "start", service: "alfred" }))}
                   />
                   <ActionButton
                     icon={RotateCcw}
                     label="Restart Temporal"
                     loading={actionLoading === "restart-temporal"}
+                    disabled={tenantDown}
                     onClick={() => handleAction("restart-temporal", () => triggerAction({ instanceId: instance.id, action: "restart", service: "temporal" }))}
                   />
                 </>
@@ -327,23 +369,26 @@ function ActionButton({
   label,
   onClick,
   loading,
+  disabled,
   variant,
 }: {
   icon: any;
   label: string;
   onClick: () => void;
   loading?: boolean;
+  disabled?: boolean;
   variant?: "destructive";
 }) {
   return (
     <button
       onClick={onClick}
-      disabled={loading}
+      disabled={loading || disabled}
+      title={disabled && !loading ? "Tenant is unreachable" : undefined}
       className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
         variant === "destructive"
           ? "bg-red-900/50 text-red-300 hover:bg-red-900"
           : "bg-accent text-accent-foreground hover:bg-accent/80"
-      } disabled:opacity-50`}
+      } disabled:cursor-not-allowed disabled:opacity-50`}
     >
       <Icon className={`size-4 ${loading ? "animate-spin" : ""}`} />
       {label}
