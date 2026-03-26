@@ -160,6 +160,20 @@ export default function GodmodeTerminal({ instanceId, instanceName }: Props) {
       ws.send(buf);
     });
 
+    // Intercept paste events to send full text as a single write,
+    // preventing xterm.js from splitting on newlines.
+    const handlePaste = (e: ClipboardEvent) => {
+      e.preventDefault();
+      const text = e.clipboardData?.getData("text");
+      if (!text || ws.readyState !== WebSocket.OPEN) return;
+      const encoded = new TextEncoder().encode(text);
+      const buf = new Uint8Array(1 + encoded.length);
+      buf[0] = MSG_DATA;
+      buf.set(encoded, 1);
+      ws.send(buf);
+    };
+    containerRef.current.addEventListener("paste", handlePaste);
+
     // Handle resize
     const ro = new ResizeObserver(() => {
       fitAddon.fit();
@@ -174,7 +188,10 @@ export default function GodmodeTerminal({ instanceId, instanceName }: Props) {
     });
     ro.observe(containerRef.current);
 
-    return () => ro.disconnect();
+    return () => {
+      ro.disconnect();
+      containerRef.current?.removeEventListener("paste", handlePaste);
+    };
   }, [instanceId]);
 
   useEffect(() => {
