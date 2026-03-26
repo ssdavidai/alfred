@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect, Suspense } from "react";
 import { useAuth } from "wasp/client/auth";
+import { useSearchParams } from "react-router-dom";
 import {
   useQuery,
   getCustomerPortalUrl,
@@ -19,9 +20,120 @@ import {
   DialogDescription,
   DialogFooter,
 } from "../client/components/ui/dialog";
-import { ExternalLink, Plus, Trash2, Copy, Key, BookOpen } from "lucide-react";
+import {
+  ExternalLink,
+  Plus,
+  Trash2,
+  Copy,
+  Key,
+  BookOpen,
+  Server,
+  KeyRound,
+  FolderOpen,
+  ScrollText,
+  TerminalSquare,
+  UserCog,
+  Loader2,
+} from "lucide-react";
+import { cn } from "../client/utils";
+
+import { AssistantsContent } from "./AssistantsPage";
+import { CredentialsContent } from "./CredentialsPage";
+import { WorkspaceContent } from "./WorkspacePage";
+import { LogsContent } from "./LogsPage";
+import { TerminalContent } from "./TerminalPage";
+
+/* ------------------------------------------------------------------ */
+/*  Tab definitions                                                     */
+/* ------------------------------------------------------------------ */
+
+interface SettingsTab {
+  id: string;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}
+
+const SETTINGS_TABS: SettingsTab[] = [
+  { id: "services", label: "Services", icon: Server },
+  { id: "credentials", label: "Credentials", icon: KeyRound },
+  { id: "workspace", label: "Workspace", icon: FolderOpen },
+  { id: "logs", label: "Logs", icon: ScrollText },
+  { id: "terminal", label: "Terminal", icon: TerminalSquare },
+  { id: "account", label: "Account", icon: UserCog },
+];
+
+const VALID_TAB_IDS = new Set(SETTINGS_TABS.map((t) => t.id));
+
+/* ------------------------------------------------------------------ */
+/*  Unified Settings Page                                               */
+/* ------------------------------------------------------------------ */
 
 export default function SettingsPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab") || "services";
+  const activeTab = VALID_TAB_IDS.has(tabParam) ? tabParam : "services";
+
+  // Redirect invalid tab params to the default
+  useEffect(() => {
+    if (tabParam && !VALID_TAB_IDS.has(tabParam)) {
+      setSearchParams({ tab: "services" }, { replace: true });
+    }
+  }, [tabParam, setSearchParams]);
+
+  const setActiveTab = (tab: string) => {
+    setSearchParams({ tab }, { replace: true });
+  };
+
+  return (
+    <DashboardLayout>
+      <h1 className="font-serif mb-6 text-2xl font-light text-cream">Settings</h1>
+
+      {/* Tab navigation */}
+      <div role="tablist" className="mb-6 flex gap-1 overflow-x-auto border-b border-gold-dim/40 pb-px">
+        {SETTINGS_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={cn(
+              "flex items-center gap-2 whitespace-nowrap px-4 py-2.5 font-mono text-xs uppercase tracking-wider transition-colors",
+              activeTab === tab.id
+                ? "border-b-2 border-gold text-gold"
+                : "text-[#8A8680] hover:text-[#E8E4DE]",
+            )}
+          >
+            <tab.icon className="h-3.5 w-3.5" />
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab content */}
+      <Suspense
+        fallback={
+          <div className="flex items-center justify-center py-16">
+            <Loader2 className="h-8 w-8 animate-spin text-gold" />
+          </div>
+        }
+      >
+        {activeTab === "services" && <AssistantsContent />}
+        {activeTab === "credentials" && <CredentialsContent />}
+        {activeTab === "workspace" && <WorkspaceContent />}
+        {activeTab === "logs" && <LogsContent />}
+        {activeTab === "terminal" && <TerminalContent />}
+        {activeTab === "account" && <AccountContent />}
+      </Suspense>
+    </DashboardLayout>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Account content (previously the entire SettingsPage)                */
+/* ------------------------------------------------------------------ */
+
+export function AccountContent() {
   const { data: user } = useAuth();
   const {
     data: portalUrl,
@@ -30,8 +142,8 @@ export default function SettingsPage() {
   } = useQuery(getCustomerPortalUrl);
 
   return (
-    <DashboardLayout>
-      <h1 className="font-serif mb-6 text-2xl font-light text-cream">Settings</h1>
+    <>
+      <h2 className="font-serif mb-6 text-xl font-light text-cream">Account</h2>
 
       <div className="space-y-6">
         {/* Account Info */}
@@ -94,7 +206,7 @@ export default function SettingsPage() {
         {/* API Keys */}
         <ApiKeysSection />
       </div>
-    </DashboardLayout>
+    </>
   );
 }
 

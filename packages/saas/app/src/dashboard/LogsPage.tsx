@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, getContainerLogs, getActivityFeed } from "wasp/client/operations";
-import DashboardLayout from "./DashboardLayout";
+import { Navigate } from "react-router-dom";
 import { Card, CardContent } from "../client/components/ui/card";
 import { Button } from "../client/components/ui/button";
 import { ScrollText, RefreshCw, Activity, AlertTriangle, CheckCircle2, WifiOff } from "lucide-react";
@@ -283,13 +283,14 @@ function RawLogsView() {
   );
 }
 
-export default function LogsPage() {
+/** Inner content — used by the unified Settings page */
+export function LogsContent() {
   const [mode, setMode] = useState<"activity" | "raw">("activity");
 
   return (
-    <DashboardLayout>
+    <>
       <div className="mb-6 flex items-center justify-between">
-        <h1 className="font-serif text-2xl font-light text-cream">Logs</h1>
+        <h2 className="font-serif text-2xl font-light text-cream">Logs</h2>
         <div className="flex items-center rounded-sm border border-border">
           <button
             className={`px-4 py-1.5 text-sm transition-colors ${
@@ -317,6 +318,10 @@ export default function LogsPage() {
       </div>
 
       {mode === "activity" ? <ActivityView /> : <RawLogsView />}
-    </DashboardLayout>
+    </>
   );
+}
+
+export default function LogsPage() {
+  return <Navigate to="/dashboard/settings?tab=logs" replace />;
 }

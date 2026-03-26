@@ -8,7 +8,7 @@ import {
   updateAgentModel,
   updateCredentials,
 } from "wasp/client/operations";
-import DashboardLayout from "./DashboardLayout";
+import { Navigate } from "react-router-dom";
 import { Card, CardContent, CardTitle } from "../client/components/ui/card";
 import { Button } from "../client/components/ui/button";
 import { Input } from "../client/components/ui/input";
@@ -421,7 +421,8 @@ function ApiKeyDialog({
 /*  Page                                                               */
 /* ------------------------------------------------------------------ */
 
-export default function AssistantsPage() {
+/** Inner content — used by the unified Settings page */
+export function AssistantsContent() {
   const { data, isLoading, error, refetch } = useQuery(getWorkerStatus);
   // Lightweight query — returns agent list + surveyor config (no docker exec)
   const {
@@ -471,8 +472,8 @@ export default function AssistantsPage() {
   };
 
   return (
-    <DashboardLayout>
-      <h1 className="font-serif mb-6 text-2xl font-light text-cream">Services</h1>
+    <>
+      <h2 className="font-serif mb-6 text-2xl font-light text-cream">Services</h2>
 
       {isLoading && (
         <p className="text-muted-foreground">Loading assistant status...</p>
@@ -602,8 +603,12 @@ export default function AssistantsPage() {
           )}
         </>
       )}
-    </DashboardLayout>
+    </>
   );
+}
+
+export default function AssistantsPage() {
+  return <Navigate to="/dashboard/settings?tab=services" replace />;
 }
 
 /* ------------------------------------------------------------------ */
