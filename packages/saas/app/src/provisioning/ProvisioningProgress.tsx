@@ -142,6 +142,16 @@ export default function ProvisioningProgress({
                       Your instance is ready!
                     </p>
                   </>
+                ) : data.job.currentStep === "done" || data.job.status === "completed" ? (
+                  <>
+                    <Loader2 className="mx-auto mb-2 h-8 w-8 animate-spin text-gold" />
+                    <p className="font-medium text-[#E8E4DE]">
+                      Finalizing your instance…
+                    </p>
+                    <p className="mt-1 text-sm text-[#8A8680]">
+                      DNS is propagating — this can take a few minutes.
+                    </p>
+                  </>
                 ) : (
                   <>
                     <Loader2 className="mx-auto mb-2 h-8 w-8 animate-spin text-gold" />
