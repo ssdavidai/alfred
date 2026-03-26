@@ -4,7 +4,7 @@ import {
   getCredentials,
   updateCredentials,
 } from "wasp/client/operations";
-import DashboardLayout from "./DashboardLayout";
+import { Navigate } from "react-router-dom";
 import { Card, CardContent, CardTitle } from "../client/components/ui/card";
 import { Button } from "../client/components/ui/button";
 import { Input } from "../client/components/ui/input";
@@ -27,7 +27,8 @@ interface Credential {
   used_by: string[];
 }
 
-export default function CredentialsPage() {
+/** Inner content — used by the unified Settings page */
+export function CredentialsContent() {
   const { data, isLoading, error, refetch } = useQuery(getCredentials);
   const [editKey, setEditKey] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -80,7 +81,7 @@ export default function CredentialsPage() {
   const editingCred = credentials.find((c) => c.key === editKey);
 
   return (
-    <DashboardLayout>
+    <>
       <h1 className="font-serif mb-2 text-2xl font-light text-cream">
         Credentials
       </h1>
@@ -253,6 +254,10 @@ export default function CredentialsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </DashboardLayout>
+    </>
   );
+}
+
+export default function CredentialsPage() {
+  return <Navigate to="/dashboard/settings?tab=credentials" replace />;
 }

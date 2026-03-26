@@ -4,7 +4,7 @@ import {
   getWorkspaceFile,
   updateWorkspaceFile,
 } from "wasp/client/operations";
-import DashboardLayout from "./DashboardLayout";
+import { Navigate } from "react-router-dom";
 import { Button } from "../client/components/ui/button";
 import { cn } from "../client/utils";
 import { useToast } from "../client/hooks/use-toast";
@@ -68,11 +68,12 @@ const WORKSPACE_FILES: WorkspaceFile[] = [
   },
 ];
 
-export default function WorkspacePage() {
+/** Inner content — used by the unified Settings page */
+export function WorkspaceContent() {
   const [activeFile, setActiveFile] = useState<WorkspaceFile>(WORKSPACE_FILES[0]);
 
   return (
-    <DashboardLayout>
+    <>
       <h1 className="font-serif mb-2 text-2xl font-light text-cream">
         Workspace
       </h1>
@@ -102,8 +103,12 @@ export default function WorkspacePage() {
 
       {/* Active file editor */}
       <FileEditor key={activeFile.id} file={activeFile} />
-    </DashboardLayout>
+    </>
   );
+}
+
+export default function WorkspacePage() {
+  return <Navigate to="/dashboard/settings?tab=workspace" replace />;
 }
 
 function FileEditor({ file }: { file: WorkspaceFile }) {

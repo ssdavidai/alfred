@@ -1,10 +1,11 @@
-import DashboardLayout from "./DashboardLayout";
+import { Navigate } from "react-router-dom";
 import Terminal from "./components/Terminal";
 import { TerminalSquare } from "lucide-react";
 
-export default function TerminalPage() {
+/** Inner content — used by the unified Settings page */
+export function TerminalContent() {
   return (
-    <DashboardLayout>
+    <>
       <div className="mb-6 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <TerminalSquare className="h-5 w-5 text-gold" />
@@ -24,6 +25,10 @@ export default function TerminalPage() {
         <code className="font-mono text-muted-foreground">openclaw --help</code>{" "}
         to get started. Session times out after 15 minutes of inactivity.
       </p>
-    </DashboardLayout>
+    </>
   );
+}
+
+export default function TerminalPage() {
+  return <Navigate to="/dashboard/settings?tab=terminal" replace />;
 }
