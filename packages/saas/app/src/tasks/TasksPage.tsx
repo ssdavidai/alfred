@@ -89,6 +89,7 @@ export function TasksContent() {
     cancelled: tasks.filter((t: any) => t.status === "cancelled").length,
   };
 
+  // Also match legacy "todo" status for pre-Spec 003 vault records
   const approvalTasks = tasks.filter(
     (t: any) =>
       (t.frontmatter?.requires_approval || t.requires_approval) &&

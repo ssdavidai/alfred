@@ -40,6 +40,7 @@ export default function IntelligencePage() {
   });
 
   const tasks: any[] = tasksData?.results ?? [];
+  // Also match legacy "todo" status for pre-Spec 003 vault records
   const approvalCount = tasks.filter(
     (t: any) =>
       (t.frontmatter?.requires_approval || t.requires_approval) &&
