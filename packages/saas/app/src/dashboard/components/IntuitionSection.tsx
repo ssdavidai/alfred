@@ -19,7 +19,7 @@ export default function IntuitionSection() {
             </CardTitle>
           </div>
           <Link
-            to="/dashboard/intuition"
+            to="/dashboard/tasks"
             className="flex items-center gap-1 font-mono text-[0.6rem] text-muted-foreground transition-colors hover:text-gold"
           >
             Manage
@@ -38,7 +38,7 @@ export default function IntuitionSection() {
               Learning engine unavailable
             </p>
             <Link
-              to="/dashboard/intuition"
+              to="/dashboard/tasks"
               className="mt-1 inline-block font-mono text-[0.6rem] text-gold/60 transition-colors hover:text-gold"
             >
               Configure Intuition

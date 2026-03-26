@@ -21,12 +21,13 @@ import {
   ChevronUp,
   Save,
   Zap,
+  ShieldAlert,
 } from "lucide-react";
 
-type FilterTab = "all" | "todo" | "active" | "blocked" | "done" | "cancelled";
+type FilterTab = "all" | "queued" | "active" | "blocked" | "done" | "cancelled";
 
 const STATUS_OPTIONS = [
-  { value: "todo", label: "Todo" },
+  { value: "queued", label: "Queued" },
   { value: "active", label: "Active" },
   { value: "blocked", label: "Blocked" },
   { value: "done", label: "Done" },
@@ -34,7 +35,7 @@ const STATUS_OPTIONS = [
 ];
 
 const STATUS_COLORS: Record<string, string> = {
-  todo: "border-zinc-500/40 bg-zinc-500/10 text-zinc-400",
+  queued: "border-zinc-500/40 bg-zinc-500/10 text-zinc-400",
   active: "border-blue-500/40 bg-blue-500/10 text-blue-400",
   blocked: "border-red-500/40 bg-red-500/10 text-red-400",
   done: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400",
@@ -56,14 +57,14 @@ const KIND_COLORS: Record<string, string> = {
 
 const FILTER_TABS: { key: FilterTab; label: string }[] = [
   { key: "all", label: "All" },
-  { key: "todo", label: "Todo" },
+  { key: "queued", label: "Queued" },
   { key: "active", label: "Active" },
   { key: "blocked", label: "Blocked" },
   { key: "done", label: "Done" },
   { key: "cancelled", label: "Cancelled" },
 ];
 
-export default function TasksPage() {
+export function TasksContent() {
   const { data, isLoading, error, refetch } = useQuery(getTasks, undefined, {
     refetchInterval: 30_000,
     retry: false,
@@ -81,12 +82,19 @@ export default function TasksPage() {
 
   const counts = {
     total: tasks.length,
-    todo: tasks.filter((t: any) => t.status === "todo").length,
+    queued: tasks.filter((t: any) => t.status === "queued").length,
     active: tasks.filter((t: any) => t.status === "active").length,
     blocked: tasks.filter((t: any) => t.status === "blocked").length,
     done: tasks.filter((t: any) => t.status === "done").length,
     cancelled: tasks.filter((t: any) => t.status === "cancelled").length,
   };
+
+  // Also match legacy "todo" status for pre-Spec 003 vault records
+  const approvalTasks = tasks.filter(
+    (t: any) =>
+      (t.frontmatter?.requires_approval || t.requires_approval) &&
+      (t.status === "queued" || t.status === "todo"),
+  );
 
   const handleStatusChange = async (path: string, newStatus: string) => {
     setUpdatingPath(path);
@@ -101,18 +109,31 @@ export default function TasksPage() {
   };
 
   return (
-    <DashboardLayout>
-      {/* Header */}
-      <div className="mb-6 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <ClipboardList className="h-5 w-5 text-gold" />
-          <h1 className="font-serif text-2xl font-light text-cream">Tasks</h1>
+    <>
+      {/* Approval Queue */}
+      {approvalTasks.length > 0 && (
+        <div className="mb-4 rounded-sm border border-amber-500/30 bg-amber-500/[0.04] p-3">
+          <div className="mb-2 flex items-center gap-2">
+            <ShieldAlert className="h-3.5 w-3.5 text-amber-400" />
+            <span className="font-mono text-xs font-medium text-amber-400">
+              {approvalTasks.length} task{approvalTasks.length > 1 ? "s" : ""} awaiting approval
+            </span>
+          </div>
+          <div className="space-y-1">
+            {approvalTasks.map((t: any) => (
+              <div
+                key={t.path}
+                className="flex items-center justify-between rounded-sm bg-amber-500/5 px-2 py-1.5"
+              >
+                <span className="truncate font-mono text-xs text-cream/80">
+                  {t.frontmatter?.name || t.name}
+                </span>
+                <TierBadge tier={t.frontmatter?.tier} />
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
-
-      <p className="text-muted-foreground mb-6 text-sm">
-        Your task list managed by Alfred. Track what needs doing, what&apos;s in progress, and what&apos;s done.
-      </p>
+      )}
 
       {/* Filter Tabs */}
       <div className="mb-4 flex gap-1">
@@ -148,9 +169,9 @@ export default function TasksPage() {
       {data && !isLoading && (
         <>
           {/* Stats Bar */}
-          <div className="mb-4 grid grid-cols-6 gap-2">
+          <div className="mb-4 grid grid-cols-3 gap-2 lg:grid-cols-6">
             <StatPill label="Total" value={counts.total} />
-            <StatPill label="Todo" value={counts.todo} />
+            <StatPill label="Queued" value={counts.queued} />
             <StatPill label="Active" value={counts.active} />
             <StatPill label="Blocked" value={counts.blocked} />
             <StatPill label="Done" value={counts.done} />
@@ -187,6 +208,21 @@ export default function TasksPage() {
           )}
         </>
       )}
+    </>
+  );
+}
+
+export default function TasksPage() {
+  return (
+    <DashboardLayout>
+      <div className="mb-6 flex items-center gap-3">
+        <ClipboardList className="h-5 w-5 text-gold" />
+        <h1 className="font-serif text-2xl font-light text-cream">Tasks</h1>
+      </div>
+      <p className="text-muted-foreground mb-6 text-sm">
+        Your task list managed by Alfred. Track what needs doing, what&apos;s in progress, and what&apos;s done.
+      </p>
+      <TasksContent />
     </DashboardLayout>
   );
 }
@@ -212,6 +248,21 @@ function Badge({ text, colorClass }: { text: string; colorClass: string }) {
   );
 }
 
+const TIER_LABELS: Record<number, string> = {
+  1: "T1 · Classify",
+  2: "T2 · Synthesis",
+  3: "T3 · Agentic",
+};
+
+function TierBadge({ tier }: { tier?: number }) {
+  if (!tier) return null;
+  return (
+    <span className="inline-flex rounded-sm border border-purple-400/30 bg-purple-400/10 px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider text-purple-400">
+      {TIER_LABELS[tier] ?? `T${tier}`}
+    </span>
+  );
+}
+
 function TaskRow({
   task,
   isExpanded,
@@ -228,7 +279,7 @@ function TaskRow({
   onRefetch: () => void;
 }) {
   const fm = task.frontmatter ?? {};
-  const statusClass = STATUS_COLORS[task.status] ?? STATUS_COLORS.todo;
+  const statusClass = STATUS_COLORS[task.status] ?? STATUS_COLORS.queued;
   const priorityClass = fm.priority ? PRIORITY_COLORS[fm.priority] : null;
   const hasAlfredInstructions = !!(fm.alfred_instructions || task.alfred_instructions);
 
@@ -275,7 +326,8 @@ function TaskRow({
           <Badge text={task.status} colorClass={statusClass} />
           <div className="flex-shrink-0">
             <Select
-              value={task.status}
+              // Normalize legacy "todo" → "queued" for pre-Spec 003 vault records
+              value={task.status === "todo" ? "queued" : task.status}
               onValueChange={(val) => onStatusChange(task.path, val)}
               disabled={isUpdating}
             >
@@ -350,7 +402,7 @@ function TaskDetail({ path, onRefetch }: { path: string; onRefetch: () => void }
   const dependsOn: string[] = Array.isArray(fm.depends_on) ? fm.depends_on : [];
   const blockedBy: string[] = Array.isArray(fm.blocked_by) ? fm.blocked_by : [];
   const tags: string[] = Array.isArray(fm.tags) ? fm.tags : [];
-  const statusClass = STATUS_COLORS[fm.status] ?? STATUS_COLORS.todo;
+  const statusClass = STATUS_COLORS[fm.status] ?? STATUS_COLORS.queued;
   const priorityClass = fm.priority ? PRIORITY_COLORS[fm.priority] : null;
   const kindClass = fm.kind ? KIND_COLORS[fm.kind] : null;
 
@@ -361,6 +413,13 @@ function TaskDetail({ path, onRefetch }: { path: string; onRefetch: () => void }
         {fm.status && <Badge text={fm.status} colorClass={statusClass} />}
         {priorityClass && <Badge text={fm.priority} colorClass={priorityClass} />}
         {kindClass && <Badge text={fm.kind} colorClass={kindClass} />}
+        <TierBadge tier={fm.tier} />
+        {fm.requires_approval && (
+          <Badge text="Approval Required" colorClass="border-amber-500/40 bg-amber-500/10 text-amber-400" />
+        )}
+        {fm.created_by && (
+          <Badge text={`via ${fm.created_by}`} colorClass="border-zinc-500/30 bg-zinc-500/10 text-zinc-400" />
+        )}
       </div>
 
       {/* Description */}
@@ -375,6 +434,12 @@ function TaskDetail({ path, onRefetch }: { path: string; onRefetch: () => void }
 
       {/* Metadata grid */}
       <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+        {fm.owner && (
+          <div>
+            <FieldLabel>Owner</FieldLabel>
+            <p className="font-mono text-[0.7rem] text-cream/80">{fm.owner}</p>
+          </div>
+        )}
         {fm.project && (
           <div>
             <FieldLabel>Project</FieldLabel>
@@ -395,6 +460,24 @@ function TaskDetail({ path, onRefetch }: { path: string; onRefetch: () => void }
           <div>
             <FieldLabel>Due</FieldLabel>
             <p className="font-mono text-[0.7rem] text-cream/80">{fm.due}</p>
+          </div>
+        )}
+        {fm.skill_entry && (
+          <div>
+            <FieldLabel>Skill</FieldLabel>
+            <p className="font-mono text-[0.7rem] text-blue-400/80">{fm.skill_entry}</p>
+          </div>
+        )}
+        {fm.source_instinct && (
+          <div>
+            <FieldLabel>Source Instinct</FieldLabel>
+            <p className="font-mono text-[0.7rem] text-purple-400/80">{fm.source_instinct}</p>
+          </div>
+        )}
+        {fm.budget_turns != null && (
+          <div>
+            <FieldLabel>Budget</FieldLabel>
+            <p className="font-mono text-[0.7rem] text-cream/80">{fm.budget_turns} turns</p>
           </div>
         )}
         {fm.run && (

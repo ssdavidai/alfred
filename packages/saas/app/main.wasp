@@ -440,10 +440,10 @@ action updateWorkspaceFile {
 // ============================================================
 // Tasks
 // ============================================================
-route TasksRoute { path: "/dashboard/tasks", to: TasksPage }
-page TasksPage {
+route IntelligenceRoute { path: "/dashboard/tasks", to: IntelligencePage }
+page IntelligencePage {
   authRequired: true,
-  component: import TasksPage from "@src/tasks/TasksPage"
+  component: import IntelligencePage from "@src/intelligence/IntelligencePage"
 }
 
 query getTasks {
