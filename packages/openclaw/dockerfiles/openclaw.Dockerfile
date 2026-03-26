@@ -17,11 +17,8 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Clone OpenClaw at pinned SHA (override via --build-arg OPENCLAW_SHA=<sha>)
-ARG OPENCLAW_SHA=OPENCLAW_SHA_PLACEHOLDER
-RUN git init /openclaw-src && \
-    git -C /openclaw-src fetch --depth 1 https://github.com/openclaw/openclaw.git ${OPENCLAW_SHA} && \
-    git -C /openclaw-src checkout FETCH_HEAD
+# Clone OpenClaw (HEAD of default branch)
+RUN git clone --depth 1 https://github.com/openclaw/openclaw.git /openclaw-src
 
 # Install and build
 WORKDIR /openclaw-src
