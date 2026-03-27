@@ -7,7 +7,7 @@
  */
 
 import crypto from "crypto";
-import type { Express, Request, Response } from "express";
+import type { Application, Request, Response } from "express";
 import { encryptApiKey, decryptApiKey } from "./tenantProxy";
 import { prisma } from "wasp/server";
 
@@ -182,17 +182,17 @@ function handleStart(req: Request, res: Response) {
 
   // Extract userId from Wasp session cookie
   // For now, require userId as query param (the UI will pass it)
-  const userId = req.query.userId as string;
+  const userId = String(req.query.userId || "");
   if (!userId) {
     return res.status(401).json({ error: "userId required" });
   }
 
-  const scopesParam = req.query.scopes as string;
+  const scopesParam = String(req.query.scopes || "");
   const scopes = scopesParam
     ? scopesParam.split(",")
     : config.defaultScopes;
 
-  const redirectAfter = (req.query.redirectAfter as string) || "/dashboard/streams";
+  const redirectAfter = String(req.query.redirectAfter || "/dashboard/streams");
 
   // Generate state token
   const state = crypto.randomBytes(24).toString("hex");
@@ -285,7 +285,7 @@ async function handleCallback(req: Request, res: Response) {
 }
 
 async function handleListCredentials(req: Request, res: Response) {
-  const userId = req.query.userId as string;
+  const userId = String(req.query.userId || "");
   if (!userId) return res.status(401).json({ error: "userId required" });
 
   const creds = await prisma.oAuthCredential.findMany({
@@ -304,7 +304,7 @@ async function handleListCredentials(req: Request, res: Response) {
 }
 
 async function handleDeleteCredential(req: Request, res: Response) {
-  const userId = req.query.userId as string;
+  const userId = String(req.query.userId || "");
   if (!userId) return res.status(401).json({ error: "userId required" });
 
   const { id } = req.params;
@@ -341,7 +341,7 @@ async function handleInternalTokenRequest(req: Request, res: Response) {
 // Registration
 // ---------------------------------------------------------------------------
 
-export function registerOAuth2Routes(app: Express): void {
+export function registerOAuth2Routes(app: Application): void {
   app.get("/auth/oauth2/:provider/start", handleStart);
   app.get("/auth/oauth2/:provider/callback", handleCallback);
   app.get("/auth/oauth2/credentials", handleListCredentials);
