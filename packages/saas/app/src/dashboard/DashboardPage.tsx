@@ -3,8 +3,11 @@ import {
   useQuery,
   getDashboardData,
   getIntuitionStatus,
+  getPendingApprovals,
+  approveAction,
+  rejectAction,
 } from "wasp/client/operations";
-import { Loader2, WifiOff, RefreshCw, BookOpen } from "lucide-react";
+import { Loader2, WifiOff, RefreshCw, BookOpen, AlertTriangle, CheckCircle, XCircle } from "lucide-react";
 import { Link } from "react-router-dom";
 import DashboardLayout from "./DashboardLayout";
 import { Card, CardContent, CardTitle } from "../client/components/ui/card";
@@ -137,6 +140,9 @@ export default function DashboardPage() {
           {/* Devices panel — expandable below TopBar */}
           {activePanel === "devices" && <DevicesPanel />}
 
+          {/* Pending Approvals — sensitive actions awaiting user permission */}
+          <PendingApprovalsBanner />
+
           {/* First Brief — personalized onboarding summary */}
           <FirstBrief />
 
@@ -213,5 +219,116 @@ export default function DashboardPage() {
         </div>
       )}
     </DashboardLayout>
+  );
+}
+
+function PendingApprovalsBanner() {
+  const { data, refetch } = useQuery(getPendingApprovals, undefined, {
+    refetchInterval: 10_000,
+    retry: false,
+  });
+
+  const [actingOn, setActingOn] = useState<string | null>(null);
+
+  const approvals: any[] = data?.results ?? [];
+
+  if (approvals.length === 0) return null;
+
+  const handleApprove = async (path: string) => {
+    setActingOn(path);
+    try {
+      await approveAction({ path });
+      refetch();
+    } catch (err: any) {
+      console.error("Approval failed:", err);
+    } finally {
+      setActingOn(null);
+    }
+  };
+
+  const handleReject = async (path: string) => {
+    setActingOn(path);
+    try {
+      await rejectAction({ path });
+      refetch();
+    } catch (err: any) {
+      console.error("Rejection failed:", err);
+    } finally {
+      setActingOn(null);
+    }
+  };
+
+  return (
+    <div className="rounded-sm border border-amber-500/40 bg-amber-500/[0.06] p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <AlertTriangle className="h-4 w-4 text-amber-400" />
+        <span className="font-serif text-base font-medium text-amber-400">
+          Pending Approvals
+        </span>
+        <span className="ml-auto rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 font-mono text-[0.6rem] font-medium text-amber-400">
+          {approvals.length}
+        </span>
+      </div>
+      <p className="mb-3 font-sans text-xs font-light text-amber-400/70">
+        Alfred wants to take the following actions but needs your permission first.
+      </p>
+      <div className="space-y-2">
+        {approvals.map((a: any) => (
+          <div
+            key={a.path}
+            className="flex items-center gap-3 rounded-sm border border-amber-500/20 bg-black/30 px-3 py-2.5"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-mono text-xs font-medium text-cream">
+                {a.name}
+              </p>
+              {a.description && (
+                <p className="mt-0.5 truncate font-sans text-[0.65rem] font-light text-cream/50">
+                  {a.description}
+                </p>
+              )}
+              {a.alfred_instructions && (
+                <p className="mt-0.5 truncate font-mono text-[0.6rem] text-gold/60">
+                  {a.alfred_instructions}
+                </p>
+              )}
+              {a.created && (
+                <span className="mt-1 inline-block font-mono text-[0.55rem] text-muted-foreground/50">
+                  {a.created}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => handleApprove(a.path)}
+                disabled={actingOn === a.path}
+                className="flex items-center gap-1 rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 font-mono text-[0.6rem] uppercase tracking-wider text-emerald-400 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
+              >
+                {actingOn === a.path ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <CheckCircle className="h-3 w-3" />
+                )}
+                Approve
+              </button>
+              <button
+                type="button"
+                onClick={() => handleReject(a.path)}
+                disabled={actingOn === a.path}
+                className="flex items-center gap-1 rounded-sm border border-red-500/30 bg-red-500/10 px-2.5 py-1.5 font-mono text-[0.6rem] uppercase tracking-wider text-red-400 transition-colors hover:bg-red-500/20 disabled:opacity-50"
+              >
+                {actingOn === a.path ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <XCircle className="h-3 w-3" />
+                )}
+                Reject
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }

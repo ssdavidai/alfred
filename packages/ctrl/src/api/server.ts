@@ -18,6 +18,7 @@ import { registerNotificationRoutes } from "./routes/notifications.js";
 import { registerModelRoutes } from "./routes/models.js";
 import { registerWorkspaceRoutes } from "./routes/workspace.js";
 import { registerToolRoutes } from "./routes/tools.js";
+import { registerApprovalRoutes } from "./routes/approvals.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -92,6 +93,7 @@ export function createApiServer(): http.Server {
   registerModelRoutes();
   registerWorkspaceRoutes();
   registerToolRoutes();
+  registerApprovalRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();

@@ -9,6 +9,9 @@ import type {
   RetryQuarantine,
   DismissQuarantine,
   GetLedgerEntries,
+  GetPendingApprovals,
+  ApproveAction,
+  RejectAction,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -91,5 +94,29 @@ export const getLedgerEntries: GetLedgerEntries<void, any> = async (_args, conte
   return proxyToTenant(instance, {
     method: "GET",
     path: "/api/v1/vault/list/ledger_entry",
+  });
+};
+
+export const getPendingApprovals: GetPendingApprovals<void, any> = async (_args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "GET",
+    path: "/api/v1/approvals/pending",
+  });
+};
+
+export const approveAction: ApproveAction<{ path: string }, any> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/approvals/${args.path}/approve`,
+  });
+};
+
+export const rejectAction: RejectAction<{ path: string }, any> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/approvals/${args.path}/reject`,
   });
 };
