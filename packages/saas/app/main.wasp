@@ -446,6 +446,16 @@ action updateWorkspaceFile {
   entities: [Instance]
 }
 
+query getFirstBrief {
+  fn: import { getFirstBrief } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action startOnboarding {
+  fn: import { startOnboarding } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
 // ============================================================
 // Tasks
 // ============================================================
