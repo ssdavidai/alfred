@@ -4,11 +4,11 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { dockerExec, ALFRED_CMD } from "../helpers.js";
 
-const VAULT_PATH = "/mnt/encrypted/vault";
+export const VAULT_PATH = "/mnt/encrypted/vault";
 const INBOX_PATH = `${VAULT_PATH}/inbox`;
-const VAULT_ENV = { ALFRED_VAULT_PATH: "/vault" };
+export const VAULT_ENV = { ALFRED_VAULT_PATH: "/vault" };
 
-const IGNORE_DIRS = new Set(["_templates", "_bases", "_docs", ".obsidian", "view", "dashboard"]);
+export const IGNORE_DIRS = new Set(["_templates", "_bases", "_docs", ".obsidian", "view", "dashboard"]);
 
 const KNOWN_TYPES = [
   "person", "org", "project", "task", "event", "note", "location",
@@ -203,7 +203,7 @@ function parseFrontmatter(content: string): ParsedRecord {
 // Recursive .md file walker (sync, fast)
 // ---------------------------------------------------------------------------
 
-function walkMd(dir: string, base: string, ignoreDirs: Set<string>): string[] {
+export function walkMd(dir: string, base: string, ignoreDirs: Set<string>): string[] {
   const results: string[] = [];
   let entries: fs.Dirent[];
   try {
@@ -226,7 +226,7 @@ function walkMd(dir: string, base: string, ignoreDirs: Set<string>): string[] {
 // Shared read helper
 // ---------------------------------------------------------------------------
 
-function readRecord(relPath: string): { fm: Record<string, unknown>; body: string; stem: string } | null {
+export function readRecord(relPath: string): { fm: Record<string, unknown>; body: string; stem: string } | null {
   const fullPath = path.join(VAULT_PATH, relPath);
   let content: string;
   try {

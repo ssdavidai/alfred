@@ -515,6 +515,22 @@ query getLedgerEntries {
   entities: [Instance]
 }
 
+// Approval queue
+query getPendingApprovals {
+  fn: import { getPendingApprovals } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action approveAction {
+  fn: import { approveAction } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action rejectAction {
+  fn: import { rejectAction } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
 // ============================================================
 // Intuition (Learning Engine)
 // ============================================================
