@@ -452,6 +452,15 @@ export function registerStreamRoutes(): void {
     sendJson(res, 200, { streams });
   });
 
+  // GET /api/v1/streams/events — MUST be before /:id to avoid matching "events" as an ID
+  addRoute("GET", "/api/v1/streams/events", async ({ res, query }) => {
+    const status = query.get("status") as "unprocessed" | "processed" | "quarantined" | undefined;
+    const limit = parseInt(query.get("limit") || "100", 10);
+
+    const events = getAllEvents(status, Math.min(limit, 500));
+    sendJson(res, 200, { events, count: events.length });
+  });
+
   // GET /api/v1/streams/:id — get full stream config by ID
   addRoute("GET", "/api/v1/streams/:id", async ({ res, params }) => {
     const streamId = params.id;
@@ -625,15 +634,6 @@ export function registerStreamRoutes(): void {
     }
 
     sendJson(res, 200, { status: "deleted" });
-  });
-
-  // GET /api/v1/streams/events — get events across all streams with status filter
-  addRoute("GET", "/api/v1/streams/events", async ({ res, query }) => {
-    const status = query.get("status") as "unprocessed" | "processed" | "quarantined" | undefined;
-    const limit = parseInt(query.get("limit") || "100", 10);
-
-    const events = getAllEvents(status, Math.min(limit, 500));
-    sendJson(res, 200, { events, count: events.length });
   });
 
   // POST /api/v1/streams/events/:id/processed — mark event as processed
