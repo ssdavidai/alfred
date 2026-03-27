@@ -16,6 +16,7 @@ import VaultGraph from "./components/VaultGraph";
 import VaultCompositionChart from "./components/VaultCompositionChart";
 import ActivityFeed from "./components/ActivityFeed";
 import WorkerActivityCharts from "./components/WorkerActivityCharts";
+import FirstBrief from "./components/FirstBrief";
 
 const DASHBOARD_CACHE_KEY = "alfred:dashboard:lastKnown";
 
@@ -135,6 +136,9 @@ export default function DashboardPage() {
 
           {/* Devices panel — expandable below TopBar */}
           {activePanel === "devices" && <DevicesPanel />}
+
+          {/* First Brief — personalized onboarding summary */}
+          <FirstBrief />
 
           {/* Daily Digest */}
           <Card>

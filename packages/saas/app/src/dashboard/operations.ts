@@ -13,6 +13,7 @@ import type {
   GetAgentConfig,
   GetModelCatalog,
   GetWorkspaceFile,
+  GetFirstBrief,
 } from "wasp/server/operations";
 import type {
   SubmitInboxItem,
@@ -24,6 +25,7 @@ import type {
   UpdateAgentConfig,
   UpdateAgentModel,
   UpdateWorkspaceFile,
+  StartOnboarding,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -479,5 +481,65 @@ export const updateWorkspaceFile: UpdateWorkspaceFile<
     method: "PUT",
     path: `/api/v1/admin/workspace/${encodeURIComponent(args.filename)}`,
     body: { content: args.content },
+  });
+};
+
+// ============================================================
+// First Brief (Onboarding Brief)
+// ============================================================
+
+export const getFirstBrief: GetFirstBrief<void, any> = async (
+  _args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+
+  // Search for onboarding brief in vault events
+  try {
+    const data: any = await proxyToTenant(instance, {
+      path: "/api/v1/vault/list/event",
+    });
+
+    if (data && Array.isArray(data.results)) {
+      // Look for the onboarding brief — it has "first-brief" or "onboarding" in its name
+      const briefRecord = data.results.find(
+        (r: any) =>
+          r.name?.toLowerCase().includes("first-brief") ||
+          r.name?.toLowerCase().includes("first brief") ||
+          r.name?.toLowerCase().includes("onboarding-brief") ||
+          r.path?.toLowerCase().includes("first-brief"),
+      );
+
+      if (briefRecord) {
+        // Fetch the full content
+        const fullRecord: any = await proxyToTenant(instance, {
+          path: `/api/v1/vault/records/${encodeURIComponent(briefRecord.path || `event/${briefRecord.name}`)}`,
+        });
+
+        return {
+          brief: fullRecord?.content ?? fullRecord?.body ?? null,
+          path: briefRecord.path || `event/${briefRecord.name}`,
+          name: briefRecord.name,
+        };
+      }
+    }
+  } catch (e) {
+    // Vault may not be available yet — return empty
+    console.error("Failed to fetch first brief:", e);
+  }
+
+  return { brief: null, path: null, name: null };
+};
+
+export const startOnboarding: StartOnboarding<
+  { streamId?: string },
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/workflows/onboarding/start",
+    body: args.streamId ? { stream_id: args.streamId } : {},
+    timeoutMs: 30_000,
   });
 };
