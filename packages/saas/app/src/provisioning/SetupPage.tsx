@@ -4,6 +4,7 @@ import {
   generateCheckoutSession,
   getClosedBetaStatus,
   getProvisioningStatus,
+  getWorkspaceFile,
   reprovisionInstance,
   useQuery,
 } from "wasp/client/operations";
@@ -50,13 +51,30 @@ export default function SetupPage() {
     }
   }, [isClosedBeta, navigate]);
 
-  // Redirect to dashboard when instance is running
+  // Check workspace files to determine if onboarding is needed
+  const isRunning = data?.instance?.status === "running";
+  const { data: userMd } = useQuery(
+    getWorkspaceFile,
+    isRunning ? { filename: "USER.md" } : undefined,
+  );
+  const { data: soulMd } = useQuery(
+    getWorkspaceFile,
+    isRunning ? { filename: "SOUL.md" } : undefined,
+  );
+
+  // Redirect when instance is running — to onboarding if workspace is empty, otherwise dashboard
   useEffect(() => {
-    if (data?.instance?.status === "running") {
-      const timer = setTimeout(() => navigate("/dashboard"), 2000);
-      return () => clearTimeout(timer);
-    }
-  }, [data?.instance?.status, navigate]);
+    if (!isRunning) return;
+    // Wait for workspace file queries to resolve
+    if (userMd === undefined || soulMd === undefined) return;
+
+    const userEmpty = !userMd?.content?.trim();
+    const soulEmpty = !soulMd?.content?.trim();
+    const destination = userEmpty || soulEmpty ? "/onboarding" : "/dashboard";
+
+    const timer = setTimeout(() => navigate(destination), 2000);
+    return () => clearTimeout(timer);
+  }, [isRunning, userMd, soulMd, navigate]);
 
   // Auto-reprovision destroyed or errored instances (user still has active subscription)
   useEffect(() => {

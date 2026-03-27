@@ -222,6 +222,15 @@ job destroyInstance {
 }
 
 // ============================================================
+// Onboarding
+// ============================================================
+route OnboardingRoute { path: "/onboarding", to: OnboardingPage }
+page OnboardingPage {
+  authRequired: true,
+  component: import OnboardingPage from "@src/onboarding/OnboardingPage"
+}
+
+// ============================================================
 // Dashboard
 // ============================================================
 route DashboardRoute { path: "/dashboard", to: DashboardPage }
