@@ -30,12 +30,20 @@ jobs:
         id: image_tag
         run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+      - name: Read pinned SHAs from VERSION file
+        id: pinned
+        run: |
+          eval "$(grep -E '^(OPENCLAW_SHA|ALFRED_SHA)=' packages/openclaw/VERSION)"
+          echo "openclaw_sha=${OPENCLAW_SHA}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push openclaw image
         uses: docker/build-push-action@v6
         with:
           context: packages/openclaw
           file: packages/openclaw/dockerfiles/openclaw.Dockerfile
           push: true
+          build-args: |
+            OPENCLAW_SHA=${{ steps.pinned.outputs.openclaw_sha }}
           tags: |
             ssdavidai00/alfred-openclaw:latest
             ssdavidai00/alfred-openclaw:sha-${{ steps.image_tag.outputs.short_sha }}

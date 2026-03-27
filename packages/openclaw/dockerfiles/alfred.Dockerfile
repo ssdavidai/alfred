@@ -6,8 +6,11 @@ ENV PATH="/root/.bun/bin:${PATH}"
 RUN corepack enable
 
 WORKDIR /openclaw
-# Clone OpenClaw (HEAD of default branch)
-RUN git clone --depth 1 https://github.com/openclaw/openclaw.git .
+# Clone OpenClaw at pinned commit
+ARG OPENCLAW_SHA=f9b8499bf6472189750b738fe1db0c43e670df10
+RUN git init . && \
+    git fetch --depth 1 https://github.com/openclaw/openclaw.git ${OPENCLAW_SHA} && \
+    git checkout FETCH_HEAD
 RUN pnpm install --frozen-lockfile && pnpm build
 
 # Stage 2: Alfred runtime (Python + Node.js for openclaw CLI)
@@ -29,9 +32,12 @@ COPY --from=openclaw-builder /openclaw/package.json /openclaw/
 RUN printf '#!/bin/sh\nexec node /openclaw/dist/index.js "$@"\n' > /usr/local/bin/openclaw && \
     chmod +x /usr/local/bin/openclaw
 
-# Clone Alfred (HEAD of default branch)
+# Clone Alfred at pinned commit
 WORKDIR /app
-RUN git clone --depth 1 https://github.com/ssdavidai/alfred.git /alfred-src
+ARG ALFRED_SHA=40f3df416cae8c145f1a9bc14211487557f37c7b
+RUN git init /alfred-src && \
+    git -C /alfred-src fetch --depth 1 https://github.com/ssdavidai/alfred.git ${ALFRED_SHA} && \
+    git -C /alfred-src checkout FETCH_HEAD
 
 # Install Alfred from source (scaffold/ and skills/ are bundled via _bundled/ by pip install)
 RUN cp /alfred-src/pyproject.toml /alfred-src/README.md /app/ && \
