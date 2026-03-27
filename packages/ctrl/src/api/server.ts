@@ -17,6 +17,7 @@ import { registerLearningRoutes } from "./routes/learning.js";
 import { registerNotificationRoutes } from "./routes/notifications.js";
 import { registerModelRoutes } from "./routes/models.js";
 import { registerWorkspaceRoutes } from "./routes/workspace.js";
+import { registerToolRoutes } from "./routes/tools.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -60,7 +61,7 @@ export function addRoute(method: string, path: string, handler: RouteHandler): v
   routes.push({ method, regex, keys, handler });
 }
 
-function matchRoute(method: string, pathname: string): { handler: RouteHandler; params: RouteParams } | null {
+export function matchRoute(method: string, pathname: string): { handler: RouteHandler; params: RouteParams } | null {
   for (const route of routes) {
     if (route.method !== method) continue;
     const match = pathname.match(route.regex);
@@ -90,6 +91,7 @@ export function createApiServer(): http.Server {
   registerNotificationRoutes();
   registerModelRoutes();
   registerWorkspaceRoutes();
+  registerToolRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
