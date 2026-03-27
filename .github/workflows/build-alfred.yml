@@ -27,12 +27,19 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Read pinned SHAs from VERSION file
+        id: pinned
+        run: |
+          eval "$(grep -E '^(OPENCLAW_SHA|ALFRED_SHA)=' packages/openclaw/VERSION)"
+          echo "alfred_sha=${ALFRED_SHA}" >> "$GITHUB_OUTPUT"
       - name: Build and push alfred-init image
         uses: docker/build-push-action@v6
         with:
           context: packages/openclaw
           file: packages/openclaw/init/Dockerfile
           push: true
+          build-args: |
+            ALFRED_SHA=${{ steps.pinned.outputs.alfred_sha }}
           tags: ssdavidai00/alfred-init:latest
           cache-from: type=gha,scope=alfred-init
           cache-to: type=gha,mode=max,scope=alfred-init
@@ -48,12 +55,21 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Read pinned SHAs from VERSION file
+        id: pinned
+        run: |
+          eval "$(grep -E '^(OPENCLAW_SHA|ALFRED_SHA)=' packages/openclaw/VERSION)"
+          echo "openclaw_sha=${OPENCLAW_SHA}" >> "$GITHUB_OUTPUT"
+          echo "alfred_sha=${ALFRED_SHA}" >> "$GITHUB_OUTPUT"
       - name: Build and push alfred-worker image
         uses: docker/build-push-action@v6
         with:
           context: packages/openclaw
           file: packages/openclaw/dockerfiles/alfred.Dockerfile
           push: true
+          build-args: |
+            OPENCLAW_SHA=${{ steps.pinned.outputs.openclaw_sha }}
+            ALFRED_SHA=${{ steps.pinned.outputs.alfred_sha }}
           tags: ssdavidai00/alfred-worker:latest
           cache-from: type=gha,scope=alfred-worker
           cache-to: type=gha,mode=max,scope=alfred-worker

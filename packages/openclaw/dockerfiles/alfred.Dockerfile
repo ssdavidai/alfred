@@ -6,8 +6,11 @@ ENV PATH="/root/.bun/bin:${PATH}"
 RUN corepack enable
 
 WORKDIR /openclaw
-# Clone OpenClaw (HEAD of default branch)
-RUN git clone --depth 1 https://github.com/openclaw/openclaw.git .
+# Clone OpenClaw at pinned commit
+ARG OPENCLAW_SHA=e3cd209889511d2293cf3826cb7c1c27cea3da38
+RUN git init . && \
+    git fetch --depth 1 https://github.com/openclaw/openclaw.git ${OPENCLAW_SHA} && \
+    git checkout FETCH_HEAD
 RUN pnpm install --frozen-lockfile && pnpm build
 
 # Stage 2: Alfred runtime (Python + Node.js for openclaw CLI)
@@ -29,9 +32,12 @@ COPY --from=openclaw-builder /openclaw/package.json /openclaw/
 RUN printf '#!/bin/sh\nexec node /openclaw/dist/index.js "$@"\n' > /usr/local/bin/openclaw && \
     chmod +x /usr/local/bin/openclaw
 
-# Clone Alfred (HEAD of default branch)
+# Clone Alfred at pinned commit
 WORKDIR /app
-RUN git clone --depth 1 https://github.com/ssdavidai/alfred.git /alfred-src
+ARG ALFRED_SHA=2ef1e7c76610d2c0224b418b8aac3d5f695d5292
+RUN git init /alfred-src && \
+    git -C /alfred-src fetch --depth 1 https://github.com/ssdavidai/alfred.git ${ALFRED_SHA} && \
+    git -C /alfred-src checkout FETCH_HEAD
 
 # Apply surveyor OpenAI-compat patch
 COPY patches/surveyor-openai-compat.patch /tmp/surveyor-openai-compat.patch

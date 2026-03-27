@@ -1,9 +1,9 @@
 # Pinned upstream dependency SHAs for openclaw package Docker builds.
 # Update these when bumping upstream dependencies and open a PR.
-# CI passes these as --build-arg to docker build.
+# CI reads these values and passes them as --build-arg to docker build.
 
 # https://github.com/openclaw/openclaw
-OPENCLAW_SHA=OPENCLAW_SHA_PLACEHOLDER
+OPENCLAW_SHA=e3cd209889511d2293cf3826cb7c1c27cea3da38
 
 # https://github.com/ssdavidai/alfred
-ALFRED_SHA=ALFRED_SHA_PLACEHOLDER
+ALFRED_SHA=2ef1e7c76610d2c0224b418b8aac3d5f695d5292
