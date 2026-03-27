@@ -27,8 +27,11 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Clone OpenClaw (HEAD of default branch)
-RUN git clone --depth 1 https://github.com/openclaw/openclaw.git /openclaw-src
+# Clone OpenClaw at known-good commit (HEAD broke with TS errors on 2026-03-27)
+ARG OPENCLAW_SHA=e3cd209
+RUN git init /openclaw-src && \
+    git -C /openclaw-src fetch --depth 1 https://github.com/openclaw/openclaw.git ${OPENCLAW_SHA} && \
+    git -C /openclaw-src checkout FETCH_HEAD
 
 # Install and build
 WORKDIR /openclaw-src
