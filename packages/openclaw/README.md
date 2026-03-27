@@ -82,10 +82,8 @@ Both paths configure OpenRouter's `text-embedding-3-small` (1536 dims) for embed
 ├── init/
 │   ├── Dockerfile           # Init container (clones Alfred for scaffold/skills)
 │   └── entrypoint.sh        # Idempotent setup logic
-├── dockerfiles/
-│   ├── openclaw.Dockerfile  # Clones & builds OpenClaw
-│   ├── alfred.Dockerfile    # Clones both, builds Alfred + OpenClaw CLI
-│   └── alfred-entrypoint.sh # Alfred container startup
-└── patches/
-    └── surveyor-openai-compat.patch  # Alfred embedder dual-mode patch
+└── dockerfiles/
+    ├── openclaw.Dockerfile  # Clones & builds OpenClaw
+    ├── alfred.Dockerfile    # Clones both, builds Alfred + OpenClaw CLI
+    └── alfred-entrypoint.sh # Alfred container startup
 ```
