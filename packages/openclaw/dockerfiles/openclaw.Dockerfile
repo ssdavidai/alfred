@@ -13,12 +13,14 @@ RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
 
 # Install qmd via bun, then make it accessible to node user
+# The bin/qmd is a shell script that dispatches to dist/cli/qmd.js, but bun
+# install doesn't run the build step. Use bun to run the TS source directly.
 RUN bun install -g https://github.com/tobi/qmd && \
     cp -a /root/.bun /opt/bun && \
     chmod -R a+rX /opt/bun && \
     ln -sf /opt/bun/bin/bun /usr/local/bin/bun && \
-    rm -f /opt/bun/bin/qmd && \
-    printf '#!/bin/sh\nexec /opt/bun/bin/bun /opt/bun/install/global/node_modules/@tobilu/qmd/bin/qmd "$@"\n' > /usr/local/bin/qmd && \
+    rm -f /opt/bun/bin/qmd /root/.bun/bin/qmd && \
+    printf '#!/bin/sh\nexec /opt/bun/bin/bun /opt/bun/install/global/node_modules/@tobilu/qmd/src/cli/qmd.ts "$@"\n' > /usr/local/bin/qmd && \
     chmod +x /usr/local/bin/qmd
 
 RUN corepack enable
