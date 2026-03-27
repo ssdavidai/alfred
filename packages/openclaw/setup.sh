@@ -72,18 +72,6 @@ else
     ok "Cloned"
 fi
 
-# --- Apply surveyor OpenAI-compat patch ---
-
-PATCH_FILE="$SCRIPT_DIR/patches/surveyor-openai-compat.patch"
-if [[ -f "$PATCH_FILE" ]]; then
-    if git apply --check "$PATCH_FILE" 2>/dev/null; then
-        git apply "$PATCH_FILE"
-        ok "Applied surveyor OpenAI-compatible embedder patch"
-    else
-        warn "Patch already applied or conflicts — skipping"
-    fi
-fi
-
 # --- Install Alfred + surveyor deps ---
 
 echo ""

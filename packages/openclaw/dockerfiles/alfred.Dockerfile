@@ -33,10 +33,6 @@ RUN printf '#!/bin/sh\nexec node /openclaw/dist/index.js "$@"\n' > /usr/local/bi
 WORKDIR /app
 RUN git clone --depth 1 https://github.com/ssdavidai/alfred.git /alfred-src
 
-# Apply surveyor OpenAI-compat patch
-COPY patches/surveyor-openai-compat.patch /tmp/surveyor-openai-compat.patch
-RUN cd /alfred-src && git apply /tmp/surveyor-openai-compat.patch || true
-
 # Install Alfred from source (scaffold/ and skills/ are bundled via _bundled/ by pip install)
 RUN cp /alfred-src/pyproject.toml /alfred-src/README.md /app/ && \
     cp -r /alfred-src/src /app/src && \
