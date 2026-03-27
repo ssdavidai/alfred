@@ -466,6 +466,16 @@ action updateTaskStatus {
   entities: [Instance]
 }
 
+query getTriage {
+  fn: import { getTriage } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+query getMatters {
+  fn: import { getMatters } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
 // ============================================================
 // Intuition (Learning Engine)
 // ============================================================
@@ -487,6 +497,16 @@ query getIntuitionInstincts {
 
 query getIntuitionQueue {
   fn: import { getIntuitionQueue } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+query getObservations {
+  fn: import { getObservations } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+query getRecentJudgments {
+  fn: import { getRecentJudgments } from "@src/intuition/operations",
   entities: [Instance]
 }
 

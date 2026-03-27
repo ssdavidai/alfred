@@ -3,6 +3,8 @@ import type {
   GetTaskDetail,
   UpdateTaskStatus,
   UpdateTask,
+  GetTriage,
+  GetMatters,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -37,5 +39,21 @@ export const updateTaskStatus: UpdateTaskStatus<{ path: string; status: string }
     method: "PATCH",
     path: `/api/v1/vault/records/${args.path}`,
     body: { set: { status: args.status } },
+  });
+};
+
+export const getTriage: GetTriage<void, any> = async (_args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "GET",
+    path: "/api/v1/vault/list/triage",
+  });
+};
+
+export const getMatters: GetMatters<void, any> = async (_args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "GET",
+    path: "/api/v1/vault/list/matter",
   });
 };

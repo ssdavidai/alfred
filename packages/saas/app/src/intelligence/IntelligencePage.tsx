@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, getTasks, getIntuitionQueue } from "wasp/client/operations";
+import { useQuery, getTasks, getIntuitionQueue, getTriage, getMatters, updateTask } from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
 import { TasksContent } from "../tasks/TasksPage";
 import {
@@ -15,12 +15,19 @@ import {
   Scale,
   Activity,
   Clock,
+  Inbox,
+  Briefcase,
+  ExternalLink,
+  XCircle,
+  Loader2,
 } from "lucide-react";
 
-type IntelligenceTab = "tasks" | "learning" | "judgment" | "activity";
+type IntelligenceTab = "tasks" | "triage" | "matters" | "learning" | "judgment" | "activity";
 
 const TABS: { key: IntelligenceTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { key: "tasks", label: "Tasks", icon: ClipboardList },
+  { key: "triage", label: "Triage", icon: Inbox },
+  { key: "matters", label: "Matters", icon: Briefcase },
   { key: "learning", label: "Learning", icon: BookOpen },
   { key: "judgment", label: "Judgment", icon: Scale },
   { key: "activity", label: "Activity", icon: Activity },
@@ -48,8 +55,22 @@ export default function IntelligencePage() {
   ).length;
   const queueCount = queueData?.items?.length ?? 0;
 
+  const { data: triageData } = useQuery(getTriage, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const triageCount = triageData?.results?.filter((t: any) => t.status !== "dismissed").length ?? 0;
+
+  const { data: mattersData } = useQuery(getMatters, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const mattersOpenCount = mattersData?.results?.filter((m: any) => m.status === "open" || !m.status).length ?? 0;
+
   const tabBadge = (tab: IntelligenceTab): number | null => {
     if (tab === "tasks" && approvalCount > 0) return approvalCount;
+    if (tab === "triage" && triageCount > 0) return triageCount;
+    if (tab === "matters" && mattersOpenCount > 0) return mattersOpenCount;
     if (tab === "judgment" && queueCount > 0) return queueCount;
     return null;
   };
@@ -95,10 +116,216 @@ export default function IntelligencePage() {
 
       {/* Tab Content */}
       {activeTab === "tasks" && <TasksContent />}
+      {activeTab === "triage" && <TriageContent />}
+      {activeTab === "matters" && <MattersContent />}
       {activeTab === "learning" && <LearningContent />}
       {activeTab === "judgment" && <JudgmentContent />}
       {activeTab === "activity" && <ActivityTab />}
     </DashboardLayout>
+  );
+}
+
+const PRIORITY_COLORS: Record<string, string> = {
+  low: "border-zinc-500/40 bg-zinc-500/10 text-zinc-400",
+  medium: "border-gold/40 bg-gold/10 text-gold",
+  high: "border-orange-500/40 bg-orange-500/10 text-orange-400",
+  urgent: "border-red-500/40 bg-red-500/10 text-red-400",
+};
+
+function TriageContent() {
+  const { data, isLoading, error, refetch } = useQuery(getTriage, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
+  const [dismissingPath, setDismissingPath] = useState<string | null>(null);
+
+  const items: any[] = data?.results ?? [];
+
+  const handleDismiss = async (path: string) => {
+    setDismissingPath(path);
+    try {
+      await updateTask({ path, set: { status: "dismissed" } });
+      refetch();
+    } catch (err: any) {
+      console.error("Dismiss failed:", err);
+    } finally {
+      setDismissingPath(null);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 py-8">
+        <Loader2 className="h-5 w-5 animate-spin text-gold" />
+        <span className="text-muted-foreground text-sm">Loading triage items...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-destructive/10 text-destructive rounded-sm p-4">
+        <p>{error.message}</p>
+      </div>
+    );
+  }
+
+  if (items.length === 0) {
+    return (
+      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-8 text-center">
+        <Inbox className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
+        <p className="font-mono text-sm text-muted-foreground">No triage items</p>
+        <p className="mt-1 font-mono text-xs text-muted-foreground/50">
+          Incoming items that need review will appear here
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {items.map((item: any) => {
+        const fm = item.frontmatter ?? {};
+        const name = fm.name || item.name || item.path;
+        const source = fm.source || fm.created_by || "unknown";
+        const priority = fm.priority;
+        const received = fm.created || fm.received || item.created;
+        const priorityClass = priority ? PRIORITY_COLORS[priority] : null;
+
+        return (
+          <div
+            key={item.path}
+            className="flex items-center gap-3 rounded-sm border border-gold-dim/20 bg-black/20 px-3 py-2.5"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-mono text-xs font-medium text-cream">
+                {name}
+              </p>
+              <div className="flex items-center gap-3">
+                <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                  {source}
+                </span>
+                {priority && priorityClass && (
+                  <span
+                    className={`inline-flex rounded-sm border px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider ${priorityClass}`}
+                  >
+                    {priority}
+                  </span>
+                )}
+                {received && (
+                  <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                    {timeAgo(received)}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <a
+                href={`/dashboard/vault/${item.path}`}
+                className="flex items-center gap-1 rounded-sm border border-gold/30 bg-gold/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-gold transition-colors hover:bg-gold/20"
+              >
+                <ExternalLink className="h-3 w-3" />
+                Review
+              </a>
+              <button
+                type="button"
+                onClick={() => handleDismiss(item.path)}
+                disabled={dismissingPath === item.path}
+                className="flex items-center gap-1 rounded-sm border border-zinc-500/30 bg-zinc-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-zinc-400 transition-colors hover:bg-zinc-500/20 disabled:opacity-50"
+              >
+                {dismissingPath === item.path ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <XCircle className="h-3 w-3" />
+                )}
+                Dismiss
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MattersContent() {
+  const { data, isLoading, error } = useQuery(getMatters, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
+  const items: any[] = data?.results ?? [];
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 py-8">
+        <Loader2 className="h-5 w-5 animate-spin text-gold" />
+        <span className="text-muted-foreground text-sm">Loading matters...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-destructive/10 text-destructive rounded-sm p-4">
+        <p>{error.message}</p>
+      </div>
+    );
+  }
+
+  if (items.length === 0) {
+    return (
+      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-8 text-center">
+        <Briefcase className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
+        <p className="font-mono text-sm text-muted-foreground">No matters</p>
+        <p className="mt-1 font-mono text-xs text-muted-foreground/50">
+          Active matters and cases will appear here
+        </p>
+      </div>
+    );
+  }
+
+  const STATUS_COLORS: Record<string, string> = {
+    open: "border-blue-500/40 bg-blue-500/10 text-blue-400",
+    resolved: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400",
+  };
+
+  return (
+    <div className="space-y-2">
+      {items.map((item: any) => {
+        const fm = item.frontmatter ?? {};
+        const name = fm.name || item.name || item.path;
+        const status = fm.status || item.status || "open";
+        const statusClass = STATUS_COLORS[status] ?? STATUS_COLORS.open;
+        const linkedTasks: any[] = Array.isArray(fm.linked_tasks) ? fm.linked_tasks : [];
+
+        return (
+          <a
+            key={item.path}
+            href={`/dashboard/vault/${item.path}`}
+            className="flex items-center gap-3 rounded-sm border border-gold-dim/20 bg-black/20 px-3 py-2.5 transition-colors hover:border-gold-dim/40"
+          >
+            <Briefcase className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/50" />
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-mono text-xs font-medium text-cream">
+                {name}
+              </p>
+              {linkedTasks.length > 0 && (
+                <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                  {linkedTasks.length} linked task{linkedTasks.length > 1 ? "s" : ""}
+                </span>
+              )}
+            </div>
+            <span
+              className={`inline-flex rounded-sm border px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider ${statusClass}`}
+            >
+              {status}
+            </span>
+          </a>
+        );
+      })}
+    </div>
   );
 }
 

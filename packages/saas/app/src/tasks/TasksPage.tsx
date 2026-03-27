@@ -22,6 +22,7 @@ import {
   Save,
   Zap,
   ShieldAlert,
+  CheckCircle,
 } from "lucide-react";
 
 type FilterTab = "all" | "queued" | "active" | "blocked" | "done" | "cancelled";
@@ -96,6 +97,20 @@ export function TasksContent() {
       (t.status === "queued" || t.status === "todo"),
   );
 
+  const [approvingPath, setApprovingPath] = useState<string | null>(null);
+
+  const handleApprove = async (path: string) => {
+    setApprovingPath(path);
+    try {
+      await updateTask({ path, set: { requires_approval: false, status: "queued" } });
+      refetch();
+    } catch (err: any) {
+      console.error("Approval failed:", err);
+    } finally {
+      setApprovingPath(null);
+    }
+  };
+
   const handleStatusChange = async (path: string, newStatus: string) => {
     setUpdatingPath(path);
     try {
@@ -128,7 +143,22 @@ export function TasksContent() {
                 <span className="truncate font-mono text-xs text-cream/80">
                   {t.frontmatter?.name || t.name}
                 </span>
-                <TierBadge tier={t.frontmatter?.tier} />
+                <div className="flex items-center gap-2">
+                  <TierBadge tier={t.frontmatter?.tier} />
+                  <button
+                    type="button"
+                    onClick={() => handleApprove(t.path)}
+                    disabled={approvingPath === t.path}
+                    className="flex items-center gap-1 rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-emerald-400 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
+                  >
+                    {approvingPath === t.path ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <CheckCircle className="h-3 w-3" />
+                    )}
+                    Approve
+                  </button>
+                </div>
               </div>
             ))}
           </div>
