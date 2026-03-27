@@ -7,6 +7,7 @@
  */
 
 import crypto from "crypto";
+import express from "express";
 import type { Application, Request, Response } from "express";
 import { encryptApiKey, decryptApiKey } from "./tenantProxy";
 import { prisma } from "wasp/server";
@@ -333,7 +334,9 @@ async function handleInternalTokenRequest(req: Request, res: Response) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const { credentialId, userId, provider } = req.body;
+  // req.body may be undefined if Express JSON parser hasn't run on this route
+  const body = req.body || {};
+  const { credentialId, userId, provider } = body;
 
   try {
     let cred;
@@ -366,6 +369,6 @@ export function registerOAuth2Routes(app: Application): void {
   app.get("/auth/oauth2/:provider/callback", handleCallback);
   app.get("/auth/oauth2/credentials", handleListCredentials);
   app.delete("/auth/oauth2/credentials/:id", handleDeleteCredential);
-  app.post("/api/internal/oauth2/token", handleInternalTokenRequest);
+  app.post("/api/internal/oauth2/token", express.json(), handleInternalTokenRequest);
   console.log("[oauth2] OAuth2 routes registered");
 }
