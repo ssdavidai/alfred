@@ -1,13 +1,24 @@
 FROM node:22-bookworm
 
-# Install SQLite with extension support (required by qmd for BM25 + vec)
+# Install build tools + SQLite (required by qmd's native deps: better-sqlite3, node-llama-cpp)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     sqlite3 \
     libsqlite3-dev \
+    build-essential \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install qmd (hybrid BM25+vector search for OpenClaw memory)
-RUN npm install -g github:tobi/qmd
+# Install Bun (qmd requires bun for installation)
+RUN curl -fsSL https://bun.sh/install | bash
+ENV PATH="/root/.bun/bin:${PATH}"
+
+# Install qmd via bun, then make it accessible to node user
+RUN bun install -g https://github.com/tobi/qmd && \
+    cp -a /root/.bun /opt/bun && \
+    chmod -R a+rX /opt/bun && \
+    ln -sf /opt/bun/bin/bun /usr/local/bin/bun && \
+    printf '#!/bin/sh\nexec /opt/bun/bin/bun run /opt/bun/install/global/node_modules/qmd/dist/cli/qmd.js "$@"\n' > /usr/local/bin/qmd && \
+    chmod +x /usr/local/bin/qmd
 
 RUN corepack enable
 
