@@ -1,0 +1,78 @@
+name: CI Check (PR)
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      ctrl: ${{ steps.filter.outputs.ctrl }}
+      learn: ${{ steps.filter.outputs.learn }}
+      saas: ${{ steps.filter.outputs.saas }}
+      openclaw: ${{ steps.filter.outputs.openclaw }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            ctrl:
+              - 'packages/ctrl/**'
+            learn:
+              - 'packages/learn/**'
+            saas:
+              - 'packages/saas/**'
+            openclaw:
+              - 'packages/openclaw/**'
+
+  check-ctrl:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.ctrl == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install and build ctrl
+        run: cd packages/ctrl && npm ci && npm run build
+
+  check-learn:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.learn == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install -r packages/learn/requirements.txt
+          pip install pytest
+      - name: Run tests
+        run: python -m pytest tests/ -v
+        env:
+          PYTHONPATH: packages/learn
+        working-directory: packages/learn
+
+  check-saas:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.saas == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Wasp build check skipped
+        run: echo "Wasp build check skipped (needs full env)"
+
+  check-openclaw:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.openclaw == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker build check skipped
+        run: echo "Docker build check skipped (runs on merge)"
