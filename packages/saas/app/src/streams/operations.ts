@@ -15,22 +15,61 @@ import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
 export const getStreams: GetStreams<void, any> = async (_args, context) => {
   if (!context.user) throw new HttpError(401, "Not authenticated");
-  return prisma.stream.findMany({
+
+  // Get Prisma streams (for SaaS-side fields: webhookToken, config, etc.)
+  const prismaStreams = await prisma.stream.findMany({
     where: { userId: context.user.id },
     orderBy: { createdAt: "desc" },
-    include: { _count: { select: { events: true } } },
   });
+
+  // Merge with tenant-side event counts
+  try {
+    const instance = await getUserInstance(context);
+    const tenantData = await proxyToTenant(instance, { path: "/api/v1/streams" });
+    const tenantStreams: any[] = tenantData?.streams || [];
+    const countMap = new Map(tenantStreams.map((s: any) => [s.id, { event_count: s.event_count || 0, last_event_at: s.last_event_at }]));
+
+    return prismaStreams.map((s: any) => {
+      const tenant = countMap.get(s.id);
+      return { ...s, _count: { events: tenant?.event_count ?? 0 }, lastEventAt: tenant?.last_event_at ?? s.lastEventAt };
+    });
+  } catch {
+    // Tenant unreachable — return Prisma data with 0 counts
+    return prismaStreams.map((s: any) => ({ ...s, _count: { events: 0 } }));
+  }
 };
 
 export const getStreamEvents: GetStreamEvents<{ streamId: string }, any> = async (args, context) => {
   if (!context.user) throw new HttpError(401, "Not authenticated");
   const stream = await prisma.stream.findUnique({ where: { id: args.streamId } });
   if (!stream || stream.userId !== context.user.id) throw new HttpError(404, "Stream not found");
-  return prisma.streamEvent.findMany({
-    where: { streamId: args.streamId },
-    orderBy: { receivedAt: "desc" },
-    take: 50,
-  });
+
+  // Proxy to tenant ctrl API for actual events (stored in JSONL on tenant)
+  try {
+    const instance = await getUserInstance(context);
+    const tenantData = await proxyToTenant(instance, {
+      path: `/api/v1/streams/${args.streamId}/events`,
+      query: { limit: "50" },
+    });
+    // Map snake_case from ctrl API to camelCase for the UI
+    return (tenantData?.events || []).map((e: any) => ({
+      id: e.id,
+      streamId: e.stream_id,
+      receivedAt: e.received_at,
+      type: e.stream_type || e.type,
+      summary: e.summary,
+      raw: e.raw,
+      sourceRef: e.source_ref,
+      processed: false,  // TODO: check processed-events.json status
+    }));
+  } catch {
+    // Tenant unreachable — fall back to Prisma (may be empty)
+    return prisma.streamEvent.findMany({
+      where: { streamId: args.streamId },
+      orderBy: { receivedAt: "desc" },
+      take: 50,
+    });
+  }
 };
 
 export const createStream: CreateStream<any, any> = async (args: any, context) => {
