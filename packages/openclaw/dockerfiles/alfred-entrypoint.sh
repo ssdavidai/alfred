@@ -26,8 +26,19 @@ if [[ -f "$ENV_FILE" ]]; then
     set +a
 fi
 
-# Load gateway token if present
-if [[ -f "$TOKEN_FILE" ]]; then
+# Load gateway token — prefer the live OpenClaw config (it may regenerate
+# its token on restart), fall back to the static token file from init.
+OPENCLAW_CONFIG="/root/.openclaw/openclaw.json"
+if [[ -f "$OPENCLAW_CONFIG" ]]; then
+    # Extract token from OpenClaw's live config (most up-to-date source)
+    LIVE_TOKEN=$(python3 -c "import json; print(json.load(open('$OPENCLAW_CONFIG')).get('gateway',{}).get('auth',{}).get('token',''))" 2>/dev/null || true)
+    if [[ -n "$LIVE_TOKEN" ]]; then
+        export OPENCLAW_GATEWAY_TOKEN="$LIVE_TOKEN"
+        # Also update the static file so openclaw-wrapper reads it correctly
+        echo -n "$LIVE_TOKEN" > "$TOKEN_FILE"
+        echo "[alfred] Token synced from OpenClaw config"
+    fi
+elif [[ -f "$TOKEN_FILE" ]]; then
     export OPENCLAW_GATEWAY_TOKEN
     OPENCLAW_GATEWAY_TOKEN=$(cat "$TOKEN_FILE")
 fi
