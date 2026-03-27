@@ -7,7 +7,7 @@ RUN corepack enable
 
 WORKDIR /openclaw
 # Clone OpenClaw at pinned commit
-ARG OPENCLAW_SHA=e3cd209889511d2293cf3826cb7c1c27cea3da38
+ARG OPENCLAW_SHA=f9b8499bf6472189750b738fe1db0c43e670df10
 RUN git init . && \
     git fetch --depth 1 https://github.com/openclaw/openclaw.git ${OPENCLAW_SHA} && \
     git checkout FETCH_HEAD
@@ -34,7 +34,7 @@ RUN printf '#!/bin/sh\nexec node /openclaw/dist/index.js "$@"\n' > /usr/local/bi
 
 # Clone Alfred at pinned commit
 WORKDIR /app
-ARG ALFRED_SHA=2ef1e7c76610d2c0224b418b8aac3d5f695d5292
+ARG ALFRED_SHA=40f3df416cae8c145f1a9bc14211487557f37c7b
 RUN git init /alfred-src && \
     git -C /alfred-src fetch --depth 1 https://github.com/ssdavidai/alfred.git ${ALFRED_SHA} && \
     git -C /alfred-src checkout FETCH_HEAD
