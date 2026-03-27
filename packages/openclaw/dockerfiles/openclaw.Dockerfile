@@ -6,8 +6,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install qmd via npm (not bun — bun's global install cache breaks after copy)
-RUN npm install -g https://github.com/tobi/qmd
+# Install qmd (hybrid BM25+vector search for OpenClaw memory)
+RUN npm install -g github:tobi/qmd
 
 RUN corepack enable
 
