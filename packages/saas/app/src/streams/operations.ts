@@ -51,7 +51,7 @@ export const createStream: CreateStream<any, any> = async (args: any, context) =
     await proxyToTenant(instance, {
       method: "POST",
       path: "/api/v1/streams",
-      body: { id: stream.id, name: stream.name, type: stream.type, source: stream.source, enabled: stream.enabled },
+      body: { id: stream.id, name: stream.name, type: stream.type, source: stream.source, config: stream.config, enabled: stream.enabled },
     });
   } catch { /* tenant may not be reachable */ }
   return stream;

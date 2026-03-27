@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "wasp/client/auth";
 import {
   useQuery,
   getStreams,
@@ -20,12 +22,6 @@ import {
   DialogFooter,
 } from "../client/components/ui/dialog";
 import {
-  Activity,
-  Mail,
-  Smartphone,
-  ShoppingBag,
-  GitBranch,
-  Zap,
   Plus,
   Radio,
   Loader2,
@@ -33,62 +29,19 @@ import {
 } from "lucide-react";
 import StreamCard from "./components/StreamCard";
 import EventLog from "./components/EventLog";
+import { SOURCES, type SourceDefinition } from "./sources";
 
-interface IntegrationDef {
-  value: string;
-  label: string;
-  description: string;
-  type: string;
-  icon: React.ComponentType<{ className?: string }>;
-}
-
-const INTEGRATIONS: IntegrationDef[] = [
-  {
-    value: "openclaw",
-    label: "OpenClaw Sessions",
-    description: "Capture AI gateway sessions and model interactions automatically.",
-    type: "scheduled",
-    icon: Activity,
-  },
-  {
-    value: "gmail",
-    label: "Gmail",
-    description: "Monitor your inbox for important emails and actionable messages.",
-    type: "scheduled",
-    icon: Mail,
-  },
-  {
-    value: "omi",
-    label: "Omi Ambient",
-    description: "Stream real-time ambient data from your Omi wearable device.",
-    type: "realtime",
-    icon: Smartphone,
-  },
-  {
-    value: "polar",
-    label: "Polar Payments",
-    description: "Track payment events, subscriptions, and billing activity.",
-    type: "webhook",
-    icon: ShoppingBag,
-  },
-  {
-    value: "github",
-    label: "GitHub",
-    description: "Receive push events, pull requests, and issue updates via webhooks.",
-    type: "webhook",
-    icon: GitBranch,
-  },
-  {
-    value: "custom",
-    label: "Custom",
-    description: "Connect any service that can send webhooks to a unique URL.",
-    type: "webhook",
-    icon: Zap,
-  },
-];
-
+const TRANSPORT_LABELS: Record<string, string> = {
+  pull: "Pull",
+  push: "Webhook",
+  realtime: "Realtime",
+  system: "System",
+};
 
 export default function StreamsPage() {
+  const { data: user } = useAuth();
+  const location = useLocation();
+  const navigate = useNavigate();
   const { data: streams, isLoading, error, refetch } = useQuery(getStreams);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [selectedStreamId, setSelectedStreamId] = useState<string | null>(null);
@@ -97,9 +50,43 @@ export default function StreamsPage() {
 
   // Integration connect flow state
   const [connectStep, setConnectStep] = useState<"pick" | "name">("pick");
-  const [selectedIntegration, setSelectedIntegration] = useState<IntegrationDef | null>(null);
+  const [selectedSource, setSelectedSource] = useState<SourceDefinition | null>(null);
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
+
+  // Handle OAuth redirect back
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const oauthStatus = params.get("oauth");
+    const provider = params.get("provider");
+
+    if (oauthStatus === "success" && provider) {
+      // Find the source definition for this provider
+      const source = SOURCES.find((s) => s.authProvider === provider);
+      if (source) {
+        // Auto-create the stream with canonical config
+        const doCreate = async () => {
+          setCreating(true);
+          try {
+            await createStream({
+              name: source.label,
+              type: source.transport === "pull" ? "scheduled" : source.transport === "push" ? "webhook" : source.transport,
+              source: source.id,
+              config: source.defaultConfig,
+            });
+            refetch();
+          } catch (err: any) {
+            console.error("Auto-create after OAuth failed:", err);
+          } finally {
+            setCreating(false);
+          }
+        };
+        doCreate();
+      }
+      // Clean up URL params
+      navigate("/dashboard/streams", { replace: true });
+    }
+  }, [location.search]);
 
   const handlePause = async (id: string) => {
     setActionLoading(id);
@@ -151,20 +138,32 @@ export default function StreamsPage() {
     }
   };
 
-  const handleSelectIntegration = (integration: IntegrationDef) => {
-    setSelectedIntegration(integration);
-    setNewName(integration.label);
+  const handleSelectSource = (source: SourceDefinition) => {
+    if (!source.available) return;
+
+    if (source.authType === "oauth2" && source.authProvider && user) {
+      // Redirect to OAuth flow
+      const scopes = (source.requiredScopes ?? []).join(",");
+      const redirectAfter = encodeURIComponent("/dashboard/streams");
+      window.location.href = `/auth/oauth2/${source.authProvider}/start?userId=${user.id}&scopes=${scopes}&redirectAfter=${redirectAfter}`;
+      return;
+    }
+
+    setSelectedSource(source);
+    setNewName(source.label);
     setConnectStep("name");
   };
 
   const handleConnect = async () => {
-    if (!newName.trim() || !selectedIntegration) return;
+    if (!newName.trim() || !selectedSource) return;
     setCreating(true);
     try {
+      const type = selectedSource.transport === "pull" ? "scheduled" : selectedSource.transport === "push" ? "webhook" : selectedSource.transport;
       await createStream({
         name: newName.trim(),
-        type: selectedIntegration.type || "webhook",
-        source: selectedIntegration.value,
+        type,
+        source: selectedSource.id,
+        config: selectedSource.defaultConfig,
       });
       closeConnectDialog();
       refetch();
@@ -178,17 +177,17 @@ export default function StreamsPage() {
   const closeConnectDialog = () => {
     setShowConnectDialog(false);
     setConnectStep("pick");
-    setSelectedIntegration(null);
+    setSelectedSource(null);
     setNewName("");
   };
 
   // Compute per-source health summary
-  const sourceStats = INTEGRATIONS.map((integration) => {
-    const sourceStreams = streams?.filter((s: any) => s.source === integration.value) ?? [];
+  const sourceStats = SOURCES.map((source) => {
+    const sourceStreams = streams?.filter((s: any) => s.source === source.id) ?? [];
     const totalEvents = sourceStreams.reduce((sum: number, s: any) => sum + (s._count?.events ?? 0), 0);
     const hasError = sourceStreams.some((s: any) => s.status === "error");
     const activeCount = sourceStreams.filter((s: any) => s.enabled && s.status !== "paused").length;
-    return { ...integration, connected: sourceStreams.length, totalEvents, hasError, activeCount };
+    return { ...source, connected: sourceStreams.length, totalEvents, hasError, activeCount };
   });
 
   const selectedStream = streams?.find((s: any) => s.id === selectedStreamId);
@@ -226,7 +225,7 @@ export default function StreamsPage() {
             const Icon = stat.icon;
             return (
               <div
-                key={stat.value}
+                key={stat.id}
                 className="rounded-sm border border-gold-dim/20 bg-black/20 px-3 py-2.5 text-center"
               >
                 <Icon className="mx-auto mb-1.5 h-4 w-4 text-muted-foreground/60" />
@@ -250,7 +249,7 @@ export default function StreamsPage() {
                   </div>
                 ) : (
                   <p className="mt-1 font-mono text-[0.55rem] text-muted-foreground/30">
-                    not connected
+                    {stat.available ? "not connected" : "coming soon"}
                   </p>
                 )}
               </div>
@@ -301,7 +300,7 @@ export default function StreamsPage() {
             <StreamCard
               key={stream.id}
               stream={stream}
-              sourceIcon={INTEGRATIONS.find((i) => i.value === stream.source)?.icon}
+              sourceIcon={SOURCES.find((s) => s.id === stream.source)?.icon}
               onPause={handlePause}
               onResume={handleResume}
               onDelete={(id) => {
@@ -348,26 +347,36 @@ export default function StreamsPage() {
                 </DialogDescription>
               </DialogHeader>
               <div className="grid grid-cols-2 gap-2 py-2">
-                {INTEGRATIONS.map((integration) => {
-                  const Icon = integration.icon;
+                {SOURCES.map((source) => {
+                  const Icon = source.icon;
                   return (
                     <button
-                      key={integration.value}
+                      key={source.id}
                       type="button"
-                      className="group flex flex-col items-start gap-2 rounded-sm border border-gold-dim/20 bg-black/20 p-3 text-left transition-colors hover:border-gold-dim/60 hover:bg-black/40"
-                      onClick={() => handleSelectIntegration(integration)}
+                      disabled={!source.available}
+                      className={`group flex flex-col items-start gap-2 rounded-sm border border-gold-dim/20 bg-black/20 p-3 text-left transition-colors ${
+                        source.available
+                          ? "hover:border-gold-dim/60 hover:bg-black/40"
+                          : "cursor-not-allowed opacity-50"
+                      }`}
+                      onClick={() => handleSelectSource(source)}
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="flex w-full items-center gap-2">
                         <Icon className="h-4 w-4 text-gold/70 group-hover:text-gold" />
                         <span className="font-mono text-xs font-medium uppercase tracking-wider text-cream">
-                          {integration.label}
+                          {source.label}
                         </span>
+                        {!source.available && (
+                          <span className="ml-auto rounded-sm bg-muted/20 px-1.5 py-0.5 font-mono text-[0.5rem] uppercase tracking-wider text-muted-foreground/60">
+                            Soon
+                          </span>
+                        )}
                       </div>
                       <p className="font-mono text-[0.6rem] leading-relaxed text-muted-foreground/60">
-                        {integration.description}
+                        {source.description}
                       </p>
                       <span className="mt-auto inline-block rounded-sm bg-gold/10 px-1.5 py-0.5 font-mono text-[0.5rem] uppercase tracking-wider text-gold/60">
-                        {integration.type}
+                        {TRANSPORT_LABELS[source.transport] ?? source.transport}
                       </span>
                     </button>
                   );
@@ -386,11 +395,11 @@ export default function StreamsPage() {
                     <ArrowLeft className="h-4 w-4" />
                   </button>
                   <DialogTitle className="text-cream font-serif font-light">
-                    Connect {selectedIntegration?.label}
+                    Connect {selectedSource?.label}
                   </DialogTitle>
                 </div>
                 <DialogDescription>
-                  {selectedIntegration?.description}
+                  {selectedSource?.description}
                 </DialogDescription>
               </DialogHeader>
               <div className="space-y-4">
@@ -399,7 +408,7 @@ export default function StreamsPage() {
                     Integration Name
                   </label>
                   <Input
-                    placeholder={`e.g. ${selectedIntegration?.label} Primary`}
+                    placeholder={`e.g. ${selectedSource?.label} Primary`}
                     value={newName}
                     onChange={(e) => setNewName(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && !creating && handleConnect()}
@@ -408,14 +417,19 @@ export default function StreamsPage() {
                 </div>
                 <div className="rounded-sm border border-gold-dim/20 bg-black/20 px-3 py-2">
                   <p className="font-mono text-[0.6rem] text-muted-foreground">
-                    Type:{" "}
+                    Transport:{" "}
                     <span className="text-cream">
-                      {selectedIntegration?.type}
+                      {TRANSPORT_LABELS[selectedSource?.transport ?? ""] ?? selectedSource?.transport}
                     </span>
                   </p>
-                  {selectedIntegration?.type === "webhook" && (
+                  {selectedSource?.transport === "push" && (
                     <p className="mt-1 font-mono text-[0.55rem] text-muted-foreground/50">
                       A unique webhook URL will be generated after connecting
+                    </p>
+                  )}
+                  {selectedSource?.transport === "pull" && (
+                    <p className="mt-1 font-mono text-[0.55rem] text-muted-foreground/50">
+                      Alfred will poll for new data on a schedule
                     </p>
                   )}
                 </div>
