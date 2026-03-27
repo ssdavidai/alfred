@@ -27,6 +27,7 @@ model User {
   apiKeys                   ApiKey[]
   streams                   Stream[]
   streamEvents              StreamEvent[]
+  oauthCredentials          OAuthCredential[]
 }
 
 model ApiKey {
@@ -173,4 +174,22 @@ model StreamEvent {
   @@index([streamId, receivedAt])
   @@index([userId, processed])
   @@unique([streamId, sourceRef])
+}
+
+model OAuthCredential {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id])
+  provider     String    // "google", "microsoft", "slack", "github"
+  accessToken  String    // encrypted with AES-256-GCM (same as apiKey)
+  refreshToken String?   // encrypted
+  tokenType    String    @default("Bearer")
+  expiresAt    DateTime?
+  scopes       String[]
+  accountLabel String?   // e.g. "david@gmail.com" for display
+  raw          Json?     // full token response for provider-specific fields
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([userId, provider])
 }

@@ -1,12 +1,14 @@
 import type { ServerSetupFn } from "wasp/server";
 import { v1ApiProxy } from "../apikeys/proxy";
 import { registerWebhookReceiver } from "./webhookReceiver";
+import { registerOAuth2Routes } from "./oauth2";
 import { attachTerminalProxy, registerTerminalStatusRoute } from "./terminalProxy";
 import { attachAdminTerminalProxy, registerAdminTerminalStatusRoute } from "./adminTerminalProxy";
 
 export const serverSetup: ServerSetupFn = async ({ app, server }) => {
   app.use("/api/v1", v1ApiProxy);
   registerWebhookReceiver(app);
+  registerOAuth2Routes(app);
   try {
     registerTerminalStatusRoute(app);
     attachTerminalProxy(server);
