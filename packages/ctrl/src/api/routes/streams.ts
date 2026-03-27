@@ -7,9 +7,11 @@ import { sendJson, ValidationError, ConflictError, NotFoundError } from "../erro
 const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
 const VAULT_PATH = "/mnt/encrypted/vault";
 const PROCESSED_EVENTS_PATH = path.join(STREAMS_DIR, "processed-events.json");
+const STREAM_CONFIGS_DIR = path.join(STREAMS_DIR, "configs");
 
 // Ensure streams directory exists
 fs.mkdirSync(STREAMS_DIR, { recursive: true });
+fs.mkdirSync(STREAM_CONFIGS_DIR, { recursive: true });
 
 interface StreamEvent {
   id: string;
@@ -46,6 +48,32 @@ interface ProcessedEventState {
 
 interface ProcessedEventsData {
   events: Record<string, ProcessedEventState>;
+}
+
+interface StreamConfig {
+  id: string;
+  name: string;
+  type: string;
+  source: string;
+  enabled: boolean;
+  // Pull engine config
+  pull_endpoint?: string;
+  pull_method?: string;
+  pull_headers?: Record<string, string>;
+  pull_params?: Record<string, string>;
+  detail_endpoint?: string;
+  detail_id_field?: string;
+  parser?: string;
+  auth_type?: string;
+  auth_config?: Record<string, unknown>;
+  cursor_field?: string;
+  cursor_value?: string;
+  cursor_param?: string;
+  schedule_cron?: string;
+  schedule_interval_seconds?: number;
+  last_pull_at?: string | null;
+  last_pull_status?: string | null;
+  last_pull_count?: number;
 }
 
 const SYSTEM_STREAMS: StreamMeta[] = [
@@ -97,6 +125,25 @@ function loadStreamsMeta(): StreamMeta[] {
 
 function saveStreamsMeta(streams: StreamMeta[]): void {
   fs.writeFileSync(getStreamMetaPath(), JSON.stringify(streams, null, 2));
+}
+
+function getStreamConfigPath(streamId: string): string {
+  const safe = streamId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return path.join(STREAM_CONFIGS_DIR, `${safe}.json`);
+}
+
+function loadStreamConfig(streamId: string): StreamConfig | null {
+  const configPath = getStreamConfigPath(streamId);
+  try {
+    return JSON.parse(fs.readFileSync(configPath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function saveStreamConfig(config: StreamConfig): void {
+  const configPath = getStreamConfigPath(config.id);
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 }
 
 function appendEvent(streamId: string, event: StreamEvent): void {
@@ -403,6 +450,88 @@ export function registerStreamRoutes(): void {
   addRoute("GET", "/api/v1/streams", async ({ res }) => {
     const streams = loadStreamsMeta();
     sendJson(res, 200, { streams });
+  });
+
+  // GET /api/v1/streams/:id — get full stream config by ID
+  addRoute("GET", "/api/v1/streams/:id", async ({ res, params }) => {
+    const streamId = params.id;
+
+    // Load metadata
+    const streams = loadStreamsMeta();
+    const meta = streams.find((s) => s.id === streamId);
+    if (!meta) {
+      throw new NotFoundError(`Stream ${streamId} not found`);
+    }
+
+    // Load config (pull engine settings) if it exists
+    const config = loadStreamConfig(streamId);
+
+    // Merge meta + config into a unified response
+    const stream: Record<string, unknown> = { ...meta };
+    if (config) {
+      // Overlay config fields onto the meta
+      for (const [key, val] of Object.entries(config)) {
+        if (val !== undefined) {
+          stream[key] = val;
+        }
+      }
+    }
+
+    sendJson(res, 200, { stream });
+  });
+
+  // PATCH /api/v1/streams/:id — update stream config fields
+  addRoute("PATCH", "/api/v1/streams/:id", async ({ res, params, body }) => {
+    const streamId = params.id;
+    const b = body as Record<string, unknown> | undefined;
+    if (!b) {
+      throw new ValidationError("Request body is required");
+    }
+
+    // Ensure stream exists in metadata
+    const streams = loadStreamsMeta();
+    const metaIdx = streams.findIndex((s) => s.id === streamId);
+    if (metaIdx < 0) {
+      throw new NotFoundError(`Stream ${streamId} not found`);
+    }
+
+    // Update metadata fields if provided
+    const metaFields = ["name", "type", "source", "enabled", "status"] as const;
+    for (const field of metaFields) {
+      if (b[field] !== undefined) {
+        (streams[metaIdx] as unknown as Record<string, unknown>)[field] = b[field];
+      }
+    }
+    saveStreamsMeta(streams);
+
+    // Update config fields
+    const existing = loadStreamConfig(streamId) || {
+      id: streamId,
+      name: streams[metaIdx].name,
+      type: streams[metaIdx].type,
+      source: streams[metaIdx].source,
+      enabled: streams[metaIdx].enabled,
+    };
+
+    const configFields = [
+      "pull_endpoint", "pull_method", "pull_headers", "pull_params",
+      "detail_endpoint", "detail_id_field", "parser",
+      "auth_type", "auth_config",
+      "cursor_field", "cursor_value", "cursor_param",
+      "schedule_cron", "schedule_interval_seconds",
+      "last_pull_at", "last_pull_status", "last_pull_count",
+      "name", "type", "source", "enabled",
+    ] as const;
+
+    for (const field of configFields) {
+      if (b[field] !== undefined) {
+        (existing as unknown as Record<string, unknown>)[field] = b[field];
+      }
+    }
+
+    saveStreamConfig(existing as StreamConfig);
+
+    sendJson(res, 200, { stream: { ...streams[metaIdx], ...existing } });
   });
 
   // GET /api/v1/streams/:id/events — recent events for a stream

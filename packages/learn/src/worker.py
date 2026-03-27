@@ -19,6 +19,7 @@ from src.workflows.reflection import ReflectionWorkflow
 from src.workflows.judgment import JudgmentWorkflow
 from src.workflows.media_ingestion import MediaIngestionWorkflow
 from src.workflows.task_runner import TaskRunnerWorkflow
+from src.workflows.stream_puller import StreamPullerWorkflow
 
 # Activities — clerk
 from src.activities.clerk import (
@@ -41,6 +42,16 @@ from src.activities.streams import (
     fetch_unprocessed_events,
     mark_event_processed,
     quarantine_event,
+)
+
+# Activities — pull
+from src.activities.pull import (
+    http_pull,
+    http_pull_detail,
+    ingest_events,
+    load_stream_config,
+    resolve_auth_header,
+    update_cursor,
 )
 
 # Activities — vault
@@ -145,6 +156,7 @@ ALL_WORKFLOWS = [
     JudgmentWorkflow,
     MediaIngestionWorkflow,
     TaskRunnerWorkflow,
+    StreamPullerWorkflow,
 ]
 
 ALL_ACTIVITIES = [
@@ -165,6 +177,13 @@ ALL_ACTIVITIES = [
     fetch_unprocessed_events,
     mark_event_processed,
     quarantine_event,
+    # Pull
+    http_pull,
+    http_pull_detail,
+    ingest_events,
+    load_stream_config,
+    resolve_auth_header,
+    update_cursor,
     # Vault
     apply_instinct_change,
     assign_records_to_session,
