@@ -9,6 +9,7 @@ import {
   routeInput,
   enableIntuition,
   disableIntuition,
+  updateInstinct,
 } from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
 import { Button } from "../client/components/ui/button";
@@ -20,7 +21,7 @@ import {
   SelectValue,
 } from "../client/components/ui/select";
 import { Link } from "react-router-dom";
-import { Brain, Loader2, Power, PowerOff, Eye, Zap, Clock, Target, ArrowRight, GitBranch } from "lucide-react";
+import { Brain, Loader2, Power, PowerOff, Eye, Zap, Clock, Target, ArrowRight, GitBranch, Pencil, Save, X } from "lucide-react";
 
 const ROUTE_OPTIONS = [
   { value: "task", label: "Task" },
@@ -57,6 +58,7 @@ export function LearningContent() {
   const {
     data: instincts,
     isLoading: instinctsLoading,
+    refetch: refetchInstincts,
   } = useQuery(getIntuitionInstincts, undefined, {
     refetchInterval: 30_000,
     retry: false,
@@ -72,6 +74,10 @@ export function LearningContent() {
   });
 
   const [toggling, setToggling] = useState(false);
+  const [editingInstinct, setEditingInstinct] = useState<string | null>(null);
+  const [editThreshold, setEditThreshold] = useState<string>("");
+  const [editStatus, setEditStatus] = useState<string>("active");
+  const [savingInstinct, setSavingInstinct] = useState(false);
 
   const handleToggle = async () => {
     setToggling(true);
@@ -85,6 +91,33 @@ export function LearningContent() {
       console.error("Toggle failed:", err);
     } finally {
       setToggling(false);
+    }
+  };
+
+  const handleEditInstinct = (instinct: any) => {
+    setEditingInstinct(instinct.path || instinct.id || instinct.name);
+    setEditThreshold(String(instinct.discretionThreshold ?? 0.5));
+    setEditStatus(instinct.status || "active");
+  };
+
+  const handleSaveInstinct = async (instinct: any) => {
+    const path = instinct.path || instinct.id;
+    if (!path) return;
+    setSavingInstinct(true);
+    try {
+      await updateInstinct({
+        path,
+        set: {
+          discretion_threshold: parseFloat(editThreshold),
+          status: editStatus,
+        },
+      });
+      setEditingInstinct(null);
+      refetchInstincts();
+    } catch (err: any) {
+      console.error("Update instinct failed:", err);
+    } finally {
+      setSavingInstinct(false);
     }
   };
 
@@ -176,33 +209,104 @@ export function LearningContent() {
               </p>
             ) : (
               <div className="space-y-2">
-                {instincts.items.map((instinct: any) => (
-                  <div
-                    key={instinct.id || instinct.name}
-                    className="flex items-center justify-between rounded-sm border border-gold-dim/10 bg-[#0A0A0A] px-3 py-2.5"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <p className="font-mono text-xs font-medium text-cream">{instinct.name}</p>
-                      <div className="flex items-center gap-3">
-                        <span className="font-mono text-[0.6rem] text-muted-foreground/60">
-                          {instinct.observationCount ?? 0} observations
-                        </span>
-                        <span className="font-mono text-[0.6rem] text-muted-foreground/60">
-                          threshold: {instinct.discretionThreshold ?? "—"}
-                        </span>
-                        {instinct.confidenceScore != null && (
-                          <span className="font-mono text-[0.6rem] text-gold/60">
-                            score: {instinct.confidenceScore}
-                          </span>
-                        )}
+                {instincts.items.map((instinct: any) => {
+                  const instinctKey = instinct.path || instinct.id || instinct.name;
+                  const isEditing = editingInstinct === instinctKey;
+                  return (
+                    <div
+                      key={instinctKey}
+                      className="rounded-sm border border-gold-dim/10 bg-[#0A0A0A] px-3 py-2.5"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="min-w-0 flex-1">
+                          <p className="font-mono text-xs font-medium text-cream">{instinct.name}</p>
+                          <div className="flex items-center gap-3">
+                            <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                              {instinct.observationCount ?? 0} observations
+                            </span>
+                            <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                              threshold: {instinct.discretionThreshold ?? "\u2014"}
+                            </span>
+                            {instinct.confidenceScore != null && (
+                              <span className="font-mono text-[0.6rem] text-gold/60">
+                                score: {instinct.confidenceScore}
+                              </span>
+                            )}
+                            {instinct.status && instinct.status !== "active" && (
+                              <span className="font-mono text-[0.6rem] text-orange-400/60">
+                                {instinct.status}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className="text-right">
+                            <p className="font-mono text-xs text-gold">{instinct.matchCount ?? 0}</p>
+                            <p className="font-mono text-[0.55rem] text-muted-foreground/40">matches</p>
+                          </div>
+                          {!isEditing && (
+                            <button
+                              type="button"
+                              onClick={() => handleEditInstinct(instinct)}
+                              className="ml-2 flex items-center gap-1 rounded-sm border border-gold-dim/20 bg-black/30 px-1.5 py-1 font-mono text-[0.6rem] text-muted-foreground transition-colors hover:border-gold/30 hover:text-gold"
+                            >
+                              <Pencil className="h-2.5 w-2.5" />
+                              Edit
+                            </button>
+                          )}
+                        </div>
                       </div>
+                      {isEditing && (
+                        <div className="mt-2 flex items-center gap-3 border-t border-gold-dim/10 pt-2">
+                          <div className="flex items-center gap-1.5">
+                            <label className="font-mono text-[0.6rem] text-muted-foreground">Threshold</label>
+                            <input
+                              type="number"
+                              min="0"
+                              max="1"
+                              step="0.05"
+                              value={editThreshold}
+                              onChange={(e) => setEditThreshold(e.target.value)}
+                              className="h-6 w-16 rounded-sm border border-gold-dim/20 bg-black/40 px-1.5 font-mono text-[0.6rem] text-cream outline-none focus:border-gold/40"
+                            />
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <label className="font-mono text-[0.6rem] text-muted-foreground">Status</label>
+                            <select
+                              value={editStatus}
+                              onChange={(e) => setEditStatus(e.target.value)}
+                              className="h-6 rounded-sm border border-gold-dim/20 bg-black/40 px-1.5 font-mono text-[0.6rem] text-cream outline-none focus:border-gold/40"
+                            >
+                              <option value="active">active</option>
+                              <option value="deprecated">deprecated</option>
+                            </select>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleSaveInstinct(instinct)}
+                            disabled={savingInstinct}
+                            className="flex items-center gap-1 rounded-sm border border-gold/30 bg-gold/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-gold transition-colors hover:bg-gold/20 disabled:opacity-50"
+                          >
+                            {savingInstinct ? (
+                              <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                            ) : (
+                              <Save className="h-2.5 w-2.5" />
+                            )}
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingInstinct(null)}
+                            className="flex items-center gap-1 rounded-sm border border-zinc-500/30 bg-zinc-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-zinc-400 transition-colors hover:bg-zinc-500/20"
+                          >
+                            <X className="h-2.5 w-2.5" />
+                            Cancel
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    <div className="text-right">
-                      <p className="font-mono text-xs text-gold">{instinct.matchCount ?? 0}</p>
-                      <p className="font-mono text-[0.55rem] text-muted-foreground/40">matches</p>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

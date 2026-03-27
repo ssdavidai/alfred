@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, getTasks, getIntuitionQueue, getTriage, getMatters, updateTask, getQuarantine, retryQuarantine, dismissQuarantine } from "wasp/client/operations";
+import { useQuery, getTasks, getIntuitionQueue, getTriage, getMatters, updateTask, getQuarantine, retryQuarantine, dismissQuarantine, getSessions, getLedgerEntries } from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
 import { TasksContent } from "../tasks/TasksPage";
 import {
@@ -23,6 +23,8 @@ import {
   AlertTriangle,
   RotateCcw,
   Trash2,
+  FolderOpen,
+  BookMarked,
 } from "lucide-react";
 
 type IntelligenceTab = "tasks" | "triage" | "matters" | "learning" | "judgment" | "activity" | "quarantine";
@@ -126,7 +128,12 @@ export default function IntelligencePage() {
       </div>
 
       {/* Tab Content */}
-      {activeTab === "tasks" && <TasksContent />}
+      {activeTab === "tasks" && (
+        <div className="space-y-6">
+          <TasksContent />
+          <LedgerSection />
+        </div>
+      )}
       {activeTab === "triage" && <TriageContent />}
       {activeTab === "matters" && <MattersContent />}
       {activeTab === "learning" && <LearningContent />}
@@ -347,7 +354,13 @@ function ActivityTab() {
     retry: false,
   });
 
+  const { data: sessionsData, isLoading: sessionsLoading } = useQuery(getSessions, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
   const tasks: any[] = tasksData?.results ?? [];
+  const sessions: any[] = sessionsData?.results ?? [];
 
   // Build a unified timeline from task events
   const taskEvents = tasks
@@ -363,6 +376,53 @@ function ActivityTab() {
   return (
     <div className="space-y-4">
       <IntuitionActivityContent />
+
+      {/* Recent Sessions */}
+      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <FolderOpen className="h-4 w-4 text-gold" />
+          <h2 className="font-serif text-base font-light text-cream">Recent Sessions</h2>
+        </div>
+        {sessionsLoading ? (
+          <div className="flex items-center gap-2 py-4">
+            <Loader2 className="h-4 w-4 animate-spin text-gold" />
+            <span className="text-muted-foreground font-mono text-xs">Loading sessions...</span>
+          </div>
+        ) : sessions.length === 0 ? (
+          <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
+            No sessions recorded yet
+          </p>
+        ) : (
+          <div className="space-y-1.5">
+            {sessions.map((session: any) => {
+              const fm = session.frontmatter ?? {};
+              const name = fm.name || session.name || session.path;
+              const recordCount = fm.record_count ?? fm.records ?? 0;
+              const date = fm.created || fm.date || session.created;
+              return (
+                <a
+                  key={session.path}
+                  href={`/dashboard/vault/${session.path}`}
+                  className="flex items-center gap-3 rounded-sm px-3 py-2 transition-colors hover:bg-gold-dim/5"
+                >
+                  <FolderOpen className="h-3 w-3 flex-shrink-0 text-muted-foreground/40" />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-mono text-xs text-cream/80">{name}</p>
+                    <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                      {recordCount} record{recordCount !== 1 ? "s" : ""}
+                    </span>
+                  </div>
+                  {date && (
+                    <span className="flex-shrink-0 font-mono text-[0.55rem] text-muted-foreground/40">
+                      {timeAgo(date)}
+                    </span>
+                  )}
+                </a>
+              );
+            })}
+          </div>
+        )}
+      </div>
 
       {/* Task Events Timeline */}
       <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
@@ -401,6 +461,87 @@ function ActivityTab() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function LedgerSection() {
+  const { data, isLoading, error } = useQuery(getLedgerEntries, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
+  const items: any[] = data?.results ?? [];
+
+  if (isLoading) {
+    return (
+      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <BookMarked className="h-4 w-4 text-gold" />
+          <h2 className="font-serif text-base font-light text-cream">Ledger</h2>
+        </div>
+        <div className="flex items-center gap-2 py-4">
+          <Loader2 className="h-4 w-4 animate-spin text-gold" />
+          <span className="text-muted-foreground font-mono text-xs">Loading ledger entries...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <BookMarked className="h-4 w-4 text-gold" />
+          <h2 className="font-serif text-base font-light text-cream">Ledger</h2>
+        </div>
+        <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
+          Ledger data not available
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <BookMarked className="h-4 w-4 text-gold" />
+        <h2 className="font-serif text-base font-light text-cream">Ledger</h2>
+      </div>
+      {items.length === 0 ? (
+        <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
+          No ledger entries yet
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {items.map((entry: any) => {
+            const fm = entry.frontmatter ?? {};
+            const name = fm.name || entry.name || entry.path;
+            const outcome = fm.outcome || fm.result || entry.status || "\u2014";
+            const date = fm.created || fm.date || entry.created;
+            return (
+              <a
+                key={entry.path}
+                href={`/dashboard/vault/${entry.path}`}
+                className="flex items-center gap-3 rounded-sm px-3 py-2 transition-colors hover:bg-gold-dim/5"
+              >
+                <BookMarked className="h-3 w-3 flex-shrink-0 text-muted-foreground/40" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-mono text-xs text-cream/80">{name}</p>
+                  <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                    outcome: {outcome}
+                  </span>
+                </div>
+                {date && (
+                  <span className="flex-shrink-0 font-mono text-[0.55rem] text-muted-foreground/40">
+                    {timeAgo(date)}
+                  </span>
+                )}
+              </a>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

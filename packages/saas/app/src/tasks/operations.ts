@@ -8,6 +8,7 @@ import type {
   GetQuarantine,
   RetryQuarantine,
   DismissQuarantine,
+  GetLedgerEntries,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -82,5 +83,13 @@ export const dismissQuarantine: DismissQuarantine<{ id: string }, any> = async (
   return proxyToTenant(instance, {
     method: "POST",
     path: `/api/v1/learning/quarantine/${args.id}/dismiss`,
+  });
+};
+
+export const getLedgerEntries: GetLedgerEntries<void, any> = async (_args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "GET",
+    path: "/api/v1/vault/list/ledger_entry",
   });
 };

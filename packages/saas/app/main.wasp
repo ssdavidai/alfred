@@ -491,6 +491,11 @@ action dismissQuarantine {
   entities: [Instance]
 }
 
+query getLedgerEntries {
+  fn: import { getLedgerEntries } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
 // ============================================================
 // Intuition (Learning Engine)
 // ============================================================
@@ -537,6 +542,16 @@ action enableIntuition {
 
 action disableIntuition {
   fn: import { disableIntuition } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+query getSessions {
+  fn: import { getSessions } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+action updateInstinct {
+  fn: import { updateInstinct } from "@src/intuition/operations",
   entities: [Instance]
 }
 
