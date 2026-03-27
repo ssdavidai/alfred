@@ -34,7 +34,7 @@ RUN printf '#!/bin/sh\nexec node /openclaw/dist/index.js "$@"\n' > /usr/local/bi
 
 # Clone Alfred at pinned commit
 WORKDIR /app
-ARG ALFRED_SHA=40f3df416cae8c145f1a9bc14211487557f37c7b
+ARG ALFRED_SHA=44cf6750f63194962bbdc65e7bf9ab4930ff081d
 RUN git init /alfred-src && \
     git -C /alfred-src fetch --depth 1 https://github.com/ssdavidai/alfred.git ${ALFRED_SHA} && \
     git -C /alfred-src checkout FETCH_HEAD
