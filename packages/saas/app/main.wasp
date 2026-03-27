@@ -476,6 +476,21 @@ query getMatters {
   entities: [Instance]
 }
 
+query getQuarantine {
+  fn: import { getQuarantine } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action retryQuarantine {
+  fn: import { retryQuarantine } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action dismissQuarantine {
+  fn: import { dismissQuarantine } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
 // ============================================================
 // Intuition (Learning Engine)
 // ============================================================

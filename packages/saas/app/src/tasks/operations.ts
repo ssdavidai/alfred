@@ -5,6 +5,9 @@ import type {
   UpdateTask,
   GetTriage,
   GetMatters,
+  GetQuarantine,
+  RetryQuarantine,
+  DismissQuarantine,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -55,5 +58,29 @@ export const getMatters: GetMatters<void, any> = async (_args, context) => {
   return proxyToTenant(instance, {
     method: "GET",
     path: "/api/v1/vault/list/matter",
+  });
+};
+
+export const getQuarantine: GetQuarantine<void, any> = async (_args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "GET",
+    path: "/api/v1/learning/quarantine",
+  });
+};
+
+export const retryQuarantine: RetryQuarantine<{ id: string }, any> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/learning/quarantine/${args.id}/retry`,
+  });
+};
+
+export const dismissQuarantine: DismissQuarantine<{ id: string }, any> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/learning/quarantine/${args.id}/dismiss`,
   });
 };
