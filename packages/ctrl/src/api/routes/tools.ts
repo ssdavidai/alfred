@@ -1,4 +1,5 @@
 import { addRoute, matchRoute } from "../server.js";
+import type { ApiRequest } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 
 // ---------------------------------------------------------------------------
