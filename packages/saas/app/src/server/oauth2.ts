@@ -333,13 +333,23 @@ async function handleInternalTokenRequest(req: Request, res: Response) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const { credentialId, userId } = req.body;
-  if (!credentialId || !userId) {
-    return res.status(400).json({ error: "credentialId and userId required" });
-  }
+  const { credentialId, userId, provider } = req.body;
 
   try {
-    const token = await getValidAccessToken(credentialId);
+    let cred;
+    if (credentialId) {
+      cred = await prisma.oAuthCredential.findUnique({ where: { id: credentialId } });
+    } else if (userId && provider) {
+      cred = await prisma.oAuthCredential.findUnique({
+        where: { userId_provider: { userId, provider } },
+      });
+    }
+
+    if (!cred) {
+      return res.status(404).json({ error: "OAuth credential not found" });
+    }
+
+    const token = await getValidAccessToken(cred.id);
     res.json({ access_token: token, token_type: "Bearer" });
   } catch (err: any) {
     console.error(`[oauth2] Internal token request failed:`, err.message);

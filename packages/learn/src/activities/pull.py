@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -53,28 +54,31 @@ async def resolve_auth_header(auth_config: dict[str, Any]) -> dict[str, str]:
         return {}
 
     if auth_type == "oauth2":
-        # Call SaaS internal endpoint to get fresh OAuth2 token
-        config = load_config()
-        saas_url = auth_config.get("token_url", "")
-        if not saas_url:
-            logger.warning("OAuth2 auth_config missing token_url, skipping auth")
+        # Call SaaS internal endpoint to get fresh OAuth2 token.
+        # The SaaS stores encrypted refresh tokens and handles auto-refresh.
+        saas_url = os.environ.get("SAAS_API_URL", "https://alfred.black")
+        provider = auth_config.get("provider", "")
+        user_id = auth_config.get("user_id", "")
+
+        if not provider:
+            logger.warning("OAuth2 auth_config missing provider, skipping auth")
             return {}
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
-                    saas_url,
+                    f"{saas_url}/api/internal/oauth2/token",
                     json={
-                        "client_id": auth_config.get("client_id", ""),
-                        "client_secret": auth_config.get("client_secret", ""),
-                        "refresh_token": auth_config.get("refresh_token", ""),
-                        "grant_type": auth_config.get("grant_type", "refresh_token"),
+                        "provider": provider,
+                        "userId": user_id,
                     },
+                    headers={"Authorization": f"Bearer internal"},
                 )
                 resp.raise_for_status()
                 data = resp.json()
                 access_token = data.get("access_token", "")
                 if access_token:
+                    logger.info("OAuth2 token resolved for provider=%s", provider)
                     return {"Authorization": f"Bearer {access_token}"}
         except Exception as exc:
             logger.error("OAuth2 token refresh failed: %s", exc)
