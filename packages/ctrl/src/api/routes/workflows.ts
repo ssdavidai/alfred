@@ -100,6 +100,33 @@ export function registerWorkflowRoutes(): void {
     sendJson(res, 200, parseJsonLines(stdout));
   });
 
+  // --- Onboarding ---
+
+  // Start onboarding pipeline workflow
+  addRoute("POST", "/api/v1/workflows/onboarding/start", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.user_id !== "string" || typeof b.stream_id !== "string") {
+      throw new ValidationError("user_id and stream_id are required");
+    }
+
+    const workflowId = `onboarding-${b.user_id}-${Date.now()}`;
+    const args = [
+      "temporal", "workflow", "start",
+      "--type", "OnboardingPipelineWorkflow",
+      "--task-queue", "alfred-learn",
+      "--workflow-id", workflowId,
+      "--input", JSON.stringify({ user_id: b.user_id, stream_id: b.stream_id }),
+    ];
+
+    const stdout = await dockerExec("temporal", args);
+    try {
+      const result = JSON.parse(stdout);
+      sendJson(res, 201, { workflow_id: workflowId, ...result });
+    } catch {
+      sendJson(res, 201, { workflow_id: workflowId, raw: stdout });
+    }
+  });
+
   // --- Schedules ---
 
   // List schedules
