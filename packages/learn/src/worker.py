@@ -20,6 +20,7 @@ from src.workflows.judgment import JudgmentWorkflow
 from src.workflows.media_ingestion import MediaIngestionWorkflow
 from src.workflows.task_runner import TaskRunnerWorkflow
 from src.workflows.stream_puller import StreamPullerWorkflow
+from src.workflows.onboarding_pipeline import OnboardingPipelineWorkflow
 
 # Activities — clerk
 from src.activities.clerk import (
@@ -116,6 +117,15 @@ from src.activities.judge import (
     score_instincts,
 )
 
+# Activities — onboarding
+from src.activities.onboarding import (
+    wait_for_gmail_events,
+    extract_entities_from_emails,
+    analyze_patterns,
+    generate_first_brief,
+    write_onboarding_results,
+)
+
 # Activities — braindump
 from src.activities.braindump import detect_braindump, extract_braindump
 
@@ -157,6 +167,7 @@ ALL_WORKFLOWS = [
     MediaIngestionWorkflow,
     TaskRunnerWorkflow,
     StreamPullerWorkflow,
+    OnboardingPipelineWorkflow,
 ]
 
 ALL_ACTIVITIES = [
@@ -241,6 +252,12 @@ ALL_ACTIVITIES = [
     update_task_status,
     write_ledger_entry,
     write_task_artifacts,
+    # Onboarding
+    wait_for_gmail_events,
+    extract_entities_from_emails,
+    analyze_patterns,
+    generate_first_brief,
+    write_onboarding_results,
     # Braindump
     detect_braindump,
     extract_braindump,
