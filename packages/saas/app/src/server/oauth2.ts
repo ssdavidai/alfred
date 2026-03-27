@@ -170,6 +170,16 @@ export async function getValidAccessToken(credentialId: string): Promise<string>
 }
 
 // ---------------------------------------------------------------------------
+// Query param helper — Express uses qs which returns string | string[] | ParsedQs | ParsedQs[]
+// ---------------------------------------------------------------------------
+
+function queryString(val: unknown): string {
+  if (typeof val === "string") return val;
+  if (Array.isArray(val)) return String(val[0] ?? "");
+  return String(val ?? "");
+}
+
+// ---------------------------------------------------------------------------
 // Express route handlers
 // ---------------------------------------------------------------------------
 
@@ -180,19 +190,17 @@ function handleStart(req: Request, res: Response) {
     return res.status(400).json({ error: `Unknown provider: ${provider}` });
   }
 
-  const userId: string = Array.isArray(req.query.userId) ? req.query.userId[0] : String(req.query.userId || "");
+  const userId = queryString(req.query.userId);
   if (!userId) {
     return res.status(401).json({ error: "userId required" });
   }
 
-  const scopesRaw = req.query.scopes;
-  const scopesParam: string = Array.isArray(scopesRaw) ? String(scopesRaw[0]) : String(scopesRaw || "");
+  const scopesParam = queryString(req.query.scopes);
   const scopes: string[] = scopesParam
     ? scopesParam.split(",")
     : config.defaultScopes;
 
-  const redirectRaw = req.query.redirectAfter;
-  const redirectAfter: string = Array.isArray(redirectRaw) ? String(redirectRaw[0]) : String(redirectRaw || "/dashboard/streams");
+  const redirectAfter = queryString(req.query.redirectAfter) || "/dashboard/streams";
 
   // Generate state token
   const state = crypto.randomBytes(24).toString("hex");
@@ -206,9 +214,9 @@ function handleStart(req: Request, res: Response) {
 }
 
 async function handleCallback(req: Request, res: Response) {
-  const code: string = Array.isArray(req.query.code) ? String(req.query.code[0]) : String(req.query.code || "");
-  const state: string = Array.isArray(req.query.state) ? String(req.query.state[0]) : String(req.query.state || "");
-  const error: string = Array.isArray(req.query.error) ? String(req.query.error[0]) : String(req.query.error || "");
+  const code = queryString(req.query.code);
+  const state = queryString(req.query.state);
+  const error = queryString(req.query.error);
 
   if (error) {
     console.error(`[oauth2] Provider returned error: ${error}`);
@@ -287,7 +295,7 @@ async function handleCallback(req: Request, res: Response) {
 }
 
 async function handleListCredentials(req: Request, res: Response) {
-  const userId: string = Array.isArray(req.query.userId) ? String(req.query.userId[0]) : String(req.query.userId || "");
+  const userId = queryString(req.query.userId);
   if (!userId) return res.status(401).json({ error: "userId required" });
 
   const creds = await prisma.oAuthCredential.findMany({
@@ -306,7 +314,7 @@ async function handleListCredentials(req: Request, res: Response) {
 }
 
 async function handleDeleteCredential(req: Request, res: Response) {
-  const userId: string = Array.isArray(req.query.userId) ? String(req.query.userId[0]) : String(req.query.userId || "");
+  const userId = queryString(req.query.userId);
   if (!userId) return res.status(401).json({ error: "userId required" });
 
   const { id } = req.params;
