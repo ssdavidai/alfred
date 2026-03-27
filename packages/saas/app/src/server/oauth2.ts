@@ -174,25 +174,25 @@ export async function getValidAccessToken(credentialId: string): Promise<string>
 // ---------------------------------------------------------------------------
 
 function handleStart(req: Request, res: Response) {
-  const provider = req.params.provider;
+  const provider: string = Array.isArray(req.params.provider) ? req.params.provider[0] : req.params.provider;
   const config = OAUTH2_PROVIDERS[provider];
   if (!config) {
     return res.status(400).json({ error: `Unknown provider: ${provider}` });
   }
 
-  // Extract userId from Wasp session cookie
-  // For now, require userId as query param (the UI will pass it)
-  const userId = String(req.query.userId || "");
+  const userId: string = Array.isArray(req.query.userId) ? req.query.userId[0] : String(req.query.userId || "");
   if (!userId) {
     return res.status(401).json({ error: "userId required" });
   }
 
-  const scopesParam = String(req.query.scopes || "");
-  const scopes = scopesParam
+  const scopesRaw = req.query.scopes;
+  const scopesParam: string = Array.isArray(scopesRaw) ? String(scopesRaw[0]) : String(scopesRaw || "");
+  const scopes: string[] = scopesParam
     ? scopesParam.split(",")
     : config.defaultScopes;
 
-  const redirectAfter = String(req.query.redirectAfter || "/dashboard/streams");
+  const redirectRaw = req.query.redirectAfter;
+  const redirectAfter: string = Array.isArray(redirectRaw) ? String(redirectRaw[0]) : String(redirectRaw || "/dashboard/streams");
 
   // Generate state token
   const state = crypto.randomBytes(24).toString("hex");
@@ -206,7 +206,9 @@ function handleStart(req: Request, res: Response) {
 }
 
 async function handleCallback(req: Request, res: Response) {
-  const { code, state, error } = req.query;
+  const code: string = Array.isArray(req.query.code) ? String(req.query.code[0]) : String(req.query.code || "");
+  const state: string = Array.isArray(req.query.state) ? String(req.query.state[0]) : String(req.query.state || "");
+  const error: string = Array.isArray(req.query.error) ? String(req.query.error[0]) : String(req.query.error || "");
 
   if (error) {
     console.error(`[oauth2] Provider returned error: ${error}`);
@@ -217,11 +219,11 @@ async function handleCallback(req: Request, res: Response) {
     return res.status(400).json({ error: "Missing code or state" });
   }
 
-  const pending = pendingStates.get(state as string);
+  const pending = pendingStates.get(state);
   if (!pending) {
     return res.status(400).json({ error: "Invalid or expired state" });
   }
-  pendingStates.delete(state as string);
+  pendingStates.delete(state);
 
   const config = OAUTH2_PROVIDERS[pending.provider];
   if (!config) {
@@ -229,7 +231,7 @@ async function handleCallback(req: Request, res: Response) {
   }
 
   try {
-    const tokens = await exchangeCodeForTokens(pending.provider, config, code as string);
+    const tokens = await exchangeCodeForTokens(pending.provider, config, code);
 
     // Extract account label from ID token or userinfo
     let accountLabel: string | null = null;
@@ -285,7 +287,7 @@ async function handleCallback(req: Request, res: Response) {
 }
 
 async function handleListCredentials(req: Request, res: Response) {
-  const userId = String(req.query.userId || "");
+  const userId: string = Array.isArray(req.query.userId) ? String(req.query.userId[0]) : String(req.query.userId || "");
   if (!userId) return res.status(401).json({ error: "userId required" });
 
   const creds = await prisma.oAuthCredential.findMany({
@@ -304,7 +306,7 @@ async function handleListCredentials(req: Request, res: Response) {
 }
 
 async function handleDeleteCredential(req: Request, res: Response) {
-  const userId = String(req.query.userId || "");
+  const userId: string = Array.isArray(req.query.userId) ? String(req.query.userId[0]) : String(req.query.userId || "");
   if (!userId) return res.status(401).json({ error: "userId required" });
 
   const { id } = req.params;
