@@ -42,6 +42,18 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build and push alfred-worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/openclaw/dockerfiles/alfred.Dockerfile
+          push: true
+          tags: |
+            ssdavidai00/alfred-worker:latest
+            ssdavidai00/alfred-worker:sha-${{ steps.image_tag.outputs.short_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Trigger fleet rollout
         continue-on-error: true
         run: |
