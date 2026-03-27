@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, getTasks, getIntuitionQueue, getTriage, getMatters, updateTask } from "wasp/client/operations";
+import { useQuery, getTasks, getIntuitionQueue, getTriage, getMatters, updateTask, getQuarantine, retryQuarantine, dismissQuarantine } from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
 import { TasksContent } from "../tasks/TasksPage";
 import {
@@ -20,9 +20,12 @@ import {
   ExternalLink,
   XCircle,
   Loader2,
+  AlertTriangle,
+  RotateCcw,
+  Trash2,
 } from "lucide-react";
 
-type IntelligenceTab = "tasks" | "triage" | "matters" | "learning" | "judgment" | "activity";
+type IntelligenceTab = "tasks" | "triage" | "matters" | "learning" | "judgment" | "activity" | "quarantine";
 
 const TABS: { key: IntelligenceTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { key: "tasks", label: "Tasks", icon: ClipboardList },
@@ -31,6 +34,7 @@ const TABS: { key: IntelligenceTab; label: string; icon: React.ComponentType<{ c
   { key: "learning", label: "Learning", icon: BookOpen },
   { key: "judgment", label: "Judgment", icon: Scale },
   { key: "activity", label: "Activity", icon: Activity },
+  { key: "quarantine", label: "Quarantine", icon: AlertTriangle },
 ];
 
 export default function IntelligencePage() {
@@ -67,11 +71,18 @@ export default function IntelligencePage() {
   });
   const mattersOpenCount = mattersData?.results?.filter((m: any) => m.status === "open" || !m.status).length ?? 0;
 
+  const { data: quarantineData } = useQuery(getQuarantine, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const quarantineCount = quarantineData?.items?.length ?? 0;
+
   const tabBadge = (tab: IntelligenceTab): number | null => {
     if (tab === "tasks" && approvalCount > 0) return approvalCount;
     if (tab === "triage" && triageCount > 0) return triageCount;
     if (tab === "matters" && mattersOpenCount > 0) return mattersOpenCount;
     if (tab === "judgment" && queueCount > 0) return queueCount;
+    if (tab === "quarantine" && quarantineCount > 0) return quarantineCount;
     return null;
   };
 
@@ -121,6 +132,7 @@ export default function IntelligencePage() {
       {activeTab === "learning" && <LearningContent />}
       {activeTab === "judgment" && <JudgmentContent />}
       {activeTab === "activity" && <ActivityTab />}
+      {activeTab === "quarantine" && <QuarantineContent />}
     </DashboardLayout>
   );
 }
@@ -389,6 +401,132 @@ function ActivityTab() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function QuarantineContent() {
+  const { data, isLoading, error, refetch } = useQuery(getQuarantine, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
+  const [actioningId, setActioningId] = useState<string | null>(null);
+
+  const items: any[] = data?.items ?? [];
+
+  const handleRetry = async (id: string) => {
+    setActioningId(id);
+    try {
+      await retryQuarantine({ id });
+      refetch();
+    } catch (err: any) {
+      console.error("Retry failed:", err);
+    } finally {
+      setActioningId(null);
+    }
+  };
+
+  const handleDismiss = async (id: string) => {
+    setActioningId(id);
+    try {
+      await dismissQuarantine({ id });
+      refetch();
+    } catch (err: any) {
+      console.error("Dismiss failed:", err);
+    } finally {
+      setActioningId(null);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 py-8">
+        <Loader2 className="h-5 w-5 animate-spin text-gold" />
+        <span className="text-muted-foreground text-sm">Loading quarantined files...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-destructive/10 text-destructive rounded-sm p-4">
+        <p>{error.message}</p>
+      </div>
+    );
+  }
+
+  if (items.length === 0) {
+    return (
+      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-8 text-center">
+        <AlertTriangle className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
+        <p className="font-mono text-sm text-muted-foreground">No quarantined files</p>
+        <p className="mt-1 font-mono text-xs text-muted-foreground/50">
+          Files that fail processing will appear here for review
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {items.map((item: any) => {
+        const filename = item.filename || item.name || item.id;
+        const reason = item.reason || "Unknown reason";
+        const date = item.quarantined_at || item.created || item.date;
+
+        return (
+          <div
+            key={item.id}
+            className="flex items-center gap-3 rounded-sm border border-gold-dim/20 bg-black/20 px-3 py-2.5"
+          >
+            <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 text-orange-400/60" />
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-mono text-xs font-medium text-cream">
+                {filename}
+              </p>
+              <div className="flex items-center gap-3">
+                <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                  {reason}
+                </span>
+                {date && (
+                  <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                    {timeAgo(date)}
+                  </span>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => handleRetry(item.id)}
+                disabled={actioningId === item.id}
+                className="flex items-center gap-1 rounded-sm border border-gold/30 bg-gold/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-gold transition-colors hover:bg-gold/20 disabled:opacity-50"
+              >
+                {actioningId === item.id ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <RotateCcw className="h-3 w-3" />
+                )}
+                Retry
+              </button>
+              <button
+                type="button"
+                onClick={() => handleDismiss(item.id)}
+                disabled={actioningId === item.id}
+                className="flex items-center gap-1 rounded-sm border border-zinc-500/30 bg-zinc-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-zinc-400 transition-colors hover:bg-zinc-500/20 disabled:opacity-50"
+              >
+                {actioningId === item.id ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Trash2 className="h-3 w-3" />
+                )}
+                Dismiss
+              </button>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
