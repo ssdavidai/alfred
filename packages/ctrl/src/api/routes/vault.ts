@@ -13,9 +13,9 @@ const IGNORE_DIRS = new Set(["_templates", "_bases", "_docs", ".obsidian", "view
 const KNOWN_TYPES = [
   "person", "org", "project", "task", "event", "note", "location",
   "process", "account", "asset", "conversation", "input", "run",
-  "session", "decision",
+  "session", "decision", "triage",
   "assumption", "constraint", "contradiction", "synthesis",
-  "observation", "instinct",
+  "observation", "instinct", "reflection",
   "matter", "ledger_entry",
 ];
 

@@ -541,6 +541,24 @@ async def _call_clerk(prompt: str) -> dict[str, Any]:
                     except (json.JSONDecodeError, TypeError):
                         pass
 
+            # Check for error indicators in messages (billing errors, run failures)
+            for msg in messages:
+                msg_content = msg.get("content", "")
+                content_str = ""
+                if isinstance(msg_content, str):
+                    content_str = msg_content
+                elif isinstance(msg_content, list):
+                    content_str = " ".join(
+                        p.get("text", "") for p in msg_content
+                        if isinstance(p, dict) and p.get("type") == "text"
+                    )
+                # Detect billing/credit errors — fail fast instead of waiting 280s
+                if any(err in content_str.lower() for err in [
+                    "insufficient credits", "billing error", "402",
+                    "out of credits", "api key has run out",
+                ]):
+                    raise RuntimeError(f"Clerk LLM billing error: {content_str[:200]}")
+
             # Look for assistant response
             for msg in messages:
                 if msg.get("role") == "assistant":
