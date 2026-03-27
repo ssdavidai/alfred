@@ -18,10 +18,8 @@ RUN bun install -g https://github.com/tobi/qmd && \
     chmod -R a+rX /opt/bun && \
     ln -sf /opt/bun/bin/bun /usr/local/bin/bun && \
     rm -f /opt/bun/bin/qmd && \
-    QMD_ENTRY=$(find /opt/bun -name "qmd.js" -path "*/cli/*" 2>/dev/null | head -1) && \
-    printf '#!/bin/sh\nexec /opt/bun/bin/bun run %s "$@"\n' "$QMD_ENTRY" > /usr/local/bin/qmd && \
-    chmod +x /usr/local/bin/qmd && \
-    echo "qmd wrapper points to: $QMD_ENTRY"
+    printf '#!/bin/sh\nexec /opt/bun/bin/bun /opt/bun/install/global/node_modules/@tobilu/qmd/bin/qmd "$@"\n' > /usr/local/bin/qmd && \
+    chmod +x /usr/local/bin/qmd
 
 RUN corepack enable
 
