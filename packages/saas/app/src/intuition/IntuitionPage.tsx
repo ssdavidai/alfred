@@ -4,6 +4,8 @@ import {
   getIntuitionStatus,
   getIntuitionInstincts,
   getIntuitionQueue,
+  getObservations,
+  getRecentJudgments,
   routeInput,
   enableIntuition,
   disableIntuition,
@@ -17,7 +19,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../client/components/ui/select";
-import { Brain, Loader2, Power, PowerOff, Eye, Zap, Clock, Target } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Brain, Loader2, Power, PowerOff, Eye, Zap, Clock, Target, ArrowRight, GitBranch } from "lucide-react";
 
 const ROUTE_OPTIONS = [
   { value: "task", label: "Task" },
@@ -55,6 +58,14 @@ export function LearningContent() {
     data: instincts,
     isLoading: instinctsLoading,
   } = useQuery(getIntuitionInstincts, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+    enabled: !statusError,
+  });
+  const {
+    data: observations,
+    isLoading: observationsLoading,
+  } = useQuery(getObservations, undefined, {
     refetchInterval: 30_000,
     retry: false,
     enabled: !statusError,
@@ -195,6 +206,59 @@ export function LearningContent() {
               </div>
             )}
           </div>
+
+          {/* Recent Observations */}
+          <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
+            <h2 className="mb-3 font-serif text-base font-light text-cream">Recent Observations</h2>
+            {observationsLoading && !observations ? (
+              <div className="flex items-center gap-2 py-4">
+                <Loader2 className="h-4 w-4 animate-spin text-gold" />
+                <span className="text-muted-foreground font-mono text-xs">
+                  Loading observations...
+                </span>
+              </div>
+            ) : !observations?.results?.length ? (
+              <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
+                No observations recorded yet.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {observations.results.map((obs: any) => (
+                  <Link
+                    key={obs.path || obs.name}
+                    to={`/dashboard/vault/${encodeURIComponent(obs.path)}`}
+                    className="flex items-center justify-between rounded-sm border border-gold-dim/10 bg-[#0A0A0A] px-3 py-2.5 transition-colors hover:border-gold-dim/30"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-mono text-xs font-medium text-cream">
+                        {obs.input_type || obs.name || "Observation"}
+                      </p>
+                      <div className="flex items-center gap-3">
+                        {obs.routing_decision && (
+                          <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                            routed to {obs.routing_decision}
+                          </span>
+                        )}
+                        {obs.confidence != null && (
+                          <span className="font-mono text-[0.6rem] text-gold/60">
+                            confidence: {typeof obs.confidence === "number" ? `${Math.round(obs.confidence * 100)}%` : obs.confidence}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {obs.date && (
+                        <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                          {timeAgo(obs.date)}
+                        </span>
+                      )}
+                      <ArrowRight className="h-3 w-3 text-muted-foreground/30" />
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </>
@@ -217,6 +281,14 @@ export function JudgmentContent() {
     retry: false,
     enabled: !statusError,
   });
+  const {
+    data: recentJudgments,
+    isLoading: judgmentsLoading,
+  } = useQuery(getRecentJudgments, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+    enabled: !statusError,
+  });
 
   const [routingId, setRoutingId] = useState<string | null>(null);
 
@@ -234,6 +306,11 @@ export function JudgmentContent() {
 
   const notAvailable = !!statusError;
 
+  // Filter to only observations that have been routed (have routed_by set)
+  const routedItems = (recentJudgments?.results ?? []).filter(
+    (obs: any) => obs.routed_by || obs.routing_decision,
+  );
+
   if (notAvailable) {
     return (
       <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-8 text-center">
@@ -249,66 +326,134 @@ export function JudgmentContent() {
   }
 
   return (
-    <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
-      <h2 className="mb-3 font-serif text-base font-light text-cream">Awaiting Judgment</h2>
-      <p className="text-muted-foreground mb-4 text-xs">
-        Inputs that haven&apos;t been auto-routed yet. Route each item to its destination.
-      </p>
-      {queueLoading && !queue ? (
-        <div className="flex items-center gap-2 py-4">
-          <Loader2 className="h-4 w-4 animate-spin text-gold" />
-          <span className="text-muted-foreground font-mono text-xs">Loading queue...</span>
-        </div>
-      ) : !queue?.items?.length ? (
-        <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
-          No inputs awaiting judgment
+    <div className="space-y-6">
+      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
+        <h2 className="mb-3 font-serif text-base font-light text-cream">Awaiting Judgment</h2>
+        <p className="text-muted-foreground mb-4 text-xs">
+          Inputs that haven&apos;t been auto-routed yet. Route each item to its destination.
         </p>
-      ) : (
-        <div className="space-y-2">
-          {queue.items.map((item: any) => (
-            <div
-              key={item.id}
-              className="flex items-center justify-between rounded-sm border border-gold-dim/10 bg-[#0A0A0A] px-3 py-2.5"
-            >
-              <div className="min-w-0 flex-1">
-                <p className="truncate font-mono text-xs font-medium text-cream">
-                  {item.summary || item.type || "Unknown input"}
-                </p>
-                <div className="flex items-center gap-2">
-                  <span className="font-mono text-[0.6rem] text-muted-foreground/60">
-                    {item.source ?? "stream"}
-                  </span>
-                  {item.receivedAt && (
-                    <span className="font-mono text-[0.6rem] text-muted-foreground/40">
-                      {timeAgo(item.receivedAt)}
+        {queueLoading && !queue ? (
+          <div className="flex items-center gap-2 py-4">
+            <Loader2 className="h-4 w-4 animate-spin text-gold" />
+            <span className="text-muted-foreground font-mono text-xs">Loading queue...</span>
+          </div>
+        ) : !queue?.items?.length ? (
+          <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
+            No inputs awaiting judgment
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {queue.items.map((item: any) => (
+              <div
+                key={item.id}
+                className="flex items-center justify-between rounded-sm border border-gold-dim/10 bg-[#0A0A0A] px-3 py-2.5"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-mono text-xs font-medium text-cream">
+                    {item.summary || item.type || "Unknown input"}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                      {item.source ?? "stream"}
                     </span>
+                    {item.receivedAt && (
+                      <span className="font-mono text-[0.6rem] text-muted-foreground/40">
+                        {timeAgo(item.receivedAt)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="ml-3 flex items-center gap-2">
+                  <Select
+                    onValueChange={(val) => handleRoute(item.id, val)}
+                    disabled={routingId === item.id}
+                  >
+                    <SelectTrigger className="h-7 w-28 font-mono text-[0.6rem]">
+                      <SelectValue placeholder="Route to..." />
+                    </SelectTrigger>
+                    <SelectContent className="border-gold-dim bg-[#0A0A0A]">
+                      {ROUTE_OPTIONS.map((opt) => (
+                        <SelectItem key={opt.value} value={opt.value}>
+                          {opt.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {routingId === item.id && (
+                    <Loader2 className="h-3 w-3 animate-spin text-gold" />
                   )}
                 </div>
               </div>
-              <div className="ml-3 flex items-center gap-2">
-                <Select
-                  onValueChange={(val) => handleRoute(item.id, val)}
-                  disabled={routingId === item.id}
-                >
-                  <SelectTrigger className="h-7 w-28 font-mono text-[0.6rem]">
-                    <SelectValue placeholder="Route to..." />
-                  </SelectTrigger>
-                  <SelectContent className="border-gold-dim bg-[#0A0A0A]">
-                    {ROUTE_OPTIONS.map((opt) => (
-                      <SelectItem key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {routingId === item.id && (
-                  <Loader2 className="h-3 w-3 animate-spin text-gold" />
-                )}
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Recent Routing Decisions */}
+      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
+        <div className="mb-3 flex items-center gap-2">
+          <GitBranch className="h-4 w-4 text-gold" />
+          <h2 className="font-serif text-base font-light text-cream">Recent Routing Decisions</h2>
         </div>
-      )}
+        {judgmentsLoading && !recentJudgments ? (
+          <div className="flex items-center gap-2 py-4">
+            <Loader2 className="h-4 w-4 animate-spin text-gold" />
+            <span className="text-muted-foreground font-mono text-xs">Loading history...</span>
+          </div>
+        ) : !routedItems.length ? (
+          <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
+            No routing decisions recorded yet.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {routedItems.map((item: any) => {
+              const isAutoRouted = item.routed_by === "alfred" || item.routed_by === "auto";
+              return (
+                <Link
+                  key={item.path || item.name}
+                  to={`/dashboard/vault/${encodeURIComponent(item.path)}`}
+                  className="flex items-center justify-between rounded-sm border border-gold-dim/10 bg-[#0A0A0A] px-3 py-2.5 transition-colors hover:border-gold-dim/30"
+                >
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate font-mono text-xs font-medium text-cream">
+                      {item.input_type || item.name || "Input"}
+                    </p>
+                    <div className="flex items-center gap-3">
+                      {item.routing_decision && (
+                        <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                          routed to {item.routing_decision}
+                        </span>
+                      )}
+                      <span
+                        className={`font-mono text-[0.6rem] ${
+                          isAutoRouted
+                            ? "text-emerald-500/70"
+                            : "text-amber-400/70"
+                        }`}
+                      >
+                        {isAutoRouted ? "auto (alfred)" : `human${item.routed_by ? ` (${item.routed_by})` : ""}`}
+                      </span>
+                      {item.confidence != null && (
+                        <span className="font-mono text-[0.6rem] text-gold/60">
+                          {typeof item.confidence === "number" ? `${Math.round(item.confidence * 100)}%` : item.confidence}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {item.date && (
+                      <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                        {timeAgo(item.date)}
+                      </span>
+                    )}
+                    <ArrowRight className="h-3 w-3 text-muted-foreground/30" />
+                  </div>
+                </Link>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -402,6 +547,22 @@ export default function IntuitionPage() {
     retry: false,
     enabled: !statusError,
   });
+  const {
+    data: observations,
+    isLoading: observationsLoading,
+  } = useQuery(getObservations, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+    enabled: !statusError,
+  });
+  const {
+    data: recentJudgments,
+    isLoading: judgmentsLoading,
+  } = useQuery(getRecentJudgments, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+    enabled: !statusError,
+  });
 
   const [routingId, setRoutingId] = useState<string | null>(null);
   const [toggling, setToggling] = useState(false);
@@ -436,6 +597,11 @@ export default function IntuitionPage() {
   // Tenant doesn't have alfred-learn deployed yet
   const notAvailable = !!statusError;
   const isLoading = statusLoading && !statusError;
+
+  // Filter to only observations that have been routed
+  const routedItems = (recentJudgments?.results ?? []).filter(
+    (obs: any) => obs.routed_by || obs.routing_decision,
+  );
 
   return (
     <DashboardLayout>
@@ -576,6 +742,72 @@ export default function IntuitionPage() {
             )}
           </div>
 
+          {/* Section 2b: Recent Routing Decisions */}
+          <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
+            <div className="mb-3 flex items-center gap-2">
+              <GitBranch className="h-4 w-4 text-gold" />
+              <h2 className="font-serif text-base font-light text-cream">Recent Routing Decisions</h2>
+            </div>
+            {judgmentsLoading && !recentJudgments ? (
+              <div className="flex items-center gap-2 py-4">
+                <Loader2 className="h-4 w-4 animate-spin text-gold" />
+                <span className="text-muted-foreground font-mono text-xs">Loading history...</span>
+              </div>
+            ) : !routedItems.length ? (
+              <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
+                No routing decisions recorded yet.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {routedItems.map((item: any) => {
+                  const isAutoRouted = item.routed_by === "alfred" || item.routed_by === "auto";
+                  return (
+                    <Link
+                      key={item.path || item.name}
+                      to={`/dashboard/vault/${encodeURIComponent(item.path)}`}
+                      className="flex items-center justify-between rounded-sm border border-gold-dim/10 bg-[#0A0A0A] px-3 py-2.5 transition-colors hover:border-gold-dim/30"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate font-mono text-xs font-medium text-cream">
+                          {item.input_type || item.name || "Input"}
+                        </p>
+                        <div className="flex items-center gap-3">
+                          {item.routing_decision && (
+                            <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                              routed to {item.routing_decision}
+                            </span>
+                          )}
+                          <span
+                            className={`font-mono text-[0.6rem] ${
+                              isAutoRouted
+                                ? "text-emerald-500/70"
+                                : "text-amber-400/70"
+                            }`}
+                          >
+                            {isAutoRouted ? "auto (alfred)" : `human${item.routed_by ? ` (${item.routed_by})` : ""}`}
+                          </span>
+                          {item.confidence != null && (
+                            <span className="font-mono text-[0.6rem] text-gold/60">
+                              {typeof item.confidence === "number" ? `${Math.round(item.confidence * 100)}%` : item.confidence}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {item.date && (
+                          <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                            {timeAgo(item.date)}
+                          </span>
+                        )}
+                        <ArrowRight className="h-3 w-3 text-muted-foreground/30" />
+                      </div>
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
           {/* Section 3: Instincts */}
           <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
             <h2 className="mb-3 font-serif text-base font-light text-cream">Instincts</h2>
@@ -613,6 +845,59 @@ export default function IntuitionPage() {
                       <p className="font-mono text-[0.55rem] text-muted-foreground/40">matches</p>
                     </div>
                   </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Section 3b: Recent Observations */}
+          <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
+            <h2 className="mb-3 font-serif text-base font-light text-cream">Recent Observations</h2>
+            {observationsLoading && !observations ? (
+              <div className="flex items-center gap-2 py-4">
+                <Loader2 className="h-4 w-4 animate-spin text-gold" />
+                <span className="text-muted-foreground font-mono text-xs">
+                  Loading observations...
+                </span>
+              </div>
+            ) : !observations?.results?.length ? (
+              <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
+                No observations recorded yet.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {observations.results.map((obs: any) => (
+                  <Link
+                    key={obs.path || obs.name}
+                    to={`/dashboard/vault/${encodeURIComponent(obs.path)}`}
+                    className="flex items-center justify-between rounded-sm border border-gold-dim/10 bg-[#0A0A0A] px-3 py-2.5 transition-colors hover:border-gold-dim/30"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-mono text-xs font-medium text-cream">
+                        {obs.input_type || obs.name || "Observation"}
+                      </p>
+                      <div className="flex items-center gap-3">
+                        {obs.routing_decision && (
+                          <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                            routed to {obs.routing_decision}
+                          </span>
+                        )}
+                        {obs.confidence != null && (
+                          <span className="font-mono text-[0.6rem] text-gold/60">
+                            confidence: {typeof obs.confidence === "number" ? `${Math.round(obs.confidence * 100)}%` : obs.confidence}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {obs.date && (
+                        <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                          {timeAgo(obs.date)}
+                        </span>
+                      )}
+                      <ArrowRight className="h-3 w-3 text-muted-foreground/30" />
+                    </div>
+                  </Link>
                 ))}
               </div>
             )}

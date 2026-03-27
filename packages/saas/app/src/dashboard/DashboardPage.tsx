@@ -2,8 +2,10 @@ import { useState, useEffect } from "react";
 import {
   useQuery,
   getDashboardData,
+  getIntuitionStatus,
 } from "wasp/client/operations";
-import { Loader2, WifiOff, RefreshCw } from "lucide-react";
+import { Loader2, WifiOff, RefreshCw, BookOpen } from "lucide-react";
+import { Link } from "react-router-dom";
 import DashboardLayout from "./DashboardLayout";
 import { Card, CardContent, CardTitle } from "../client/components/ui/card";
 import { Switch } from "../client/components/ui/switch";
@@ -62,6 +64,13 @@ export default function DashboardPage() {
   const isStaleBecauseRefetchFailed = !!data && !!error;
   const showStaleBanner = isStaleBecauseRefetchFailed || isStaleBecauseCached;
   const staleCachedAt = isStaleBecauseCached ? persistedCache!.cachedAt : null;
+
+  // Fetch learning status for daily digest (silently — don't block dashboard)
+  const { data: learningStatus } = useQuery(getIntuitionStatus, undefined, {
+    refetchInterval: 60_000,
+    retry: false,
+  });
+  const lastDigest = learningStatus?.lastDigest ?? null;
 
   // Containers from dashboard data
   const containers: any[] | null = displayData?.containers ?? null;
@@ -126,6 +135,42 @@ export default function DashboardPage() {
 
           {/* Devices panel — expandable below TopBar */}
           {activePanel === "devices" && <DevicesPanel />}
+
+          {/* Daily Digest */}
+          <Card>
+            <CardContent className="p-4">
+              <div className="mb-3 flex items-center gap-2">
+                <BookOpen className="h-4 w-4 text-gold" />
+                <span className="font-serif text-base font-light text-cream">Daily Digest</span>
+              </div>
+              {lastDigest ? (
+                <div className="space-y-2">
+                  <p className="font-sans text-sm font-light leading-relaxed text-cream/80">
+                    {lastDigest.summary}
+                  </p>
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-[0.6rem] text-muted-foreground/50">
+                      {lastDigest.timestamp
+                        ? new Date(lastDigest.timestamp).toLocaleString()
+                        : ""}
+                    </span>
+                    {lastDigest.path && (
+                      <Link
+                        to={`/dashboard/vault/${encodeURIComponent(lastDigest.path)}`}
+                        className="font-mono text-[0.6rem] text-gold/70 transition-colors hover:text-gold"
+                      >
+                        View full digest
+                      </Link>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <p className="py-2 font-mono text-xs text-muted-foreground/50">
+                  No digest yet. Alfred will generate one after observing your daily activity.
+                </p>
+              )}
+            </CardContent>
+          </Card>
 
           {/* Worker Activity Charts */}
           <WorkerActivityCharts />

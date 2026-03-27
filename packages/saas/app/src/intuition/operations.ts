@@ -2,6 +2,8 @@ import type {
   GetIntuitionStatus,
   GetIntuitionInstincts,
   GetIntuitionQueue,
+  GetObservations,
+  GetRecentJudgments,
   RouteInput,
   EnableIntuition,
   DisableIntuition,
@@ -36,4 +38,22 @@ export const enableIntuition: EnableIntuition<void, any> = async (_args, context
 export const disableIntuition: DisableIntuition<void, any> = async (_args, context) => {
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, { method: "POST", path: "/api/v1/learning/disable" });
+};
+
+export const getObservations: GetObservations<void, any> = async (_args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "GET",
+    path: "/api/v1/vault/list/observation",
+    query: { limit: "10", sort: "date_desc" },
+  });
+};
+
+export const getRecentJudgments: GetRecentJudgments<void, any> = async (_args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "GET",
+    path: "/api/v1/vault/list/observation",
+    query: { limit: "20", sort: "date_desc" },
+  });
 };
