@@ -44,6 +44,7 @@ services:
     volumes:
       - /mnt/encrypted/openclaw:/home/node/.openclaw
       - /mnt/encrypted/vault:/home/node/.openclaw/workspace/vault
+      - /mnt/encrypted/vault:/vault
       - /mnt/encrypted/alfred:/alfred-data
       - shared_tmp:/tmp
     ports:
