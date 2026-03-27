@@ -1,7 +1,5 @@
 import { addRoute, matchRoute } from "../server.js";
-import type { ApiRequest } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
-import type { ServerResponse } from "node:http";
 
 // ---------------------------------------------------------------------------
 // Tool definitions — each maps to an existing ctrl API endpoint
