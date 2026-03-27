@@ -317,7 +317,7 @@ async function handleDeleteCredential(req: Request, res: Response) {
   const userId = queryString(req.query.userId);
   if (!userId) return res.status(401).json({ error: "userId required" });
 
-  const { id } = req.params;
+  const id = queryString(req.params.id);
   await prisma.oAuthCredential.deleteMany({
     where: { id, userId },
   });
