@@ -36,4 +36,4 @@ fi
 mkdir -p /app/data
 
 echo "[alfred] Starting daemons..."
-exec alfred --config "$CONFIG" up
+exec alfred --config "$CONFIG" up --foreground
