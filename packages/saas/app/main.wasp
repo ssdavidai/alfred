@@ -245,6 +245,12 @@ page DashboardPage {
   component: import DashboardPage from "@src/dashboard/DashboardPage"
 }
 
+route CommandCenterRoute { path: "/dashboard/command-center", to: CommandCenterPage }
+page CommandCenterPage {
+  authRequired: true,
+  component: import CommandCenterPage from "@src/dashboard/CommandCenterPage"
+}
+
 route InboxRoute { path: "/dashboard/inbox", to: InboxPage }
 page InboxPage {
   authRequired: true,

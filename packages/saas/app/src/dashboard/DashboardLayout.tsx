@@ -34,10 +34,11 @@ interface NavItem {
 }
 
 const dashboardNavItems: NavItem[] = [
-  { path: "/dashboard", label: "Home", icon: LayoutDashboard },
-  { path: "/dashboard/streams", label: "Streams", icon: Radio },
+  { path: "/dashboard", label: "Alfred", icon: Home },
+  { path: "/dashboard/command-center", label: "Command Center", icon: LayoutDashboard },
   { path: "/dashboard/vault", label: "Vault", icon: FolderTree },
   { path: "/dashboard/tasks", label: "Intelligence", icon: Brain },
+  { path: "/dashboard/streams", label: "Streams", icon: Radio },
   { path: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
 
@@ -55,11 +56,17 @@ const adminNavItems: NavItem[] = [
 function getOrbIntensity(pathname: string): number {
   // VaultNebula replaces the orb background on the home page
   if (pathname === "/dashboard") return 0;
+  if (pathname.startsWith("/dashboard/command-center")) return 0.35;
   if (pathname.startsWith("/dashboard/tasks") || pathname.startsWith("/dashboard/intuition")) return 0.35;
   if (pathname.startsWith("/dashboard/vault")) return 0.25;
   if (pathname.startsWith("/dashboard/streams")) return 0.35;
   if (pathname.startsWith("/dashboard/settings")) return 0.2;
   return 0.35;
+}
+
+/** On the nebula homepage, the sidebar should be fully transparent glass */
+function isNebulaPage(pathname: string): boolean {
+  return pathname === "/dashboard";
 }
 
 // ---------------------------------------------------------------------------
@@ -70,10 +77,12 @@ function CollapsibleSidebar({
   navItems,
   adminItems,
   isActive,
+  glassMode,
 }: {
   navItems: NavItem[];
   adminItems: NavItem[] | null;
   isActive: (path: string) => boolean;
+  glassMode?: boolean;
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
 
@@ -83,7 +92,12 @@ function CollapsibleSidebar({
       onMouseLeave={() => setIsExpanded(false)}
       animate={{ width: isExpanded ? 280 : 60 }}
       transition={{ type: "spring" as const, stiffness: 200, damping: 25 }}
-      className="fixed inset-y-0 left-0 z-20 hidden flex-col border-r border-white/[0.06] bg-black/30 backdrop-blur-xl md:flex"
+      className={cn(
+        "fixed inset-y-0 left-0 z-20 hidden flex-col border-r backdrop-blur-xl md:flex",
+        glassMode
+          ? "border-white/[0.03] bg-black/10"
+          : "border-white/[0.06] bg-black/30",
+      )}
     >
       {/* Logo */}
       <div className="flex h-16 items-center px-4">
@@ -362,6 +376,7 @@ export default function DashboardLayout({
 
   const adminItems = user?.isAdmin ? adminNavItems : null;
   const orbIntensity = getOrbIntensity(location.pathname);
+  const glassMode = isNebulaPage(location.pathname);
 
   return (
     <div className="min-h-screen bg-transparent">
@@ -377,6 +392,7 @@ export default function DashboardLayout({
           navItems={dashboardNavItems}
           adminItems={adminItems}
           isActive={isActive}
+          glassMode={glassMode}
         />
 
         {/* Mobile header */}

@@ -1,5 +1,6 @@
-import { Suspense } from "react";
-import { Canvas } from "@react-three/fiber";
+import { Suspense, useRef, useEffect, useCallback } from "react";
+import * as THREE from "three";
+import { Canvas, useThree, useFrame } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import { EffectComposer, Bloom } from "@react-three/postprocessing";
 import { Loader2 } from "lucide-react";
@@ -7,12 +8,22 @@ import NebulaScene from "./NebulaScene";
 import type { NebulaData } from "./NebulaScene";
 
 // ---------------------------------------------------------------------------
+// Camera API — exposed to parent via ref
+// ---------------------------------------------------------------------------
+
+export interface CameraApi {
+  zoomTo: (x: number, y: number, z: number) => void;
+  reset: () => void;
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 interface VaultNebulaProps {
   nebulaData: NebulaData | null;
-  onRecordClick?: (clusterId: string) => void;
+  onRecordClick?: (clusterId: string, position?: { x: number; y: number; z: number }) => void;
+  cameraRef?: React.RefObject<CameraApi | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -31,10 +42,75 @@ function NebulaLoading() {
 }
 
 // ---------------------------------------------------------------------------
+// Camera controller — handles smooth zoom and reset inside the canvas
+// ---------------------------------------------------------------------------
+
+const DEFAULT_POS = new THREE.Vector3(0, 0, 8);
+
+interface CameraControllerProps {
+  cameraRef?: React.RefObject<CameraApi | null>;
+}
+
+function CameraController({ cameraRef }: CameraControllerProps) {
+  const { camera } = useThree();
+  const targetRef = useRef<THREE.Vector3 | null>(null);
+  const progressRef = useRef(0);
+  const startPosRef = useRef(new THREE.Vector3());
+  const isAnimatingRef = useRef(false);
+
+  const zoomTo = useCallback(
+    (x: number, y: number, z: number) => {
+      startPosRef.current.copy(camera.position);
+      // Offset the target so the camera looks at the cluster from a comfortable distance
+      targetRef.current = new THREE.Vector3(x, y, z + 3);
+      progressRef.current = 0;
+      isAnimatingRef.current = true;
+    },
+    [camera],
+  );
+
+  const reset = useCallback(() => {
+    startPosRef.current.copy(camera.position);
+    targetRef.current = DEFAULT_POS.clone();
+    progressRef.current = 0;
+    isAnimatingRef.current = true;
+  }, [camera]);
+
+  // Expose camera API to parent via ref
+  useEffect(() => {
+    if (cameraRef) {
+      (cameraRef as React.MutableRefObject<CameraApi | null>).current = { zoomTo, reset };
+    }
+    return () => {
+      if (cameraRef) {
+        (cameraRef as React.MutableRefObject<CameraApi | null>).current = null;
+      }
+    };
+  }, [cameraRef, zoomTo, reset]);
+
+  useFrame((_, delta) => {
+    if (!isAnimatingRef.current || !targetRef.current) return;
+    progressRef.current = Math.min(1, progressRef.current + delta * 1.0);
+    // Smooth ease-out
+    const t = 1 - Math.pow(1 - progressRef.current, 3);
+    camera.position.lerpVectors(startPosRef.current, targetRef.current, t);
+    if (progressRef.current >= 1) {
+      isAnimatingRef.current = false;
+    }
+  });
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // VaultNebula — full-viewport R3F canvas
 // ---------------------------------------------------------------------------
 
-export default function VaultNebula({ nebulaData, onRecordClick }: VaultNebulaProps) {
+export default function VaultNebula({
+  nebulaData,
+  onRecordClick,
+  cameraRef,
+}: VaultNebulaProps) {
   if (!nebulaData) {
     return (
       <div className="fixed inset-0 z-0 bg-black">
@@ -53,6 +129,8 @@ export default function VaultNebula({ nebulaData, onRecordClick }: VaultNebulaPr
       >
         <color attach="background" args={["#000000"]} />
         <ambientLight intensity={0.1} />
+
+        <CameraController cameraRef={cameraRef} />
 
         <Suspense fallback={null}>
           <NebulaScene data={nebulaData} onRecordClick={onRecordClick} />
