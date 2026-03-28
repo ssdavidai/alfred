@@ -30,6 +30,7 @@ import {
 import StreamCard from "./components/StreamCard";
 import EventLog from "./components/EventLog";
 import { SOURCES, type SourceDefinition } from "./sources";
+import SpotlightCard from "../components/ui/SpotlightCard";
 
 const TRANSPORT_LABELS: Record<string, string> = {
   pull: "Pull",
@@ -224,10 +225,7 @@ export default function StreamsPage() {
           {sourceStats.map((stat) => {
             const Icon = stat.icon;
             return (
-              <div
-                key={stat.id}
-                className="rounded-sm border border-gold-dim/20 bg-black/20 px-3 py-2.5 text-center"
-              >
+              <SpotlightCard key={stat.id} className="text-center">
                 <Icon className="mx-auto mb-1.5 h-4 w-4 text-muted-foreground/60" />
                 <p className="font-mono text-[0.6rem] font-medium uppercase tracking-wider text-cream/80">
                   {stat.label}
@@ -252,7 +250,7 @@ export default function StreamsPage() {
                     {stat.available ? "not connected" : "coming soon"}
                   </p>
                 )}
-              </div>
+              </SpotlightCard>
             );
           })}
         </div>
@@ -274,24 +272,26 @@ export default function StreamsPage() {
       )}
 
       {streams && streams.length === 0 && (
-        <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-8 text-center">
-          <Radio className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
-          <p className="font-mono text-sm text-muted-foreground">
-            No integrations connected yet
-          </p>
-          <p className="mt-1 font-mono text-xs text-muted-foreground/50">
-            Connect an app to start streaming events into Alfred
-          </p>
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-4 gap-1.5 font-mono text-xs"
-            onClick={() => setShowConnectDialog(true)}
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Connect Your First Integration
-          </Button>
-        </div>
+        <SpotlightCard>
+          <div className="text-center py-4">
+            <Radio className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
+            <p className="font-mono text-sm text-muted-foreground">
+              No integrations connected yet
+            </p>
+            <p className="mt-1 font-mono text-xs text-muted-foreground/50">
+              Connect an app to start streaming events into Alfred
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-4 gap-1.5 font-mono text-xs"
+              onClick={() => setShowConnectDialog(true)}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Connect Your First Integration
+            </Button>
+          </div>
+        </SpotlightCard>
       )}
 
       {streams && streams.length > 0 && (

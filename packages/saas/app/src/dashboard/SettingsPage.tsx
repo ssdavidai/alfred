@@ -9,7 +9,7 @@ import {
   revokeApiKey,
 } from "wasp/client/operations";
 import DashboardLayout from "./DashboardLayout";
-import { Card, CardContent, CardTitle } from "../client/components/ui/card";
+
 import { Button } from "../client/components/ui/button";
 import { Input } from "../client/components/ui/input";
 import {
@@ -36,6 +36,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { cn } from "../client/utils";
+import SpotlightCard from "../components/ui/SpotlightCard";
 
 import { AssistantsContent } from "./AssistantsPage";
 import { CredentialsContent } from "./CredentialsPage";
@@ -147,61 +148,51 @@ export function AccountContent() {
 
       <div className="space-y-6">
         {/* Account Info */}
-        <Card>
-          <CardContent className="p-6">
-            <CardTitle className="text-cream mb-4 text-lg">
-              Account
-            </CardTitle>
-            <dl className="space-y-3 text-sm">
-              <div className="flex justify-between">
-                <dt className="text-muted-foreground">Email</dt>
-                <dd className="text-foreground">{user?.email || "-"}</dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-muted-foreground">Plan</dt>
-                <dd className="text-foreground capitalize">
-                  {user?.subscriptionPlan || "None"}
-                </dd>
-              </div>
-              <div className="flex justify-between">
-                <dt className="text-muted-foreground">Subscription Status</dt>
-                <dd className="text-foreground capitalize">
-                  {user?.subscriptionStatus?.replace(/_/g, " ") || "None"}
-                </dd>
-              </div>
-            </dl>
-          </CardContent>
-        </Card>
+        <SpotlightCard title="Account">
+          <dl className="space-y-3 text-sm">
+            <div className="flex justify-between">
+              <dt className="text-muted-foreground">Email</dt>
+              <dd className="text-foreground">{user?.email || "-"}</dd>
+            </div>
+            <div className="flex justify-between">
+              <dt className="text-muted-foreground">Plan</dt>
+              <dd className="text-foreground capitalize">
+                {user?.subscriptionPlan || "None"}
+              </dd>
+            </div>
+            <div className="flex justify-between">
+              <dt className="text-muted-foreground">Subscription Status</dt>
+              <dd className="text-foreground capitalize">
+                {user?.subscriptionStatus?.replace(/_/g, " ") || "None"}
+              </dd>
+            </div>
+          </dl>
+        </SpotlightCard>
 
         {/* Subscription Management */}
-        <Card>
-          <CardContent className="p-6">
-            <CardTitle className="text-cream mb-4 text-lg">
-              Subscription
-            </CardTitle>
-            <p className="text-muted-foreground mb-4 text-sm">
-              Manage your subscription, update payment methods, or cancel through
-              the customer portal.
-            </p>
-            {portalError && (
-              <div className="bg-destructive/10 text-destructive mb-4 rounded-sm p-3 text-sm">
-                <p>Failed to load subscription portal: {portalError.message}</p>
-              </div>
-            )}
-            {portalUrl ? (
-              <Button
-                onClick={() => window.open(portalUrl, "_blank")}
-              >
-                <ExternalLink className="mr-2 h-4 w-4" />
-                Manage Subscription
-              </Button>
-            ) : (
-              <Button disabled={portalLoading || !!portalError}>
-                {portalLoading ? "Loading..." : "No active subscription"}
-              </Button>
-            )}
-          </CardContent>
-        </Card>
+        <SpotlightCard title="Subscription">
+          <p className="text-muted-foreground mb-4 text-sm">
+            Manage your subscription, update payment methods, or cancel through
+            the customer portal.
+          </p>
+          {portalError && (
+            <div className="bg-destructive/10 text-destructive mb-4 rounded-sm p-3 text-sm">
+              <p>Failed to load subscription portal: {portalError.message}</p>
+            </div>
+          )}
+          {portalUrl ? (
+            <Button
+              onClick={() => window.open(portalUrl, "_blank")}
+            >
+              <ExternalLink className="mr-2 h-4 w-4" />
+              Manage Subscription
+            </Button>
+          ) : (
+            <Button disabled={portalLoading || !!portalError}>
+              {portalLoading ? "Loading..." : "No active subscription"}
+            </Button>
+          )}
+        </SpotlightCard>
 
         {/* API Keys */}
         <ApiKeysSection />
@@ -261,12 +252,8 @@ function ApiKeysSection() {
   };
 
   return (
-    <Card>
-      <CardContent className="p-6">
-        <div className="mb-4 flex items-center justify-between">
-          <CardTitle className="text-cream text-lg">
-            API Keys
-          </CardTitle>
+    <SpotlightCard title="API Keys">
+        <div className="mb-4 flex items-center justify-end">
           <div className="flex gap-2">
             <a href="https://alfred.black/docs" target="_blank" rel="noopener noreferrer">
               <Button variant="ghost" size="sm">
@@ -386,7 +373,6 @@ function ApiKeysSection() {
             )}
           </DialogContent>
         </Dialog>
-      </CardContent>
-    </Card>
+    </SpotlightCard>
   );
 }
