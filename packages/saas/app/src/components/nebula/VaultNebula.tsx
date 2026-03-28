@@ -1,65 +1,173 @@
 /**
- * VaultNebula — Pure CSS nebula cloud visualization.
+ * VaultNebula — Data-driven CSS nebula cloud visualization.
  *
- * No WebGL, no Three.js, no Canvas. Just layered radial gradients with
- * CSS animations and an SVG gooey blur filter that makes them merge
- * into organic cloud shapes. Runs at 60fps on any device including phones.
+ * Pure CSS — no WebGL, no Canvas. Layered radial gradients with a refined
+ * SVG blur filter that merges them into organic cloud shapes. Each cloud
+ * region is generated from real vault cluster data (record types + counts).
  *
- * Each gradient blob represents a cluster region in the vault. Colors
- * map to record types: gold (notes), teal (decisions), red (triage),
- * purple (haze), bright gold (core).
+ * HD quality: lower blur stdDeviation (12), more gradient layers with
+ * multiple opacity stops, fine grain detail clouds for texture.
  */
 
+import { useMemo } from "react";
+
 // ---------------------------------------------------------------------------
-// Cloud definitions — position, color, size, animation timing
+// Color mapping — vault record type → nebula cloud color
 // ---------------------------------------------------------------------------
 
-const CLOUDS = [
-  // Large gold nebula (center-left) — notes, conversations
-  { x: 35, y: 40, color: "#C9A84C", size: 55, duration: 25, delay: 0 },
-  { x: 30, y: 50, color: "#B8960B", size: 45, duration: 30, delay: 1 },
+const TYPE_COLORS: Record<string, string> = {
+  note: "#C9A84C",
+  conversation: "#C9A84C",
+  task: "#E8DCC8",
+  decision: "#1E4D5E",
+  assumption: "#2A6B7C",
+  constraint: "#1E4D5E",
+  contradiction: "#FF6B6B",
+  synthesis: "#7B68AE",
+  triage: "#FF6B6B",
+  project: "#D4AF37",
+  matter: "#D4AF37",
+  person: "#C9A84C",
+  org: "#B8960B",
+  event: "#8B7532",
+  observation: "#553888",
+  instinct: "#7B68AE",
+  reflection: "#4A2D78",
+  location: "#2A6B7C",
+  skill: "#D4AF37",
+};
 
-  // Teal region (right) — decisions, assumptions
-  { x: 70, y: 35, color: "#1E4D5E", size: 40, duration: 28, delay: 2 },
-  { x: 75, y: 45, color: "#2A6B7C", size: 35, duration: 22, delay: 0.5 },
+const DEFAULT_COLOR = "#8B7532";
 
-  // Warm red wisp (upper) — triage
-  { x: 25, y: 20, color: "#FF6B6B", size: 30, duration: 32, delay: 1.5 },
+// ---------------------------------------------------------------------------
+// Cloud generation from vault data
+// ---------------------------------------------------------------------------
 
-  // Deep purple haze (lower-right)
-  { x: 60, y: 70, color: "#553888", size: 45, duration: 35, delay: 3 },
-  { x: 55, y: 75, color: "#4A2D78", size: 35, duration: 27, delay: 1 },
+interface CloudDef {
+  x: number;
+  y: number;
+  color: string;
+  size: number;
+  opacity: number;
+  duration: number;
+  delay: number;
+  drift: number;
+}
 
-  // Bright gold core (center)
-  { x: 50, y: 45, color: "#D4AF37", size: 50, duration: 20, delay: 0 },
-  { x: 45, y: 50, color: "#C9A84C", size: 40, duration: 24, delay: 2 },
+/** Deterministic pseudo-random from seed (for stable cloud positions) */
+function seededRandom(seed: number): () => number {
+  let s = seed;
+  return () => {
+    s = (s * 16807 + 0) % 2147483647;
+    return (s - 1) / 2147483646;
+  };
+}
 
-  // Subtle fill clouds for depth
-  { x: 20, y: 65, color: "#8B7532", size: 35, duration: 38, delay: 2.5 },
-  { x: 80, y: 60, color: "#2A4A5E", size: 30, duration: 33, delay: 1 },
-  { x: 50, y: 20, color: "#C9A84C", size: 25, duration: 29, delay: 3 },
-];
+function generateClouds(
+  vaultTypes: Record<string, number> | null,
+): CloudDef[] {
+  if (!vaultTypes || Object.keys(vaultTypes).length === 0) {
+    // Fallback: ambient gold nebula when no data
+    return [
+      { x: 40, y: 45, color: "#C9A84C", size: 50, opacity: 0.25, duration: 25, delay: 0, drift: 0 },
+      { x: 60, y: 40, color: "#D4AF37", size: 40, opacity: 0.2, duration: 30, delay: 1, drift: 1 },
+      { x: 50, y: 55, color: "#8B7532", size: 45, opacity: 0.15, duration: 35, delay: 2, drift: 2 },
+      { x: 35, y: 35, color: "#1E4D5E", size: 30, opacity: 0.12, duration: 28, delay: 1.5, drift: 3 },
+      { x: 65, y: 60, color: "#553888", size: 35, opacity: 0.1, duration: 32, delay: 3, drift: 0 },
+    ];
+  }
+
+  const types = Object.entries(vaultTypes)
+    .filter(([_, count]: [string, number]) => count > 0)
+    .sort(([, a]: [string, number], [, b]: [string, number]) => b - a);
+
+  const totalRecords = types.reduce((sum: number, [, c]: [string, number]) => sum + c, 0);
+  const clouds: CloudDef[] = [];
+  const rand = seededRandom(42);
+
+  // Position clusters in a loose spiral/scatter
+  const centerX = 50;
+  const centerY = 48;
+
+  types.forEach(([type, count]: [string, number], i: number) => {
+    const color = TYPE_COLORS[type] || DEFAULT_COLOR;
+    const weight = count / totalRecords;
+
+    // Position: spiral outward from center
+    const angle = (i / types.length) * Math.PI * 2 + rand() * 0.5;
+    const radius = 12 + i * 4 + rand() * 8;
+    const x = centerX + Math.cos(angle) * radius;
+    const y = centerY + Math.sin(angle) * radius;
+
+    // Size proportional to record count (sqrt for visual balance)
+    const baseSize = 15 + Math.sqrt(weight) * 50;
+
+    // Main cloud blob
+    clouds.push({
+      x, y, color,
+      size: baseSize,
+      opacity: 0.12 + weight * 0.2,
+      duration: 20 + rand() * 20,
+      delay: rand() * 4,
+      drift: i % 6,
+    });
+
+    // Secondary detail blob (offset, smaller, same color)
+    clouds.push({
+      x: x + (rand() - 0.5) * 10,
+      y: y + (rand() - 0.5) * 8,
+      color,
+      size: baseSize * 0.6,
+      opacity: 0.08 + weight * 0.1,
+      duration: 25 + rand() * 15,
+      delay: rand() * 3,
+      drift: (i + 2) % 6,
+    });
+
+    // Faint halo for larger clusters
+    if (weight > 0.1) {
+      clouds.push({
+        x: x + (rand() - 0.5) * 6,
+        y: y + (rand() - 0.5) * 6,
+        color,
+        size: baseSize * 1.3,
+        opacity: 0.04,
+        duration: 30 + rand() * 10,
+        delay: rand() * 2,
+        drift: (i + 4) % 6,
+      });
+    }
+  });
+
+  return clouds;
+}
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
 interface VaultNebulaProps {
-  nebulaData?: unknown;
+  /** vault.types from getDashboardData: Record<string, number> */
+  vaultTypes?: Record<string, number> | null;
 }
 
-export default function VaultNebula(_props: VaultNebulaProps) {
+export default function VaultNebula({ vaultTypes }: VaultNebulaProps) {
+  const clouds = useMemo(
+    () => generateClouds(vaultTypes ?? null),
+    [vaultTypes],
+  );
+
   return (
     <div className="fixed inset-0 z-0 overflow-hidden bg-black">
-      {/* SVG filter for organic cloud merging */}
+      {/* SVG filter — refined blur for HD cloud merging */}
       <svg className="absolute h-0 w-0">
         <defs>
           <filter id="nebula-gooey">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="30" result="blur" />
+            <feGaussianBlur in="SourceGraphic" stdDeviation="12" result="blur" />
             <feColorMatrix
               in="blur"
               mode="matrix"
-              values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 22 -8"
+              values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -7"
               result="goo"
             />
             <feBlend in="SourceGraphic" in2="goo" />
@@ -72,18 +180,18 @@ export default function VaultNebula(_props: VaultNebulaProps) {
         className="absolute inset-0"
         style={{ filter: "url(#nebula-gooey)" }}
       >
-        {CLOUDS.map((cloud, i) => (
+        {clouds.map((cloud: CloudDef, i: number) => (
           <div
             key={i}
             className="absolute rounded-full"
             style={{
               left: `${cloud.x}%`,
               top: `${cloud.y}%`,
-              width: `${cloud.size}vmax`,
-              height: `${cloud.size}vmax`,
+              width: `${cloud.size}vmin`,
+              height: `${cloud.size}vmin`,
               transform: "translate(-50%, -50%)",
-              background: `radial-gradient(circle, ${cloud.color}40 0%, ${cloud.color}15 40%, transparent 70%)`,
-              animation: `nebula-drift-${i % 4} ${cloud.duration}s ease-in-out infinite`,
+              background: `radial-gradient(ellipse at 45% 45%, ${cloud.color}${hex(cloud.opacity * 1.5)} 0%, ${cloud.color}${hex(cloud.opacity)} 30%, ${cloud.color}${hex(cloud.opacity * 0.4)} 60%, transparent 80%)`,
+              animation: `nebula-drift-${cloud.drift} ${cloud.duration}s ease-in-out infinite`,
               animationDelay: `${cloud.delay}s`,
             }}
           />
@@ -94,39 +202,58 @@ export default function VaultNebula(_props: VaultNebulaProps) {
       <div
         className="absolute inset-0"
         style={{
-          background: "radial-gradient(ellipse at 45% 45%, rgba(201,168,76,0.06) 0%, transparent 60%)",
+          background:
+            "radial-gradient(ellipse at 48% 46%, rgba(201,168,76,0.04) 0%, transparent 55%)",
           animation: "nebula-breathe 8s ease-in-out infinite",
         }}
       />
 
-      {/* Keyframes */}
+      {/* Keyframes — 6 drift patterns for variety */}
       <style>{`
         @keyframes nebula-drift-0 {
           0%, 100% { transform: translate(-50%, -50%) translate(0, 0); }
-          25% { transform: translate(-50%, -50%) translate(2vw, -1.5vh); }
-          50% { transform: translate(-50%, -50%) translate(-1vw, 2vh); }
-          75% { transform: translate(-50%, -50%) translate(1.5vw, 1vh); }
+          25% { transform: translate(-50%, -50%) translate(1.5vw, -1vh); }
+          50% { transform: translate(-50%, -50%) translate(-0.5vw, 1.5vh); }
+          75% { transform: translate(-50%, -50%) translate(1vw, 0.5vh); }
         }
         @keyframes nebula-drift-1 {
           0%, 100% { transform: translate(-50%, -50%) translate(0, 0); }
-          33% { transform: translate(-50%, -50%) translate(-2vw, 1vh); }
-          66% { transform: translate(-50%, -50%) translate(1.5vw, -2vh); }
+          33% { transform: translate(-50%, -50%) translate(-1.5vw, 0.8vh); }
+          66% { transform: translate(-50%, -50%) translate(1vw, -1.2vh); }
         }
         @keyframes nebula-drift-2 {
           0%, 100% { transform: translate(-50%, -50%) translate(0, 0); }
-          25% { transform: translate(-50%, -50%) translate(1vw, 2vh); }
-          50% { transform: translate(-50%, -50%) translate(-2vw, -1vh); }
-          75% { transform: translate(-50%, -50%) translate(2vw, -1.5vh); }
+          25% { transform: translate(-50%, -50%) translate(0.8vw, 1.5vh); }
+          50% { transform: translate(-50%, -50%) translate(-1.2vw, -0.5vh); }
+          75% { transform: translate(-50%, -50%) translate(1.5vw, -1vh); }
         }
         @keyframes nebula-drift-3 {
           0%, 100% { transform: translate(-50%, -50%) translate(0, 0); }
-          50% { transform: translate(-50%, -50%) translate(-1.5vw, 1.5vh); }
+          50% { transform: translate(-50%, -50%) translate(-1vw, 1vh); }
+        }
+        @keyframes nebula-drift-4 {
+          0%, 100% { transform: translate(-50%, -50%) translate(0, 0); }
+          30% { transform: translate(-50%, -50%) translate(1vw, -0.8vh); }
+          70% { transform: translate(-50%, -50%) translate(-0.8vw, 1.2vh); }
+        }
+        @keyframes nebula-drift-5 {
+          0%, 100% { transform: translate(-50%, -50%) translate(0, 0); }
+          40% { transform: translate(-50%, -50%) translate(-1.2vw, -0.5vh); }
+          80% { transform: translate(-50%, -50%) translate(0.5vw, 1vh); }
         }
         @keyframes nebula-breathe {
-          0%, 100% { opacity: 0.4; transform: scale(1); }
-          50% { opacity: 0.8; transform: scale(1.05); }
+          0%, 100% { opacity: 0.5; transform: scale(1); }
+          50% { opacity: 1; transform: scale(1.03); }
         }
       `}</style>
     </div>
   );
+}
+
+/** Convert opacity 0-1 to 2-char hex for CSS color alpha */
+function hex(opacity: number): string {
+  const clamped = Math.max(0, Math.min(1, opacity));
+  return Math.round(clamped * 255)
+    .toString(16)
+    .padStart(2, "0");
 }
