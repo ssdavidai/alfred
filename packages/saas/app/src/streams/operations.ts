@@ -41,8 +41,6 @@ export const getStreams: GetStreams<void, any> = async (_args, context) => {
 
 export const getStreamEvents: GetStreamEvents<{ streamId: string }, any> = async (args, context) => {
   if (!context.user) throw new HttpError(401, "Not authenticated");
-  const stream = await prisma.stream.findUnique({ where: { id: args.streamId } });
-  if (!stream || stream.userId !== context.user.id) throw new HttpError(404, "Stream not found");
 
   // Proxy to tenant ctrl API for actual events (stored in JSONL on tenant)
   try {
@@ -51,9 +49,9 @@ export const getStreamEvents: GetStreamEvents<{ streamId: string }, any> = async
       path: `/api/v1/streams/${args.streamId}/events`,
       query: { limit: "50" },
     });
-    console.log(`[getStreamEvents] proxy returned ${JSON.stringify(tenantData)?.length} bytes, events: ${tenantData?.events?.length ?? 'undefined'}`);
     // Map snake_case from ctrl API to camelCase for the UI
-    return (tenantData?.events || []).map((e: any) => ({
+    const events = tenantData?.events || [];
+    return events.map((e: any) => ({
       id: e.id,
       streamId: e.stream_id,
       receivedAt: e.received_at,
@@ -61,16 +59,12 @@ export const getStreamEvents: GetStreamEvents<{ streamId: string }, any> = async
       summary: e.summary,
       raw: e.raw,
       sourceRef: e.source_ref,
-      processed: false,  // TODO: check processed-events.json status
+      processed: false,
     }));
   } catch (err: any) {
     console.error(`[getStreamEvents] proxy failed: ${err?.message || err}`);
-    // Tenant unreachable — fall back to Prisma (may be empty)
-    return prisma.streamEvent.findMany({
-      where: { streamId: args.streamId },
-      orderBy: { receivedAt: "desc" },
-      take: 50,
-    });
+    // Tenant unreachable — return empty
+    return [];
   }
 };
 
