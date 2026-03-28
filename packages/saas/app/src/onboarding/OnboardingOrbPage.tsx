@@ -304,7 +304,7 @@ const wordVariants = {
     opacity: 1,
     y: 0,
     filter: "blur(0px)",
-    transition: { duration: 0.5, ease: "easeOut" },
+    transition: { duration: 0.5, ease: "easeOut" as const },
   },
 };
 
@@ -319,7 +319,7 @@ function AnimatedTextReveal() {
   useEffect(() => {
     if (activeSentence >= sentences.length - 1) return;
     const timer = setTimeout(
-      () => setActiveSentence((s) => s + 1),
+      () => setActiveSentence((s: number) => s + 1),
       2000,
     );
     return () => clearTimeout(timer);
@@ -506,7 +506,7 @@ function LetterPhase({
     visible: (i: number) => ({
       opacity: 1,
       y: 0,
-      transition: { duration: 0.8, delay: 0.3 + i * 0.2, ease: "easeOut" },
+      transition: { duration: 0.8, delay: 0.3 + i * 0.2, ease: "easeOut" as const },
     }),
   };
 
@@ -516,7 +516,7 @@ function LetterPhase({
       opacity: 1,
       y: 0,
       transition: {
-        type: "spring",
+        type: "spring" as const,
         stiffness: 80,
         damping: 14,
         delay: 0.5 + paragraphs.length * 0.2 + i * 0.12,
