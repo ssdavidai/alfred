@@ -595,12 +595,12 @@ action updateInstinct {
 // ============================================================
 query getStreams {
   fn: import { getStreams } from "@src/streams/operations",
-  entities: [Stream, StreamEvent]
+  entities: [Stream, StreamEvent, Instance]
 }
 
 query getStreamEvents {
   fn: import { getStreamEvents } from "@src/streams/operations",
-  entities: [Stream, StreamEvent]
+  entities: [Instance]
 }
 
 action createStream {
