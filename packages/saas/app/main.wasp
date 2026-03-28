@@ -230,6 +230,12 @@ page OnboardingPage {
   component: import OnboardingPage from "@src/onboarding/OnboardingPage"
 }
 
+route OnboardingOrbRoute { path: "/onboarding/orb", to: OnboardingOrbPage }
+page OnboardingOrbPage {
+  authRequired: true,
+  component: import OnboardingOrbPage from "@src/onboarding/OnboardingOrbPage"
+}
+
 // ============================================================
 // Dashboard
 // ============================================================

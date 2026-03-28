@@ -1,12 +1,10 @@
-import { useState, useCallback } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "wasp/client/auth";
 import {
   useQuery,
   getStreams,
   updateWorkspaceFile,
-  startOnboarding,
-  getFirstBrief,
 } from "wasp/client/operations";
 import { Button } from "../client/components/ui/button";
 import { cn } from "../client/utils";
@@ -19,7 +17,6 @@ import {
   User,
   Sparkles,
   Radio,
-  LayoutDashboard,
   FileText,
 } from "lucide-react";
 
@@ -132,7 +129,7 @@ export default function OnboardingPage() {
   // Pre-fill email when user loads
   useState(() => {
     if (user?.email && !userForm.email) {
-      setUserForm((prev) => ({ ...prev, email: user.email ?? "" }));
+      setUserForm((prev: typeof userForm) => ({ ...prev, email: user.email ?? "" }));
     }
   });
 
@@ -204,11 +201,11 @@ export default function OnboardingPage() {
         setSaving(false);
       }
     }
-    setStep((s) => Math.min(s + 1, STEPS.length - 1));
+    setStep((s: number) => Math.min(s + 1, STEPS.length - 1));
   };
 
   const handleBack = () => {
-    setStep((s) => Math.max(s - 1, 0));
+    setStep((s: number) => Math.max(s - 1, 0));
   };
 
   const handleConnectGmail = () => {
@@ -300,7 +297,7 @@ export default function OnboardingPage() {
             userName={userForm.fullName}
             presetLabel={SOUL_PRESETS[soulPreset].label}
             gmailConnected={gmailConnected}
-            onFinish={() => navigate("/dashboard")}
+            onFinish={() => navigate("/onboarding/orb")}
           />
         )}
       </div>
@@ -359,7 +356,7 @@ function StepUser({
           <input
             type="text"
             value={form.fullName}
-            onChange={(e) => update("fullName", e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => update("fullName", e.target.value)}
             placeholder="Jane Smith"
             className={inputClass}
           />
@@ -369,7 +366,7 @@ function StepUser({
           <input
             type="email"
             value={form.email}
-            onChange={(e) => update("email", e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => update("email", e.target.value)}
             placeholder="jane@example.com"
             className={inputClass}
           />
@@ -379,7 +376,7 @@ function StepUser({
           <input
             type="text"
             value={form.location}
-            onChange={(e) => update("location", e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => update("location", e.target.value)}
             placeholder="San Francisco, CA (Pacific Time)"
             className={inputClass}
           />
@@ -388,7 +385,7 @@ function StepUser({
         <Field label="What you do">
           <textarea
             value={form.whatYouDo}
-            onChange={(e) => update("whatYouDo", e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => update("whatYouDo", e.target.value)}
             placeholder="2-3 sentences about your work, role, or what you spend your days on."
             rows={3}
             className={inputClass}
@@ -398,7 +395,7 @@ function StepUser({
         <Field label="Your priorities">
           <textarea
             value={form.priorities}
-            onChange={(e) => update("priorities", e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => update("priorities", e.target.value)}
             placeholder="What matters most to you right now? Projects, goals, themes."
             rows={3}
             className={inputClass}
@@ -408,7 +405,7 @@ function StepUser({
         <Field label="Family / Household" optional>
           <textarea
             value={form.household}
-            onChange={(e) => update("household", e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => update("household", e.target.value)}
             placeholder="Who lives with you, pets, anything Alfred should know about your household."
             rows={2}
             className={inputClass}
@@ -504,7 +501,7 @@ function StepSoul({
         </label>
         <textarea
           value={customInstructions}
-          onChange={(e) => onCustomChange(e.target.value)}
+          onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => onCustomChange(e.target.value)}
           placeholder="Any additional instructions for Alfred's behavior..."
           rows={3}
           className={inputClass}
@@ -615,28 +612,6 @@ function StepDone({
   gmailConnected: boolean;
   onFinish: () => void;
 }) {
-  const [briefState, setBriefState] = useState<
-    "idle" | "starting" | "generating" | "ready" | "error"
-  >("idle");
-  const [briefError, setBriefError] = useState<string | null>(null);
-
-  const handleGenerateBrief = async () => {
-    setBriefState("starting");
-    setBriefError(null);
-    try {
-      await startOnboarding({});
-      setBriefState("generating");
-    } catch (e: any) {
-      console.error("Failed to start onboarding workflow:", e);
-      setBriefError(e?.message || "Failed to start onboarding workflow");
-      setBriefState("error");
-    }
-  };
-
-  const handleBriefReady = useCallback(() => {
-    setBriefState("ready");
-  }, []);
-
   return (
     <div className="text-center">
       <h1 className="font-serif text-4xl font-light text-cream mb-4">
@@ -664,123 +639,14 @@ function StepDone({
         />
       </div>
 
-      {/* First Brief Generation */}
-      {briefState === "idle" && (
-        <div className="mb-8">
-          <Button onClick={handleGenerateBrief} variant="outline" size="lg">
-            <FileText className="mr-2 h-4 w-4" />
-            Generate Your First Brief
-          </Button>
-          <p className="mt-3 text-xs text-[#8A8680]">
-            Alfred will read your connected data and prepare a personalized summary.
-          </p>
-        </div>
-      )}
-
-      {briefState === "starting" && (
-        <div className="mb-8 rounded-sm border border-[#333] bg-[#111] p-6">
-          <div className="flex items-center justify-center gap-3">
-            <Loader2 className="h-4 w-4 animate-spin text-gold" />
-            <p className="font-sans text-sm text-cream/70">
-              Starting onboarding workflow...
-            </p>
-          </div>
-        </div>
-      )}
-
-      {briefState === "generating" && (
-        <div className="mb-8">
-          <FirstBriefInline onBriefReady={handleBriefReady} />
-        </div>
-      )}
-
-      {briefState === "ready" && (
-        <div className="mb-8">
-          <FirstBriefInline onBriefReady={handleBriefReady} />
-        </div>
-      )}
-
-      {briefState === "error" && (
-        <div className="mb-8">
-          <div className="rounded-sm border border-destructive/30 bg-destructive/10 p-4 mb-4">
-            <p className="font-sans text-sm text-destructive">
-              {briefError || "Something went wrong."}
-            </p>
-          </div>
-          <Button onClick={handleGenerateBrief} variant="outline" size="sm">
-            Try Again
-          </Button>
-        </div>
-      )}
-
-      <Button onClick={onFinish} size="lg">
-        <LayoutDashboard className="mr-2 h-4 w-4" />
-        Go to Dashboard
-      </Button>
-    </div>
-  );
-}
-
-/**
- * Inline brief display for the onboarding completion page.
- * Polls for the brief and shows it when ready.
- */
-function FirstBriefInline({ onBriefReady }: { onBriefReady: () => void }) {
-  const [notified, setNotified] = useState(false);
-  const { data } = useQuery(getFirstBrief, undefined, {
-    refetchInterval: 5_000,
-  });
-
-  const brief = data?.brief ?? null;
-
-  // Notify parent once when brief arrives
-  if (brief && !notified) {
-    setNotified(true);
-    setTimeout(() => onBriefReady(), 0);
-  }
-
-  if (!brief) {
-    return (
-      <div className="rounded-sm border border-[#333] bg-[#111] p-6">
-        <div className="flex items-center justify-center gap-3 mb-2">
-          <div className="relative flex h-5 w-5 items-center justify-center">
-            <div className="absolute h-5 w-5 animate-ping rounded-full bg-gold/20" />
-            <div className="h-2.5 w-2.5 rounded-full bg-gold/60" />
-          </div>
-          <p className="font-sans text-sm text-cream/70">
-            Alfred is reading your emails and preparing your personalized brief.
-          </p>
-        </div>
-        <p className="font-mono text-[0.6rem] text-muted-foreground/50">
-          This takes about 2 minutes.
+      <div className="mb-8">
+        <Button onClick={onFinish} variant="outline" size="lg">
+          <FileText className="mr-2 h-4 w-4" />
+          Generate Your First Brief
+        </Button>
+        <p className="mt-3 text-xs text-[#8A8680]">
+          Alfred will read your connected data and prepare a personalized summary.
         </p>
-      </div>
-    );
-  }
-
-  // Render the brief text with basic formatting
-  const paragraphs = brief.split(/\n{2,}/);
-  return (
-    <div className="rounded-sm border border-gold/20 bg-gold/5 p-6 text-left">
-      <div className="flex items-center gap-2 mb-4">
-        <FileText className="h-4 w-4 text-gold" />
-        <span className="font-serif text-base font-light text-cream">
-          Your First Brief
-        </span>
-      </div>
-      <div className="space-y-3">
-        {paragraphs.map((p: string, i: number) => (
-          <p
-            key={i}
-            className="font-sans text-sm font-light leading-relaxed text-cream/80"
-            dangerouslySetInnerHTML={{
-              __html: p
-                .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-                .replace(/\*(.+?)\*/g, "<em>$1</em>")
-                .replace(/\n/g, "<br />"),
-            }}
-          />
-        ))}
       </div>
     </div>
   );
