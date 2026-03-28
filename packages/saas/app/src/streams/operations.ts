@@ -51,6 +51,7 @@ export const getStreamEvents: GetStreamEvents<{ streamId: string }, any> = async
       path: `/api/v1/streams/${args.streamId}/events`,
       query: { limit: "50" },
     });
+    console.log(`[getStreamEvents] proxy returned ${JSON.stringify(tenantData)?.length} bytes, events: ${tenantData?.events?.length ?? 'undefined'}`);
     // Map snake_case from ctrl API to camelCase for the UI
     return (tenantData?.events || []).map((e: any) => ({
       id: e.id,
@@ -62,7 +63,8 @@ export const getStreamEvents: GetStreamEvents<{ streamId: string }, any> = async
       sourceRef: e.source_ref,
       processed: false,  // TODO: check processed-events.json status
     }));
-  } catch {
+  } catch (err: any) {
+    console.error(`[getStreamEvents] proxy failed: ${err?.message || err}`);
     // Tenant unreachable — fall back to Prisma (may be empty)
     return prisma.streamEvent.findMany({
       where: { streamId: args.streamId },
