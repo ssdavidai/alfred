@@ -26,6 +26,7 @@ import {
   FolderOpen,
   BookMarked,
 } from "lucide-react";
+import SpotlightCard from "../components/ui/SpotlightCard";
 
 type IntelligenceTab = "tasks" | "triage" | "matters" | "learning" | "judgment" | "activity" | "quarantine";
 
@@ -192,13 +193,15 @@ function TriageContent() {
 
   if (items.length === 0) {
     return (
-      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-8 text-center">
-        <Inbox className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
-        <p className="font-mono text-sm text-muted-foreground">No triage items</p>
-        <p className="mt-1 font-mono text-xs text-muted-foreground/50">
-          Incoming items that need review will appear here
-        </p>
-      </div>
+      <SpotlightCard>
+        <div className="text-center py-4">
+          <Inbox className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
+          <p className="font-mono text-sm text-muted-foreground">No triage items</p>
+          <p className="mt-1 font-mono text-xs text-muted-foreground/50">
+            Incoming items that need review will appear here
+          </p>
+        </div>
+      </SpotlightCard>
     );
   }
 
@@ -295,13 +298,15 @@ function MattersContent() {
 
   if (items.length === 0) {
     return (
-      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-8 text-center">
-        <Briefcase className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
-        <p className="font-mono text-sm text-muted-foreground">No matters</p>
-        <p className="mt-1 font-mono text-xs text-muted-foreground/50">
-          Active matters and cases will appear here
-        </p>
-      </div>
+      <SpotlightCard>
+        <div className="text-center py-4">
+          <Briefcase className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
+          <p className="font-mono text-sm text-muted-foreground">No matters</p>
+          <p className="mt-1 font-mono text-xs text-muted-foreground/50">
+            Active matters and cases will appear here
+          </p>
+        </div>
+      </SpotlightCard>
     );
   }
 
@@ -378,11 +383,7 @@ function ActivityTab() {
       <IntuitionActivityContent />
 
       {/* Recent Sessions */}
-      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
-        <div className="mb-3 flex items-center gap-2">
-          <FolderOpen className="h-4 w-4 text-gold" />
-          <h2 className="font-serif text-base font-light text-cream">Recent Sessions</h2>
-        </div>
+      <SpotlightCard title="Recent Sessions" icon={<FolderOpen className="h-4 w-4 text-gold" />}>
         {sessionsLoading ? (
           <div className="flex items-center gap-2 py-4">
             <Loader2 className="h-4 w-4 animate-spin text-gold" />
@@ -422,11 +423,10 @@ function ActivityTab() {
             })}
           </div>
         )}
-      </div>
+      </SpotlightCard>
 
       {/* Task Events Timeline */}
-      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
-        <h2 className="mb-3 font-serif text-base font-light text-cream">Task Events</h2>
+      <SpotlightCard title="Task Events">
         {tasksLoading ? (
           <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
             Loading task events...
@@ -460,7 +460,7 @@ function ActivityTab() {
             ))}
           </div>
         )}
-      </div>
+      </SpotlightCard>
     </div>
   );
 }
@@ -475,39 +475,27 @@ function LedgerSection() {
 
   if (isLoading) {
     return (
-      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
-        <div className="mb-3 flex items-center gap-2">
-          <BookMarked className="h-4 w-4 text-gold" />
-          <h2 className="font-serif text-base font-light text-cream">Ledger</h2>
-        </div>
+      <SpotlightCard title="Ledger" icon={<BookMarked className="h-4 w-4 text-gold" />}>
         <div className="flex items-center gap-2 py-4">
           <Loader2 className="h-4 w-4 animate-spin text-gold" />
           <span className="text-muted-foreground font-mono text-xs">Loading ledger entries...</span>
         </div>
-      </div>
+      </SpotlightCard>
     );
   }
 
   if (error) {
     return (
-      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
-        <div className="mb-3 flex items-center gap-2">
-          <BookMarked className="h-4 w-4 text-gold" />
-          <h2 className="font-serif text-base font-light text-cream">Ledger</h2>
-        </div>
+      <SpotlightCard title="Ledger" icon={<BookMarked className="h-4 w-4 text-gold" />}>
         <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
           Ledger data not available
         </p>
-      </div>
+      </SpotlightCard>
     );
   }
 
   return (
-    <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-4">
-      <div className="mb-3 flex items-center gap-2">
-        <BookMarked className="h-4 w-4 text-gold" />
-        <h2 className="font-serif text-base font-light text-cream">Ledger</h2>
-      </div>
+    <SpotlightCard title="Ledger" icon={<BookMarked className="h-4 w-4 text-gold" />}>
       {items.length === 0 ? (
         <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
           No ledger entries yet
@@ -542,7 +530,7 @@ function LedgerSection() {
           })}
         </div>
       )}
-    </div>
+    </SpotlightCard>
   );
 }
 
@@ -599,13 +587,15 @@ function QuarantineContent() {
 
   if (items.length === 0) {
     return (
-      <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-8 text-center">
-        <AlertTriangle className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
-        <p className="font-mono text-sm text-muted-foreground">No quarantined files</p>
-        <p className="mt-1 font-mono text-xs text-muted-foreground/50">
-          Files that fail processing will appear here for review
-        </p>
-      </div>
+      <SpotlightCard>
+        <div className="text-center py-4">
+          <AlertTriangle className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
+          <p className="font-mono text-sm text-muted-foreground">No quarantined files</p>
+          <p className="mt-1 font-mono text-xs text-muted-foreground/50">
+            Files that fail processing will appear here for review
+          </p>
+        </div>
+      </SpotlightCard>
     );
   }
 

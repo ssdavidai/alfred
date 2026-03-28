@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, getVaultRecords, getInboxItems } from "wasp/client/operations";
 import DashboardLayout from "./DashboardLayout";
-import { Card, CardContent } from "../client/components/ui/card";
+
+import SpotlightCard from "../components/ui/SpotlightCard";
 import { Input } from "../client/components/ui/input";
 import { Button } from "../client/components/ui/button";
 import {
@@ -183,8 +184,7 @@ export default function VaultBrowserPage() {
       )}
 
       {/* Main explorer layout */}
-      <Card>
-        <CardContent className="p-0">
+      <SpotlightCard className="[&>div.relative.z-10>div.p-4]:p-0">
           <div className="flex min-h-[480px]">
             {/* Left sidebar: folder tree */}
             <div className="w-56 flex-shrink-0 border-r border-gold-dim/40 overflow-y-auto">
@@ -347,8 +347,7 @@ export default function VaultBrowserPage() {
               </div>
             </div>
           </div>
-        </CardContent>
-      </Card>
+      </SpotlightCard>
     </DashboardLayout>
   );
 }
