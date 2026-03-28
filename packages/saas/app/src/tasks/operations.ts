@@ -141,18 +141,30 @@ export const promoteTriage: PromoteTriage<
 };
 
 export const createVaultRecord: CreateVaultRecord<
-  { type: string; name: string; fields?: Record<string, string>; content?: string },
+  { type: string; name: string; fields?: Record<string, string>; content?: string; description?: string },
   any
 > = async (args, context) => {
+  // Always generate content with frontmatter to avoid CLI issues with spaces in names
+  const fields = args.fields || {};
+  const fmLines = [
+    "---",
+    `type: ${args.type}`,
+    `name: "${args.name}"`,
+    ...Object.entries(fields).map(([k, v]) => `${k}: ${String(v)}`),
+    `created: ${new Date().toISOString().slice(0, 10)}`,
+    "---",
+  ];
+  const body = args.description ? `\n# ${args.name}\n\n${args.description}\n` : `\n# ${args.name}\n`;
+  const content = args.content || (fmLines.join("\n") + "\n" + body);
+
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, {
     method: "POST",
     path: "/api/v1/vault/records",
     body: {
       type: args.type,
-      name: args.name,
-      fields: args.fields || {},
-      content: args.content,
+      name: `${args.type}/${args.name}.md`,
+      content,
     },
   });
 };
