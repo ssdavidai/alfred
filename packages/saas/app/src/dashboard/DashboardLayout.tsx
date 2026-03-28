@@ -53,12 +53,12 @@ const adminNavItems: NavItem[] = [
 // ---------------------------------------------------------------------------
 
 function getOrbIntensity(pathname: string): number {
-  if (pathname === "/dashboard") return 0.4;
-  if (pathname.startsWith("/dashboard/tasks") || pathname.startsWith("/dashboard/intuition")) return 0.2;
-  if (pathname.startsWith("/dashboard/vault")) return 0.15;
-  if (pathname.startsWith("/dashboard/streams")) return 0.2;
-  if (pathname.startsWith("/dashboard/settings")) return 0.1;
-  return 0.2;
+  if (pathname === "/dashboard") return 0.7;
+  if (pathname.startsWith("/dashboard/tasks") || pathname.startsWith("/dashboard/intuition")) return 0.35;
+  if (pathname.startsWith("/dashboard/vault")) return 0.25;
+  if (pathname.startsWith("/dashboard/streams")) return 0.35;
+  if (pathname.startsWith("/dashboard/settings")) return 0.2;
+  return 0.35;
 }
 
 // ---------------------------------------------------------------------------
@@ -363,7 +363,7 @@ export default function DashboardLayout({
   const orbIntensity = getOrbIntensity(location.pathname);
 
   return (
-    <div className="min-h-screen bg-[#0A0A0A]">
+    <div className="min-h-screen bg-transparent">
       {/* Persistent orb background */}
       <div className="fixed inset-0 z-0">
         <OrbBackground intensity={orbIntensity} />

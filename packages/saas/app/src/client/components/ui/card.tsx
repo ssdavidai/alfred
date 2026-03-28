@@ -8,8 +8,8 @@ const cardVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-black/40 backdrop-blur-sm text-card-foreground",
-        accent: "bg-black/50 backdrop-blur-sm text-card-accent-foreground",
+        default: "bg-black/15 backdrop-blur-sm text-card-foreground",
+        accent: "bg-black/25 backdrop-blur-sm text-card-accent-foreground",
         faded: "text-card-faded-foreground opacity-50",
         bento:
           "bg-black/30 backdrop-blur-sm text-card-subtle-foreground border-none",
