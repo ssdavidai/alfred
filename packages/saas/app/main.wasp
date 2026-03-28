@@ -548,6 +548,16 @@ action rejectAction {
   entities: [Instance]
 }
 
+action promoteTriage {
+  fn: import { promoteTriage } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action createVaultRecord {
+  fn: import { createVaultRecord } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
 // ============================================================
 // Intuition (Learning Engine)
 // ============================================================
