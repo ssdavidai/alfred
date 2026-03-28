@@ -246,7 +246,7 @@ function LetterPhase({
 
   const handleDecision = useCallback(
     (index: number, decision: "keep" | "discard") => {
-      setAutomations((prev) => {
+      setAutomations((prev: typeof automations) => {
         const next = [...prev];
         next[index] = { ...next[index], decision };
         return next;
@@ -257,7 +257,7 @@ function LetterPhase({
 
   // Check if all decided
   useEffect(() => {
-    const decided = automations.every((a) => a.decision !== null);
+    const decided = automations.every((a: { decision: string | null }) => a.decision !== null);
     if (decided && !allDecided) {
       setAllDecided(true);
       // Show done message, then redirect
@@ -292,7 +292,7 @@ function LetterPhase({
 
       {/* Brief paragraphs */}
       <div style={{ marginBottom: 48 }}>
-        {paragraphs.map((p, i) => (
+        {paragraphs.map((p: string, i: number) => (
           <p
             key={i}
             style={{
@@ -334,7 +334,7 @@ function LetterPhase({
         </p>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {automations.map((auto, i) => (
+          {automations.map((auto: any, i: number) => (
             <div
               key={auto.name}
               style={{

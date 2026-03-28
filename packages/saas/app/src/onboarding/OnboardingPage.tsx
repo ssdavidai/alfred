@@ -129,7 +129,7 @@ export default function OnboardingPage() {
   // Pre-fill email when user loads
   useState(() => {
     if (user?.email && !userForm.email) {
-      setUserForm((prev) => ({ ...prev, email: user.email ?? "" }));
+      setUserForm((prev: typeof userForm) => ({ ...prev, email: user.email ?? "" }));
     }
   });
 
@@ -201,11 +201,11 @@ export default function OnboardingPage() {
         setSaving(false);
       }
     }
-    setStep((s) => Math.min(s + 1, STEPS.length - 1));
+    setStep((s: number) => Math.min(s + 1, STEPS.length - 1));
   };
 
   const handleBack = () => {
-    setStep((s) => Math.max(s - 1, 0));
+    setStep((s: number) => Math.max(s - 1, 0));
   };
 
   const handleConnectGmail = () => {
@@ -356,7 +356,7 @@ function StepUser({
           <input
             type="text"
             value={form.fullName}
-            onChange={(e) => update("fullName", e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => update("fullName", e.target.value)}
             placeholder="Jane Smith"
             className={inputClass}
           />
@@ -366,7 +366,7 @@ function StepUser({
           <input
             type="email"
             value={form.email}
-            onChange={(e) => update("email", e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => update("email", e.target.value)}
             placeholder="jane@example.com"
             className={inputClass}
           />
@@ -376,7 +376,7 @@ function StepUser({
           <input
             type="text"
             value={form.location}
-            onChange={(e) => update("location", e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => update("location", e.target.value)}
             placeholder="San Francisco, CA (Pacific Time)"
             className={inputClass}
           />
@@ -385,7 +385,7 @@ function StepUser({
         <Field label="What you do">
           <textarea
             value={form.whatYouDo}
-            onChange={(e) => update("whatYouDo", e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => update("whatYouDo", e.target.value)}
             placeholder="2-3 sentences about your work, role, or what you spend your days on."
             rows={3}
             className={inputClass}
@@ -395,7 +395,7 @@ function StepUser({
         <Field label="Your priorities">
           <textarea
             value={form.priorities}
-            onChange={(e) => update("priorities", e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => update("priorities", e.target.value)}
             placeholder="What matters most to you right now? Projects, goals, themes."
             rows={3}
             className={inputClass}
@@ -405,7 +405,7 @@ function StepUser({
         <Field label="Family / Household" optional>
           <textarea
             value={form.household}
-            onChange={(e) => update("household", e.target.value)}
+            onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => update("household", e.target.value)}
             placeholder="Who lives with you, pets, anything Alfred should know about your household."
             rows={2}
             className={inputClass}
@@ -501,7 +501,7 @@ function StepSoul({
         </label>
         <textarea
           value={customInstructions}
-          onChange={(e) => onCustomChange(e.target.value)}
+          onChange={(e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => onCustomChange(e.target.value)}
           placeholder="Any additional instructions for Alfred's behavior..."
           rows={3}
           className={inputClass}
