@@ -37,7 +37,7 @@ export default function SpotlightCard({
       whileHover={{ scale: 1.01 }}
       transition={{ type: "spring" as const, stiffness: 300, damping: 20 }}
       className={cn(
-        "relative overflow-hidden rounded-xl border border-white/[0.08] bg-black/40 backdrop-blur-md",
+        "relative overflow-hidden rounded-xl border border-white/[0.06] bg-black/20 backdrop-blur-sm",
         "transition-colors duration-300 hover:border-amber-500/20",
         className,
       )}

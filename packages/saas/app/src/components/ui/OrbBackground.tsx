@@ -6,11 +6,11 @@ import { motion, useMotionValue, useSpring } from "framer-motion";
 // ---------------------------------------------------------------------------
 
 const GRADIENTS = [
-  { color: "#C9A84C", size: 300, duration: 22, delay: 0 },
-  { color: "#D4AF37", size: 250, duration: 28, delay: 2 },
-  { color: "#8B7532", size: 350, duration: 34, delay: 1 },
-  { color: "#FFD700", size: 200, duration: 20, delay: 3 },
-  { color: "#B8860B", size: 280, duration: 40, delay: 1.5 },
+  { color: "#C9A84C", size: 600, duration: 22, delay: 0 },
+  { color: "#D4AF37", size: 500, duration: 28, delay: 2 },
+  { color: "#8B7532", size: 700, duration: 34, delay: 1 },
+  { color: "#FFD700", size: 450, duration: 20, delay: 3 },
+  { color: "#B8860B", size: 550, duration: 40, delay: 1.5 },
 ];
 
 interface OrbBackgroundProps {
