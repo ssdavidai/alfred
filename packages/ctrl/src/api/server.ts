@@ -19,6 +19,7 @@ import { registerModelRoutes } from "./routes/models.js";
 import { registerWorkspaceRoutes } from "./routes/workspace.js";
 import { registerToolRoutes } from "./routes/tools.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
+import { registerOmiRoutes } from "./routes/omi.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -94,6 +95,7 @@ export function createApiServer(): http.Server {
   registerWorkspaceRoutes();
   registerToolRoutes();
   registerApprovalRoutes();
+  registerOmiRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();

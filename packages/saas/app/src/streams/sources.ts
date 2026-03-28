@@ -50,7 +50,7 @@ export const SOURCES: SourceDefinition[] = [
   {
     id: "omi",
     label: "Omi Ambient",
-    description: "Real-time transcription from your Omi wearable. The Omi receiver POSTs finalized conversations to a webhook URL.",
+    description: "Real-time audio from your Omi wearable. Paste this URL into the Omi app developer settings as the audio stream endpoint: https://{tenant}.alfred.black/api/v1/streams/omi/audio?token={webhookToken}&uid=omi-device",
     icon: Headphones,
     transport: "push",
     authType: "none",

@@ -21,6 +21,7 @@ from src.workflows.media_ingestion import MediaIngestionWorkflow
 from src.workflows.task_runner import TaskRunnerWorkflow
 from src.workflows.stream_puller import StreamPullerWorkflow
 from src.workflows.onboarding_pipeline import OnboardingPipelineWorkflow
+from src.workflows.omi_processor import OmiAudioProcessorWorkflow
 
 # Activities — clerk
 from src.activities.clerk import (
@@ -126,6 +127,14 @@ from src.activities.onboarding import (
     write_onboarding_results,
 )
 
+# Activities — omi audio
+from src.activities.omi_audio import (
+    group_audio_segments,
+    ingest_omi_transcription,
+    scan_audio_buffer,
+    transcribe_audio_group,
+)
+
 # Activities — braindump
 from src.activities.braindump import detect_braindump, extract_braindump
 
@@ -168,6 +177,7 @@ ALL_WORKFLOWS = [
     TaskRunnerWorkflow,
     StreamPullerWorkflow,
     OnboardingPipelineWorkflow,
+    OmiAudioProcessorWorkflow,
 ]
 
 ALL_ACTIVITIES = [
@@ -266,6 +276,11 @@ ALL_ACTIVITIES = [
     process_audio,
     process_document,
     process_image,
+    # Omi Audio
+    scan_audio_buffer,
+    group_audio_segments,
+    transcribe_audio_group,
+    ingest_omi_transcription,
     # Validators
     validate_classification,
 ]
