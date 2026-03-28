@@ -17,7 +17,20 @@ export interface NebulaData {
 
 interface NebulaSceneProps {
   data: NebulaData;
-  onRecordClick?: (clusterId: string) => void;
+  onRecordClick?: (clusterId: string, position?: { x: number; y: number; z: number }) => void;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers — connected cluster IDs for a given cluster
+// ---------------------------------------------------------------------------
+
+function getConnectedIds(clusterId: string, links: NebulaLink[]): Set<string> {
+  const connected = new Set<string>();
+  for (const link of links) {
+    if (link.source === clusterId) connected.add(link.target);
+    if (link.target === clusterId) connected.add(link.source);
+  }
+  return connected;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +72,9 @@ function getCloudTexture(): THREE.Texture {
 
 interface CloudGroupProps {
   cluster: PositionedCluster;
-  onRecordClick?: (clusterId: string) => void;
+  onRecordClick?: (clusterId: string, position?: { x: number; y: number; z: number }) => void;
+  /** Dim multiplier applied to opacity. 1.0 = normal, < 1 = dimmed, > 1 = brightened */
+  dimFactor: number;
 }
 
 interface SpriteData {
@@ -68,7 +83,7 @@ interface SpriteData {
   opacity: number;
 }
 
-function CloudGroup({ cluster, onRecordClick }: CloudGroupProps) {
+function CloudGroup({ cluster, onRecordClick, dimFactor }: CloudGroupProps) {
   const groupRef = useRef<THREE.Group>(null);
   const [hovered, setHovered] = useState(false);
   const texture = useMemo(() => getCloudTexture(), []);
@@ -97,8 +112,11 @@ function CloudGroup({ cluster, onRecordClick }: CloudGroupProps) {
   });
 
   const handleClick = useCallback(() => {
-    onRecordClick?.(id);
-  }, [onRecordClick, id]);
+    onRecordClick?.(id, { x, y, z });
+  }, [onRecordClick, id, x, y, z]);
+
+  // Effective opacity factor: hover brightens, dimFactor dims/brightens
+  const effectiveOpacityFactor = hovered ? dimFactor * 2.5 : dimFactor;
 
   return (
     <group
@@ -118,47 +136,88 @@ function CloudGroup({ cluster, onRecordClick }: CloudGroupProps) {
             map={texture}
             color={color}
             transparent
-            opacity={hovered ? s.opacity * 2.5 : s.opacity}
+            opacity={Math.min(1, s.opacity * effectiveOpacityFactor)}
             blending={THREE.AdditiveBlending}
             depthWrite={false}
           />
         </sprite>
       ))}
 
-      {/* Label — visible on hover */}
+      {/* Enhanced tooltip — visible on hover */}
       {hovered && (
         <Html center distanceFactor={8} style={{ pointerEvents: "none" }}>
           <div
             style={{
-              background: "rgba(0,0,0,0.75)",
-              backdropFilter: "blur(8px)",
+              background: "rgba(0,0,0,0.80)",
+              backdropFilter: "blur(12px)",
               border: "1px solid rgba(201,168,76,0.3)",
-              borderRadius: 8,
-              padding: "6px 12px",
+              borderRadius: 10,
+              padding: "8px 14px",
               whiteSpace: "nowrap",
+              minWidth: 120,
             }}
           >
-            <span
+            {/* Cluster label */}
+            <div
               style={{
-                color: "#F0EDE8",
-                fontFamily: "monospace",
-                fontSize: 11,
-                letterSpacing: "0.08em",
-                textTransform: "uppercase",
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                marginBottom: 4,
               }}
             >
-              {label}
-            </span>
-            <span
+              <div
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  backgroundColor: color,
+                  boxShadow: `0 0 8px ${color}60`,
+                }}
+              />
+              <span
+                style={{
+                  color: "#F0EDE8",
+                  fontFamily: "monospace",
+                  fontSize: 11,
+                  letterSpacing: "0.1em",
+                  textTransform: "uppercase",
+                  fontWeight: 500,
+                }}
+              >
+                {label}
+              </span>
+            </div>
+            {/* Record count */}
+            <div
               style={{
-                color: "rgba(201,168,76,0.7)",
-                fontFamily: "monospace",
-                fontSize: 10,
-                marginLeft: 8,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
               }}
             >
-              {recordCount}
-            </span>
+              <span
+                style={{
+                  color: "rgba(201,168,76,0.7)",
+                  fontFamily: "monospace",
+                  fontSize: 10,
+                }}
+              >
+                {recordCount} record{recordCount !== 1 ? "s" : ""}
+              </span>
+              <span
+                style={{
+                  color: "rgba(240,237,232,0.3)",
+                  fontFamily: "monospace",
+                  fontSize: 9,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.1em",
+                }}
+              >
+                click to explore
+              </span>
+            </div>
           </div>
         </Html>
       )}
@@ -208,18 +267,91 @@ function StarField() {
 
 export default function NebulaScene({ data, onRecordClick }: NebulaSceneProps) {
   const positioned = useForceLayout(data.clusters, data.links);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+
+  // Compute connected IDs for the hovered cluster
+  const connectedIds = useMemo(() => {
+    if (!hoveredId) return new Set<string>();
+    return getConnectedIds(hoveredId, data.links);
+  }, [hoveredId, data.links]);
+
+  // Compute dim factor for each cluster
+  const getDimFactor = useCallback(
+    (clusterId: string): number => {
+      if (!hoveredId) return 1.0;
+      if (clusterId === hoveredId) return 1.5;
+      if (connectedIds.has(clusterId)) return 1.0;
+      return 0.3;
+    },
+    [hoveredId, connectedIds],
+  );
+
+  // Wrap onRecordClick and also track hover for dimming
+  const handlePointerOver = useCallback((clusterId: string) => {
+    setHoveredId(clusterId);
+  }, []);
+
+  const handlePointerOut = useCallback(() => {
+    setHoveredId(null);
+  }, []);
 
   return (
     <>
       <StarField />
       <LinkFilaments clusters={positioned} links={data.links} />
       {positioned.map((cluster) => (
-        <CloudGroup
+        <CloudGroupWrapper
           key={cluster.id}
           cluster={cluster}
           onRecordClick={onRecordClick}
+          dimFactor={getDimFactor(cluster.id)}
+          onHoverIn={handlePointerOver}
+          onHoverOut={handlePointerOut}
         />
       ))}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Wrapper to intercept hover events at the scene level
+// ---------------------------------------------------------------------------
+
+interface CloudGroupWrapperProps {
+  cluster: PositionedCluster;
+  onRecordClick?: (clusterId: string, position?: { x: number; y: number; z: number }) => void;
+  dimFactor: number;
+  onHoverIn: (clusterId: string) => void;
+  onHoverOut: () => void;
+}
+
+function CloudGroupWrapper({
+  cluster,
+  onRecordClick,
+  dimFactor,
+  onHoverIn,
+  onHoverOut,
+}: CloudGroupWrapperProps) {
+  const handlePointerOver = useCallback(
+    (e: { stopPropagation?: () => void }) => {
+      // Stop propagation so only the nearest cloud triggers
+      e.stopPropagation?.();
+      onHoverIn(cluster.id);
+    },
+    [cluster.id, onHoverIn],
+  );
+
+  const handlePointerOut = useCallback(() => {
+    onHoverOut();
+  }, [onHoverOut]);
+
+  return (
+    <group onPointerOver={handlePointerOver} onPointerOut={handlePointerOut}>
+      <CloudGroup
+        cluster={cluster}
+        onRecordClick={onRecordClick}
+        dimFactor={dimFactor}
+      />
+    </group>
   );
 }
