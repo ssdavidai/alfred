@@ -595,6 +595,170 @@ export function registerVaultRoutes(): void {
     sendJson(res, 200, { nodes, edges: dedupedEdges, activity });
   });
 
+  // --- NEBULA: cluster + wikilink data for nebula visualization ---
+
+  addRoute("GET", "/api/v1/vault/nebula-data", async ({ res }) => {
+    const SURVEYOR_STATE_PATH = "/mnt/encrypted/alfred/surveyor_state.json";
+    const WIKILINK_RE = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
+
+    // Color mapping by record type
+    const TYPE_COLORS: Record<string, string> = {
+      note: "#C9A84C",
+      conversation: "#C9A84C",
+      task: "#FFFFFF",
+      decision: "#1E4D5E",
+      assumption: "#1E4D5E",
+      constraint: "#1E4D5E",
+      triage: "#FF6B6B",
+      project: "#D4AF37",
+      matter: "#D4AF37",
+      observation: "#8B7532",
+      instinct: "#8B7532",
+      reflection: "#8B7532",
+    };
+    const DEFAULT_COLOR = "#858C9C";
+
+    // 1. Walk vault for all .md files
+    const NEBULA_IGNORE = new Set(["_templates", "_bases", ".obsidian", "inbox", "view"]);
+    const files = walkMd(VAULT_PATH, VAULT_PATH, NEBULA_IGNORE);
+
+    // Build a map of relPath → type (derived from directory name)
+    const fileTypes: Record<string, string> = {};
+    for (const relPath of files) {
+      const dir = relPath.split("/")[0] || "";
+      fileTypes[relPath] = dir;
+    }
+
+    // 2. Extract wikilinks from raw file content (no frontmatter parsing — fast)
+    interface LinkEntry { source: string; target: string }
+    const links: LinkEntry[] = [];
+    const stemToPath: Record<string, string> = {};
+
+    // Build stem lookup
+    for (const relPath of files) {
+      const stem = path.basename(relPath, ".md");
+      stemToPath[stem] = relPath;
+      // Also index "type/Name" without .md
+      stemToPath[relPath.replace(/\.md$/, "")] = relPath;
+    }
+
+    const fileSet = new Set(files);
+    for (const relPath of files) {
+      let content: string;
+      try {
+        content = fs.readFileSync(path.join(VAULT_PATH, relPath), "utf-8");
+      } catch {
+        continue;
+      }
+      let m: RegExpExecArray | null;
+      WIKILINK_RE.lastIndex = 0;
+      while ((m = WIKILINK_RE.exec(content)) !== null) {
+        const ref = m[1].trim();
+        const target = stemToPath[ref] || stemToPath[ref.replace(/\.md$/, "")];
+        if (target && target !== relPath && fileSet.has(target)) {
+          links.push({ source: relPath, target });
+        }
+      }
+    }
+
+    // Deduplicate links
+    const linkKeys = new Set<string>();
+    const dedupedLinks: LinkEntry[] = [];
+    for (const l of links) {
+      const key = `${l.source}|${l.target}`;
+      if (!linkKeys.has(key)) {
+        linkKeys.add(key);
+        dedupedLinks.push(l);
+      }
+    }
+
+    // 3. Read surveyor state for clusters
+    interface SurveyorCluster { label: string[]; members: string[] }
+    interface SurveyorFile { semantic_cluster_id?: string; [key: string]: unknown }
+    interface SurveyorState {
+      clusters?: Record<string, SurveyorCluster>;
+      files?: Record<string, SurveyorFile>;
+    }
+
+    let surveyorState: SurveyorState = {};
+    try {
+      const raw = fs.readFileSync(SURVEYOR_STATE_PATH, "utf-8");
+      surveyorState = JSON.parse(raw);
+    } catch {
+      // surveyor_state.json may not exist yet
+    }
+
+    const clusteredPaths = new Set<string>();
+    interface ClusterEntry {
+      id: string;
+      label: string[];
+      recordCount: number;
+      color: string;
+      records: string[];
+    }
+    const clusters: ClusterEntry[] = [];
+
+    if (surveyorState.clusters) {
+      for (const [clusterId, cluster] of Object.entries(surveyorState.clusters)) {
+        const members = cluster.members || [];
+        // Resolve member filenames to vault-relative paths
+        const resolvedMembers: string[] = [];
+        for (const member of members) {
+          const resolved = stemToPath[member] || stemToPath[member.replace(/\.md$/, "")];
+          if (resolved && fileSet.has(resolved)) {
+            resolvedMembers.push(resolved);
+            clusteredPaths.add(resolved);
+          }
+        }
+
+        if (resolvedMembers.length === 0) continue;
+
+        // Determine dominant color from record types
+        const typeCounts: Record<string, number> = {};
+        for (const rp of resolvedMembers) {
+          const t = fileTypes[rp] || "";
+          typeCounts[t] = (typeCounts[t] || 0) + 1;
+        }
+        let dominantType = "";
+        let maxCount = 0;
+        for (const [t, c] of Object.entries(typeCounts)) {
+          if (c > maxCount) { dominantType = t; maxCount = c; }
+        }
+
+        clusters.push({
+          id: clusterId,
+          label: cluster.label || [],
+          recordCount: resolvedMembers.length,
+          color: TYPE_COLORS[dominantType] || DEFAULT_COLOR,
+          records: resolvedMembers,
+        });
+      }
+    }
+
+    // 4. Build unclustered list
+    const unclustered: Array<{ path: string; type: string }> = [];
+    for (const relPath of files) {
+      if (!clusteredPaths.has(relPath)) {
+        unclustered.push({ path: relPath, type: fileTypes[relPath] || "" });
+      }
+    }
+
+    // 5. Stats
+    const stats = {
+      totalRecords: files.length,
+      totalLinks: dedupedLinks.length,
+      totalClusters: clusters.length,
+    };
+
+    sendJson(res, 200, {
+      clusters,
+      unclustered,
+      links: dedupedLinks,
+      stats,
+      generatedAt: new Date().toISOString(),
+    });
+  });
+
   // --- STATIC / NON-VAULT ---
 
   // Vault schema
