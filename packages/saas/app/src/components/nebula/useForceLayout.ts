@@ -52,13 +52,6 @@ export function useForceLayout(
       size: Math.sqrt(c.recordCount) * 0.35,
     }));
 
-    // Build a node-id lookup for d3's link force
-    const nodeById = new Map(nodes.map((n) => [n.id, n]));
-
-    const simLinks = links
-      .filter((l) => nodeById.has(l.source) && nodeById.has(l.target))
-      .map((l) => ({ ...l }));
-
     // Run simulation synchronously (tick N times, then read positions)
     const sim = forceSimulation(nodes, 3)
       .force("charge", forceManyBody().strength(-2.5))

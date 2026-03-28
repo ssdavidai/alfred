@@ -182,16 +182,14 @@ function StarField() {
     return arr;
   }, []);
 
+  const geometry = useMemo(() => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    return g;
+  }, [positions]);
+
   return (
-    <points>
-      <bufferGeometry>
-        <bufferAttribute
-          attach="attributes-position"
-          array={positions}
-          count={count}
-          itemSize={3}
-        />
-      </bufferGeometry>
+    <points geometry={geometry}>
       <pointsMaterial
         size={0.02}
         color="#C9A84C"

@@ -1,7 +1,6 @@
-import { useMemo } from "react";
+import { useRef, useEffect, useMemo } from "react";
 import * as THREE from "three";
-import type { PositionedCluster } from "./useForceLayout";
-import type { NebulaLink } from "./useForceLayout";
+import type { PositionedCluster, NebulaLink } from "./useForceLayout";
 
 // ---------------------------------------------------------------------------
 // Link Filaments — thin glowing gold lines between cloud clusters
@@ -13,8 +12,10 @@ interface LinkFilamentsProps {
 }
 
 export default function LinkFilaments({ clusters, links }: LinkFilamentsProps) {
+  const groupRef = useRef<THREE.Group>(null);
+
   const clusterMap = useMemo(
-    () => new Map(clusters.map((c) => [c.id, c])),
+    () => new Map(clusters.map((c: PositionedCluster) => [c.id, c])),
     [clusters],
   );
 
@@ -22,7 +23,7 @@ export default function LinkFilaments({ clusters, links }: LinkFilamentsProps) {
   const validLinks = useMemo(
     () =>
       links.filter(
-        (l) =>
+        (l: NebulaLink) =>
           l.source !== l.target &&
           clusterMap.has(l.source) &&
           clusterMap.has(l.target),
@@ -30,40 +31,34 @@ export default function LinkFilaments({ clusters, links }: LinkFilamentsProps) {
     [links, clusterMap],
   );
 
-  return (
-    <group>
-      {validLinks.map((link, i) => {
-        const a = clusterMap.get(link.source)!;
-        const b = clusterMap.get(link.target)!;
-        return <Filament key={`${link.source}-${link.target}-${i}`} a={a} b={b} />;
-      })}
-    </group>
-  );
-}
+  useEffect(() => {
+    if (!groupRef.current) return;
+    // Clear existing children
+    while (groupRef.current.children.length > 0) {
+      const child = groupRef.current.children[0];
+      groupRef.current.remove(child);
+      if ((child as any).geometry) (child as any).geometry.dispose();
+      if ((child as any).material) (child as any).material.dispose();
+    }
 
-function Filament({
-  a,
-  b,
-}: {
-  a: PositionedCluster;
-  b: PositionedCluster;
-}) {
-  const geometry = useMemo(() => {
-    const g = new THREE.BufferGeometry();
-    const positions = new Float32Array([a.x, a.y, a.z, b.x, b.y, b.z]);
-    g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    return g;
-  }, [a.x, a.y, a.z, b.x, b.y, b.z]);
+    const material = new THREE.LineBasicMaterial({
+      color: 0xC9A84C,
+      transparent: true,
+      opacity: 0.08,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
 
-  return (
-    <line geometry={geometry}>
-      <lineBasicMaterial
-        color="#C9A84C"
-        transparent
-        opacity={0.08}
-        blending={THREE.AdditiveBlending}
-        depthWrite={false}
-      />
-    </line>
-  );
+    for (const link of validLinks) {
+      const a = clusterMap.get(link.source)!;
+      const b = clusterMap.get(link.target)!;
+      const geometry = new THREE.BufferGeometry();
+      const positions = new Float32Array([a.x, a.y, a.z, b.x, b.y, b.z]);
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      const line = new THREE.Line(geometry, material);
+      groupRef.current.add(line);
+    }
+  }, [validLinks, clusterMap]);
+
+  return <group ref={groupRef} />;
 }
