@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { addRoute } from "../server.js";
-import { sendJson, ValidationError } from "../errors.js";
+import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { dockerExec, ALFRED_CMD } from "../helpers.js";
 
 export const VAULT_PATH = "/mnt/encrypted/vault";
@@ -456,6 +456,79 @@ export function registerVaultRoutes(): void {
     } catch {
       sendJson(res, 200, { raw: stdout });
     }
+  });
+
+  // Promote triage → task (errand)
+  addRoute("POST", "/api/v1/vault/promote-triage", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.triagePath !== "string") {
+      throw new ValidationError("triagePath is required");
+    }
+
+    const triagePath = b.triagePath as string;
+    const matter = typeof b.matter === "string" ? b.matter : "";
+    const owner = typeof b.owner === "string" ? b.owner : "human";
+    const priority = typeof b.priority === "string" ? b.priority : "normal";
+
+    // 1. Read the triage record to get its content
+    const fullTriagePath = path.resolve(VAULT_PATH, triagePath);
+    let triageContent: string;
+    try {
+      triageContent = await fs.promises.readFile(fullTriagePath, "utf-8");
+    } catch {
+      throw new NotFoundError(`Triage record not found: ${triagePath}`);
+    }
+
+    // Parse frontmatter to get name and other fields
+    const fmMatch = triageContent.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+    let triageName = path.basename(triagePath, ".md");
+    let triageBody = triageContent;
+    if (fmMatch) {
+      const fmText = fmMatch[1];
+      triageBody = fmMatch[2] || "";
+      const nameMatch = fmText.match(/name:\s*(.+)/);
+      if (nameMatch) triageName = nameMatch[1].trim();
+    }
+
+    // 2. Create a task record from the triage content
+    const taskSlug = triageName.replace(/[^a-zA-Z0-9 -]/g, "").replace(/\s+/g, "-").toLowerCase().slice(0, 80);
+    const now = new Date().toISOString().slice(0, 10);
+    const taskFrontmatter = [
+      "---",
+      "type: task",
+      `name: "${triageName}"`,
+      `status: queued`,
+      `owner: ${owner}`,
+      `priority: ${priority}`,
+      matter ? `matter: "[[matter/${matter}]]"` : "",
+      `source_triage: "[[${triagePath.replace(/\.md$/, "")}]]"`,
+      `created: ${now}`,
+      "---",
+    ].filter(Boolean).join("\n");
+
+    const taskContent = `${taskFrontmatter}\n\n# ${triageName}\n\n${triageBody.trim()}\n`;
+
+    // Write task record
+    const taskDir = path.resolve(VAULT_PATH, "task");
+    await fs.promises.mkdir(taskDir, { recursive: true });
+    const taskPath = `task/${taskSlug}.md`;
+    const fullTaskPath = path.resolve(VAULT_PATH, taskPath);
+    await fs.promises.writeFile(fullTaskPath, taskContent, "utf-8");
+
+    // 3. Mark triage as resolved
+    const resolvedArgs = [...ALFRED_CMD, "vault", "edit", triagePath, "--set", "status=resolved"];
+    try {
+      await dockerExec("alfred", resolvedArgs, VAULT_ENV);
+    } catch {
+      // Non-fatal: task was created even if triage update fails
+    }
+
+    sendJson(res, 201, {
+      taskPath,
+      triagePath,
+      name: triageName,
+      status: "promoted",
+    });
   });
 
   // --- GRAPH: nodes + edges + agent activity ---

@@ -12,6 +12,8 @@ import type {
   GetPendingApprovals,
   ApproveAction,
   RejectAction,
+  PromoteTriage,
+  CreateVaultRecord,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -118,5 +120,39 @@ export const rejectAction: RejectAction<{ path: string }, any> = async (args, co
   return proxyToTenant(instance, {
     method: "POST",
     path: `/api/v1/approvals/${args.path}/reject`,
+  });
+};
+
+export const promoteTriage: PromoteTriage<
+  { triagePath: string; matter?: string; owner?: string; priority?: string },
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/vault/promote-triage",
+    body: {
+      triagePath: args.triagePath,
+      matter: args.matter || "",
+      owner: args.owner || "human",
+      priority: args.priority || "normal",
+    },
+  });
+};
+
+export const createVaultRecord: CreateVaultRecord<
+  { type: string; name: string; fields?: Record<string, string>; content?: string },
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/vault/records",
+    body: {
+      type: args.type,
+      name: args.name,
+      fields: args.fields || {},
+      content: args.content,
+    },
   });
 };
