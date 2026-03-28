@@ -3,6 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 import { useAuth, logout } from "wasp/client/auth";
 import { useQuery, getProvisioningStatus } from "wasp/client/operations";
 import ProvisioningProgress from "../provisioning/ProvisioningProgress";
+import { motion } from "framer-motion";
 import {
   Home,
   FolderOpen,
@@ -52,19 +53,24 @@ function NavLink({
   onClick?: () => void;
 }) {
   return (
-    <Link
-      to={item.path}
-      onClick={onClick}
-      className={cn(
-        "flex items-center gap-3 rounded-sm px-3 py-2 font-sans text-sm font-light transition-colors",
-        isActive
-          ? "border-l-2 border-gold text-gold"
-          : "text-[#8A8680] hover:text-[#E8E4DE]",
-      )}
+    <motion.div
+      whileHover={{ x: 4 }}
+      transition={{ type: "spring", stiffness: 300, damping: 20 }}
     >
-      <item.icon className="h-4 w-4" />
-      {item.label}
-    </Link>
+      <Link
+        to={item.path}
+        onClick={onClick}
+        className={cn(
+          "flex items-center gap-3 rounded-sm px-3 py-2 font-sans text-sm font-light transition-all duration-200",
+          isActive
+            ? "border-l-2 border-[#C9A84C] bg-[#C9A84C]/5 text-[#C9A84C]"
+            : "text-[#8A8680] hover:bg-[#C9A84C]/5 hover:text-[#E8E4DE]",
+        )}
+      >
+        <item.icon className="h-4 w-4" />
+        {item.label}
+      </Link>
+    </motion.div>
   );
 }
 
@@ -82,13 +88,19 @@ function SidebarNav({
   return (
     <>
       <nav className="mt-4 space-y-1 px-3">
-        {navItems.map((item) => (
-          <NavLink
+        {navItems.map((item, i) => (
+          <motion.div
             key={item.path}
-            item={item}
-            isActive={isActive(item.path)}
-            onClick={onClick}
-          />
+            initial={{ opacity: 0, x: -12 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: 0.05 * i, duration: 0.3, ease: "easeOut" }}
+          >
+            <NavLink
+              item={item}
+              isActive={isActive(item.path)}
+              onClick={onClick}
+            />
+          </motion.div>
         ))}
       </nav>
       {adminItems && (
@@ -100,13 +112,23 @@ function SidebarNav({
             </span>
           </div>
           <div className="space-y-1">
-            {adminItems.map((item) => (
-              <NavLink
+            {adminItems.map((item, i) => (
+              <motion.div
                 key={item.path}
-                item={item}
-                isActive={isActive(item.path)}
-                onClick={onClick}
-              />
+                initial={{ opacity: 0, x: -12 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{
+                  delay: 0.05 * (navItems.length + i),
+                  duration: 0.3,
+                  ease: "easeOut",
+                }}
+              >
+                <NavLink
+                  item={item}
+                  isActive={isActive(item.path)}
+                  onClick={onClick}
+                />
+              </motion.div>
             ))}
           </div>
         </nav>
@@ -148,7 +170,10 @@ export default function DashboardLayout({
       {/* Desktop sidebar */}
       <aside className="hidden w-64 border-r border-gold-dim/40 bg-[#0A0A0A] md:block">
         <div className="p-6">
-          <Link to="/" className="transition-opacity duration-300 hover:opacity-80">
+          <Link
+            to="/"
+            className="transition-opacity duration-300 hover:opacity-80"
+          >
             <img
               src="/images/alfred-logo.png"
               alt="ALFRED"
@@ -167,7 +192,10 @@ export default function DashboardLayout({
       <div className="flex flex-1 flex-col overflow-auto">
         {/* Mobile header */}
         <header className="sticky top-0 z-40 flex items-center justify-between border-b border-gold-dim/40 bg-[#0A0A0A]/95 px-4 py-3 backdrop-blur-sm md:hidden">
-          <Link to="/" className="transition-opacity duration-300 hover:opacity-80">
+          <Link
+            to="/"
+            className="transition-opacity duration-300 hover:opacity-80"
+          >
             <img
               src="/images/alfred-logo.png"
               alt="ALFRED"

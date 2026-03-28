@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { motion } from "framer-motion";
 import { Button } from "../../client/components/ui/button";
 import {
   Upload,
@@ -11,6 +12,7 @@ import {
   Loader2,
 } from "lucide-react";
 import FileUploadDialog from "./FileUploadDialog";
+import AnimatedCounter from "../../components/ui/AnimatedCounter";
 
 interface TopBarProps {
   data: any;
@@ -18,6 +20,11 @@ interface TopBarProps {
   activePanel: string | null;
   onPanelToggle: (panel: string | null) => void;
 }
+
+const hoverGlow = {
+  scale: 1.01,
+  boxShadow: "0 0 12px rgba(201,168,76,0.1)",
+};
 
 export default function TopBar({
   data,
@@ -36,12 +43,12 @@ export default function TopBar({
   const isVaultLoading = !data.vault;
   const isServicesLoading = !containers;
 
-  const runningContainers = containers?.filter(
-    (c: any) => c.State === "running" && c.Service !== "init",
-  ).length ?? 0;
-  const totalContainers = containers?.filter(
-    (c: any) => c.Service !== "init",
-  ).length ?? 0;
+  const runningContainers =
+    containers?.filter(
+      (c: any) => c.State === "running" && c.Service !== "init",
+    ).length ?? 0;
+  const totalContainers =
+    containers?.filter((c: any) => c.Service !== "init").length ?? 0;
 
   const pairedCount = data.devices?.paired;
   const pendingCount = data.devices?.pending;
@@ -52,18 +59,51 @@ export default function TopBar({
 
   return (
     <>
-      <div className="flex items-center rounded-sm border border-gold-dim/20 bg-black/20">
+      <motion.div
+        initial={{ opacity: 0, y: -8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.4, ease: "easeOut" }}
+        className="flex items-center rounded-sm border border-white/10 bg-black/40 backdrop-blur-md"
+      >
         {/* Health */}
-        <button
+        <motion.button
+          whileHover={hoverGlow}
+          transition={{ type: "spring", stiffness: 300, damping: 20 }}
           className="flex items-center gap-2 px-4 py-2.5 font-mono text-xs transition-colors hover:bg-gold/5"
-          title={isHealthLoading ? "Loading health" : `Health: ${healthStatus}`}
+          title={
+            isHealthLoading ? "Loading health" : `Health: ${healthStatus}`
+          }
         >
           {isHealthLoading ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin text-gold" />
           ) : isOk ? (
-            <CheckCircle className="h-3.5 w-3.5 text-green-500" />
+            <motion.div
+              animate={{
+                boxShadow: [
+                  "0 0 0px rgba(34,197,94,0.4)",
+                  "0 0 8px rgba(34,197,94,0.6)",
+                  "0 0 0px rgba(34,197,94,0.4)",
+                ],
+              }}
+              transition={{ duration: 2, repeat: Infinity }}
+              className="rounded-full"
+            >
+              <CheckCircle className="h-3.5 w-3.5 text-green-500" />
+            </motion.div>
           ) : (
-            <AlertCircle className="h-3.5 w-3.5 text-amber-500" />
+            <motion.div
+              animate={{
+                boxShadow: [
+                  "0 0 0px rgba(245,158,11,0.4)",
+                  "0 0 8px rgba(245,158,11,0.6)",
+                  "0 0 0px rgba(245,158,11,0.4)",
+                ],
+              }}
+              transition={{ duration: 1.5, repeat: Infinity }}
+              className="rounded-full"
+            >
+              <AlertCircle className="h-3.5 w-3.5 text-amber-500" />
+            </motion.div>
           )}
           <span
             className={
@@ -76,29 +116,44 @@ export default function TopBar({
           >
             {isHealthLoading ? "Loading" : isOk ? "OK" : healthLabel}
           </span>
-        </button>
+        </motion.button>
 
-        <div className="h-6 border-r border-gold-dim/20" />
+        <div className="h-6 border-r border-white/10" />
 
         {/* Vault */}
-        <a
+        <motion.a
           href="/dashboard/vault"
+          whileHover={hoverGlow}
+          transition={{ type: "spring", stiffness: 300, damping: 20 }}
           className="flex items-center gap-2 px-4 py-2.5 font-mono text-xs text-muted-foreground transition-colors hover:bg-gold/5 hover:text-cream"
         >
           <FolderOpen className="h-3.5 w-3.5 text-gold/70" />
-          <span>{isVaultLoading ? "Loading records..." : `${totalRecords} records`}</span>
-          {!isVaultLoading && (inboxCount ?? 0) > 0 && (
-            <span className="rounded-full bg-gold/15 px-1.5 py-0.5 text-[0.6rem] text-gold">
-              {inboxCount} inbox
+          {isVaultLoading ? (
+            <span>Loading records...</span>
+          ) : (
+            <span>
+              <AnimatedCounter
+                value={totalRecords ?? 0}
+                duration={1.2}
+                className="font-mono"
+              />{" "}
+              records
             </span>
           )}
-        </a>
+          {!isVaultLoading && (inboxCount ?? 0) > 0 && (
+            <span className="rounded-full bg-gold/15 px-1.5 py-0.5 text-[0.6rem] text-gold">
+              <AnimatedCounter value={inboxCount} duration={0.8} /> inbox
+            </span>
+          )}
+        </motion.a>
 
-        <div className="h-6 border-r border-gold-dim/20" />
+        <div className="h-6 border-r border-white/10" />
 
         {/* Services */}
-        <a
+        <motion.a
           href="/dashboard/assistants"
+          whileHover={hoverGlow}
+          transition={{ type: "spring", stiffness: 300, damping: 20 }}
           className="flex items-center gap-2 px-4 py-2.5 font-mono text-xs text-muted-foreground transition-colors hover:bg-gold/5 hover:text-cream"
         >
           <Bot className="h-3.5 w-3.5 text-gold/70" />
@@ -106,15 +161,17 @@ export default function TopBar({
             {isServicesLoading
               ? "Loading services..."
               : (totalContainers ?? 0) > 0
-              ? `${runningContainers}/${totalContainers} up`
-              : "..."}
+                ? `${runningContainers}/${totalContainers} up`
+                : "..."}
           </span>
-        </a>
+        </motion.a>
 
-        <div className="h-6 border-r border-gold-dim/20" />
+        <div className="h-6 border-r border-white/10" />
 
         {/* Devices */}
-        <button
+        <motion.button
+          whileHover={hoverGlow}
+          transition={{ type: "spring", stiffness: 300, damping: 20 }}
           className={`flex items-center gap-2 px-4 py-2.5 font-mono text-xs transition-colors hover:bg-gold/5 ${
             activePanel === "devices"
               ? "bg-gold/10 text-cream"
@@ -125,13 +182,15 @@ export default function TopBar({
           }
         >
           <Smartphone className="h-3.5 w-3.5 text-gold/70" />
-          <span>{isDevicesLoading ? "Loading devices..." : `${pairedCount} paired`}</span>
+          <span>
+            {isDevicesLoading ? "Loading devices..." : `${pairedCount} paired`}
+          </span>
           {!isDevicesLoading && (pendingCount ?? 0) > 0 && (
             <span className="rounded-full bg-gold/20 px-1.5 py-0.5 text-[0.6rem] font-medium text-gold">
               PENDING: {pendingCount}
             </span>
           )}
-        </button>
+        </motion.button>
 
         {/* Spacer */}
         <div className="flex-1" />
@@ -170,7 +229,7 @@ export default function TopBar({
             </Button>
           )}
         </div>
-      </div>
+      </motion.div>
 
       <FileUploadDialog open={uploadOpen} onOpenChange={setUploadOpen} />
     </>
