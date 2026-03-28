@@ -769,7 +769,7 @@ function FirstBriefInline({ onBriefReady }: { onBriefReady: () => void }) {
         </span>
       </div>
       <div className="space-y-3">
-        {paragraphs.map((p, i) => (
+        {paragraphs.map((p: string, i: number) => (
           <p
             key={i}
             className="font-sans text-sm font-light leading-relaxed text-cream/80"
