@@ -61,8 +61,8 @@ export default function DashboardPage() {
 
   return (
     <DashboardLayout>
-      {/* VaultNebula — full viewport volumetric shader background */}
-      <VaultNebula />
+      {/* VaultNebula — data-driven cloud background */}
+      <VaultNebula vaultTypes={displayData?.vault?.types ?? null} />
 
       {/* Floating overlay — loading, error, breathing indicator */}
       <div className="pointer-events-none fixed inset-0 z-10 flex flex-col items-center justify-end pb-8">
