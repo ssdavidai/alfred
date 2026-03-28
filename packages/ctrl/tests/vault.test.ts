@@ -28,10 +28,32 @@ const readFileSyncFn = mock.fn((_path: string) => "");
 const writeFileSyncFn = mock.fn(() => {});
 const readdirSyncFn = mock.fn(() => [] as any[]);
 
+const mkdirSyncFn = mock.fn();
+const existsSyncFn = mock.fn(() => false);
+const statSyncFn = mock.fn(() => ({ mtimeMs: 0, isDirectory: () => false, isFile: () => false }));
+const unlinkSyncFn = mock.fn();
+const renameSyncFn = mock.fn();
+const appendFileSyncFn = mock.fn();
+const openSyncFn = mock.fn(() => 0);
+const readSyncFn = mock.fn(() => 0);
+const closeSyncFn = mock.fn();
+const createReadStreamFn = mock.fn(() => ({ pipe: mock.fn(), on: mock.fn() }));
+
 const fsMock = {
   readFileSync: readFileSyncFn,
   writeFileSync: writeFileSyncFn,
   readdirSync: readdirSyncFn,
+  mkdirSync: mkdirSyncFn,
+  existsSync: existsSyncFn,
+  statSync: statSyncFn,
+  unlinkSync: unlinkSyncFn,
+  renameSync: renameSyncFn,
+  appendFileSync: appendFileSyncFn,
+  openSync: openSyncFn,
+  readSync: readSyncFn,
+  closeSync: closeSyncFn,
+  createReadStream: createReadStreamFn,
+  Dirent: class Dirent { name = ""; isFile() { return true; } isDirectory() { return false; } },
   promises: { mkdir: mkdirFn, writeFile: writeFileFn },
 };
 
@@ -41,6 +63,17 @@ mock.module("node:fs", {
     readFileSync: readFileSyncFn,
     writeFileSync: writeFileSyncFn,
     readdirSync: readdirSyncFn,
+    mkdirSync: mkdirSyncFn,
+    existsSync: existsSyncFn,
+    statSync: statSyncFn,
+    unlinkSync: unlinkSyncFn,
+    renameSync: renameSyncFn,
+    appendFileSync: appendFileSyncFn,
+    openSync: openSyncFn,
+    readSync: readSyncFn,
+    closeSync: closeSyncFn,
+    createReadStream: createReadStreamFn,
+    Dirent: class Dirent { name = ""; isFile() { return true; } isDirectory() { return false; } },
   },
 });
 
