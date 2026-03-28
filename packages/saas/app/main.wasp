@@ -372,6 +372,11 @@ query getVaultGraph {
   entities: [Instance]
 }
 
+query getNebulaData {
+  fn: import { getNebulaData } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
 query getWorkerStatus {
   fn: import { getWorkerStatus } from "@src/dashboard/operations",
   entities: [Instance]

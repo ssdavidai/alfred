@@ -5,6 +5,7 @@ import type {
   GetVaultRecords,
   GetVaultRecord,
   GetVaultGraph,
+  GetNebulaData,
   GetWorkerStatus,
   GetDevices,
   GetContainerLogs,
@@ -257,6 +258,21 @@ export const getVaultGraph: GetVaultGraph<void, any> = async (
 ) => {
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, { path: "/api/v1/vault/graph" });
+};
+
+// ============================================================
+// Vault Nebula (cluster + wikilink visualization)
+// ============================================================
+export const getNebulaData: GetNebulaData<void, any> = async (
+  _args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "GET",
+    path: "/api/v1/vault/nebula-data",
+    timeoutMs: 30_000,
+  });
 };
 
 // ============================================================
