@@ -286,30 +286,41 @@ function TriageContent() {
 
   const [dismissingPath, setDismissingPath] = useState<string | null>(null);
   const [convertingPath, setConvertingPath] = useState<string | null>(null);
+  const [expandedPath, setExpandedPath] = useState<string | null>(null);
+  const [instructions, setInstructions] = useState<Record<string, string>>({});
 
   const items: any[] = data?.results ?? [];
 
-  const handleDismiss = async (path: string) => {
-    setDismissingPath(path);
-    try {
-      await updateTask({ path, set: { status: "dismissed" } });
-      refetch();
-    } catch (err: any) {
-      console.error("Dismiss failed:", err);
-    } finally {
-      setDismissingPath(null);
+  const saveInstructionAndAct = async (path: string, action: "dismiss" | "convert") => {
+    const instruction = instructions[path]?.trim();
+    // If user wrote an instruction, save it to the triage record first
+    if (instruction) {
+      try {
+        await updateTask({ path, set: { alfred_instructions: instruction } });
+      } catch {
+        // Non-fatal — continue with the action even if instruction save fails
+      }
     }
-  };
-
-  const handleConvertToErrand = async (path: string) => {
-    setConvertingPath(path);
-    try {
-      await promoteTriage({ triagePath: path, owner: "human" });
-      refetch();
-    } catch (err: any) {
-      console.error("Convert to errand failed:", err);
-    } finally {
-      setConvertingPath(null);
+    if (action === "dismiss") {
+      setDismissingPath(path);
+      try {
+        await updateTask({ path, set: { status: "dismissed" } });
+        refetch();
+      } catch (err: any) {
+        console.error("Dismiss failed:", err);
+      } finally {
+        setDismissingPath(null);
+      }
+    } else {
+      setConvertingPath(path);
+      try {
+        await promoteTriage({ triagePath: path, owner: "human" });
+        refetch();
+      } catch (err: any) {
+        console.error("Convert to errand failed:", err);
+      } finally {
+        setConvertingPath(null);
+      }
     }
   };
 
@@ -355,68 +366,96 @@ function TriageContent() {
         const priorityClass = priority ? PRIORITY_COLORS[priority] : null;
         const isActioning = dismissingPath === item.path || convertingPath === item.path;
 
+        const isExpanded = expandedPath === item.path;
+        const currentInstruction = instructions[item.path] || "";
+
         return (
           <div
             key={item.path}
-            className="flex items-center gap-3 rounded-sm border border-gold-dim/20 bg-black/20 px-3 py-2.5"
+            className="rounded-sm border border-gold-dim/20 bg-black/20"
           >
-            <div className="min-w-0 flex-1">
-              <p className="truncate font-mono text-xs font-medium text-cream">
-                {name}
-              </p>
-              <div className="flex items-center gap-3">
-                <span className="font-mono text-[0.6rem] text-muted-foreground/60">
-                  {source}
-                </span>
-                {priority && priorityClass && (
-                  <span
-                    className={`inline-flex rounded-sm border px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider ${priorityClass}`}
-                  >
-                    {priority}
+            <div className="flex items-center gap-3 px-3 py-2.5">
+              <div
+                className="min-w-0 flex-1 cursor-pointer"
+                onClick={() => setExpandedPath(isExpanded ? null : item.path)}
+              >
+                <p className="truncate font-mono text-xs font-medium text-cream">
+                  {name}
+                </p>
+                <div className="flex items-center gap-3">
+                  <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                    {source}
                   </span>
-                )}
-                {received && (
-                  <span className="font-mono text-[0.55rem] text-muted-foreground/40">
-                    {timeAgo(received)}
-                  </span>
-                )}
+                  {priority && priorityClass && (
+                    <span
+                      className={`inline-flex rounded-sm border px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider ${priorityClass}`}
+                    >
+                      {priority}
+                    </span>
+                  )}
+                  {received && (
+                    <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                      {timeAgo(received)}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <a
+                  href={`/dashboard/vault/${item.path}`}
+                  className="flex items-center gap-1 rounded-sm border border-gold/30 bg-gold/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-gold transition-colors hover:bg-gold/20"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  Review
+                </a>
+                <button
+                  type="button"
+                  onClick={() => saveInstructionAndAct(item.path, "convert")}
+                  disabled={isActioning}
+                  className="flex items-center gap-1 rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-emerald-400 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
+                >
+                  {convertingPath === item.path ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <ArrowRight className="h-3 w-3" />
+                  )}
+                  Errand
+                </button>
+                <button
+                  type="button"
+                  onClick={() => saveInstructionAndAct(item.path, "dismiss")}
+                  disabled={isActioning}
+                  className="flex items-center gap-1 rounded-sm border border-zinc-500/30 bg-zinc-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-zinc-400 transition-colors hover:bg-zinc-500/20 disabled:opacity-50"
+                >
+                  {dismissingPath === item.path ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <XCircle className="h-3 w-3" />
+                  )}
+                  Dismiss
+                </button>
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <a
-                href={`/dashboard/vault/${item.path}`}
-                className="flex items-center gap-1 rounded-sm border border-gold/30 bg-gold/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-gold transition-colors hover:bg-gold/20"
-              >
-                <ExternalLink className="h-3 w-3" />
-                Review
-              </a>
-              <button
-                type="button"
-                onClick={() => handleConvertToErrand(item.path)}
-                disabled={isActioning}
-                className="flex items-center gap-1 rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-emerald-400 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
-              >
-                {convertingPath === item.path ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
-                  <ArrowRight className="h-3 w-3" />
-                )}
-                Convert to Errand
-              </button>
-              <button
-                type="button"
-                onClick={() => handleDismiss(item.path)}
-                disabled={isActioning}
-                className="flex items-center gap-1 rounded-sm border border-zinc-500/30 bg-zinc-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-zinc-400 transition-colors hover:bg-zinc-500/20 disabled:opacity-50"
-              >
-                {dismissingPath === item.path ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
-                  <XCircle className="h-3 w-3" />
-                )}
-                Dismiss
-              </button>
-            </div>
+            {/* Expandable instruction field — teaches Alfred how to handle similar items */}
+            {isExpanded && (
+              <div className="border-t border-gold-dim/10 px-3 py-2.5">
+                <label className="mb-1 block font-mono text-[0.55rem] uppercase tracking-wider text-muted-foreground/60">
+                  Teach Alfred (optional) — how should similar items be handled?
+                </label>
+                <input
+                  type="text"
+                  value={currentInstruction}
+                  onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                    setInstructions((prev: Record<string, string>) => ({ ...prev, [item.path]: e.target.value }))
+                  }
+                  placeholder="e.g. security alerts from Google — always dismiss, not important"
+                  className="w-full rounded-sm border border-gold-dim/20 bg-black/30 px-2 py-1.5 font-mono text-xs text-cream placeholder:text-muted-foreground/30 focus:border-gold/40 focus:outline-none"
+                />
+                <p className="mt-1 font-mono text-[0.5rem] text-muted-foreground/40">
+                  Alfred will learn this pattern and handle similar items automatically over time.
+                </p>
+              </div>
+            )}
           </div>
         );
       })}
