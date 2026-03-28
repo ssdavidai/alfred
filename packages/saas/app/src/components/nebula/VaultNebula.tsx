@@ -1,5 +1,5 @@
 import { Canvas, useFrame } from "@react-three/fiber";
-import { useMemo, useRef, useEffect } from "react";
+import { useMemo, useEffect } from "react";
 import * as THREE from "three";
 
 // ---------------------------------------------------------------------------
