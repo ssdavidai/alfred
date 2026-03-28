@@ -63,19 +63,19 @@ export default function TopBar({
         initial={{ opacity: 0, y: -8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, ease: "easeOut" }}
-        className="flex items-center rounded-sm border border-white/10 bg-black/40 backdrop-blur-md"
+        className="sticky top-0 z-20 mx-0 mt-0 flex items-center rounded-2xl border border-white/[0.08] bg-black/30 shadow-lg shadow-black/20 backdrop-blur-xl"
       >
         {/* Health */}
         <motion.button
           whileHover={hoverGlow}
-          transition={{ type: "spring", stiffness: 300, damping: 20 }}
-          className="flex items-center gap-2 px-4 py-2.5 font-mono text-xs transition-colors hover:bg-gold/5"
+          transition={{ type: "spring" as const, stiffness: 300, damping: 20 }}
+          className="flex items-center gap-2 rounded-l-2xl px-4 py-2.5 font-mono text-xs transition-colors hover:bg-[#C9A84C]/5"
           title={
             isHealthLoading ? "Loading health" : `Health: ${healthStatus}`
           }
         >
           {isHealthLoading ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-gold" />
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-[#C9A84C]" />
           ) : isOk ? (
             <motion.div
               animate={{
@@ -118,16 +118,16 @@ export default function TopBar({
           </span>
         </motion.button>
 
-        <div className="h-6 border-r border-white/10" />
+        <div className="h-6 border-r border-white/[0.08]" />
 
         {/* Vault */}
         <motion.a
           href="/dashboard/vault"
           whileHover={hoverGlow}
-          transition={{ type: "spring", stiffness: 300, damping: 20 }}
-          className="flex items-center gap-2 px-4 py-2.5 font-mono text-xs text-muted-foreground transition-colors hover:bg-gold/5 hover:text-cream"
+          transition={{ type: "spring" as const, stiffness: 300, damping: 20 }}
+          className="flex items-center gap-2 px-4 py-2.5 font-mono text-xs text-muted-foreground transition-colors hover:bg-[#C9A84C]/5 hover:text-[#F0EDE8]"
         >
-          <FolderOpen className="h-3.5 w-3.5 text-gold/70" />
+          <FolderOpen className="h-3.5 w-3.5 text-[#C9A84C]/70" />
           {isVaultLoading ? (
             <span>Loading records...</span>
           ) : (
@@ -141,22 +141,22 @@ export default function TopBar({
             </span>
           )}
           {!isVaultLoading && (inboxCount ?? 0) > 0 && (
-            <span className="rounded-full bg-gold/15 px-1.5 py-0.5 text-[0.6rem] text-gold">
+            <span className="rounded-full bg-[#C9A84C]/15 px-1.5 py-0.5 text-[0.6rem] text-[#C9A84C]">
               <AnimatedCounter value={inboxCount} duration={0.8} /> inbox
             </span>
           )}
         </motion.a>
 
-        <div className="h-6 border-r border-white/10" />
+        <div className="h-6 border-r border-white/[0.08]" />
 
         {/* Services */}
         <motion.a
           href="/dashboard/assistants"
           whileHover={hoverGlow}
-          transition={{ type: "spring", stiffness: 300, damping: 20 }}
-          className="flex items-center gap-2 px-4 py-2.5 font-mono text-xs text-muted-foreground transition-colors hover:bg-gold/5 hover:text-cream"
+          transition={{ type: "spring" as const, stiffness: 300, damping: 20 }}
+          className="flex items-center gap-2 px-4 py-2.5 font-mono text-xs text-muted-foreground transition-colors hover:bg-[#C9A84C]/5 hover:text-[#F0EDE8]"
         >
-          <Bot className="h-3.5 w-3.5 text-gold/70" />
+          <Bot className="h-3.5 w-3.5 text-[#C9A84C]/70" />
           <span>
             {isServicesLoading
               ? "Loading services..."
@@ -166,27 +166,27 @@ export default function TopBar({
           </span>
         </motion.a>
 
-        <div className="h-6 border-r border-white/10" />
+        <div className="h-6 border-r border-white/[0.08]" />
 
         {/* Devices */}
         <motion.button
           whileHover={hoverGlow}
-          transition={{ type: "spring", stiffness: 300, damping: 20 }}
-          className={`flex items-center gap-2 px-4 py-2.5 font-mono text-xs transition-colors hover:bg-gold/5 ${
+          transition={{ type: "spring" as const, stiffness: 300, damping: 20 }}
+          className={`flex items-center gap-2 px-4 py-2.5 font-mono text-xs transition-colors hover:bg-[#C9A84C]/5 ${
             activePanel === "devices"
-              ? "bg-gold/10 text-cream"
+              ? "bg-[#C9A84C]/10 text-[#F0EDE8]"
               : "text-muted-foreground"
           }`}
           onClick={() =>
             onPanelToggle(activePanel === "devices" ? null : "devices")
           }
         >
-          <Smartphone className="h-3.5 w-3.5 text-gold/70" />
+          <Smartphone className="h-3.5 w-3.5 text-[#C9A84C]/70" />
           <span>
             {isDevicesLoading ? "Loading devices..." : `${pairedCount} paired`}
           </span>
           {!isDevicesLoading && (pendingCount ?? 0) > 0 && (
-            <span className="rounded-full bg-gold/20 px-1.5 py-0.5 text-[0.6rem] font-medium text-gold">
+            <span className="rounded-full bg-[#C9A84C]/20 px-1.5 py-0.5 text-[0.6rem] font-medium text-[#C9A84C]">
               PENDING: {pendingCount}
             </span>
           )}
@@ -200,7 +200,7 @@ export default function TopBar({
           <Button
             variant="ghost"
             size="sm"
-            className="gap-1.5 font-mono text-[0.65rem] text-muted-foreground hover:text-cream"
+            className="gap-1.5 font-mono text-[0.65rem] text-muted-foreground hover:text-[#F0EDE8]"
             onClick={() => setUploadOpen(true)}
           >
             <Upload className="h-3 w-3" />
@@ -211,7 +211,7 @@ export default function TopBar({
             <Button
               variant="ghost"
               size="sm"
-              className="gap-1.5 font-mono text-[0.65rem] text-muted-foreground hover:text-cream"
+              className="gap-1.5 font-mono text-[0.65rem] text-muted-foreground hover:text-[#F0EDE8]"
               asChild
             >
               <a
