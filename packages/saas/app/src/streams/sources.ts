@@ -50,15 +50,15 @@ export const SOURCES: SourceDefinition[] = [
   {
     id: "omi",
     label: "Omi Ambient",
-    description: "Real-time transcription from your Omi wearable.",
+    description: "Real-time transcription from your Omi wearable. The Omi receiver POSTs finalized conversations to a webhook URL.",
     icon: Headphones,
-    transport: "realtime",
-    authType: "api_key",
+    transport: "push",
+    authType: "none",
     defaultConfig: {
-      transport: "realtime",
+      transport: "push",
       parser: "omi",
     },
-    available: false,  // coming soon
+    available: true,
   },
   {
     id: "polar",
