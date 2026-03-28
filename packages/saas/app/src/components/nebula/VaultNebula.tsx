@@ -159,38 +159,21 @@ export default function VaultNebula({ vaultTypes }: VaultNebulaProps) {
 
   return (
     <div className="fixed inset-0 z-0 overflow-hidden bg-black">
-      {/* SVG filter — refined blur for HD cloud merging */}
-      <svg className="absolute h-0 w-0">
-        <defs>
-          <filter id="nebula-gooey">
-            <feGaussianBlur in="SourceGraphic" stdDeviation="12" result="blur" />
-            <feColorMatrix
-              in="blur"
-              mode="matrix"
-              values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -7"
-              result="goo"
-            />
-            <feBlend in="SourceGraphic" in2="goo" />
-          </filter>
-        </defs>
-      </svg>
-
-      {/* Cloud layer with gooey filter */}
-      <div
-        className="absolute inset-0"
-        style={{ filter: "url(#nebula-gooey)" }}
-      >
+      {/* Cloud layer — each blob has its own CSS blur for smooth, high-res edges */}
+      <div className="absolute inset-0">
         {clouds.map((cloud: CloudDef, i: number) => (
           <div
             key={i}
-            className="absolute rounded-full"
+            className="absolute rounded-full will-change-transform"
             style={{
               left: `${cloud.x}%`,
               top: `${cloud.y}%`,
               width: `${cloud.size}vmin`,
               height: `${cloud.size}vmin`,
               transform: "translate(-50%, -50%)",
-              background: `radial-gradient(ellipse at 45% 45%, ${cloud.color}${hex(cloud.opacity * 1.5)} 0%, ${cloud.color}${hex(cloud.opacity)} 30%, ${cloud.color}${hex(cloud.opacity * 0.4)} 60%, transparent 80%)`,
+              background: `radial-gradient(ellipse at 48% 46%, ${cloud.color}${hex(cloud.opacity * 1.8)} 0%, ${cloud.color}${hex(cloud.opacity * 1.2)} 15%, ${cloud.color}${hex(cloud.opacity * 0.7)} 35%, ${cloud.color}${hex(cloud.opacity * 0.3)} 55%, ${cloud.color}${hex(cloud.opacity * 0.08)} 75%, transparent 100%)`,
+              filter: `blur(${Math.max(8, cloud.size * 0.6)}px)`,
+              mixBlendMode: "screen",
               animation: `nebula-drift-${cloud.drift} ${cloud.duration}s ease-in-out infinite`,
               animationDelay: `${cloud.delay}s`,
             }}
