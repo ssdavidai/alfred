@@ -6,6 +6,12 @@ import {
   startOnboarding,
   getFirstBrief,
 } from "wasp/client/operations";
+import {
+  motion,
+  AnimatePresence,
+  useMotionValue,
+  useSpring,
+} from "framer-motion";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,6 +45,18 @@ const DEFAULT_AUTOMATIONS: AutomationCard[] = [
     description: "Auto-classify and file incoming emails",
     decision: null,
   },
+];
+
+// ---------------------------------------------------------------------------
+// Gradient definitions for animated background
+// ---------------------------------------------------------------------------
+
+const GRADIENTS = [
+  { color: "#C9A84C", size: 300, duration: 22, delay: 0 },
+  { color: "#D4AF37", size: 250, duration: 28, delay: 2 },
+  { color: "#8B7532", size: 350, duration: 34, delay: 1 },
+  { color: "#FFD700", size: 200, duration: 20, delay: 3 },
+  { color: "#B8860B", size: 280, duration: 40, delay: 1.5 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -86,52 +104,258 @@ export default function OnboardingOrbPage() {
   }, [briefData, phase]);
 
   // Get user's first name for the salutation
-  const userName = (user as any)?.username || (user as any)?.email?.split("@")[0] || "Friend";
+  const userName =
+    (user as any)?.username ||
+    (user as any)?.email?.split("@")[0] ||
+    "Friend";
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        backgroundColor: "#000",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        overflow: "auto",
+        zIndex: 9999,
+      }}
+    >
+      <AnimatePresence mode="wait">
+        {(phase === "orb" || phase === "transition") && (
+          <motion.div
+            key="orb-phase"
+            initial={{ opacity: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            transition={{ duration: 1.2, ease: "easeInOut" }}
+          >
+            <OrbPhase visible={orbVisible} mountTime={mountTime.current} />
+          </motion.div>
+        )}
+        {phase === "letter" && briefText && (
+          <motion.div
+            key="letter-phase"
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 1, ease: "easeOut" }}
+            style={{ width: "100%", maxWidth: 600 }}
+          >
+            <LetterPhase
+              userName={userName}
+              briefText={briefText}
+              onComplete={() => navigate("/dashboard")}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Animated Gradient Background
+// ---------------------------------------------------------------------------
+
+function AnimatedGradientBackground() {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mouseX = useMotionValue(
+    typeof window !== "undefined" ? window.innerWidth / 2 : 500,
+  );
+  const mouseY = useMotionValue(
+    typeof window !== "undefined" ? window.innerHeight / 2 : 400,
+  );
+  const smoothX = useSpring(mouseX, { stiffness: 30, damping: 20 });
+  const smoothY = useSpring(mouseY, { stiffness: 30, damping: 20 });
+
+  useEffect(() => {
+    const handleMouse = (e: MouseEvent) => {
+      mouseX.set(e.clientX);
+      mouseY.set(e.clientY);
+    };
+    window.addEventListener("mousemove", handleMouse);
+    return () => window.removeEventListener("mousemove", handleMouse);
+  }, [mouseX, mouseY]);
+
+  // Track mouse influence per gradient
+  const gradientRefs = useRef<HTMLDivElement[]>([]);
+
+  useEffect(() => {
+    let raf: number;
+    const update = () => {
+      const mx = smoothX.get();
+      const my = smoothY.get();
+      gradientRefs.current.forEach((el) => {
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const dx = (mx - cx) * 0.04;
+        const dy = (my - cy) * 0.04;
+        el.style.transform = `translate(${dx}px, ${dy}px)`;
+      });
+      raf = requestAnimationFrame(update);
+    };
+    raf = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(raf);
+  }, [smoothX, smoothY]);
 
   return (
     <>
+      {/* SVG gooey filter for organic gradient merging */}
+      <svg style={{ position: "absolute", width: 0, height: 0 }}>
+        <defs>
+          <filter id="gooey">
+            <feGaussianBlur in="SourceGraphic" stdDeviation="40" result="blur" />
+            <feColorMatrix
+              in="blur"
+              mode="matrix"
+              values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 18 -7"
+              result="goo"
+            />
+            <feComposite in="SourceGraphic" in2="goo" operator="atop" />
+          </filter>
+        </defs>
+      </svg>
+
       <style>{`
-        @keyframes orbPulse {
-          0%, 100% { transform: scale(1); }
-          50% { transform: scale(1.15); }
+        @keyframes gradient0 {
+          0%, 100% { top: 20%; left: 30%; }
+          25% { top: 35%; left: 55%; }
+          50% { top: 50%; left: 40%; }
+          75% { top: 30%; left: 20%; }
         }
-        @keyframes fadeIn {
-          from { opacity: 0; }
-          to { opacity: 1; }
+        @keyframes gradient1 {
+          0%, 100% { top: 60%; left: 60%; }
+          25% { top: 40%; left: 35%; }
+          50% { top: 25%; left: 55%; }
+          75% { top: 55%; left: 45%; }
         }
-        @keyframes letterFadeIn {
-          from { opacity: 0; transform: translateY(20px); }
-          to { opacity: 1; transform: translateY(0); }
+        @keyframes gradient2 {
+          0%, 100% { top: 40%; left: 50%; }
+          25% { top: 55%; left: 25%; }
+          50% { top: 35%; left: 60%; }
+          75% { top: 50%; left: 40%; }
+        }
+        @keyframes gradient3 {
+          0%, 100% { top: 30%; left: 40%; }
+          25% { top: 50%; left: 60%; }
+          50% { top: 60%; left: 30%; }
+          75% { top: 35%; left: 50%; }
+        }
+        @keyframes gradient4 {
+          0%, 100% { top: 55%; left: 35%; }
+          25% { top: 30%; left: 50%; }
+          50% { top: 45%; left: 25%; }
+          75% { top: 60%; left: 55%; }
         }
       `}</style>
+
       <div
+        ref={containerRef}
         style={{
-          position: "fixed",
+          position: "absolute",
           inset: 0,
-          backgroundColor: "#000",
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          overflow: "auto",
-          zIndex: 9999,
+          overflow: "hidden",
+          filter: "url(#gooey)",
         }}
       >
-        {(phase === "orb" || phase === "transition") && (
-          <OrbPhase
-            visible={orbVisible}
-            mountTime={mountTime.current}
+        {GRADIENTS.map((g, i) => (
+          <motion.div
+            key={i}
+            ref={(el) => {
+              if (el) gradientRefs.current[i] = el;
+            }}
+            initial={{ opacity: 0, scale: 0.6 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ duration: 2, delay: g.delay, ease: "easeOut" }}
+            style={{
+              position: "absolute",
+              width: g.size,
+              height: g.size,
+              borderRadius: "50%",
+              background: `radial-gradient(circle, ${g.color}55 0%, ${g.color}20 40%, transparent 70%)`,
+              animation: `gradient${i} ${g.duration}s ease-in-out infinite`,
+              marginLeft: -g.size / 2,
+              marginTop: -g.size / 2,
+              willChange: "top, left, transform",
+            }}
           />
-        )}
-        {phase === "letter" && briefText && (
-          <LetterPhase
-            userName={userName}
-            briefText={briefText}
-            onComplete={() => navigate("/dashboard")}
-          />
-        )}
+        ))}
       </div>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Animated Text Reveal
+// ---------------------------------------------------------------------------
+
+const sentences = [
+  "Alfred is coming to life.",
+  "I'm reading your world now.",
+  "This will take a moment.",
+];
+
+const wordVariants = {
+  hidden: { opacity: 0, y: 20, filter: "blur(8px)" },
+  visible: {
+    opacity: 1,
+    y: 0,
+    filter: "blur(0px)",
+    transition: { duration: 0.5, ease: "easeOut" as const },
+  },
+};
+
+const sentenceVariants = {
+  hidden: {},
+  visible: { transition: { staggerChildren: 0.15 } },
+};
+
+function AnimatedTextReveal() {
+  const [activeSentence, setActiveSentence] = useState(0);
+
+  useEffect(() => {
+    if (activeSentence >= sentences.length - 1) return;
+    const timer = setTimeout(
+      () => setActiveSentence((s: number) => s + 1),
+      2000,
+    );
+    return () => clearTimeout(timer);
+  }, [activeSentence]);
+
+  return (
+    <div style={{ textAlign: "center" }}>
+      <AnimatePresence mode="wait">
+        <motion.p
+          key={activeSentence}
+          variants={sentenceVariants}
+          initial="hidden"
+          animate="visible"
+          exit={{ opacity: 0, transition: { duration: 0.3 } }}
+          style={{
+            fontVariant: "small-caps",
+            letterSpacing: "0.2em",
+            color: "#C9A84C",
+            fontSize: 14,
+            lineHeight: 2,
+            margin: 0,
+            fontFamily: "'EB Garamond', 'Georgia', serif",
+            display: "flex",
+            flexWrap: "wrap",
+            justifyContent: "center",
+            gap: "0 0.35em",
+          }}
+        >
+          {sentences[activeSentence].split(" ").map((word, wi) => (
+            <motion.span key={wi} variants={wordVariants}>
+              {word}
+            </motion.span>
+          ))}
+        </motion.p>
+      </AnimatePresence>
+    </div>
   );
 }
 
@@ -161,60 +385,69 @@ function OrbPhase({
   }, [mountTime]);
 
   return (
-    <div
+    <motion.div
+      animate={{ opacity: visible ? 1 : 0 }}
+      transition={{ duration: 1.5 }}
       style={{
+        position: "fixed",
+        inset: 0,
         display: "flex",
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        gap: "48px",
-        opacity: visible ? 1 : 0,
-        transition: "opacity 1.5s ease-in-out",
       }}
     >
-      {/* The Orb */}
-      <div
+      {/* Animated gradient background */}
+      <AnimatedGradientBackground />
+
+      {/* Central glow focal point */}
+      <motion.div
+        initial={{ opacity: 0, scale: 0.5 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 2, ease: "easeOut" }}
         style={{
+          position: "relative",
+          zIndex: 1,
           width: 120,
           height: 120,
           borderRadius: "50%",
           background:
-            "radial-gradient(circle at 50% 50%, #C9A84C 0%, rgba(201,168,76,0.3) 40%, transparent 70%)",
-          boxShadow: "0 0 80px rgba(201,168,76,0.4), 0 0 160px rgba(201,168,76,0.15)",
-          animation: "orbPulse 3.5s ease-in-out infinite",
+            "radial-gradient(circle at 50% 50%, rgba(201,168,76,0.3) 0%, transparent 70%)",
+          boxShadow:
+            "0 0 80px rgba(201,168,76,0.2), 0 0 160px rgba(201,168,76,0.08)",
         }}
       />
 
-      {/* Text below orb */}
+      {/* Text below */}
       <div
         style={{
-          animation: "fadeIn 1s ease-in-out 1s both",
-          textAlign: "center",
+          position: "relative",
+          zIndex: 1,
+          marginTop: 48,
         }}
       >
-        <p
-          style={{
-            fontVariant: "small-caps",
-            letterSpacing: "0.2em",
-            color: "#C9A84C",
-            fontSize: 14,
-            lineHeight: 2,
-            margin: 0,
-            fontFamily: "'EB Garamond', 'Georgia', serif",
-          }}
-        >
-          {timeoutText || (
-            <>
-              Alfred is coming to life.
-              <br />
-              I'm reading your world now.
-              <br />
-              This will take a moment.
-            </>
-          )}
-        </p>
+        {timeoutText ? (
+          <motion.p
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            style={{
+              fontVariant: "small-caps",
+              letterSpacing: "0.2em",
+              color: "#C9A84C",
+              fontSize: 14,
+              lineHeight: 2,
+              margin: 0,
+              fontFamily: "'EB Garamond', 'Georgia', serif",
+              textAlign: "center",
+            }}
+          >
+            {timeoutText}
+          </motion.p>
+        ) : (
+          <AnimatedTextReveal />
+        )}
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -231,9 +464,9 @@ function LetterPhase({
   briefText: string;
   onComplete: () => void;
 }) {
-  const [automations, setAutomations] = useState<AutomationCard[]>(
-    () => [...DEFAULT_AUTOMATIONS]
-  );
+  const [automations, setAutomations] = useState<AutomationCard[]>(() => [
+    ...DEFAULT_AUTOMATIONS,
+  ]);
   const [allDecided, setAllDecided] = useState(false);
   const [showDone, setShowDone] = useState(false);
 
@@ -252,12 +485,14 @@ function LetterPhase({
         return next;
       });
     },
-    []
+    [],
   );
 
   // Check if all decided
   useEffect(() => {
-    const decided = automations.every((a: { decision: string | null }) => a.decision !== null);
+    const decided = automations.every(
+      (a: { decision: string | null }) => a.decision !== null,
+    );
     if (decided && !allDecided) {
       setAllDecided(true);
       // Show done message, then redirect
@@ -266,6 +501,29 @@ function LetterPhase({
     }
   }, [automations, allDecided, onComplete]);
 
+  const paragraphVariants = {
+    hidden: { opacity: 0, y: 20 },
+    visible: (i: number) => ({
+      opacity: 1,
+      y: 0,
+      transition: { duration: 0.8, delay: 0.3 + i * 0.2, ease: "easeOut" as const },
+    }),
+  };
+
+  const automationVariants = {
+    hidden: { opacity: 0, y: 40 },
+    visible: (i: number) => ({
+      opacity: 1,
+      y: 0,
+      transition: {
+        type: "spring" as const,
+        stiffness: 80,
+        damping: 14,
+        delay: 0.5 + paragraphs.length * 0.2 + i * 0.12,
+      },
+    }),
+  };
+
   return (
     <div
       style={{
@@ -273,11 +531,13 @@ function LetterPhase({
         maxWidth: 600,
         margin: "0 auto",
         padding: "64px 24px",
-        animation: "letterFadeIn 1.2s ease-out both",
       }}
     >
       {/* Salutation */}
-      <p
+      <motion.p
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.8, ease: "easeOut" }}
         style={{
           fontFamily: "'EB Garamond', 'Georgia', serif",
           fontSize: 24,
@@ -288,13 +548,17 @@ function LetterPhase({
         }}
       >
         {userName},
-      </p>
+      </motion.p>
 
-      {/* Brief paragraphs */}
+      {/* Brief paragraphs — staggered fade */}
       <div style={{ marginBottom: 48 }}>
         {paragraphs.map((p: string, i: number) => (
-          <p
+          <motion.p
             key={i}
+            custom={i}
+            initial="hidden"
+            animate="visible"
+            variants={paragraphVariants}
             style={{
               fontFamily: "'EB Garamond', 'Georgia', serif",
               fontSize: 18,
@@ -302,7 +566,6 @@ function LetterPhase({
               color: "#F0EDE8",
               marginBottom: 24,
               fontWeight: 400,
-              animation: `fadeIn 0.8s ease-in-out ${0.3 + i * 0.15}s both`,
             }}
             dangerouslySetInnerHTML={{
               __html: p
@@ -314,12 +577,12 @@ function LetterPhase({
         ))}
       </div>
 
-      {/* Automation cards */}
-      <div
-        style={{
-          marginBottom: 48,
-          animation: `fadeIn 0.8s ease-in-out ${0.3 + paragraphs.length * 0.15}s both`,
-        }}
+      {/* Automation cards — spring slide-up */}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 0.3 + paragraphs.length * 0.2, duration: 0.6 }}
+        style={{ marginBottom: 48 }}
       >
         <p
           style={{
@@ -330,13 +593,23 @@ function LetterPhase({
             marginBottom: 24,
           }}
         >
-          I've prepared three automations to get us started. Keep what serves you; discard what doesn't.
+          I've prepared three automations to get us started. Keep what serves
+          you; discard what doesn't.
         </p>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {automations.map((auto: any, i: number) => (
-            <div
+            <motion.div
               key={auto.name}
+              custom={i}
+              initial="hidden"
+              animate="visible"
+              variants={automationVariants}
+              whileHover={{
+                scale: 1.01,
+                boxShadow: "0 0 12px rgba(201,168,76,0.1)",
+              }}
+              transition={{ type: "spring", stiffness: 300, damping: 20 }}
               style={{
                 border: "1px solid #222",
                 borderRadius: 2,
@@ -347,8 +620,7 @@ function LetterPhase({
                     : auto.decision === "discard"
                       ? "rgba(100,100,100,0.05)"
                       : "rgba(17,17,17,0.6)",
-                transition: "all 0.3s ease",
-                animation: `fadeIn 0.6s ease-in-out ${0.5 + paragraphs.length * 0.15 + i * 0.1}s both`,
+                transition: "background-color 0.3s ease",
               }}
             >
               <div
@@ -384,7 +656,14 @@ function LetterPhase({
                 </div>
 
                 {auto.decision === null ? (
-                  <div style={{ display: "flex", gap: 16, flexShrink: 0, marginLeft: 16 }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: 16,
+                      flexShrink: 0,
+                      marginLeft: 16,
+                    }}
+                  >
                     <button
                       onClick={() => handleDecision(i, "keep")}
                       style={{
@@ -419,7 +698,14 @@ function LetterPhase({
                     </button>
                   </div>
                 ) : (
-                  <span
+                  <motion.span
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{
+                      type: "spring",
+                      stiffness: 200,
+                      damping: 12,
+                    }}
                     style={{
                       fontFamily: "'JetBrains Mono', monospace",
                       fontSize: 11,
@@ -432,49 +718,79 @@ function LetterPhase({
                     }}
                   >
                     {auto.decision === "keep" ? "Kept" : "Discarded"}
-                  </span>
+                  </motion.span>
                 )}
               </div>
-            </div>
+            </motion.div>
           ))}
         </div>
-      </div>
+      </motion.div>
 
-      {/* Sign-off */}
-      <p
-        style={{
-          fontFamily: "'EB Garamond', 'Georgia', serif",
-          fontSize: 18,
-          color: "#F0EDE8",
-          fontStyle: "italic",
-          marginBottom: 48,
-          animation: `fadeIn 0.8s ease-in-out ${0.8 + paragraphs.length * 0.15}s both`,
-        }}
-      >
-        — Alfred
-      </p>
+      {/* Sign-off — gold typewriter effect */}
+      <SignOff delay={0.8 + paragraphs.length * 0.2} />
 
       {/* Done message */}
-      {showDone && (
-        <div
-          style={{
-            textAlign: "center",
-            animation: "fadeIn 0.8s ease-in-out both",
+      <AnimatePresence>
+        {showDone && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.8 }}
+            style={{ textAlign: "center" }}
+          >
+            <p
+              style={{
+                fontVariant: "small-caps",
+                letterSpacing: "0.2em",
+                color: "#C9A84C",
+                fontSize: 14,
+                fontFamily: "'EB Garamond', 'Georgia', serif",
+              }}
+            >
+              Done. Your Alfred is fully set up.
+            </p>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sign-off with gold typewriter/fade effect
+// ---------------------------------------------------------------------------
+
+function SignOff({ delay }: { delay: number }) {
+  const text = "— Alfred";
+  return (
+    <motion.p
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ delay, duration: 0.5 }}
+      style={{
+        fontFamily: "'EB Garamond', 'Georgia', serif",
+        fontSize: 18,
+        color: "#F0EDE8",
+        fontStyle: "italic",
+        marginBottom: 48,
+        display: "flex",
+      }}
+    >
+      {text.split("").map((char, i) => (
+        <motion.span
+          key={i}
+          initial={{ opacity: 0, color: "#D4AF37" }}
+          animate={{ opacity: 1, color: "#F0EDE8" }}
+          transition={{
+            delay: delay + 0.06 * i,
+            duration: 0.4,
+            color: { delay: delay + 0.06 * i + 0.3, duration: 0.8 },
           }}
         >
-          <p
-            style={{
-              fontVariant: "small-caps",
-              letterSpacing: "0.2em",
-              color: "#C9A84C",
-              fontSize: 14,
-              fontFamily: "'EB Garamond', 'Georgia', serif",
-            }}
-          >
-            Done. Your Alfred is fully set up.
-          </p>
-        </div>
-      )}
-    </div>
+          {char === " " ? "\u00A0" : char}
+        </motion.span>
+      ))}
+    </motion.p>
   );
 }
