@@ -21,7 +21,7 @@ import {
   FolderTree,
 } from "lucide-react";
 import { cn } from "../client/utils";
-import OrbBackground from "../components/ui/OrbBackground";
+import VaultNebula from "../components/nebula/VaultNebula";
 
 // ---------------------------------------------------------------------------
 // Types & Nav definitions
@@ -53,15 +53,11 @@ const adminNavItems: NavItem[] = [
 // Orb intensity per route
 // ---------------------------------------------------------------------------
 
-function getOrbIntensity(pathname: string): number {
-  // VaultNebula replaces the orb background on the home page
+function getNebulaOpacity(pathname: string): number {
+  // Home page renders its own full VaultNebula — hide the layout one
   if (pathname === "/dashboard") return 0;
-  if (pathname.startsWith("/dashboard/command-center")) return 0.35;
-  if (pathname.startsWith("/dashboard/tasks") || pathname.startsWith("/dashboard/intuition")) return 0.35;
-  if (pathname.startsWith("/dashboard/vault")) return 0.25;
-  if (pathname.startsWith("/dashboard/streams")) return 0.35;
-  if (pathname.startsWith("/dashboard/settings")) return 0.2;
-  return 0.35;
+  // All other pages: subtle nebula background at 20%
+  return 0.2;
 }
 
 /** On the nebula homepage, the sidebar should be fully transparent glass */
@@ -375,15 +371,17 @@ export default function DashboardLayout({
   };
 
   const adminItems = user?.isAdmin ? adminNavItems : null;
-  const orbIntensity = getOrbIntensity(location.pathname);
+  const nebulaOpacity = getNebulaOpacity(location.pathname);
   const glassMode = isNebulaPage(location.pathname);
 
   return (
-    <div className="min-h-screen bg-transparent">
-      {/* Persistent orb background */}
-      <div className="fixed inset-0 z-0">
-        <OrbBackground intensity={orbIntensity} />
-      </div>
+    <div className="min-h-screen bg-black">
+      {/* Persistent nebula background — same Alfred visualization on all pages */}
+      {nebulaOpacity > 0 && (
+        <div className="fixed inset-0 z-0" style={{ opacity: nebulaOpacity }}>
+          <VaultNebula />
+        </div>
+      )}
 
       {/* Content layer */}
       <div className="relative z-10 flex min-h-screen">
