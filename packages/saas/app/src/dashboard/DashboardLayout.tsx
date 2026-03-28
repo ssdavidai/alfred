@@ -6,7 +6,6 @@ import ProvisioningProgress from "../provisioning/ProvisioningProgress";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Home,
-  FolderOpen,
   Radio,
   Settings,
   Menu,
