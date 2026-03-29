@@ -22,6 +22,7 @@ from .gmail import parse as gmail_parse
 from .github_webhook import parse as github_webhook_parse
 from .polar import parse as polar_parse
 from .omi import parse as omi_parse
+from .notion import parse as notion_parse
 
 PARSERS: dict[str, Callable[[dict], list[ParsedEvent]]] = {
     "passthrough": passthrough_parse,
@@ -29,6 +30,7 @@ PARSERS: dict[str, Callable[[dict], list[ParsedEvent]]] = {
     "github-webhook": github_webhook_parse,
     "polar": polar_parse,
     "omi": omi_parse,
+    "notion": notion_parse,
 }
 
 def get_parser(name: str) -> Callable[[dict], list[ParsedEvent]]:

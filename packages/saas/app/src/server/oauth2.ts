@@ -42,6 +42,14 @@ const OAUTH2_PROVIDERS: Record<string, OAuth2ProviderConfig> = {
     clientSecret: () => process.env.MICROSOFT_CLIENT_SECRET || "",
     defaultScopes: ["openid", "email", "profile", "offline_access"],
   },
+  notion: {
+    authorizeUrl: "https://api.notion.com/v1/oauth/authorize",
+    tokenUrl: "https://api.notion.com/v1/oauth/token",
+    clientId: () => process.env.NOTION_CLIENT_ID || "",
+    clientSecret: () => process.env.NOTION_CLIENT_SECRET || "",
+    defaultScopes: [],  // Notion doesn't use scopes — permissions set in integration config
+    extraAuthorizeParams: { owner: "user" },
+  },
 };
 
 // In-memory state store (short-lived, cleared on callback)
@@ -80,17 +88,35 @@ async function exchangeCodeForTokens(
   scope?: string;
   [key: string]: unknown;
 }> {
-  const body = new URLSearchParams({
-    client_id: config.clientId(),
-    client_secret: config.clientSecret(),
+  // Notion uses Basic auth (base64 of client_id:client_secret) for token exchange
+  // instead of passing credentials in the form body.
+  const useBasicAuth = provider === "notion";
+
+  const bodyParams: Record<string, string> = {
     code,
     grant_type: "authorization_code",
     redirect_uri: getCallbackUrl(provider),
-  });
+  };
+
+  if (!useBasicAuth) {
+    bodyParams.client_id = config.clientId();
+    bodyParams.client_secret = config.clientSecret();
+  }
+
+  const body = new URLSearchParams(bodyParams);
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/x-www-form-urlencoded",
+  };
+
+  if (useBasicAuth) {
+    const credentials = Buffer.from(`${config.clientId()}:${config.clientSecret()}`).toString("base64");
+    headers["Authorization"] = `Basic ${credentials}`;
+  }
 
   const resp = await fetch(config.tokenUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    headers,
     body: body.toString(),
   });
 

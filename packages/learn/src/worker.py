@@ -52,6 +52,7 @@ from src.activities.pull import (
     http_pull_detail,
     ingest_events,
     load_stream_config,
+    notion_fetch_blocks,
     resolve_auth_header,
     update_cursor,
 )
@@ -208,6 +209,7 @@ ALL_ACTIVITIES = [
     http_pull_detail,
     ingest_events,
     load_stream_config,
+    notion_fetch_blocks,
     resolve_auth_header,
     update_cursor,
     # Vault

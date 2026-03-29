@@ -1,4 +1,4 @@
-import { Mail, Headphones, CreditCard, Github, Globe, MessageSquare } from "lucide-react";
+import { Mail, Headphones, CreditCard, Github, Globe, MessageSquare, FileText } from "lucide-react";
 
 export interface SourceDefinition {
   id: string;
@@ -83,6 +83,26 @@ export const SOURCES: SourceDefinition[] = [
     defaultConfig: {
       transport: "push",
       parser: "github-webhook",
+    },
+    available: true,
+  },
+  {
+    id: "notion",
+    label: "Notion",
+    description: "Sync your Notion workspace — pages, wikis, and database schemas.",
+    icon: FileText,
+    transport: "pull",
+    authType: "oauth2",
+    authProvider: "notion",
+    requiredScopes: [],
+    defaultConfig: {
+      transport: "pull",
+      parser: "notion",
+      pull: {
+        endpoint: "https://api.notion.com/v1/search",
+        method: "POST",
+        intervalSeconds: 900,  // 15 min
+      },
     },
     available: true,
   },
