@@ -660,7 +660,20 @@ export const startOnboarding: StartOnboarding<
     }
   }
 
-  // Step 8: Trigger onboarding workflow (reads Gmail, generates First Brief)
+  // Step 8: Trigger onboarding workflow ONLY if not already running
+  try {
+    const progress = await proxyToTenant(instance, {
+      path: "/api/v1/onboarding/progress",
+    });
+    const stage = progress?.stage;
+    if (stage && stage !== "not_started" && stage !== "unknown") {
+      console.info(`[startOnboarding] Onboarding already at stage=${stage}, skipping workflow trigger`);
+      return { status: "already_running", stage, streamId: gmailStream.id };
+    }
+  } catch {
+    // Progress endpoint not available — proceed with trigger
+  }
+
   try {
     await proxyToTenant(instance, {
       method: "POST",
