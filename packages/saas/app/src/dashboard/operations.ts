@@ -550,12 +550,125 @@ export const getFirstBrief: GetFirstBrief<void, any> = async (
 export const startOnboarding: StartOnboarding<
   { streamId?: string },
   any
-> = async (args, context) => {
+> = async (_args, context) => {
+  if (!context.user) throw new HttpError(401);
   const instance = await getUserInstance(context);
-  return proxyToTenant(instance, {
-    method: "POST",
-    path: "/api/v1/workflows/onboarding/start",
-    body: args.streamId ? { stream_id: args.streamId } : {},
-    timeoutMs: 30_000,
+  const userId = context.user.id;
+
+  // Step 1: Check if Gmail stream already exists
+  let gmailStream = await context.entities.Stream.findFirst({
+    where: { userId, source: "gmail" },
   });
+
+  if (!gmailStream) {
+    // Step 2: Check if Google OAuth credential exists
+    const credential = await context.entities.OAuthCredential.findFirst({
+      where: { userId, provider: "google" },
+    });
+    if (!credential) {
+      return { status: "no_credential", message: "No Google credential found" };
+    }
+
+    // Step 3: Create Gmail stream in SaaS DB
+    const crypto = await import("crypto");
+    gmailStream = await context.entities.Stream.create({
+      data: {
+        userId,
+        name: "Gmail",
+        type: "scheduled",
+        source: "gmail",
+        config: {
+          transport: "pull",
+          parser: "gmail",
+          pull: {
+            endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
+            method: "GET",
+            intervalSeconds: 300,
+            detailEndpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=full",
+            detailIdField: "messages[*].id",
+          },
+        },
+        webhookToken: crypto.randomBytes(24).toString("hex"),
+      },
+    });
+
+    // Step 4: Create stream on tenant
+    try {
+      await proxyToTenant(instance, {
+        method: "POST",
+        path: "/api/v1/streams",
+        body: {
+          id: gmailStream.id,
+          name: "Gmail",
+          type: "scheduled",
+          source: "gmail",
+          config: gmailStream.config,
+          enabled: true,
+        },
+      });
+    } catch (e: any) {
+      console.error("[startOnboarding] Failed to create stream on tenant:", e?.message);
+    }
+
+    // Step 5: Create stream config on tenant (for pull engine)
+    try {
+      await proxyToTenant(instance, {
+        method: "PATCH",
+        path: `/api/v1/streams/${gmailStream.id}`,
+        body: {
+          pull_endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
+          pull_method: "GET",
+          detail_endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=full",
+          detail_id_field: "id",
+          parser: "gmail",
+          auth_type: "oauth2",
+          auth_config: { provider: "google", user_id: userId },
+          schedule_interval_seconds: 300,
+        },
+      });
+    } catch (e: any) {
+      console.error("[startOnboarding] Failed to create stream config:", e?.message);
+    }
+
+    // Step 6: Create Temporal schedule for Gmail pull
+    try {
+      await proxyToTenant(instance, {
+        method: "POST",
+        path: "/api/v1/schedules",
+        body: {
+          scheduleId: "al-stream-pull-gmail",
+          workflowType: "StreamPullerWorkflow",
+          input: { stream_id: gmailStream.id },
+          interval: "5m",
+          overlapPolicy: "Skip",
+        },
+      });
+    } catch (e: any) {
+      console.error("[startOnboarding] Failed to create pull schedule:", e?.message);
+    }
+
+    // Step 7: Trigger immediate first pull
+    try {
+      await proxyToTenant(instance, {
+        method: "POST",
+        path: "/api/v1/schedules/al-stream-pull-gmail/trigger",
+      });
+    } catch (e: any) {
+      console.error("[startOnboarding] Failed to trigger first pull:", e?.message);
+    }
+  }
+
+  // Step 8: Trigger onboarding workflow (reads Gmail, generates First Brief)
+  try {
+    await proxyToTenant(instance, {
+      method: "POST",
+      path: "/api/v1/workflows/onboarding/start",
+      body: { stream_id: gmailStream.id },
+      timeoutMs: 30_000,
+    });
+  } catch (e: any) {
+    console.error("[startOnboarding] Failed to trigger onboarding workflow:", e?.message);
+  }
+
+  return { status: "started", streamId: gmailStream.id };
 };

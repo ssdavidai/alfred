@@ -471,7 +471,7 @@ query getFirstBrief {
 
 action startOnboarding {
   fn: import { startOnboarding } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: [Instance, Stream, OAuthCredential]
 }
 
 // ============================================================
