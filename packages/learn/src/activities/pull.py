@@ -135,6 +135,30 @@ async def http_pull_detail(
 
 
 @activity.defn
+async def notion_fetch_blocks(page_id: str, auth_headers: dict) -> list[dict]:
+    """Fetch all blocks (content) for a Notion page."""
+    blocks = []
+    cursor = None
+    headers = {**auth_headers, "Notion-Version": "2022-06-28"}
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while True:
+            url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+            params = {"page_size": "100"}
+            if cursor:
+                params["start_cursor"] = cursor
+            resp = await client.get(url, headers=headers, params=params)
+            if resp.status_code != 200:
+                logger.warning("Notion block fetch failed for page %s: %s", page_id, resp.status_code)
+                break
+            data = resp.json()
+            blocks.extend(data.get("results", []))
+            if not data.get("has_more"):
+                break
+            cursor = data.get("next_cursor")
+    return blocks
+
+
+@activity.defn
 async def ingest_events(
     stream_id: str,
     stream_type: str,

@@ -19,6 +19,7 @@ with workflow.unsafe.imports_passed_through():
         http_pull_detail,
         ingest_events,
         load_stream_config,
+        notion_fetch_blocks,
         resolve_auth_header,
         update_cursor,
     )
@@ -98,10 +99,14 @@ class StreamPullerWorkflow:
         detail_endpoint = config.get("detail_endpoint", "")
         detail_id_field = config.get("detail_id_field", "id")
         detail_items: list[dict[str, Any]] = []
+        parser_name = config.get("parser", "passthrough")
 
         if detail_endpoint:
-            # Extract IDs from list response
-            items = raw_response.get("messages", raw_response.get("items", raw_response.get("data", [])))
+            # Extract IDs from list response — support multiple response shapes
+            items = raw_response.get("messages",
+                        raw_response.get("results",
+                            raw_response.get("items",
+                                raw_response.get("data", []))))
             if isinstance(items, list) and items:
                 ids = [item.get(detail_id_field, "") for item in items if item.get(detail_id_field)]
                 if ids:
@@ -113,8 +118,28 @@ class StreamPullerWorkflow:
                     )
                     result.detail_fetches = len(detail_items)
 
+        # 5b. Notion-specific: fetch blocks for each page and attach as _blocks
+        if parser_name == "notion":
+            items = raw_response.get("results", [])
+            if isinstance(items, list) and items:
+                enriched_items: list[dict[str, Any]] = []
+                for item in items:
+                    page_id = item.get("id", "")
+                    if item.get("object") == "page" and page_id:
+                        blocks: list[dict[str, Any]] = await workflow.execute_activity(
+                            notion_fetch_blocks,
+                            args=[page_id, headers],
+                            start_to_close_timeout=timedelta(seconds=60),
+                            retry_policy=RetryPolicy(maximum_attempts=2),
+                        )
+                        enriched_item = {**item, "_blocks": blocks}
+                        enriched_items.append(enriched_item)
+                        result.detail_fetches += 1
+                    else:
+                        enriched_items.append(item)
+                detail_items = enriched_items
+
         # 6. Run parser on response (done in ingest activity, pass parser name)
-        parser_name = config.get("parser", "passthrough")
 
         # Determine what to ingest — detail items if we fetched them, else raw response
         raw_to_ingest = detail_items if detail_items else [raw_response]
