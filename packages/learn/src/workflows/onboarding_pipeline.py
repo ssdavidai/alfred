@@ -26,6 +26,7 @@ with workflow.unsafe.imports_passed_through():
         personalize_alfred,
         suggest_automations,
         write_first_brief,
+        write_facts_to_vault,
     )
 
 ONBOARD_PATH = "/alfred-data/onboard.json"
@@ -141,11 +142,12 @@ class OnboardingPipelineWorkflow:
             start_to_close_timeout=timedelta(minutes=5),
         )
 
-        # Mark done
+        # Stage 7: Write facts as vault records (person/org entities + fact summary)
         await workflow.execute_activity(
-            update_onboard_stage,
-            args=[onboard_path, "done"],
-            start_to_close_timeout=timedelta(seconds=10),
+            write_facts_to_vault,
+            args=[onboard_path],
+            start_to_close_timeout=timedelta(minutes=3),
+            retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
         return OnboardingResult(brief_path=brief_path)

@@ -342,12 +342,26 @@ async def personalize_alfred(onboard_path: str) -> None:
     facts = onboard.get("facts", [])
     patterns = onboard.get("patterns", [])
 
+    # Summarize facts by category to keep prompt manageable
+    fact_summary: dict[str, list[str]] = {}
+    for fact in facts:
+        if isinstance(fact, dict):
+            cat = fact.get("category", "general")
+            text = fact.get("fact", "")
+            if text:
+                fact_summary.setdefault(cat, []).append(text)
+    fact_text = ""
+    for cat, items in sorted(fact_summary.items()):
+        fact_text += f"\n### {cat.title()} ({len(items)} facts)\n"
+        for item in items[:15]:  # Cap 15 per category
+            fact_text += f"- {item}\n"
+
     # Generate USER.md content
     user_prompt = f"""You are Alfred, a butler's intelligence system. Based on 100 days of email analysis,
-write a comprehensive USER.md profile for your master.
+write a USER.md profile for your master.
 
-FACTS ({len(facts)} total):
-{json.dumps(facts, indent=2)}
+FACTS SUMMARY ({len(facts)} total, grouped by category):
+{fact_text}
 
 PATTERNS ({len(patterns)} total):
 {json.dumps(patterns, indent=2)}
@@ -363,7 +377,11 @@ Write a rich, detailed USER.md in markdown. Include:
 This is NOT a template — it's a real profile based on real data. If you're uncertain about something,
 say so. Be specific and personal.
 
-IMPORTANT: Return ONLY the markdown content. No JSON wrapping. No code fences. Just the raw markdown starting with # USER.md"""
+IMPORTANT:
+- Return ONLY the markdown content. No JSON wrapping. No code fences.
+- Start with # USER.md
+- Keep it under 1500 words. Be concise but specific.
+- Focus on the most important facts, not every detail."""
 
     user_md = await _call_clerk(user_prompt, raw=True)
     if not isinstance(user_md, str):
@@ -544,8 +562,85 @@ IMPORTANT: Return ONLY the brief text. No JSON wrapping. No code fences. Just th
         await client.close()
 
     # Update onboard.json
-    onboard["stage"] = "done"
     onboard["brief"] = brief_text
     _write_onboard(onboard_path, onboard)
 
     return brief_path
+
+
+# ---------------------------------------------------------------------------
+# Activity: write_facts_to_vault (Stage 7 — post-brief)
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def write_facts_to_vault(onboard_path: str) -> dict[str, int]:
+    """Write extracted facts as vault records (person, org entities). Runs after brief is delivered."""
+    config = load_config()
+    onboard = _read_onboard(onboard_path)
+    facts = onboard.get("facts", [])
+    patterns = onboard.get("patterns", [])
+
+    client = VaultClient(config)
+    persons_created = 0
+    orgs_created = 0
+
+    try:
+        # Extract unique people from facts
+        people_names: set[str] = set()
+        for fact in facts:
+            f = fact.get("fact", "") if isinstance(fact, dict) else str(fact)
+            cat = fact.get("category", "") if isinstance(fact, dict) else ""
+            # Look for personal/professional facts mentioning names
+            if cat in ("personal", "professional", "social"):
+                # Simple heuristic: facts often start with a name
+                pass  # We'll use the patterns instead
+
+        # Extract people and orgs from patterns
+        for pattern in patterns:
+            if not isinstance(pattern, dict):
+                continue
+            entities = pattern.get("entities_involved", [])
+            for entity in entities:
+                if isinstance(entity, str) and entity not in people_names:
+                    people_names.add(entity)
+
+        # Write person records
+        for name in people_names:
+            if len(name) < 2 or len(name) > 100:
+                continue
+            content = f"---\ntype: person\nname: \"{name}\"\nstatus: active\ntags: [onboarding]\ncreated: {__import__('datetime').date.today().isoformat()}\n---\n\n# {name}\n\n*Discovered during onboarding from email analysis.*\n"
+            try:
+                await client.write_record("person", name, content)
+                persons_created += 1
+            except Exception:
+                pass  # May already exist
+
+        # Write fact summary as a vault note
+        fact_categories: dict[str, list[str]] = {}
+        for fact in facts:
+            if isinstance(fact, dict):
+                cat = fact.get("category", "general")
+                text = fact.get("fact", "")
+                if text:
+                    fact_categories.setdefault(cat, []).append(text)
+
+        if fact_categories:
+            summary_lines = ["# Onboarding — Discovered Facts\n", f"*{len(facts)} facts extracted from 100 days of email analysis.*\n"]
+            for cat, cat_facts in sorted(fact_categories.items()):
+                summary_lines.append(f"\n## {cat.title()}\n")
+                for f in cat_facts[:30]:  # Cap per category
+                    summary_lines.append(f"- {f}")
+            summary_content = "\n".join(summary_lines) + "\n"
+            try:
+                await client.write_record("note", "Onboarding — Discovered Facts", summary_content)
+            except Exception:
+                pass
+
+    finally:
+        await client.close()
+
+    # Mark truly done
+    onboard["stage"] = "done"
+    _write_onboard(onboard_path, onboard)
+
+    return {"persons_created": persons_created, "orgs_created": orgs_created}

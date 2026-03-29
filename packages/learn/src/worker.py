@@ -129,6 +129,7 @@ from src.activities.onboarding import (
     personalize_alfred,
     suggest_automations,
     write_first_brief,
+    write_facts_to_vault,
 )
 
 # Activities — omi audio
@@ -276,6 +277,7 @@ ALL_ACTIVITIES = [
     personalize_alfred,
     suggest_automations,
     write_first_brief,
+    write_facts_to_vault,
     # Braindump
     detect_braindump,
     extract_braindump,

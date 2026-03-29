@@ -114,19 +114,28 @@ function GoldProgressBar({ active, progress }: { active: boolean; progress?: num
 // Brief display component
 // ---------------------------------------------------------------------------
 
-function BriefDisplay({ content }: { content: string }) {
+function BriefDisplay({ content, onContinue }: { content: string; onContinue: () => void }) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 1.2, ease: "easeOut" }}
-      className="mx-auto mt-8 max-w-[600px] px-6"
+      transition={{ duration: 1.2, ease: "easeOut" as const }}
+      className="pointer-events-auto mx-auto mt-8 max-w-[640px] max-h-[70vh] overflow-y-auto px-6 pb-24"
+      style={{ scrollbarWidth: "thin", scrollbarColor: "#C9A84C33 transparent" }}
     >
       <div
-        className="whitespace-pre-wrap text-center text-[#F0EDE8] leading-relaxed"
+        className="whitespace-pre-wrap text-left text-[#F0EDE8] leading-[1.8]"
         style={{ fontFamily: "'EB Garamond', 'Georgia', serif", fontSize: "1.1rem" }}
       >
         {content}
+      </div>
+      <div className="mt-12 flex justify-center">
+        <button
+          onClick={onContinue}
+          className="rounded-full border border-[#C9A84C]/30 bg-[#C9A84C]/10 px-8 py-3 font-mono text-xs uppercase tracking-[0.2em] text-[#C9A84C] transition-all hover:bg-[#C9A84C]/20 hover:border-[#C9A84C]/50"
+        >
+          Continue to Dashboard
+        </button>
       </div>
     </motion.div>
   );
@@ -332,14 +341,11 @@ export default function DashboardPage() {
   // Brief auto-dismiss timer (30s)
   // ---------------------------------------------------------------------------
 
-  useEffect(() => {
-    if (onboardingState !== "brief_ready") return;
-    const timer = setTimeout(() => {
-      setBriefDismissed(true);
-      localStorage.setItem("alfred:brief_seen", "true");
-    }, 30_000);
-    return () => clearTimeout(timer);
-  }, [onboardingState]);
+  // No auto-dismiss — user must click "Continue to Dashboard"
+  const handleBriefContinue = () => {
+    setBriefDismissed(true);
+    localStorage.setItem("alfred:brief_seen", "true");
+  };
 
   // ---------------------------------------------------------------------------
   // Stage-aware messages
@@ -437,7 +443,7 @@ export default function DashboardPage() {
           {/* Brief display (State 3) */}
           <AnimatePresence>
             {onboardingState === "brief_ready" && briefContent && (
-              <BriefDisplay content={briefContent} />
+              <BriefDisplay content={briefContent} onContinue={handleBriefContinue} />
             )}
           </AnimatePresence>
 
