@@ -328,13 +328,11 @@ Write a rich, detailed USER.md in markdown. Include:
 This is NOT a template — it's a real profile based on real data. If you're uncertain about something,
 say so. Be specific and personal.
 
-Return JSON:
-{{
-  "user_md": "The full USER.md content in markdown"
-}}"""
+IMPORTANT: Return ONLY the markdown content. No JSON wrapping. No code fences. Just the raw markdown starting with # USER.md"""
 
-    user_result = await _call_clerk(user_prompt)
-    user_md = user_result.get("user_md", "# User Profile\n\nProfile pending.")
+    user_md = await _call_clerk(user_prompt, raw=True)
+    if not isinstance(user_md, str):
+        user_md = str(user_md)
 
     # Generate SOUL.md content
     soul_prompt = f"""You are Alfred, a butler's intelligence system. Based on what you've learned about your master,
@@ -355,13 +353,11 @@ Write a SOUL.md that tunes Alfred's personality to THIS specific user. Include:
 
 This must feel like a real butler who has studied their master — not a generic assistant.
 
-Return JSON:
-{{
-  "soul_md": "The full SOUL.md content in markdown"
-}}"""
+IMPORTANT: Return ONLY the markdown content. No JSON wrapping. No code fences. Just the raw markdown starting with # SOUL.md"""
 
-    soul_result = await _call_clerk(soul_prompt)
-    soul_md = soul_result.get("soul_md", "# Alfred — Butler Protocol\n\nAwaiting personalization.")
+    soul_md = await _call_clerk(soul_prompt, raw=True)
+    if not isinstance(soul_md, str):
+        soul_md = str(soul_md)
 
     # Write to vault via ctrl API
     client = VaultClient(config)
@@ -483,13 +479,11 @@ You're new to this household and you're committed to learning. Keep it brief and
 Tone: Professional butler. Warm but not effusive. Concise. Personal. Honest about uncertainty.
 You are not Sherlock Holmes — you are a trusted household manager meeting someone for the first time.
 
-Return JSON:
-{{
-  "brief": "The full 5-paragraph brief text, with paragraphs separated by double newlines."
-}}"""
+IMPORTANT: Return ONLY the brief text. No JSON wrapping. No code fences. Just the 5 paragraphs, separated by blank lines."""
 
-    result = await _call_clerk(prompt)
-    brief_text = result.get("brief", "")
+    brief_text = await _call_clerk(prompt, raw=True)
+    if not isinstance(brief_text, str):
+        brief_text = str(brief_text)
 
     # Write brief to vault as event record
     client = VaultClient(config)

@@ -460,12 +460,14 @@ Return JSON only:
     return await _call_clerk(prompt)
 
 
-async def _call_clerk(prompt: str) -> dict[str, Any]:
+async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
     """Spawn a Clerk subagent via OpenClaw sessions_spawn, poll for result.
 
     The subagent has full tool access (read, pdf, exec, etc.) so it can
     actually inspect files in the vault.  Uses sessions_history polling
     with cleanup=keep so the response is available after completion.
+
+    If raw=True, returns the raw text response without JSON extraction.
     """
     import asyncio
 
@@ -571,8 +573,12 @@ async def _call_clerk(prompt: str) -> dict[str, Any]:
                         # Content is array of parts
                         for part in msg_content:
                             if isinstance(part, dict) and part.get("type") == "text":
+                                if raw:
+                                    return part["text"]
                                 return _extract_json(part["text"])
                     elif isinstance(msg_content, str):
+                        if raw:
+                            return msg_content
                         return _extract_json(msg_content)
 
     raise TimeoutError(f"Clerk subagent did not respond within 280s: {session_key}")
@@ -588,6 +594,13 @@ def _extract_json(content: str) -> dict[str, Any]:
     try:
         return json.loads(content)
     except json.JSONDecodeError:
+        pass
+    # Try fixing unescaped newlines in string values (common LLM issue)
+    try:
+        import re
+        fixed = re.sub(r'(?<=": ")(.*?)(?="[,}\]])', lambda m: m.group(0).replace('\n', '\\n').replace('\r', '\\r'), content, flags=re.DOTALL)
+        return json.loads(fixed)
+    except (json.JSONDecodeError, Exception):
         pass
     # Strip markdown code fences
     if "```" in content:
