@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /setup
 
 # Clone Alfred at pinned commit
-ARG ALFRED_SHA=44cf6750f63194962bbdc65e7bf9ab4930ff081d
+ARG ALFRED_SHA=e510cbe84217d091811c3e4217ed15a8a72234f2
 RUN git init /alfred-src && \
     git -C /alfred-src fetch --depth 1 https://github.com/ssdavidai/alfred.git ${ALFRED_SHA} && \
     git -C /alfred-src checkout FETCH_HEAD
