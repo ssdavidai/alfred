@@ -54,6 +54,47 @@ def _write_onboard(path: str, data: dict[str, Any]) -> None:
         json.dump(data, f, indent=2)
 
 
+def _summarize_facts(facts: list[dict], max_per_category: int = 20) -> str:
+    """Build a compact text summary of facts grouped by category."""
+    by_cat: dict[str, list[str]] = {}
+    for f in facts:
+        if isinstance(f, dict):
+            cat = f.get("category", "general")
+            text = f.get("fact", "")
+            if text:
+                by_cat.setdefault(cat, []).append(text)
+    lines: list[str] = []
+    for cat, items in sorted(by_cat.items()):
+        lines.append(f"\n### {cat.title()} ({len(items)} facts)")
+        for item in items[:max_per_category]:
+            lines.append(f"- {item}")
+        if len(items) > max_per_category:
+            lines.append(f"  ... and {len(items) - max_per_category} more")
+    return "\n".join(lines)
+
+
+def _parse_json_response(raw: Any, key: str) -> list[dict]:
+    """Extract a list from a Clerk response, handling raw text + truncation."""
+    if isinstance(raw, dict):
+        return raw.get(key, [])
+    if not isinstance(raw, str) or not raw.strip():
+        return []
+    text = raw.strip()
+    first_brace = text.find("{")
+    if first_brace < 0:
+        return []
+    try:
+        fragment = text[first_brace:]
+        open_b = fragment.count("[") - fragment.count("]")
+        open_c = fragment.count("{") - fragment.count("}")
+        repaired = fragment + ("]" * max(0, open_b)) + ("}" * max(0, open_c))
+        parsed = json.loads(repaired)
+        return parsed.get(key, [])
+    except Exception as exc:
+        logger.warning("JSON parse failed for key '%s': %s — raw preview: %s", key, exc, text[:200])
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Activity: init_onboard_json
 # ---------------------------------------------------------------------------
@@ -293,12 +334,13 @@ async def analyze_patterns_v2(onboard_path: str) -> None:
     """Analyze all accumulated facts for patterns. Updates onboard.json."""
     onboard = _read_onboard(onboard_path)
     facts = onboard.get("facts", [])
+    fact_text = _summarize_facts(facts, max_per_category=25)
 
     prompt = f"""You are Alfred, a butler's intelligence system. You've been reading your new master's emails
-for the past 100 days and extracted these facts:
+for the past 100 days and extracted {len(facts)} facts about them.
 
-FACTS ({len(facts)} total):
-{json.dumps(facts, indent=2)}
+FACTS BY CATEGORY:
+{fact_text}
 
 Find patterns in your master's life. Look for:
 1. **Work patterns** — recurring meetings, project cycles, collaboration structures
@@ -323,27 +365,9 @@ Return JSON:
 Be specific and evidence-based. Don't invent patterns that aren't supported by the facts."""
 
     raw_result = await _call_clerk(prompt, raw=True)
-    # Parse JSON from raw text — handle truncation gracefully
-    patterns = []
-    if isinstance(raw_result, dict):
-        patterns = raw_result.get("patterns", [])
-    elif isinstance(raw_result, str):
-        try:
-            import re
-            # Find the JSON object in the response
-            text = raw_result.strip()
-            first_brace = text.find("{")
-            if first_brace >= 0:
-                fragment = text[first_brace:]
-                # Repair truncation by closing open brackets
-                open_b = fragment.count("[") - fragment.count("]")
-                open_c = fragment.count("{") - fragment.count("}")
-                repaired = fragment + ("]" * max(0, open_b)) + ("}" * max(0, open_c))
-                parsed = json.loads(repaired)
-                patterns = parsed.get("patterns", [])
-        except Exception:
-            # Last resort: treat empty
-            patterns = []
+    logger.info("analyze_patterns_v2: clerk returned type=%s len=%s", type(raw_result).__name__, len(str(raw_result)))
+    patterns = _parse_json_response(raw_result, "patterns")
+    logger.info("analyze_patterns_v2: extracted %d patterns", len(patterns))
 
     onboard["patterns"] = patterns
     onboard["progress"]["patterns_count"] = len(patterns)
@@ -432,21 +456,31 @@ IMPORTANT: Return ONLY the markdown content. No JSON wrapping. No code fences. J
     if not isinstance(soul_md, str):
         soul_md = str(soul_md)
 
+    logger.info("personalize_alfred: user_md len=%d, soul_md len=%d", len(user_md), len(soul_md))
+
+    # Save to onboard.json for resume
+    onboard["user_md"] = user_md
+    onboard["soul_md"] = soul_md
+    _write_onboard(onboard_path, onboard)
+
     # Write to vault via ctrl API
     client = VaultClient(config)
     try:
-        # Write USER.md via workspace endpoint
         api_key = os.environ.get("AAS_API_KEY", "")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         async with httpx.AsyncClient(base_url=config.alfred_ctrl_url, timeout=30.0, headers=headers) as http:
-            await http.put(
+            r1 = await http.put(
                 "/api/v1/admin/workspace/USER.md",
                 json={"content": user_md},
             )
-            await http.put(
+            logger.info("personalize_alfred: USER.md write status=%d", r1.status_code)
+            r2 = await http.put(
                 "/api/v1/admin/workspace/SOUL.md",
                 json={"content": soul_md},
             )
+            logger.info("personalize_alfred: SOUL.md write status=%d", r2.status_code)
+    except Exception as exc:
+        logger.error("personalize_alfred: vault write failed: %s", exc)
     finally:
         await client.close()
 
@@ -594,75 +628,78 @@ IMPORTANT: Return ONLY the brief text. No JSON wrapping. No code fences. Just th
 
 @activity.defn
 async def write_facts_to_vault(onboard_path: str) -> dict[str, int]:
-    """Extract structured entities from facts via Clerk and write to vault as typed records."""
+    """Extract structured entities from facts via Clerk in batches and write to vault."""
     config = load_config()
     onboard = _read_onboard(onboard_path)
     facts = onboard.get("facts", [])
     patterns = onboard.get("patterns", [])
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # Summarize facts for the Clerk prompt
-    fact_text = ""
+    # Batch facts into chunks of ~150 to keep prompts manageable
+    BATCH_SIZE = 150
+    all_entities: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+
+    fact_lines: list[str] = []
     for fact in facts:
         if isinstance(fact, dict):
-            fact_text += f"- [{fact.get('category', 'general')}] {fact.get('fact', '')}\n"
+            fact_lines.append(f"- [{fact.get('category', 'general')}] {fact.get('fact', '')}")
 
-    # Ask Clerk to extract structured entities from all facts
-    entity_prompt = f"""You are Alfred, a butler's intelligence system. You've collected {len(facts)} facts about your master from 100 days of email.
+    for batch_start in range(0, len(fact_lines), BATCH_SIZE):
+        batch = fact_lines[batch_start:batch_start + BATCH_SIZE]
+        batch_text = "\n".join(batch)
+        batch_num = batch_start // BATCH_SIZE + 1
+        total_batches = (len(fact_lines) + BATCH_SIZE - 1) // BATCH_SIZE
 
-Now extract STRUCTURED ENTITIES from these facts. Create proper vault records for every person, organization, project, and location mentioned.
+        activity.heartbeat(f"Extracting entities batch {batch_num}/{total_batches}")
 
-FACTS:
-{fact_text[:12000]}
+        entity_prompt = f"""You are Alfred, a butler's intelligence system. Extract STRUCTURED ENTITIES from these facts about your master.
 
-PATTERNS:
-{json.dumps(patterns[:10], indent=2) if patterns else "None yet"}
+FACTS (batch {batch_num}/{total_batches}, {len(batch)} facts):
+{batch_text}
 
-For each entity, provide:
+For each distinct person, organization, project, or location mentioned, provide:
 - type: person, org, project, or location
-- name: proper name
+- name: proper name (full name for people)
 - description: 2-3 sentences about this entity based on the facts
-- relationship: how they relate to the user (for people: colleague, friend, family, vendor, etc.)
+- relationship: how they relate to the user (colleague, friend, family, vendor, client, employer, etc.)
 - tags: relevant keywords
 
 Return JSON:
 {{
   "entities": [
-    {{"type": "person", "name": "Full Name", "description": "...", "relationship": "colleague", "tags": ["work", "engineering"]}},
+    {{"type": "person", "name": "Full Name", "description": "...", "relationship": "colleague", "tags": ["work"]}},
     {{"type": "org", "name": "Company Name", "description": "...", "relationship": "employer", "tags": ["tech"]}},
     {{"type": "project", "name": "Project Name", "description": "...", "tags": ["active"]}},
-    {{"type": "location", "name": "Place Name", "description": "...", "tags": ["home"]}}
+    {{"type": "location", "name": "City Name", "description": "...", "tags": ["home"]}}
   ]
 }}
 
-Extract EVERY entity you can find. Be thorough. Include people, companies, services, projects, cities, anything that's a real named thing in the user's life."""
+Extract EVERY named entity you can find. Be thorough."""
 
-    raw_result = await _call_clerk(entity_prompt, raw=True)
-    entities: list[dict[str, Any]] = []
-    if isinstance(raw_result, dict):
-        entities = raw_result.get("entities", [])
-    elif isinstance(raw_result, str):
-        try:
-            text = raw_result.strip()
-            first_brace = text.find("{")
-            if first_brace >= 0:
-                fragment = text[first_brace:]
-                open_b = fragment.count("[") - fragment.count("]")
-                open_c = fragment.count("{") - fragment.count("}")
-                repaired = fragment + ("]" * max(0, open_b)) + ("}" * max(0, open_c))
-                parsed = json.loads(repaired)
-                entities = parsed.get("entities", [])
-        except Exception:
-            entities = []
+        raw_result = await _call_clerk(entity_prompt, raw=True)
+        logger.info("write_facts_to_vault: batch %d/%d clerk returned type=%s len=%s",
+                     batch_num, total_batches, type(raw_result).__name__, len(str(raw_result)))
 
-    activity.heartbeat(f"Extracted {len(entities)} structured entities")
+        batch_entities = _parse_json_response(raw_result, "entities")
+        logger.info("write_facts_to_vault: batch %d extracted %d entities", batch_num, len(batch_entities))
+
+        for ent in batch_entities:
+            if isinstance(ent, dict) and ent.get("name"):
+                name_key = ent["name"].strip().lower()
+                if name_key not in seen_names:
+                    seen_names.add(name_key)
+                    all_entities.append(ent)
+
+    logger.info("write_facts_to_vault: total unique entities=%d from %d facts", len(all_entities), len(facts))
+    activity.heartbeat(f"Extracted {len(all_entities)} unique entities, writing to vault")
 
     # Write each entity to vault
     client = VaultClient(config)
     counts: dict[str, int] = {"person": 0, "org": 0, "project": 0, "location": 0, "note": 0}
 
     try:
-        for entity in entities:
+        for entity in all_entities:
             if not isinstance(entity, dict):
                 continue
             etype = entity.get("type", "")
@@ -675,7 +712,6 @@ Extract EVERY entity you can find. Be thorough. Include people, companies, servi
             tags = entity.get("tags", [])
             tag_str = ", ".join(tags) if isinstance(tags, list) else str(tags)
 
-            # Build frontmatter
             fm_lines = [
                 "---",
                 f"type: {etype}",
@@ -698,8 +734,8 @@ Extract EVERY entity you can find. Be thorough. Include people, companies, servi
             try:
                 await client.write_record(etype, name, content)
                 counts[etype] = counts.get(etype, 0) + 1
-            except Exception:
-                pass  # May already exist or invalid type
+            except Exception as exc:
+                logger.warning("write_facts_to_vault: failed to write %s/%s: %s", etype, name, exc)
 
         # Also write fact summary note
         fact_categories: dict[str, list[str]] = {}
@@ -738,6 +774,8 @@ Extract EVERY entity you can find. Be thorough. Include people, companies, servi
 
     finally:
         await client.close()
+
+    logger.info("write_facts_to_vault: final counts=%s", counts)
 
     # Mark truly done
     onboard["stage"] = "done"
