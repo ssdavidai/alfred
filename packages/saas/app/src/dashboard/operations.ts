@@ -636,11 +636,12 @@ export const startOnboarding: StartOnboarding<
         method: "POST",
         path: "/api/v1/schedules",
         body: {
-          scheduleId: "al-stream-pull-gmail",
-          workflowType: "StreamPullerWorkflow",
+          schedule_id: "al-stream-pull-gmail",
+          workflow_type: "StreamPullerWorkflow",
+          task_queue: "alfred-learn",
+          cron: "*/5 * * * *",
           input: { stream_id: gmailStream.id },
-          interval: "5m",
-          overlapPolicy: "Skip",
+          overlap_policy: "Skip",
         },
       });
     } catch (e: any) {
