@@ -36,13 +36,14 @@ export const SOURCES: SourceDefinition[] = [
     defaultConfig: {
       transport: "pull",
       parser: "gmail",
+      auth_type: "oauth2",
+      auth_provider: "google",
       pull: {
-        endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+        endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
         method: "GET",
         intervalSeconds: 300,
         detailEndpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=full",
-        detailIdField: "messages[*].id",
-        paginationStrategy: "nextPageToken",
+        detailIdField: "id",
       },
     },
     available: true,

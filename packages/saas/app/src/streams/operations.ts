@@ -95,12 +95,13 @@ export const createStream: CreateStream<any, any> = async (args: any, context) =
     // If this is a pull stream, configure the pull engine on the tenant
     const pullConfig = (args.config as any)?.pull;
     if (args.type === "scheduled" && pullConfig) {
+      const authProvider = (args.config as any)?.auth_provider || args.source;
       const patchBody: Record<string, unknown> = {
         pull_endpoint: pullConfig.endpoint,
         pull_method: pullConfig.method || "GET",
         parser: (args.config as any)?.parser || "passthrough",
         auth_type: (args.config as any)?.auth_type || "none",
-        auth_config: { provider: args.source === "notion" ? "notion" : args.source, user_id: context.user.id },
+        auth_config: { provider: authProvider, user_id: context.user.id },
         schedule_interval_seconds: pullConfig.intervalSeconds || 300,
       };
       // Static headers from config (e.g. Notion-Version)
