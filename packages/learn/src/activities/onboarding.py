@@ -75,23 +75,43 @@ def _summarize_facts(facts: list[dict], max_per_category: int = 20) -> str:
 
 def _parse_json_response(raw: Any, key: str) -> list[dict]:
     """Extract a list from a Clerk response, handling raw text + truncation."""
+    import re as _re
     if isinstance(raw, dict):
         return raw.get(key, [])
     if not isinstance(raw, str) or not raw.strip():
         return []
-    text = raw.strip()
+    # Strip control characters that break JSON parsing (common in truncated LLM output)
+    text = _re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', raw.strip())
     first_brace = text.find("{")
     if first_brace < 0:
         return []
     try:
         fragment = text[first_brace:]
+        # Try direct parse first
+        try:
+            return json.loads(fragment).get(key, [])
+        except json.JSONDecodeError:
+            pass
+        # Truncation repair: close open brackets/braces
+        # Also trim trailing partial entries (cut at last complete object)
+        last_close = max(fragment.rfind("}"), fragment.rfind("]"))
+        if last_close > 0:
+            trimmed = fragment[:last_close + 1]
+            open_b = trimmed.count("[") - trimmed.count("]")
+            open_c = trimmed.count("{") - trimmed.count("}")
+            repaired = trimmed + ("]" * max(0, open_b)) + ("}" * max(0, open_c))
+            try:
+                return json.loads(repaired).get(key, [])
+            except json.JSONDecodeError:
+                pass
+        # Fallback: full fragment repair
         open_b = fragment.count("[") - fragment.count("]")
         open_c = fragment.count("{") - fragment.count("}")
         repaired = fragment + ("]" * max(0, open_b)) + ("}" * max(0, open_c))
         parsed = json.loads(repaired)
         return parsed.get(key, [])
     except Exception as exc:
-        logger.warning("JSON parse failed for key '%s': %s — raw preview: %s", key, exc, text[:200])
+        logger.warning("JSON parse failed for key '%s': %s — raw len=%d preview: %s", key, exc, len(text), text[:300])
         return []
 
 
@@ -695,19 +715,22 @@ Return JSON:
 
 Extract EVERY named entity. Be thorough."""
 
-        raw_result = await _call_clerk(entity_prompt, raw=True)
-        logger.info("write_facts_to_vault: batch %d/%d clerk returned type=%s len=%s",
-                     batch_num, total_batches, type(raw_result).__name__, len(str(raw_result)))
+        try:
+            raw_result = await _call_clerk(entity_prompt, raw=True)
+            logger.info("write_facts_to_vault: batch %d/%d clerk returned type=%s len=%s",
+                         batch_num, total_batches, type(raw_result).__name__, len(str(raw_result)))
 
-        batch_entities = _parse_json_response(raw_result, "entities")
-        logger.info("write_facts_to_vault: batch %d extracted %d entities", batch_num, len(batch_entities))
+            batch_entities = _parse_json_response(raw_result, "entities")
+            logger.info("write_facts_to_vault: batch %d extracted %d entities", batch_num, len(batch_entities))
 
-        for ent in batch_entities:
-            if isinstance(ent, dict) and ent.get("name"):
-                name_key = ent["name"].strip().lower()
-                if name_key not in seen_names:
-                    seen_names.add(name_key)
-                    all_entities.append(ent)
+            for ent in batch_entities:
+                if isinstance(ent, dict) and ent.get("name"):
+                    name_key = ent["name"].strip().lower()
+                    if name_key not in seen_names:
+                        seen_names.add(name_key)
+                        all_entities.append(ent)
+        except Exception as exc:
+            logger.error("write_facts_to_vault: batch %d failed: %s — continuing", batch_num, exc)
 
     logger.info("write_facts_to_vault: total unique entities=%d", len(all_entities))
     activity.heartbeat(f"Extracted {len(all_entities)} entities — writing vault records")
