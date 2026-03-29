@@ -50,13 +50,18 @@ async def write_vault_record(classification: dict[str, Any]) -> str:
         dates = classification.get("dates", [])
 
         # Build frontmatter + body
+        # Tasks get queued status and alfred ownership for TaskRunner pickup
+        status = "queued" if record_type == "task" else "active"
         frontmatter_lines = [
             "---",
             f"type: {record_type}",
             f"name: {title}",
-            "status: active",
+            f"status: {status}",
             f"tags: [{', '.join(tags)}]",
         ]
+        if record_type == "task":
+            frontmatter_lines.insert(4, "owner: alfred")
+            frontmatter_lines.insert(5, "priority: normal")
         if dates:
             frontmatter_lines.append(f"dates: [{', '.join(dates)}]")
         frontmatter_lines.append("---")

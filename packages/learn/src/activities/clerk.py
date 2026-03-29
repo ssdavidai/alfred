@@ -45,18 +45,21 @@ STEP 2: Based on the file content, classify and extract information.
 STEP 3: Return ONLY a JSON object. No explanation, no prose, no markdown.
 {file_instruction}
 
-Classify as exactly one of: triage, event, note, conversation, braindump, noise.
+Classify as exactly one of: task, triage, event, note, conversation, braindump, noise.
 
-- triage: something actionable or requiring human review, but you lack context to handle it
+- task: a clearly actionable item — an invoice to pay, a bug to fix, a follow-up to send, a deadline to meet, something specific that requires action
+- triage: something that MIGHT need attention but is ambiguous — you're unsure whether to act on it, or it requires human judgment to decide
 - event: a calendar event, meeting, or time-bound occurrence
 - note: reference material, documentation, knowledge worth keeping
-- conversation: a chat or email thread
+- conversation: a chat or email thread (not actionable)
 - braindump: unstructured stream of thought, ideas, or notes
-- noise: trivial, automated, or contains no meaningful information
+- noise: trivial, automated notifications, or contains no meaningful information (CI build notifications, routine alerts, spam)
+
+Prefer "task" over "triage" when the action is clear. Prefer "noise" over "triage" for automated notifications.
 
 Your ENTIRE response must be valid JSON matching this schema:
 {{
-  "type": "triage|event|note|conversation|braindump|noise",
+  "type": "task|triage|event|note|conversation|braindump|noise",
   "title": "concise descriptive title",
   "entities": [{{"name": "...", "type": "person|org|place"}}],
   "action_items": ["concrete next steps if any"],
