@@ -59,8 +59,22 @@ def _write_onboard(path: str, data: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 @activity.defn
-async def init_onboard_json(onboard_path: str, user_id: str) -> None:
-    """Create initial onboard.json with empty state."""
+async def init_onboard_json(onboard_path: str, user_id: str) -> dict[str, Any]:
+    """Initialize onboard.json, preserving existing data for resume capability.
+
+    Returns the current state so the workflow can decide where to resume from.
+    """
+    existing = _read_onboard(onboard_path)
+
+    # If we have existing data with facts, preserve it (resume scenario)
+    if existing.get("facts") and len(existing["facts"]) > 0:
+        # Just update user_id in case it changed, keep everything else
+        existing["user_id"] = user_id
+        _write_onboard(onboard_path, existing)
+        activity.heartbeat(f"Resuming: stage={existing.get('stage')}, facts={len(existing['facts'])}")
+        return existing
+
+    # Fresh start
     data = {
         "user_id": user_id,
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -70,8 +84,10 @@ async def init_onboard_json(onboard_path: str, user_id: str) -> None:
         "patterns": [],
         "automations": [],
         "brief": "",
+        "processed_days": [],  # Track which days have been processed
     }
     _write_onboard(onboard_path, data)
+    return data
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +275,10 @@ IMPORTANT: Only return GENUINELY NEW facts not already in the existing list. Be 
     # Append to onboard.json
     onboard["facts"].extend(new_facts)
     onboard["progress"]["facts_count"] = len(onboard["facts"])
+    # Track processed days for resume capability
+    processed_days = onboard.setdefault("processed_days", [])
+    if day_chunk.get("date") and day_chunk["date"] not in processed_days:
+        processed_days.append(day_chunk["date"])
     _write_onboard(onboard_path, onboard)
 
     return {"new_facts_count": len(new_facts), "total_facts": len(onboard["facts"])}
