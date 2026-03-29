@@ -209,12 +209,16 @@ class OnboardingPipelineWorkflow:
         # Feeds raw emails through the event processor pipeline so the
         # curator creates rich, interlinked vault records.
         # -----------------------------------------------------------------
-        if input.stream_id and resume_idx <= _stage_index("writing_facts"):
-            await workflow.execute_activity(
-                update_onboard_stage,
-                args=[onboard_path, "writing_facts"],
-                start_to_close_timeout=timedelta(seconds=10),
-            )
+        # Mark done BEFORE the backfill so the dashboard shows the normal view
+        await workflow.execute_activity(
+            update_onboard_stage,
+            args=[onboard_path, "done"],
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+
+        # Stage 7: Backfill Gmail as proper stream events (runs in background
+        # after onboarding is marked complete — doesn't block the dashboard)
+        if input.stream_id:
             await workflow.execute_activity(
                 backfill_gmail_as_events,
                 args=[input.stream_id, input.user_id, 100, 5000],
@@ -222,13 +226,6 @@ class OnboardingPipelineWorkflow:
                 heartbeat_timeout=timedelta(seconds=120),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-
-        # Mark done
-        await workflow.execute_activity(
-            update_onboard_stage,
-            args=[onboard_path, "done"],
-            start_to_close_timeout=timedelta(seconds=10),
-        )
 
         return OnboardingResult(
             brief_path=brief_path,
