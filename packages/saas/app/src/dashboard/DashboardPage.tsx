@@ -5,6 +5,7 @@ import {
   getProvisioningStatus,
   getFirstBrief,
   startOnboarding,
+  provisionNewUser,
 } from "wasp/client/operations";
 import { useAuth } from "wasp/client/auth";
 import { motion, AnimatePresence } from "framer-motion";
@@ -224,9 +225,9 @@ export default function DashboardPage() {
     if (provisioningTriggered.current) return;
     provisioningTriggered.current = true;
 
-    console.info("[DashboardPage] New user detected — triggering startOnboarding");
-    startOnboarding({}).catch((err: any) => {
-      console.error("[DashboardPage] startOnboarding failed:", err);
+    console.info("[DashboardPage] New user detected — triggering provisioning");
+    provisionNewUser({}).catch((err: any) => {
+      console.error("[DashboardPage] provisionNewUser failed:", err);
     });
   }, [onboardingState]);
 

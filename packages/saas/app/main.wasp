@@ -198,6 +198,11 @@ action reprovisionInstance {
   entities: [Instance, ProvisioningJob]
 }
 
+action provisionNewUser {
+  fn: import { provisionNewUser } from "@src/provisioning/operations",
+  entities: [Instance, ProvisioningJob]
+}
+
 job provisionInstance {
   executor: PgBoss,
   perform: {
