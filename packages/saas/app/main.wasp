@@ -558,6 +558,31 @@ action createVaultRecord {
   entities: [Instance]
 }
 
+action triggerErrandExecution {
+  fn: import { triggerErrandExecution } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+query getSchedules {
+  fn: import { getSchedules } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action triggerSchedule {
+  fn: import { triggerSchedule } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action pauseSchedule {
+  fn: import { pauseSchedule } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action resumeSchedule {
+  fn: import { resumeSchedule } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
 // ============================================================
 // Intuition (Learning Engine)
 // ============================================================
