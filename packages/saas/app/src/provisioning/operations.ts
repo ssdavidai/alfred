@@ -2,6 +2,7 @@ import { HttpError } from "wasp/server";
 import type {
   GetProvisioningStatus,
   ReprovisionInstance,
+  ProvisionNewUser,
 } from "wasp/server/operations";
 import { provisionInstance } from "wasp/server/jobs";
 import { tierToServerType, SubscriptionStatus } from "../payment/plans";
@@ -147,4 +148,70 @@ export const reprovisionInstance: ReprovisionInstance<
   );
 
   await provisionInstance.submit({});
+};
+
+export const provisionNewUser: ProvisionNewUser<void, any> = async (
+  _args,
+  context,
+) => {
+  if (!context.user) {
+    throw new HttpError(401, "Not authenticated");
+  }
+
+  const user = context.user;
+
+  // Check if instance already exists
+  const existing = await context.entities.Instance.findUnique({
+    where: { userId: user.id },
+  });
+  if (existing) {
+    // Already has an instance — return its status
+    return { status: existing.status, instanceId: existing.id, alreadyExists: true };
+  }
+
+  // Check if a provisioning job already exists
+  const existingJob = await context.entities.ProvisioningJob.findFirst({
+    where: { userId: user.id },
+  });
+  if (existingJob) {
+    return { status: "provisioning", jobId: existingJob.id, alreadyExists: true };
+  }
+
+  // Generate customer name from email
+  const slug = (user.email || user.id)
+    .split("@")[0]
+    .replace(/[^a-zA-Z0-9_-]/g, "-")
+    .slice(0, 20);
+  const customerName = `alfred-${slug}-${Date.now().toString(36)}`;
+
+  // Default to PREMIUM tier (cx53) for Google signup users
+  const tier = "PREMIUM";
+  const serverType = tierToServerType[tier.toLowerCase()] ?? "cx53";
+
+  // Create instance + job
+  const instance = await context.entities.Instance.create({
+    data: {
+      userId: user.id,
+      customerName,
+      tier,
+      serverType,
+      status: "provisioning",
+    },
+  });
+
+  await context.entities.ProvisioningJob.create({
+    data: {
+      userId: user.id,
+      instanceId: instance.id,
+      status: "pending",
+    },
+  });
+
+  console.info(
+    `[provisionNewUser] New instance for ${user.email}: ${customerName} (${serverType})`,
+  );
+
+  await provisionInstance.submit({});
+
+  return { status: "provisioning", instanceId: instance.id, customerName };
 };
