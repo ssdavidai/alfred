@@ -223,6 +223,110 @@ async def update_cursor(stream_id: str, cursor_value: str) -> None:
         resp.raise_for_status()
 
 
+@activity.defn
+async def backfill_gmail_as_events(
+    stream_id: str,
+    user_id: str,
+    days: int = 100,
+    max_messages: int = 5000,
+) -> int:
+    """One-time backfill: fetch Gmail history and ingest as proper stream events.
+
+    Unlike the onboarding backfill (which extracted facts), this feeds raw
+    full-format emails through the gmail parser → ctrl ingest pipeline,
+    so the event processor and curator handle them normally.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    config = load_config()
+
+    # 1. Get OAuth token
+    saas_url = os.environ.get("SAAS_API_URL", "https://alfred.black")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{saas_url}/api/internal/oauth2/token",
+            json={"provider": "google", "userId": user_id},
+            headers={"Authorization": "Bearer internal"},
+        )
+        resp.raise_for_status()
+        token = resp.json()["access_token"]
+
+    # 2. Fetch message IDs
+    from_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y/%m/%d")
+    auth_headers = {"Authorization": f"Bearer {token}"}
+    all_ids: list[str] = []
+    page_token: str | None = None
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        while True:
+            params: dict[str, Any] = {"maxResults": 100, "q": f"after:{from_date}"}
+            if page_token:
+                params["pageToken"] = page_token
+            resp = await client.get(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+                params=params, headers=auth_headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            for msg in data.get("messages", []):
+                all_ids.append(msg["id"])
+            page_token = data.get("nextPageToken")
+            if not page_token or len(all_ids) >= max_messages:
+                break
+            activity.heartbeat(f"Fetched {len(all_ids)} message IDs")
+
+    logger.info("backfill_gmail_as_events: found %d messages in last %d days", len(all_ids), days)
+
+    # 3. Fetch full messages and ingest in batches
+    parser = get_parser("gmail")
+    ingested = 0
+    BATCH = 10
+
+    async with httpx.AsyncClient(timeout=30.0) as gmail_client, _ctrl_client(config) as ctrl:
+        for i in range(0, len(all_ids), BATCH):
+            batch_ids = all_ids[i:i + BATCH]
+            for msg_id in batch_ids:
+                try:
+                    resp = await gmail_client.get(
+                        f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}?format=full",
+                        headers=auth_headers,
+                    )
+                    if resp.status_code != 200:
+                        continue
+                    raw_msg = resp.json()
+                    parsed = parser(raw_msg)
+                    for event in parsed:
+                        ingest_resp = await ctrl.post(
+                            "/api/v1/streams/ingest",
+                            json={
+                                "stream_id": stream_id,
+                                "stream_type": "gmail",
+                                "source_ref": event.source_ref,
+                                "received_at": event.received_at,
+                                "raw": event.raw,
+                                "summary": event.summary,
+                                "metadata": {
+                                    **event.metadata,
+                                    "event_type": event.event_type,
+                                    "parser": "gmail",
+                                    "backfill": True,
+                                },
+                            },
+                        )
+                        if ingest_resp.status_code in (200, 201):
+                            status = ingest_resp.json().get("status", "")
+                            if status != "duplicate":
+                                ingested += 1
+                except Exception as exc:
+                    logger.warning("backfill_gmail: failed msg %s: %s", msg_id, exc)
+                    continue
+
+            activity.heartbeat(f"Ingested {ingested} emails ({i + len(batch_ids)}/{len(all_ids)})")
+
+    logger.info("backfill_gmail_as_events: ingested %d events from %d messages", ingested, len(all_ids))
+    return ingested
+
+
 def _ctrl_client(config: Any) -> httpx.AsyncClient:
     """Create an authenticated httpx client for the ctrl API."""
     import os

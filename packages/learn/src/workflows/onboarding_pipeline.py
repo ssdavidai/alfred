@@ -30,6 +30,7 @@ with workflow.unsafe.imports_passed_through():
         write_first_brief,
         write_facts_to_vault,
     )
+    from src.activities.pull import backfill_gmail_as_events
 
 ONBOARD_PATH = "/alfred-data/onboard.json"
 
@@ -204,14 +205,29 @@ class OnboardingPipelineWorkflow:
             )
 
         # -----------------------------------------------------------------
-        # Stage 7: Write facts to vault (always run — idempotent)
+        # Stage 7: Backfill Gmail as proper stream events
+        # Feeds raw emails through the event processor pipeline so the
+        # curator creates rich, interlinked vault records.
         # -----------------------------------------------------------------
+        if input.stream_id and resume_idx <= _stage_index("writing_facts"):
+            await workflow.execute_activity(
+                update_onboard_stage,
+                args=[onboard_path, "writing_facts"],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            await workflow.execute_activity(
+                backfill_gmail_as_events,
+                args=[input.stream_id, input.user_id, 100, 5000],
+                start_to_close_timeout=timedelta(minutes=60),
+                heartbeat_timeout=timedelta(seconds=120),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+
+        # Mark done
         await workflow.execute_activity(
-            write_facts_to_vault,
-            args=[onboard_path],
-            start_to_close_timeout=timedelta(minutes=30),
-            heartbeat_timeout=timedelta(seconds=120),
-            retry_policy=RetryPolicy(maximum_attempts=2),
+            update_onboard_stage,
+            args=[onboard_path, "done"],
+            start_to_close_timeout=timedelta(seconds=10),
         )
 
         return OnboardingResult(

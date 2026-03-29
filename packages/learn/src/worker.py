@@ -48,6 +48,7 @@ from src.activities.streams import (
 
 # Activities — pull
 from src.activities.pull import (
+    backfill_gmail_as_events,
     http_pull,
     http_pull_detail,
     ingest_events,
@@ -205,6 +206,7 @@ ALL_ACTIVITIES = [
     mark_event_processed,
     quarantine_event,
     # Pull
+    backfill_gmail_as_events,
     http_pull,
     http_pull_detail,
     ingest_events,
