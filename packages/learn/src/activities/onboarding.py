@@ -238,8 +238,23 @@ Return JSON:
 
 IMPORTANT: Only return GENUINELY NEW facts not already in the existing list. Be specific and factual. Do not hallucinate."""
 
-    result = await _call_clerk(prompt)
-    new_facts = result.get("new_facts", [])
+    raw_result = await _call_clerk(prompt, raw=True)
+    new_facts = []
+    if isinstance(raw_result, dict):
+        new_facts = raw_result.get("new_facts", [])
+    elif isinstance(raw_result, str):
+        try:
+            text = raw_result.strip()
+            first_brace = text.find("{")
+            if first_brace >= 0:
+                fragment = text[first_brace:]
+                open_b = fragment.count("[") - fragment.count("]")
+                open_c = fragment.count("{") - fragment.count("}")
+                repaired = fragment + ("]" * max(0, open_b)) + ("}" * max(0, open_c))
+                parsed = json.loads(repaired)
+                new_facts = parsed.get("new_facts", [])
+        except Exception:
+            new_facts = []
 
     # Append to onboard.json
     onboard["facts"].extend(new_facts)
@@ -287,8 +302,28 @@ Return JSON:
 
 Be specific and evidence-based. Don't invent patterns that aren't supported by the facts."""
 
-    result = await _call_clerk(prompt)
-    patterns = result.get("patterns", [])
+    raw_result = await _call_clerk(prompt, raw=True)
+    # Parse JSON from raw text — handle truncation gracefully
+    patterns = []
+    if isinstance(raw_result, dict):
+        patterns = raw_result.get("patterns", [])
+    elif isinstance(raw_result, str):
+        try:
+            import re
+            # Find the JSON object in the response
+            text = raw_result.strip()
+            first_brace = text.find("{")
+            if first_brace >= 0:
+                fragment = text[first_brace:]
+                # Repair truncation by closing open brackets
+                open_b = fragment.count("[") - fragment.count("]")
+                open_c = fragment.count("{") - fragment.count("}")
+                repaired = fragment + ("]" * max(0, open_b)) + ("}" * max(0, open_c))
+                parsed = json.loads(repaired)
+                patterns = parsed.get("patterns", [])
+        except Exception:
+            # Last resort: treat empty
+            patterns = []
 
     onboard["patterns"] = patterns
     onboard["progress"]["patterns_count"] = len(patterns)
@@ -419,8 +454,23 @@ Return JSON:
 
 Be practical and specific. These should be things that could actually be built."""
 
-    result = await _call_clerk(prompt)
-    automations = result.get("automations", [])
+    raw_result = await _call_clerk(prompt, raw=True)
+    automations = []
+    if isinstance(raw_result, dict):
+        automations = raw_result.get("automations", [])
+    elif isinstance(raw_result, str):
+        try:
+            text = raw_result.strip()
+            first_brace = text.find("{")
+            if first_brace >= 0:
+                fragment = text[first_brace:]
+                open_b = fragment.count("[") - fragment.count("]")
+                open_c = fragment.count("{") - fragment.count("}")
+                repaired = fragment + ("]" * max(0, open_b)) + ("}" * max(0, open_c))
+                parsed = json.loads(repaired)
+                automations = parsed.get("automations", [])
+        except Exception:
+            automations = []
 
     onboard["automations"] = automations
     _write_onboard(onboard_path, onboard)

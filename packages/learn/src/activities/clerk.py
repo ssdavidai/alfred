@@ -514,7 +514,7 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
     # 2. Poll sessions_history until assistant response appears
     # Use a fresh client with longer timeout for polling phase
     async with httpx.AsyncClient(timeout=15.0) as client:
-        for attempt in range(28):  # 28 × 10s = 280s max
+        for attempt in range(48):  # 48 × 10s = 480s max
             await asyncio.sleep(10)
             try:
                 hist_resp = await client.post(
@@ -581,7 +581,7 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
                             return msg_content
                         return _extract_json(msg_content)
 
-    raise TimeoutError(f"Clerk subagent did not respond within 280s: {session_key}")
+    raise TimeoutError(f"Clerk subagent did not respond within 480s: {session_key}")
 
 
 def _extract_json(content: str) -> dict[str, Any]:
