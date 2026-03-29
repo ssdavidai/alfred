@@ -232,40 +232,40 @@ export default function DashboardPage() {
   }, [onboardingState]);
 
   // ---------------------------------------------------------------------------
-  // Auto-capture Google tokens + create Gmail stream after provisioning
+  // Auto-capture Google tokens + trigger onboarding after provisioning
   // ---------------------------------------------------------------------------
+
+  const onboardingTriggered = useRef(false);
 
   useEffect(() => {
     if (onboardingState !== "awaiting_brief") return;
+    if (onboardingTriggered.current) return;
 
-    // Check URL for oauth=success (returning from token capture redirect)
+    const hasCredential = provStatus?.hasGoogleCredential;
+
+    // Clean up oauth=success from URL if present
     const params = new URLSearchParams(window.location.search);
     if (params.get("oauth") === "success") {
-      // Tokens captured — trigger onboarding workflow
-      sessionStorage.setItem("alfred:oauth_captured", "true");
-      console.info("[DashboardPage] OAuth tokens captured — triggering onboarding");
       window.history.replaceState({}, "", "/dashboard");
+    }
+
+    if (hasCredential) {
+      // Credential exists — trigger onboarding workflow (creates Gmail stream + First Brief)
+      onboardingTriggered.current = true;
+      console.info("[DashboardPage] Google credential exists — triggering onboarding");
       startOnboarding({}).catch((err: any) => {
         console.error("[DashboardPage] onboarding workflow failed:", err);
       });
       return;
     }
 
-    // Already captured tokens (persists across re-renders/reloads)
-    if (sessionStorage.getItem("alfred:oauth_captured") === "true") {
-      // Tokens already captured, just re-trigger onboarding in case it failed
-      startOnboarding({}).catch(() => {});
-      return;
-    }
-
-    // No tokens yet — redirect to capture them via our custom OAuth flow
+    // No credential — redirect to capture tokens (one-time, Google auto-approves)
     if (!authUser?.id) return;
-    console.info("[DashboardPage] Redirecting to capture Google OAuth tokens");
-    // Mark that we're about to redirect (prevent loop on fast reloads)
-    sessionStorage.setItem("alfred:oauth_captured", "pending");
+    onboardingTriggered.current = true;
+    console.info("[DashboardPage] No Google credential — redirecting to OAuth");
     const scopes = "https://www.googleapis.com/auth/gmail.readonly";
     window.location.href = `/auth/oauth2/google/start?userId=${authUser.id}&scopes=${encodeURIComponent(scopes)}&redirectAfter=${encodeURIComponent("/dashboard?oauth=success")}`;
-  }, [onboardingState, authUser]);
+  }, [onboardingState, authUser, provStatus]);
 
   // ---------------------------------------------------------------------------
   // Brief auto-dismiss timer (30s)
