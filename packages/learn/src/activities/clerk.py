@@ -487,7 +487,7 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
                     "task": prompt,
                     "agentId": config.clerk_agent_id,
                     "mode": "run",
-                    "cleanup": "keep",
+                    "cleanup": "auto",
                     "sandbox": "inherit",
                     "runTimeoutSeconds": 240,
                 },
