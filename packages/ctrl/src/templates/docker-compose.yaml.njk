@@ -159,6 +159,7 @@ services:
       - TASK_QUEUE=alfred-learn
       - ALFRED_LEARN_ENABLED=${ALFRED_LEARN_ENABLED:-true}
       - ALFRED_CTRL_URL=http://ctrl-api:3100
+      - SAAS_API_URL=https://alfred.black
     env_file:
       - .env
     restart: unless-stopped
