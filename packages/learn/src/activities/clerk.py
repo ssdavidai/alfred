@@ -606,4 +606,16 @@ def _extract_json(content: str) -> dict[str, Any]:
             return json.loads(content[first_brace:last_brace + 1])
         except json.JSONDecodeError:
             pass
+
+    # Attempt to repair truncated JSON (close open brackets/braces)
+    if first_brace != -1:
+        fragment = content[first_brace:]
+        open_braces = fragment.count("{") - fragment.count("}")
+        open_brackets = fragment.count("[") - fragment.count("]")
+        repaired = fragment + ("]" * max(0, open_brackets)) + ("}" * max(0, open_braces))
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
+
     raise ValueError(f"Could not parse JSON from Clerk response: {content[:200]}")
