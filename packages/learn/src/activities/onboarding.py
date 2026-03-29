@@ -594,48 +594,114 @@ IMPORTANT: Return ONLY the brief text. No JSON wrapping. No code fences. Just th
 
 @activity.defn
 async def write_facts_to_vault(onboard_path: str) -> dict[str, int]:
-    """Write extracted facts as vault records (person, org entities). Runs after brief is delivered."""
+    """Extract structured entities from facts via Clerk and write to vault as typed records."""
     config = load_config()
     onboard = _read_onboard(onboard_path)
     facts = onboard.get("facts", [])
     patterns = onboard.get("patterns", [])
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    # Summarize facts for the Clerk prompt
+    fact_text = ""
+    for fact in facts:
+        if isinstance(fact, dict):
+            fact_text += f"- [{fact.get('category', 'general')}] {fact.get('fact', '')}\n"
+
+    # Ask Clerk to extract structured entities from all facts
+    entity_prompt = f"""You are Alfred, a butler's intelligence system. You've collected {len(facts)} facts about your master from 100 days of email.
+
+Now extract STRUCTURED ENTITIES from these facts. Create proper vault records for every person, organization, project, and location mentioned.
+
+FACTS:
+{fact_text[:12000]}
+
+PATTERNS:
+{json.dumps(patterns[:10], indent=2) if patterns else "None yet"}
+
+For each entity, provide:
+- type: person, org, project, or location
+- name: proper name
+- description: 2-3 sentences about this entity based on the facts
+- relationship: how they relate to the user (for people: colleague, friend, family, vendor, etc.)
+- tags: relevant keywords
+
+Return JSON:
+{{
+  "entities": [
+    {{"type": "person", "name": "Full Name", "description": "...", "relationship": "colleague", "tags": ["work", "engineering"]}},
+    {{"type": "org", "name": "Company Name", "description": "...", "relationship": "employer", "tags": ["tech"]}},
+    {{"type": "project", "name": "Project Name", "description": "...", "tags": ["active"]}},
+    {{"type": "location", "name": "Place Name", "description": "...", "tags": ["home"]}}
+  ]
+}}
+
+Extract EVERY entity you can find. Be thorough. Include people, companies, services, projects, cities, anything that's a real named thing in the user's life."""
+
+    raw_result = await _call_clerk(entity_prompt, raw=True)
+    entities: list[dict[str, Any]] = []
+    if isinstance(raw_result, dict):
+        entities = raw_result.get("entities", [])
+    elif isinstance(raw_result, str):
+        try:
+            text = raw_result.strip()
+            first_brace = text.find("{")
+            if first_brace >= 0:
+                fragment = text[first_brace:]
+                open_b = fragment.count("[") - fragment.count("]")
+                open_c = fragment.count("{") - fragment.count("}")
+                repaired = fragment + ("]" * max(0, open_b)) + ("}" * max(0, open_c))
+                parsed = json.loads(repaired)
+                entities = parsed.get("entities", [])
+        except Exception:
+            entities = []
+
+    activity.heartbeat(f"Extracted {len(entities)} structured entities")
+
+    # Write each entity to vault
     client = VaultClient(config)
-    persons_created = 0
-    orgs_created = 0
+    counts: dict[str, int] = {"person": 0, "org": 0, "project": 0, "location": 0, "note": 0}
 
     try:
-        # Extract unique people from facts
-        people_names: set[str] = set()
-        for fact in facts:
-            f = fact.get("fact", "") if isinstance(fact, dict) else str(fact)
-            cat = fact.get("category", "") if isinstance(fact, dict) else ""
-            # Look for personal/professional facts mentioning names
-            if cat in ("personal", "professional", "social"):
-                # Simple heuristic: facts often start with a name
-                pass  # We'll use the patterns instead
-
-        # Extract people and orgs from patterns
-        for pattern in patterns:
-            if not isinstance(pattern, dict):
+        for entity in entities:
+            if not isinstance(entity, dict):
                 continue
-            entities = pattern.get("entities_involved", [])
-            for entity in entities:
-                if isinstance(entity, str) and entity not in people_names:
-                    people_names.add(entity)
-
-        # Write person records
-        for name in people_names:
-            if len(name) < 2 or len(name) > 100:
+            etype = entity.get("type", "")
+            name = entity.get("name", "")
+            if not name or not etype or len(name) < 2:
                 continue
-            content = f"---\ntype: person\nname: \"{name}\"\nstatus: active\ntags: [onboarding]\ncreated: {__import__('datetime').date.today().isoformat()}\n---\n\n# {name}\n\n*Discovered during onboarding from email analysis.*\n"
+
+            desc = entity.get("description", "")
+            relationship = entity.get("relationship", "")
+            tags = entity.get("tags", [])
+            tag_str = ", ".join(tags) if isinstance(tags, list) else str(tags)
+
+            # Build frontmatter
+            fm_lines = [
+                "---",
+                f"type: {etype}",
+                f'name: "{name}"',
+                "status: active",
+                f"tags: [{tag_str}]",
+                f"created: {today}",
+            ]
+            if relationship:
+                fm_lines.append(f"relationship: {relationship}")
+            fm_lines.append("---")
+
+            body = f"\n# {name}\n\n{desc}\n"
+            if relationship:
+                body += f"\n**Relationship**: {relationship}\n"
+            body += "\n*Discovered during onboarding from email analysis.*\n"
+
+            content = "\n".join(fm_lines) + "\n" + body
+
             try:
-                await client.write_record("person", name, content)
-                persons_created += 1
+                await client.write_record(etype, name, content)
+                counts[etype] = counts.get(etype, 0) + 1
             except Exception:
-                pass  # May already exist
+                pass  # May already exist or invalid type
 
-        # Write fact summary as a vault note
+        # Also write fact summary note
         fact_categories: dict[str, list[str]] = {}
         for fact in facts:
             if isinstance(fact, dict):
@@ -645,14 +711,28 @@ async def write_facts_to_vault(onboard_path: str) -> dict[str, int]:
                     fact_categories.setdefault(cat, []).append(text)
 
         if fact_categories:
-            summary_lines = ["# Onboarding — Discovered Facts\n", f"*{len(facts)} facts extracted from 100 days of email analysis.*\n"]
+            summary_lines = [
+                "---",
+                "type: note",
+                'name: "Onboarding — Discovered Facts"',
+                "status: active",
+                "tags: [onboarding, facts]",
+                f"created: {today}",
+                "---",
+                "",
+                "# Onboarding — Discovered Facts",
+                "",
+                f"*{len(facts)} facts extracted from 100 days of email analysis.*",
+                "",
+            ]
             for cat, cat_facts in sorted(fact_categories.items()):
-                summary_lines.append(f"\n## {cat.title()}\n")
-                for f in cat_facts[:30]:  # Cap per category
-                    summary_lines.append(f"- {f}")
-            summary_content = "\n".join(summary_lines) + "\n"
+                summary_lines.append(f"## {cat.title()}\n")
+                for f_text in cat_facts[:30]:
+                    summary_lines.append(f"- {f_text}")
+                summary_lines.append("")
             try:
-                await client.write_record("note", "Onboarding — Discovered Facts", summary_content)
+                await client.write_record("note", "Onboarding — Discovered Facts", "\n".join(summary_lines) + "\n")
+                counts["note"] = 1
             except Exception:
                 pass
 
@@ -663,4 +743,4 @@ async def write_facts_to_vault(onboard_path: str) -> dict[str, int]:
     onboard["stage"] = "done"
     _write_onboard(onboard_path, onboard)
 
-    return {"persons_created": persons_created, "orgs_created": orgs_created}
+    return counts
