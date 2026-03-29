@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import {
   useQuery,
   getDashboardData,
   getProvisioningStatus,
   getFirstBrief,
+  getOnboardingProgress,
   startOnboarding,
   provisionNewUser,
 } from "wasp/client/operations";
@@ -75,8 +76,23 @@ function useCyclingMessages(messages: string[], intervalMs: number = 4000): stri
 // Progress bar component
 // ---------------------------------------------------------------------------
 
-function GoldProgressBar({ active }: { active: boolean }) {
+function GoldProgressBar({ active, progress }: { active: boolean; progress?: number }) {
   if (!active) return null;
+
+  // If we have a real progress value (0-1), show a determinate bar
+  if (progress != null && progress > 0 && progress < 1) {
+    return (
+      <div className="mt-6 h-[1px] w-48 overflow-hidden rounded-full bg-[#C9A84C]/10">
+        <motion.div
+          className="h-full bg-[#C9A84C]/60"
+          initial={{ width: "0%" }}
+          animate={{ width: `${Math.round(progress * 100)}%` }}
+          transition={{ duration: 0.5, ease: "easeOut" }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="mt-6 h-[1px] w-48 overflow-hidden rounded-full bg-[#C9A84C]/10">
       <motion.div
@@ -87,7 +103,7 @@ function GoldProgressBar({ active }: { active: boolean }) {
           repeat: Infinity,
           duration: 2,
           ease: "easeInOut",
-        }}
+        } as const}
         style={{ width: "40%" }}
       />
     </div>
@@ -117,6 +133,38 @@ function BriefDisplay({ content }: { content: string }) {
 }
 
 // ---------------------------------------------------------------------------
+// Stage-specific message builder
+// ---------------------------------------------------------------------------
+
+function buildOnboardingMessage(stage: string, progress: any): string {
+  const currentDay = progress?.current_day ?? 0;
+  const totalDays = progress?.total_days ?? 0;
+  const factsCount = progress?.facts_count ?? 0;
+
+  switch (stage) {
+    case "backfill":
+      return "Reading your emails";
+    case "processing":
+      if (totalDays > 0) {
+        return `Learning who you are (day ${currentDay} of ${totalDays})`;
+      }
+      return `Learning who you are (${factsCount} facts discovered)`;
+    case "patterns":
+      return "Finding patterns in your world";
+    case "personalize":
+      return "Personalizing your Alfred";
+    case "automations":
+      return "Thinking about how to help you";
+    case "brief":
+      return "Writing your first brief";
+    case "done":
+      return "Alfred is ready";
+    default:
+      return "Preparing your Alfred";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // DashboardPage — zero-config onboarding + VaultNebula home
 // ---------------------------------------------------------------------------
 
@@ -138,6 +186,10 @@ export default function DashboardPage() {
   );
 
   const { data: briefData } = useQuery(getFirstBrief, undefined, {
+    refetchInterval: 5_000,
+  });
+
+  const { data: onboardProgress } = useQuery(getOnboardingProgress, undefined, {
     refetchInterval: 5_000,
   });
 
@@ -171,29 +223,42 @@ export default function DashboardPage() {
     instanceStatus === "provisioning" ||
     provStatus?.job?.status === "running" ||
     provStatus?.job?.status === "pending";
-  const hasBrief = briefData?.brief != null && briefData.brief !== "";
+
+  // Check for brief from onboard progress (v2) OR from vault event (v1 fallback)
+  const onboardStage = onboardProgress?.stage as string | undefined;
+  const onboardBrief = onboardProgress?.brief as string | undefined;
+  const hasBrief =
+    (onboardStage === "done" && onboardBrief != null && onboardBrief !== "") ||
+    (briefData?.brief != null && briefData.brief !== "");
+
   const hasVaultData =
     displayData?.vault?.total_records != null &&
     displayData.vault.total_records > 0;
   const isNewUser = !hasInstance && !isProvisioning && provStatus !== undefined;
 
+  // Onboarding is actively running if stage is not "done" and not "not_started"
+  const isOnboardingActive =
+    onboardStage != null &&
+    onboardStage !== "done" &&
+    onboardStage !== "not_started";
+
   const [briefDismissed, setBriefDismissed] = useState(false);
 
   const onboardingState: OnboardingState = (() => {
     // If we have vault data and a brief has been seen/dismissed, returning user
-    if (hasInstance && hasVaultData && (briefDismissed || !hasBrief)) {
+    if (hasInstance && hasVaultData && (briefDismissed || !hasBrief) && !isOnboardingActive) {
       return "returning_user";
     }
     // If we have vault data but also have a fresh brief, could be returning user
-    if (hasInstance && hasVaultData && hasBrief && !briefDismissed) {
+    if (hasInstance && hasVaultData && hasBrief && !briefDismissed && !isOnboardingActive) {
       return "returning_user";
     }
-    // Brief ready
-    if (hasInstance && hasBrief) {
+    // Brief ready (onboarding complete)
+    if (hasInstance && hasBrief && !isOnboardingActive) {
       return "brief_ready";
     }
-    // Instance running but no brief yet
-    if (hasInstance && !hasBrief) {
+    // Instance running but onboarding still in progress or no brief yet
+    if (hasInstance && (isOnboardingActive || !hasBrief)) {
       return "awaiting_brief";
     }
     // Provisioning in progress
@@ -278,7 +343,7 @@ export default function DashboardPage() {
   }, [onboardingState]);
 
   // ---------------------------------------------------------------------------
-  // Cycling messages
+  // Stage-aware messages
   // ---------------------------------------------------------------------------
 
   const provisioningMessages = [
@@ -288,21 +353,35 @@ export default function DashboardPage() {
     "Almost there",
   ];
 
-  const briefMessages = [
-    "Reading your emails",
-    "Learning who you are",
-    "Finding patterns",
-    "Preparing your first brief",
-  ];
+  // Build dynamic message from onboarding progress
+  const onboardingMessage = useMemo(() => {
+    if (onboardStage && isOnboardingActive) {
+      return buildOnboardingMessage(onboardStage, onboardProgress?.progress);
+    }
+    return "Preparing your first brief";
+  }, [onboardStage, onboardProgress?.progress, isOnboardingActive]);
 
   const activeMessages =
     onboardingState === "new_user" || onboardingState === "provisioning"
       ? provisioningMessages
       : onboardingState === "awaiting_brief"
-        ? briefMessages
+        ? [onboardingMessage]
         : ["Alfred is ready"];
 
   const currentMessage = useCyclingMessages(activeMessages);
+
+  // Calculate progress bar value for determinate progress
+  const progressValue = useMemo(() => {
+    if (!onboardProgress?.progress || !isOnboardingActive) return undefined;
+    const { current_day, total_days } = onboardProgress.progress;
+    if (onboardStage === "processing" && total_days > 0) {
+      return current_day / total_days;
+    }
+    return undefined;
+  }, [onboardProgress, onboardStage, isOnboardingActive]);
+
+  // Use the brief from onboard progress if available, otherwise fall back to vault
+  const briefContent = onboardBrief || briefData?.brief || "";
 
   // ---------------------------------------------------------------------------
   // Render
@@ -334,6 +413,18 @@ export default function DashboardPage() {
             </motion.p>
           </AnimatePresence>
 
+          {/* Fact counter — visible during processing stage */}
+          {onboardStage === "processing" && onboardProgress?.progress?.facts_count > 0 && (
+            <motion.p
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.6 }}
+              className="mt-2 font-mono text-[0.6rem] uppercase tracking-[0.2em] text-[#C9A84C]/40"
+            >
+              {onboardProgress.progress.facts_count} facts discovered
+            </motion.p>
+          )}
+
           {/* Gold progress bar — visible during provisioning and brief generation */}
           <GoldProgressBar
             active={
@@ -341,12 +432,13 @@ export default function DashboardPage() {
               onboardingState === "provisioning" ||
               onboardingState === "awaiting_brief"
             }
+            progress={progressValue}
           />
 
           {/* Brief display (State 3) */}
           <AnimatePresence>
-            {onboardingState === "brief_ready" && briefData?.brief && (
-              <BriefDisplay content={briefData.brief} />
+            {onboardingState === "brief_ready" && briefContent && (
+              <BriefDisplay content={briefContent} />
             )}
           </AnimatePresence>
 
@@ -376,7 +468,7 @@ export default function DashboardPage() {
             <div className="pointer-events-auto flex items-center gap-3 rounded-xl border border-[#C9A84C]/20 bg-black/60 px-4 py-3 backdrop-blur-sm">
               <motion.div
                 animate={{ rotate: 360 }}
-                transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+                transition={{ repeat: Infinity, duration: 1, ease: "linear" } as const}
                 className="h-4 w-4 border-2 border-[#C9A84C] border-t-transparent rounded-full"
               />
               <p className="font-mono text-xs uppercase tracking-[0.2em] text-[#F0EDE8]/60">

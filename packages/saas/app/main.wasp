@@ -474,6 +474,11 @@ action startOnboarding {
   entities: [Instance, Stream, OAuthCredential]
 }
 
+query getOnboardingProgress {
+  fn: import { getOnboardingProgress } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
 // ============================================================
 // Tasks
 // ============================================================

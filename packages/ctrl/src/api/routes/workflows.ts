@@ -1,6 +1,9 @@
+import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { dockerExec, parseJsonLines } from "../helpers.js";
+
+const ONBOARD_JSON_PATH = "/mnt/encrypted/alfred/onboard.json";
 
 export function registerWorkflowRoutes(): void {
   // --- Workflows ---
@@ -102,11 +105,11 @@ export function registerWorkflowRoutes(): void {
 
   // --- Onboarding ---
 
-  // Start onboarding pipeline workflow
+  // Start onboarding pipeline workflow (v2)
   addRoute("POST", "/api/v1/workflows/onboarding/start", async ({ res, body }) => {
     const b = body as Record<string, unknown> | undefined;
-    if (!b || typeof b.user_id !== "string" || typeof b.stream_id !== "string") {
-      throw new ValidationError("user_id and stream_id are required");
+    if (!b || typeof b.user_id !== "string") {
+      throw new ValidationError("user_id is required");
     }
 
     const workflowId = `onboarding-${b.user_id}-${Date.now()}`;
@@ -115,7 +118,7 @@ export function registerWorkflowRoutes(): void {
       "--type", "OnboardingPipelineWorkflow",
       "--task-queue", "alfred-learn",
       "--workflow-id", workflowId,
-      "--input", JSON.stringify({ user_id: b.user_id, stream_id: b.stream_id }),
+      "--input", JSON.stringify({ user_id: b.user_id, stream_id: b.stream_id ?? "" }),
     ];
 
     const stdout = await dockerExec("temporal", args);
@@ -124,6 +127,32 @@ export function registerWorkflowRoutes(): void {
       sendJson(res, 201, { workflow_id: workflowId, ...result });
     } catch {
       sendJson(res, 201, { workflow_id: workflowId, raw: stdout });
+    }
+  });
+
+  // Get onboarding progress (reads /mnt/encrypted/alfred/onboard.json)
+  addRoute("GET", "/api/v1/onboarding/progress", async ({ res }) => {
+    try {
+      const raw = fs.readFileSync(ONBOARD_JSON_PATH, "utf-8");
+      const data = JSON.parse(raw);
+      sendJson(res, 200, {
+        stage: data.stage ?? "unknown",
+        progress: data.progress ?? { current_day: 0, total_days: 0, facts_count: 0, patterns_count: 0 },
+        facts_count: data.facts?.length ?? 0,
+        patterns_count: data.patterns?.length ?? 0,
+        automations_count: data.automations?.length ?? 0,
+        brief: data.brief ?? "",
+      });
+    } catch {
+      // File doesn't exist yet — onboarding hasn't started
+      sendJson(res, 200, {
+        stage: "not_started",
+        progress: { current_day: 0, total_days: 0, facts_count: 0, patterns_count: 0 },
+        facts_count: 0,
+        patterns_count: 0,
+        automations_count: 0,
+        brief: "",
+      });
     }
   });
 

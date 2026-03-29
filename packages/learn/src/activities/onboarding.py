@@ -1,14 +1,18 @@
-"""Onboarding activities — entity extraction, pattern analysis, first brief generation.
+"""Onboarding v2 activities — Gmail backfill, progressive fact extraction, butler brief.
 
 All LLM calls go through the Clerk (OpenClaw gateway). All vault writes go through
-the alfred-ctrl API via VaultClient.
+the alfred-ctrl API via VaultClient. The onboard.json progress file lives at
+/alfred-data/onboard.json and is polled by the frontend via ctrl API.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
+import logging
+import os
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -18,341 +22,486 @@ from src.activities.clerk import _call_clerk
 from src.config import load_config
 from src.utils.vault_client import VaultClient
 
+logger = logging.getLogger("alfred-learn")
+
+ONBOARD_PATH = "/alfred-data/onboard.json"
+
+
+# ---------------------------------------------------------------------------
+# Helper: read / write onboard.json
+# ---------------------------------------------------------------------------
+
+def _read_onboard(path: str) -> dict[str, Any]:
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {
+            "user_id": "",
+            "started_at": "",
+            "stage": "backfill",
+            "progress": {"current_day": 0, "total_days": 0, "facts_count": 0, "patterns_count": 0},
+            "facts": [],
+            "patterns": [],
+            "automations": [],
+            "brief": "",
+        }
+
+
+def _write_onboard(path: str, data: dict[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Activity: init_onboard_json
+# ---------------------------------------------------------------------------
 
 @activity.defn
-async def wait_for_gmail_events(
-    stream_id: str,
-    min_events: int = 10,
-    max_wait_seconds: int = 300,
-) -> list[dict[str, Any]]:
-    """Poll ctrl API for unprocessed Gmail events until we have enough or timeout."""
+async def init_onboard_json(onboard_path: str, user_id: str) -> None:
+    """Create initial onboard.json with empty state."""
+    data = {
+        "user_id": user_id,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "stage": "backfill",
+        "progress": {"current_day": 0, "total_days": 0, "facts_count": 0, "patterns_count": 0},
+        "facts": [],
+        "patterns": [],
+        "automations": [],
+        "brief": "",
+    }
+    _write_onboard(onboard_path, data)
+
+
+# ---------------------------------------------------------------------------
+# Activity: update_onboard_stage
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def update_onboard_stage(onboard_path: str, stage: str) -> None:
+    """Update the stage field in onboard.json."""
+    data = _read_onboard(onboard_path)
+    data["stage"] = stage
+    _write_onboard(onboard_path, data)
+
+
+# ---------------------------------------------------------------------------
+# Activity: update_onboard_progress
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def update_onboard_progress(onboard_path: str, current_day: int, total_days: int) -> None:
+    """Update progress counters in onboard.json."""
+    data = _read_onboard(onboard_path)
+    data["progress"]["current_day"] = current_day
+    data["progress"]["total_days"] = total_days
+    _write_onboard(onboard_path, data)
+
+
+# ---------------------------------------------------------------------------
+# Activity: backfill_gmail_history (Stage 1)
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def backfill_gmail_history(user_id: str) -> list[dict[str, Any]]:
+    """Fetch last 100 days of Gmail via API. Returns day-chunks.
+
+    Each chunk: { date: "2026-01-15", emails: [{from, to, subject, snippet, date, message_id}], count: N }
+    """
+    # Get OAuth token from SaaS internal endpoint
+    saas_url = os.environ.get("SAAS_API_URL", "https://alfred.black")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{saas_url}/api/internal/oauth2/token",
+            json={"provider": "google", "userId": user_id},
+            headers={"Authorization": "Bearer internal"},
+        )
+        resp.raise_for_status()
+        token = resp.json()["access_token"]
+
+    # Fetch message IDs from last 100 days
+    from_date = (datetime.now(timezone.utc) - timedelta(days=100)).strftime("%Y/%m/%d")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    all_messages: list[dict[str, Any]] = []
+    page_token: str | None = None
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        while True:
+            params: dict[str, Any] = {"maxResults": 100, "q": f"after:{from_date}"}
+            if page_token:
+                params["pageToken"] = page_token
+            resp = await client.get(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+                params=params,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            messages = data.get("messages", [])
+            all_messages.extend(messages)
+            page_token = data.get("nextPageToken")
+            if not page_token or len(all_messages) >= 5000:
+                break
+            activity.heartbeat(f"Fetched {len(all_messages)} message IDs")
+
+    logger.info("Backfill: found %d message IDs in last 100 days", len(all_messages))
+
+    # Fetch metadata for each message
+    detailed: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for i, msg in enumerate(all_messages):
+            if i % 50 == 0:
+                activity.heartbeat(f"Fetching details: {i}/{len(all_messages)}")
+            try:
+                resp = await client.get(
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}"
+                    "?format=metadata"
+                    "&metadataHeaders=From&metadataHeaders=To"
+                    "&metadataHeaders=Subject&metadataHeaders=Date",
+                    headers=headers,
+                )
+                if resp.status_code == 200:
+                    detailed.append(resp.json())
+            except Exception:
+                continue
+
+    # Group by day
+    day_chunks: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for msg in detailed:
+        headers_list = msg.get("payload", {}).get("headers", [])
+        date_str = next((h["value"] for h in headers_list if h["name"] == "Date"), "")
+        from_str = next((h["value"] for h in headers_list if h["name"] == "From"), "")
+        to_str = next((h["value"] for h in headers_list if h["name"] == "To"), "")
+        subject = next((h["value"] for h in headers_list if h["name"] == "Subject"), "")
+        snippet = msg.get("snippet", "")
+
+        try:
+            dt = parsedate_to_datetime(date_str)
+            day_key = dt.strftime("%Y-%m-%d")
+        except Exception:
+            day_key = "unknown"
+
+        day_chunks[day_key].append({
+            "from": from_str,
+            "to": to_str,
+            "subject": subject,
+            "snippet": snippet,
+            "date": date_str,
+            "message_id": msg.get("id", ""),
+        })
+
+    # Cap at 50 per day, sort by date
+    result: list[dict[str, Any]] = []
+    for day_key in sorted(day_chunks.keys()):
+        emails = day_chunks[day_key][:50]
+        result.append({"date": day_key, "emails": emails, "count": len(emails)})
+
+    logger.info("Backfill: produced %d day-chunks from %d messages", len(result), len(detailed))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Activity: process_day_chunk (Stage 2)
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def process_day_chunk(day_chunk: dict[str, Any], onboard_path: str, user_id: str) -> dict[str, Any]:
+    """Process one day's emails: extract facts, update onboard.json."""
+    onboard = _read_onboard(onboard_path)
+    existing_facts = onboard.get("facts", [])
+
+    # Build prompt — include last 50 existing facts for deduplication context
+    prompt = f"""You are Alfred, a butler's intelligence system. You're reading your new master's emails from {day_chunk['date']}.
+
+EXISTING FACTS ABOUT THE USER (from previous days):
+{json.dumps(existing_facts[-50:], indent=2)}
+
+TODAY'S EMAILS ({day_chunk['count']} emails from {day_chunk['date']}):
+{json.dumps(day_chunk['emails'][:50], indent=2)}
+
+Extract NEW facts about the user that aren't already in the existing facts list. Categories:
+- personal: name, location, family, pets, hobbies, preferences
+- professional: job title, company, projects, colleagues, clients
+- financial: subscriptions, payments, banking, investments
+- health: appointments, medications, fitness
+- social: friends, events, travel plans
+- routine: regular meetings, daily habits, communication patterns
+
+Return JSON:
+{{
+  "new_facts": [
+    {{"category": "personal|professional|financial|health|social|routine", "fact": "...", "confidence": "high|medium|low", "source_day": "{day_chunk['date']}"}}
+  ]
+}}
+
+IMPORTANT: Only return GENUINELY NEW facts not already in the existing list. Be specific and factual. Do not hallucinate."""
+
+    result = await _call_clerk(prompt)
+    new_facts = result.get("new_facts", [])
+
+    # Append to onboard.json
+    onboard["facts"].extend(new_facts)
+    onboard["progress"]["facts_count"] = len(onboard["facts"])
+    _write_onboard(onboard_path, onboard)
+
+    return {"new_facts_count": len(new_facts), "total_facts": len(onboard["facts"])}
+
+
+# ---------------------------------------------------------------------------
+# Activity: analyze_patterns_v2 (Stage 3)
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def analyze_patterns_v2(onboard_path: str) -> None:
+    """Analyze all accumulated facts for patterns. Updates onboard.json."""
+    onboard = _read_onboard(onboard_path)
+    facts = onboard.get("facts", [])
+
+    prompt = f"""You are Alfred, a butler's intelligence system. You've been reading your new master's emails
+for the past 100 days and extracted these facts:
+
+FACTS ({len(facts)} total):
+{json.dumps(facts, indent=2)}
+
+Find patterns in your master's life. Look for:
+1. **Work patterns** — recurring meetings, project cycles, collaboration structures
+2. **Communication patterns** — who they talk to most, email volume trends, response patterns
+3. **Life patterns** — routines, regular appointments, seasonal activities
+4. **Priority signals** — what gets immediate attention vs what gets deferred
+5. **Relationship clusters** — groups of people who appear together, team structures
+
+Return JSON:
+{{
+  "patterns": [
+    {{
+      "type": "work|communication|life|priority|relationship",
+      "name": "Pattern name",
+      "description": "Clear description of the pattern",
+      "confidence": "high|medium|low",
+      "evidence": "Brief supporting evidence from the facts"
+    }}
+  ]
+}}
+
+Be specific and evidence-based. Don't invent patterns that aren't supported by the facts."""
+
+    result = await _call_clerk(prompt)
+    patterns = result.get("patterns", [])
+
+    onboard["patterns"] = patterns
+    onboard["progress"]["patterns_count"] = len(patterns)
+    _write_onboard(onboard_path, onboard)
+
+
+# ---------------------------------------------------------------------------
+# Activity: personalize_alfred (Stage 4)
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def personalize_alfred(onboard_path: str) -> None:
+    """Write USER.md and SOUL.md to vault based on discovered facts and patterns."""
     config = load_config()
+    onboard = _read_onboard(onboard_path)
+    facts = onboard.get("facts", [])
+    patterns = onboard.get("patterns", [])
+
+    # Generate USER.md content
+    user_prompt = f"""You are Alfred, a butler's intelligence system. Based on 100 days of email analysis,
+write a comprehensive USER.md profile for your master.
+
+FACTS ({len(facts)} total):
+{json.dumps(facts, indent=2)}
+
+PATTERNS ({len(patterns)} total):
+{json.dumps(patterns, indent=2)}
+
+Write a rich, detailed USER.md in markdown. Include:
+- **Identity**: Name, location, timezone (if inferrable)
+- **Professional life**: Role, company, key projects, work style
+- **Personal life**: Family, interests, routines
+- **Communication style**: How they write, response patterns, preferences
+- **Priorities**: What matters most to them based on their behavior
+- **Key relationships**: Important people and their roles
+
+This is NOT a template — it's a real profile based on real data. If you're uncertain about something,
+say so. Be specific and personal.
+
+Return JSON:
+{{
+  "user_md": "The full USER.md content in markdown"
+}}"""
+
+    user_result = await _call_clerk(user_prompt)
+    user_md = user_result.get("user_md", "# User Profile\n\nProfile pending.")
+
+    # Generate SOUL.md content
+    soul_prompt = f"""You are Alfred, a butler's intelligence system. Based on what you've learned about your master,
+write a SOUL.md that defines your personality as their butler.
+
+USER PROFILE SUMMARY:
+{user_md[:2000]}
+
+PATTERNS:
+{json.dumps(patterns, indent=2)}
+
+Write a SOUL.md that tunes Alfred's personality to THIS specific user. Include:
+- **Tone**: How should Alfred speak to this person? Formal? Casual? Technical?
+- **Priorities**: What should Alfred watch for and flag proactively?
+- **Boundaries**: What topics to be careful with based on observed behavior
+- **Communication rhythm**: When and how to reach out
+- **Personality notes**: How to be genuinely helpful to THIS person specifically
+
+This must feel like a real butler who has studied their master — not a generic assistant.
+
+Return JSON:
+{{
+  "soul_md": "The full SOUL.md content in markdown"
+}}"""
+
+    soul_result = await _call_clerk(soul_prompt)
+    soul_md = soul_result.get("soul_md", "# Alfred — Butler Protocol\n\nAwaiting personalization.")
+
+    # Write to vault via ctrl API
     client = VaultClient(config)
-    start = time.monotonic()
     try:
-        while (time.monotonic() - start) < max_wait_seconds:
-            events = await client.fetch_unprocessed_events(limit=min_events + 10)
-            # Filter to the target stream
-            stream_events = [
-                e for e in events
-                if e.get("stream_id") == stream_id or not stream_id
-            ]
-            if len(stream_events) >= min_events:
-                activity.heartbeat(f"Found {len(stream_events)} events")
-                return stream_events
-            activity.heartbeat(f"Waiting for events: {len(stream_events)}/{min_events}")
-            await asyncio.sleep(15)
-        # Return whatever we have if timeout
-        events = await client.fetch_unprocessed_events(limit=min_events + 10)
-        return [e for e in events if e.get("stream_id") == stream_id or not stream_id]
+        # Write USER.md via workspace endpoint
+        api_key = os.environ.get("AAS_API_KEY", "")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        async with httpx.AsyncClient(base_url=config.alfred_ctrl_url, timeout=30.0, headers=headers) as http:
+            await http.put(
+                "/api/v1/admin/workspace/USER.md",
+                json={"content": user_md},
+            )
+            await http.put(
+                "/api/v1/admin/workspace/SOUL.md",
+                json={"content": soul_md},
+            )
     finally:
         await client.close()
 
 
+# ---------------------------------------------------------------------------
+# Activity: suggest_automations (Stage 5)
+# ---------------------------------------------------------------------------
+
 @activity.defn
-async def extract_entities_from_emails(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Call Clerk to extract people, organizations, topics, and relationships from emails."""
-    # Build a summarized batch of emails for the Clerk
-    email_summaries = []
-    for evt in events[:20]:  # Cap at 20 for prompt size
-        raw = evt.get("raw", {})
-        email_summaries.append({
-            "from": raw.get("from", evt.get("source", "")),
-            "to": raw.get("to", ""),
-            "subject": raw.get("subject", evt.get("summary", "")),
-            "snippet": raw.get("snippet", raw.get("body", ""))[:500],
-            "date": raw.get("date", evt.get("created_at", "")),
-        })
+async def suggest_automations(onboard_path: str) -> None:
+    """Suggest top 3 automated workflows based on patterns. Updates onboard.json."""
+    onboard = _read_onboard(onboard_path)
+    facts = onboard.get("facts", [])
+    patterns = onboard.get("patterns", [])
 
-    prompt = f"""You are a butler's clerk performing first-time onboarding. Your master has just connected their Gmail.
-Below are their recent emails. Extract every person, organization, and topic you can identify.
+    prompt = f"""You are Alfred, a butler's intelligence system. Based on what you've learned about your master,
+suggest the top 3 automations that would save them the most time.
 
-For each person, note:
-- Their name and email address
-- Their apparent relationship to the master (colleague, client, friend, family, vendor, etc.)
-- How frequently they appear in this batch
+FACTS ({len(facts)} total):
+{json.dumps(facts[-30:], indent=2)}
 
-For each organization, note:
-- The organization name
-- Its apparent role (employer, client, vendor, service provider, etc.)
+PATTERNS ({len(patterns)} total):
+{json.dumps(patterns, indent=2)}
 
-For each topic, note:
-- The topic name
-- Which emails it appears in
-- Whether it seems urgent, routine, or informational
+For each automation, explain:
+- What it does
+- Why it would help THIS person specifically
+- What trigger would activate it
+- What action it would take
 
-Also identify any relationships between entities (e.g., "Jane works at Acme Corp").
-
-EMAILS:
-{json.dumps(email_summaries, indent=2)}
-
-Return JSON only:
+Return JSON:
 {{
-  "people": [
+  "automations": [
     {{
-      "name": "Full Name",
-      "email": "email@example.com",
-      "relationship": "colleague|client|friend|family|vendor|other",
-      "frequency": 1,
-      "context": "Brief note about this person"
-    }}
-  ],
-  "organizations": [
-    {{
-      "name": "Org Name",
-      "role": "employer|client|vendor|service|other",
-      "context": "Brief note"
-    }}
-  ],
-  "topics": [
-    {{
-      "name": "Topic Name",
-      "urgency": "urgent|routine|informational",
-      "email_count": 1,
-      "context": "Brief note"
-    }}
-  ],
-  "relationships": [
-    {{
-      "from": "Entity A",
-      "to": "Entity B",
-      "type": "works_at|manages|collaborates_with|client_of|other",
-      "context": "Brief note"
+      "name": "Automation name",
+      "description": "What it does and why it helps",
+      "trigger": "When this automation fires",
+      "action": "What it does when triggered",
+      "estimated_time_saved": "e.g. 30 min/week"
     }}
   ]
-}}"""
+}}
 
-    return await _call_clerk(prompt)
+Be practical and specific. These should be things that could actually be built."""
+
+    result = await _call_clerk(prompt)
+    automations = result.get("automations", [])
+
+    onboard["automations"] = automations
+    _write_onboard(onboard_path, onboard)
 
 
-@activity.defn
-async def analyze_patterns(
-    events: list[dict[str, Any]],
-    entities: dict[str, Any],
-) -> dict[str, Any]:
-    """Call Clerk to identify communication patterns, routines, and priorities."""
-    # Build timeline data
-    timeline = []
-    for evt in events[:20]:
-        raw = evt.get("raw", {})
-        timeline.append({
-            "from": raw.get("from", evt.get("source", "")),
-            "subject": raw.get("subject", evt.get("summary", "")),
-            "date": raw.get("date", evt.get("created_at", "")),
-            "labels": raw.get("labels", []),
-        })
-
-    prompt = f"""You are a butler's clerk analyzing your new master's communication patterns during onboarding.
-
-Using the email timeline and extracted entities below, identify:
-
-1. **Communication frequency patterns** — Who writes most often? Are there regular check-ins?
-2. **Time-of-day patterns** — When does the master receive most email? Any morning vs evening patterns?
-3. **Priority signals** — Which senders or topics consistently demand quick responses?
-4. **Recurring routines** — Weekly meetings, regular reports, recurring threads?
-5. **Attention clusters** — Groups of related emails that form a "workstream"
-
-ENTITIES (already extracted):
-{json.dumps(entities, indent=2)}
-
-EMAIL TIMELINE:
-{json.dumps(timeline, indent=2)}
-
-Return JSON only:
-{{
-  "patterns": [
-    {{
-      "type": "frequency|time_of_day|priority|routine|cluster",
-      "name": "Pattern name",
-      "description": "What this pattern is",
-      "entities_involved": ["Name1", "Name2"],
-      "confidence": 0.8,
-      "evidence": "Brief supporting evidence"
-    }}
-  ],
-  "suggested_priorities": [
-    {{
-      "item": "Description of priority item",
-      "reason": "Why this should be prioritized",
-      "urgency": "high|medium|low"
-    }}
-  ],
-  "routines_detected": [
-    {{
-      "name": "Routine name",
-      "frequency": "daily|weekly|monthly",
-      "next_expected": "When this might next occur",
-      "participants": ["Name1"]
-    }}
-  ]
-}}"""
-
-    return await _call_clerk(prompt)
-
+# ---------------------------------------------------------------------------
+# Activity: write_first_brief (Stage 6)
+# ---------------------------------------------------------------------------
 
 @activity.defn
-async def generate_first_brief(
-    events: list[dict[str, Any]],
-    entities: dict[str, Any],
-    patterns: dict[str, Any],
-) -> str:
-    """Call Clerk to write a personalized 5-paragraph morning brief."""
-    # Prepare a compact summary of the source data
-    email_subjects = []
-    for evt in events[:20]:
-        raw = evt.get("raw", {})
-        email_subjects.append({
-            "from": raw.get("from", evt.get("source", "")),
-            "subject": raw.get("subject", evt.get("summary", "")),
-            "date": raw.get("date", evt.get("created_at", "")),
-            "snippet": raw.get("snippet", raw.get("body", ""))[:200],
-        })
+async def write_first_brief(onboard_path: str) -> str:
+    """Write the First Brief to vault. Returns the vault path."""
+    config = load_config()
+    onboard = _read_onboard(onboard_path)
+    facts = onboard.get("facts", [])
+    patterns = onboard.get("patterns", [])
+    automations = onboard.get("automations", [])
 
-    prompt = f"""You are Alfred Black, a personal butler's intelligence system. You have just completed onboarding
-for a new master. This is the very first brief you will deliver. Make it count.
+    prompt = f"""You are Alfred Black, a personal butler's intelligence system. You have spent the past few minutes
+reading 100 days of your new master's email. This is the very first brief you will ever deliver to them.
+
+You don't know this person yet — not really. You've read their emails, but that's not the same as
+knowing someone. Be honest about what you see and what you're still uncertain about.
+
+FACTS YOU'VE GATHERED ({len(facts)} total):
+{json.dumps(facts[-40:], indent=2)}
+
+PATTERNS YOU'VE NOTICED ({len(patterns)} total):
+{json.dumps(patterns, indent=2)}
+
+AUTOMATIONS YOU'D LIKE TO SUGGEST:
+{json.dumps(automations, indent=2)}
 
 Write exactly 5 paragraphs:
 
-**Paragraph 1 — Who's Been Reaching Out**
-Name the key people from recent emails. Provide context for each — who they are, what they seem to want.
-Make the master feel you already understand their world.
+**Paragraph 1 — First Impressions**
+Who is this person based on what you've seen? What does their email world look like?
+Tone: "I don't know you yet, so I may be wrong, but here's what I see."
 
-**Paragraph 2 — What Needs Attention Today**
-Identify anything urgent, any deadlines, any items that look time-sensitive.
-Be specific. If nothing is truly urgent, say so honestly.
+**Paragraph 2 — The Shape of Their Days**
+What patterns did you notice? Recurring rhythms, key relationships, work/life balance signals.
+Be specific but humble — these are observations, not conclusions.
 
-**Paragraph 3 — Recurring Themes and Patterns**
-What patterns did you notice? Regular correspondents, repeated topics, workstreams forming.
-Show the master you see the shape of their days.
+**Paragraph 3 — What Deserves Attention**
+Based on recent emails, what seems most important right now? Any open threads, pending decisions,
+or things that look time-sensitive?
 
-**Paragraph 4 — Suggested Priorities**
-Based on what you've seen, suggest what deserves attention first.
-Be practical and direct — a butler advises, not lectures.
+**Paragraph 4 — How I'd Like to Help**
+Mention the automations you'd suggest. Explain why each one fits this person.
+Be practical, not salesy.
 
-**Paragraph 5 — A Personal Note**
-Close with something warm and grounding. You are a butler — professional, loyal, observant.
-Welcome your master to the service. Keep it brief and genuine.
+**Paragraph 5 — A Butler's Promise**
+Close with something genuine. You are a butler — professional, loyal, observant.
+You're new to this household and you're committed to learning. Keep it brief and real.
 
-Tone: Professional butler. Warm but not effusive. Concise. Personal. You are not Sherlock Holmes
-deducing secrets — you are a trusted household manager helping someone start their day well.
+Tone: Professional butler. Warm but not effusive. Concise. Personal. Honest about uncertainty.
+You are not Sherlock Holmes — you are a trusted household manager meeting someone for the first time.
 
-ENTITIES FOUND:
-{json.dumps(entities, indent=2)}
-
-PATTERNS OBSERVED:
-{json.dumps(patterns, indent=2)}
-
-RECENT EMAILS:
-{json.dumps(email_subjects, indent=2)}
-
-IMPORTANT: Return JSON only:
+Return JSON:
 {{
   "brief": "The full 5-paragraph brief text, with paragraphs separated by double newlines."
 }}"""
 
     result = await _call_clerk(prompt)
-    return result.get("brief", "")
+    brief_text = result.get("brief", "")
 
-
-@activity.defn
-async def write_onboarding_results(
-    entities: dict[str, Any],
-    patterns: dict[str, Any],
-    brief: str,
-) -> str:
-    """Write extracted entities, patterns, and brief to vault. Returns the brief's vault path."""
-    config = load_config()
+    # Write brief to vault as event record
     client = VaultClient(config)
     try:
-        # 1. Write person records for each extracted person
-        for person in entities.get("people", []):
-            name = person.get("name", "Unknown")
-            content = _build_person_record(person)
-            try:
-                await client.write_record("person", name, content)
-            except httpx.HTTPStatusError:
-                # Person may already exist — not fatal
-                pass
-
-        # 2. Write org records for each extracted organization
-        for org in entities.get("organizations", []):
-            name = org.get("name", "Unknown")
-            content = _build_org_record(org)
-            try:
-                await client.write_record("organization", name, content)
-            except httpx.HTTPStatusError:
-                pass
-
-        # 3. Write patterns as a vault note
-        patterns_content = _build_patterns_note(patterns)
-        await client.write_record("note", "Onboarding — Communication Patterns", patterns_content)
-
-        # 4. Write the first brief as an event record
-        brief_content = _build_brief_record(brief)
+        brief_content = f"# First Brief\n\n*Your first morning brief from Alfred.*\n\n{brief_text}"
         brief_path = await client.write_record("event", "First Brief", brief_content)
-
-        return brief_path
     finally:
         await client.close()
 
+    # Update onboard.json
+    onboard["stage"] = "done"
+    onboard["brief"] = brief_text
+    _write_onboard(onboard_path, onboard)
 
-def _build_person_record(person: dict[str, Any]) -> str:
-    """Build markdown content for a person vault record."""
-    lines = []
-    lines.append(f"# {person.get('name', 'Unknown')}\n")
-    if person.get("email"):
-        lines.append(f"**Email:** {person['email']}")
-    if person.get("relationship"):
-        lines.append(f"**Relationship:** {person['relationship']}")
-    if person.get("context"):
-        lines.append(f"\n{person['context']}")
-    lines.append("\n\n*Discovered during onboarding.*")
-    return "\n".join(lines)
-
-
-def _build_org_record(org: dict[str, Any]) -> str:
-    """Build markdown content for an organization vault record."""
-    lines = []
-    lines.append(f"# {org.get('name', 'Unknown')}\n")
-    if org.get("role"):
-        lines.append(f"**Role:** {org['role']}")
-    if org.get("context"):
-        lines.append(f"\n{org['context']}")
-    lines.append("\n\n*Discovered during onboarding.*")
-    return "\n".join(lines)
-
-
-def _build_patterns_note(patterns: dict[str, Any]) -> str:
-    """Build markdown content for the patterns note."""
-    lines = ["# Onboarding — Communication Patterns\n"]
-    lines.append("*Automatically detected during onboarding analysis.*\n")
-
-    if patterns.get("patterns"):
-        lines.append("## Patterns\n")
-        for p in patterns["patterns"]:
-            lines.append(f"### {p.get('name', 'Unnamed')}")
-            lines.append(f"**Type:** {p.get('type', 'unknown')} | **Confidence:** {p.get('confidence', 'N/A')}")
-            lines.append(f"{p.get('description', '')}\n")
-
-    if patterns.get("suggested_priorities"):
-        lines.append("## Suggested Priorities\n")
-        for sp in patterns["suggested_priorities"]:
-            urgency = sp.get("urgency", "medium")
-            lines.append(f"- **[{urgency.upper()}]** {sp.get('item', '')} — {sp.get('reason', '')}")
-        lines.append("")
-
-    if patterns.get("routines_detected"):
-        lines.append("## Detected Routines\n")
-        for r in patterns["routines_detected"]:
-            lines.append(f"- **{r.get('name', '')}** ({r.get('frequency', 'unknown')})")
-        lines.append("")
-
-    return "\n".join(lines)
-
-
-def _build_brief_record(brief: str) -> str:
-    """Build markdown content for the first brief event record."""
-    lines = ["# First Brief\n"]
-    lines.append("*Your first morning brief from Alfred.*\n")
-    lines.append(brief)
-    return "\n".join(lines)
+    return brief_path
