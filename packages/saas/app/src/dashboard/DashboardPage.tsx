@@ -231,9 +231,6 @@ export default function DashboardPage() {
     (onboardStage === "done" && onboardBrief != null && onboardBrief !== "") ||
     (briefData?.brief != null && briefData.brief !== "");
 
-  const hasVaultData =
-    displayData?.vault?.total_records != null &&
-    displayData.vault.total_records > 0;
   const isNewUser = !hasInstance && !isProvisioning && provStatus !== undefined;
 
   // Onboarding is actively running if stage is not "done" and not "not_started"
@@ -242,20 +239,19 @@ export default function DashboardPage() {
     onboardStage !== "done" &&
     onboardStage !== "not_started";
 
-  const [briefDismissed, setBriefDismissed] = useState(false);
+  // Persist brief dismissal so returning users don't see it again
+  const [briefDismissed, setBriefDismissed] = useState(() => {
+    return localStorage.getItem("alfred:brief_seen") === "true";
+  });
 
   const onboardingState: OnboardingState = (() => {
-    // If we have vault data and a brief has been seen/dismissed, returning user
-    if (hasInstance && hasVaultData && (briefDismissed || !hasBrief) && !isOnboardingActive) {
-      return "returning_user";
-    }
-    // If we have vault data but also have a fresh brief, could be returning user
-    if (hasInstance && hasVaultData && hasBrief && !briefDismissed && !isOnboardingActive) {
-      return "returning_user";
-    }
-    // Brief ready (onboarding complete)
-    if (hasInstance && hasBrief && !isOnboardingActive) {
+    // Brief ready and not yet dismissed — show it (highest priority)
+    if (hasInstance && hasBrief && !briefDismissed && !isOnboardingActive) {
       return "brief_ready";
+    }
+    // Brief already seen/dismissed — normal dashboard
+    if (hasInstance && briefDismissed && !isOnboardingActive) {
+      return "returning_user";
     }
     // Instance running but onboarding still in progress or no brief yet
     if (hasInstance && (isOnboardingActive || !hasBrief)) {
@@ -338,7 +334,10 @@ export default function DashboardPage() {
 
   useEffect(() => {
     if (onboardingState !== "brief_ready") return;
-    const timer = setTimeout(() => setBriefDismissed(true), 30_000);
+    const timer = setTimeout(() => {
+      setBriefDismissed(true);
+      localStorage.setItem("alfred:brief_seen", "true");
+    }, 30_000);
     return () => clearTimeout(timer);
   }, [onboardingState]);
 
