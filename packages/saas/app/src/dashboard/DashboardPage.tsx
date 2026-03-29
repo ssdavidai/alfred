@@ -226,7 +226,7 @@ export default function DashboardPage() {
     provisioningTriggered.current = true;
 
     console.info("[DashboardPage] New user detected — triggering provisioning");
-    provisionNewUser({}).catch((err: any) => {
+    provisionNewUser().catch((err: any) => {
       console.error("[DashboardPage] provisionNewUser failed:", err);
     });
   }, [onboardingState]);
