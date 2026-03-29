@@ -9,6 +9,7 @@ import {
   resumeStream,
   deleteStream,
   regenerateWebhookToken,
+  storeIntegrationToken,
 } from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
 import { Button } from "../client/components/ui/button";
@@ -50,9 +51,11 @@ export default function StreamsPage() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
 
   // Integration connect flow state
-  const [connectStep, setConnectStep] = useState<"pick" | "name">("pick");
+  const [connectStep, setConnectStep] = useState<"pick" | "name" | "api_key">("pick");
   const [selectedSource, setSelectedSource] = useState<SourceDefinition | null>(null);
   const [newName, setNewName] = useState("");
+  const [apiToken, setApiToken] = useState("");
+  const [tokenError, setTokenError] = useState("");
   const [creating, setCreating] = useState(false);
 
   // Handle OAuth redirect back
@@ -150,6 +153,15 @@ export default function StreamsPage() {
       return;
     }
 
+    if (source.authType === "api_key") {
+      setSelectedSource(source);
+      setNewName(source.label);
+      setApiToken("");
+      setTokenError("");
+      setConnectStep("api_key");
+      return;
+    }
+
     setSelectedSource(source);
     setNewName(source.label);
     setConnectStep("name");
@@ -175,11 +187,40 @@ export default function StreamsPage() {
     }
   };
 
+  const handleConnectWithToken = async () => {
+    if (!apiToken.trim() || !selectedSource) return;
+    setCreating(true);
+    setTokenError("");
+    try {
+      // Store the token as an OAuth credential
+      await storeIntegrationToken({
+        provider: selectedSource.authProvider!,
+        token: apiToken.trim(),
+      });
+      // Create the stream with default config
+      const type = selectedSource.transport === "pull" ? "scheduled" : selectedSource.transport === "push" ? "webhook" : selectedSource.transport;
+      await createStream({
+        name: newName.trim() || selectedSource.label,
+        type,
+        source: selectedSource.id,
+        config: selectedSource.defaultConfig,
+      });
+      closeConnectDialog();
+      refetch();
+    } catch (err: any) {
+      setTokenError(err?.message || "Failed to store token");
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const closeConnectDialog = () => {
     setShowConnectDialog(false);
     setConnectStep("pick");
     setSelectedSource(null);
     setNewName("");
+    setApiToken("");
+    setTokenError("");
   };
 
   // Compute per-source health summary
@@ -381,6 +422,81 @@ export default function StreamsPage() {
                     </button>
                   );
                 })}
+              </div>
+            </>
+          ) : connectStep === "api_key" ? (
+            <>
+              <DialogHeader>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="text-muted-foreground transition-colors hover:text-cream"
+                    onClick={() => setConnectStep("pick")}
+                  >
+                    <ArrowLeft className="h-4 w-4" />
+                  </button>
+                  <DialogTitle className="text-cream font-serif font-light">
+                    Connect {selectedSource?.label}
+                  </DialogTitle>
+                </div>
+                <DialogDescription>
+                  Create an internal integration at{" "}
+                  <a
+                    href="https://www.notion.so/profile/integrations"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-gold underline underline-offset-2"
+                  >
+                    notion.so/profile/integrations
+                  </a>
+                  , then paste the Internal Integration Secret below. Make sure
+                  to share the pages you want Alfred to access with the integration.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div>
+                  <label className="mb-1.5 block font-mono text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+                    Integration Name
+                  </label>
+                  <Input
+                    placeholder={`e.g. ${selectedSource?.label} Workspace`}
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1.5 block font-mono text-[0.65rem] uppercase tracking-wider text-muted-foreground">
+                    Internal Integration Token
+                  </label>
+                  <Input
+                    type="password"
+                    placeholder="ntn_..."
+                    value={apiToken}
+                    onChange={(e) => { setApiToken(e.target.value); setTokenError(""); }}
+                    onKeyDown={(e) => e.key === "Enter" && !creating && apiToken.trim() && handleConnectWithToken()}
+                    autoFocus
+                  />
+                  {tokenError && (
+                    <p className="mt-1 font-mono text-[0.55rem] text-red-400">{tokenError}</p>
+                  )}
+                </div>
+                <div className="rounded-sm border border-gold-dim/20 bg-black/20 px-3 py-2">
+                  <p className="font-mono text-[0.6rem] text-muted-foreground">
+                    Your token is encrypted at rest and only used to sync your Notion workspace.
+                    Alfred will poll every 15 minutes for changes.
+                  </p>
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={closeConnectDialog}>
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleConnectWithToken}
+                    disabled={creating || !apiToken.trim()}
+                  >
+                    {creating ? "Connecting..." : "Connect"}
+                  </Button>
+                </DialogFooter>
               </div>
             </>
           ) : (

@@ -10,8 +10,10 @@ import type {
   PauseStream,
   ResumeStream,
   RegenerateWebhookToken,
+  StoreIntegrationToken,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
+import { encryptApiKey } from "../server/tenantProxy";
 
 export const getStreams: GetStreams<void, any> = async (_args, context) => {
   if (!context.user) throw new HttpError(401, "Not authenticated");
@@ -83,12 +85,58 @@ export const createStream: CreateStream<any, any> = async (args: any, context) =
   });
   try {
     const instance = await getUserInstance(context);
+    // Create stream on tenant
     await proxyToTenant(instance, {
       method: "POST",
       path: "/api/v1/streams",
       body: { id: stream.id, name: stream.name, type: stream.type, source: stream.source, config: stream.config, enabled: stream.enabled },
     });
-  } catch { /* tenant may not be reachable */ }
+
+    // If this is a pull stream, configure the pull engine on the tenant
+    const pullConfig = (args.config as any)?.pull;
+    if (args.type === "scheduled" && pullConfig) {
+      const patchBody: Record<string, unknown> = {
+        pull_endpoint: pullConfig.endpoint,
+        pull_method: pullConfig.method || "GET",
+        parser: (args.config as any)?.parser || "passthrough",
+        auth_type: (args.config as any)?.auth_type || "none",
+        auth_config: { provider: args.source === "notion" ? "notion" : args.source, user_id: context.user.id },
+        schedule_interval_seconds: pullConfig.intervalSeconds || 300,
+      };
+      // Static headers from config (e.g. Notion-Version)
+      if (pullConfig.headers) {
+        patchBody.pull_headers = pullConfig.headers;
+      }
+      if (pullConfig.detailEndpoint) {
+        patchBody.detail_endpoint = pullConfig.detailEndpoint;
+        patchBody.detail_id_field = pullConfig.detailIdField || "id";
+      }
+
+      await proxyToTenant(instance, {
+        method: "PATCH",
+        path: `/api/v1/streams/${stream.id}`,
+        body: patchBody,
+      });
+
+      // Create Temporal schedule for the pull
+      const scheduleId = `al-stream-pull-${args.source}-${stream.id.slice(0, 8)}`;
+      const intervalMin = Math.max(Math.round((pullConfig.intervalSeconds || 300) / 60), 1);
+      await proxyToTenant(instance, {
+        method: "POST",
+        path: "/api/v1/schedules",
+        body: {
+          schedule_id: scheduleId,
+          workflow_type: "StreamPullerWorkflow",
+          task_queue: "alfred-learn",
+          cron: `*/${intervalMin} * * * *`,
+          input: { stream_id: stream.id },
+          overlap_policy: "Skip",
+        },
+      });
+    }
+  } catch (err: any) {
+    console.error("[createStream] Tenant setup failed:", err?.message);
+  }
   return stream;
 };
 
@@ -148,4 +196,37 @@ export const regenerateWebhookToken: RegenerateWebhookToken<any, any> = async (a
   if (!existing || existing.userId !== context.user.id) throw new HttpError(404, "Stream not found");
   if (existing.type !== "webhook") throw new HttpError(400, "Only webhook streams have tokens");
   return prisma.stream.update({ where: { id: args.id }, data: { webhookToken: crypto.randomBytes(24).toString("hex") } });
+};
+
+export const storeIntegrationToken: StoreIntegrationToken<any, any> = async (args: any, context) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+
+  const { provider, token } = args;
+  if (!provider || !token) throw new HttpError(400, "provider and token are required");
+
+  // Store as an OAuthCredential — same shape the pull engine expects
+  await prisma.oAuthCredential.upsert({
+    where: {
+      userId_provider: {
+        userId: context.user.id,
+        provider,
+      },
+    },
+    create: {
+      userId: context.user.id,
+      provider,
+      accessToken: encryptApiKey(token),
+      refreshToken: null,
+      tokenType: "Bearer",
+      expiresAt: null, // Internal tokens don't expire
+      scopes: [],
+      accountLabel: `${provider} integration`,
+    },
+    update: {
+      accessToken: encryptApiKey(token),
+      expiresAt: null,
+    },
+  });
+
+  return { status: "stored" };
 };

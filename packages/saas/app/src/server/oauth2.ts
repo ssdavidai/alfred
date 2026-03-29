@@ -42,14 +42,8 @@ const OAUTH2_PROVIDERS: Record<string, OAuth2ProviderConfig> = {
     clientSecret: () => process.env.MICROSOFT_CLIENT_SECRET || "",
     defaultScopes: ["openid", "email", "profile", "offline_access"],
   },
-  notion: {
-    authorizeUrl: "https://api.notion.com/v1/oauth/authorize",
-    tokenUrl: "https://api.notion.com/v1/oauth/token",
-    clientId: () => process.env.NOTION_CLIENT_ID || "",
-    clientSecret: () => process.env.NOTION_CLIENT_SECRET || "",
-    defaultScopes: [],  // Notion doesn't use scopes — permissions set in integration config
-    extraAuthorizeParams: { owner: "user" },
-  },
+  // Notion uses user-provided Internal Integration Tokens instead of OAuth.
+  // Tokens are stored via storeIntegrationToken action, not the OAuth flow.
 };
 
 // In-memory state store (short-lived, cleared on callback)
@@ -162,8 +156,10 @@ export async function getValidAccessToken(credentialId: string): Promise<string>
   const cred = await prisma.oAuthCredential.findUnique({ where: { id: credentialId } });
   if (!cred) throw new Error(`OAuth credential ${credentialId} not found`);
 
-  const config = OAUTH2_PROVIDERS[cred.provider];
-  if (!config) throw new Error(`Unknown OAuth provider: ${cred.provider}`);
+  // Non-expiring tokens (e.g. Notion internal integration tokens) — return directly
+  if (!cred.expiresAt && !cred.refreshToken) {
+    return decryptApiKey(cred.accessToken);
+  }
 
   // Check if token is still valid (with 5min buffer)
   const now = new Date();
@@ -171,6 +167,9 @@ export async function getValidAccessToken(credentialId: string): Promise<string>
   if (cred.expiresAt && cred.expiresAt.getTime() - bufferMs > now.getTime()) {
     return decryptApiKey(cred.accessToken);
   }
+
+  const config = OAUTH2_PROVIDERS[cred.provider];
+  if (!config) throw new Error(`Unknown OAuth provider: ${cred.provider}`);
 
   // Token expired or about to expire — refresh
   if (!cred.refreshToken) {

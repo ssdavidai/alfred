@@ -89,19 +89,21 @@ export const SOURCES: SourceDefinition[] = [
   {
     id: "notion",
     label: "Notion",
-    description: "Sync your Notion workspace — pages, wikis, and database schemas.",
+    description: "Sync your Notion workspace — pages, wikis, and database schemas. Create an internal integration at notion.so/profile/integrations, then paste the token here.",
     icon: FileText,
     transport: "pull",
-    authType: "oauth2",
+    authType: "api_key",
     authProvider: "notion",
     requiredScopes: [],
     defaultConfig: {
       transport: "pull",
       parser: "notion",
+      auth_type: "oauth2",
       pull: {
         endpoint: "https://api.notion.com/v1/search",
         method: "POST",
         intervalSeconds: 900,  // 15 min
+        headers: { "Notion-Version": "2022-06-28" },
       },
     },
     available: true,
