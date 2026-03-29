@@ -1,7 +1,27 @@
 import { useState } from "react";
-import { useQuery, getTasks, getIntuitionQueue, getTriage, getMatters, updateTask, getQuarantine, retryQuarantine, dismissQuarantine, getSessions, getLedgerEntries, promoteTriage, createVaultRecord } from "wasp/client/operations";
+import {
+  useQuery,
+  getTasks,
+  getTaskDetail,
+  getIntuitionQueue,
+  getTriage,
+  getMatters,
+  updateTask,
+  updateTaskStatus,
+  getQuarantine,
+  retryQuarantine,
+  dismissQuarantine,
+  getSessions,
+  getLedgerEntries,
+  promoteTriage,
+  createVaultRecord,
+  triggerErrandExecution,
+  getSchedules,
+  triggerSchedule,
+  pauseSchedule,
+  resumeSchedule,
+} from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
-import { TasksContent } from "../tasks/TasksPage";
 import {
   LearningContent,
   JudgmentContent,
@@ -30,10 +50,26 @@ import {
   ChevronDown,
   ChevronUp,
   CheckCircle,
+  Link,
+  Play,
+  Pause,
+  Zap,
+  Save,
+  Settings,
+  ShieldAlert,
+  User,
+  CalendarClock,
 } from "lucide-react";
 import SpotlightCard from "../components/ui/SpotlightCard";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../client/components/ui/select";
 
-type IntelligenceTab = "errands" | "triage" | "matters" | "learning" | "judgment" | "activity" | "quarantine";
+type IntelligenceTab = "errands" | "triage" | "matters" | "learning" | "judgment" | "activity" | "workflows" | "quarantine";
 
 const TABS: { key: IntelligenceTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { key: "errands", label: "Errands", icon: ClipboardCheck },
@@ -42,6 +78,7 @@ const TABS: { key: IntelligenceTab; label: string; icon: React.ComponentType<{ c
   { key: "learning", label: "Learning", icon: BookOpen },
   { key: "judgment", label: "Judgment", icon: Scale },
   { key: "activity", label: "Activity", icon: Activity },
+  { key: "workflows", label: "Workflows", icon: Settings },
   { key: "quarantine", label: "Quarantine", icon: AlertTriangle },
 ];
 
@@ -107,7 +144,7 @@ export default function IntelligencePage() {
       </p>
 
       {/* Tab Navigation */}
-      <div className="mb-6 flex border-b border-gold-dim/20">
+      <div className="mb-6 flex flex-wrap border-b border-gold-dim/20">
         {TABS.map((tab) => {
           const badge = tabBadge(tab.key);
           return (
@@ -137,7 +174,7 @@ export default function IntelligencePage() {
       {activeTab === "errands" && (
         <div className="space-y-6">
           <CreateErrandForm />
-          <TasksContent />
+          <ErrandsContent />
           <LedgerSection />
         </div>
       )}
@@ -146,13 +183,76 @@ export default function IntelligencePage() {
       {activeTab === "learning" && <LearningContent />}
       {activeTab === "judgment" && <JudgmentContent />}
       {activeTab === "activity" && <ActivityTab />}
+      {activeTab === "workflows" && <WorkflowsContent />}
       {activeTab === "quarantine" && <QuarantineContent />}
     </DashboardLayout>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/*  Create Errand inline form                                         */
+/*  Status / Priority constants                                        */
+/* ------------------------------------------------------------------ */
+
+const STATUS_OPTIONS = [
+  { value: "queued", label: "Queued" },
+  { value: "active", label: "Active" },
+  { value: "blocked", label: "Blocked" },
+  { value: "done", label: "Done" },
+  { value: "cancelled", label: "Cancelled" },
+];
+
+const STATUS_COLORS: Record<string, string> = {
+  queued: "border-zinc-500/40 bg-zinc-500/10 text-zinc-400",
+  active: "border-blue-500/40 bg-blue-500/10 text-blue-400",
+  blocked: "border-red-500/40 bg-red-500/10 text-red-400",
+  done: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400",
+  cancelled: "border-zinc-600/40 bg-zinc-600/10 text-zinc-500",
+};
+
+const PRIORITY_COLORS: Record<string, string> = {
+  low: "border-zinc-500/40 bg-zinc-500/10 text-zinc-400",
+  normal: "border-gold/40 bg-gold/10 text-gold",
+  medium: "border-gold/40 bg-gold/10 text-gold",
+  high: "border-orange-500/40 bg-orange-500/10 text-orange-400",
+  urgent: "border-red-500/40 bg-red-500/10 text-red-400",
+};
+
+const OWNER_OPTIONS = [
+  { value: "alfred", label: "Alfred" },
+  { value: "human", label: "Human" },
+];
+
+const PRIORITY_OPTIONS = [
+  { value: "low", label: "Low" },
+  { value: "normal", label: "Normal" },
+  { value: "high", label: "High" },
+  { value: "urgent", label: "Urgent" },
+];
+
+/* ------------------------------------------------------------------ */
+/*  Badge helper                                                       */
+/* ------------------------------------------------------------------ */
+
+function Badge({ text, colorClass }: { text: string; colorClass: string }) {
+  return (
+    <span
+      className={`inline-flex rounded-sm border px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider ${colorClass}`}
+    >
+      {text}
+    </span>
+  );
+}
+
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="font-mono text-[0.6rem] font-light uppercase tracking-[0.15em] text-muted-foreground/60">
+      {children}
+    </span>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Create Errand inline form                                          */
 /* ------------------------------------------------------------------ */
 
 function CreateErrandForm() {
@@ -264,18 +364,796 @@ function CreateErrandForm() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Priority colors (shared)                                          */
+/*  Errands Content — replaces TasksContent with matter linking,       */
+/*  detail panel, and execute-now                                      */
 /* ------------------------------------------------------------------ */
 
-const PRIORITY_COLORS: Record<string, string> = {
-  low: "border-zinc-500/40 bg-zinc-500/10 text-zinc-400",
-  medium: "border-gold/40 bg-gold/10 text-gold",
-  high: "border-orange-500/40 bg-orange-500/10 text-orange-400",
-  urgent: "border-red-500/40 bg-red-500/10 text-red-400",
-};
+type FilterTab = "all" | "queued" | "active" | "blocked" | "done" | "cancelled";
+
+const FILTER_TABS: { key: FilterTab; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "queued", label: "Queued" },
+  { key: "active", label: "Active" },
+  { key: "blocked", label: "Blocked" },
+  { key: "done", label: "Done" },
+  { key: "cancelled", label: "Cancelled" },
+];
+
+function ErrandsContent() {
+  const { data, isLoading, error, refetch } = useQuery(getTasks, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
+  const { data: mattersData } = useQuery(getMatters, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
+  const [filter, setFilter] = useState<FilterTab>("all");
+  const [expandedPath, setExpandedPath] = useState<string | null>(null);
+  const [updatingPath, setUpdatingPath] = useState<string | null>(null);
+  const [linkingPath, setLinkingPath] = useState<string | null>(null);
+  const [executingAll, setExecutingAll] = useState(false);
+
+  const tasks: any[] = data?.results ?? [];
+  const matters: any[] = mattersData?.results ?? [];
+
+  const filteredTasks = filter === "all"
+    ? tasks
+    : tasks.filter((t: any) => t.status === filter);
+
+  const counts = {
+    total: tasks.length,
+    queued: tasks.filter((t: any) => t.status === "queued").length,
+    active: tasks.filter((t: any) => t.status === "active").length,
+    blocked: tasks.filter((t: any) => t.status === "blocked").length,
+    done: tasks.filter((t: any) => t.status === "done").length,
+    cancelled: tasks.filter((t: any) => t.status === "cancelled").length,
+  };
+
+  // Also match legacy "todo" status for pre-Spec 003 vault records
+  const approvalTasks = tasks.filter(
+    (t: any) =>
+      (t.frontmatter?.requires_approval || t.requires_approval) &&
+      (t.status === "queued" || t.status === "todo"),
+  );
+
+  const [approvingPath, setApprovingPath] = useState<string | null>(null);
+
+  const handleApprove = async (path: string) => {
+    setApprovingPath(path);
+    try {
+      await updateTask({ path, set: { requires_approval: false, status: "queued" } });
+      refetch();
+    } catch (err: any) {
+      console.error("Approval failed:", err);
+    } finally {
+      setApprovingPath(null);
+    }
+  };
+
+  const handleStatusChange = async (path: string, newStatus: string) => {
+    setUpdatingPath(path);
+    try {
+      await updateTaskStatus({ path, status: newStatus });
+      refetch();
+    } catch (err: any) {
+      console.error("Status update failed:", err);
+    } finally {
+      setUpdatingPath(null);
+    }
+  };
+
+  const handleLinkMatter = async (errandPath: string, matterName: string) => {
+    setLinkingPath(errandPath);
+    try {
+      await updateTask({ path: errandPath, set: { matter: `[[matter/${matterName}]]` } });
+      refetch();
+    } catch (err: any) {
+      console.error("Link matter failed:", err);
+    } finally {
+      setLinkingPath(null);
+    }
+  };
+
+  const handleExecuteNow = async () => {
+    setExecutingAll(true);
+    try {
+      await triggerErrandExecution();
+      refetch();
+    } catch (err: any) {
+      console.error("Trigger execution failed:", err);
+    } finally {
+      setExecutingAll(false);
+    }
+  };
+
+  // Check if there are queued alfred-owned errands
+  const hasQueuedAlfredErrands = tasks.some(
+    (t: any) => t.status === "queued" && (t.frontmatter?.owner === "alfred" || t.owner === "alfred"),
+  );
+
+  return (
+    <>
+      {/* Approval Queue */}
+      {approvalTasks.length > 0 && (
+        <div className="mb-4 rounded-sm border border-amber-500/30 bg-amber-500/[0.04] p-3">
+          <div className="mb-2 flex items-center gap-2">
+            <ShieldAlert className="h-3.5 w-3.5 text-amber-400" />
+            <span className="font-mono text-xs font-medium text-amber-400">
+              {approvalTasks.length} task{approvalTasks.length > 1 ? "s" : ""} awaiting approval
+            </span>
+          </div>
+          <div className="space-y-1">
+            {approvalTasks.map((t: any) => (
+              <div
+                key={t.path}
+                className="flex items-center justify-between rounded-sm bg-amber-500/5 px-2 py-1.5"
+              >
+                <span className="truncate font-mono text-xs text-cream/80">
+                  {t.frontmatter?.name || t.name}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleApprove(t.path)}
+                  disabled={approvingPath === t.path}
+                  className="flex items-center gap-1 rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-emerald-400 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
+                >
+                  {approvingPath === t.path ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <CheckCircle className="h-3 w-3" />
+                  )}
+                  Approve
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Execute Now button for queued alfred errands */}
+      {hasQueuedAlfredErrands && (
+        <div className="mb-4">
+          <button
+            type="button"
+            onClick={handleExecuteNow}
+            disabled={executingAll}
+            className="flex items-center gap-2 rounded-sm border border-blue-500/30 bg-blue-500/10 px-3 py-2 font-mono text-xs uppercase tracking-wider text-blue-400 transition-colors hover:bg-blue-500/20 disabled:opacity-50"
+          >
+            {executingAll ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Play className="h-3.5 w-3.5" />
+            )}
+            Execute Now — run queued Alfred errands
+          </button>
+        </div>
+      )}
+
+      {/* Filter Tabs */}
+      <div className="mb-4 flex gap-1">
+        {FILTER_TABS.map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            onClick={() => setFilter(tab.key)}
+            className={`rounded-sm px-3 py-1.5 font-mono text-xs transition-colors ${
+              filter === tab.key
+                ? "bg-gold/15 text-gold"
+                : "text-muted-foreground hover:text-cream"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {isLoading && (
+        <div className="flex items-center gap-2 py-8">
+          <Loader2 className="h-5 w-5 animate-spin text-gold" />
+          <span className="text-muted-foreground text-sm">Loading errands...</span>
+        </div>
+      )}
+
+      {error && (
+        <div className="bg-destructive/10 text-destructive rounded-sm p-4">
+          <p>{error.message}</p>
+        </div>
+      )}
+
+      {data && !isLoading && (
+        <>
+          {/* Stats Bar */}
+          <div className="mb-4 grid grid-cols-3 gap-2 lg:grid-cols-6">
+            <StatPill label="Total" value={counts.total} />
+            <StatPill label="Queued" value={counts.queued} />
+            <StatPill label="Active" value={counts.active} />
+            <StatPill label="Blocked" value={counts.blocked} />
+            <StatPill label="Done" value={counts.done} />
+            <StatPill label="Cancelled" value={counts.cancelled} />
+          </div>
+
+          {/* Errand List */}
+          {filteredTasks.length === 0 ? (
+            <div className="rounded-sm border border-gold-dim/20 bg-black/20 p-8 text-center">
+              <ClipboardCheck className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
+              <p className="font-mono text-sm text-muted-foreground">
+                {filter === "all" ? "No errands yet" : `No ${filter} errands`}
+              </p>
+              <p className="mt-1 font-mono text-xs text-muted-foreground/50">
+                Errands created through Alfred will appear here
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {filteredTasks.map((task: any) => (
+                <ErrandRow
+                  key={task.path}
+                  task={task}
+                  matters={matters}
+                  isExpanded={expandedPath === task.path}
+                  isUpdating={updatingPath === task.path}
+                  isLinking={linkingPath === task.path}
+                  onToggle={() =>
+                    setExpandedPath(expandedPath === task.path ? null : task.path)
+                  }
+                  onStatusChange={handleStatusChange}
+                  onLinkMatter={handleLinkMatter}
+                  onRefetch={refetch}
+                />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
+function StatPill({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-sm border border-gold-dim/20 bg-black/20 px-3 py-2 text-center">
+      <p className="font-mono text-lg font-light text-cream">{value}</p>
+      <p className="font-mono text-[0.6rem] uppercase tracking-wider text-muted-foreground">
+        {label}
+      </p>
+    </div>
+  );
+}
 
 /* ------------------------------------------------------------------ */
-/*  Triage with "Convert to Errand" button                            */
+/*  Errand Row — with Link to Matter + Execute Now                     */
+/* ------------------------------------------------------------------ */
+
+function ErrandRow({
+  task,
+  matters,
+  isExpanded,
+  isUpdating,
+  isLinking,
+  onToggle,
+  onStatusChange,
+  onLinkMatter,
+  onRefetch,
+}: {
+  task: any;
+  matters: any[];
+  isExpanded: boolean;
+  isUpdating: boolean;
+  isLinking: boolean;
+  onToggle: () => void;
+  onStatusChange: (path: string, status: string) => void;
+  onLinkMatter: (path: string, matterName: string) => void;
+  onRefetch: () => void;
+}) {
+  const fm = task.frontmatter ?? {};
+  const statusClass = STATUS_COLORS[task.status] ?? STATUS_COLORS.queued;
+  const priorityClass = fm.priority ? PRIORITY_COLORS[fm.priority] : null;
+  const hasMatter = !!(fm.matter || task.matter);
+  const matterDisplay = hasMatter
+    ? String(fm.matter || task.matter).replace(/^\[\[|\]\]$/g, "").replace(/^matter\//, "")
+    : null;
+
+  const [showLinkDropdown, setShowLinkDropdown] = useState(false);
+
+  return (
+    <div className="rounded-sm border border-gold-dim/20 bg-black/20">
+      <div className="flex items-center gap-3 px-3 py-2.5">
+        <button
+          type="button"
+          onClick={onToggle}
+          className="flex min-w-0 flex-1 items-center gap-3 text-left"
+        >
+          {isExpanded ? (
+            <ChevronUp className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/50" />
+          ) : (
+            <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/50" />
+          )}
+          <span className="truncate font-mono text-xs font-medium text-cream">
+            {fm.name || task.name}
+          </span>
+          {(fm.alfred_instructions || task.alfred_instructions) && (
+            <Zap className="h-3 w-3 flex-shrink-0 text-gold/70" />
+          )}
+        </button>
+
+        <div className="flex items-center gap-2">
+          {/* Linked matter or Link button */}
+          {matterDisplay ? (
+            <a
+              href={`/dashboard/vault/matter/${encodeURIComponent(matterDisplay)}.md`}
+              className="flex-shrink-0 font-mono text-[0.6rem] text-blue-400/70 hover:text-blue-400"
+            >
+              {matterDisplay}
+            </a>
+          ) : (
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowLinkDropdown(!showLinkDropdown)}
+                disabled={isLinking}
+                className="flex items-center gap-1 rounded-sm border border-zinc-500/30 bg-zinc-500/10 px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider text-zinc-400 transition-colors hover:bg-zinc-500/20 disabled:opacity-50"
+              >
+                {isLinking ? (
+                  <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                ) : (
+                  <Link className="h-2.5 w-2.5" />
+                )}
+                Link
+              </button>
+              {showLinkDropdown && matters.length > 0 && (
+                <div className="absolute right-0 top-full z-50 mt-1 max-h-40 w-48 overflow-y-auto rounded-sm border border-gold-dim/30 bg-[#0A0A0A] shadow-xl">
+                  {matters.map((m: any) => {
+                    const mName = m.frontmatter?.name || m.name || m.path;
+                    return (
+                      <button
+                        key={m.path}
+                        type="button"
+                        onClick={() => {
+                          setShowLinkDropdown(false);
+                          onLinkMatter(task.path, mName);
+                        }}
+                        className="block w-full px-3 py-1.5 text-left font-mono text-xs text-cream/80 transition-colors hover:bg-gold-dim/10"
+                      >
+                        {mName}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {(fm.project || task.project) && (
+            <span className="flex-shrink-0 font-mono text-[0.6rem] text-muted-foreground/50">
+              {String(fm.project || task.project).replace(/^\[\[|\]\]$/g, "")}
+            </span>
+          )}
+          {(fm.assigned || task.assigned) && (
+            <span className="flex-shrink-0 font-mono text-[0.6rem] text-muted-foreground/50">
+              @{String(fm.assigned || task.assigned).replace(/^\[\[|\]\]$/g, "")}
+            </span>
+          )}
+          {(fm.due || task.due) && (
+            <span className="flex-shrink-0 font-mono text-[0.6rem] text-muted-foreground/60">
+              {fm.due || task.due}
+            </span>
+          )}
+          {priorityClass && (
+            <Badge text={fm.priority} colorClass={priorityClass} />
+          )}
+          <Badge text={task.status} colorClass={statusClass} />
+          <div className="flex-shrink-0">
+            <Select
+              value={task.status === "todo" ? "queued" : task.status}
+              onValueChange={(val: string) => onStatusChange(task.path, val)}
+              disabled={isUpdating}
+            >
+              <SelectTrigger className="h-6 w-[6.5rem] font-mono text-[0.6rem]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent className="border-gold-dim bg-[#0A0A0A]">
+                {STATUS_OPTIONS.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {isUpdating && (
+            <Loader2 className="h-3 w-3 animate-spin text-gold" />
+          )}
+        </div>
+      </div>
+
+      {isExpanded && (
+        <ErrandDetailPanel path={task.path} task={task} matters={matters} onLinkMatter={onLinkMatter} onRefetch={onRefetch} />
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Errand Detail Panel (#69) — inline accordion                       */
+/* ------------------------------------------------------------------ */
+
+function ErrandDetailPanel({
+  path,
+  task,
+  matters,
+  onLinkMatter,
+  onRefetch,
+}: {
+  path: string;
+  task: any;
+  matters: any[];
+  onLinkMatter: (path: string, matterName: string) => void;
+  onRefetch: () => void;
+}) {
+  const { data, isLoading, error } = useQuery(getTaskDetail, { path });
+  const [instructions, setInstructions] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [updatingField, setUpdatingField] = useState<string | null>(null);
+
+  if (isLoading) {
+    return (
+      <div className="border-t border-gold-dim/10 px-3 py-4">
+        <div className="flex items-center gap-2">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-gold" />
+          <span className="font-mono text-xs text-muted-foreground">Loading detail...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="border-t border-gold-dim/10 px-3 py-4">
+        <p className="font-mono text-xs text-red-400">Failed to load detail</p>
+      </div>
+    );
+  }
+
+  const fm = data?.frontmatter ?? {};
+  const body = data?.body ?? "";
+  const currentInstructions = instructions ?? fm.alfred_instructions ?? "";
+
+  const handleSaveInstructions = async () => {
+    setSaving(true);
+    setSaved(false);
+    try {
+      await updateTask({ path, set: { alfred_instructions: currentInstructions } });
+      setSaved(true);
+      onRefetch();
+      setTimeout(() => setSaved(false), 2000);
+    } catch (err: any) {
+      console.error("Failed to save instructions:", err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleFieldUpdate = async (field: string, value: string) => {
+    setUpdatingField(field);
+    try {
+      await updateTask({ path, set: { [field]: value } });
+      onRefetch();
+    } catch (err: any) {
+      console.error(`Failed to update ${field}:`, err);
+    } finally {
+      setUpdatingField(null);
+    }
+  };
+
+  // Parse action items from body
+  const actionItemsMatch = body.match(/## Action Items\n([\s\S]*?)(?=\n## |\n$|$)/);
+  const actionItems = actionItemsMatch
+    ? actionItemsMatch[1]
+        .split("\n")
+        .filter((line: string) => line.trim().startsWith("- "))
+        .map((line: string) => line.replace(/^- /, "").trim())
+    : [];
+
+  // Body without action items section
+  const bodyWithoutActions = body.replace(/## Action Items\n[\s\S]*?(?=\n## |\n$|$)/, "").trim();
+
+  const hasMatter = !!(fm.matter || task.matter);
+  const matterDisplay = hasMatter
+    ? String(fm.matter || task.matter).replace(/^\[\[|\]\]$/g, "").replace(/^matter\//, "")
+    : null;
+  const sourceTriagePath = fm.source_triage || fm.promoted_from || null;
+
+  const owner = fm.owner || task.owner || "human";
+  const priority = fm.priority || "normal";
+
+  return (
+    <div className="border-t border-gold-dim/10 px-4 py-4 space-y-4">
+      {/* Status with change buttons */}
+      <div>
+        <FieldLabel>Status</FieldLabel>
+        <div className="mt-1 flex flex-wrap gap-1.5">
+          {STATUS_OPTIONS.map((opt) => {
+            const isActive = (fm.status || task.status) === opt.value;
+            const optClass = STATUS_COLORS[opt.value] ?? "";
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => !isActive && handleFieldUpdate("status", opt.value)}
+                disabled={updatingField === "status"}
+                className={`rounded-sm border px-2 py-1 font-mono text-[0.55rem] uppercase tracking-wider transition-colors disabled:opacity-50 ${
+                  isActive
+                    ? optClass
+                    : "border-zinc-700/30 bg-zinc-800/20 text-zinc-500 hover:bg-zinc-700/20"
+                }`}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+          {updatingField === "status" && <Loader2 className="h-3 w-3 animate-spin text-gold" />}
+        </div>
+      </div>
+
+      {/* Owner toggle */}
+      <div>
+        <FieldLabel>Owner</FieldLabel>
+        <div className="mt-1 flex gap-1.5">
+          {OWNER_OPTIONS.map((opt) => {
+            const isActive = owner === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => !isActive && handleFieldUpdate("owner", opt.value)}
+                disabled={updatingField === "owner"}
+                className={`flex items-center gap-1.5 rounded-sm border px-2 py-1 font-mono text-[0.55rem] uppercase tracking-wider transition-colors disabled:opacity-50 ${
+                  isActive
+                    ? opt.value === "alfred"
+                      ? "border-gold/40 bg-gold/10 text-gold"
+                      : "border-blue-400/40 bg-blue-400/10 text-blue-400"
+                    : "border-zinc-700/30 bg-zinc-800/20 text-zinc-500 hover:bg-zinc-700/20"
+                }`}
+              >
+                {opt.value === "alfred" ? <Zap className="h-2.5 w-2.5" /> : <User className="h-2.5 w-2.5" />}
+                {opt.label}
+              </button>
+            );
+          })}
+          {updatingField === "owner" && <Loader2 className="h-3 w-3 animate-spin text-gold" />}
+        </div>
+      </div>
+
+      {/* Priority dropdown */}
+      <div>
+        <FieldLabel>Priority</FieldLabel>
+        <div className="mt-1 flex flex-wrap gap-1.5">
+          {PRIORITY_OPTIONS.map((opt) => {
+            const isActive = priority === opt.value;
+            const optClass = PRIORITY_COLORS[opt.value] ?? "";
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => !isActive && handleFieldUpdate("priority", opt.value)}
+                disabled={updatingField === "priority"}
+                className={`rounded-sm border px-2 py-1 font-mono text-[0.55rem] uppercase tracking-wider transition-colors disabled:opacity-50 ${
+                  isActive
+                    ? optClass
+                    : "border-zinc-700/30 bg-zinc-800/20 text-zinc-500 hover:bg-zinc-700/20"
+                }`}
+              >
+                {opt.label}
+              </button>
+            );
+          })}
+          {updatingField === "priority" && <Loader2 className="h-3 w-3 animate-spin text-gold" />}
+        </div>
+      </div>
+
+      {/* Linked Matter */}
+      <div>
+        <FieldLabel>Linked Matter</FieldLabel>
+        <div className="mt-1">
+          {matterDisplay ? (
+            <a
+              href={`/dashboard/vault/matter/${encodeURIComponent(matterDisplay)}.md`}
+              className="inline-flex items-center gap-1.5 rounded-sm border border-blue-400/30 bg-blue-400/10 px-2 py-1 font-mono text-[0.6rem] text-blue-400 transition-colors hover:bg-blue-400/20"
+            >
+              <Briefcase className="h-2.5 w-2.5" />
+              {matterDisplay}
+              <ExternalLink className="h-2.5 w-2.5" />
+            </a>
+          ) : (
+            <MatterLinkDropdown
+              matters={matters}
+              onSelect={(matterName: string) => onLinkMatter(path, matterName)}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* Source (promoted from triage) */}
+      {sourceTriagePath && (
+        <div>
+          <FieldLabel>Source</FieldLabel>
+          <a
+            href={`/dashboard/vault/${sourceTriagePath}`}
+            className="mt-1 inline-flex items-center gap-1.5 font-mono text-[0.65rem] text-muted-foreground/80 hover:text-cream"
+          >
+            <Inbox className="h-3 w-3" />
+            Promoted from triage
+            <ExternalLink className="h-2.5 w-2.5" />
+          </a>
+        </div>
+      )}
+
+      {/* Action Items */}
+      {actionItems.length > 0 && (
+        <div>
+          <FieldLabel>Action Items</FieldLabel>
+          <ul className="mt-1 space-y-0.5">
+            {actionItems.map((item: string, i: number) => (
+              <li key={i} className="flex items-start gap-2 font-mono text-[0.65rem] text-cream/80">
+                <CheckCircle className="mt-0.5 h-3 w-3 flex-shrink-0 text-muted-foreground/40" />
+                {item}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Metadata grid */}
+      <div className="grid grid-cols-2 gap-x-6 gap-y-3">
+        {fm.project && (
+          <div>
+            <FieldLabel>Project</FieldLabel>
+            <p className="font-mono text-[0.7rem] text-cream/80">
+              {String(fm.project).replace(/^\[\[|\]\]$/g, "")}
+            </p>
+          </div>
+        )}
+        {fm.assigned && (
+          <div>
+            <FieldLabel>Assigned</FieldLabel>
+            <p className="font-mono text-[0.7rem] text-cream/80">
+              {String(fm.assigned).replace(/^\[\[|\]\]$/g, "")}
+            </p>
+          </div>
+        )}
+        {fm.due && (
+          <div>
+            <FieldLabel>Due</FieldLabel>
+            <p className="font-mono text-[0.7rem] text-cream/80">{fm.due}</p>
+          </div>
+        )}
+        {fm.created && (
+          <div>
+            <FieldLabel>Created</FieldLabel>
+            <p className="font-mono text-[0.7rem] text-cream/80">{fm.created}</p>
+          </div>
+        )}
+        {fm.created_by && (
+          <div>
+            <FieldLabel>Created By</FieldLabel>
+            <p className="font-mono text-[0.7rem] text-cream/80">{fm.created_by}</p>
+          </div>
+        )}
+      </div>
+
+      {/* Alfred Instructions */}
+      <div className="rounded-sm border border-gold/30 bg-gold/[0.03] p-3 space-y-2">
+        <div>
+          <div className="flex items-center gap-2">
+            <Zap className="h-3.5 w-3.5 text-gold" />
+            <span className="font-serif text-sm font-medium text-gold">
+              Alfred Instructions
+            </span>
+          </div>
+          <p className="mt-0.5 font-mono text-[0.6rem] text-muted-foreground/60">
+            Tell Alfred how to handle this errand
+          </p>
+        </div>
+        <textarea
+          className="w-full rounded-sm border border-gold/20 bg-black/40 px-3 py-2 font-mono text-xs leading-relaxed text-cream placeholder:text-muted-foreground/30 focus:border-gold/50 focus:outline-none focus:ring-1 focus:ring-gold/20 resize-y min-h-[4rem]"
+          rows={3}
+          placeholder="e.g. Research this topic and draft a summary, then notify me when done..."
+          value={currentInstructions}
+          onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setInstructions(e.target.value)}
+        />
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleSaveInstructions}
+            disabled={saving}
+            className="flex items-center gap-1.5 rounded-sm border border-gold/30 bg-gold/10 px-3 py-1.5 font-mono text-[0.65rem] uppercase tracking-wider text-gold transition-colors hover:bg-gold/20 disabled:opacity-50"
+          >
+            {saving ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Save className="h-3 w-3" />
+            )}
+            {saving ? "Saving..." : saved ? "Saved" : "Save Instructions"}
+          </button>
+          {saved && (
+            <span className="font-mono text-[0.6rem] text-emerald-400">Saved</span>
+          )}
+        </div>
+      </div>
+
+      {/* Body content */}
+      {bodyWithoutActions && (
+        <div className="rounded-sm bg-[#0A0A0A] px-3 py-2">
+          <p className="whitespace-pre-wrap font-mono text-[0.65rem] leading-relaxed text-muted-foreground/80">
+            {bodyWithoutActions}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Matter Link Dropdown                                               */
+/* ------------------------------------------------------------------ */
+
+function MatterLinkDropdown({
+  matters,
+  onSelect,
+}: {
+  matters: any[];
+  onSelect: (matterName: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  if (matters.length === 0) {
+    return (
+      <span className="font-mono text-[0.6rem] text-muted-foreground/40">
+        No matters available
+      </span>
+    );
+  }
+
+  return (
+    <div className="relative inline-block">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1 rounded-sm border border-zinc-500/30 bg-zinc-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-zinc-400 transition-colors hover:bg-zinc-500/20"
+      >
+        <Link className="h-3 w-3" />
+        Link to Matter
+      </button>
+      {open && (
+        <div className="absolute left-0 top-full z-50 mt-1 max-h-40 w-48 overflow-y-auto rounded-sm border border-gold-dim/30 bg-[#0A0A0A] shadow-xl">
+          {matters.map((m: any) => {
+            const mName = m.frontmatter?.name || m.name || m.path;
+            return (
+              <button
+                key={m.path}
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  onSelect(mName);
+                }}
+                className="block w-full px-3 py-1.5 text-left font-mono text-xs text-cream/80 transition-colors hover:bg-gold-dim/10"
+              >
+                {mName}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Triage with "Convert to Errand" button                             */
 /* ------------------------------------------------------------------ */
 
 function TriageContent() {
@@ -436,7 +1314,7 @@ function TriageContent() {
                 </button>
               </div>
             </div>
-            {/* Expandable instruction field — teaches Alfred how to handle similar items */}
+            {/* Expandable instruction field */}
             {isExpanded && (
               <div className="border-t border-gold-dim/10 px-3 py-2.5">
                 <label className="mb-1 block font-mono text-[0.55rem] uppercase tracking-wider text-muted-foreground/60">
@@ -464,7 +1342,7 @@ function TriageContent() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Matters — with Create, detail accordion, linked errands           */
+/*  Matters — with Create, detail accordion, linked errands            */
 /* ------------------------------------------------------------------ */
 
 function MattersContent() {
@@ -513,7 +1391,7 @@ function MattersContent() {
     );
   }
 
-  const STATUS_COLORS: Record<string, string> = {
+  const MATTER_STATUS_COLORS: Record<string, string> = {
     open: "border-blue-500/40 bg-blue-500/10 text-blue-400",
     resolved: "border-emerald-500/40 bg-emerald-500/10 text-emerald-400",
   };
@@ -521,6 +1399,13 @@ function MattersContent() {
   return (
     <div className="space-y-4">
       <CreateMatterForm />
+
+      {/* Tip about projects */}
+      <div className="rounded-sm border border-gold-dim/20 bg-gold/[0.03] px-3 py-2">
+        <p className="font-mono text-[0.65rem] text-muted-foreground/60">
+          Tip: Projects with active errands can be promoted to matters.
+        </p>
+      </div>
 
       {items.length === 0 ? (
         <SpotlightCard>
@@ -538,11 +1423,11 @@ function MattersContent() {
             const fm = item.frontmatter ?? {};
             const name = fm.name || item.name || item.path;
             const status = fm.status || item.status || "open";
-            const statusClass = STATUS_COLORS[status] ?? STATUS_COLORS.open;
+            const statusClass = MATTER_STATUS_COLORS[status] ?? MATTER_STATUS_COLORS.open;
             const isExpanded = expandedPath === item.path;
             const created = fm.created || item.created;
 
-            // Linked errands: filter tasks whose matter field includes this matter's name
+            // Linked errands
             const linkedErrands = allTasks.filter((t: any) => {
               const matterField = t.frontmatter?.matter || t.matter || "";
               return String(matterField).includes(name);
@@ -588,7 +1473,6 @@ function MattersContent() {
                 {/* Expanded detail */}
                 {isExpanded && (
                   <div className="border-t border-gold-dim/10 px-4 py-4 space-y-4">
-                    {/* Matter metadata */}
                     <div className="flex flex-wrap items-center gap-3">
                       <span
                         className={`inline-flex rounded-sm border px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider ${statusClass}`}
@@ -694,7 +1578,7 @@ function MattersContent() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Create Matter inline form                                         */
+/*  Create Matter inline form                                          */
 /* ------------------------------------------------------------------ */
 
 function CreateMatterForm() {
@@ -782,7 +1666,7 @@ function CreateMatterForm() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Activity tab                                                      */
+/*  Activity tab                                                       */
 /* ------------------------------------------------------------------ */
 
 function ActivityTab() {
@@ -898,7 +1782,197 @@ function ActivityTab() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Ledger section                                                    */
+/*  Workflows tab (#71) — Temporal schedules                           */
+/* ------------------------------------------------------------------ */
+
+function WorkflowsContent() {
+  const { data, isLoading, error, refetch } = useQuery(getSchedules, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+  });
+
+  const [actioningId, setActioningId] = useState<string | null>(null);
+
+  const schedules: any[] = data?.schedules ?? data?.items ?? (Array.isArray(data) ? data : []);
+
+  const handleTrigger = async (id: string) => {
+    setActioningId(`trigger-${id}`);
+    try {
+      await triggerSchedule({ id });
+      refetch();
+    } catch (err: any) {
+      console.error("Trigger schedule failed:", err);
+    } finally {
+      setActioningId(null);
+    }
+  };
+
+  const handlePause = async (id: string) => {
+    setActioningId(`pause-${id}`);
+    try {
+      await pauseSchedule({ id });
+      refetch();
+    } catch (err: any) {
+      console.error("Pause schedule failed:", err);
+    } finally {
+      setActioningId(null);
+    }
+  };
+
+  const handleResume = async (id: string) => {
+    setActioningId(`resume-${id}`);
+    try {
+      await resumeSchedule({ id });
+      refetch();
+    } catch (err: any) {
+      console.error("Resume schedule failed:", err);
+    } finally {
+      setActioningId(null);
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 py-8">
+        <Loader2 className="h-5 w-5 animate-spin text-gold" />
+        <span className="text-muted-foreground text-sm">Loading workflows...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-destructive/10 text-destructive rounded-sm p-4">
+        <p>{error.message}</p>
+      </div>
+    );
+  }
+
+  if (schedules.length === 0) {
+    return (
+      <SpotlightCard>
+        <div className="text-center py-4">
+          <Settings className="mx-auto mb-3 h-10 w-10 text-muted-foreground/30" />
+          <p className="font-mono text-sm text-muted-foreground">No scheduled workflows</p>
+          <p className="mt-1 font-mono text-xs text-muted-foreground/50">
+            Temporal workflow schedules will appear here
+          </p>
+        </div>
+      </SpotlightCard>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {schedules.map((schedule: any) => {
+        const id = schedule.scheduleId || schedule.id || schedule.name;
+        const workflowType = schedule.workflowType || schedule.workflow_type || schedule.info?.workflowType || "Unknown";
+        const isPaused = schedule.paused ?? schedule.info?.paused ?? false;
+        const nextRun = schedule.nextActionTime || schedule.next_run || schedule.info?.nextActionTimes?.[0] || null;
+        const lastRun = schedule.lastActionTime || schedule.last_run || schedule.info?.recentActions?.[0]?.scheduledAt || null;
+        const name = schedule.name || schedule.scheduleId || id;
+
+        return (
+          <SpotlightCard key={id}>
+            <div className="flex items-center gap-3">
+              <CalendarClock className="h-4 w-4 flex-shrink-0 text-gold/60" />
+              <div className="min-w-0 flex-1">
+                <p className="truncate font-mono text-xs font-medium text-cream">
+                  {name}
+                </p>
+                <div className="flex flex-wrap items-center gap-3 mt-0.5">
+                  <span className="font-mono text-[0.6rem] text-muted-foreground/60">
+                    {workflowType}
+                  </span>
+                  {isPaused && (
+                    <Badge text="Paused" colorClass="border-amber-500/40 bg-amber-500/10 text-amber-400" />
+                  )}
+                  {!isPaused && (
+                    <Badge text="Active" colorClass="border-emerald-500/40 bg-emerald-500/10 text-emerald-400" />
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-4 mt-1">
+                  {nextRun && (
+                    <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                      Next: {formatScheduleTime(nextRun)}
+                    </span>
+                  )}
+                  {lastRun && (
+                    <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                      Last: {formatScheduleTime(lastRun)}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleTrigger(id)}
+                  disabled={actioningId === `trigger-${id}`}
+                  className="flex items-center gap-1 rounded-sm border border-blue-500/30 bg-blue-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-blue-400 transition-colors hover:bg-blue-500/20 disabled:opacity-50"
+                >
+                  {actioningId === `trigger-${id}` ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Play className="h-3 w-3" />
+                  )}
+                  Trigger
+                </button>
+                {isPaused ? (
+                  <button
+                    type="button"
+                    onClick={() => handleResume(id)}
+                    disabled={actioningId === `resume-${id}`}
+                    className="flex items-center gap-1 rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-emerald-400 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
+                  >
+                    {actioningId === `resume-${id}` ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Play className="h-3 w-3" />
+                    )}
+                    Resume
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handlePause(id)}
+                    disabled={actioningId === `pause-${id}`}
+                    className="flex items-center gap-1 rounded-sm border border-amber-500/30 bg-amber-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-amber-400 transition-colors hover:bg-amber-500/20 disabled:opacity-50"
+                  >
+                    {actioningId === `pause-${id}` ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Pause className="h-3 w-3" />
+                    )}
+                    Pause
+                  </button>
+                )}
+              </div>
+            </div>
+          </SpotlightCard>
+        );
+      })}
+    </div>
+  );
+}
+
+function formatScheduleTime(ts: string): string {
+  try {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return ts;
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return ts;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Ledger section                                                     */
 /* ------------------------------------------------------------------ */
 
 function LedgerSection() {
@@ -971,7 +2045,7 @@ function LedgerSection() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Quarantine                                                        */
+/*  Quarantine                                                         */
 /* ------------------------------------------------------------------ */
 
 function QuarantineContent() {

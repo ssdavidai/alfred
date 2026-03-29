@@ -14,6 +14,11 @@ import type {
   RejectAction,
   PromoteTriage,
   CreateVaultRecord,
+  TriggerErrandExecution,
+  GetSchedules,
+  TriggerSchedule,
+  PauseSchedule,
+  ResumeSchedule,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -166,5 +171,46 @@ export const createVaultRecord: CreateVaultRecord<
       name: `${args.type}/${args.name}.md`,
       content,
     },
+  });
+};
+
+export const triggerErrandExecution: TriggerErrandExecution<void, any> = async (_args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/workflows/trigger",
+    body: { workflowType: "TaskRunnerWorkflow", input: {} },
+  });
+};
+
+export const getSchedules: GetSchedules<void, any> = async (_args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "GET",
+    path: "/api/v1/schedules",
+  });
+};
+
+export const triggerSchedule: TriggerSchedule<{ id: string }, any> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/schedules/${args.id}/trigger`,
+  });
+};
+
+export const pauseSchedule: PauseSchedule<{ id: string }, any> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/schedules/${args.id}/pause`,
+  });
+};
+
+export const resumeSchedule: ResumeSchedule<{ id: string }, any> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/schedules/${args.id}/unpause`,
   });
 };
