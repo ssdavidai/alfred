@@ -664,7 +664,7 @@ export const startOnboarding: StartOnboarding<
     await proxyToTenant(instance, {
       method: "POST",
       path: "/api/v1/workflows/onboarding/start",
-      body: { stream_id: gmailStream.id },
+      body: { user_id: userId, stream_id: gmailStream.id },
       timeoutMs: 30_000,
     });
   } catch (e: any) {
