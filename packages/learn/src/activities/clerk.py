@@ -546,8 +546,10 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
                     except (json.JSONDecodeError, TypeError):
                         pass
 
-            # Check for error indicators in messages (billing errors, run failures)
+            # Check for error indicators in assistant messages only (not user/system)
             for msg in messages:
+                if msg.get("role") != "assistant":
+                    continue
                 msg_content = msg.get("content", "")
                 content_str = ""
                 if isinstance(msg_content, str):
@@ -559,7 +561,7 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
                     )
                 # Detect billing/credit errors — fail fast instead of waiting 280s
                 if any(err in content_str.lower() for err in [
-                    "insufficient credits", "billing error", "402",
+                    "insufficient credits", "billing error",
                     "out of credits", "api key has run out",
                 ]):
                     raise RuntimeError(f"Clerk LLM billing error: {content_str[:200]}")
@@ -573,15 +575,33 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
                         # Content is array of parts
                         for part in msg_content:
                             if isinstance(part, dict) and part.get("type") == "text":
+                                await _cleanup_session(session_key)
                                 if raw:
                                     return part["text"]
                                 return _extract_json(part["text"])
                     elif isinstance(msg_content, str):
+                        await _cleanup_session(session_key)
                         if raw:
                             return msg_content
                         return _extract_json(msg_content)
 
     raise TimeoutError(f"Clerk subagent did not respond within 480s: {session_key}")
+
+
+async def _cleanup_session(session_key: str) -> None:
+    """Delete a clerk subagent session from OpenClaw to prevent accumulation."""
+    try:
+        config = load_config()
+        token = config.gateway_token()
+        base = config.openclaw_gateway_url
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"{base}/tools/invoke",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={"tool": "sessions_delete", "args": {"sessionKey": session_key}},
+            )
+    except Exception:
+        pass  # Best-effort cleanup
 
 
 def _extract_json(content: str) -> dict[str, Any]:
