@@ -195,10 +195,22 @@ export const deleteUserById: DeleteUserById<DeleteUserByIdInput, void> = async (
   }
 
   // Delete related records in FK order, then the user.
-  // Every table with a userId FK must be cleared here.
+  // Every table with a userId or authId FK must be cleared here.
+
+  // First: delete Auth children (AuthIdentity + Session reference auth.id, not user.id)
+  const auth = await prisma.auth.findFirst({ where: { userId: id } });
+  if (auth) {
+    await prisma.$transaction([
+      prisma.authIdentity.deleteMany({ where: { authId: auth.id } }),
+      prisma.session.deleteMany({ where: { userId: auth.id } }),
+    ]);
+  }
+
+  // Then: delete all user-owned records + auth + user
   await prisma.$transaction([
     prisma.streamEvent.deleteMany({ where: { userId: id } }),
     prisma.stream.deleteMany({ where: { userId: id } }),
+    prisma.oAuthCredential.deleteMany({ where: { userId: id } }),
     context.entities.ApiKey.deleteMany({ where: { userId: id } }),
     context.entities.ContactFormMessage.deleteMany({ where: { userId: id } }),
     context.entities.ProvisioningJob.deleteMany({ where: { userId: id } }),
