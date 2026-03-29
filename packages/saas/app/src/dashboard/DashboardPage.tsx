@@ -1,9 +1,13 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   useQuery,
   getDashboardData,
+  getProvisioningStatus,
+  getFirstBrief,
+  startOnboarding,
 } from "wasp/client/operations";
-import { Loader2 } from "lucide-react";
+import { useAuth } from "wasp/client/auth";
+import { motion, AnimatePresence } from "framer-motion";
 import DashboardLayout from "./DashboardLayout";
 import VaultNebula from "../components/nebula/VaultNebula";
 
@@ -32,84 +36,371 @@ function saveDashboardCache(data: any): void {
 }
 
 // ---------------------------------------------------------------------------
-// DashboardPage — VaultNebula is the primary view
+// Onboarding state machine
+// ---------------------------------------------------------------------------
+
+type OnboardingState =
+  | "new_user"        // State 1: No instance, need to provision
+  | "provisioning"    // State 1: Provisioning in progress
+  | "awaiting_brief"  // State 2: Instance ready, waiting for first brief
+  | "brief_ready"     // State 3: Brief is ready to show
+  | "returning_user"; // State 4: Normal dashboard
+
+// ---------------------------------------------------------------------------
+// Cycling message hook
+// ---------------------------------------------------------------------------
+
+function useCyclingMessages(messages: string[], intervalMs: number = 4000): string {
+  const [index, setIndex] = useState(0);
+  const messagesRef = useRef(messages);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+    setIndex(0);
+  }, [messages.join("|")]);
+
+  useEffect(() => {
+    if (messagesRef.current.length <= 1) return;
+    const timer = setInterval(() => {
+      setIndex((i) => (i + 1) % messagesRef.current.length);
+    }, intervalMs);
+    return () => clearInterval(timer);
+  }, [intervalMs, messages.length]);
+
+  return messages[index] ?? "";
+}
+
+// ---------------------------------------------------------------------------
+// Progress bar component
+// ---------------------------------------------------------------------------
+
+function GoldProgressBar({ active }: { active: boolean }) {
+  if (!active) return null;
+  return (
+    <div className="mt-6 h-[1px] w-48 overflow-hidden rounded-full bg-[#C9A84C]/10">
+      <motion.div
+        className="h-full bg-[#C9A84C]/60"
+        initial={{ x: "-100%" }}
+        animate={{ x: "100%" }}
+        transition={{
+          repeat: Infinity,
+          duration: 2,
+          ease: "easeInOut",
+        }}
+        style={{ width: "40%" }}
+      />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Brief display component
+// ---------------------------------------------------------------------------
+
+function BriefDisplay({ content }: { content: string }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 1.2, ease: "easeOut" }}
+      className="mx-auto mt-8 max-w-[600px] px-6"
+    >
+      <div
+        className="whitespace-pre-wrap text-center text-[#F0EDE8] leading-relaxed"
+        style={{ fontFamily: "'EB Garamond', 'Georgia', serif", fontSize: "1.1rem" }}
+      >
+        {content}
+      </div>
+    </motion.div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// DashboardPage — zero-config onboarding + VaultNebula home
 // ---------------------------------------------------------------------------
 
 export default function DashboardPage() {
-  const [persistedCache, setPersistedCache] = useState<{
-    data: any;
-    cachedAt: number;
-  } | null>(() => loadDashboardCache());
+  useAuth(); // ensures authenticated
 
-  const { data, isLoading, error } = useQuery(
+  // ---------------------------------------------------------------------------
+  // Queries — conditionally poll based on state
+  // ---------------------------------------------------------------------------
+
+  const { data: provStatus } = useQuery(getProvisioningStatus, undefined, {
+    refetchInterval: 5_000,
+  });
+
+  const { data: dashData, isLoading: dashLoading, error: dashError } = useQuery(
     getDashboardData,
     undefined,
     { refetchInterval: 30_000 },
   );
 
-  // Persist last good data
+  const { data: briefData } = useQuery(getFirstBrief, undefined, {
+    refetchInterval: 5_000,
+  });
+
+  // ---------------------------------------------------------------------------
+  // Dashboard cache (for returning users)
+  // ---------------------------------------------------------------------------
+
+  const [persistedCache, setPersistedCache] = useState<{
+    data: any;
+    cachedAt: number;
+  } | null>(() => loadDashboardCache());
+
   useEffect(() => {
-    if (data) {
-      const cache = { data, cachedAt: Date.now() };
+    if (dashData) {
+      const cache = { data: dashData, cachedAt: Date.now() };
       setPersistedCache(cache);
-      saveDashboardCache(data);
+      saveDashboardCache(dashData);
     }
-  }, [data]);
+  }, [dashData]);
 
   const displayData =
-    data || (error && persistedCache ? persistedCache.data : null);
+    dashData || (dashError && persistedCache ? persistedCache.data : null);
+
+  // ---------------------------------------------------------------------------
+  // State detection
+  // ---------------------------------------------------------------------------
+
+  const instanceStatus = provStatus?.instance?.status as string | undefined;
+  const hasInstance = instanceStatus === "running";
+  const isProvisioning =
+    instanceStatus === "provisioning" ||
+    provStatus?.job?.status === "running" ||
+    provStatus?.job?.status === "pending";
+  const hasBrief = briefData?.brief != null && briefData.brief !== "";
+  const hasVaultData =
+    displayData?.vault?.total_records != null &&
+    displayData.vault.total_records > 0;
+  const isNewUser = !hasInstance && !isProvisioning && provStatus !== undefined;
+
+  const [briefDismissed, setBriefDismissed] = useState(false);
+
+  const onboardingState: OnboardingState = (() => {
+    // If we have vault data and a brief has been seen/dismissed, returning user
+    if (hasInstance && hasVaultData && (briefDismissed || !hasBrief)) {
+      return "returning_user";
+    }
+    // If we have vault data but also have a fresh brief, could be returning user
+    if (hasInstance && hasVaultData && hasBrief && !briefDismissed) {
+      return "returning_user";
+    }
+    // Brief ready
+    if (hasInstance && hasBrief) {
+      return "brief_ready";
+    }
+    // Instance running but no brief yet
+    if (hasInstance && !hasBrief) {
+      return "awaiting_brief";
+    }
+    // Provisioning in progress
+    if (isProvisioning) {
+      return "provisioning";
+    }
+    // New user — no instance
+    if (isNewUser) {
+      return "new_user";
+    }
+    // Still loading — treat as provisioning to show a nice message
+    return "provisioning";
+  })();
+
+  const isOnboarding =
+    onboardingState === "new_user" ||
+    onboardingState === "provisioning" ||
+    onboardingState === "awaiting_brief" ||
+    onboardingState === "brief_ready";
+
+  // ---------------------------------------------------------------------------
+  // Auto-trigger provisioning (State 1)
+  // ---------------------------------------------------------------------------
+
+  const provisioningTriggered = useRef(false);
+
+  useEffect(() => {
+    if (onboardingState !== "new_user") return;
+    if (provisioningTriggered.current) return;
+    provisioningTriggered.current = true;
+
+    console.info("[DashboardPage] New user detected — triggering startOnboarding");
+    startOnboarding({}).catch((err: any) => {
+      console.error("[DashboardPage] startOnboarding failed:", err);
+    });
+  }, [onboardingState]);
+
+  // ---------------------------------------------------------------------------
+  // Auto-trigger onboarding workflow after provisioning (State 2)
+  // ---------------------------------------------------------------------------
+
+  const onboardingWorkflowTriggered = useRef(false);
+
+  useEffect(() => {
+    if (onboardingState !== "awaiting_brief") return;
+    if (onboardingWorkflowTriggered.current) return;
+    onboardingWorkflowTriggered.current = true;
+
+    console.info("[DashboardPage] Instance ready — triggering onboarding workflow");
+    startOnboarding({}).catch((err: any) => {
+      console.error("[DashboardPage] onboarding workflow trigger failed:", err);
+    });
+  }, [onboardingState]);
+
+  // ---------------------------------------------------------------------------
+  // Brief auto-dismiss timer (30s)
+  // ---------------------------------------------------------------------------
+
+  useEffect(() => {
+    if (onboardingState !== "brief_ready") return;
+    const timer = setTimeout(() => setBriefDismissed(true), 30_000);
+    return () => clearTimeout(timer);
+  }, [onboardingState]);
+
+  // ---------------------------------------------------------------------------
+  // Cycling messages
+  // ---------------------------------------------------------------------------
+
+  const provisioningMessages = [
+    "Alfred is waking up",
+    "Provisioning your butler",
+    "Setting up your space",
+    "Almost there",
+  ];
+
+  const briefMessages = [
+    "Reading your emails",
+    "Learning who you are",
+    "Finding patterns",
+    "Preparing your first brief",
+  ];
+
+  const activeMessages =
+    onboardingState === "new_user" || onboardingState === "provisioning"
+      ? provisioningMessages
+      : onboardingState === "awaiting_brief"
+        ? briefMessages
+        : ["Alfred is ready"];
+
+  const currentMessage = useCyclingMessages(activeMessages);
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
+
+  // During onboarding, show fallback amber nebula (no vaultTypes)
+  const nebulaTypes =
+    isOnboarding ? null : (displayData?.vault?.types ?? null);
 
   return (
-    <DashboardLayout>
+    <DashboardLayout hideSidebar={isOnboarding}>
       {/* VaultNebula — data-driven cloud background */}
-      <VaultNebula vaultTypes={displayData?.vault?.types ?? null} />
+      <VaultNebula vaultTypes={nebulaTypes} />
 
-      {/* Floating overlay — loading, error, breathing indicator */}
-      <div className="pointer-events-none fixed inset-0 z-10 flex flex-col items-center justify-end pb-8">
-        {isLoading && !displayData && (
-          <div className="pointer-events-auto flex items-center gap-3 rounded-xl border border-[#C9A84C]/20 bg-black/60 px-4 py-3 backdrop-blur-sm">
-            <Loader2 className="h-4 w-4 animate-spin text-[#C9A84C]" />
-            <p className="font-mono text-xs uppercase tracking-[0.2em] text-[#F0EDE8]/60">
-              Loading vault topology...
-            </p>
-          </div>
-        )}
+      {/* Onboarding states (1, 2, 3) */}
+      {isOnboarding && (
+        <div className="pointer-events-none fixed inset-0 z-10 flex flex-col items-center justify-center">
+          {/* Cycling message */}
+          <AnimatePresence mode="wait">
+            <motion.p
+              key={currentMessage}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              transition={{ duration: 0.6, ease: "easeInOut" }}
+              className="font-mono text-sm uppercase tracking-[0.25em] text-[#F0EDE8]/70"
+            >
+              {currentMessage}
+            </motion.p>
+          </AnimatePresence>
 
-        {error && !displayData && (
-          <div className="pointer-events-auto rounded-xl border border-destructive/30 bg-black/60 p-4 text-destructive backdrop-blur-sm">
-            <p className="font-sans text-sm font-light">
-              Tenant unreachable — showing empty nebula.
-            </p>
-          </div>
-        )}
+          {/* Gold progress bar — visible during provisioning and brief generation */}
+          <GoldProgressBar
+            active={
+              onboardingState === "new_user" ||
+              onboardingState === "provisioning" ||
+              onboardingState === "awaiting_brief"
+            }
+          />
 
-        {/* Record count badge */}
-        {displayData?.vault?.total_records != null && (
-          <div className="pointer-events-auto mt-4 rounded-full border border-[#C9A84C]/15 bg-black/40 px-4 py-1.5 backdrop-blur-sm">
-            <span className="font-mono text-[0.6rem] uppercase tracking-[0.2em] text-[#F0EDE8]/40">
-              {displayData.vault.total_records} records
+          {/* Brief display (State 3) */}
+          <AnimatePresence>
+            {onboardingState === "brief_ready" && briefData?.brief && (
+              <BriefDisplay content={briefData.brief} />
+            )}
+          </AnimatePresence>
+
+          {/* Bottom breathing indicator for brief_ready state */}
+          {onboardingState === "brief_ready" && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 2, duration: 1 }}
+              className="absolute bottom-8"
+            >
+              <span
+                className="font-mono text-[0.55rem] uppercase tracking-[0.25em] text-[#C9A84C]/50"
+                style={{ animation: "breathe 4s ease-in-out infinite" }}
+              >
+                Alfred is watching
+              </span>
+            </motion.div>
+          )}
+        </div>
+      )}
+
+      {/* State 4: Returning user — normal dashboard */}
+      {!isOnboarding && (
+        <div className="pointer-events-none fixed inset-0 z-10 flex flex-col items-center justify-end pb-8">
+          {dashLoading && !displayData && (
+            <div className="pointer-events-auto flex items-center gap-3 rounded-xl border border-[#C9A84C]/20 bg-black/60 px-4 py-3 backdrop-blur-sm">
+              <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+                className="h-4 w-4 border-2 border-[#C9A84C] border-t-transparent rounded-full"
+              />
+              <p className="font-mono text-xs uppercase tracking-[0.2em] text-[#F0EDE8]/60">
+                Loading vault topology...
+              </p>
+            </div>
+          )}
+
+          {dashError && !displayData && (
+            <div className="pointer-events-auto rounded-xl border border-destructive/30 bg-black/60 p-4 text-destructive backdrop-blur-sm">
+              <p className="font-sans text-sm font-light">
+                Tenant unreachable — showing empty nebula.
+              </p>
+            </div>
+          )}
+
+          {/* Record count badge */}
+          {displayData?.vault?.total_records != null && (
+            <div className="pointer-events-auto mt-4 rounded-full border border-[#C9A84C]/15 bg-black/40 px-4 py-1.5 backdrop-blur-sm">
+              <span className="font-mono text-[0.6rem] uppercase tracking-[0.2em] text-[#F0EDE8]/40">
+                {displayData.vault.total_records} records
+              </span>
+            </div>
+          )}
+
+          {/* Breathing indicator — Alfred is alive */}
+          <div className="mt-3">
+            <span
+              className="font-mono text-[0.55rem] uppercase tracking-[0.25em] text-[#C9A84C]/50"
+              style={{ animation: "breathe 4s ease-in-out infinite" }}
+            >
+              Alfred is watching
             </span>
           </div>
-        )}
-
-        {/* Breathing indicator — Alfred is alive */}
-        <div className="mt-3">
-          <span
-            className="font-mono text-[0.55rem] uppercase tracking-[0.25em] text-[#C9A84C]/50"
-            style={{
-              animation: "breathe 4s ease-in-out infinite",
-            }}
-          >
-            Alfred is watching
-          </span>
-          <style>{`
-            @keyframes breathe {
-              0%, 100% { opacity: 0.15; }
-              50% { opacity: 0.6; }
-            }
-          `}</style>
         </div>
-      </div>
+      )}
+
+      {/* Shared breathe keyframes */}
+      <style>{`
+        @keyframes breathe {
+          0%, 100% { opacity: 0.15; }
+          50% { opacity: 0.6; }
+        }
+      `}</style>
     </DashboardLayout>
   );
 }

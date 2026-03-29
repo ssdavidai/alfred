@@ -346,8 +346,10 @@ function MobileSidebar({
 
 export default function DashboardLayout({
   children,
+  hideSidebar,
 }: {
   children: React.ReactNode;
+  hideSidebar?: boolean;
 }) {
   const { data: user } = useAuth();
   const location = useLocation();
@@ -386,62 +388,75 @@ export default function DashboardLayout({
       {/* Content layer */}
       <div className="relative z-10 flex min-h-screen">
         {/* Desktop collapsible sidebar */}
-        <CollapsibleSidebar
-          navItems={dashboardNavItems}
-          adminItems={adminItems}
-          isActive={isActive}
-          glassMode={glassMode}
-        />
+        {!hideSidebar && (
+          <CollapsibleSidebar
+            navItems={dashboardNavItems}
+            adminItems={adminItems}
+            isActive={isActive}
+            glassMode={glassMode}
+          />
+        )}
 
         {/* Mobile header */}
-        <header className="fixed left-0 right-0 top-0 z-40 flex items-center justify-between border-b border-white/[0.06] bg-black/50 px-4 py-3 backdrop-blur-xl md:hidden">
-          <Link
-            to="/"
-            className="transition-opacity duration-300 hover:opacity-80"
-          >
-            <img
-              src="/images/alfred-logo.png"
-              alt="ALFRED"
-              className="h-6 w-auto"
-            />
-          </Link>
-          <button
-            type="button"
-            onClick={() => setMobileMenuOpen(true)}
-            className="text-[#E8E4DE] transition-colors hover:text-[#C9A84C]"
-          >
-            <span className="sr-only">Open menu</span>
-            <Menu className="h-5 w-5" />
-          </button>
-        </header>
+        {!hideSidebar && (
+          <header className="fixed left-0 right-0 top-0 z-40 flex items-center justify-between border-b border-white/[0.06] bg-black/50 px-4 py-3 backdrop-blur-xl md:hidden">
+            <Link
+              to="/"
+              className="transition-opacity duration-300 hover:opacity-80"
+            >
+              <img
+                src="/images/alfred-logo.png"
+                alt="ALFRED"
+                className="h-6 w-auto"
+              />
+            </Link>
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen(true)}
+              className="text-[#E8E4DE] transition-colors hover:text-[#C9A84C]"
+            >
+              <span className="sr-only">Open menu</span>
+              <Menu className="h-5 w-5" />
+            </button>
+          </header>
+        )}
 
         {/* Mobile sidebar overlay */}
-        <MobileSidebar
-          navItems={dashboardNavItems}
-          adminItems={adminItems}
-          isActive={isActive}
-          isOpen={mobileMenuOpen}
-          onClose={() => setMobileMenuOpen(false)}
-        />
+        {!hideSidebar && (
+          <MobileSidebar
+            navItems={dashboardNavItems}
+            adminItems={adminItems}
+            isActive={isActive}
+            isOpen={mobileMenuOpen}
+            onClose={() => setMobileMenuOpen(false)}
+          />
+        )}
 
         {/* Main content area */}
-        <main className="ml-0 flex-1 pt-14 md:ml-[60px] md:pt-0">
-          <div className="p-6 lg:p-8">
-            {isAdminPage ? (
-              children
-            ) : provLoading ? (
-              <div className="flex items-center justify-center py-16">
-                <Loader2 className="h-8 w-8 animate-spin text-[#C9A84C]" />
-              </div>
-            ) : instanceReady ? (
-              children
-            ) : (
-              <ProvisioningProgress
-                data={provStatus ?? null}
-                isLoading={provLoading}
-              />
-            )}
-          </div>
+        <main className={cn(
+          "flex-1",
+          hideSidebar ? "ml-0 pt-0" : "ml-0 pt-14 md:ml-[60px] md:pt-0",
+        )}>
+          {hideSidebar ? (
+            children
+          ) : (
+            <div className="p-6 lg:p-8">
+              {isAdminPage ? (
+                children
+              ) : provLoading ? (
+                <div className="flex items-center justify-center py-16">
+                  <Loader2 className="h-8 w-8 animate-spin text-[#C9A84C]" />
+                </div>
+              ) : instanceReady ? (
+                children
+              ) : (
+                <ProvisioningProgress
+                  data={provStatus ?? null}
+                  isLoading={provLoading}
+                />
+              )}
+            </div>
+          )}
         </main>
       </div>
     </div>
