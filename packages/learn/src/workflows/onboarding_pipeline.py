@@ -209,7 +209,8 @@ class OnboardingPipelineWorkflow:
         await workflow.execute_activity(
             write_facts_to_vault,
             args=[onboard_path],
-            start_to_close_timeout=timedelta(minutes=3),
+            start_to_close_timeout=timedelta(minutes=30),
+            heartbeat_timeout=timedelta(seconds=120),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
 

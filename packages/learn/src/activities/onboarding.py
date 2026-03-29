@@ -626,16 +626,34 @@ IMPORTANT: Return ONLY the brief text. No JSON wrapping. No code fences. Just th
 # Activity: write_facts_to_vault (Stage 7 — post-brief)
 # ---------------------------------------------------------------------------
 
+def _find_wikilinks(text: str, entity_names: list[str]) -> list[str]:
+    """Find entity names mentioned in text and return as wikilinks."""
+    text_lower = text.lower()
+    links = []
+    for name in entity_names:
+        if name.lower() in text_lower and len(name) > 2:
+            links.append(f"[[{name}]]")
+    return links
+
+
+def _slugify(text: str) -> str:
+    """Create a filesystem-safe slug from text."""
+    import re
+    slug = text.lower().strip()
+    slug = re.sub(r'[^\w\s-]', '', slug)
+    slug = re.sub(r'[\s]+', '-', slug)
+    return slug[:80]
+
+
 @activity.defn
 async def write_facts_to_vault(onboard_path: str) -> dict[str, int]:
-    """Extract structured entities from facts via Clerk in batches and write to vault."""
+    """Write every fact as an observation + extract entities, all interlinked."""
     config = load_config()
     onboard = _read_onboard(onboard_path)
     facts = onboard.get("facts", [])
-    patterns = onboard.get("patterns", [])
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # Batch facts into chunks of ~150 to keep prompts manageable
+    # ── Step 1: Extract structured entities via Clerk (batched) ──────────
     BATCH_SIZE = 150
     all_entities: list[dict[str, Any]] = []
     seen_names: set[str] = set()
@@ -645,15 +663,15 @@ async def write_facts_to_vault(onboard_path: str) -> dict[str, int]:
         if isinstance(fact, dict):
             fact_lines.append(f"- [{fact.get('category', 'general')}] {fact.get('fact', '')}")
 
+    total_batches = max(1, (len(fact_lines) + BATCH_SIZE - 1) // BATCH_SIZE)
     for batch_start in range(0, len(fact_lines), BATCH_SIZE):
         batch = fact_lines[batch_start:batch_start + BATCH_SIZE]
         batch_text = "\n".join(batch)
         batch_num = batch_start // BATCH_SIZE + 1
-        total_batches = (len(fact_lines) + BATCH_SIZE - 1) // BATCH_SIZE
 
         activity.heartbeat(f"Extracting entities batch {batch_num}/{total_batches}")
 
-        entity_prompt = f"""You are Alfred, a butler's intelligence system. Extract STRUCTURED ENTITIES from these facts about your master.
+        entity_prompt = f"""Extract STRUCTURED ENTITIES from these facts about a person.
 
 FACTS (batch {batch_num}/{total_batches}, {len(batch)} facts):
 {batch_text}
@@ -661,7 +679,7 @@ FACTS (batch {batch_num}/{total_batches}, {len(batch)} facts):
 For each distinct person, organization, project, or location mentioned, provide:
 - type: person, org, project, or location
 - name: proper name (full name for people)
-- description: 2-3 sentences about this entity based on the facts
+- description: 2-3 sentences about this entity
 - relationship: how they relate to the user (colleague, friend, family, vendor, client, employer, etc.)
 - tags: relevant keywords
 
@@ -675,7 +693,7 @@ Return JSON:
   ]
 }}
 
-Extract EVERY named entity you can find. Be thorough."""
+Extract EVERY named entity. Be thorough."""
 
         raw_result = await _call_clerk(entity_prompt, raw=True)
         logger.info("write_facts_to_vault: batch %d/%d clerk returned type=%s len=%s",
@@ -691,14 +709,66 @@ Extract EVERY named entity you can find. Be thorough."""
                     seen_names.add(name_key)
                     all_entities.append(ent)
 
-    logger.info("write_facts_to_vault: total unique entities=%d from %d facts", len(all_entities), len(facts))
-    activity.heartbeat(f"Extracted {len(all_entities)} unique entities, writing to vault")
+    logger.info("write_facts_to_vault: total unique entities=%d", len(all_entities))
+    activity.heartbeat(f"Extracted {len(all_entities)} entities — writing vault records")
 
-    # Write each entity to vault
+    # ── Step 2: Build entity name list for wikilink matching ─────────────
+    entity_names = [e["name"] for e in all_entities if e.get("name")]
+
+    # ── Step 3: Write each fact as an observation record ─────────────────
     client = VaultClient(config)
-    counts: dict[str, int] = {"person": 0, "org": 0, "project": 0, "location": 0, "note": 0}
+    counts: dict[str, int] = defaultdict(int)
 
     try:
+        for i, fact in enumerate(facts):
+            if not isinstance(fact, dict):
+                continue
+            text = fact.get("fact", "").strip()
+            if not text:
+                continue
+
+            cat = fact.get("category", "general")
+            confidence = fact.get("confidence", "medium")
+            source_day = fact.get("source_day", today)
+            slug = _slugify(text)
+            name = f"{source_day} {slug}"
+
+            # Find entity wikilinks in this fact
+            links = _find_wikilinks(text, entity_names)
+            links_section = ""
+            if links:
+                links_section = "\n## Related\n" + " ".join(links) + "\n"
+
+            content = (
+                f"---\n"
+                f"type: observation\n"
+                f'name: "{text[:80]}"\n'
+                f"status: processed\n"
+                f"category: {cat}\n"
+                f"confidence: {confidence}\n"
+                f"source: email-onboarding\n"
+                f"source_day: {source_day}\n"
+                f"tags: [onboarding, {cat}]\n"
+                f"created: {source_day}\n"
+                f"---\n\n"
+                f"{text}\n"
+                f"{links_section}"
+            )
+
+            try:
+                await client.write_record("observation", name, content)
+                counts["observation"] += 1
+            except Exception:
+                pass  # Duplicate or write error — continue
+
+            # Heartbeat every 50 facts
+            if (i + 1) % 50 == 0:
+                activity.heartbeat(f"Writing facts: {i + 1}/{len(facts)}")
+
+        logger.info("write_facts_to_vault: wrote %d observation records", counts["observation"])
+        activity.heartbeat(f"Wrote {counts['observation']} observations — now writing entities")
+
+        # ── Step 4: Write entity records with descriptions + wikilinks ───
         for entity in all_entities:
             if not isinstance(entity, dict):
                 continue
@@ -712,6 +782,40 @@ Extract EVERY named entity you can find. Be thorough."""
             tags = entity.get("tags", [])
             tag_str = ", ".join(tags) if isinstance(tags, list) else str(tags)
 
+            # Find facts that mention this entity
+            related_facts = []
+            name_lower = name.lower()
+            for fact in facts:
+                if isinstance(fact, dict) and name_lower in fact.get("fact", "").lower():
+                    related_facts.append(fact.get("fact", ""))
+
+            # Find other entities mentioned alongside this one
+            related_entities = set()
+            for fact_text in related_facts:
+                for other_name in entity_names:
+                    if other_name != name and other_name.lower() in fact_text.lower():
+                        related_entities.add(other_name)
+
+            # Build body
+            body_parts = [f"\n# {name}\n"]
+            if desc:
+                body_parts.append(f"{desc}\n")
+            if relationship:
+                body_parts.append(f"**Relationship**: {relationship}\n")
+
+            if related_facts:
+                body_parts.append(f"\n## Known facts ({len(related_facts)})\n")
+                for rf in related_facts[:15]:
+                    body_parts.append(f"- {rf}")
+                if len(related_facts) > 15:
+                    body_parts.append(f"- ... and {len(related_facts) - 15} more")
+
+            if related_entities:
+                body_parts.append(f"\n## Related\n")
+                body_parts.append(" ".join(f"[[{re}]]" for re in sorted(related_entities)))
+
+            body_parts.append("\n\n*Discovered during onboarding from email analysis.*\n")
+
             fm_lines = [
                 "---",
                 f"type: {etype}",
@@ -724,61 +828,21 @@ Extract EVERY named entity you can find. Be thorough."""
                 fm_lines.append(f"relationship: {relationship}")
             fm_lines.append("---")
 
-            body = f"\n# {name}\n\n{desc}\n"
-            if relationship:
-                body += f"\n**Relationship**: {relationship}\n"
-            body += "\n*Discovered during onboarding from email analysis.*\n"
-
-            content = "\n".join(fm_lines) + "\n" + body
+            content = "\n".join(fm_lines) + "\n" + "\n".join(body_parts)
 
             try:
                 await client.write_record(etype, name, content)
-                counts[etype] = counts.get(etype, 0) + 1
+                counts[etype] += 1
             except Exception as exc:
                 logger.warning("write_facts_to_vault: failed to write %s/%s: %s", etype, name, exc)
-
-        # Also write fact summary note
-        fact_categories: dict[str, list[str]] = {}
-        for fact in facts:
-            if isinstance(fact, dict):
-                cat = fact.get("category", "general")
-                text = fact.get("fact", "")
-                if text:
-                    fact_categories.setdefault(cat, []).append(text)
-
-        if fact_categories:
-            summary_lines = [
-                "---",
-                "type: note",
-                'name: "Onboarding — Discovered Facts"',
-                "status: active",
-                "tags: [onboarding, facts]",
-                f"created: {today}",
-                "---",
-                "",
-                "# Onboarding — Discovered Facts",
-                "",
-                f"*{len(facts)} facts extracted from 100 days of email analysis.*",
-                "",
-            ]
-            for cat, cat_facts in sorted(fact_categories.items()):
-                summary_lines.append(f"## {cat.title()}\n")
-                for f_text in cat_facts[:30]:
-                    summary_lines.append(f"- {f_text}")
-                summary_lines.append("")
-            try:
-                await client.write_record("note", "Onboarding — Discovered Facts", "\n".join(summary_lines) + "\n")
-                counts["note"] = 1
-            except Exception:
-                pass
 
     finally:
         await client.close()
 
-    logger.info("write_facts_to_vault: final counts=%s", counts)
+    logger.info("write_facts_to_vault: final counts=%s", dict(counts))
 
     # Mark truly done
     onboard["stage"] = "done"
     _write_onboard(onboard_path, onboard)
 
-    return counts
+    return dict(counts)
