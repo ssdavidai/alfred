@@ -235,19 +235,15 @@ export default function DashboardPage() {
   // Auto-capture Google tokens + create Gmail stream after provisioning
   // ---------------------------------------------------------------------------
 
-  const tokenCaptureTriggered = useRef(false);
-
   useEffect(() => {
     if (onboardingState !== "awaiting_brief") return;
-    if (tokenCaptureTriggered.current) return;
 
     // Check URL for oauth=success (returning from token capture redirect)
     const params = new URLSearchParams(window.location.search);
     if (params.get("oauth") === "success") {
       // Tokens captured — trigger onboarding workflow
-      tokenCaptureTriggered.current = true;
+      sessionStorage.setItem("alfred:oauth_captured", "true");
       console.info("[DashboardPage] OAuth tokens captured — triggering onboarding");
-      // Clean URL
       window.history.replaceState({}, "", "/dashboard");
       startOnboarding({}).catch((err: any) => {
         console.error("[DashboardPage] onboarding workflow failed:", err);
@@ -255,14 +251,21 @@ export default function DashboardPage() {
       return;
     }
 
+    // Already captured tokens (persists across re-renders/reloads)
+    if (sessionStorage.getItem("alfred:oauth_captured") === "true") {
+      // Tokens already captured, just re-trigger onboarding in case it failed
+      startOnboarding({}).catch(() => {});
+      return;
+    }
+
     // No tokens yet — redirect to capture them via our custom OAuth flow
-    // Since user already consented during Google signup, this is instant (no consent screen)
-    tokenCaptureTriggered.current = true;
-    if (!authUser?.id) return; // Wait for auth to load
+    if (!authUser?.id) return;
     console.info("[DashboardPage] Redirecting to capture Google OAuth tokens");
+    // Mark that we're about to redirect (prevent loop on fast reloads)
+    sessionStorage.setItem("alfred:oauth_captured", "pending");
     const scopes = "https://www.googleapis.com/auth/gmail.readonly";
     window.location.href = `/auth/oauth2/google/start?userId=${authUser.id}&scopes=${encodeURIComponent(scopes)}&redirectAfter=${encodeURIComponent("/dashboard?oauth=success")}`;
-  }, [onboardingState, provStatus]);
+  }, [onboardingState, authUser]);
 
   // ---------------------------------------------------------------------------
   // Brief auto-dismiss timer (30s)
