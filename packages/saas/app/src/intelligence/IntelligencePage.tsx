@@ -867,7 +867,6 @@ function ErrandDetailPanel({
     : null;
   const sourceTriagePath = fm.source_triage || fm.promoted_from || null;
 
-  const statusClass = STATUS_COLORS[fm.status || task.status] ?? STATUS_COLORS.queued;
   const owner = fm.owner || task.owner || "human";
   const priority = fm.priority || "normal";
 
