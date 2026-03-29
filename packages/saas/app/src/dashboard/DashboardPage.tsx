@@ -121,7 +121,7 @@ function BriefDisplay({ content }: { content: string }) {
 // ---------------------------------------------------------------------------
 
 export default function DashboardPage() {
-  useAuth(); // ensures authenticated
+  const { data: authUser } = useAuth();
 
   // ---------------------------------------------------------------------------
   // Queries — conditionally poll based on state
@@ -232,21 +232,37 @@ export default function DashboardPage() {
   }, [onboardingState]);
 
   // ---------------------------------------------------------------------------
-  // Auto-trigger onboarding workflow after provisioning (State 2)
+  // Auto-capture Google tokens + create Gmail stream after provisioning
   // ---------------------------------------------------------------------------
 
-  const onboardingWorkflowTriggered = useRef(false);
+  const tokenCaptureTriggered = useRef(false);
 
   useEffect(() => {
     if (onboardingState !== "awaiting_brief") return;
-    if (onboardingWorkflowTriggered.current) return;
-    onboardingWorkflowTriggered.current = true;
+    if (tokenCaptureTriggered.current) return;
 
-    console.info("[DashboardPage] Instance ready — triggering onboarding workflow");
-    startOnboarding({}).catch((err: any) => {
-      console.error("[DashboardPage] onboarding workflow trigger failed:", err);
-    });
-  }, [onboardingState]);
+    // Check URL for oauth=success (returning from token capture redirect)
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("oauth") === "success") {
+      // Tokens captured — trigger onboarding workflow
+      tokenCaptureTriggered.current = true;
+      console.info("[DashboardPage] OAuth tokens captured — triggering onboarding");
+      // Clean URL
+      window.history.replaceState({}, "", "/dashboard");
+      startOnboarding({}).catch((err: any) => {
+        console.error("[DashboardPage] onboarding workflow failed:", err);
+      });
+      return;
+    }
+
+    // No tokens yet — redirect to capture them via our custom OAuth flow
+    // Since user already consented during Google signup, this is instant (no consent screen)
+    tokenCaptureTriggered.current = true;
+    if (!authUser?.id) return; // Wait for auth to load
+    console.info("[DashboardPage] Redirecting to capture Google OAuth tokens");
+    const scopes = "https://www.googleapis.com/auth/gmail.readonly";
+    window.location.href = `/auth/oauth2/google/start?userId=${authUser.id}&scopes=${encodeURIComponent(scopes)}&redirectAfter=${encodeURIComponent("/dashboard?oauth=success")}`;
+  }, [onboardingState, provStatus]);
 
   // ---------------------------------------------------------------------------
   // Brief auto-dismiss timer (30s)
