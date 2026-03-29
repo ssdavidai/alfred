@@ -118,11 +118,15 @@ class StreamPullerWorkflow:
                     )
                     result.detail_fetches = len(detail_items)
 
-        # 5b. Notion-specific: fetch blocks for each page and attach as _blocks
+        # 5b. Notion-specific: fetch blocks per page and ingest incrementally
+        #     to avoid exceeding Temporal's 4MB gRPC message limit.
         if parser_name == "notion":
             items = raw_response.get("results", [])
             if isinstance(items, list) and items:
-                enriched_items: list[dict[str, Any]] = []
+                stream_type = config.get("type", "custom")
+                batch: list[dict[str, Any]] = []
+                BATCH_SIZE = 3
+
                 for item in items:
                     page_id = item.get("id", "")
                     if item.get("object") == "page" and page_id:
@@ -132,27 +136,54 @@ class StreamPullerWorkflow:
                             start_to_close_timeout=timedelta(seconds=60),
                             retry_policy=RetryPolicy(maximum_attempts=2),
                         )
-                        enriched_item = {**item, "_blocks": blocks}
-                        enriched_items.append(enriched_item)
+                        batch.append({**item, "_blocks": blocks})
                         result.detail_fetches += 1
                     else:
-                        enriched_items.append(item)
-                detail_items = enriched_items
+                        batch.append(item)
+
+                    # Ingest in small batches to keep payloads under 4MB
+                    if len(batch) >= BATCH_SIZE:
+                        count: int = await workflow.execute_activity(
+                            ingest_events,
+                            args=[stream_id, stream_type, parser_name, batch],
+                            start_to_close_timeout=timedelta(seconds=60),
+                            retry_policy=RetryPolicy(maximum_attempts=2),
+                        )
+                        result.events_ingested += count
+                        result.events_pulled += len(batch)
+                        batch = []
+
+                # Flush remaining
+                if batch:
+                    count = await workflow.execute_activity(
+                        ingest_events,
+                        args=[stream_id, stream_type, parser_name, batch],
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                    result.events_ingested += count
+                    result.events_pulled += len(batch)
+
+                # Skip the generic ingest below — already handled
+                detail_items = []
 
         # 6. Run parser on response (done in ingest activity, pass parser name)
 
         # Determine what to ingest — detail items if we fetched them, else raw response
-        raw_to_ingest = detail_items if detail_items else [raw_response]
+        # Notion ingests incrementally in step 5b, so skip the bulk ingest.
+        already_ingested = parser_name == "notion" and result.events_pulled > 0
+        if not already_ingested:
+            raw_to_ingest = detail_items if detail_items else [raw_response]
 
-        # 7. Ingest parsed events via POST /api/v1/streams/ingest
-        ingested_count: int = await workflow.execute_activity(
-            ingest_events,
-            args=[stream_id, config.get("type", "custom"), parser_name, raw_to_ingest],
-            start_to_close_timeout=timedelta(seconds=60),
-            retry_policy=RetryPolicy(maximum_attempts=2),
-        )
-        result.events_ingested = ingested_count
-        result.events_pulled = len(raw_to_ingest)
+            # 7. Ingest parsed events via POST /api/v1/streams/ingest
+            ingested_count: int = await workflow.execute_activity(
+                ingest_events,
+                args=[stream_id, config.get("type", "custom"), parser_name, raw_to_ingest],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            result.events_ingested += ingested_count
+            result.events_pulled += len(raw_to_ingest)
 
         # 8. Update cursor if configured
         cursor_field = config.get("cursor_field", "")
