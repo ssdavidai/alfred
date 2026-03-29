@@ -192,7 +192,7 @@ export function registerWorkflowRoutes(): void {
     const args = [
       "temporal", "schedule", "create",
       "--schedule-id", b.schedule_id as string,
-      "--workflow-type", b.workflow_type as string,
+      "--type", b.workflow_type as string,
       "--task-queue", b.task_queue as string,
       "--cron", b.cron as string,
     ];
