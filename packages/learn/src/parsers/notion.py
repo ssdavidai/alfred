@@ -1,6 +1,6 @@
 """Notion parser — converts Notion pages/blocks to vault-ready content."""
 
-from parsers import ParsedEvent
+from src.parsers import ParsedEvent
 from datetime import datetime
 
 
