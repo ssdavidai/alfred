@@ -190,7 +190,7 @@ page SetupPage {
 
 query getProvisioningStatus {
   fn: import { getProvisioningStatus } from "@src/provisioning/operations",
-  entities: [Instance, ProvisioningJob]
+  entities: [Instance, ProvisioningJob, OAuthCredential]
 }
 
 action reprovisionInstance {

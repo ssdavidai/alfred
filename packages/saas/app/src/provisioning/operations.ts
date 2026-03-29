@@ -38,6 +38,12 @@ export const getProvisioningStatus: GetProvisioningStatus<
     jobError = job.error || "Provisioning was interrupted — please retry";
   }
 
+  // Check if Google OAuth credential exists (for Gmail stream setup)
+  const hasGoogleCredential = !!(await context.entities.OAuthCredential?.findFirst({
+    where: { userId: context.user.id, provider: "google" },
+    select: { id: true },
+  }));
+
   return {
     instance: instance
       ? {
@@ -58,6 +64,7 @@ export const getProvisioningStatus: GetProvisioningStatus<
           completedAt: job.completedAt?.toISOString() ?? null,
         }
       : null,
+    hasGoogleCredential,
   };
 };
 
