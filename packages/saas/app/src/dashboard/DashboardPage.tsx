@@ -120,7 +120,7 @@ function BriefDisplay({ content }: { content: string }) {
 // ---------------------------------------------------------------------------
 
 export default function DashboardPage() {
-  const { data: user } = useAuth();
+  useAuth(); // ensures authenticated
 
   // ---------------------------------------------------------------------------
   // Queries — conditionally poll based on state

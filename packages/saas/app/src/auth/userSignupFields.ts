@@ -99,7 +99,13 @@ export const getGoogleUserFields = defineUserSignupFields({
 
 export function getGoogleAuthConfig() {
   return {
-    scopes: ["profile", "email"], // must include at least 'profile' for Google
+    scopes: [
+      "profile",
+      "email",
+      "https://www.googleapis.com/auth/gmail.readonly",
+    ],
+    accessType: "offline",
+    prompt: "consent",
   };
 }
 
