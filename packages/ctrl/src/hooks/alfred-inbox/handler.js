@@ -55,7 +55,9 @@ function flush(sessionKey, workspaceDir) {
   // Append a StreamEvent to the system-openclaw-sessions stream.
   // The EventProcessor → Judgment → Curator pipeline handles classification,
   // routing, and structured record creation. No direct inbox write needed.
-  const streamsDir = join(workspaceDir, "..", "alfred", "streams");
+  // Write to /alfred-data/streams/ which is the shared volume between
+  // openclaw and ctrl-api (host: /mnt/encrypted/alfred/streams/).
+  const streamsDir = "/alfred-data/streams";
   if (!existsSync(streamsDir)) {
     mkdirSync(streamsDir, { recursive: true });
   }
