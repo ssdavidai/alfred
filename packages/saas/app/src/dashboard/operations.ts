@@ -15,6 +15,7 @@ import type {
   GetModelCatalog,
   GetWorkspaceFile,
   GetFirstBrief,
+  GetOnboardingProgress,
 } from "wasp/server/operations";
 import type {
   SubmitInboxItem,
@@ -672,4 +673,31 @@ export const startOnboarding: StartOnboarding<
   }
 
   return { status: "started", streamId: gmailStream.id };
+};
+
+// ============================================================
+// Onboarding Progress (v2)
+// ============================================================
+
+export const getOnboardingProgress: GetOnboardingProgress<void, any> = async (
+  _args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+
+  try {
+    return await proxyToTenant(instance, {
+      path: "/api/v1/onboarding/progress",
+    });
+  } catch (e) {
+    console.error("Failed to fetch onboarding progress:", e);
+    return {
+      stage: "not_started",
+      progress: { current_day: 0, total_days: 0, facts_count: 0, patterns_count: 0 },
+      facts_count: 0,
+      patterns_count: 0,
+      automations_count: 0,
+      brief: "",
+    };
+  }
 };

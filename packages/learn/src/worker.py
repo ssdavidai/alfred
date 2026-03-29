@@ -118,13 +118,17 @@ from src.activities.judge import (
     score_instincts,
 )
 
-# Activities — onboarding
+# Activities — onboarding v2
 from src.activities.onboarding import (
-    wait_for_gmail_events,
-    extract_entities_from_emails,
-    analyze_patterns,
-    generate_first_brief,
-    write_onboarding_results,
+    init_onboard_json,
+    update_onboard_stage,
+    update_onboard_progress,
+    backfill_gmail_history,
+    process_day_chunk,
+    analyze_patterns_v2,
+    personalize_alfred,
+    suggest_automations,
+    write_first_brief,
 )
 
 # Activities — omi audio
@@ -262,12 +266,16 @@ ALL_ACTIVITIES = [
     update_task_status,
     write_ledger_entry,
     write_task_artifacts,
-    # Onboarding
-    wait_for_gmail_events,
-    extract_entities_from_emails,
-    analyze_patterns,
-    generate_first_brief,
-    write_onboarding_results,
+    # Onboarding v2
+    init_onboard_json,
+    update_onboard_stage,
+    update_onboard_progress,
+    backfill_gmail_history,
+    process_day_chunk,
+    analyze_patterns_v2,
+    personalize_alfred,
+    suggest_automations,
+    write_first_brief,
     # Braindump
     detect_braindump,
     extract_braindump,
