@@ -29,10 +29,12 @@ export const getStreams: GetStreams<void, any> = async (_args, context) => {
     const instance = await getUserInstance(context);
     const tenantData = await proxyToTenant(instance, { path: "/api/v1/streams" });
     const tenantStreams: any[] = tenantData?.streams || [];
-    const countMap = new Map(tenantStreams.map((s: any) => [s.id, { event_count: s.event_count || 0, last_event_at: s.last_event_at }]));
+    // Build lookup by both ID and source — system streams use different IDs on SaaS vs tenant
+    const countById = new Map(tenantStreams.map((s: any) => [s.id, { event_count: s.event_count || 0, last_event_at: s.last_event_at }]));
+    const countBySource = new Map(tenantStreams.map((s: any) => [s.source, { event_count: s.event_count || 0, last_event_at: s.last_event_at }]));
 
     return prismaStreams.map((s: any) => {
-      const tenant = countMap.get(s.id);
+      const tenant = countById.get(s.id) || countBySource.get(s.source);
       return { ...s, _count: { events: tenant?.event_count ?? 0 }, lastEventAt: tenant?.last_event_at ?? s.lastEventAt };
     });
   } catch {
