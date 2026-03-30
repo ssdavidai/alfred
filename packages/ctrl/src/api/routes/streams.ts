@@ -449,6 +449,26 @@ export function registerStreamRoutes(): void {
   // GET /api/v1/streams — list streams for this tenant
   addRoute("GET", "/api/v1/streams", async ({ res }) => {
     const streams = loadStreamsMeta();
+
+    // Compute accurate event counts + last_event_at from JSONL files
+    for (const stream of streams) {
+      const filePath = getStreamEventsPath(stream.id);
+      try {
+        const content = fs.readFileSync(filePath, "utf-8");
+        const lines = content.trim().split("\n").filter(Boolean);
+        stream.event_count = lines.length;
+        // Find the most recent received_at
+        if (lines.length > 0) {
+          try {
+            const last = JSON.parse(lines[lines.length - 1]);
+            stream.last_event_at = last.received_at || stream.last_event_at;
+          } catch { /* keep existing */ }
+        }
+      } catch {
+        // No JSONL file = 0 events (keep existing count which may be 0)
+      }
+    }
+
     sendJson(res, 200, { streams });
   });
 
