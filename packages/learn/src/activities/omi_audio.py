@@ -277,6 +277,7 @@ async def transcribe_audio_group(group: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "text": text,
         "language": language,
+        "language_probability": result.get("language_probability", 0),
         "duration_seconds": round(duration_seconds, 1),
         "segment_count": len(sorted_group),
     }
@@ -309,9 +310,20 @@ async def ingest_omi_transcription(
     Returns the event_id from ctrl, or empty string on failure.
     """
     text = transcription.get("text", "")
+    lang_prob = transcription.get("language_probability", 0)
+    word_count = len(text.split()) if text.strip() else 0
+
+    # Quality gate — discard hallucinated / noise transcriptions
+    discard_reason = ""
     if not text.strip():
-        logger.info("[omi] Skipping ingest: empty transcription")
-        # Still move files to processed
+        discard_reason = "empty transcription"
+    elif lang_prob < 0.5:
+        discard_reason = f"low language confidence ({lang_prob})"
+    elif word_count < 5:
+        discard_reason = f"too few words ({word_count})"
+
+    if discard_reason:
+        logger.info("[omi] Discarding transcription: %s — text: %s", discard_reason, text[:80])
         _move_to_processed(group)
         return ""
 
