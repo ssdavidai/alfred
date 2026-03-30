@@ -28,6 +28,7 @@ SPEECH_GAP_SECONDS = 60  # 60s of silence between speech = new conversation
 MIN_SPEECH_CHUNKS = 3  # need at least 3 speech chunks to form a group
 SILENCE_RMS_THRESHOLD = 300  # PCM16 RMS below this = silence (range 0-32768)
 READY_AGE_SECONDS = 30  # group is ready if last speech chunk is 30s+ old
+RETENTION_SECONDS = 48 * 60 * 60  # delete processed audio after 48 hours
 
 
 def _pcm_rms(pcm_bytes: bytes) -> float:
@@ -110,8 +111,38 @@ async def scan_audio_buffer() -> list[dict[str, Any]]:
                 "has_speech": _has_speech(str(pcm_file)),
             })
 
+    # Purge processed files older than retention period
+    _purge_old_processed(audio_dir)
+
     logger.info("[omi] Scanned audio buffer: %d unprocessed files", len(results))
     return results
+
+
+def _purge_old_processed(audio_dir: Path) -> None:
+    """Delete processed audio files older than RETENTION_SECONDS."""
+    now = time.time()
+    purged = 0
+    for uid_dir in audio_dir.iterdir():
+        if not uid_dir.is_dir():
+            continue
+        processed_dir = uid_dir / "processed"
+        if not processed_dir.is_dir():
+            continue
+        for f in processed_dir.iterdir():
+            try:
+                if now - f.stat().st_mtime > RETENTION_SECONDS:
+                    f.unlink()
+                    purged += 1
+            except Exception:
+                continue
+        # Remove empty processed/ dirs
+        try:
+            if processed_dir.is_dir() and not any(processed_dir.iterdir()):
+                processed_dir.rmdir()
+        except Exception:
+            pass
+    if purged:
+        logger.info("[omi] Purged %d processed audio files (>48h old)", purged)
 
 
 @activity.defn
