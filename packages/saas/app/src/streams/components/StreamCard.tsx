@@ -28,6 +28,7 @@ interface StreamCardProps {
     webhookToken: string | null;
     lastEventAt: string | null;
     errorMessage: string | null;
+    tenantBaseUrl?: string | null;
     _count?: { events: number };
   };
   sourceIcon?: React.ComponentType<{ className?: string }>;
@@ -64,12 +65,18 @@ export default function StreamCard({
   const isLoading = actionLoading === stream.id;
   const eventCount = stream._count?.events ?? 0;
 
-  const copyWebhookUrl = () => {
-    if (stream.webhookToken) {
-      navigator.clipboard.writeText(
-        `${window.location.origin}/webhooks/${stream.webhookToken}`,
-      );
+  const getWebhookUrl = (): string => {
+    if (!stream.webhookToken) return "";
+    // Omi streams use a special audio endpoint on the tenant, not the SaaS webhook
+    if (stream.source === "omi" && stream.tenantBaseUrl) {
+      return `${stream.tenantBaseUrl}/api/v1/streams/omi/audio?token=${stream.webhookToken}&uid=omi-device`;
     }
+    return `${window.location.origin}/webhooks/${stream.webhookToken}`;
+  };
+
+  const copyWebhookUrl = () => {
+    const url = getWebhookUrl();
+    if (url) navigator.clipboard.writeText(url);
   };
 
   return (
