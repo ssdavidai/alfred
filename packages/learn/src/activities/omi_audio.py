@@ -5,8 +5,10 @@ from __future__ import annotations
 import io
 import json
 import logging
+import math
 import os
 import shutil
+import struct
 import time
 import wave
 from pathlib import Path
@@ -22,8 +24,29 @@ logger = logging.getLogger("alfred-learn")
 OMI_AUDIO_DIR = os.environ.get("OMI_AUDIO_DIR", "/alfred-data/streams/omi-audio")
 
 # Grouping constants
-CONVERSATION_GAP_SECONDS = 10 * 60  # 10 min gap = new conversation
-DEBOUNCE_SECONDS = 2 * 60  # skip group if latest file < 2 min old
+SPEECH_GAP_SECONDS = 60  # 60s of silence between speech = new conversation
+MIN_SPEECH_CHUNKS = 3  # need at least 3 speech chunks to form a group
+SILENCE_RMS_THRESHOLD = 300  # PCM16 RMS below this = silence (range 0-32768)
+READY_AGE_SECONDS = 30  # group is ready if last speech chunk is 30s+ old
+
+
+def _pcm_rms(pcm_bytes: bytes) -> float:
+    """Compute RMS energy of PCM16 audio. Returns 0-32768 range."""
+    if len(pcm_bytes) < 2:
+        return 0.0
+    n_samples = len(pcm_bytes) // 2
+    samples = struct.unpack(f"<{n_samples}h", pcm_bytes[:n_samples * 2])
+    sum_sq = sum(s * s for s in samples)
+    return math.sqrt(sum_sq / n_samples)
+
+
+def _has_speech(pcm_path: str, threshold: float = SILENCE_RMS_THRESHOLD) -> bool:
+    """Check if a PCM file contains speech (above silence threshold)."""
+    try:
+        data = Path(pcm_path).read_bytes()
+        return _pcm_rms(data) > threshold
+    except Exception:
+        return False
 
 
 def pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 16000, channels: int = 1) -> bytes:
@@ -84,6 +107,7 @@ async def scan_audio_buffer() -> list[dict[str, Any]]:
                 "size": pcm_file.stat().st_size,
                 "sample_rate": meta.get("sample_rate", 16000),
                 "stream_id": meta.get("stream_id", ""),
+                "has_speech": _has_speech(str(pcm_file)),
             })
 
     logger.info("[omi] Scanned audio buffer: %d unprocessed files", len(results))
@@ -92,30 +116,42 @@ async def scan_audio_buffer() -> list[dict[str, Any]]:
 
 @activity.defn
 async def group_audio_segments(files: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    """Group PCM files by uid + time proximity.
+    """Group PCM files by speech activity.
 
-    Returns list of groups (each group is a list of segment metadata).
-    A gap > CONVERSATION_GAP_SECONDS between consecutive files starts a new group.
-    Groups where the latest file is < DEBOUNCE_SECONDS old are skipped (still recording).
+    Only files with detected speech are included. A silence gap longer than
+    SPEECH_GAP_SECONDS between speech chunks starts a new conversation group.
+    Groups are ready when the last speech chunk is READY_AGE_SECONDS old.
+    Silent-only files are moved to processed/ immediately.
     """
     if not files:
         return []
 
-    # Sort by uid then timestamp
+    # Separate speech from silence
     sorted_files = sorted(files, key=lambda f: (f["uid"], f["timestamp"]))
+    speech_files = [f for f in sorted_files if f.get("has_speech", False)]
+    silent_files = [f for f in sorted_files if not f.get("has_speech", False)]
 
+    # Move silent files to processed/ immediately (they'll never be transcribed)
+    if silent_files:
+        _move_to_processed(silent_files)
+        logger.info("[omi] Discarded %d silent chunks", len(silent_files))
+
+    if not speech_files:
+        logger.info("[omi] No speech detected in %d files", len(files))
+        return []
+
+    # Group speech files: new group when uid changes or silence gap > threshold
     groups: list[list[dict[str, Any]]] = []
     current_group: list[dict[str, Any]] = []
 
-    for f in sorted_files:
+    for f in speech_files:
         if not current_group:
             current_group = [f]
             continue
 
         prev = current_group[-1]
-        # New group if different uid or time gap exceeds threshold
-        time_gap_ms = f["timestamp"] - prev["timestamp"]
-        if f["uid"] != prev["uid"] or time_gap_ms > CONVERSATION_GAP_SECONDS * 1000:
+        gap_ms = f["timestamp"] - prev["timestamp"]
+        if f["uid"] != prev["uid"] or gap_ms > SPEECH_GAP_SECONDS * 1000:
             groups.append(current_group)
             current_group = [f]
         else:
@@ -124,27 +160,27 @@ async def group_audio_segments(files: list[dict[str, Any]]) -> list[list[dict[st
     if current_group:
         groups.append(current_group)
 
-    # Apply debounce: skip groups where the latest file is too recent
+    # Ready check: last speech chunk must be old enough (conversation ended)
     now_ms = int(time.time() * 1000)
     ready_groups: list[list[dict[str, Any]]] = []
 
     for group in groups:
-        latest_ts = max(f["timestamp"] for f in group)
-        age_ms = now_ms - latest_ts
-        if age_ms >= DEBOUNCE_SECONDS * 1000:
+        if len(group) < MIN_SPEECH_CHUNKS:
+            # Too short — probably noise, skip for now (will be picked up later or discarded)
+            continue
+        latest_speech_ts = max(f["timestamp"] for f in group)
+        age_ms = now_ms - latest_speech_ts
+        if age_ms >= READY_AGE_SECONDS * 1000:
             ready_groups.append(group)
         else:
             logger.info(
-                "[omi] Skipping group (debounce): uid=%s, %d files, latest=%dms ago",
-                group[0]["uid"],
-                len(group),
-                age_ms,
+                "[omi] Group not ready: uid=%s, %d speech chunks, last speech %ds ago",
+                group[0]["uid"], len(group), age_ms // 1000,
             )
 
     logger.info(
-        "[omi] Grouped segments: %d total groups, %d ready",
-        len(groups),
-        len(ready_groups),
+        "[omi] Grouped: %d files scanned, %d speech, %d silent discarded, %d groups, %d ready",
+        len(files), len(speech_files), len(silent_files), len(groups), len(ready_groups),
     )
     return ready_groups
 
