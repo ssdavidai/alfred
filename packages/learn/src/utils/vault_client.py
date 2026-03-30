@@ -29,6 +29,15 @@ class VaultClient:
 
     # --- Vault CRUD --------------------------------------------------------
 
+    async def drop_to_inbox(self, filename: str, content: str) -> str:
+        """Write a file to the vault inbox for curator processing. Returns filename."""
+        resp = await self._client.post(
+            "/api/v1/vault/inbox",
+            json={"filename": filename, "content": content},
+        )
+        resp.raise_for_status()
+        return resp.json().get("filename", filename)
+
     async def write_record(self, record_type: str, name: str, content: str) -> str:
         """Write a vault record. Returns the vault path."""
         resp = await self._client.post(

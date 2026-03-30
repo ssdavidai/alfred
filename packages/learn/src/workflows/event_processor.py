@@ -23,7 +23,7 @@ with workflow.unsafe.imports_passed_through():
         mark_event_processed,
         quarantine_event,
     )
-    from src.activities.vault import ensure_entities_exist, write_vault_record
+    from src.activities.vault import write_vault_record
     from src.validators.frontmatter import validate_classification
 
 
@@ -128,7 +128,31 @@ class EventProcessorWorkflow:
                 )
                 continue
 
-            # 5. Write to vault
+            # 5. Drop to inbox for curator processing
+            # Inject raw text so the curator has full content to work with
+            raw = event.get("raw", {})
+            raw_text = ""
+            if isinstance(raw, dict):
+                # Email: subject + snippet/body
+                parts = []
+                for key in ("subject", "snippet", "body", "text", "content"):
+                    if key in raw and raw[key]:
+                        parts.append(str(raw[key]))
+                # Conversation messages
+                for msg in raw.get("messages", []):
+                    if isinstance(msg, dict):
+                        role = msg.get("role", "")
+                        content = msg.get("content", "")
+                        parts.append(f"{role}: {content}" if role else str(content))
+                    elif isinstance(msg, str):
+                        parts.append(msg)
+                raw_text = "\n\n".join(parts)
+            elif isinstance(raw, str):
+                raw_text = raw
+
+            classification["raw_text"] = raw_text
+            classification["source"] = event.get("stream_type", "")
+
             vault_path: str = await workflow.execute_activity(
                 write_vault_record,
                 args=[classification],
@@ -142,16 +166,7 @@ class EventProcessorWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
 
-            # 7. Entity extraction — ensure person/org records exist
-            entities = classification.get("entities", [])
-            if entities:
-                await workflow.execute_activity(
-                    ensure_entities_exist,
-                    args=[entities],
-                    start_to_close_timeout=timedelta(seconds=30),
-                )
-
-            # 8. Attempt judgment (router) if instincts exist
+            # 7. Attempt judgment (router) if instincts exist
             await workflow.execute_activity(
                 attempt_judgment,
                 args=[event, metadata, classification],

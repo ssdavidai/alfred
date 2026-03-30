@@ -37,7 +37,12 @@ def vault_record_path(
 
 @activity.defn
 async def write_vault_record(classification: dict[str, Any]) -> str:
-    """Write a classified event to the vault as a record. Returns vault path."""
+    """Drop a classified event into the vault inbox for curator processing.
+
+    The curator's 4-stage pipeline (analyze → entity resolution → interlink
+    → enrich) creates the real structured vault records. We just provide the
+    raw content with classification hints so the curator knows what to do.
+    """
     config = load_config()
     client = VaultClient(config)
     try:
@@ -47,44 +52,52 @@ async def write_vault_record(classification: dict[str, Any]) -> str:
         tags = classification.get("tags", [])
         entities = classification.get("entities", [])
         action_items = classification.get("action_items", [])
-        dates = classification.get("dates", [])
+        source = classification.get("source", "")
+        raw_text = classification.get("raw_text", "")
 
-        # Build frontmatter + body
-        # Tasks get queued status and alfred ownership for TaskRunner pickup
-        status = "queued" if record_type == "task" else "active"
-        frontmatter_lines = [
-            "---",
-            f"type: {record_type}",
-            f"name: {title}",
-            f"status: {status}",
-            f"tags: [{', '.join(tags)}]",
-        ]
-        if record_type == "task":
-            frontmatter_lines.insert(4, "owner: alfred")
-            frontmatter_lines.insert(5, "priority: normal")
-        if dates:
-            frontmatter_lines.append(f"dates: [{', '.join(dates)}]")
-        frontmatter_lines.append("---")
+        # Build a rich inbox file the curator can work with
+        parts = [f"# {title}", ""]
 
-        body_parts = [f"# {title}", "", summary]
+        if record_type != "note":
+            parts.append(f"**Classified as**: {record_type}")
+        if tags:
+            parts.append(f"**Tags**: {', '.join(tags)}")
+        if source:
+            parts.append(f"**Source**: {source}")
+        parts.append("")
+
+        if summary:
+            parts.append(summary)
+            parts.append("")
+
+        if raw_text:
+            parts.append("## Full content")
+            parts.append("")
+            parts.append(raw_text)
+            parts.append("")
 
         if entities:
-            body_parts.append("")
-            body_parts.append("## Entities")
+            parts.append("## People and entities mentioned")
             for e in entities:
-                body_parts.append(f"- {e.get('name', '')} ({e.get('type', '')})")
+                parts.append(f"- {e.get('name', '')} ({e.get('type', '')})")
+            parts.append("")
 
         if action_items:
-            body_parts.append("")
-            body_parts.append("## Action Items")
+            parts.append("## Action items")
             for item in action_items:
-                body_parts.append(f"- [ ] {item}")
+                parts.append(f"- {item}")
+            parts.append("")
 
-        content = "\n".join(frontmatter_lines) + "\n\n" + "\n".join(body_parts) + "\n"
+        content = "\n".join(parts)
 
-        name = vault_record_path(record_type, title)
-        path = await client.write_record(record_type, name, content)
-        return path
+        # Filename: date-slugified-title.md
+        slug = re.sub(r'[^\w\s-]', '', title.lower())
+        slug = re.sub(r'[\s]+', '-', slug)[:60]
+        today = datetime.now().strftime("%Y-%m-%d")
+        filename = f"{today}-{slug}.md"
+
+        path = await client.drop_to_inbox(filename, content)
+        return f"inbox/{path}"
     finally:
         await client.close()
 
