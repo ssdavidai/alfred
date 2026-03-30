@@ -111,10 +111,14 @@ export function createApiServer(): http.Server {
     }
 
     try {
-      authenticate(req);
-
       const qIdx = url.indexOf("?");
       const pathname = qIdx >= 0 ? url.slice(0, qIdx) : url;
+
+      // Public routes that authenticate via their own mechanism (e.g. webhook token)
+      const isPublic = pathname.startsWith("/api/v1/streams/omi/");
+      if (!isPublic) {
+        authenticate(req);
+      }
       const query = new URLSearchParams(qIdx >= 0 ? url.slice(qIdx + 1) : "");
 
       const matched = matchRoute(method, pathname);
