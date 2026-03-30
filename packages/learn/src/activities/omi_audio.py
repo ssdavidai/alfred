@@ -26,6 +26,7 @@ OMI_AUDIO_DIR = os.environ.get("OMI_AUDIO_DIR", "/alfred-data/streams/omi-audio"
 # Grouping constants
 SPEECH_GAP_SECONDS = 60  # 60s of silence between speech = new conversation
 MIN_SPEECH_CHUNKS = 3  # need at least 3 speech chunks to form a group
+MAX_GROUP_DURATION_SECONDS = 5 * 60  # cap groups at 5 min to keep transcription fast
 SILENCE_RMS_THRESHOLD = 300  # PCM16 RMS below this = silence (range 0-32768)
 READY_AGE_SECONDS = 30  # group is ready if last speech chunk is 30s+ old
 RETENTION_SECONDS = 48 * 60 * 60  # delete processed audio after 48 hours
@@ -191,13 +192,59 @@ async def group_audio_segments(files: list[dict[str, Any]]) -> list[list[dict[st
     if current_group:
         groups.append(current_group)
 
+    # Split large groups into ≤5 min chunks, tagged with a shared conversation_id
+    import uuid as _uuid
+    chunked_groups: list[list[dict[str, Any]]] = []
+    for group in groups:
+        if not group:
+            continue
+        first_ts = group[0]["timestamp"]
+        last_ts = group[-1]["timestamp"]
+        duration_ms = last_ts - first_ts
+        conv_id = str(_uuid.uuid4())[:8]
+
+        if duration_ms <= MAX_GROUP_DURATION_SECONDS * 1000:
+            # Small enough — tag and keep as one
+            for f in group:
+                f["conversation_id"] = conv_id
+                f["part"] = 1
+                f["total_parts"] = 1
+            chunked_groups.append(group)
+        else:
+            # Split into 5-min chunks
+            chunk: list[dict[str, Any]] = []
+            chunk_start_ts = group[0]["timestamp"]
+            part = 0
+            for f in group:
+                if f["timestamp"] - chunk_start_ts > MAX_GROUP_DURATION_SECONDS * 1000 and chunk:
+                    chunked_groups.append(chunk)
+                    part += 1
+                    chunk = []
+                    chunk_start_ts = f["timestamp"]
+                f["conversation_id"] = conv_id
+                chunk.append(f)
+            if chunk:
+                chunked_groups.append(chunk)
+                part += 1
+            # Set part numbers
+            total_parts = part
+            current_part = 0
+            for cg in chunked_groups[-total_parts:]:
+                current_part += 1
+                for f in cg:
+                    f["part"] = current_part
+                    f["total_parts"] = total_parts
+            logger.info("[omi] Split conversation %s into %d parts (%.0fs total)",
+                        conv_id, total_parts, duration_ms / 1000)
+
+    groups = chunked_groups
+
     # Ready check: last speech chunk must be old enough (conversation ended)
     now_ms = int(time.time() * 1000)
     ready_groups: list[list[dict[str, Any]]] = []
 
     for group in groups:
         if len(group) < MIN_SPEECH_CHUNKS:
-            # Too short — probably noise, skip for now (will be picked up later or discarded)
             continue
         latest_speech_ts = max(f["timestamp"] for f in group)
         age_ms = now_ms - latest_speech_ts
@@ -335,8 +382,10 @@ async def ingest_omi_transcription(
     first_ts = sorted_group[0]["timestamp"]
     last_ts = sorted_group[-1]["timestamp"]
     uid = sorted_group[0]["uid"]
+    conv_id = sorted_group[0].get("conversation_id", "")
+    part = sorted_group[0].get("part", 1)
+    total_parts = sorted_group[0].get("total_parts", 1)
 
-    # Build omi conversation format (matching existing parser expectations)
     from datetime import datetime, timezone
 
     start_dt = datetime.fromtimestamp(first_ts / 1000, tz=timezone.utc)
@@ -344,13 +393,11 @@ async def ingest_omi_transcription(
     date_str = start_dt.strftime("%Y-%m-%d")
     time_range = f"{start_dt.strftime('%H:%M')}-{end_dt.strftime('%H:%M')}"
 
-    # Source ref for dedup
     source_ref = f"omi-audio:{uid}:{first_ts}"
-
-    # Word count
     word_count = len(text.split())
 
-    # Format as omi conversation object (matches parser format)
+    part_label = f" (part {part}/{total_parts})" if total_parts > 1 else ""
+
     raw_payload = {
         "date": date_str,
         "time_range": time_range,
@@ -358,12 +405,15 @@ async def ingest_omi_transcription(
         "segments": segment_count,
         "duration_seconds": duration_seconds,
         "word_count": word_count,
-        "text": f"Date: {date_str} | Time: {time_range} | Language: {language}\n\n{text}",
+        "conversation_id": conv_id,
+        "part": part,
+        "total_parts": total_parts,
+        "text": f"Date: {date_str} | Time: {time_range} | Language: {language}{part_label}\n\n{text}",
     }
 
     # Build summary
     duration_str = f"{int(duration_seconds) // 60}m{int(duration_seconds) % 60}s"
-    summary = f"Omi conversation ({date_str} {time_range}, {duration_str}, {word_count} words, {language})"
+    summary = f"Omi conversation ({date_str} {time_range}, {duration_str}, {word_count} words, {language}){part_label}"
 
     config = load_config()
     api_key = os.environ.get("AAS_API_KEY", "")
@@ -398,6 +448,9 @@ async def ingest_omi_transcription(
                         "parser": "omi",
                         "event_type": "omi-conversation",
                         "source": "omi-audio-pipeline",
+                        "conversation_id": conv_id,
+                        "part": part,
+                        "total_parts": total_parts,
                     },
                 },
             )
