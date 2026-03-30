@@ -19,7 +19,7 @@ from src.config import load_config
 
 logger = logging.getLogger("alfred-learn")
 
-OMI_AUDIO_DIR = "/mnt/encrypted/alfred/streams/omi-audio"
+OMI_AUDIO_DIR = os.environ.get("OMI_AUDIO_DIR", "/alfred-data/streams/omi-audio")
 
 # Grouping constants
 CONVERSATION_GAP_SECONDS = 10 * 60  # 10 min gap = new conversation
