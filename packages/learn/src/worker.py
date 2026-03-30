@@ -310,10 +310,6 @@ async def run_worker() -> None:
     logger.info("Connecting to Temporal at %s", config.temporal_host)
     client = await Client.connect(config.temporal_host)
 
-    # Pre-warm Whisper model so first transcription doesn't timeout
-    from src.whisper_model import warmup as whisper_warmup
-    whisper_warmup()
-
     logger.info("Starting worker on task queue: %s", config.task_queue)
     worker = Worker(
         client,
