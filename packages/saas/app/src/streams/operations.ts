@@ -49,8 +49,16 @@ export const getStreamEvents: GetStreamEvents<{ streamId: string }, any> = async
   // Proxy to tenant ctrl API for actual events (stored in JSONL on tenant)
   try {
     const instance = await getUserInstance(context);
+
+    // Resolve tenant stream ID — system streams use "system-{source}" on the tenant
+    let tenantStreamId = args.streamId;
+    const stream = await prisma.stream.findUnique({ where: { id: args.streamId } });
+    if (stream?.isSystem) {
+      tenantStreamId = `system-${stream.source}`;
+    }
+
     const tenantData = await proxyToTenant(instance, {
-      path: `/api/v1/streams/${args.streamId}/events`,
+      path: `/api/v1/streams/${tenantStreamId}/events`,
       query: { limit: "50" },
     });
     // Map snake_case from ctrl API to camelCase for the UI
