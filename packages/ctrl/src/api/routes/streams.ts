@@ -35,6 +35,7 @@ interface StreamMeta {
   last_event_at: string | null;
   event_count: number;
   system?: boolean;
+  webhookToken?: string;
 }
 
 interface ProcessedEventState {
@@ -624,6 +625,7 @@ export function registerStreamRoutes(): void {
       status: "idle",
       last_event_at: null,
       event_count: 0,
+      ...(typeof b.webhookToken === "string" ? { webhookToken: b.webhookToken } : {}),
     };
 
     streams.push(stream);

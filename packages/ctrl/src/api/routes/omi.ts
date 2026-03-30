@@ -41,6 +41,10 @@ function findOmiStream(token: string): { streamId: string; meta: StreamMeta } | 
   const streams = loadStreamsMeta();
   for (const meta of streams) {
     if (meta.source !== "omi") continue;
+    // Check token in stream metadata (synced from SaaS) or config file
+    if ((meta as any).webhookToken === token) {
+      return { streamId: meta.id, meta };
+    }
     const config = loadStreamConfig(meta.id);
     if (config?.webhookToken === token) {
       return { streamId: meta.id, meta };
