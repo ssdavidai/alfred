@@ -476,7 +476,7 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
     base = config.openclaw_gateway_url
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         # 1. Spawn the clerk subagent
         spawn_resp = await client.post(
             f"{base}/tools/invoke",
@@ -513,7 +513,7 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
 
     # 2. Poll sessions_history until assistant response appears
     # Use a fresh client with longer timeout for polling phase
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         for attempt in range(48):  # 48 × 10s = 480s max
             await asyncio.sleep(10)
             try:
