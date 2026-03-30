@@ -151,8 +151,9 @@ async def group_audio_segments(files: list[dict[str, Any]]) -> list[list[dict[st
 
 @activity.defn
 async def transcribe_audio_group(group: list[dict[str, Any]]) -> dict[str, Any]:
-    """Read and concatenate PCM files in a group, transcribe via OpenAI Whisper API.
+    """Read and concatenate PCM files in a group, transcribe via local faster-whisper.
 
+    Uses whisper-large-v3 (int8, CPU) baked into the Docker image.
     Returns {text, language, duration_seconds, segment_count}.
     """
     if not group:
@@ -176,36 +177,34 @@ async def transcribe_audio_group(group: list[dict[str, Any]]) -> dict[str, Any]:
     # Calculate duration: PCM16 = 2 bytes per sample
     duration_seconds = len(pcm_bytes) / (sample_rate * 2)
 
-    # Convert to WAV for Whisper API
+    # Convert to WAV for faster-whisper
     wav_bytes = pcm_to_wav(pcm_bytes, sample_rate=sample_rate)
 
-    # Get API key
-    api_key = os.environ.get("OPENAI_API_KEY", "") or os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("No OPENAI_API_KEY or OPENROUTER_API_KEY found in environment")
+    # Write temp WAV file (faster-whisper needs a file path)
+    import asyncio
+    import tempfile
 
-    # Send to OpenAI Whisper API
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        files = {"file": ("audio.wav", wav_bytes, "audio/wav")}
-        data = {"model": "whisper-1", "response_format": "json"}
-        resp = await client.post(
-            "https://api.openai.com/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {api_key}"},
-            files=files,
-            data=data,
-        )
-        resp.raise_for_status()
-        result = resp.json()
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp.write(wav_bytes)
+        tmp_path = tmp.name
+
+    try:
+        # Run transcription in executor (faster-whisper is synchronous)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _transcribe_sync, tmp_path)
+    finally:
+        os.unlink(tmp_path)
 
     text = result.get("text", "")
     language = result.get("language", "")
 
     logger.info(
-        "[omi] Transcribed group: uid=%s, %d segments, %.1fs, %d chars",
+        "[omi] Transcribed group: uid=%s, %d segments, %.1fs, %d chars, lang=%s",
         sorted_group[0]["uid"],
         len(sorted_group),
         duration_seconds,
         len(text),
+        language,
     )
 
     return {
@@ -213,6 +212,21 @@ async def transcribe_audio_group(group: list[dict[str, Any]]) -> dict[str, Any]:
         "language": language,
         "duration_seconds": round(duration_seconds, 1),
         "segment_count": len(sorted_group),
+    }
+
+
+def _transcribe_sync(wav_path: str) -> dict[str, Any]:
+    """Synchronous transcription via faster-whisper (called from executor)."""
+    from src.whisper_model import get_whisper_model
+
+    model = get_whisper_model()
+    segments, info = model.transcribe(wav_path, beam_size=5, vad_filter=True)
+    text = " ".join(seg.text.strip() for seg in segments)
+
+    return {
+        "text": text,
+        "language": info.language,
+        "language_probability": round(info.language_probability, 2),
     }
 
 
