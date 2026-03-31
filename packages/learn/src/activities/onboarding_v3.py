@@ -28,38 +28,80 @@ from src.config import load_config
 
 logger = logging.getLogger("alfred-learn")
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-OPUS_MODEL = "anthropic/claude-opus-4-6"
 ONBOARD_PATH = "/alfred-data/onboard.json"
 
 
-def _get_api_key() -> str:
-    return os.environ.get("OPENROUTER_API_KEY", "")
+def _resolve_llm_config() -> tuple[str, str, dict[str, str]]:
+    """Resolve which API to call for Claude models.
+
+    If ANTHROPIC_API_KEY is set, calls Anthropic directly.
+    Otherwise falls back to OpenRouter.
+
+    Returns (base_url, model_id, headers).
+    """
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
+
+    if anthropic_key:
+        return (
+            "https://api.anthropic.com/v1/messages",
+            "claude-opus-4-6",
+            {
+                "x-api-key": anthropic_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+        )
+    elif openrouter_key:
+        return (
+            "https://openrouter.ai/api/v1/chat/completions",
+            "anthropic/claude-opus-4-6",
+            {
+                "Authorization": f"Bearer {openrouter_key}",
+                "Content-Type": "application/json",
+            },
+        )
+    else:
+        raise RuntimeError("Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY is set")
 
 
 async def _call_opus(prompt: str, max_tokens: int = 8192) -> str:
-    """Direct OpenRouter call to Opus 4.6. Returns raw text response."""
-    api_key = _get_api_key()
-    if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY not set")
+    """Call Opus 4.6 via Anthropic API (preferred) or OpenRouter fallback."""
+    base_url, model, headers = _resolve_llm_config()
 
     async with httpx.AsyncClient(timeout=300.0) as client:
-        resp = await client.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": OPUS_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.4,
-                "max_tokens": max_tokens,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if "anthropic.com" in base_url:
+            # Anthropic Messages API format
+            resp = await client.post(
+                base_url,
+                headers=headers,
+                json={
+                    "model": model,
+                    "max_tokens": max_tokens,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.4,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            # Anthropic returns content as array of blocks
+            content = data.get("content", [])
+            return " ".join(b.get("text", "") for b in content if b.get("type") == "text")
+        else:
+            # OpenRouter (OpenAI-compatible) format
+            resp = await client.post(
+                base_url,
+                headers=headers,
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.4,
+                    "max_tokens": max_tokens,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
 
 def _read_onboard(path: str) -> dict:
