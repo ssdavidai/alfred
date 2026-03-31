@@ -4,11 +4,13 @@ import { registerWebhookReceiver } from "./webhookReceiver";
 import { registerOAuth2Routes } from "./oauth2";
 import { attachTerminalProxy, registerTerminalStatusRoute } from "./terminalProxy";
 import { attachAdminTerminalProxy, registerAdminTerminalStatusRoute } from "./adminTerminalProxy";
+import { registerSSHKeyRoutes } from "./sshKeyDownload";
 
 export const serverSetup: ServerSetupFn = async ({ app, server }) => {
   app.use("/api/v1", v1ApiProxy);
   registerWebhookReceiver(app);
   registerOAuth2Routes(app);
+  registerSSHKeyRoutes(app);
   try {
     registerTerminalStatusRoute(app);
     attachTerminalProxy(server);
