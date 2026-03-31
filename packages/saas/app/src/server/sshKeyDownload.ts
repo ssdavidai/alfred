@@ -107,7 +107,6 @@ export function registerSSHKeyRoutes(app: Application): void {
             // We can't easily match without the ctrl DB, so for fallback
             // just check if this is the most recent key (crude but works for single-instance users)
             keyContent = fs.readFileSync(keyPath, "utf-8");
-            keyId = dir;
             // Don't break — keep scanning to get the latest
           }
         }
