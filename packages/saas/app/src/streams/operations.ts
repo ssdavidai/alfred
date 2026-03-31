@@ -33,7 +33,7 @@ export const getStreams: GetStreams<void, any> = async (_args, context) => {
     const countById = new Map(tenantStreams.map((s: any) => [s.id, { event_count: s.event_count || 0, last_event_at: s.last_event_at }]));
     const countBySource = new Map(tenantStreams.map((s: any) => [s.source, { event_count: s.event_count || 0, last_event_at: s.last_event_at }]));
 
-    const tenantBaseUrl = instance.subdomainUrl?.replace(/\/$/, "") || null;
+    const tenantBaseUrl = (instance as any)?.subdomainUrl?.replace(/\/$/, "") || null;
     return prismaStreams.map((s: any) => {
       const tenant = countById.get(s.id) || countBySource.get(s.source);
       return { ...s, _count: { events: tenant?.event_count ?? 0 }, lastEventAt: tenant?.last_event_at ?? s.lastEventAt, tenantBaseUrl };

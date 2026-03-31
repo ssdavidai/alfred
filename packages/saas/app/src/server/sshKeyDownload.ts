@@ -8,7 +8,6 @@ import { getSessionAndUserFromBearerToken } from "wasp/auth/session";
 import { prisma } from "wasp/server";
 import fs from "fs";
 import path from "path";
-import type { IncomingMessage } from "http";
 
 // The ctrl stores SSH keys at this path inside the SaaS container
 const CTRL_DATA_DIR = "/app/alfred-ctrl/data";
@@ -19,7 +18,7 @@ async function getUserIdFromRequest(req: Request): Promise<string | null> {
   if (queryToken) {
     (req as any).headers = { ...req.headers, authorization: `Bearer ${queryToken}` };
   }
-  const result = await getSessionAndUserFromBearerToken(req as unknown as IncomingMessage);
+  const result = await getSessionAndUserFromBearerToken(req as any);
   if (!result) return null;
   return result.user.id;
 }
@@ -61,7 +60,6 @@ export function registerSSHKeyRoutes(app: Application): void {
 
       // Find the key file — iterate through directories
       let keyContent: string | null = null;
-      let keyId: string | null = null;
       const dirs = fs.readdirSync(sshKeysDir);
 
       // We need to match the instance to a key. The ctrl SQLite has this mapping,
