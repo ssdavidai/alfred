@@ -51,6 +51,13 @@ from src.activities.batch_processor import (
     process_stream_batch,
     process_onboarding_facts,
 )
+from src.activities.onboarding_v3 import (
+    fetch_email_metadata,
+    extract_facts_opus,
+    discover_patterns_opus,
+    personalize_opus,
+    write_brief_opus,
+)
 from src.activities.pull import (
     backfill_gmail_as_events,
     http_pull,
@@ -212,6 +219,12 @@ ALL_ACTIVITIES = [
     # Batch processor
     process_stream_batch,
     process_onboarding_facts,
+    # Onboarding v3
+    fetch_email_metadata,
+    extract_facts_opus,
+    discover_patterns_opus,
+    personalize_opus,
+    write_brief_opus,
     # Pull
     backfill_gmail_as_events,
     http_pull,
