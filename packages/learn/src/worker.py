@@ -47,6 +47,10 @@ from src.activities.streams import (
 )
 
 # Activities — pull
+from src.activities.batch_processor import (
+    process_stream_batch,
+    process_onboarding_facts,
+)
 from src.activities.pull import (
     backfill_gmail_as_events,
     http_pull,
@@ -205,6 +209,9 @@ ALL_ACTIVITIES = [
     fetch_unprocessed_events,
     mark_event_processed,
     quarantine_event,
+    # Batch processor
+    process_stream_batch,
+    process_onboarding_facts,
     # Pull
     backfill_gmail_as_events,
     http_pull,
