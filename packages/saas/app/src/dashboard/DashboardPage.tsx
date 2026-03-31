@@ -7,6 +7,7 @@ import {
   getOnboardingProgress,
   startOnboarding,
   provisionNewUser,
+  submitFactCorrections,
 } from "wasp/client/operations";
 import { useAuth } from "wasp/client/auth";
 import { motion, AnimatePresence } from "framer-motion";
@@ -42,11 +43,12 @@ function saveDashboardCache(data: any): void {
 // ---------------------------------------------------------------------------
 
 type OnboardingState =
-  | "new_user"        // State 1: No instance, need to provision
-  | "provisioning"    // State 1: Provisioning in progress
-  | "awaiting_brief"  // State 2: Instance ready, waiting for first brief
-  | "brief_ready"     // State 3: Brief is ready to show
-  | "returning_user"; // State 4: Normal dashboard
+  | "new_user"               // State 1: No instance, need to provision
+  | "provisioning"           // State 1: Provisioning in progress
+  | "awaiting_brief"         // State 2: Instance ready, waiting for first brief
+  | "awaiting_verification"  // State 2.5: Facts ready, verify before generating brief
+  | "brief_ready"            // State 3: Brief is ready to show
+  | "returning_user";        // State 4: Normal dashboard
 
 // ---------------------------------------------------------------------------
 // Cycling message hook
@@ -70,6 +72,105 @@ function useCyclingMessages(messages: string[], intervalMs: number = 4000): stri
   }, [intervalMs, messages.length]);
 
   return messages[index] ?? "";
+}
+
+// ---------------------------------------------------------------------------
+// Fact verification card component
+// ---------------------------------------------------------------------------
+
+function FactVerificationCard({
+  facts,
+  onConfirm,
+}: {
+  facts: Array<{ field: string; value: string; display: string }>;
+  onConfirm: (corrections: Record<string, string>) => Promise<void>;
+}) {
+  const [editedFacts, setEditedFacts] = useState<Record<string, string>>(() => {
+    const initial: Record<string, string> = {};
+    for (const f of facts) {
+      initial[f.field] = f.value;
+    }
+    return initial;
+  });
+  const [editingField, setEditingField] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleConfirm = async () => {
+    setSubmitting(true);
+    // Build corrections — only include fields that changed
+    const corrections: Record<string, string> = {};
+    for (const f of facts) {
+      if (editedFacts[f.field] !== f.value) {
+        corrections[f.display] = editedFacts[f.field];
+      }
+    }
+    await onConfirm(corrections);
+    setSubmitting(false);
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: -20 }}
+      transition={{ duration: 0.6 }}
+      className="mt-8 w-full max-w-lg"
+    >
+      <p className="mb-6 font-serif text-sm font-light leading-relaxed text-[#E8E4DE]/80">
+        Sir, before I share my first observations, I want to ensure I have the
+        basics right. I've been studying your correspondence and believe the
+        following to be true. Would you kindly correct anything I've got wrong?
+      </p>
+
+      <div className="space-y-2">
+        {facts.map((fact) => (
+          <div
+            key={fact.field}
+            className="flex items-center gap-3 rounded-sm border border-[#C9A84C]/10 bg-black/20 px-4 py-2.5"
+          >
+            <span className="w-24 flex-shrink-0 font-mono text-[0.55rem] uppercase tracking-wider text-[#C9A84C]/40">
+              {fact.display}
+            </span>
+            {editingField === fact.field ? (
+              <input
+                type="text"
+                autoFocus
+                value={editedFacts[fact.field] || ""}
+                onChange={(e) =>
+                  setEditedFacts((prev) => ({ ...prev, [fact.field]: e.target.value }))
+                }
+                onBlur={() => setEditingField(null)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") setEditingField(null);
+                }}
+                className="flex-1 bg-transparent font-serif text-sm text-[#E8E4DE] outline-none border-b border-[#C9A84C]/30 pb-0.5"
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setEditingField(fact.field)}
+                className="flex-1 text-left font-serif text-sm text-[#E8E4DE] hover:text-[#C9A84C] transition-colors"
+              >
+                {editedFacts[fact.field] || "(unknown)"}
+              </button>
+            )}
+            <span className="text-[0.6rem]">
+              {editedFacts[fact.field] !== fact.value ? "✏️" : "✓"}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <button
+        type="button"
+        onClick={handleConfirm}
+        disabled={submitting}
+        className="mt-6 w-full rounded-sm border border-[#C9A84C]/30 bg-[#C9A84C]/10 px-6 py-3 font-mono text-xs uppercase tracking-[0.2em] text-[#C9A84C] transition-colors hover:bg-[#C9A84C]/20 disabled:opacity-50"
+      >
+        {submitting ? "Generating your brief..." : "That's correct, continue →"}
+      </button>
+    </motion.div>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +355,10 @@ export default function DashboardPage() {
   });
 
   const onboardingState: OnboardingState = (() => {
+    // Fact verification card — show before brief generation
+    if (hasInstance && onboardStage === "awaiting_verification") {
+      return "awaiting_verification";
+    }
     // Brief ready and not yet dismissed — show it (highest priority)
     if (hasInstance && hasBrief && !briefDismissed && !isOnboardingActive) {
       return "brief_ready";
@@ -282,6 +387,7 @@ export default function DashboardPage() {
     onboardingState === "new_user" ||
     onboardingState === "provisioning" ||
     onboardingState === "awaiting_brief" ||
+    onboardingState === "awaiting_verification" ||
     onboardingState === "brief_ready";
 
   // ---------------------------------------------------------------------------
@@ -439,6 +545,22 @@ export default function DashboardPage() {
             }
             progress={progressValue}
           />
+
+          {/* Fact verification card (State 2.5) */}
+          <AnimatePresence>
+            {onboardingState === "awaiting_verification" && onboardProgress?.key_identity_facts?.length > 0 && (
+              <FactVerificationCard
+                facts={onboardProgress.key_identity_facts}
+                onConfirm={async (corrections) => {
+                  try {
+                    await submitFactCorrections({ corrections });
+                  } catch (err) {
+                    console.error("Failed to submit corrections:", err);
+                  }
+                }}
+              />
+            )}
+          </AnimatePresence>
 
           {/* Brief display (State 3) */}
           <AnimatePresence>

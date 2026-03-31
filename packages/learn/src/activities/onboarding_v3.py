@@ -211,10 +211,22 @@ Return JSON:
   "facts": [
     {{"category": "personal", "fact": "Full name is ...", "confidence": "high"}},
     {{"category": "health_fitness", "fact": "Trains Muay Thai at ...", "confidence": "medium"}}
+  ],
+  "key_identity_facts": [
+    {{"field": "name", "value": "David Szabo-Stuban", "display": "Full name"}},
+    {{"field": "age", "value": "35", "display": "Age"}},
+    {{"field": "location", "value": "Törökbálint, Hungary", "display": "Location"}},
+    {{"field": "partner", "value": "Eszter", "display": "Partner"}},
+    {{"field": "children", "value": "Hanna (6 months)", "display": "Children"}},
+    {{"field": "pets", "value": "Madonna", "display": "Pets"}},
+    {{"field": "company", "value": "Ugly Code LLC", "display": "Company/Role"}},
+    {{"field": "main_project", "value": "Alfred Black", "display": "Main project"}}
   ]
 }}
 
-Be EXHAUSTIVE. This is about the WHOLE person — their family dinners matter as much as their business deals. Extract every person, place, service, habit, preference, and pattern you can find. Hundreds of facts expected from {len(emails)} emails."""
+The key_identity_facts are the 8-12 most important facts about who this person IS — the ones where getting them wrong would be embarrassing for a butler. Include: name, age, location, partner, children, pets, company/role, main project, and anything else that defines their identity.
+
+Be EXHAUSTIVE on the facts. This is about the WHOLE person — their family dinners matter as much as their business deals. Extract every person, place, service, habit, preference, and pattern you can find. Hundreds of facts expected from {len(emails)} emails."""
 
     raw = await _call_llm(prompt, max_tokens=16384)
 
@@ -239,13 +251,23 @@ Be EXHAUSTIVE. This is about the WHOLE person — their family dinners matter as
         except Exception:
             logger.error("onboarding_v3: failed to parse facts from Opus response")
 
-    logger.info("onboarding_v3: extracted %d facts", len(facts))
+    # Extract key identity facts from the same response
+    key_identity_facts = []
+    try:
+        if match:
+            parsed = json.loads(match.group())
+            key_identity_facts = parsed.get("key_identity_facts", [])
+    except Exception:
+        pass
+
+    logger.info("onboarding_v3: extracted %d facts, %d key identity facts", len(facts), len(key_identity_facts))
 
     onboard["facts"] = facts
+    onboard["key_identity_facts"] = key_identity_facts
     onboard["progress"]["facts_count"] = len(facts)
     _write_onboard(onboard_path, onboard)
 
-    return {"facts": len(facts)}
+    return {"facts": len(facts), "key_identity_facts": len(key_identity_facts)}
 
 
 # ---------------------------------------------------------------------------
@@ -447,9 +469,19 @@ async def write_brief_opus(onboard_path: str) -> dict[str, Any]:
         for p in patterns if isinstance(p, dict)
     )
 
+    # Check for user corrections from the fact verification card
+    corrections = onboard.get("fact_corrections", {})
+    corrections_text = ""
+    if corrections:
+        corrections_text = "\n\nIMPORTANT CORRECTIONS FROM THE USER (these override anything else):\n"
+        for field, value in corrections.items():
+            corrections_text += f"- {field}: {value}\n"
+        corrections_text += "\nUse these corrected values. Do NOT use the original values for these fields.\n"
+
     activity.heartbeat("Sending to Opus for First Brief")
 
     prompt = f"""You are Alfred, a personal AI butler, writing your First Brief — the very first letter to your new master. You've spent time quietly observing their email life — not just their work, but their LIFE — and have formed an impression of the whole person.
+{corrections_text}
 
 USER PROFILE:
 {user_md[:3000]}

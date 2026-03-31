@@ -42,12 +42,13 @@ with workflow.unsafe.imports_passed_through():
 ONBOARD_PATH = "/alfred-data/onboard.json"
 
 STAGE_ORDER = [
-    "metadata",      # Stage 1: fetch email metadata + snippets
-    "facts",         # Stage 2: extract facts (Opus)
-    "patterns",      # Stage 3: discover patterns (Opus)
-    "personalize",   # Stage 4: USER.md + SOUL.md + MEMORY.md + TOOLS.md (Opus)
-    "brief",         # Stage 5: First Brief (Opus)
-    "done",          # Stage 6: complete — show brief, start background vault build
+    "metadata",              # Stage 1: fetch email metadata + snippets
+    "facts",                 # Stage 2: extract facts (Opus)
+    "patterns",              # Stage 3: discover patterns (Opus)
+    "personalize",           # Stage 4: USER.md + SOUL.md + MEMORY.md + TOOLS.md (Opus)
+    "awaiting_verification", # Stage 4.5: wait for user to verify key facts
+    "brief",                 # Stage 5: First Brief (Opus) — with corrections
+    "done",                  # Stage 6: complete — show brief, start background vault build
 ]
 
 
@@ -178,7 +179,28 @@ class OnboardingPipelineWorkflow:
             )
 
         # -----------------------------------------------------------------
-        # Stage 5: First Brief (1 Opus call)
+        # Stage 4.5: Wait for user verification of key identity facts
+        # The workflow RETURNS here. A separate trigger (from the SaaS
+        # submitFactCorrections operation) restarts the workflow to
+        # continue from the "brief" stage.
+        # -----------------------------------------------------------------
+        if resume_idx <= _stage_index("awaiting_verification"):
+            await workflow.execute_activity(
+                update_onboard_stage,
+                args=[onboard_path, "awaiting_verification"],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            # Return — dashboard shows the fact verification card.
+            # When the user confirms, the workflow is re-triggered
+            # and resumes from "brief" stage.
+            return OnboardingResult(
+                brief_path="",
+                facts_count=len(current_state.get("facts", [])),
+                patterns_count=len(current_state.get("patterns", [])),
+            )
+
+        # -----------------------------------------------------------------
+        # Stage 5: First Brief (1 Opus call) — with user corrections
         # -----------------------------------------------------------------
         brief_path = ""
         if resume_idx <= _stage_index("brief"):
