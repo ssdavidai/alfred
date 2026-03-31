@@ -31,77 +31,29 @@ logger = logging.getLogger("alfred-learn")
 ONBOARD_PATH = "/alfred-data/onboard.json"
 
 
-def _resolve_llm_config() -> tuple[str, str, dict[str, str]]:
-    """Resolve which API to call for Claude models.
-
-    If ANTHROPIC_API_KEY is set, calls Anthropic directly (Sonnet 4.6, 1M context).
-    Otherwise falls back to OpenRouter.
-
-    Returns (base_url, model_id, headers).
-    """
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "")
-
-    if anthropic_key:
-        return (
-            "https://api.anthropic.com/v1/messages",
-            "claude-sonnet-4-6",
-            {
-                "x-api-key": anthropic_key,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            },
-        )
-    elif openrouter_key:
-        return (
-            "https://openrouter.ai/api/v1/chat/completions",
-            "anthropic/claude-sonnet-4-6",
-            {
-                "Authorization": f"Bearer {openrouter_key}",
-                "Content-Type": "application/json",
-            },
-        )
-    else:
-        raise RuntimeError("Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY is set")
-
-
-async def _call_opus(prompt: str, max_tokens: int = 8192) -> str:
-    """Call Opus 4.6 via Anthropic API (preferred) or OpenRouter fallback."""
-    base_url, model, headers = _resolve_llm_config()
+async def _call_llm(prompt: str, max_tokens: int = 8192) -> str:
+    """Call Sonnet 4.6 via OpenRouter. Returns raw text response."""
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY not set")
 
     async with httpx.AsyncClient(timeout=300.0) as client:
-        if "anthropic.com" in base_url:
-            # Anthropic Messages API format
-            resp = await client.post(
-                base_url,
-                headers=headers,
-                json={
-                    "model": model,
-                    "max_tokens": max_tokens,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.4,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            # Anthropic returns content as array of blocks
-            content = data.get("content", [])
-            return " ".join(b.get("text", "") for b in content if b.get("type") == "text")
-        else:
-            # OpenRouter (OpenAI-compatible) format
-            resp = await client.post(
-                base_url,
-                headers=headers,
-                json={
-                    "model": model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.4,
-                    "max_tokens": max_tokens,
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        resp = await client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "anthropic/claude-sonnet-4-6",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.4,
+                "max_tokens": max_tokens,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("choices", [{}])[0].get("message", {}).get("content", "")
 
 
 def _read_onboard(path: str) -> dict:
@@ -260,7 +212,7 @@ Return JSON:
 
 Be EXHAUSTIVE. Extract every person, company, project, service, location, and pattern you can find. Hundreds of facts expected from {len(emails)} emails."""
 
-    raw = await _call_opus(prompt, max_tokens=16384)
+    raw = await _call_llm(prompt, max_tokens=16384)
 
     # Parse JSON
     facts = []
@@ -352,7 +304,7 @@ Return JSON:
 
 Be insightful. Look for non-obvious connections. A great butler notices what the master doesn't."""
 
-    raw = await _call_opus(prompt, max_tokens=8192)
+    raw = await _call_llm(prompt, max_tokens=8192)
 
     patterns = []
     try:
@@ -424,7 +376,7 @@ Write these four files. Return them in this exact JSON format:
 
 Make each file genuinely useful — not generic templates. Reference specific names, projects, and patterns from the data."""
 
-    raw = await _call_opus(prompt, max_tokens=16384)
+    raw = await _call_llm(prompt, max_tokens=16384)
 
     files = {}
     try:
@@ -521,7 +473,7 @@ Start with "Sir," or "Ma'am," (infer from the data). End with "At your disposal.
 
 Return ONLY the brief text. No JSON wrapping."""
 
-    brief = await _call_opus(prompt, max_tokens=4096)
+    brief = await _call_llm(prompt, max_tokens=4096)
 
     # Clean up any markdown fences
     brief = brief.strip()
