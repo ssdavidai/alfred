@@ -168,11 +168,27 @@ async def update_onboard_stage(onboard_path: str, stage: str) -> None:
 # ---------------------------------------------------------------------------
 
 @activity.defn
-async def update_onboard_progress(onboard_path: str, current_day: int, total_days: int) -> None:
-    """Update progress counters in onboard.json."""
+async def update_onboard_progress(onboard_path: str, updates: Any = None, total_days: int = 0) -> None:
+    """Update progress counters and/or merge data into onboard.json.
+
+    Accepts either:
+    - (path, current_day_int, total_days_int) — legacy v2 format
+    - (path, dict_of_updates) — v3 format (merges keys into onboard.json)
+    """
     data = _read_onboard(onboard_path)
-    data["progress"]["current_day"] = current_day
-    data["progress"]["total_days"] = total_days
+    if isinstance(updates, dict):
+        # v3: merge dict into onboard.json
+        for k, v in updates.items():
+            if k == "current_day":
+                data["progress"]["current_day"] = v
+            elif k == "total_days":
+                data["progress"]["total_days"] = v
+            else:
+                data[k] = v
+    elif isinstance(updates, int):
+        # v2 legacy: positional args (current_day, total_days)
+        data["progress"]["current_day"] = updates
+        data["progress"]["total_days"] = total_days
     _write_onboard(onboard_path, data)
 
 
