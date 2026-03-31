@@ -696,6 +696,11 @@ action storeIntegrationToken {
   entities: [OAuthCredential]
 }
 
+action submitFactCorrections {
+  fn: import { submitFactCorrections } from "@src/dashboard/operations",
+  entities: [Instance, Stream]
+}
+
 action submitAccessRequest {
   fn: import { submitAccessRequest } from "@src/landing-page/operations",
   entities: [],

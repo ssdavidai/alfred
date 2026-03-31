@@ -142,6 +142,7 @@ export function registerWorkflowRoutes(): void {
         patterns_count: data.patterns?.length ?? 0,
         automations_count: data.automations?.length ?? 0,
         brief: data.brief ?? "",
+        key_identity_facts: data.key_identity_facts ?? [],
       });
     } catch {
       // File doesn't exist yet — onboarding hasn't started
@@ -153,6 +154,23 @@ export function registerWorkflowRoutes(): void {
         automations_count: 0,
         brief: "",
       });
+    }
+  });
+
+  // POST /api/v1/onboarding/corrections — submit fact corrections, advance stage to "brief"
+  addRoute("POST", "/api/v1/onboarding/corrections", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    const corrections = (b?.corrections ?? {}) as Record<string, string>;
+
+    try {
+      const raw = fs.readFileSync(ONBOARD_JSON_PATH, "utf-8");
+      const data = JSON.parse(raw);
+      data.fact_corrections = corrections;
+      data.stage = "brief";
+      fs.writeFileSync(ONBOARD_JSON_PATH, JSON.stringify(data, null, 2));
+      sendJson(res, 200, { status: "corrections_saved", stage: "brief" });
+    } catch {
+      sendJson(res, 500, { error: "Failed to save corrections" });
     }
   });
 

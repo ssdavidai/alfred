@@ -714,3 +714,38 @@ export const getOnboardingProgress: GetOnboardingProgress<void, any> = async (
     };
   }
 };
+
+// Submit fact corrections and trigger brief generation
+export const submitFactCorrections: any = async (
+  args: { corrections: Record<string, string> },
+  context: any,
+) => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const instance = await getUserInstance(context);
+
+  // Write corrections to onboard.json and update stage to "brief"
+  await proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/onboarding/corrections",
+    body: { corrections: args.corrections },
+  });
+
+  // Trigger the onboarding workflow to resume from "brief" stage
+  const userId = context.user.id;
+  const stream = await prisma.stream.findFirst({
+    where: { userId, source: "gmail" },
+  });
+
+  await proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/workflows",
+    body: {
+      workflow_type: "OnboardingPipelineWorkflow",
+      task_queue: "alfred-learn",
+      workflow_id: `onboarding-brief-${Date.now()}`,
+      input: { user_id: userId, stream_id: stream?.id || "" },
+    },
+  });
+
+  return { status: "brief_generating" };
+};
