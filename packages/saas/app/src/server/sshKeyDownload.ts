@@ -157,7 +157,8 @@ export function registerSSHKeyRoutes(app: Application): void {
         user: "deploy",
         instructions: [
           "1. Download your SSH key using the button above",
-          "2. Set permissions: chmod 600 alfred-*.pem",
+          "2. Set permissions (macOS/Linux): chmod 600 alfred-*.pem",
+          "   Windows (PowerShell): icacls alfred-*.pem /inheritance:r /grant:r \"%USERNAME%:R\"",
           `3. Connect: ssh -i alfred-*.pem deploy@${hostname}`,
           "4. Once connected, run: docker exec -it compose-openclaw-1 sh",
           "5. Inside the container: openclaw configure",
