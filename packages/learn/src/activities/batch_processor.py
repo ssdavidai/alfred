@@ -7,9 +7,9 @@ interlink → enrich).
 
 No direct LLM calls. No direct vault writes. Just smart batching into inbox.
 
-Used for:
-- Onboarding: batch 100-day Gmail backfill into ~70-120 inbox files
-- Ongoing: batch new stream events periodically
+Preprocessing: strips raw email body to clean readable text — subject,
+from, to, date, snippet. Personal domains get first 500 chars of body.
+100 emails per inbox file → ~16 files for 1,600 emails.
 """
 
 from __future__ import annotations
@@ -31,17 +31,83 @@ from src.utils.vault_client import VaultClient
 logger = logging.getLogger("alfred-learn")
 
 # --- Config ---
-SMALL_DOMAIN_THRESHOLD = 5  # domains with fewer emails go to mixed batches
-MIXED_BATCH_SIZE = 20
-MAX_EMAILS_PER_BATCH = 20  # cap per inbox file to keep curator prompts manageable
+SMALL_DOMAIN_THRESHOLD = 5
+MIXED_BATCH_SIZE = 100
+EMAILS_PER_FILE = 100
+
+# Domains that are clearly services (not personal conversations)
+# Personal domains get more body text included
+SERVICE_DOMAIN_SIGNALS = {
+    "noreply", "no-reply", "notification", "notifications", "mailer",
+    "mail", "email", "newsletter", "updates", "info", "support",
+    "billing", "receipts", "alert", "alerts",
+}
+
+
+def _is_service_domain(domain: str, emails: list[dict]) -> bool:
+    """Heuristic: is this a service/notification domain vs personal email?"""
+    # Check if most senders are noreply-style
+    service_senders = sum(
+        1 for e in emails
+        if any(sig in e.get("from", "").lower().split("@")[0] for sig in SERVICE_DOMAIN_SIGNALS)
+    )
+    if service_senders > len(emails) * 0.5:
+        return True
+    # High volume from single domain = likely service
+    if len(emails) > 20:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
-# Email metadata extraction
+# Email extraction + preprocessing
 # ---------------------------------------------------------------------------
 
-def _extract_email_summary(event: dict) -> dict[str, str]:
-    """Extract sender domain, subject, from, snippet, body text from a Gmail event."""
+def _extract_body_text(payload: dict) -> str:
+    """Extract plain text body from Gmail payload, strip signatures and junk."""
+    def _extract(part: dict) -> str:
+        if part.get("mimeType", "").startswith("text/plain"):
+            data = part.get("body", {}).get("data", "")
+            if data:
+                try:
+                    return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+                except Exception:
+                    return ""
+        for sub in part.get("parts", []):
+            t = _extract(sub)
+            if t:
+                return t
+        return ""
+
+    raw = _extract(payload)
+    if not raw:
+        return ""
+
+    # Strip common junk
+    # Remove zero-width spaces and excessive whitespace
+    raw = re.sub(r'[\u200b\u200c\u200d\u00a0]+', ' ', raw)
+    # Remove quoted reply chains (lines starting with >)
+    lines = raw.split("\n")
+    clean = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(">"):
+            continue
+        if stripped.lower().startswith("on ") and stripped.endswith("wrote:"):
+            break  # Stop at reply chain
+        if stripped == "--":
+            break  # Stop at signature
+        if stripped.lower().startswith("sent from my"):
+            break
+        if stripped.lower().startswith("unsubscribe"):
+            break
+        clean.append(line)
+
+    return "\n".join(clean).strip()
+
+
+def _extract_email(event: dict) -> dict[str, str]:
+    """Extract clean email summary from a Gmail stream event."""
     raw = event.get("raw", {})
     payload = raw.get("payload", {})
     headers = {}
@@ -52,23 +118,8 @@ def _extract_email_summary(event: dict) -> dict[str, str]:
 
     sender = headers.get("from", "")
     domain = sender.split("@")[-1].strip(">").strip() if "@" in sender else "unknown"
-
-    def _extract_text(part: dict) -> str:
-        if part.get("mimeType", "").startswith("text/plain"):
-            data = part.get("body", {}).get("data", "")
-            if data:
-                try:
-                    return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
-                except Exception:
-                    return ""
-        for sub in part.get("parts", []):
-            t = _extract_text(sub)
-            if t:
-                return t
-        return ""
-
-    body = _extract_text(payload)
     snippet = raw.get("snippet", "")
+    body = _extract_body_text(payload)
 
     return {
         "domain": domain,
@@ -76,7 +127,8 @@ def _extract_email_summary(event: dict) -> dict[str, str]:
         "to": headers.get("to", ""),
         "subject": headers.get("subject", ""),
         "date": headers.get("date", event.get("received_at", "")),
-        "body": body[:2000] if body else snippet[:500],
+        "snippet": snippet,
+        "body": body,
     }
 
 
@@ -118,54 +170,60 @@ def _slugify(text: str, maxlen: int = 60) -> str:
     return s[:maxlen]
 
 
-def _build_domain_batch_content(domain: str, emails: list[dict]) -> str:
-    """Build a markdown inbox file for a batch of emails from one domain."""
+def _format_email_line(email: dict, include_body: bool = False) -> str:
+    """Format one email as a compact markdown block."""
     lines = [
-        f"# Emails from {domain} ({len(emails)} messages)",
-        "",
-        f"*Process these {len(emails)} emails from {domain}. Create proper vault records: extract people, organizations, projects, tasks, and key facts. Link related entities with wikilinks.*",
-        "",
-        "---",
+        f"### {email.get('subject', 'No Subject')}",
+        f"From: {email['from']} | To: {email['to']} | Date: {email['date']}",
+    ]
+    snippet = email.get("snippet", "")
+    body = email.get("body", "")
+
+    if include_body and body:
+        lines.append("")
+        lines.append(body[:500])
+    elif snippet:
+        lines.append(snippet)
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_domain_batch(domain: str, emails: list[dict], is_service: bool) -> str:
+    """Build inbox file content for a domain batch."""
+    lines = [
+        f"# {len(emails)} emails from {domain}",
         "",
     ]
 
-    for i, e in enumerate(emails, 1):
-        lines.append(f"## Email {i}: {e.get('subject', 'No Subject')}")
-        lines.append("")
-        lines.append(f"**From**: {e['from']}")
-        lines.append(f"**To**: {e['to']}")
-        lines.append(f"**Date**: {e['date']}")
-        lines.append("")
-        if e['body']:
-            lines.append(e['body'][:1500])
-        lines.append("")
+    if is_service:
+        lines.append(f"*These are {len(emails)} service/notification emails from {domain}. Summarize the user's relationship with this service. Extract any people, actionable items, or important events. Create appropriate vault records.*")
+    else:
+        lines.append(f"*These are {len(emails)} emails involving {domain}. Process each conversation — extract people, relationships, projects, tasks, and key facts. Create proper vault records with wikilinks.*")
+
+    lines.extend(["", "---", ""])
+
+    for email in emails:
+        lines.append(_format_email_line(email, include_body=not is_service))
         lines.append("---")
         lines.append("")
 
     return "\n".join(lines)
 
 
-def _build_mixed_batch_content(emails: list[dict]) -> str:
-    """Build a markdown inbox file for a mixed batch of emails."""
+def _build_mixed_batch(emails: list[dict]) -> str:
+    """Build inbox file content for a mixed batch."""
     lines = [
-        f"# Mixed emails ({len(emails)} messages from various senders)",
+        f"# {len(emails)} emails from various senders",
         "",
-        f"*Process these {len(emails)} emails individually. Create proper vault records for each: extract people, organizations, projects, tasks, and key facts.*",
+        f"*Process these {len(emails)} emails individually. Extract people, organizations, projects, tasks, and key facts. Create proper vault records.*",
         "",
         "---",
         "",
     ]
 
-    for i, e in enumerate(emails, 1):
-        lines.append(f"## Email {i}: {e.get('subject', 'No Subject')} ({e['domain']})")
-        lines.append("")
-        lines.append(f"**From**: {e['from']}")
-        lines.append(f"**To**: {e['to']}")
-        lines.append(f"**Date**: {e['date']}")
-        lines.append("")
-        if e['body']:
-            lines.append(e['body'][:1500])
-        lines.append("")
+    for email in emails:
+        lines.append(_format_email_line(email, include_body=True))
         lines.append("---")
         lines.append("")
 
@@ -173,21 +231,17 @@ def _build_mixed_batch_content(emails: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Main activity: process_stream_batch
+# Main activities
 # ---------------------------------------------------------------------------
 
 @activity.defn
 async def process_stream_batch(stream_id: str, stream_type: str = "gmail") -> dict[str, Any]:
     """Group stream events by sender domain and drop batched files into inbox.
 
-    The curator agent picks them up and creates proper vault records
-    through its 4-stage pipeline.
-
-    Returns {emails_processed, domains, batches_written}.
+    The curator agent picks them up and creates proper vault records.
     """
     config = load_config()
 
-    # Read all events from JSONL
     streams_dir = os.environ.get("STREAMS_DIR", "/alfred-data/streams")
     jsonl_path = os.path.join(streams_dir, f"{stream_id}.jsonl")
 
@@ -195,7 +249,7 @@ async def process_stream_batch(stream_id: str, stream_type: str = "gmail") -> di
         logger.warning("batch_processor: JSONL not found: %s", jsonl_path)
         return {"emails_processed": 0, "error": "JSONL not found"}
 
-    # Parse all events and extract email summaries
+    # Parse all events
     activity.heartbeat("Reading stream events")
     emails: list[dict] = []
     with open(jsonl_path) as f:
@@ -205,9 +259,9 @@ async def process_stream_batch(stream_id: str, stream_type: str = "gmail") -> di
                 continue
             try:
                 event = json.loads(line)
-                summary = _extract_email_summary(event)
-                if summary.get("subject") or summary.get("body"):
-                    emails.append(summary)
+                email = _extract_email(event)
+                if email.get("subject") or email.get("snippet"):
+                    emails.append(email)
             except Exception:
                 continue
 
@@ -220,24 +274,27 @@ async def process_stream_batch(stream_id: str, stream_type: str = "gmail") -> di
     # Group by domain
     domain_groups, mixed_batches = _group_by_domain(emails)
     logger.info(
-        "batch_processor: %d domain groups, %d mixed batches",
+        "batch_processor: %d domain groups, %d mixed batches (%d small-domain emails)",
         len(domain_groups), len(mixed_batches),
+        sum(len(b) for b in mixed_batches),
     )
 
-    # Write batched inbox files
+    # Write to inbox
     client = VaultClient(config)
     batches_written = 0
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     try:
-        # Domain batches — split large domains into chunks of MAX_EMAILS_PER_BATCH
         for domain, items in domain_groups.items():
-            for chunk_start in range(0, len(items), MAX_EMAILS_PER_BATCH):
-                chunk = items[chunk_start:chunk_start + MAX_EMAILS_PER_BATCH]
-                chunk_num = chunk_start // MAX_EMAILS_PER_BATCH + 1
-                total_chunks = (len(items) + MAX_EMAILS_PER_BATCH - 1) // MAX_EMAILS_PER_BATCH
+            is_service = _is_service_domain(domain, items)
 
-                content = _build_domain_batch_content(domain, chunk)
+            # Split into chunks of EMAILS_PER_FILE
+            for chunk_start in range(0, len(items), EMAILS_PER_FILE):
+                chunk = items[chunk_start:chunk_start + EMAILS_PER_FILE]
+                chunk_num = chunk_start // EMAILS_PER_FILE + 1
+                total_chunks = (len(items) + EMAILS_PER_FILE - 1) // EMAILS_PER_FILE
+
+                content = _build_domain_batch(domain, chunk, is_service)
                 suffix = f"-part{chunk_num}" if total_chunks > 1 else ""
                 filename = f"{today}-emails-{_slugify(domain)}{suffix}.md"
 
@@ -246,9 +303,8 @@ async def process_stream_batch(stream_id: str, stream_type: str = "gmail") -> di
 
             activity.heartbeat(f"Written {batches_written} batches")
 
-        # Mixed batches
         for i, batch in enumerate(mixed_batches):
-            content = _build_mixed_batch_content(batch)
+            content = _build_mixed_batch(batch)
             filename = f"{today}-emails-mixed-{i + 1:03d}.md"
             await client.drop_to_inbox(filename, content)
             batches_written += 1
@@ -257,8 +313,8 @@ async def process_stream_batch(stream_id: str, stream_type: str = "gmail") -> di
         await client.close()
 
     logger.info(
-        "batch_processor: wrote %d inbox files from %d emails (%d domains + %d mixed)",
-        batches_written, len(emails), len(domain_groups), len(mixed_batches),
+        "batch_processor: wrote %d inbox files from %d emails",
+        batches_written, len(emails),
     )
 
     return {
@@ -289,53 +345,48 @@ async def process_onboarding_facts(onboard_path: str) -> dict[str, Any]:
             if text:
                 by_cat[cat].append(f"[{day}] {text}")
 
-    # Write one inbox file per category
+    # Write one inbox file with ALL facts (curator processes in one shot)
     client = VaultClient(config)
-    files_written = 0
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     try:
+        lines = [
+            f"# Onboarding: {len(facts)} facts from 100 days of email",
+            "",
+            "*Create vault records for every person, organization, project, and location mentioned. Also create a user profile summary note.*",
+            "",
+        ]
         for cat, items in sorted(by_cat.items()):
-            lines = [
-                f"# Onboarding Facts — {cat.title()}",
-                "",
-                f"*{len(items)} facts about the user extracted from 100 days of email. Create proper vault records: people, organizations, projects, locations, and any actionable items.*",
-                "",
-            ]
+            lines.append(f"## {cat.title()} ({len(items)} facts)")
+            lines.append("")
             for item in items:
                 lines.append(f"- {item}")
             lines.append("")
 
-            content = "\n".join(lines)
-            filename = f"{today}-onboarding-facts-{_slugify(cat)}.md"
-            await client.drop_to_inbox(filename, content)
-            files_written += 1
+        content = "\n".join(lines)
+        await client.drop_to_inbox(f"{today}-onboarding-all-facts.md", content)
 
-        # Also write the brief and automations
+        # Brief and automations as separate files
+        files_written = 1
+
         brief = onboard.get("brief", "")
         if brief:
-            await client.drop_to_inbox(
-                f"{today}-onboarding-first-brief.md",
-                f"# First Brief\n\n{brief}\n",
-            )
+            await client.drop_to_inbox(f"{today}-onboarding-first-brief.md", f"# First Brief\n\n{brief}\n")
             files_written += 1
 
         automations = onboard.get("automations", [])
         if automations:
-            lines = ["# Suggested Automations", ""]
+            auto_lines = ["# Suggested Automations", ""]
             for a in automations:
                 if isinstance(a, dict):
-                    lines.append(f"## {a.get('name', 'Untitled')}")
-                    lines.append(a.get("description", ""))
+                    auto_lines.append(f"## {a.get('name', 'Untitled')}")
+                    auto_lines.append(a.get("description", ""))
                     if a.get("trigger"):
-                        lines.append(f"**Trigger**: {a['trigger']}")
+                        auto_lines.append(f"**Trigger**: {a['trigger']}")
                     if a.get("action"):
-                        lines.append(f"**Action**: {a['action']}")
-                    lines.append("")
-            await client.drop_to_inbox(
-                f"{today}-onboarding-automations.md",
-                "\n".join(lines),
-            )
+                        auto_lines.append(f"**Action**: {a['action']}")
+                    auto_lines.append("")
+            await client.drop_to_inbox(f"{today}-onboarding-automations.md", "\n".join(auto_lines))
             files_written += 1
 
     finally:
