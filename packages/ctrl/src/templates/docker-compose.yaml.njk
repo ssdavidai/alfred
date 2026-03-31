@@ -55,7 +55,7 @@ services:
       - NODE_OPTIONS=--max-old-space-size=3072
     env_file:
       - .env
-    command: ["node", "openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
+    command: ["sh", "-c", "node -e \"const fs=require('fs'),p='/home/node/.openclaw/agents',src=p+'/main/agent/auth-profiles.json';if(fs.existsSync(src)){const d=fs.readFileSync(src,'utf8');fs.readdirSync(p).forEach(a=>{if(a==='main')return;const dir=p+'/'+a+'/agent',dest=dir+'/auth-profiles.json';if(!fs.existsSync(dest)){fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(dest,d);console.log('auth-profiles propagated to '+a)}})}\" 2>/dev/null; exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured"]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:18789/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
