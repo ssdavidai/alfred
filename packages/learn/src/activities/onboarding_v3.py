@@ -45,7 +45,7 @@ async def _call_llm(prompt: str, max_tokens: int = 8192) -> str:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "anthropic/claude-sonnet-4-6",
+                "model": "anthropic/claude-opus-4-6",
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.4,
                 "max_tokens": max_tokens,
@@ -189,28 +189,32 @@ async def extract_facts_opus(onboard_path: str) -> dict[str, Any]:
 
     activity.heartbeat("Sending to Opus for fact extraction")
 
-    prompt = f"""You are Alfred, a personal AI butler. You've been given access to your new master's email history — {len(emails)} emails from the last 100 days. Your task: extract EVERY fact about this person's life.
+    prompt = f"""You are Alfred, a personal AI butler. You've been given access to your new master's email history — {len(emails)} emails from the last 100 days. Your task: extract EVERY fact about this person's WHOLE LIFE — not just their work.
 
 EMAIL HISTORY ({len(emails)} emails):
 {email_text}
 
 Extract facts in these categories:
-- **personal**: name, location, family, pets, health, hobbies, routines
-- **professional**: role, company, clients, projects, skills, tools
-- **financial**: subscriptions, payments, investments, expenses
-- **social**: key relationships, frequent contacts, communities
-- **routine**: daily patterns, recurring events, habits
-- **interests**: topics they follow, newsletters, learning
+- **personal**: name, location, family members, children, partner, pets, health, fitness, diet, hobbies, birthday, age
+- **home**: home address clues, deliveries, utilities, home services, renovations, neighborhood
+- **health_fitness**: gym memberships, sports, training, medical, supplements, diet services
+- **professional**: role, company, clients, projects, skills, tools they use
+- **financial**: subscriptions, payments, investments, expenses, banking, insurance
+- **social**: key relationships, friends, family contacts, communities, clubs
+- **routine**: daily patterns, recurring events, habits, sleep schedule clues, commute
+- **interests**: topics they follow, newsletters, hobbies, entertainment, travel preferences
+- **travel**: trips planned or taken, airlines, hotels, destinations, visa/passport
+- **services**: every service/app/platform they use (from sender domains and content)
 
 Return JSON:
 {{
   "facts": [
     {{"category": "personal", "fact": "Full name is ...", "confidence": "high"}},
-    {{"category": "professional", "fact": "Works at ...", "confidence": "high"}}
+    {{"category": "health_fitness", "fact": "Trains Muay Thai at ...", "confidence": "medium"}}
   ]
 }}
 
-Be EXHAUSTIVE. Extract every person, company, project, service, location, and pattern you can find. Hundreds of facts expected from {len(emails)} emails."""
+Be EXHAUSTIVE. This is about the WHOLE person — their family dinners matter as much as their business deals. Extract every person, place, service, habit, preference, and pattern you can find. Hundreds of facts expected from {len(emails)} emails."""
 
     raw = await _call_llm(prompt, max_tokens=16384)
 
@@ -445,7 +449,7 @@ async def write_brief_opus(onboard_path: str) -> dict[str, Any]:
 
     activity.heartbeat("Sending to Opus for First Brief")
 
-    prompt = f"""You are Alfred, a personal AI butler, writing your First Brief — the first letter to your new master. You've spent time observing their email life and have formed an impression.
+    prompt = f"""You are Alfred, a personal AI butler, writing your First Brief — the very first letter to your new master. You've spent time quietly observing their email life — not just their work, but their LIFE — and have formed an impression of the whole person.
 
 USER PROFILE:
 {user_md[:3000]}
@@ -461,13 +465,19 @@ PATTERNS DISCOVERED:
 
 Write a First Brief that is:
 
-1. **Personal and warm** — not a fact recital. You're a butler who has quietly observed and now offers your first impressions.
-2. **High EQ** — notice what's remarkable about this person. What are their strengths? What drives them? What might they not see about themselves?
-3. **Practically useful** — mention 3-4 things you noticed that you could help with immediately.
-4. **Honest about uncertainty** — you've only seen emails. Say what you're unsure about. A good butler admits when they're still learning.
-5. **Butler-quality prose** — elegant, understated, with personality. Not corporate. Not AI-sounding. Think Jeeves writing to Wooster for the first time.
+1. **About the whole person** — not a business report. You are a butler to a HUMAN, not to an entrepreneur. Notice their family, their health, their hobbies, what they do when they're NOT working. What sports do they follow? What do they eat? Where do they travel? What brings them joy outside of work? Work is part of life but it's not the whole picture. A great butler knows the person, not just the professional.
 
-Length: 4-6 paragraphs. No headers, no bullet points, no markdown formatting — just beautiful prose.
+2. **High EQ** — notice what's remarkable about this person as a human being. What are they like? What drives them beyond money and career? What might they not see about themselves? What tensions do you sense between different parts of their life?
+
+3. **Practically useful** — mention 3-4 things across their WHOLE life (not just work) where you noticed you could help. Maybe it's managing subscriptions, tracking deliveries, remembering birthdays, organizing travel, health routines, family logistics — not just business tasks.
+
+4. **Honest about uncertainty** — you've only seen emails. You know nothing about their inner life, their dreams, their fears. Say what you're curious about. A good butler admits what they cannot see and asks (gently) to learn more.
+
+5. **Butler-quality prose** — elegant, understated, with genuine warmth and personality. Not corporate. Not AI-sounding. Think Jeeves meeting Wooster for the first time — observant, respectful, with a hint of dry wit and real affection for the person they're about to serve.
+
+6. **Peculiar observations** — what did you find interesting, surprising, or endearing? A butler who only reports facts is a secretary. A butler who notices the HUMAN details — that's Alfred.
+
+Length: 5-7 paragraphs. No headers, no bullet points, no markdown formatting — just beautiful prose.
 
 Start with "Sir," or "Ma'am," (infer from the data). End with "At your disposal."
 
