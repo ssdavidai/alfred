@@ -31,6 +31,7 @@ with workflow.unsafe.imports_passed_through():
         write_facts_to_vault,
     )
     from src.activities.pull import backfill_gmail_as_events
+    from src.activities.batch_processor import process_stream_batch, process_onboarding_facts
 
 ONBOARD_PATH = "/alfred-data/onboard.json"
 
@@ -216,9 +217,13 @@ class OnboardingPipelineWorkflow:
             start_to_close_timeout=timedelta(seconds=10),
         )
 
-        # Stage 7: Backfill Gmail as proper stream events (runs in background
-        # after onboarding is marked complete — doesn't block the dashboard)
+        # -----------------------------------------------------------------
+        # Stage 7: Backfill Gmail + batch-process into vault
+        # First ingests raw emails as stream events, then processes them
+        # via domain-clustered batching (direct OpenRouter, no Clerk overhead).
+        # -----------------------------------------------------------------
         if input.stream_id:
+            # Ingest raw emails into the stream JSONL
             await workflow.execute_activity(
                 backfill_gmail_as_events,
                 args=[input.stream_id, input.user_id, 100, 5000],
@@ -226,6 +231,24 @@ class OnboardingPipelineWorkflow:
                 heartbeat_timeout=timedelta(seconds=120),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
+
+            # Batch-process the stream into vault records
+            await workflow.execute_activity(
+                process_stream_batch,
+                args=[input.stream_id, "gmail"],
+                start_to_close_timeout=timedelta(minutes=45),
+                heartbeat_timeout=timedelta(seconds=120),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+
+        # Process onboarding facts into vault entities
+        await workflow.execute_activity(
+            process_onboarding_facts,
+            args=[onboard_path],
+            start_to_close_timeout=timedelta(minutes=10),
+            heartbeat_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
 
         return OnboardingResult(
             brief_path=brief_path,
