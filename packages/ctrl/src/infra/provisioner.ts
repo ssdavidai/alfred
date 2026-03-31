@@ -23,6 +23,7 @@ import dockerComposeTemplate from "../templates/docker-compose.yaml.njk";
 import bootstrapTemplate from "../templates/bootstrap-openclaw.sh.njk";
 import cloudflaredConfigTemplate from "../templates/cloudflared-config.yaml.njk";
 import openclawConfigTemplate from "../templates/openclaw-config.json.njk";
+import openclawWorkersConfigTemplate from "../templates/openclaw-workers-config.json.njk";
 import workflowAuthorSkill from "../templates/skills/workflow-author.md";
 // Vault seed — skill graph files
 import vaultSkillIndex from "../templates/vault-seed/skill/index.md";
@@ -508,6 +509,50 @@ os.remove('/tmp/openclaw-tenant-config.json')
       hostKeyOpts,
     );
     log("OpenClaw configured");
+
+    // Pre-configure openclaw-workers with worker-specific config (no user-facing agents)
+    log("Pre-configuring OpenClaw Workers...");
+    const workersConfig = nunjucks.renderString(openclawWorkersConfigTemplate, {
+      vault_path: "/home/node/.openclaw/workspace/vault",
+    });
+    await ssh.upload(
+      server.public_net.ipv4.ip,
+      keyPair.privateKeyPath,
+      workersConfig,
+      "/tmp/openclaw-workers-config.json",
+      0o644,
+      undefined,
+      hostKeyOpts,
+    );
+    await ssh.exec(
+      server.public_net.ipv4.ip,
+      keyPair.privateKeyPath,
+      `python3 -c "
+import json, os
+
+def deep_merge(base, overlay):
+    for k, v in overlay.items():
+        if k in base and isinstance(base[k], dict) and isinstance(v, dict):
+            deep_merge(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+os.makedirs('/mnt/encrypted/openclaw-workers', exist_ok=True)
+p = '/mnt/encrypted/openclaw-workers/openclaw.json'
+cfg = {}
+if os.path.exists(p):
+    with open(p) as f: cfg = json.load(f)
+with open('/tmp/openclaw-workers-config.json') as f: tenant = json.load(f)
+deep_merge(cfg, tenant)
+with open(p, 'w') as f: json.dump(cfg, f, indent=2)
+os.remove('/tmp/openclaw-workers-config.json')
+os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
+"`,
+      undefined,
+      hostKeyOpts,
+    );
+    log("OpenClaw Workers configured");
 
     // --- Pre-deploy tenant API (must exist before bootstrap starts ctrl-api) ---
     {

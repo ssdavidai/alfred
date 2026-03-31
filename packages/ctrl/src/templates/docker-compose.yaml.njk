@@ -72,10 +72,46 @@ services:
     mem_limit: 4g
     pids_limit: 256
 
+  openclaw-workers:
+    image: ssdavidai00/alfred-openclaw:latest
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+    volumes:
+      - /mnt/encrypted/openclaw-workers:/home/node/.openclaw
+      - /mnt/encrypted/vault:/home/node/.openclaw/workspace/vault
+      - /mnt/encrypted/vault:/vault
+      - /mnt/encrypted/alfred:/alfred-data
+    tmpfs:
+      - /tmp:size=256m
+    environment:
+      - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
+      - NODE_OPTIONS=--max-old-space-size=2048
+    env_file:
+      - .env
+    command: ["sh", "-c", "node -e \"const fs=require('fs'),p='/home/node/.openclaw/agents',src=p+'/learn-clerk/agent/auth-profiles.json';if(!fs.existsSync(src)){const main='/home/node/.openclaw/agents/main/agent/auth-profiles.json';if(fs.existsSync(main)){const d=fs.readFileSync(main,'utf8');fs.readdirSync(p).forEach(a=>{const dir=p+'/'+a+'/agent',dest=dir+'/auth-profiles.json';if(!fs.existsSync(dest)){fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(dest,d);console.log('auth-profiles propagated to '+a)}})}}\" 2>/dev/null; exec node openclaw.mjs gateway --bind lan --port 18790 --allow-unconfigured"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:18790/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    mem_limit: 2g
+    pids_limit: 256
+
   alfred:
     image: ssdavidai00/alfred-worker:latest
     depends_on:
-      openclaw:
+      openclaw-workers:
         condition: service_healthy
       ctrl-api:
         condition: service_healthy
@@ -84,10 +120,11 @@ services:
     volumes:
       - /mnt/encrypted/vault:/vault
       - /mnt/encrypted/alfred:/app/data
-      - /mnt/encrypted/openclaw:/root/.openclaw
-      - shared_tmp:/tmp
+      - /mnt/encrypted/openclaw-workers:/root/.openclaw
+    tmpfs:
+      - /tmp:size=256m
     environment:
-      - OPENCLAW_GATEWAY_URL=http://openclaw:18789
+      - OPENCLAW_GATEWAY_URL=http://openclaw-workers:18790
       - ALFRED_CTRL_URL=http://ctrl-api:3100
     env_file:
       - .env
@@ -145,7 +182,7 @@ services:
     depends_on:
       temporal:
         condition: service_healthy
-      openclaw:
+      openclaw-workers:
         condition: service_healthy
       ctrl-api:
         condition: service_healthy
@@ -154,7 +191,7 @@ services:
       - /mnt/encrypted/alfred:/alfred-data
     environment:
       - TEMPORAL_HOST=temporal:7233
-      - OPENCLAW_GATEWAY_URL=http://openclaw:18789
+      - OPENCLAW_GATEWAY_URL=http://openclaw-workers:18790
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
       - VAULT_PATH=/vault
       - TASK_QUEUE=alfred-learn
@@ -171,5 +208,4 @@ services:
     mem_limit: 4g
     pids_limit: 128
 
-volumes:
-  shared_tmp:
+volumes: {}
