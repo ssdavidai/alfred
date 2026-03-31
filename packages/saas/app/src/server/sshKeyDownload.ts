@@ -122,7 +122,7 @@ export function registerSSHKeyRoutes(app: Application): void {
       res.setHeader("Content-Type", "application/x-pem-file");
       res.setHeader(
         "Content-Disposition",
-        `attachment; filename="alfred-${tailscaleHostname}.pem"`,
+        `attachment; filename="${tailscaleHostname}.pem"`,
       );
       res.send(keyContent);
     } catch (err: any) {
