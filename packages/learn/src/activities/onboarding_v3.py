@@ -103,7 +103,7 @@ async def fetch_email_metadata(user_id: str) -> dict[str, Any]:
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         while True:
-            params: dict[str, Any] = {"maxResults": 100, "q": f"after:{from_date}"}
+            params: dict[str, Any] = {"maxResults": 100, "q": f"after:{from_date} -in:drafts -in:spam -in:trash -in:chats -category:promotions"}
             if page_token:
                 params["pageToken"] = page_token
             resp = await client.get(
