@@ -34,7 +34,7 @@ ONBOARD_PATH = "/alfred-data/onboard.json"
 def _resolve_llm_config() -> tuple[str, str, dict[str, str]]:
     """Resolve which API to call for Claude models.
 
-    If ANTHROPIC_API_KEY is set, calls Anthropic directly.
+    If ANTHROPIC_API_KEY is set, calls Anthropic directly (Sonnet 4.6, 1M context).
     Otherwise falls back to OpenRouter.
 
     Returns (base_url, model_id, headers).
@@ -45,7 +45,7 @@ def _resolve_llm_config() -> tuple[str, str, dict[str, str]]:
     if anthropic_key:
         return (
             "https://api.anthropic.com/v1/messages",
-            "claude-opus-4-6",
+            "claude-sonnet-4-6",
             {
                 "x-api-key": anthropic_key,
                 "anthropic-version": "2023-06-01",
@@ -55,7 +55,7 @@ def _resolve_llm_config() -> tuple[str, str, dict[str, str]]:
     elif openrouter_key:
         return (
             "https://openrouter.ai/api/v1/chat/completions",
-            "anthropic/claude-opus-4-6",
+            "anthropic/claude-sonnet-4-6",
             {
                 "Authorization": f"Bearer {openrouter_key}",
                 "Content-Type": "application/json",
