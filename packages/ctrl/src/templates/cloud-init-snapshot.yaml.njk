@@ -6,21 +6,9 @@
 #   2. LUKS volume setup (per-tenant volume ID)
 #   3. SSH host key regeneration (snapshot wipes them)
 
-users:
-  - name: deploy
-    groups: sudo, docker
-    shell: /bin/bash
-    sudo:
-      - "ALL=(ALL) NOPASSWD: /usr/bin/systemctl *"
-      - "ALL=(ALL) NOPASSWD: /usr/bin/tailscale *"
-      - "ALL=(ALL) NOPASSWD: /usr/bin/cloudflared *"
-      - "ALL=(ALL) NOPASSWD: /usr/local/bin/cloudflared *"
-      - "ALL=(ALL) NOPASSWD: /usr/bin/chown *"
-      - "ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /opt/alfred/*"
-      - "ALL=(ALL) NOPASSWD: /usr/bin/bash /opt/alfred/*.sh"
-      - "ALL=(ALL) NOPASSWD: /usr/bin/bash -c set -a && source /opt/alfred/*.env *"
-    ssh_authorized_keys:
-      - {{ ssh_public_key }}
+# users: block is intentionally omitted — cloud-init skips user config
+# when the user already exists in the snapshot. SSH key + sudo rules are
+# injected explicitly in runcmd below.
 
 ssh_pwauth: false
 
@@ -29,6 +17,28 @@ ssh_deletekeys: true
 ssh_genkeytypes: [ed25519, rsa]
 
 runcmd:
+  # --- Re-apply sudo rules (cloud-init skips user config when user already exists in snapshot) ---
+  - |
+    cat > /etc/sudoers.d/90-deploy-alfred << 'SUDOERS'
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl *
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/tailscale *
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/cloudflared *
+    deploy ALL=(ALL) NOPASSWD: /usr/local/bin/cloudflared *
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/chown *
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /opt/alfred/*
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/bash /opt/alfred/*.sh
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/bash -c set -a && source /opt/alfred/*.env *
+    SUDOERS
+  - chmod 440 /etc/sudoers.d/90-deploy-alfred
+
+  # --- Inject SSH key for deploy user (snapshot has no authorized_keys) ---
+  - |
+    mkdir -p /home/deploy/.ssh
+    echo '{{ ssh_public_key }}' > /home/deploy/.ssh/authorized_keys
+    chmod 700 /home/deploy/.ssh
+    chmod 600 /home/deploy/.ssh/authorized_keys
+    chown -R deploy:deploy /home/deploy/.ssh
+
   # --- Setup encrypted volume ---
   - mkdir -p /mnt/encrypted
   - |
