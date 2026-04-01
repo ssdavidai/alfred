@@ -114,7 +114,7 @@ function FactVerificationCard({
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -20 }}
       transition={{ duration: 0.6 }}
-      className="mt-8 w-full max-w-lg"
+      className="pointer-events-auto mt-8 w-full max-w-lg"
     >
       <p className="mb-6 font-serif text-sm font-light leading-relaxed text-[#E8E4DE]/80">
         Sir, before I share my first observations, I want to ensure I have the
