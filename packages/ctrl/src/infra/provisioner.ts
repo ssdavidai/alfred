@@ -19,6 +19,7 @@ import { DEFAULTS } from "../data/constants.js";
 import type { InstanceConfig, ProvisioningState, ProvisioningStep } from "../data/types.js";
 
 import cloudInitTemplate from "../templates/cloud-init.yaml.njk";
+import cloudInitSnapshotTemplate from "../templates/cloud-init-snapshot.yaml.njk";
 import dockerComposeTemplate from "../templates/docker-compose.yaml.njk";
 import bootstrapTemplate from "../templates/bootstrap-openclaw.sh.njk";
 import cloudflaredConfigTemplate from "../templates/cloudflared-config.yaml.njk";
@@ -153,8 +154,10 @@ export async function provision(
 
     // --- Render cloud-init ---
     setStep("render_cloud_init");
-    log("Rendering cloud-init...");
-    const cloudInit = nunjucks.renderString(cloudInitTemplate, {
+    const useSnapshot = !!config.snapshot_id;
+    const ciTemplate = useSnapshot ? cloudInitSnapshotTemplate : cloudInitTemplate;
+    log(`Rendering cloud-init (${useSnapshot ? "snapshot" : "full"})...`);
+    const cloudInit = nunjucks.renderString(ciTemplate, {
       ssh_public_key: keyPair.publicKey,
       volume_id: volume.id,
     });
@@ -167,6 +170,7 @@ export async function provision(
       name: `alfred-${config.customer_name}`,
       server_type: config.server_type,
       location: config.location,
+      image: config.snapshot_id ?? undefined,
       ssh_keys: [ssh_key.id],
       user_data: cloudInit,
       firewalls: [{ firewall: firewallId }],
@@ -335,14 +339,18 @@ export async function provision(
 
     // --- Start containers ---
     setStep("start_containers");
-    log("Pulling images...");
-    await ssh.exec(
-      server.public_net.ipv4.ip,
-      keyPair.privateKeyPath,
-      `cd ${DEFAULTS.dockerComposeDir} && docker compose pull`,
-      undefined,
-      hostKeyOpts,
-    );
+    if (useSnapshot) {
+      log("Snapshot boot — skipping image pull (pre-baked)");
+    } else {
+      log("Pulling images...");
+      await ssh.exec(
+        server.public_net.ipv4.ip,
+        keyPair.privateKeyPath,
+        `cd ${DEFAULTS.dockerComposeDir} && docker compose pull`,
+        undefined,
+        hostKeyOpts,
+      );
+    }
     log("Starting init + temporal...");
     await ssh.exec(
       server.public_net.ipv4.ip,

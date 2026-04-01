@@ -56,6 +56,11 @@ export async function generateKeyPair(instanceId: number): Promise<KeyPair> {
   };
 }
 
+export async function cleanupKeyPair(instanceId: number): Promise<void> {
+  const keyDir = path.join(process.cwd(), "data", "ssh_keys", String(instanceId));
+  await fs.rm(keyDir, { recursive: true, force: true });
+}
+
 export async function getPrivateKeyPath(instanceId: number): Promise<string> {
   const keyPath = path.join(
     process.cwd(),

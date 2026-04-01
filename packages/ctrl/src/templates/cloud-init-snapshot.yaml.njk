@@ -1,0 +1,85 @@
+#cloud-config
+# Minimal cloud-init for snapshot-based provisioning.
+# OS packages, Docker, Node, Tailscale, cloudflared, systemd units, and
+# scripts are all pre-baked in the snapshot. This only handles:
+#   1. SSH key injection for the deploy user
+#   2. LUKS volume setup (per-tenant volume ID)
+#   3. SSH host key regeneration (snapshot wipes them)
+
+users:
+  - name: deploy
+    groups: sudo, docker
+    shell: /bin/bash
+    sudo:
+      - "ALL=(ALL) NOPASSWD: /usr/bin/systemctl *"
+      - "ALL=(ALL) NOPASSWD: /usr/bin/tailscale *"
+      - "ALL=(ALL) NOPASSWD: /usr/bin/cloudflared *"
+      - "ALL=(ALL) NOPASSWD: /usr/local/bin/cloudflared *"
+      - "ALL=(ALL) NOPASSWD: /usr/bin/chown *"
+      - "ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /opt/alfred/*"
+      - "ALL=(ALL) NOPASSWD: /usr/bin/bash /opt/alfred/*.sh"
+      - "ALL=(ALL) NOPASSWD: /usr/bin/bash -c set -a && source /opt/alfred/*.env *"
+    ssh_authorized_keys:
+      - {{ ssh_public_key }}
+
+ssh_pwauth: false
+
+# Regenerate SSH host keys (snapshot has none)
+ssh_deletekeys: true
+ssh_genkeytypes: [ed25519, rsa]
+
+runcmd:
+  # --- Setup encrypted volume ---
+  - mkdir -p /mnt/encrypted
+  - |
+    if [ -b /dev/disk/by-id/scsi-0HC_Volume_{{ volume_id }} ]; then
+      VOLUME_DEV="/dev/disk/by-id/scsi-0HC_Volume_{{ volume_id }}"
+
+      # Generate LUKS keyfile
+      mkdir -p /opt/alfred
+      dd if=/dev/urandom of=/opt/alfred/luks.key bs=4096 count=1
+      chmod 600 /opt/alfred/luks.key
+
+      # Format with LUKS2 if not already encrypted
+      if ! cryptsetup isLuks "$VOLUME_DEV" 2>/dev/null; then
+        cryptsetup luksFormat --type luks2 --batch-mode --key-file /opt/alfred/luks.key "$VOLUME_DEV"
+      fi
+
+      # Open and mount
+      cryptsetup luksOpen --key-file /opt/alfred/luks.key "$VOLUME_DEV" alfred-data
+      if ! blkid /dev/mapper/alfred-data; then
+        mkfs.ext4 /dev/mapper/alfred-data
+      fi
+      mount /dev/mapper/alfred-data /mnt/encrypted
+
+      # Create data directories — all owned by deploy (uid 1000)
+      mkdir -p /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal
+      chown -R deploy:deploy /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal
+    fi
+
+  # --- Update LUKS auto-unlock service with this tenant's volume ID ---
+  - |
+    cat > /etc/systemd/system/alfred-luks.service << 'LUKS_SVC'
+    [Unit]
+    Description=Open LUKS volume for Alfred
+    Before=docker.service
+    After=local-fs.target
+
+    [Service]
+    Type=oneshot
+    RemainAfterExit=yes
+    ExecStart=/bin/bash -c 'cryptsetup luksOpen --key-file /opt/alfred/luks.key /dev/disk/by-id/scsi-0HC_Volume_{{ volume_id }} alfred-data && mount /dev/mapper/alfred-data /mnt/encrypted'
+    ExecStop=/bin/bash -c 'umount /mnt/encrypted && cryptsetup luksClose alfred-data'
+
+    [Install]
+    WantedBy=multi-user.target
+    LUKS_SVC
+  - systemctl daemon-reload
+  - systemctl enable alfred-luks.service
+
+  # --- Reset machine-id so each tenant gets unique DHCP/logging identity ---
+  - rm -f /etc/machine-id /var/lib/dbus/machine-id
+  - systemd-machine-id-setup
+
+  # --- Signal completion ---
+  - touch /opt/alfred/.cloud-init-complete

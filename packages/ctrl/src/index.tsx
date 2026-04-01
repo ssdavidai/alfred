@@ -86,6 +86,7 @@ program
   .option("--type <type>", "Server type", process.env.DEFAULT_SERVER_TYPE ?? DEFAULTS.serverType)
   .option("--location <loc>", "Location", process.env.DEFAULT_LOCATION ?? DEFAULTS.location)
   .option("--ts-key <key>", "Tailscale auth key")
+  .option("--snapshot <id>", "Golden snapshot ID (auto-detects latest if set to 'auto')")
   .action(async (name, opts) => {
     getDb();
 
@@ -102,12 +103,30 @@ program
       process.exit(1);
     }
 
+    // Resolve snapshot ID
+    let snapshotId: number | undefined;
+    if (opts.snapshot) {
+      if (opts.snapshot === "auto") {
+        const { getLatestSnapshotId } = await import("./infra/snapshot.js");
+        const latest = await getLatestSnapshotId();
+        if (latest) {
+          snapshotId = latest;
+          console.log(`Using latest golden snapshot: ${snapshotId}`);
+        } else {
+          console.log("No golden snapshot found, falling back to full cloud-init");
+        }
+      } else {
+        snapshotId = Number(opts.snapshot);
+      }
+    }
+
     const config: InstanceConfig = {
       customer_name: name,
       server_type: opts.type,
       location: opts.location,
       tailscale_authkey: tsKey,
       openrouter_api_key: process.env.OPENROUTER_API_KEY,
+      snapshot_id: snapshotId,
     };
 
     console.log(`Provisioning "${name}" (${opts.type} in ${opts.location})...`);
@@ -642,6 +661,67 @@ program
     }
     console.log(instance.api_key);
     closeDb();
+  });
+
+// --- Snapshot management ---
+const snapshotCmd = program
+  .command("snapshot")
+  .description("Manage golden snapshots for fast provisioning");
+
+snapshotCmd
+  .command("build")
+  .description("Build a new golden snapshot (spins up throwaway VPS, pulls images, snapshots, destroys)")
+  .option("--location <loc>", "Hetzner location for build VPS", "fsn1")
+  .action(async (opts) => {
+    const { buildSnapshot } = await import("./infra/snapshot.js");
+    console.log("Building golden snapshot...\n");
+    const result = await buildSnapshot(
+      (msg) => console.log(`  ${msg}`),
+      opts.location,
+    );
+    console.log(`\nSnapshot ready!`);
+    console.log(`  ID:          ${result.imageId}`);
+    console.log(`  Description: ${result.description}`);
+  });
+
+snapshotCmd
+  .command("list")
+  .description("List golden snapshots")
+  .action(async () => {
+    const { listSnapshots } = await import("./infra/snapshot.js");
+    const images = await listSnapshots();
+    if (images.length === 0) {
+      console.log("No golden snapshots found. Run `aas snapshot build` to create one.");
+      return;
+    }
+    console.log("Golden snapshots (newest first):\n");
+    for (const img of images) {
+      const size = (img.image_size / 1024 / 1024 / 1024).toFixed(1);
+      console.log(`  ${img.id}  ${img.description}  ${size}GB  ${img.created}`);
+    }
+  });
+
+snapshotCmd
+  .command("delete <id>")
+  .description("Delete a golden snapshot by ID")
+  .action(async (id) => {
+    const { deleteSnapshot } = await import("./infra/snapshot.js");
+    await deleteSnapshot(Number(id));
+    console.log(`Snapshot ${id} deleted.`);
+  });
+
+snapshotCmd
+  .command("latest")
+  .description("Print the latest golden snapshot ID")
+  .action(async () => {
+    const { getLatestSnapshotId } = await import("./infra/snapshot.js");
+    const id = await getLatestSnapshotId();
+    if (id) {
+      console.log(String(id));
+    } else {
+      console.error("No golden snapshot found.");
+      process.exit(1);
+    }
   });
 
 program.parse();

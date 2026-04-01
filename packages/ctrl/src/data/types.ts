@@ -52,6 +52,7 @@ export interface InstanceConfig {
   openrouter_api_key?: string;
   tailscale_tag?: string;
   subdomain?: string;
+  snapshot_id?: number;
 }
 
 // --- Provisioning ---

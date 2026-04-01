@@ -35,6 +35,17 @@ export interface HetznerFirewall {
   name: string;
 }
 
+export interface HetznerImage {
+  id: number;
+  type: "snapshot" | "system" | "app" | "backup";
+  status: string;
+  description: string;
+  image_size: number;
+  created: string;
+  created_from: { id: number; name: string } | null;
+  labels: Record<string, string>;
+}
+
 export interface FirewallRule {
   direction: "in" | "out";
   protocol: "tcp" | "udp" | "icmp" | "gre" | "esp";
@@ -82,6 +93,7 @@ class HetznerClient {
     name: string;
     server_type: string;
     location: string;
+    image?: string | number;
     ssh_keys: number[];
     user_data?: string;
     firewalls?: { firewall: number }[];
@@ -91,7 +103,7 @@ class HetznerClient {
       name: params.name,
       server_type: params.server_type,
       location: params.location,
-      image: "ubuntu-24.04",
+      image: params.image ?? "ubuntu-24.04",
       ssh_keys: params.ssh_keys,
       user_data: params.user_data,
       firewalls: params.firewalls,
@@ -119,6 +131,10 @@ class HetznerClient {
 
   async enableBackup(serverId: number): Promise<void> {
     await this.request("POST", `/servers/${serverId}/actions/enable_backup`);
+  }
+
+  async poweroffServer(serverId: number): Promise<void> {
+    await this.request("POST", `/servers/${serverId}/actions/poweroff`);
   }
 
   // --- Volumes ---
@@ -202,6 +218,40 @@ class HetznerClient {
 
   async deleteFirewall(id: number): Promise<void> {
     await this.request("DELETE", `/firewalls/${id}`);
+  }
+
+  // --- Images / Snapshots ---
+
+  async createImage(
+    serverId: number,
+    description: string,
+    labels?: Record<string, string>
+  ): Promise<{ image: HetznerImage }> {
+    return this.request("POST", `/servers/${serverId}/actions/create_image`, {
+      type: "snapshot",
+      description,
+      labels: {
+        "managed-by": "alfred-ctrl",
+        ...labels,
+      },
+    });
+  }
+
+  async listImages(
+    type: "snapshot" | "system" = "snapshot",
+    labelSelector?: string
+  ): Promise<{ images: HetznerImage[] }> {
+    const params = new URLSearchParams({ type, per_page: "50" });
+    if (labelSelector) params.set("label_selector", labelSelector);
+    return this.request("GET", `/images?${params}`);
+  }
+
+  async deleteImage(id: number): Promise<void> {
+    await this.request("DELETE", `/images/${id}`);
+  }
+
+  async getImage(id: number): Promise<{ image: HetznerImage }> {
+    return this.request("GET", `/images/${id}`);
   }
 }
 

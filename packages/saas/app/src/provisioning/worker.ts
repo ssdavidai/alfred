@@ -123,6 +123,30 @@ export async function provisionInstanceJob(
     let finalExitCode = 1;
     let lastStderr = "";
 
+    // Auto-detect latest golden snapshot for fast provisioning.
+    // Falls back to full cloud-init if no snapshot exists.
+    let snapshotArgs: string[] = [];
+    try {
+      const { stdout: snapshotId } = await execFileAsync(
+        process.execPath,
+        ["--experimental-sqlite", ALFRED_CTRL_PATH, "snapshot", "latest"],
+        {
+          timeout: 15_000,
+          env: { ...process.env, NODE_NO_WARNINGS: "1" },
+          cwd: process.env.ALFRED_CTRL_CWD || "/opt/alfred-saas/alfred-ctrl",
+        },
+      );
+      const id = snapshotId.trim();
+      if (id) {
+        snapshotArgs = ["--snapshot", id];
+        logs.push(`Using golden snapshot: ${id}`);
+        console.info(`[provision:${instance.customerName}] Using golden snapshot: ${id}`);
+      }
+    } catch {
+      logs.push("No golden snapshot found, using full cloud-init");
+      console.info(`[provision:${instance.customerName}] No golden snapshot, full cloud-init`);
+    }
+
     for (const location of LOCATIONS) {
       logs.push(`Trying location: ${location}`);
       console.info(
@@ -143,6 +167,7 @@ export async function provisionInstanceJob(
             instance.serverType,
             "--location",
             location,
+            ...snapshotArgs,
           ],
           {
             timeout: 1_200_000, // 20 minutes
