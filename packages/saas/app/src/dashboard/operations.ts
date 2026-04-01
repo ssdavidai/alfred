@@ -1,4 +1,4 @@
-import { HttpError } from "wasp/server";
+import { HttpError, prisma } from "wasp/server";
 import type {
   GetDashboardData,
   GetInboxItems,
