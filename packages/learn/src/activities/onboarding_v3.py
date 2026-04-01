@@ -187,6 +187,11 @@ async def extract_facts_opus(onboard_path: str) -> dict[str, Any]:
     if not emails:
         return {"facts": [], "count": 0}
 
+    # Cap at 3000 emails to stay within Opus context limits
+    if len(emails) > 3000:
+        logger.info("onboarding_v3: capping emails from %d to 3000", len(emails))
+        emails = emails[:3000]
+
     # Build email corpus text — compact format
     lines = []
     for e in emails:
