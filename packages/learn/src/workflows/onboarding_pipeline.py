@@ -110,7 +110,7 @@ class OnboardingPipelineWorkflow:
             metadata = await workflow.execute_activity(
                 fetch_email_metadata,
                 args=[input.user_id],
-                start_to_close_timeout=timedelta(minutes=10),
+                start_to_close_timeout=timedelta(minutes=30),
                 heartbeat_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -140,7 +140,8 @@ class OnboardingPipelineWorkflow:
             await workflow.execute_activity(
                 extract_facts_opus,
                 args=[onboard_path],
-                start_to_close_timeout=timedelta(minutes=10),
+                start_to_close_timeout=timedelta(minutes=30),
+                schedule_to_start_timeout=timedelta(minutes=15),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
@@ -157,7 +158,7 @@ class OnboardingPipelineWorkflow:
             await workflow.execute_activity(
                 discover_patterns_opus,
                 args=[onboard_path],
-                start_to_close_timeout=timedelta(minutes=10),
+                start_to_close_timeout=timedelta(minutes=30),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
@@ -174,7 +175,7 @@ class OnboardingPipelineWorkflow:
             await workflow.execute_activity(
                 personalize_opus,
                 args=[onboard_path],
-                start_to_close_timeout=timedelta(minutes=10),
+                start_to_close_timeout=timedelta(minutes=30),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
@@ -213,7 +214,7 @@ class OnboardingPipelineWorkflow:
             await workflow.execute_activity(
                 write_brief_opus,
                 args=[onboard_path],
-                start_to_close_timeout=timedelta(minutes=10),
+                start_to_close_timeout=timedelta(minutes=30),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
             brief_path = "event/First Brief.md"
@@ -244,7 +245,7 @@ class OnboardingPipelineWorkflow:
             await workflow.execute_activity(
                 process_stream_batch,
                 args=[input.stream_id, "gmail"],
-                start_to_close_timeout=timedelta(minutes=10),
+                start_to_close_timeout=timedelta(minutes=30),
                 heartbeat_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
