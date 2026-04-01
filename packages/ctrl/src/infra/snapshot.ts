@@ -131,8 +131,12 @@ export async function buildSnapshot(
         // Clean apt cache
         "sudo apt-get clean",
         "sudo rm -rf /var/lib/apt/lists/*",
-        // Clean cloud-init state so it re-runs on next boot
+        // Fully reset cloud-init state so it re-runs on next boot.
+        // cloud-init clean --logs alone is insufficient — stale obj.pkl
+        // causes "degraded done" status with pickle errors on snapshot boot.
         "sudo cloud-init clean --logs",
+        "sudo rm -rf /var/lib/cloud/instance /var/lib/cloud/data /var/lib/cloud/sem",
+        "sudo rm -f /var/lib/cloud/.ds-identify.result",
         // Remove SSH host keys — regenerated on snapshot boot
         "sudo rm -f /etc/ssh/ssh_host_*",
         // Remove machine-id — regenerated on snapshot boot
