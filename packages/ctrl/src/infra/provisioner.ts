@@ -343,13 +343,19 @@ export async function provision(
       log("Snapshot boot — skipping image pull (pre-baked)");
     } else {
       log("Pulling images...");
-      await ssh.exec(
-        server.public_net.ipv4.ip,
-        keyPair.privateKeyPath,
-        `cd ${DEFAULTS.dockerComposeDir} && docker compose pull`,
-        undefined,
-        hostKeyOpts,
-      );
+      // timeout: 10 min for image pull. Retry once on failure.
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const pullResult = await ssh.exec(
+          server.public_net.ipv4.ip,
+          keyPair.privateKeyPath,
+          `cd ${DEFAULTS.dockerComposeDir} && timeout 600 docker compose pull 2>&1`,
+          undefined,
+          hostKeyOpts,
+        );
+        if (pullResult.code === 0) break;
+        if (attempt === 2) throw new Error(`Docker pull failed after 2 attempts: ${pullResult.stdout}`);
+        log(`Image pull attempt ${attempt} failed (exit ${pullResult.code}), retrying...`);
+      }
     }
     log("Starting init + temporal...");
     await ssh.exec(
