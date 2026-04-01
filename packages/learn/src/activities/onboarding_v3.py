@@ -159,11 +159,19 @@ async def fetch_email_metadata(user_id: str) -> dict[str, Any]:
 
     logger.info("onboarding_v3: fetched metadata for %d emails from %d domains", len(emails), len(by_domain))
 
+    # Write emails directly to onboard.json (don't return them — 5000 emails
+    # exceeds Temporal's 4MB gRPC payload limit for activity results)
+    onboard_path = os.environ.get("ONBOARD_PATH", "/alfred-data/onboard.json")
+    onboard = _read_onboard(onboard_path)
+    onboard["emails"] = emails
+    onboard["top_domains"] = sorted(by_domain.items(), key=lambda x: -x[1])[:30]
+    onboard["progress"]["current_day"] = len(emails)
+    onboard["progress"]["total_days"] = len(emails)
+    _write_onboard(onboard_path, onboard)
+
     return {
-        "emails": emails,
         "count": len(emails),
         "domains": len(by_domain),
-        "top_domains": sorted(by_domain.items(), key=lambda x: -x[1])[:30],
     }
 
 

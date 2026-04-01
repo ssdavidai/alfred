@@ -107,24 +107,14 @@ class OnboardingPipelineWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
 
-            metadata = await workflow.execute_activity(
+            # Activity writes emails directly to onboard.json (too large for
+            # Temporal activity result — 5000 emails exceeds 4MB gRPC limit)
+            await workflow.execute_activity(
                 fetch_email_metadata,
                 args=[input.user_id],
                 start_to_close_timeout=timedelta(minutes=30),
                 heartbeat_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3),
-            )
-
-            # Save metadata to onboard.json for subsequent stages
-            await workflow.execute_activity(
-                update_onboard_progress,
-                args=[onboard_path, {
-                    "emails": metadata.get("emails", []),
-                    "top_domains": metadata.get("top_domains", []),
-                    "current_day": metadata.get("count", 0),
-                    "total_days": metadata.get("count", 0),
-                }],
-                start_to_close_timeout=timedelta(seconds=30),
             )
 
         # -----------------------------------------------------------------
