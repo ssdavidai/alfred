@@ -122,7 +122,7 @@ def extract_manifest_from_history(hist_data):
     JSON structure, then extract the JSON.
     """
     messages = _get_messages(hist_data)
-    manifest_pattern = re.compile(r'/tmp/alfred-curator-[0-9a-f]+-manifest\.json')
+    manifest_pattern = re.compile(r'/alfred-data/alfred-curator-[0-9a-f]+-manifest\.json')
 
     for msg in messages:
         if msg.get("role") != "assistant":
@@ -174,7 +174,7 @@ def collect_manifest_files(explicit_path=None):
     """Read curator manifest JSON files from /tmp and return their contents.
 
     If *explicit_path* is given (via --manifest-path), read only that file.
-    Otherwise fall back to globbing /tmp/alfred-curator-*-manifest.json for
+    Otherwise fall back to globbing /alfred-data/alfred-curator-*-manifest.json for
     backwards compatibility.
 
     The pipeline generates a unique manifest_path and embeds it in the
@@ -190,7 +190,7 @@ def collect_manifest_files(explicit_path=None):
     if explicit_path:
         paths = [explicit_path]
     else:
-        paths = sorted(glob.glob("/tmp/alfred-curator-*-manifest.json"))
+        paths = sorted(glob.glob("/alfred-data/alfred-curator-*-manifest.json"))
 
     results = []
     for path in paths:
@@ -260,9 +260,9 @@ def main():
 
     # If no explicit --manifest-path, try to extract it from the prompt text.
     # The pipeline embeds a line like:
-    #   **Write the JSON to this exact file path:** `/tmp/alfred-curator-<id>-manifest.json`
+    #   **Write the JSON to this exact file path:** `/alfred-data/alfred-curator-<id>-manifest.json`
     if not manifest_path:
-        m = re.search(r'/tmp/alfred-curator-[0-9a-f]+-manifest\.json', prompt)
+        m = re.search(r'/alfred-data/alfred-curator-[0-9a-f]+-manifest\.json', prompt)
         if m:
             manifest_path = m.group(0)
             print(f"[openclaw-wrapper] extracted manifest_path from prompt: {manifest_path}", file=sys.stderr)
