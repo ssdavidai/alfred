@@ -60,6 +60,7 @@
     "bind": "lan",
     "auth": {
       "mode": "token",
+      {% if gateway_token %}"token": "{{ gateway_token }}",{% endif %}
       "allowTailscale": true
     },
     "controlUi": {

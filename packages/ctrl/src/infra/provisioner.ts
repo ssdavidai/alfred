@@ -482,10 +482,15 @@ export async function provision(
     // backend, and controlUi for LAN binding. Deep-merged with any existing
     // config the init container created (preserving gateway tokens etc.).
     log("Pre-configuring OpenClaw...");
+    // Generate a shared gateway token for both openclaw and openclaw-workers.
+    // Both gateways must use the same token so alfred/alfred-learn can authenticate
+    // against either one using the single .gateway-token file.
+    const gatewayToken = crypto.randomBytes(24).toString("hex");
     // vault_path: where the vault volume is mounted inside the openclaw container
     // (per docker-compose.yaml.njk: /mnt/encrypted/vault → /home/node/.openclaw/workspace/vault)
     const openclawConfig = nunjucks.renderString(openclawConfigTemplate, {
       vault_path: "/home/node/.openclaw/workspace/vault",
+      gateway_token: gatewayToken,
     });
     await ssh.upload(
       server.public_net.ipv4.ip,
@@ -524,10 +529,23 @@ os.remove('/tmp/openclaw-tenant-config.json')
     );
     log("OpenClaw configured");
 
+    // Write the shared gateway token to the .gateway-token file so alfred/alfred-learn
+    // can read it on startup. This ensures all services use the same token from the start.
+    await ssh.exec(
+      server.public_net.ipv4.ip,
+      keyPair.privateKeyPath,
+      `printf '%s' '${gatewayToken}' > /mnt/encrypted/alfred/.gateway-token && chmod 644 /mnt/encrypted/alfred/.gateway-token`,
+      undefined,
+      hostKeyOpts,
+    );
+    updateInstance(instance.id, { gateway_token: gatewayToken });
+    log("Gateway token written");
+
     // Pre-configure openclaw-workers with worker-specific config (no user-facing agents)
     log("Pre-configuring OpenClaw Workers...");
     const workersConfig = nunjucks.renderString(openclawWorkersConfigTemplate, {
       vault_path: "/home/node/.openclaw/workspace/vault",
+      gateway_token: gatewayToken,
     });
     await ssh.upload(
       server.public_net.ipv4.ip,
