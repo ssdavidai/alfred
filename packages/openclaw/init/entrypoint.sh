@@ -98,7 +98,32 @@ Master index of all learned routing patterns (instincts).
 EOF
 fi
 
-# --- 6. Fix permissions ---
+# --- 6. Sync gateway token into openclaw configs ---
+# Ensures both openclaw (main) and openclaw-workers use the same auth token.
+# Fixes existing tenants where the tokens diverged (each gateway auto-generated its own).
+if [[ -f "$TOKEN_FILE" ]]; then
+    GW_TOKEN=$(cat "$TOKEN_FILE")
+    for cfg in /openclaw-state/openclaw.json /openclaw-workers-state/openclaw.json; do
+        if [[ -f "$cfg" ]]; then
+            python3 -c "
+import json, sys
+p = '$cfg'
+t = '$GW_TOKEN'
+with open(p) as f: c = json.load(f)
+auth = c.setdefault('gateway', {}).setdefault('auth', {})
+if auth.get('token') != t:
+    auth['token'] = t
+    auth['mode'] = 'token'
+    with open(p, 'w') as f: json.dump(c, f, indent=2)
+    print(f'[init] Synced gateway token to {p}')
+else:
+    print(f'[init] Gateway token already in sync: {p}')
+" 2>/dev/null || true
+        fi
+    done
+fi
+
+# --- 7. Fix permissions ---
 # OpenClaw runs as uid 1000 (node user).  The alfred container runs as root
 # with cap_add: DAC_OVERRIDE so it can access uid-1000-owned files.
 chown -R 1000:1000 /openclaw-state 2>/dev/null || true
