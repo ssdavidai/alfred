@@ -102,6 +102,7 @@ fi
 # OpenClaw runs as uid 1000 (node user).  The alfred container runs as root
 # with cap_add: DAC_OVERRIDE so it can access uid-1000-owned files.
 chown -R 1000:1000 /openclaw-state 2>/dev/null || true
+chown -R 1000:1000 /openclaw-workers-state 2>/dev/null || true
 chown -R 1000:1000 /vault 2>/dev/null || true
 
 # Alfred data needs to be writable by all containers
