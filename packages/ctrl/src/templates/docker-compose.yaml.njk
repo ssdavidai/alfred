@@ -9,6 +9,7 @@ services:
     volumes:
       - /mnt/encrypted/vault:/vault
       - /mnt/encrypted/openclaw:/openclaw-state
+      - /mnt/encrypted/openclaw-workers:/openclaw-workers-state
       - /mnt/encrypted/alfred:/alfred-data
     env_file:
       - .env
