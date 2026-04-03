@@ -113,17 +113,44 @@ def extract_last_assistant_message(hist_data):
     return None
 
 
-def extract_manifest_from_history(hist_data):
-    """Try to extract manifest JSON from tool-use calls in the conversation.
+def _extract_entities_json(text):
+    """Find a JSON object with an "entities" array anywhere in text.
 
-    When the agent writes the manifest via 'cat > /tmp/...' or a Write tool,
-    the command input contains the full JSON.  We search assistant messages
-    for tool_use blocks whose input contains 'entities' and a manifest-like
-    JSON structure, then extract the JSON.
+    Uses brace-depth tracking to handle nested objects.
+    Returns the JSON string if found, else None.
+    """
+    for m in re.finditer(r'\{[^{}]*"entities"\s*:\s*\[', text):
+        start = m.start()
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    try:
+                        data = json.loads(candidate)
+                        if isinstance(data.get("entities"), list):
+                            return candidate
+                    except json.JSONDecodeError:
+                        continue
+                    break
+    return None
+
+
+def extract_manifest_from_history(hist_data):
+    """Try to extract manifest JSON from the conversation history.
+
+    Searches three sources in tool-use calls and message text:
+    1. Write tool calls (content field contains the JSON)
+    2. Bash tool calls (command field contains cat/heredoc with JSON)
+    3. Assistant message text (model may include JSON in response)
     """
     messages = _get_messages(hist_data)
     manifest_pattern = re.compile(r'/alfred-data/alfred-curator-[0-9a-f]+-manifest\.json')
 
+    # Pass 1: Search tool_use blocks (Write tool, Bash tool)
     for msg in messages:
         if msg.get("role") != "assistant":
             continue
@@ -131,39 +158,62 @@ def extract_manifest_from_history(hist_data):
         if not isinstance(content, list):
             continue
         for part in content:
-            if not isinstance(part, dict):
+            if not isinstance(part, dict) or part.get("type") != "tool_use":
                 continue
-            # Look for tool_use blocks (e.g. Bash/exec tool calls)
-            if part.get("type") == "tool_use":
-                inp = part.get("input", {})
-                # The Bash/exec tool typically has a "command" field
-                cmd_text = ""
-                if isinstance(inp, dict):
-                    cmd_text = inp.get("command", "") or inp.get("content", "") or str(inp)
-                elif isinstance(inp, str):
-                    cmd_text = inp
+            inp = part.get("input", {})
+            tool_name = part.get("name", "")
 
-                # Check if this tool call writes the manifest file
-                if manifest_pattern.search(cmd_text) and '"entities"' in cmd_text:
-                    # Extract the JSON from the heredoc or command text
-                    m = re.search(r'\{[^{}]*"entities"\s*:\s*\[', cmd_text)
-                    if m:
-                        start = m.start()
-                        depth = 0
-                        for i in range(start, len(cmd_text)):
-                            if cmd_text[i] == '{':
-                                depth += 1
-                            elif cmd_text[i] == '}':
-                                depth -= 1
-                                if depth == 0:
-                                    candidate = cmd_text[start:i + 1]
-                                    try:
-                                        data = json.loads(candidate)
-                                        if isinstance(data.get("entities"), list):
-                                            return candidate
-                                    except json.JSONDecodeError:
-                                        continue
-                                    break
+            # Write tool: input has "file_path" and "content" fields
+            if tool_name in ("Write", "write") and isinstance(inp, dict):
+                file_path = inp.get("file_path", "")
+                file_content = inp.get("content", "")
+                if manifest_pattern.search(file_path) and '"entities"' in file_content:
+                    result = _extract_entities_json(file_content)
+                    if result:
+                        return result
+
+            # Bash tool: input has "command" field (heredoc or echo)
+            cmd_text = ""
+            if isinstance(inp, dict):
+                cmd_text = inp.get("command", "") or inp.get("content", "") or str(inp)
+            elif isinstance(inp, str):
+                cmd_text = inp
+
+            if cmd_text and '"entities"' in cmd_text:
+                if manifest_pattern.search(cmd_text):
+                    result = _extract_entities_json(cmd_text)
+                    if result:
+                        return result
+
+    # Pass 2: Search assistant message text for JSON code blocks or inline JSON
+    for msg in reversed(messages):
+        if msg.get("role") != "assistant":
+            continue
+        text = ""
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text = " ".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        if '"entities"' not in text:
+            continue
+
+        # Try markdown code blocks first (```json ... ```)
+        for block_match in re.finditer(r'```(?:json)?\s*\n(.*?)\n```', text, re.DOTALL):
+            block = block_match.group(1).strip()
+            if '"entities"' in block:
+                result = _extract_entities_json(block)
+                if result:
+                    return result
+
+        # Try raw JSON anywhere in text
+        result = _extract_entities_json(text)
+        if result:
+            return result
+
     return None
 
 
