@@ -592,6 +592,14 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
       const preApiKey = crypto.randomBytes(32).toString("hex");
       try {
         log("Pre-deploying api.mjs for ctrl-api...");
+        // Ensure target directory exists (cloud-init creates it, but be defensive)
+        await ssh.exec(
+          server.public_net.ipv4.ip,
+          keyPair.privateKeyPath,
+          `sudo mkdir -p ${DEFAULTS.alfredBasePath}`,
+          undefined,
+          hostKeyOpts,
+        );
         await ssh.upload(
           server.public_net.ipv4.ip,
           keyPair.privateKeyPath,
@@ -601,6 +609,15 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
           undefined,
           hostKeyOpts,
         );
+        // Verify upload produced a file (not a directory)
+        const verifyResult = await ssh.exec(
+          server.public_net.ipv4.ip,
+          keyPair.privateKeyPath,
+          `test -f ${DEFAULTS.alfredBasePath}/api.mjs && wc -c < ${DEFAULTS.alfredBasePath}/api.mjs`,
+          undefined,
+          hostKeyOpts,
+        );
+        log(`api.mjs uploaded (${verifyResult.stdout.trim()} bytes)`);
         await ssh.exec(
           server.public_net.ipv4.ip,
           keyPair.privateKeyPath,
@@ -609,7 +626,7 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
           hostKeyOpts,
         );
         updateInstance(instance.id, { api_key: preApiKey });
-        log("api.mjs + AAS_API_KEY ready");
+        log("AAS_API_KEY ready");
       } catch (e) {
         log(`Warning: pre-deploy api.mjs failed: ${e}`);
       }
@@ -948,7 +965,14 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
     log(`ERROR: ${errMsg}`);
 
     if (state.instance_id) {
-      updateInstance(state.instance_id, { status: "error" });
+      // Save all captured resource IDs so destroy() can clean them up.
+      // These may have been set in the state object but not yet written
+      // to DB if the failure happened between API call and updateInstance().
+      const partialUpdate: Record<string, unknown> = { status: "error" };
+      if (state.server_id) partialUpdate.server_id = state.server_id;
+      if (state.volume_id) partialUpdate.volume_id = state.volume_id;
+      if (state.ssh_key_id) partialUpdate.ssh_key_id = state.ssh_key_id;
+      updateInstance(state.instance_id, partialUpdate as any);
       insertEvent(state.instance_id, "error", errMsg);
     }
 
@@ -1104,6 +1128,12 @@ export async function deployApi(
   }
 
   log("Uploading api.mjs...");
+  // Ensure target directory exists (defensive — may have been removed or never created)
+  await ssh.exec(
+    instance.ip_address,
+    sshKeyPath,
+    `sudo mkdir -p ${DEFAULTS.alfredBasePath}`,
+  );
   const apiContent = await fs.readFile(apiMjsPath, "utf-8");
   await ssh.upload(
     instance.ip_address,
@@ -1112,6 +1142,7 @@ export async function deployApi(
     `${DEFAULTS.alfredBasePath}/api.mjs`,
     0o644
   );
+  log(`api.mjs uploaded (${apiContent.length} bytes)`);
 
   // Check if tenant has the ctrl-api Docker service. If not, upgrade their
   // compose file and migrate from systemd to Docker.
