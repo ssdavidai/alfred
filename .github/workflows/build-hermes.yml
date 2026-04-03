@@ -1,0 +1,88 @@
+name: Build & Push Docker Images (Hermes)
+
+# Separate from build-openclaw.yml — both coexist during migration.
+# This workflow builds NEW images with NEW names. It never touches
+# the existing production images (alfred-openclaw, alfred-worker, etc.).
+#
+# Does NOT trigger fleet rollout — Hermes images are only used by
+# tenants that have been explicitly migrated to the Hermes compose template.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/hermes/**'
+  workflow_dispatch:
+
+concurrency:
+  group: build-hermes
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute image tag
+        id: image_tag
+        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push alfred-hermes (agent runtime)
+        uses: docker/build-push-action@v6
+        with:
+          context: packages/hermes
+          file: packages/hermes/dockerfiles/hermes.Dockerfile
+          push: true
+          tags: |
+            ssdavidai00/alfred-hermes:latest
+            ssdavidai00/alfred-hermes:sha-${{ steps.image_tag.outputs.short_sha }}
+          cache-from: type=gha,scope=hermes
+          cache-to: type=gha,mode=max,scope=hermes
+
+      - name: Build and push alfred-init-hermes (init container)
+        uses: docker/build-push-action@v6
+        with:
+          context: packages/hermes
+          file: packages/hermes/dockerfiles/init.Dockerfile
+          push: true
+          tags: |
+            ssdavidai00/alfred-init-hermes:latest
+            ssdavidai00/alfred-init-hermes:sha-${{ steps.image_tag.outputs.short_sha }}
+          cache-from: type=gha,scope=init-hermes
+          cache-to: type=gha,mode=max,scope=init-hermes
+
+      - name: Build and push alfred-worker-hermes (vault workers)
+        uses: docker/build-push-action@v6
+        with:
+          context: packages/hermes
+          file: packages/hermes/dockerfiles/worker.Dockerfile
+          push: true
+          tags: |
+            ssdavidai00/alfred-worker-hermes:latest
+            ssdavidai00/alfred-worker-hermes:sha-${{ steps.image_tag.outputs.short_sha }}
+          cache-from: type=gha,scope=worker-hermes
+          cache-to: type=gha,mode=max,scope=worker-hermes
+
+      - name: Build and push alfred-learn-hermes (intelligence layer)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/hermes/dockerfiles/learn.Dockerfile
+          push: true
+          tags: |
+            ssdavidai00/alfred-learn-hermes:latest
+            ssdavidai00/alfred-learn-hermes:sha-${{ steps.image_tag.outputs.short_sha }}
+          cache-from: type=gha,scope=learn-hermes
+          cache-to: type=gha,mode=max,scope=learn-hermes
+
+      # No fleet rollout — Hermes images are pulled manually per migrated tenant
