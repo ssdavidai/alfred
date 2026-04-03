@@ -82,6 +82,52 @@ program
   });
 
 program
+  .command("scan-orphans")
+  .description("Scan for orphaned Hetzner resources with no matching DB instance")
+  .option("--cleanup", "Destroy orphaned resources (default: report only)")
+  .action(async (opts) => {
+    getDb();
+    const { scanOrphans, cleanupOrphans } = await import("./infra/orphan-scanner.js");
+    console.log("Scanning for orphaned resources...\n");
+    const report = await scanOrphans();
+
+    if (report.total === 0) {
+      console.log("No orphaned resources found.");
+      closeDb();
+      return;
+    }
+
+    console.log(`Found ${report.total} orphaned resource(s):\n`);
+    if (report.servers.length > 0) {
+      console.log(`Servers (${report.servers.length}):`);
+      for (const s of report.servers) {
+        console.log(`  - ${s.name} (id: ${s.id}, ip: ${s.ip}, created: ${s.created})`);
+      }
+    }
+    if (report.volumes.length > 0) {
+      console.log(`Volumes (${report.volumes.length}):`);
+      for (const v of report.volumes) {
+        console.log(`  - ${v.name} (id: ${v.id}, ${v.size}GB, ${v.location})`);
+      }
+    }
+    if (report.sshKeys.length > 0) {
+      console.log(`SSH Keys (${report.sshKeys.length}):`);
+      for (const k of report.sshKeys) {
+        console.log(`  - ${k.name} (id: ${k.id})`);
+      }
+    }
+
+    if (opts.cleanup) {
+      console.log("\nCleaning up...");
+      const result = await cleanupOrphans(report, console.log);
+      console.log(`\nCleanup complete: ${result.deleted} deleted, ${result.errors} errors`);
+    } else {
+      console.log("\nRun with --cleanup to destroy these resources.");
+    }
+    closeDb();
+  });
+
+program
   .command("check-location <server_type> <location>")
   .description("Check if a server type is available in a Hetzner location")
   .action(async (serverType, location) => {

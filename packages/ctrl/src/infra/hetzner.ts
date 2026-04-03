@@ -190,6 +190,14 @@ class HetznerClient {
     });
   }
 
+  async listVolumes(): Promise<HetznerVolume[]> {
+    const data = await this.request<{ volumes: HetznerVolume[] }>(
+      "GET",
+      `/volumes?per_page=50`
+    );
+    return data.volumes;
+  }
+
   async deleteVolume(id: number): Promise<void> {
     await this.request("DELETE", `/volumes/${id}`);
   }
@@ -220,6 +228,14 @@ class HetznerClient {
       public_key: publicKey,
       labels: { "managed-by": "alfred-ctrl" },
     });
+  }
+
+  async listSSHKeys(): Promise<HetznerSSHKey[]> {
+    const data = await this.request<{ ssh_keys: HetznerSSHKey[] }>(
+      "GET",
+      `/ssh_keys?per_page=50`
+    );
+    return data.ssh_keys;
   }
 
   async deleteSSHKey(id: number): Promise<void> {
