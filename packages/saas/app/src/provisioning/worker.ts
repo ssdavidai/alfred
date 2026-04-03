@@ -1,6 +1,6 @@
 import { spawn, execFile } from "child_process";
 import { promisify } from "util";
-import { encryptApiKey } from "../server/tenantProxy";
+import { encryptApiKey, decryptApiKey } from "../server/tenantProxy";
 import { prisma } from "wasp/server";
 
 const execFileAsync = promisify(execFile);
@@ -382,6 +382,7 @@ export async function provisionInstanceJob(
     }
 
     // Auto-create Gmail stream if user signed up with Google and has OAuth credentials
+    let gmailStreamId: string | null = null;
     try {
       const googleCred = await prisma.oAuthCredential.findUnique({
         where: {
@@ -389,7 +390,7 @@ export async function provisionInstanceJob(
         },
       });
       if (googleCred) {
-        await prisma.stream.upsert({
+        const stream = await prisma.stream.upsert({
           where: { userId_source: { userId: instance.userId, source: "gmail" } },
           create: {
             userId: instance.userId,
@@ -401,10 +402,56 @@ export async function provisionInstanceJob(
           },
           update: {},
         });
+        gmailStreamId = stream.id;
         console.info(`Auto-created Gmail stream for ${instance.customerName}`);
+
+        // Push the stream config to the tenant's ctrl API
+        const tenantApiKey = decryptApiKey(updateData.apiKey ?? instance.apiKey ?? "");
+        const tenantUrl = `https://${updateData.tailscaleHostname}:3100`;
+        try {
+          await fetch(`${tenantUrl}/api/v1/streams`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${tenantApiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              id: stream.id,
+              name: "Gmail",
+              type: "scheduled",
+              source: "gmail",
+              enabled: true,
+            }),
+          });
+          console.info(`Pushed Gmail stream to tenant ${instance.customerName}`);
+        } catch (e: any) {
+          console.error("Failed to push Gmail stream to tenant:", e.message);
+        }
       }
     } catch (e: any) {
       console.error("Failed to auto-create Gmail stream:", e.message);
+    }
+
+    // Trigger onboarding if Gmail stream was created
+    if (gmailStreamId) {
+      try {
+        const tenantApiKey = decryptApiKey(updateData.apiKey ?? instance.apiKey ?? "");
+        const tenantUrl = `https://${updateData.tailscaleHostname}:3100`;
+        await fetch(`${tenantUrl}/api/v1/workflows/onboarding/start`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tenantApiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            user_id: instance.userId,
+            stream_id: gmailStreamId,
+          }),
+        });
+        console.info(`Triggered onboarding for ${instance.customerName}`);
+      } catch (e: any) {
+        console.error("Failed to trigger onboarding:", e.message);
+      }
     }
 
     console.info(`Provisioning completed for ${instance.customerName}`);

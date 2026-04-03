@@ -157,7 +157,8 @@ export function registerWorkflowRoutes(): void {
     }
   });
 
-  // POST /api/v1/onboarding/corrections — submit fact corrections, advance stage to "brief"
+  // POST /api/v1/onboarding/corrections — submit fact corrections, advance stage to "brief",
+  // then trigger a new onboarding workflow to generate the brief.
   addRoute("POST", "/api/v1/onboarding/corrections", async ({ res, body }) => {
     const b = body as Record<string, unknown> | undefined;
     const corrections = (b?.corrections ?? {}) as Record<string, string>;
@@ -168,6 +169,26 @@ export function registerWorkflowRoutes(): void {
       data.fact_corrections = corrections;
       data.stage = "brief";
       fs.writeFileSync(ONBOARD_JSON_PATH, JSON.stringify(data, null, 2));
+
+      // Trigger a new onboarding workflow to pick up from "brief" stage.
+      // The previous workflow already exited after awaiting_verification.
+      const userId = data.user_id ?? "";
+      const streamId = data.stream_id ?? "";
+      if (userId) {
+        const workflowId = `onboarding-${userId}-brief-${Date.now()}`;
+        try {
+          await dockerExec("temporal", [
+            "temporal", "workflow", "start",
+            "--type", "OnboardingPipelineWorkflow",
+            "--task-queue", "alfred-learn",
+            "--workflow-id", workflowId,
+            "--input", JSON.stringify({ user_id: userId, stream_id: streamId }),
+          ]);
+        } catch (e: any) {
+          console.error("Failed to trigger brief workflow:", e.message);
+        }
+      }
+
       sendJson(res, 200, { status: "corrections_saved", stage: "brief" });
     } catch {
       sendJson(res, 500, { error: "Failed to save corrections" });
