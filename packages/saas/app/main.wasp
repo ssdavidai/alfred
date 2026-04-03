@@ -52,6 +52,8 @@ app AlfredSaaS {
     },
     onAuthFailedRedirectTo: "/login",
     onAuthSucceededRedirectTo: "/dashboard",
+    onAfterSignup: import { onAfterSignup } from "@src/auth/hooks",
+    onAfterLogin: import { onAfterLogin } from "@src/auth/hooks",
   },
 
   db: {

@@ -342,6 +342,32 @@ export async function provisionInstanceJob(
       console.error("Failed to create system stream:", e.message);
     }
 
+    // Auto-create Gmail stream if user signed up with Google and has OAuth credentials
+    try {
+      const googleCred = await prisma.oAuthCredential.findUnique({
+        where: {
+          userId_provider: { userId: instance.userId, provider: "google" },
+        },
+      });
+      if (googleCred) {
+        await prisma.stream.upsert({
+          where: { userId_source: { userId: instance.userId, source: "gmail" } },
+          create: {
+            userId: instance.userId,
+            name: "Gmail",
+            type: "scheduled",
+            source: "gmail",
+            enabled: true,
+            config: {},
+          },
+          update: {},
+        });
+        console.info(`Auto-created Gmail stream for ${instance.customerName}`);
+      }
+    } catch (e: any) {
+      console.error("Failed to auto-create Gmail stream:", e.message);
+    }
+
     console.info(`Provisioning completed for ${instance.customerName}`);
     activeProvisionPids.delete(job.id);
   } catch (error: any) {
