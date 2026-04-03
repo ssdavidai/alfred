@@ -44,6 +44,7 @@ services:
         condition: service_healthy
     volumes:
       - /mnt/encrypted/openclaw:/home/node/.openclaw
+      - /mnt/encrypted/openclaw/qmd-cache:/home/node/.cache/qmd
       - /mnt/encrypted/vault:/home/node/.openclaw/workspace/vault
       - /mnt/encrypted/vault:/vault
       - /mnt/encrypted/alfred:/alfred-data
@@ -82,6 +83,7 @@ services:
         condition: service_healthy
     volumes:
       - /mnt/encrypted/openclaw-workers:/home/node/.openclaw
+      - /mnt/encrypted/openclaw-workers/qmd-cache:/home/node/.cache/qmd
       - /mnt/encrypted/vault:/home/node/.openclaw/workspace/vault
       - /mnt/encrypted/vault:/vault
       - /mnt/encrypted/alfred:/alfred-data
