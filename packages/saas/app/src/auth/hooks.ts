@@ -25,22 +25,24 @@ function extractGoogleTokens(oauth: any): {
   const tokens = oauth.tokens;
   if (!tokens) return null;
 
-  // Wasp wraps Arctic OAuth tokens — access the underlying data
+  // Access token fields — Wasp/Arctic may use plain properties or getter functions
   const accessToken =
-    tokens.accessToken?.() ?? tokens.access_token ?? tokens.accessToken;
+    (typeof tokens.accessToken === "function" ? tokens.accessToken() : tokens.accessToken) ??
+    tokens.access_token;
   if (!accessToken) return null;
 
   const refreshToken =
-    tokens.refreshToken?.() ?? tokens.refresh_token ?? tokens.refreshToken ?? null;
+    (typeof tokens.refreshToken === "function" ? tokens.refreshToken() : tokens.refreshToken) ??
+    tokens.refresh_token ?? null;
   const idToken =
-    tokens.idToken?.() ?? tokens.id_token ?? tokens.idToken ?? null;
+    (typeof tokens.idToken === "function" ? tokens.idToken() : tokens.idToken) ??
+    tokens.id_token ?? null;
 
   let expiresIn: number | null = null;
-  if (tokens.accessTokenExpiresAt) {
+  const expiresAtRaw = tokens.accessTokenExpiresAt;
+  if (expiresAtRaw) {
     const expiresAt =
-      typeof tokens.accessTokenExpiresAt === "function"
-        ? tokens.accessTokenExpiresAt()
-        : tokens.accessTokenExpiresAt;
+      typeof expiresAtRaw === "function" ? expiresAtRaw() : expiresAtRaw;
     if (expiresAt instanceof Date) {
       expiresIn = Math.floor((expiresAt.getTime() - Date.now()) / 1000);
     }
