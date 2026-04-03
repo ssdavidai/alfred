@@ -43,11 +43,13 @@ RUN pnpm build
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:build
 
-# Create a production-only node_modules (strip dev dependencies)
-RUN cp -a /openclaw-src /app && \
-    cd /app && \
-    rm -rf .git node_modules && \
-    pnpm install --frozen-lockfile --prod
+# Copy to /app, strip source code and git history (keep node_modules as-is)
+RUN mkdir -p /app && \
+    cp -a /openclaw-src/dist /app/dist && \
+    cp -a /openclaw-src/node_modules /app/node_modules && \
+    cp /openclaw-src/package.json /app/ && \
+    cp /openclaw-src/openclaw.mjs /app/ 2>/dev/null || true && \
+    if [ -d /openclaw-src/ui/dist ]; then cp -a /openclaw-src/ui/dist /app/ui-dist; fi
 
 # ============================================================
 # Stage 2: Runtime
