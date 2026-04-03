@@ -87,6 +87,36 @@ class HetznerClient {
     return res.json() as Promise<T>;
   }
 
+  // --- Server Type Availability ---
+
+  /**
+   * Check if a server type is available in a specific location.
+   * Uses GET /server_types?name={type} and checks if the location
+   * appears in the pricing list (empty = unavailable).
+   */
+  async isServerTypeAvailable(
+    serverType: string,
+    location: string
+  ): Promise<boolean> {
+    try {
+      const data = await this.request<{
+        server_types: Array<{
+          name: string;
+          prices: Array<{ location: string; price_monthly: { gross: string } }>;
+        }>;
+      }>("GET", `/server_types?name=${encodeURIComponent(serverType)}`);
+
+      const st = data.server_types?.[0];
+      if (!st) return false; // server type doesn't exist
+
+      // Check if the location appears in the pricing list
+      return st.prices.some((p) => p.location === location);
+    } catch {
+      // If API fails, assume available (let createServer fail with specific error)
+      return true;
+    }
+  }
+
   // --- Servers ---
 
   async createServer(params: {

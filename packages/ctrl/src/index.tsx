@@ -26,6 +26,7 @@ import {
   getEvents,
 } from "./db/queries.js";
 import { provision, destroy, updateImages, rollback, deployApi, repairTunnel } from "./infra/provisioner.js";
+import { getHetznerClient } from "./infra/hetzner.js";
 import { runHealthChecks } from "./monitoring/health.js";
 import { exec as sshExec } from "./infra/ssh.js";
 import { DEFAULTS } from "./data/constants.js";
@@ -78,6 +79,16 @@ program
       }
     }
     closeDb();
+  });
+
+program
+  .command("check-location <server_type> <location>")
+  .description("Check if a server type is available in a Hetzner location")
+  .action(async (serverType, location) => {
+    const hetzner = getHetznerClient();
+    const available = await hetzner.isServerTypeAvailable(serverType, location);
+    console.log(available ? "available" : "unavailable");
+    process.exit(available ? 0 : 1);
   });
 
 program

@@ -147,7 +147,46 @@ export async function provisionInstanceJob(
       console.info(`[provision:${instance.customerName}] No golden snapshot, full cloud-init`);
     }
 
-    for (const location of LOCATIONS) {
+    // Pre-check location availability to avoid wasting resources.
+    // Calls the ctrl CLI's check-location command which queries Hetzner API
+    // without creating any resources.
+    const availableLocations: string[] = [];
+    for (const loc of LOCATIONS) {
+      try {
+        const { stdout } = await execFileAsync(
+          process.execPath,
+          [
+            "--experimental-sqlite",
+            ALFRED_CTRL_PATH,
+            "check-location",
+            instance.serverType,
+            loc,
+          ],
+          {
+            timeout: 10_000,
+            env: { ...process.env, NODE_NO_WARNINGS: "1" },
+            cwd: process.env.ALFRED_CTRL_CWD || "/opt/alfred-saas/alfred-ctrl",
+          },
+        );
+        if (stdout.trim() === "available") {
+          availableLocations.push(loc);
+        } else {
+          logs.push(`Location ${loc}: unavailable for ${instance.serverType} (skipped)`);
+          console.info(`[provision:${instance.customerName}] Skipping ${loc} — unavailable`);
+        }
+      } catch {
+        // If check fails, include the location (let provisioner handle the error)
+        availableLocations.push(loc);
+      }
+    }
+
+    if (availableLocations.length === 0) {
+      throw new Error(`No Hetzner locations available for server type ${instance.serverType}`);
+    }
+
+    logs.push(`Available locations: ${availableLocations.join(", ")}`);
+
+    for (const location of availableLocations) {
       logs.push(`Trying location: ${location}`);
       console.info(
         `[provision:${instance.customerName}] Trying location: ${location}`,
