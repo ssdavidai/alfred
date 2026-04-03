@@ -70,6 +70,74 @@ def _write_onboard(path: str, data: dict) -> None:
         json.dump(data, f, indent=2)
 
 
+def _parse_json_with_key(raw: str, key: str) -> dict:
+    """Parse a JSON object containing a specific key from LLM output.
+
+    Uses brace-depth tracking instead of greedy regex. Handles markdown
+    code blocks and truncated JSON (brace repair).
+    """
+    if not raw or f'"{key}"' not in raw:
+        logger.error("onboarding_v3: no '%s' key found in LLM response (len=%d)", key, len(raw))
+        return {}
+
+    # Strip markdown code fences if present
+    text = raw
+    code_block = re.search(r'```(?:json)?\s*\n(.*?)\n```', raw, re.DOTALL)
+    if code_block and f'"{key}"' in code_block.group(1):
+        text = code_block.group(1).strip()
+
+    # Try direct parse first
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed.get(key), list):
+            return parsed
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    # Brace-depth tracking
+    pattern = r'\{[^{}]*"' + re.escape(key) + r'"\s*:\s*\['
+    for match in re.finditer(pattern, text):
+        start = match.start()
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    try:
+                        parsed = json.loads(candidate)
+                        if isinstance(parsed.get(key), list):
+                            return parsed
+                    except json.JSONDecodeError:
+                        continue
+                    break
+
+    # Brace repair for truncated JSON (may hit max_tokens)
+    try:
+        first = text.find("{")
+        if first >= 0:
+            fragment = text[first:]
+            ob = fragment.count("[") - fragment.count("]")
+            oc = fragment.count("{") - fragment.count("}")
+            repaired = fragment + ("]" * max(0, ob)) + ("}" * max(0, oc))
+            parsed = json.loads(repaired)
+            if isinstance(parsed.get(key), list):
+                logger.info("onboarding_v3: parsed %s via brace repair", key)
+                return parsed
+    except Exception:
+        pass
+
+    logger.error("onboarding_v3: failed to parse '%s' from LLM response (len=%d)", key, len(raw))
+    return {}
+
+
+def _parse_json_with_facts(raw: str) -> dict:
+    """Parse a JSON object containing both "facts" and "key_identity_facts"."""
+    return _parse_json_with_key(raw, "facts")
+
+
 # ---------------------------------------------------------------------------
 # Step 1: Fetch email metadata + snippets
 # ---------------------------------------------------------------------------
@@ -243,35 +311,10 @@ Be EXHAUSTIVE on the facts. This is about the WHOLE person — their family dinn
 
     raw = await _call_llm(prompt, max_tokens=16384)
 
-    # Parse JSON
-    facts = []
-    try:
-        # Find JSON in response
-        match = re.search(r'\{[\s\S]*"facts"[\s\S]*\}', raw)
-        if match:
-            parsed = json.loads(match.group())
-            facts = parsed.get("facts", [])
-    except json.JSONDecodeError:
-        # Try repair
-        try:
-            first = raw.find("{")
-            if first >= 0:
-                fragment = raw[first:]
-                ob = fragment.count("[") - fragment.count("]")
-                oc = fragment.count("{") - fragment.count("}")
-                repaired = fragment + ("]" * max(0, ob)) + ("}" * max(0, oc))
-                facts = json.loads(repaired).get("facts", [])
-        except Exception:
-            logger.error("onboarding_v3: failed to parse facts from Opus response")
-
-    # Extract key identity facts from the same response
-    key_identity_facts = []
-    try:
-        if match:
-            parsed = json.loads(match.group())
-            key_identity_facts = parsed.get("key_identity_facts", [])
-    except Exception:
-        pass
+    # Parse JSON — use brace-depth tracking (not greedy regex)
+    parsed = _parse_json_with_facts(raw)
+    facts = parsed.get("facts", [])
+    key_identity_facts = parsed.get("key_identity_facts", [])
 
     logger.info("onboarding_v3: extracted %d facts, %d key identity facts", len(facts), len(key_identity_facts))
 
@@ -345,22 +388,9 @@ Be insightful. Look for non-obvious connections. A great butler notices what the
 
     raw = await _call_llm(prompt, max_tokens=8192)
 
-    patterns = []
-    try:
-        match = re.search(r'\{[\s\S]*"patterns"[\s\S]*\}', raw)
-        if match:
-            patterns = json.loads(match.group()).get("patterns", [])
-    except Exception:
-        try:
-            first = raw.find("{")
-            if first >= 0:
-                fragment = raw[first:]
-                ob = fragment.count("[") - fragment.count("]")
-                oc = fragment.count("{") - fragment.count("}")
-                repaired = fragment + ("]" * max(0, ob)) + ("}" * max(0, oc))
-                patterns = json.loads(repaired).get("patterns", [])
-        except Exception:
-            logger.error("onboarding_v3: failed to parse patterns")
+    # Reuse the same robust parser (looks for "patterns" key)
+    parsed = _parse_json_with_key(raw, "patterns")
+    patterns = parsed.get("patterns", [])
 
     logger.info("onboarding_v3: discovered %d patterns", len(patterns))
 
