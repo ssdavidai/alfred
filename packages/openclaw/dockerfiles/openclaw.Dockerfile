@@ -43,13 +43,10 @@ RUN pnpm build
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:build
 
-# Copy to /app, strip source code and git history (keep node_modules as-is)
-RUN mkdir -p /app && \
-    cp -a /openclaw-src/dist /app/dist && \
-    cp -a /openclaw-src/node_modules /app/node_modules && \
-    cp /openclaw-src/package.json /app/ && \
-    cp /openclaw-src/openclaw.mjs /app/ 2>/dev/null || true && \
-    if [ -d /openclaw-src/ui/dist ]; then cp -a /openclaw-src/ui/dist /app/ui-dist; fi
+# Copy full app to /app, strip only .git (saves ~200MB)
+# OpenClaw needs various runtime files beyond just dist/ — safer to copy everything
+RUN cp -a /openclaw-src /app && \
+    rm -rf /app/.git /app/.github
 
 # ============================================================
 # Stage 2: Runtime
