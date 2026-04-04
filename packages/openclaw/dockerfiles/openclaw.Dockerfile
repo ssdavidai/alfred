@@ -51,9 +51,11 @@ RUN cp -a /openclaw-src /app && \
 # ============================================================
 # Stage 2: Runtime
 # ============================================================
-FROM node:22-slim
+# Use bookworm (not slim) — OpenClaw gateway needs native libs at runtime
+# that are missing from slim (libsqlite3, libstdc++ for node-llama-cpp, etc.)
+FROM node:22-bookworm
 
-# Runtime dependencies only: SQLite runtime lib, Python for alfred-vault CLI
+# Runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     sqlite3 \
     python3 \
