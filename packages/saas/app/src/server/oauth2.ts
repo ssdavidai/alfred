@@ -381,7 +381,11 @@ async function handleInternalTokenRequest(req: Request, res: Response) {
     res.json({ access_token: token, token_type: "Bearer" });
   } catch (err: any) {
     console.error(`[oauth2] Internal token request failed:`, err.message);
-    res.status(500).json({ error: err.message });
+    if (err.message?.includes('invalid_grant') || err.message?.includes('Token has been expired or revoked')) {
+      res.status(401).json({ error: 'token_revoked', message: 'OAuth token expired or revoked — user must re-authorize' });
+    } else {
+      res.status(500).json({ error: err.message });
+    }
   }
 }
 
