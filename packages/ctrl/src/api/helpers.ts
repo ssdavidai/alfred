@@ -51,12 +51,21 @@ export const ALFRED_CMD = ["alfred", "--config", "/app/data/config.yaml"];
 export const OPENCLAW_CMD = ["node", "openclaw.mjs"];
 
 export function parseJsonLines(raw: string): unknown[] {
+  const trimmed = raw.trim();
+  if (!trimmed) return [];
+  // Try parsing as a single JSON document first (handles pretty-printed arrays from Temporal CLI)
+  try {
+    const parsed = JSON.parse(trimmed);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    // Fall back to line-by-line JSONL parsing
+  }
   const results: unknown[] = [];
   for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
+    const t = line.trim();
+    if (!t) continue;
     try {
-      results.push(JSON.parse(trimmed));
+      results.push(JSON.parse(t));
     } catch {
       // skip non-JSON lines
     }

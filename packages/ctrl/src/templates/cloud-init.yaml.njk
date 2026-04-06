@@ -164,6 +164,7 @@ runcmd:
     WorkingDirectory=/opt/alfred/compose
     ExecStart=/usr/bin/docker compose pull --quiet
     ExecStartPost=/usr/bin/docker compose up -d --remove-orphans
+    ExecStartPost=/usr/bin/docker image prune -f
     User=deploy
     UPDATE_SVC
   - |

@@ -155,10 +155,28 @@ function appendEvent(streamId: string, event: StreamEvent): void {
 function readRecentEvents(streamId: string, limit: number = 50): StreamEvent[] {
   const filePath = getStreamEventsPath(streamId);
   try {
-    const content = fs.readFileSync(filePath, "utf-8");
-    const lines = content.trim().split("\n").filter(Boolean);
+    const stat = fs.statSync(filePath);
+    if (stat.size === 0) return [];
+
+    // Read only the tail of the file to avoid loading huge JSONL files into memory.
+    // ~100KB per event worst case, so limit*100KB should be enough.
+    const TAIL_BYTES = Math.min(stat.size, Math.max(limit * 100 * 1024, 1024 * 1024));
+    const buf = Buffer.alloc(TAIL_BYTES);
+    const fd = fs.openSync(filePath, "r");
+    try {
+      fs.readSync(fd, buf, 0, TAIL_BYTES, stat.size - TAIL_BYTES);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const tail = buf.toString("utf-8");
+    const lines = tail.split("\n").filter(Boolean);
+
+    // If we started mid-line (reading from middle of file), skip the first partial line
+    const startIdx = (TAIL_BYTES < stat.size && lines.length > 0) ? 1 : 0;
+    const validLines = lines.slice(startIdx);
+
     // Return most recent events first
-    return lines
+    return validLines
       .slice(-limit)
       .reverse()
       .map((line) => JSON.parse(line));
@@ -170,8 +188,29 @@ function readRecentEvents(streamId: string, limit: number = 50): StreamEvent[] {
 function hasSourceRef(streamId: string, sourceRef: string): boolean {
   const filePath = getStreamEventsPath(streamId);
   try {
-    const content = fs.readFileSync(filePath, "utf-8");
-    return content.includes(`"source_ref":"${sourceRef}"`);
+    const stat = fs.statSync(filePath);
+    if (stat.size === 0) return false;
+    const needle = `"source_ref":"${sourceRef}"`;
+    const needleBuf = Buffer.from(needle);
+
+    // Stream through the file in chunks to avoid loading it all into memory
+    const BUF_SIZE = 256 * 1024;
+    const buf = Buffer.alloc(BUF_SIZE + needleBuf.length);
+    const fd = fs.openSync(filePath, "r");
+    let carry = 0; // bytes carried from previous chunk (to handle needle spanning chunks)
+    try {
+      let bytesRead: number;
+      while ((bytesRead = fs.readSync(fd, buf, carry, BUF_SIZE, null)) > 0) {
+        const total = carry + bytesRead;
+        if (buf.subarray(0, total).includes(needleBuf)) return true;
+        // Carry the last (needle.length - 1) bytes to handle boundary matches
+        carry = Math.min(total, needleBuf.length - 1);
+        buf.copyWithin(0, total - carry, total);
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    return false;
   } catch {
     return false;
   }
@@ -191,57 +230,71 @@ function saveProcessedEvents(data: ProcessedEventsData): void {
 }
 
 function getAllEvents(statusFilter?: "unprocessed" | "processed" | "quarantined", limit?: number): StreamEvent[] {
-  const processedData = loadProcessedEvents();
-  const allEvents: StreamEvent[] = [];
+  const effectiveLimit = Math.min(limit && limit > 0 ? limit : 500, 500);
+  const processedData = statusFilter ? loadProcessedEvents() : null;
 
-  // Read all stream JSONL files
+  // Collect recent events from each stream by reading only the tail of each file.
+  // This avoids loading hundreds of MB of JSONL into memory at once.
+  const candidates: StreamEvent[] = [];
+
   const files = fs.readdirSync(STREAMS_DIR);
   for (const file of files) {
-    if (file.endsWith(".jsonl")) {
-      const filePath = path.join(STREAMS_DIR, file);
+    if (!file.endsWith(".jsonl")) continue;
+    const filePath = path.join(STREAMS_DIR, file);
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.size === 0) continue;
+
+      // Read only the tail of the file — enough for ~effectiveLimit events per stream.
+      // Gmail events can be 40-100KB each, so limit to 2MB tail per file to stay safe
+      // within the 512MB container memory limit.
+      const TAIL_BYTES = Math.min(stat.size, 2 * 1024 * 1024);
+      const buf = Buffer.alloc(TAIL_BYTES);
+      const fd = fs.openSync(filePath, "r");
       try {
-        const content = fs.readFileSync(filePath, "utf-8");
-        const lines = content.trim().split("\n").filter(Boolean);
-        for (const line of lines) {
-          const event = JSON.parse(line) as StreamEvent;
-          allEvents.push(event);
-        }
-      } catch {
-        // Skip files that can't be read
-        continue;
+        fs.readSync(fd, buf, 0, TAIL_BYTES, stat.size - TAIL_BYTES);
+      } finally {
+        fs.closeSync(fd);
       }
+      const tail = buf.toString("utf-8");
+      const lines = tail.split("\n").filter(Boolean);
+
+      // If we started mid-line (reading from middle of file), skip the first partial line
+      const startIdx = (TAIL_BYTES < stat.size && lines.length > 0) ? 1 : 0;
+
+      // Take only the last effectiveLimit lines from this stream
+      const recentLines = lines.slice(Math.max(startIdx, lines.length - effectiveLimit));
+
+      for (const line of recentLines) {
+        try {
+          const event = JSON.parse(line) as StreamEvent;
+
+          // Apply status filter inline to avoid accumulating unneeded events
+          if (statusFilter && processedData) {
+            const state = processedData.events[event.id];
+            if (statusFilter === "unprocessed" && state) continue;
+            if (statusFilter === "processed" && state?.status !== "processed") continue;
+            if (statusFilter === "quarantined" && state?.status !== "quarantined") continue;
+          }
+
+          candidates.push(event);
+        } catch {
+          // skip malformed lines
+        }
+      }
+    } catch {
+      continue;
     }
   }
 
-  // Filter by status if specified
-  let filtered = allEvents;
-  if (statusFilter) {
-    filtered = allEvents.filter((event) => {
-      const state = processedData.events[event.id];
-      if (statusFilter === "unprocessed") {
-        return !state;
-      } else if (statusFilter === "processed") {
-        return state?.status === "processed";
-      } else if (statusFilter === "quarantined") {
-        return state?.status === "quarantined";
-      }
-      return false;
-    });
-  }
-
   // Sort by received_at descending (most recent first)
-  filtered.sort((a, b) => {
+  candidates.sort((a, b) => {
     const dateA = new Date(a.received_at).getTime();
     const dateB = new Date(b.received_at).getTime();
     return dateB - dateA;
   });
 
-  // Apply limit if specified
-  if (limit && limit > 0) {
-    filtered = filtered.slice(0, limit);
-  }
-
-  return filtered;
+  return candidates.slice(0, effectiveLimit);
 }
 
 // ---------------------------------------------------------------------------
@@ -451,19 +504,42 @@ export function registerStreamRoutes(): void {
   addRoute("GET", "/api/v1/streams", async ({ res }) => {
     const streams = loadStreamsMeta();
 
-    // Compute accurate event counts + last_event_at from JSONL files
+    // Compute event counts + last_event_at without loading entire files into memory
     for (const stream of streams) {
       const filePath = getStreamEventsPath(stream.id);
       try {
-        const content = fs.readFileSync(filePath, "utf-8");
-        const lines = content.trim().split("\n").filter(Boolean);
-        stream.event_count = lines.length;
-        // Find the most recent received_at
-        if (lines.length > 0) {
-          try {
-            const last = JSON.parse(lines[lines.length - 1]);
-            stream.last_event_at = last.received_at || stream.last_event_at;
-          } catch { /* keep existing */ }
+        const stat = fs.statSync(filePath);
+        if (stat.size === 0) continue;
+
+        // Count lines by streaming through the file in chunks
+        let lineCount = 0;
+        const BUF_SIZE = 64 * 1024;
+        const buf = Buffer.alloc(BUF_SIZE);
+        const fd = fs.openSync(filePath, "r");
+        try {
+          let bytesRead: number;
+          while ((bytesRead = fs.readSync(fd, buf, 0, BUF_SIZE, null)) > 0) {
+            for (let i = 0; i < bytesRead; i++) {
+              if (buf[i] === 0x0a) lineCount++;
+            }
+          }
+          stream.event_count = lineCount;
+
+          // Read just the last line for last_event_at (read last 4KB)
+          const tailSize = Math.min(stat.size, 4096);
+          const tailBuf = Buffer.alloc(tailSize);
+          fs.readSync(fd, tailBuf, 0, tailSize, stat.size - tailSize);
+          const tail = tailBuf.toString("utf-8");
+          const lastNewline = tail.lastIndexOf("\n", tail.length - 2);
+          const lastLine = lastNewline >= 0 ? tail.slice(lastNewline + 1).trim() : tail.trim();
+          if (lastLine) {
+            try {
+              const last = JSON.parse(lastLine);
+              stream.last_event_at = last.received_at || stream.last_event_at;
+            } catch { /* keep existing */ }
+          }
+        } finally {
+          fs.closeSync(fd);
         }
       } catch {
         // No JSONL file = 0 events (keep existing count which may be 0)
