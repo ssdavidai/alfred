@@ -100,6 +100,7 @@ async function spawnAndPoll(
   // Poll until done or timeout
   const pollInterval = 5_000;
   const deadline = start + timeoutMs;
+  let lastAssistantText = "";
 
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, pollInterval));
@@ -111,8 +112,9 @@ async function spawnAndPoll(
 
     const details = histResult?.result?.details;
     const messages = details?.messages || [];
+    const status = details?.status || "";
 
-    // Look for the last assistant message with <final> tags
+    // Extract text from the last assistant message
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       if (msg.role !== "assistant") continue;
@@ -128,6 +130,8 @@ async function spawnAndPoll(
           .join("\n");
       }
 
+      if (text) lastAssistantText = text;
+
       // Check for <final> tag (subagent completion marker)
       const finalMatch = text.match(/<final>([\s\S]*?)<\/final>/);
       if (finalMatch) {
@@ -139,19 +143,55 @@ async function spawnAndPoll(
       }
 
       // Also accept if the session status indicates completion
-      if (details?.status === "completed" || details?.status === "done") {
+      if (status === "completed" || status === "done") {
         return {
           answer: text.trim(),
           sessionKey,
           durationMs: Date.now() - start,
         };
       }
+
+      break; // only inspect the last assistant message per poll
+    }
+
+    // Detect billing / LLM errors surfaced as session content or error status.
+    // OpenClaw surfaces billing errors (402) as assistant messages containing
+    // "billing error" and may set status to "error" or "failed".
+    const billingPattern = /billing error|out of credits|insufficient balance|402/i;
+
+    if (billingPattern.test(lastAssistantText)) {
+      return {
+        answer: `[error: The target tenant's LLM provider returned a billing error — their API key has run out of credits or has an insufficient balance. The remote Alfred cannot respond until credits are topped up.]`,
+        sessionKey,
+        durationMs: Date.now() - start,
+      };
+    }
+
+    // Catch error/failed session status early instead of polling until timeout
+    if (status === "error" || status === "failed") {
+      const detail = lastAssistantText
+        ? lastAssistantText.slice(0, 500)
+        : "no details available";
+      return {
+        answer: `[error: Remote session failed — ${detail}]`,
+        sessionKey,
+        durationMs: Date.now() - start,
+      };
     }
   }
 
-  // Timeout — return whatever we have
+  // Timeout — return whatever partial content we captured so the caller
+  // gets useful diagnostic info instead of a bare "timeout" message.
+  if (lastAssistantText) {
+    return {
+      answer: `[timeout — the remote Alfred did not produce a final answer within ${Math.round(timeoutMs / 1000)}s. Partial content: ${lastAssistantText.slice(0, 1000)}]`,
+      sessionKey,
+      durationMs: Date.now() - start,
+    };
+  }
+
   return {
-    answer: "[timeout — no final answer received]",
+    answer: `[timeout — the remote Alfred produced no response within ${Math.round(timeoutMs / 1000)}s. This may indicate the tenant's LLM provider is unavailable or out of credits.]`,
     sessionKey,
     durationMs: Date.now() - start,
   };
