@@ -1,6 +1,7 @@
 import { addRoute, matchRoute } from "../server.js";
 import type { ApiRequest } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
+import { crossTenantAsk } from "./crossTenant.js";
 
 // ---------------------------------------------------------------------------
 // Tool definitions — each maps to an existing ctrl API endpoint
@@ -84,7 +85,237 @@ const TOOLS: ToolDef[] = [
     },
     endpoint: "POST /api/v1/admin/containers/{service}/restart",
   },
+  // --- Vault extras ---
+  {
+    name: "vault_context",
+    description: "Get an overview of all vault records grouped by type",
+    parameters: {},
+    endpoint: "GET /api/v1/vault/context",
+  },
+  {
+    name: "vault_inbox",
+    description: "List files in the vault inbox",
+    parameters: {},
+    endpoint: "GET /api/v1/vault/inbox",
+  },
+  {
+    name: "vault_inbox_add",
+    description: "Add an item to the vault inbox for curator processing",
+    parameters: {
+      filename: { type: "string", required: true },
+      content: { type: "string", required: true },
+    },
+    endpoint: "POST /api/v1/vault/inbox",
+  },
+  {
+    name: "vault_delete",
+    description: "Delete a vault record by path",
+    parameters: { path: { type: "string", required: true } },
+    endpoint: "DELETE /api/v1/vault/records/{path}",
+  },
+  {
+    name: "vault_graph",
+    description: "Get the vault relationship graph",
+    parameters: {},
+    endpoint: "GET /api/v1/vault/graph",
+  },
+  {
+    name: "vault_schema",
+    description: "Get vault record types and their status enums",
+    parameters: {},
+    endpoint: "GET /api/v1/vault/schema",
+  },
+  // --- Learning & Intelligence ---
+  {
+    name: "learning_status",
+    description: "Get learning system status (observations, instincts, reflections counts)",
+    parameters: {},
+    endpoint: "GET /api/v1/learning/status",
+  },
+  {
+    name: "learning_observations",
+    description: "List observations (behavioral patterns extracted from data)",
+    parameters: {},
+    endpoint: "GET /api/v1/learning/observations",
+  },
+  {
+    name: "learning_instincts",
+    description: "List instincts (learned action patterns)",
+    parameters: {},
+    endpoint: "GET /api/v1/learning/instincts",
+  },
+  {
+    name: "learning_reflections",
+    description: "List reflections (synthesized insights)",
+    parameters: {},
+    endpoint: "GET /api/v1/learning/reflections",
+  },
+  {
+    name: "learning_sessions",
+    description: "List conversation sessions tracked by the learning system",
+    parameters: {},
+    endpoint: "GET /api/v1/learning/sessions",
+  },
+  {
+    name: "learning_queue",
+    description: "Get items waiting in the learning processing queue",
+    parameters: {},
+    endpoint: "GET /api/v1/learning/queue",
+  },
+  {
+    name: "learning_enable",
+    description: "Enable the learning system",
+    parameters: {},
+    endpoint: "POST /api/v1/learning/enable",
+  },
+  {
+    name: "learning_disable",
+    description: "Disable the learning system",
+    parameters: {},
+    endpoint: "POST /api/v1/learning/disable",
+  },
+  // --- Streams ---
+  {
+    name: "streams_list",
+    description: "List all configured data streams",
+    parameters: {},
+    endpoint: "GET /api/v1/streams",
+  },
+  {
+    name: "streams_events",
+    description: "List recent stream events",
+    parameters: {},
+    endpoint: "GET /api/v1/streams/events",
+  },
+  // --- Workflows (Temporal) ---
+  {
+    name: "workflows_list",
+    description: "List active Temporal workflows",
+    parameters: {},
+    endpoint: "GET /api/v1/workflows",
+  },
+  {
+    name: "workflows_get",
+    description: "Get details of a specific workflow",
+    parameters: { wfId: { type: "string", required: true } },
+    endpoint: "GET /api/v1/workflows/{wfId}",
+  },
+  {
+    name: "workflows_start",
+    description: "Start a new Temporal workflow",
+    parameters: {
+      workflowType: { type: "string", required: true },
+      workflowId: { type: "string", required: false },
+      input: { type: "object", required: false },
+    },
+    endpoint: "POST /api/v1/workflows",
+  },
+  {
+    name: "workflows_cancel",
+    description: "Cancel a running workflow",
+    parameters: { wfId: { type: "string", required: true } },
+    endpoint: "POST /api/v1/workflows/{wfId}/cancel",
+  },
+  // --- Schedules (Temporal cron) ---
+  {
+    name: "schedules_list",
+    description: "List all Temporal schedules",
+    parameters: {},
+    endpoint: "GET /api/v1/schedules",
+  },
+  {
+    name: "schedules_trigger",
+    description: "Manually trigger a schedule to run now",
+    parameters: { schId: { type: "string", required: true } },
+    endpoint: "POST /api/v1/schedules/{schId}/trigger",
+  },
+  {
+    name: "schedules_pause",
+    description: "Pause a schedule",
+    parameters: { schId: { type: "string", required: true } },
+    endpoint: "POST /api/v1/schedules/{schId}/pause",
+  },
+  {
+    name: "schedules_unpause",
+    description: "Unpause a schedule",
+    parameters: { schId: { type: "string", required: true } },
+    endpoint: "POST /api/v1/schedules/{schId}/unpause",
+  },
+  // --- Workers (vault daemons) ---
+  {
+    name: "workers_status",
+    description: "Get status of vault worker daemons (curator, janitor, distiller)",
+    parameters: {},
+    endpoint: "GET /api/v1/workers/status",
+  },
+  {
+    name: "workers_restart",
+    description: "Restart vault worker daemons",
+    parameters: {},
+    endpoint: "POST /api/v1/workers/restart",
+  },
+  // --- Admin ---
+  {
+    name: "admin_dashboard",
+    description: "Get a dashboard summary of the instance (health, containers, vault stats)",
+    parameters: {},
+    endpoint: "GET /api/v1/admin/dashboard",
+  },
+  {
+    name: "admin_health",
+    description: "Run a health check on the instance",
+    parameters: {},
+    endpoint: "GET /api/v1/admin/health",
+  },
+  {
+    name: "admin_containers",
+    description: "List all Docker containers and their status",
+    parameters: {},
+    endpoint: "GET /api/v1/admin/containers",
+  },
+  {
+    name: "admin_system_info",
+    description: "Get system information (CPU, memory, disk, uptime)",
+    parameters: {},
+    endpoint: "GET /api/v1/admin/system/info",
+  },
+  {
+    name: "admin_activity",
+    description: "Get recent activity log",
+    parameters: {},
+    endpoint: "GET /api/v1/admin/activity",
+  },
+  {
+    name: "admin_models",
+    description: "List available AI models",
+    parameters: {},
+    endpoint: "GET /api/v1/admin/models",
+  },
+  {
+    name: "container_logs",
+    description: "Get logs from a Docker container",
+    parameters: {
+      service: { type: "string", required: true, enum: ["alfred", "openclaw", "openclaw-workers", "ctrl-api", "alfred-learn", "temporal"] },
+    },
+    endpoint: "GET /api/v1/admin/containers/{service}/logs",
+  },
 ];
+
+// Cross-tenant tool — only registered when CROSS_TENANT_PEERS is configured
+if (process.env.CROSS_TENANT_PEERS) {
+  TOOLS.push({
+    name: "ask_alfred",
+    description:
+      "Ask another tenant's Alfred a question. The question is sent to the target tenant's Alfred agent, " +
+      "which processes it using that tenant's vault context and returns an answer. Admin-only.",
+    parameters: {
+      tenant: { type: "string", required: true },
+      prompt: { type: "string", required: true },
+      timeout_seconds: { type: "number", required: false },
+    },
+    endpoint: "__cross_tenant__", // special dispatch — not a real route
+  });
+}
 
 const TOOL_MAP = new Map(TOOLS.map((t) => [t.name, t]));
 
@@ -101,6 +332,16 @@ async function dispatchTool(
   args: Record<string, unknown>,
   ctx: ApiRequest,
 ): Promise<void> {
+  // Special dispatch for cross-tenant tool
+  if (tool.name === "ask_alfred") {
+    const tenant = String(args.tenant || "");
+    const prompt = String(args.prompt || "");
+    const timeout = Number(args.timeout_seconds) || 300;
+    const result = await crossTenantAsk(tenant, prompt, timeout);
+    sendJson(ctx.res, 200, result);
+    return;
+  }
+
   const [method, pathTemplate] = tool.endpoint.split(" ", 2);
 
   // Substitute {param} placeholders in the path with arg values
