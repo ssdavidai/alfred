@@ -88,11 +88,12 @@ async function spawnAndPoll(
   // truncate them if AGENTS.md is too large, so explicitly tell the subagent
   // to read them from disk.
   const enrichedTask = [
-    "IMPORTANT: Before answering, read these workspace files for context about your master:",
-    "1. Read USER.md (your master's identity, work, clients, location)",
-    "2. Read SOUL.md (how you should serve your master)",
-    "3. Read MEMORY.md (long-term curated facts)",
-    "Then answer the following question using the context from these files:",
+    "IMPORTANT: Before answering, you MUST read these files using the read tool with EXACT paths:",
+    "1. Read file at path: ~/.openclaw/workspace/USER.md",
+    "2. Read file at path: ~/.openclaw/workspace/SOUL.md",
+    "3. Read file at path: ~/.openclaw/workspace/MEMORY.md",
+    "These files contain your master's identity, preferences, clients, and curated facts.",
+    "Use the information from these files to answer this question:",
     "",
     prompt,
   ].join("\n");
