@@ -1,7 +1,7 @@
 import { addRoute, matchRoute } from "../server.js";
 import type { ApiRequest } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
-import { crossTenantAsk } from "./crossTenant.js";
+import { crossTenantAsk, crossTenantProxy } from "./crossTenant.js";
 
 // ---------------------------------------------------------------------------
 // Tool definitions — each maps to an existing ctrl API endpoint
@@ -315,6 +315,28 @@ if (process.env.CROSS_TENANT_PEERS) {
     },
     endpoint: "__cross_tenant__", // special dispatch — not a real route
   });
+
+  TOOLS.push({
+    name: "tenant_api",
+    description:
+      "Execute any ctrl-api operation on a peer tenant (IDDQD). Full CRUD access to vault, streams, " +
+      "workflows, schedules, learning, workers, admin, openclaw, and workspace. " +
+      "See the IDDQD API Reference in TOOLS.md for available endpoints.",
+    parameters: {
+      tenant: { type: "string", required: true },
+      method: { type: "string", required: true, enum: ["GET", "POST", "PATCH", "DELETE"] },
+      path: { type: "string", required: true },
+      body: { type: "object", required: false },
+    },
+    endpoint: "__cross_tenant_proxy__",
+  });
+
+  TOOLS.push({
+    name: "tenant_list",
+    description: "List available peer tenants that can be targeted with tenant_api or ask_alfred.",
+    parameters: {},
+    endpoint: "GET /api/v1/cross-tenant/peers",
+  });
 }
 
 const TOOL_MAP = new Map(TOOLS.map((t) => [t.name, t]));
@@ -332,12 +354,23 @@ async function dispatchTool(
   args: Record<string, unknown>,
   ctx: ApiRequest,
 ): Promise<void> {
-  // Special dispatch for cross-tenant tool
+  // Special dispatch for cross-tenant tools
   if (tool.name === "ask_alfred") {
     const tenant = String(args.tenant || "");
     const prompt = String(args.prompt || "");
     const timeout = Number(args.timeout_seconds) || 300;
     const result = await crossTenantAsk(tenant, prompt, timeout);
+    sendJson(ctx.res, 200, result);
+    return;
+  }
+
+  if (tool.name === "tenant_api") {
+    const result = await crossTenantProxy(
+      String(args.tenant || ""),
+      String(args.method || "GET"),
+      String(args.path || ""),
+      args.body,
+    );
     sendJson(ctx.res, 200, result);
     return;
   }

@@ -265,6 +265,56 @@ export async function crossTenantAsk(
 }
 
 // ---------------------------------------------------------------------------
+// Generic proxy to any peer tenant ctrl-api (IDDQD — admin only)
+// ---------------------------------------------------------------------------
+
+export async function crossTenantProxy(
+  tenantId: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; data: unknown; tenant: string }> {
+  const peers = loadPeers();
+  const peer = peers.get(tenantId);
+  if (!peer) {
+    const available = [...peers.keys()].join(", ") || "(none configured)";
+    throw new ValidationError(`Unknown tenant "${tenantId}". Available peers: ${available}`);
+  }
+
+  if (!path.startsWith("/api/v1/")) {
+    throw new ValidationError("Path must start with /api/v1/");
+  }
+
+  const host = peer.tailscaleHost || peer.tailscaleIp;
+  const proto = peer.tailscaleHost ? "https" : "http";
+  const url = `${proto}://${host}:3100${path}`;
+
+  const upperMethod = method.toUpperCase();
+  console.log(`[iddqd] ${upperMethod} ${path} → ${peer.label}`);
+
+  const fetchOptions: RequestInit = {
+    method: upperMethod,
+    headers: {
+      Authorization: `Bearer ${peer.apiKey}`,
+      "Content-Type": "application/json",
+    },
+    signal: AbortSignal.timeout(30_000),
+  };
+
+  if (body && upperMethod !== "GET" && upperMethod !== "HEAD") {
+    fetchOptions.body = JSON.stringify(body);
+  }
+
+  const resp = await fetch(url, fetchOptions);
+  const contentType = resp.headers.get("content-type") || "";
+  const data = contentType.includes("application/json")
+    ? await resp.json()
+    : await resp.text();
+
+  return { status: resp.status, data, tenant: peer.label };
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
