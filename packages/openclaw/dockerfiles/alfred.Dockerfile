@@ -7,7 +7,7 @@ RUN corepack enable
 
 WORKDIR /openclaw
 # Clone OpenClaw at pinned commit
-ARG OPENCLAW_SHA=f9b8499bf6472189750b738fe1db0c43e670df10
+ARG OPENCLAW_SHA=3e72c0352dde84a0bcb3aabafa99c2d4b12d1c46
 RUN git init . && \
     git fetch --depth 1 https://github.com/openclaw/openclaw.git ${OPENCLAW_SHA} && \
     git checkout FETCH_HEAD

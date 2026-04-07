@@ -27,8 +27,8 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Clone OpenClaw at known-good commit (HEAD broke with TS errors on 2026-03-27)
-ARG OPENCLAW_SHA=f9b8499bf6472189750b738fe1db0c43e670df10
+# Clone OpenClaw at known-good commit — v2026.4.5 (fixes Codex OAuth auth resolution)
+ARG OPENCLAW_SHA=3e72c0352dde84a0bcb3aabafa99c2d4b12d1c46
 RUN git init /openclaw-src && \
     git -C /openclaw-src fetch --depth 1 https://github.com/openclaw/openclaw.git ${OPENCLAW_SHA} && \
     git -C /openclaw-src checkout FETCH_HEAD
