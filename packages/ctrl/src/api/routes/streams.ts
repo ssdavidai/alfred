@@ -768,4 +768,74 @@ export function registerStreamRoutes(): void {
     saveProcessedEvents(processedData);
     sendJson(res, 200, { status: "quarantined", event_id: eventId });
   });
+
+  // POST /api/v1/streams/prune — remove processed events older than retention period from JSONL files.
+  // Keeps unprocessed events and recently-processed events (default 7 days).
+  // Also prunes stale entries from processed-events.json.
+  addRoute("POST", "/api/v1/streams/prune", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    const retentionDays = Math.max(Number(b?.retention_days) || 7, 1);
+    const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+
+    const processedData = loadProcessedEvents();
+    const processedIds = new Set<string>();
+    const staleIds: string[] = [];
+
+    // Build set of events that are processed AND older than retention
+    for (const [id, state] of Object.entries(processedData.events)) {
+      const processedAt = new Date(state.processed_at).getTime();
+      if (processedAt < cutoff) {
+        processedIds.add(id);
+        staleIds.push(id);
+      }
+    }
+
+    let totalRemoved = 0;
+    let totalKept = 0;
+    let bytesReclaimed = 0;
+
+    // Rewrite each JSONL file, keeping only unprocessed + recently-processed events
+    const files = fs.readdirSync(STREAMS_DIR);
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue;
+      const filePath = path.join(STREAMS_DIR, file);
+      const beforeSize = fs.statSync(filePath).size;
+
+      const content = fs.readFileSync(filePath, "utf-8");
+      const lines = content.split("\n").filter(Boolean);
+      const kept: string[] = [];
+
+      for (const line of lines) {
+        try {
+          const event = JSON.parse(line);
+          const eventId = event.id || event.source_ref || "";
+          if (processedIds.has(eventId)) {
+            totalRemoved++;
+          } else {
+            kept.push(line);
+            totalKept++;
+          }
+        } catch {
+          kept.push(line); // keep unparseable lines
+        }
+      }
+
+      fs.writeFileSync(filePath, kept.join("\n") + (kept.length ? "\n" : ""));
+      bytesReclaimed += beforeSize - fs.statSync(filePath).size;
+    }
+
+    // Prune stale entries from processed-events.json
+    for (const id of staleIds) {
+      delete processedData.events[id];
+    }
+    saveProcessedEvents(processedData);
+
+    sendJson(res, 200, {
+      pruned: totalRemoved,
+      kept: totalKept,
+      stale_tracking_removed: staleIds.length,
+      bytes_reclaimed: bytesReclaimed,
+      retention_days: retentionDays,
+    });
+  });
 }

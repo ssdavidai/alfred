@@ -24,27 +24,27 @@ INTERVAL_SCHEDULES = [
     {
         "id": "al-event-processor",
         "workflow": "EventProcessorWorkflow",
-        "interval": timedelta(minutes=2),
+        "interval": timedelta(minutes=15),
     },
     {
         "id": "al-session-tracker",
         "workflow": "SessionTrackerWorkflow",
-        "interval": timedelta(minutes=5),
+        "interval": timedelta(minutes=15),
     },
     {
         "id": "al-learning",
         "workflow": "LearningWorkflow",
-        "interval": timedelta(minutes=5),
+        "interval": timedelta(minutes=15),
     },
     {
         "id": "al-judgment",
         "workflow": "JudgmentWorkflow",
-        "interval": timedelta(minutes=2),
+        "interval": timedelta(minutes=15),
     },
     {
         "id": "al-task-runner",
         "workflow": "TaskRunnerWorkflow",
-        "interval": timedelta(minutes=2),
+        "interval": timedelta(minutes=15),
     },
 ]
 
