@@ -140,22 +140,34 @@ p = '$cfg'
 is_workers = 'workers' in p
 with open(p) as f: c = json.load(f)
 
-# (a) Per-agent config for stateless agents
+# (a) Per-agent config for stateless agents — remove heartbeats only
+# Note: compaction and session are NOT valid per-agent keys in OpenClaw.
+# Session maintenance is handled at the top-level (workers-only, below).
 agents = c.get('agents', {}).get('list', [])
 stateless = {'learn-clerk', 'vault-curator', 'vault-janitor', 'vault-distiller', 'vault-surveyor'}
 for a in agents:
     if a.get('id') in stateless:
-        a['compaction'] = {'mode': 'safeguard', 'memoryFlush': {'enabled': False}}
         a.pop('heartbeat', None)
-        a['session'] = {'maintenance': {'mode': 'enforce', 'pruneAfter': '1h', 'maxEntries': 10}}
+        a.pop('compaction', None)   # remove invalid per-agent key
+        a.pop('session', None)      # remove invalid per-agent key
 
-# (b) Disable memory plugin entirely on openclaw-workers
+# (b) Workers-only: disable memory plugin + aggressive session maintenance
 # Safe because workers only run stateless agents (clerk, curator, janitor, etc.)
 # The main openclaw instance keeps memory enabled for the user-facing Alfred.
 if is_workers:
     plugins = c.setdefault('plugins', {})
     slots = plugins.setdefault('slots', {})
     slots['memory'] = 'none'
+    c['session'] = {
+        'maintenance': {
+            'mode': 'enforce',
+            'pruneAfter': '30m',
+            'maxEntries': 20,
+            'rotateBytes': '1mb',
+            'maxDiskBytes': '50mb',
+            'highWaterBytes': '10mb',
+        }
+    }
 
 with open(p, 'w') as f: json.dump(c, f, indent=2)
 print(f'[init] Configured stateless agents + memory plugin in {p}')
