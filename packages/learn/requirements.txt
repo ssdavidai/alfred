@@ -5,6 +5,7 @@ faster-whisper==1.1.0
 requests>=2.31.0
 
 # Behavioral profiler (#283)
+setuptools>=69.0  # required by tsfresh (pkg_resources)
 pandas==2.2.3
 numpy==1.26.4
 scikit-learn==1.5.2
