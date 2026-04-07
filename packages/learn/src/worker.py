@@ -79,6 +79,7 @@ from src.activities.vault import (
     fetch_active_instincts,
     fetch_distiller_learnings,
     fetch_janitor_flags,
+    fetch_stream_log,
     fetch_unassigned_records,
     fetch_unprocessed_observations,
     mark_observations_processed,
@@ -152,6 +153,9 @@ from src.activities.omi_audio import (
     scan_audio_buffer,
     transcribe_audio_group,
 )
+
+# Activities — stream log
+from src.activities.stream_log import append_to_stream_log
 
 # Activities — braindump
 from src.activities.braindump import detect_braindump, extract_braindump
@@ -243,6 +247,7 @@ ALL_ACTIVITIES = [
     fetch_active_instincts,
     fetch_distiller_learnings,
     fetch_janitor_flags,
+    fetch_stream_log,
     fetch_unassigned_records,
     fetch_unprocessed_observations,
     mark_observations_processed,
@@ -302,6 +307,8 @@ ALL_ACTIVITIES = [
     suggest_automations,
     write_first_brief,
     write_facts_to_vault,
+    # Stream log
+    append_to_stream_log,
     # Braindump
     detect_braindump,
     extract_braindump,

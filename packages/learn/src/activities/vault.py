@@ -135,6 +135,24 @@ async def drop_raw_event_to_inbox(event: dict[str, Any]) -> str:
 
 
 @activity.defn
+async def fetch_stream_log(date_str: str = "") -> str:
+    """Fetch today's stream log content. Returns empty string if no log exists."""
+    config = load_config()
+    client = VaultClient(config)
+    try:
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        log_path = f"memory/stream-log-{date_str}.md"
+        try:
+            record = await client.read_record(log_path)
+            return record.get("content", "")
+        except Exception:
+            return ""
+    finally:
+        await client.close()
+
+
+@activity.defn
 async def write_vault_record(classification: dict[str, Any]) -> str:
     """Legacy: Drop a classified event into the vault inbox.
 

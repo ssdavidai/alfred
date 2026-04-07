@@ -1,8 +1,9 @@
-"""Workflow 1: Event Processor — reads unprocessed stream events, drops raw content to inbox.
+"""Workflow 1: Event Processor — reads unprocessed stream events, tiers them.
 
-Simplified flow (2026-04-07): fetch → drop raw to inbox → mark processed.
-The curator's 4-stage pipeline handles all classification, entity resolution,
-interlinking, and enrichment. No LLM calls happen here.
+Three-tier flow:
+- Tier 3: discard (empty/meaningless)
+- Tier 2: quick-log to stream log (automated/low-value, no LLM)
+- Tier 1: full processing (drop raw to inbox for curator's 4-stage pipeline)
 """
 
 from __future__ import annotations
@@ -14,6 +15,9 @@ from typing import Any
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
+    from src.activities.classify import extract_metadata
+    from src.activities.noise import extract_log_line, is_tier2, is_tier3
+    from src.activities.stream_log import append_to_stream_log
     from src.activities.streams import (
         fetch_unprocessed_events,
         mark_event_processed,
@@ -26,6 +30,8 @@ class ProcessorResult:
     processed: int = 0
     paths: list[str] = field(default_factory=list)
     media_triggered: int = 0
+    tier2_logged: int = 0
+    tier3_discarded: int = 0
 
 
 @workflow.defn(name="EventProcessorWorkflow")
@@ -40,6 +46,8 @@ class EventProcessorWorkflow:
 
         results: list[str] = []
         media_count = 0
+        tier2_count = 0
+        tier3_count = 0
 
         for event in events[:20]:
             # Media streams still get routed to their dedicated workflow
@@ -57,17 +65,49 @@ class EventProcessorWorkflow:
                 )
                 continue
 
-            # 2. Drop raw content to inbox as markdown — curator handles the rest
+            # Tier 3: discard (empty/meaningless)
+            if is_tier3(event):
+                await workflow.execute_activity(
+                    mark_event_processed,
+                    args=[event.get("id", ""), "noise-discarded", "tier3"],
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
+                tier3_count += 1
+                continue
+
+            # Extract metadata for tiering decision
+            metadata: dict[str, Any] = await workflow.execute_activity(
+                extract_metadata,
+                args=[event],
+                start_to_close_timeout=timedelta(seconds=15),
+            )
+
+            # Tier 2: quick log (no LLM, no inbox)
+            if is_tier2(event, metadata):
+                log_line = extract_log_line(event)
+                await workflow.execute_activity(
+                    append_to_stream_log,
+                    args=[event.get("stream_type", "unknown"), log_line],
+                    start_to_close_timeout=timedelta(seconds=15),
+                )
+                await workflow.execute_activity(
+                    mark_event_processed,
+                    args=[event.get("id", ""), "stream-log", "tier2"],
+                    start_to_close_timeout=timedelta(seconds=10),
+                )
+                tier2_count += 1
+                continue
+
+            # Tier 1: full processing — drop raw to inbox for curator
             inbox_path: str = await workflow.execute_activity(
                 drop_raw_event_to_inbox,
                 args=[event],
                 start_to_close_timeout=timedelta(seconds=30),
             )
 
-            # 3. Mark processed
             await workflow.execute_activity(
                 mark_event_processed,
-                args=[event.get("id", ""), inbox_path, event.get("stream_type", "")],
+                args=[event.get("id", ""), inbox_path, "tier1"],
                 start_to_close_timeout=timedelta(seconds=10),
             )
 
@@ -77,4 +117,6 @@ class EventProcessorWorkflow:
             processed=len(results),
             paths=results,
             media_triggered=media_count,
+            tier2_logged=tier2_count,
+            tier3_discarded=tier3_count,
         )

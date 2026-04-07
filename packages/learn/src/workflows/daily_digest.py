@@ -14,7 +14,7 @@ from temporalio import workflow
 with workflow.unsafe.imports_passed_through():
     from src.activities.clerk import clerk_daily_digest
     from src.activities.notify import notify_digest_ready, notify_eod_prompt
-    from src.activities.vault import collect_daily_activity, write_digest_record
+    from src.activities.vault import collect_daily_activity, fetch_stream_log, write_digest_record
 
 
 @dataclass
@@ -32,6 +32,15 @@ class DailyDigestWorkflow:
             collect_daily_activity,
             start_to_close_timeout=timedelta(seconds=30),
         )
+
+        # 1b. Fetch today's stream log (tier 2 events)
+        stream_log: str = await workflow.execute_activity(
+            fetch_stream_log,
+            args=[""],
+            start_to_close_timeout=timedelta(seconds=15),
+        )
+        if stream_log:
+            activity_data["stream_log"] = stream_log
 
         # 2. Ask Clerk to summarize
         digest = await workflow.execute_activity(
