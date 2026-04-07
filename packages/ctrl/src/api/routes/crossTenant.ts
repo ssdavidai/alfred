@@ -84,9 +84,22 @@ async function spawnAndPoll(
 ): Promise<{ answer: string; sessionKey: string; durationMs: number }> {
   const start = Date.now();
 
+  // Prepend instructions to read workspace context files — the bootstrap may
+  // truncate them if AGENTS.md is too large, so explicitly tell the subagent
+  // to read them from disk.
+  const enrichedTask = [
+    "IMPORTANT: Before answering, read these workspace files for context about your master:",
+    "1. Read USER.md (your master's identity, work, clients, location)",
+    "2. Read SOUL.md (how you should serve your master)",
+    "3. Read MEMORY.md (long-term curated facts)",
+    "Then answer the following question using the context from these files:",
+    "",
+    prompt,
+  ].join("\n");
+
   // Spawn
   const spawnResult = (await gatewayInvoke("sessions_spawn", {
-    task: prompt,
+    task: enrichedTask,
     agentId: "main",
     mode: "run",
     runTimeoutSeconds: Math.floor(timeoutMs / 1000),
