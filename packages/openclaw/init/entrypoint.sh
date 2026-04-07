@@ -157,7 +157,27 @@ else:
     fi
 done
 
-# --- 8. Fix permissions ---
+# --- 8. Reset stateless agent sessions (prevent QMD/transcript bloat) ---
+# Stateless agents accumulate session history and QMD data that grows unbounded.
+# On every init (container restart), wipe their session transcripts and QMD
+# databases. This is safe because these agents don't need conversation memory.
+for agent in learn-clerk vault-curator vault-janitor vault-distiller vault-surveyor; do
+    AGENT_DIR="/openclaw-state/agents/$agent"
+    if [ -d "$AGENT_DIR" ]; then
+        rm -f "$AGENT_DIR"/qmd/xdg-cache/qmd/index.sqlite* 2>/dev/null
+        rm -f "$AGENT_DIR"/sessions/*.jsonl 2>/dev/null
+        echo "[init] Reset session state for $agent"
+    fi
+    # Same for openclaw-workers state
+    WORKER_DIR="/openclaw-workers-state/agents/$agent"
+    if [ -d "$WORKER_DIR" ]; then
+        rm -f "$WORKER_DIR"/qmd/xdg-cache/qmd/index.sqlite* 2>/dev/null
+        rm -f "$WORKER_DIR"/sessions/*.jsonl 2>/dev/null
+        echo "[init] Reset session state for $agent (workers)"
+    fi
+done
+
+# --- 9. Fix permissions ---
 # OpenClaw runs as uid 1000 (node user).  The alfred container runs as root
 # with cap_add: DAC_OVERRIDE so it can access uid-1000-owned files.
 chown -R 1000:1000 /openclaw-state 2>/dev/null || true
