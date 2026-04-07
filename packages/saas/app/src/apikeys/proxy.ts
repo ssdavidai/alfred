@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import express from "express";
 import type { MiddlewareConfigFn } from "wasp/server";
 import { prisma } from "wasp/server";
 import { decryptApiKey } from "../server/tenantProxy";
@@ -118,11 +119,15 @@ export const userApiProxy = async (req: any, res: any, _context: any) => {
   }
 };
 
-// Public API route: /api/v1/vault/context → tenant /api/v1/vault/context (pass-through)
-export const v1ApiProxy = async (req: any, res: any, _context: any) => {
+// Public API route: /api/v1/* → tenant /api/v1/* (pass-through)
+// Uses an Express Router with its own json() middleware because Wasp's
+// middleware config only applies to Wasp-defined api routes, not app.use().
+// Without this, POST request bodies are undefined and never forwarded.
+const v1Router = express.Router();
+v1Router.use(express.json({ limit: "50mb" }));
+v1Router.all("*", async (req: any, res: any) => {
   try {
     const fullPath: string = req.originalUrl || req.url || "";
-    // Pass the path through directly — it's already /api/v1/...
     const tenantPath = fullPath.split("?")[0];
     return await authenticateAndProxy(req, res, tenantPath);
   } catch (error: any) {
@@ -132,7 +137,8 @@ export const v1ApiProxy = async (req: any, res: any, _context: any) => {
     console.error("API proxy error:", error);
     return res.status(502).json({ error: `Failed to reach tenant: ${error.message}` });
   }
-};
+});
+export const v1ApiProxy = v1Router;
 
 function buildTenantUrl(
   hostname: string,
