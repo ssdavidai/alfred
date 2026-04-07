@@ -123,7 +123,41 @@ else:
     done
 fi
 
-# --- 7. Fix permissions ---
+# --- 7. Configure stateless agents (disable QMD bloat) ---
+# Agents that process items independently (clerk, curator, janitor, distiller,
+# surveyor) don't need conversation memory. Without this, their QMD databases
+# grow unbounded (~20MB / 400K tokens), causing a compaction death loop that
+# burns $30-40/week in wasted input tokens. Ref: post-mortem 2026-04-07.
+for cfg in /openclaw-state/openclaw.json /openclaw-workers-state/openclaw.json; do
+    if [[ -f "$cfg" ]]; then
+        python3 -c "
+import json, sys
+p = '$cfg'
+with open(p) as f: c = json.load(f)
+agents = c.get('agents', {}).get('list', [])
+stateless = {'learn-clerk', 'vault-curator', 'vault-janitor', 'vault-distiller', 'vault-surveyor'}
+changed = False
+for a in agents:
+    if a.get('id') in stateless:
+        needs_fix = (
+            a.get('compaction', {}).get('memoryFlush', {}).get('enabled') is not False
+            or 'session' not in a
+        )
+        if needs_fix:
+            a['compaction'] = {'mode': 'safeguard', 'memoryFlush': {'enabled': False}}
+            a.pop('heartbeat', None)
+            a['session'] = {'maintenance': {'mode': 'enforce', 'pruneAfter': '1h', 'maxEntries': 10}}
+            changed = True
+if changed:
+    with open(p, 'w') as f: json.dump(c, f, indent=2)
+    print(f'[init] Configured stateless agents in {p}')
+else:
+    print(f'[init] Stateless agents already configured in {p}')
+" 2>/dev/null || true
+    fi
+done
+
+# --- 8. Fix permissions ---
 # OpenClaw runs as uid 1000 (node user).  The alfred container runs as root
 # with cap_add: DAC_OVERRIDE so it can access uid-1000-owned files.
 chown -R 1000:1000 /openclaw-state 2>/dev/null || true
