@@ -268,10 +268,25 @@ async def extract_facts_opus(onboard_path: str) -> dict[str, Any]:
 
     email_text = "\n".join(lines)
 
+    # Inject behavioral profiler data if available (#283)
+    profiler_context = ""
+    profile = onboard.get("profile", {})
+    if profile:
+        summary = profile.get("summary", {})
+        profiler_context = f"""
+
+BEHAVIORAL ANALYSIS (pre-computed from email metadata — use as ground truth):
+- Inner circle contacts: {', '.join(summary.get('inner_circle', [])[:10])}
+- Communication style: {summary.get('communication_style', 'unknown')}
+- Work hours estimate: {summary.get('work_hours', 'unknown')}
+- Top subscriptions/services: {', '.join(summary.get('top_subscriptions', [])[:10])}
+- Key behavioral patterns: {'; '.join(summary.get('key_patterns', [])[:5])}
+"""
+
     activity.heartbeat("Sending to Opus for fact extraction")
 
     prompt = f"""You are Alfred, a personal AI butler. You've been given access to your new master's email history — {len(emails)} emails from the last 100 days. Your task: extract EVERY fact about this person's WHOLE LIFE — not just their work.
-
+{profiler_context}
 EMAIL HISTORY ({len(emails)} emails):
 {email_text}
 
@@ -352,10 +367,30 @@ async def discover_patterns_opus(onboard_path: str) -> dict[str, Any]:
 
     domain_summary = "\n".join(f"- {d}: {c} emails" for d, c in top_domains[:20])
 
+    # Inject behavioral profiler data if available (#283)
+    profiler_context = ""
+    profile = onboard.get("profile", {})
+    if profile:
+        rhythm = profile.get("rhythm", {})
+        tiers = profile.get("sender_tiers", {})
+        summary = profile.get("summary", {})
+        profiler_context = f"""
+
+BEHAVIORAL PROFILER DATA (ML-extracted from email metadata — high confidence):
+- Peak work hours: {rhythm.get('peak_hours', [])}
+- Work window: {summary.get('work_hours', 'unknown')}
+- Weekend activity ratio: {rhythm.get('weekend_activity_ratio', 'unknown')}
+- Regularity score: {rhythm.get('regularity_score', 'unknown')} (0=chaotic, 1=clockwork)
+- Communication style: {summary.get('communication_style', 'unknown')}
+- Sender tiers: inner_circle={len(tiers.get('inner_circle',[]))}, regular={len(tiers.get('regular',[]))}, noise={len(tiers.get('noise',[]))}
+- Detected routines: {len(rhythm.get('detected_routines', []))}
+- Key patterns: {'; '.join(summary.get('key_patterns', [])[:5])}
+"""
+
     activity.heartbeat("Sending to Opus for pattern discovery")
 
     prompt = f"""You are Alfred, a personal AI butler. You've extracted {len(facts)} facts from your new master's {len(emails)} emails. Now discover PATTERNS in their life.
-
+{profiler_context}
 FACTS SUMMARY:
 {fact_summary}
 

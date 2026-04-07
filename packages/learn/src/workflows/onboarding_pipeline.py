@@ -38,17 +38,26 @@ with workflow.unsafe.imports_passed_through():
     )
     from src.activities.pull import backfill_gmail_as_events
     from src.activities.batch_processor import process_stream_batch
+    from src.activities.profiler import run_behavioral_profiler
+    from src.activities.packs import (
+        generate_stream_pack,
+        generate_matter_pack,
+        generate_instinct_pack,
+        generate_errand_pack,
+    )
 
 ONBOARD_PATH = "/alfred-data/onboard.json"
 
 STAGE_ORDER = [
     "metadata",              # Stage 1: fetch email metadata + snippets
-    "facts",                 # Stage 2: extract facts (Opus)
-    "patterns",              # Stage 3: discover patterns (Opus)
-    "personalize",           # Stage 4: USER.md + SOUL.md + MEMORY.md + TOOLS.md (Opus)
-    "awaiting_verification", # Stage 4.5: wait for user to verify key facts
-    "brief",                 # Stage 5: First Brief (Opus) — with corrections
-    "done",                  # Stage 6: complete — show brief, start background vault build
+    "profiler",              # Stage 2: behavioral profiler (pure Python/ML, no LLM)
+    "facts",                 # Stage 3: extract facts (Opus) — enhanced with profiler data
+    "patterns",              # Stage 4: discover patterns (Opus) — enhanced with profiler data
+    "personalize",           # Stage 5: USER.md + SOUL.md + MEMORY.md + TOOLS.md (Opus)
+    "awaiting_verification", # Stage 5.5: wait for user to verify key facts
+    "brief",                 # Stage 6: First Brief (Opus) — with corrections
+    "packs",                 # Stage 7: generate four packs from profiler data
+    "done",                  # Stage 8: complete — show brief, start background vault build
 ]
 
 
@@ -118,7 +127,25 @@ class OnboardingPipelineWorkflow:
             )
 
         # -----------------------------------------------------------------
-        # Stage 2: Extract facts (1 Opus call)
+        # Stage 2: Behavioral profiler (pure Python/ML, no LLM)
+        # -----------------------------------------------------------------
+        if resume_idx <= _stage_index("profiler"):
+            await workflow.execute_activity(
+                update_onboard_stage,
+                args=[onboard_path, "profiler"],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+
+            await workflow.execute_activity(
+                run_behavioral_profiler,
+                args=[onboard_path],
+                start_to_close_timeout=timedelta(minutes=10),
+                heartbeat_timeout=timedelta(seconds=120),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+
+        # -----------------------------------------------------------------
+        # Stage 3: Extract facts (1 Opus call) — enhanced with profiler data
         # -----------------------------------------------------------------
         if resume_idx <= _stage_index("facts"):
             await workflow.execute_activity(
@@ -208,6 +235,42 @@ class OnboardingPipelineWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
             brief_path = "event/First Brief.md"
+
+        # -----------------------------------------------------------------
+        # Stage 7: Generate four packs from profiler data
+        # -----------------------------------------------------------------
+        if resume_idx <= _stage_index("packs"):
+            await workflow.execute_activity(
+                update_onboard_stage,
+                args=[onboard_path, "packs"],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+
+            # Run pack generators sequentially
+            await workflow.execute_activity(
+                generate_matter_pack,
+                args=[onboard_path],
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            await workflow.execute_activity(
+                generate_instinct_pack,
+                args=[onboard_path],
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            await workflow.execute_activity(
+                generate_errand_pack,
+                args=[onboard_path],
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            await workflow.execute_activity(
+                generate_stream_pack,
+                args=[onboard_path],
+                start_to_close_timeout=timedelta(minutes=5),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
 
         # -----------------------------------------------------------------
         # Mark done BEFORE background processing

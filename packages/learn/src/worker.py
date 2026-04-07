@@ -160,6 +160,15 @@ from src.activities.omi_audio import (
 from src.activities.stream_log import append_to_stream_log
 from src.activities.maintenance import run_janitor_scan_and_fix, run_distiller_batch
 
+# Activities — behavioral profiler + packs (#283, #284)
+from src.activities.profiler import run_behavioral_profiler
+from src.activities.packs import (
+    generate_stream_pack,
+    generate_matter_pack,
+    generate_instinct_pack,
+    generate_errand_pack,
+)
+
 # Activities — braindump
 from src.activities.braindump import detect_braindump, extract_braindump
 
@@ -317,6 +326,12 @@ ALL_ACTIVITIES = [
     # Nightly maintenance
     run_janitor_scan_and_fix,
     run_distiller_batch,
+    # Behavioral profiler + packs
+    run_behavioral_profiler,
+    generate_stream_pack,
+    generate_matter_pack,
+    generate_instinct_pack,
+    generate_errand_pack,
     # Braindump
     detect_braindump,
     extract_braindump,
