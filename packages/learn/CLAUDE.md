@@ -31,7 +31,7 @@ Alfred Learn is a Python + Temporal Docker container that provides Alfred Black'
 `alfred-learn` — all 6 workflows use this queue
 
 ## 6 Workflows
-1. EventProcessorWorkflow — schedule: every 2 min
+1. EventProcessorWorkflow — schedule: every 2 min. Simplified: fetch events → drop raw content to inbox → mark processed. No LLM classification — the curator handles everything.
 2. SessionTrackerWorkflow — schedule: every 5 min
 3. DailyDigestWorkflow — schedule: daily 6pm
 4. LearningWorkflow — schedule: every 5 min

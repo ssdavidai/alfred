@@ -1,8 +1,8 @@
-"""Workflow 1: Event Processor — reads unprocessed stream events, classifies, writes vault records.
+"""Workflow 1: Event Processor — reads unprocessed stream events, drops raw content to inbox.
 
-Enhancements:
-- Detects stream_type=='media' and triggers MediaIngestionWorkflow
-- Detects braindumps and triggers deep extraction
+Simplified flow (2026-04-07): fetch → drop raw to inbox → mark processed.
+The curator's 4-stage pipeline handles all classification, entity resolution,
+interlinking, and enrichment. No LLM calls happen here.
 """
 
 from __future__ import annotations
@@ -12,19 +12,13 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
-from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from src.activities.braindump import detect_braindump, extract_braindump
-    from src.activities.classify import classify_event, extract_metadata
-    from src.activities.judge import attempt_judgment
     from src.activities.streams import (
         fetch_unprocessed_events,
         mark_event_processed,
-        quarantine_event,
     )
-    from src.activities.vault import write_vault_record
-    from src.validators.frontmatter import validate_classification
+    from src.activities.vault import drop_raw_event_to_inbox
 
 
 @dataclass
@@ -32,7 +26,6 @@ class ProcessorResult:
     processed: int = 0
     paths: list[str] = field(default_factory=list)
     media_triggered: int = 0
-    braindumps_extracted: int = 0
 
 
 @workflow.defn(name="EventProcessorWorkflow")
@@ -47,10 +40,9 @@ class EventProcessorWorkflow:
 
         results: list[str] = []
         media_count = 0
-        braindump_count = 0
 
         for event in events[:20]:
-            # Check for media stream — trigger MediaIngestionWorkflow
+            # Media streams still get routed to their dedicated workflow
             if event.get("stream_type") == "media":
                 await workflow.execute_child_workflow(
                     "MediaIngestionWorkflow",
@@ -58,126 +50,31 @@ class EventProcessorWorkflow:
                     id=f"media-{event.get('id', '')[:16]}",
                 )
                 media_count += 1
-                # Mark as processed
                 await workflow.execute_activity(
                     mark_event_processed,
-                    args=[event.get("id", ""), f"media-ingestion", "media"],
+                    args=[event.get("id", ""), "media-ingestion", "media"],
                     start_to_close_timeout=timedelta(seconds=10),
                 )
                 continue
 
-            # 2. Extract metadata (Python — deterministic)
-            metadata = await workflow.execute_activity(
-                extract_metadata,
+            # 2. Drop raw content to inbox as markdown — curator handles the rest
+            inbox_path: str = await workflow.execute_activity(
+                drop_raw_event_to_inbox,
                 args=[event],
-                start_to_close_timeout=timedelta(seconds=10),
-            )
-
-            # 3. Classify via Clerk + 4. Validate (retry once before quarantine)
-            classification = None
-            validated = None
-            for attempt in range(2):
-                classification = await workflow.execute_activity(
-                    classify_event,
-                    args=[event, metadata],
-                    start_to_close_timeout=timedelta(seconds=300),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-
-                validated = await workflow.execute_activity(
-                    validate_classification,
-                    args=[classification],
-                    start_to_close_timeout=timedelta(seconds=10),
-                )
-
-                if validated.valid:
-                    break
-
-            if not validated.valid:
-                # Quarantine on second validation failure
-                await workflow.execute_activity(
-                    quarantine_event,
-                    args=[event, validated.errors],
-                    start_to_close_timeout=timedelta(seconds=10),
-                )
-                continue
-
-            # 4b. Check for braindump — deep extraction
-            is_braindump = await workflow.execute_activity(
-                detect_braindump,
-                args=[event, metadata],
-                start_to_close_timeout=timedelta(seconds=10),
-            )
-
-            if is_braindump or classification.get("type") == "braindump":
-                braindump_results = await workflow.execute_activity(
-                    extract_braindump,
-                    args=[event, metadata, classification],
-                    start_to_close_timeout=timedelta(seconds=120),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
-                )
-                braindump_count += 1
-                for br in braindump_results:
-                    results.append(br.get("path", ""))
-
-                # Mark processed
-                await workflow.execute_activity(
-                    mark_event_processed,
-                    args=[event.get("id", ""), "braindump-extraction", "braindump"],
-                    start_to_close_timeout=timedelta(seconds=10),
-                )
-                continue
-
-            # 5. Drop to inbox for curator processing
-            # Inject raw text so the curator has full content to work with
-            raw = event.get("raw", {})
-            raw_text = ""
-            if isinstance(raw, dict):
-                # Email: subject + snippet/body
-                parts = []
-                for key in ("subject", "snippet", "body", "text", "content"):
-                    if key in raw and raw[key]:
-                        parts.append(str(raw[key]))
-                # Conversation messages
-                for msg in raw.get("messages", []):
-                    if isinstance(msg, dict):
-                        role = msg.get("role", "")
-                        content = msg.get("content", "")
-                        parts.append(f"{role}: {content}" if role else str(content))
-                    elif isinstance(msg, str):
-                        parts.append(msg)
-                raw_text = "\n\n".join(parts)
-            elif isinstance(raw, str):
-                raw_text = raw
-
-            classification["raw_text"] = raw_text
-            classification["source"] = event.get("stream_type", "")
-
-            vault_path: str = await workflow.execute_activity(
-                write_vault_record,
-                args=[classification],
                 start_to_close_timeout=timedelta(seconds=30),
             )
 
-            # 6. Mark processed
+            # 3. Mark processed
             await workflow.execute_activity(
                 mark_event_processed,
-                args=[event.get("id", ""), vault_path, classification.get("type", "")],
+                args=[event.get("id", ""), inbox_path, event.get("stream_type", "")],
                 start_to_close_timeout=timedelta(seconds=10),
             )
 
-            # 7. Attempt judgment (router) if instincts exist
-            await workflow.execute_activity(
-                attempt_judgment,
-                args=[event, metadata, classification],
-                start_to_close_timeout=timedelta(seconds=30),
-            )
-
-            results.append(vault_path)
+            results.append(inbox_path)
 
         return ProcessorResult(
             processed=len(results),
             paths=results,
             media_triggered=media_count,
-            braindumps_extracted=braindump_count,
         )

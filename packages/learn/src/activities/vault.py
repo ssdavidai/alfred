@@ -36,12 +36,109 @@ def vault_record_path(
 
 
 @activity.defn
-async def write_vault_record(classification: dict[str, Any]) -> str:
-    """Drop a classified event into the vault inbox for curator processing.
+async def drop_raw_event_to_inbox(event: dict[str, Any]) -> str:
+    """Drop a raw stream event into the vault inbox as markdown.
 
+    Builds a simple markdown file with the full raw content and metadata.
     The curator's 4-stage pipeline (analyze → entity resolution → interlink
-    → enrich) creates the real structured vault records. We just provide the
-    raw content with classification hints so the curator knows what to do.
+    → enrich) handles all classification and structuring.
+
+    No LLM calls — pure Python content extraction.
+    """
+    config = load_config()
+    client = VaultClient(config)
+    try:
+        stream_type = event.get("stream_type", "unknown")
+        received_at = event.get("received_at", event.get("created_at", ""))
+        source_ref = event.get("source_ref", event.get("id", ""))
+        raw = event.get("raw", {})
+
+        # Extract a subject/summary line for the title
+        title = "Untitled"
+        raw_text = ""
+        metadata_parts: list[str] = []
+
+        if isinstance(raw, dict):
+            # Try common title fields
+            title = (
+                raw.get("subject")
+                or raw.get("title")
+                or raw.get("name")
+                or raw.get("snippet", "")[:80]
+                or "Untitled"
+            )
+
+            # Extract full body content
+            body_parts: list[str] = []
+            for key in ("body", "text", "content", "snippet"):
+                val = raw.get(key)
+                if val and isinstance(val, str):
+                    body_parts.append(val)
+                    break  # use the richest field available
+
+            # Conversation messages (openclaw sessions, chats)
+            for msg in raw.get("messages", []):
+                if isinstance(msg, dict):
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    body_parts.append(f"**{role}**: {content}" if role else str(content))
+                elif isinstance(msg, str):
+                    body_parts.append(msg)
+
+            raw_text = "\n\n".join(body_parts)
+
+            # Collect metadata fields (everything that isn't the body)
+            skip_keys = {"body", "text", "content", "snippet", "messages", "subject", "title", "name"}
+            for k, v in raw.items():
+                if k not in skip_keys and v:
+                    if isinstance(v, (str, int, float, bool)):
+                        metadata_parts.append(f"- **{k}**: {v}")
+                    elif isinstance(v, list) and len(v) <= 10:
+                        metadata_parts.append(f"- **{k}**: {', '.join(str(i) for i in v)}")
+
+        elif isinstance(raw, str):
+            raw_text = raw
+            title = raw[:80].split("\n")[0] or "Untitled"
+
+        # Build the markdown inbox file
+        parts = [f"# {title}", ""]
+        parts.append(f"**Source**: {stream_type}")
+        if received_at:
+            parts.append(f"**Received**: {received_at}")
+        if source_ref:
+            parts.append(f"**Source ref**: {source_ref}")
+        parts.append("")
+
+        parts.append("## Content")
+        parts.append("")
+        parts.append(raw_text if raw_text else "(no content)")
+        parts.append("")
+
+        if metadata_parts:
+            parts.append("## Metadata")
+            parts.append("")
+            parts.extend(metadata_parts)
+            parts.append("")
+
+        content = "\n".join(parts)
+
+        # Filename: date-slugified-title.md
+        slug = re.sub(r'[^\w\s-]', '', title.lower())
+        slug = re.sub(r'[\s]+', '-', slug)[:60]
+        today = datetime.now().strftime("%Y-%m-%d")
+        filename = f"{today}-{slug}.md"
+
+        path = await client.drop_to_inbox(filename, content)
+        return f"inbox/{path}"
+    finally:
+        await client.close()
+
+
+@activity.defn
+async def write_vault_record(classification: dict[str, Any]) -> str:
+    """Legacy: Drop a classified event into the vault inbox.
+
+    Kept for backward compatibility. New code should use drop_raw_event_to_inbox.
     """
     config = load_config()
     client = VaultClient(config)
@@ -55,7 +152,6 @@ async def write_vault_record(classification: dict[str, Any]) -> str:
         source = classification.get("source", "")
         raw_text = classification.get("raw_text", "")
 
-        # Build a rich inbox file the curator can work with
         parts = [f"# {title}", ""]
 
         if record_type != "note":
@@ -90,7 +186,6 @@ async def write_vault_record(classification: dict[str, Any]) -> str:
 
         content = "\n".join(parts)
 
-        # Filename: date-slugified-title.md
         slug = re.sub(r'[^\w\s-]', '', title.lower())
         slug = re.sub(r'[\s]+', '-', slug)[:60]
         today = datetime.now().strftime("%Y-%m-%d")
