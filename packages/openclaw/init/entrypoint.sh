@@ -128,31 +128,37 @@ fi
 # surveyor) don't need conversation memory. Without this, their QMD databases
 # grow unbounded (~20MB / 400K tokens), causing a compaction death loop that
 # burns $30-40/week in wasted input tokens. Ref: post-mortem 2026-04-07.
+#
+# Two-layer fix:
+# a) Per-agent: disable memoryFlush + aggressive session pruning
+# b) Global on workers: plugins.slots.memory = "none" (kills QMD entirely)
 for cfg in /openclaw-state/openclaw.json /openclaw-workers-state/openclaw.json; do
     if [[ -f "$cfg" ]]; then
         python3 -c "
 import json, sys
 p = '$cfg'
+is_workers = 'workers' in p
 with open(p) as f: c = json.load(f)
+
+# (a) Per-agent config for stateless agents
 agents = c.get('agents', {}).get('list', [])
 stateless = {'learn-clerk', 'vault-curator', 'vault-janitor', 'vault-distiller', 'vault-surveyor'}
-changed = False
 for a in agents:
     if a.get('id') in stateless:
-        needs_fix = (
-            a.get('compaction', {}).get('memoryFlush', {}).get('enabled') is not False
-            or 'session' not in a
-        )
-        if needs_fix:
-            a['compaction'] = {'mode': 'safeguard', 'memoryFlush': {'enabled': False}}
-            a.pop('heartbeat', None)
-            a['session'] = {'maintenance': {'mode': 'enforce', 'pruneAfter': '1h', 'maxEntries': 10}}
-            changed = True
-if changed:
-    with open(p, 'w') as f: json.dump(c, f, indent=2)
-    print(f'[init] Configured stateless agents in {p}')
-else:
-    print(f'[init] Stateless agents already configured in {p}')
+        a['compaction'] = {'mode': 'safeguard', 'memoryFlush': {'enabled': False}}
+        a.pop('heartbeat', None)
+        a['session'] = {'maintenance': {'mode': 'enforce', 'pruneAfter': '1h', 'maxEntries': 10}}
+
+# (b) Disable memory plugin entirely on openclaw-workers
+# Safe because workers only run stateless agents (clerk, curator, janitor, etc.)
+# The main openclaw instance keeps memory enabled for the user-facing Alfred.
+if is_workers:
+    plugins = c.setdefault('plugins', {})
+    slots = plugins.setdefault('slots', {})
+    slots['memory'] = 'none'
+
+with open(p, 'w') as f: json.dump(c, f, indent=2)
+print(f'[init] Configured stateless agents + memory plugin in {p}')
 " 2>/dev/null || true
     fi
 done
