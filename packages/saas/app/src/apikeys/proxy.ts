@@ -125,7 +125,7 @@ export const userApiProxy = async (req: any, res: any, _context: any) => {
 // Without this, POST request bodies are undefined and never forwarded.
 const v1Router = express.Router();
 v1Router.use(express.json({ limit: "50mb" }));
-v1Router.all("*", async (req: any, res: any) => {
+v1Router.all("/{*path}", async (req: any, res: any) => {
   try {
     const fullPath: string = req.originalUrl || req.url || "";
     const tenantPath = fullPath.split("?")[0];
