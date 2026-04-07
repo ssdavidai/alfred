@@ -65,6 +65,14 @@ CALENDAR_SCHEDULES = [
             minute=[ScheduleRange(start=0)],
         ),
     },
+    {
+        "id": "al-nightly-maintenance",
+        "workflow": "NightlyMaintenanceWorkflow",
+        "calendar": ScheduleCalendarSpec(
+            hour=[ScheduleRange(start=3)],
+            minute=[ScheduleRange(start=0)],
+        ),
+    },
 ]
 
 

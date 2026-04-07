@@ -22,6 +22,7 @@ from src.workflows.task_runner import TaskRunnerWorkflow
 from src.workflows.stream_puller import StreamPullerWorkflow
 from src.workflows.onboarding_pipeline import OnboardingPipelineWorkflow
 from src.workflows.omi_processor import OmiAudioProcessorWorkflow
+from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
 
 # Activities — clerk
 from src.activities.clerk import (
@@ -157,6 +158,7 @@ from src.activities.omi_audio import (
 
 # Activities — stream log
 from src.activities.stream_log import append_to_stream_log
+from src.activities.maintenance import run_janitor_scan_and_fix, run_distiller_batch
 
 # Activities — braindump
 from src.activities.braindump import detect_braindump, extract_braindump
@@ -201,6 +203,7 @@ ALL_WORKFLOWS = [
     StreamPullerWorkflow,
     OnboardingPipelineWorkflow,
     OmiAudioProcessorWorkflow,
+    NightlyMaintenanceWorkflow,
 ]
 
 ALL_ACTIVITIES = [
@@ -311,6 +314,9 @@ ALL_ACTIVITIES = [
     write_facts_to_vault,
     # Stream log
     append_to_stream_log,
+    # Nightly maintenance
+    run_janitor_scan_and_fix,
+    run_distiller_batch,
     # Braindump
     detect_braindump,
     extract_braindump,
