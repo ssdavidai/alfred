@@ -151,13 +151,17 @@ for a in agents:
         a.pop('compaction', None)   # remove invalid per-agent key
         a.pop('session', None)      # remove invalid per-agent key
 
-# (b) Workers-only: disable memory plugin + aggressive session maintenance
+# (b) Workers-only: disable memory plugin + aggressive session maintenance + rate limiting
 # Safe because workers only run stateless agents (clerk, curator, janitor, etc.)
 # The main openclaw instance keeps memory enabled for the user-facing Alfred.
 if is_workers:
     plugins = c.setdefault('plugins', {})
     slots = plugins.setdefault('slots', {})
     slots['memory'] = 'none'
+    # Serialize all LLM calls — max 1 concurrent agent run across all sessions.
+    # Prevents burst of parallel calls that blow through Gemini's 4M TPM limit.
+    defaults = c.setdefault('agents', {}).setdefault('defaults', {})
+    defaults['maxConcurrent'] = 1
     c['session'] = {
         'maintenance': {
             'mode': 'enforce',
