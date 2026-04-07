@@ -9,7 +9,7 @@ setuptools<70  # tsfresh needs pkg_resources, removed in setuptools>=82
 pandas==2.2.3
 numpy==1.26.4
 scikit-learn==1.5.2
-tsfresh==0.20.3
+tsfresh==0.21.1
 hdbscan==0.8.40
 pyod==2.0.2
 lifetimes==0.11.3
