@@ -47,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
         generate_errand_pack,
     )
     from src.activities.assign_chores import assign_initial_chores
+    from src.activities.chore_generation import restart_learn_worker
 
 ONBOARD_PATH = "/alfred-data/onboard.json"
 
@@ -294,13 +295,40 @@ class OnboardingPipelineWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
 
-            await workflow.execute_activity(
+            # Assign initial chores runs the full chain:
+            #  - Opus template matching (Step 3)
+            #  - S4-8 generation chain for unmatched opportunities
+            #    (generate → validate → smoke → deploy, up to 3 templates)
+            # Timeout extended to 20 minutes because each generation attempt
+            # can make up to 3 Opus calls (_call_llm total timeout 600s per
+            # call) and we can generate up to 3 templates in one run.
+            chore_result = await workflow.execute_activity(
                 assign_initial_chores,
                 args=[onboard_path, input.user_id],
-                start_to_close_timeout=timedelta(minutes=5),
-                heartbeat_timeout=timedelta(seconds=60),
-                retry_policy=RetryPolicy(maximum_attempts=3),
+                start_to_close_timeout=timedelta(minutes=20),
+                heartbeat_timeout=timedelta(seconds=90),
+                retry_policy=RetryPolicy(maximum_attempts=2),
             )
+
+            # If any templates were generated, we need to restart the
+            # alfred-learn worker so load_user_chore_templates picks
+            # them up on next boot. This activity kills its own worker
+            # mid-flight — Temporal's retry policy handles reconnection
+            # automatically when the new worker comes online.
+            if isinstance(chore_result, dict) and chore_result.get("generated", 0) > 0:
+                workflow.logger.info(
+                    "Stage 7.5 generated %d templates — triggering worker restart",
+                    chore_result["generated"],
+                )
+                await workflow.execute_activity(
+                    restart_learn_worker,
+                    start_to_close_timeout=timedelta(minutes=3),
+                    heartbeat_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(
+                        maximum_attempts=2,
+                        initial_interval=timedelta(seconds=30),
+                    ),
+                )
 
         # -----------------------------------------------------------------
         # Mark done BEFORE background processing

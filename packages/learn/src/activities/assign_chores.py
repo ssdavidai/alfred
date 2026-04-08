@@ -51,6 +51,20 @@ def _template_to_workflow_name(template_id: str) -> str:
     return _TEMPLATE_TO_WORKFLOW[template_id]
 
 
+def _resolve_workflow_type(chore: dict[str, Any]) -> str:
+    """Return the Temporal workflow type name for a chore spec.
+
+    Generated chores (from S4-8 onwards) carry an explicit
+    `workflow_class_name` field set by the generation pipeline. Standard
+    library chores use the `template` field mapped through
+    _template_to_workflow_name. This helper picks the right path.
+    """
+    wf_class = chore.get("workflow_class_name")
+    if isinstance(wf_class, str) and wf_class.strip():
+        return wf_class.strip()
+    return _template_to_workflow_name(chore["template"])
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -370,12 +384,43 @@ def _build_chore_content(chore: dict[str, Any], schedule_id: str) -> str:
     Note the deliberate use of a JSON-encoded single-quoted scalar for
     `params` — this is required so the flat-only vault.ts frontmatter parser
     returns it as a usable string that the chore template can json.loads.
+
+    Generated-template chores additionally carry:
+      quarantine: true
+      quarantine_remaining: 3
+      generated: true
+      workflow_class_name: <TheirGeneratedWorkflow>
+    so S4-9's quarantine gate in _base.load_chore_context can enforce
+    dry-run mode for the first 3 runs.
     """
     now = datetime.now(timezone.utc).isoformat()
     tags_yaml = "[" + ", ".join(chore.get("tags", ["chore"])) + "]"
     params_json = json.dumps(chore["params"], default=str, separators=(",", ":"))
     params_yaml = _quote_yaml_scalar(params_json)
     schedule_yaml = _quote_yaml_scalar(chore["schedule"])
+
+    # Optional generation/quarantine metadata (only set for generated chores
+    # from S4-8 onwards; standard library chores don't set these)
+    generated = bool(chore.get("generated"))
+    quarantine_lines = ""
+    if generated:
+        quarantine_lines = (
+            f"generated: true\n"
+            f"quarantine: true\n"
+            f"quarantine_remaining: 3\n"
+        )
+        wf_class = chore.get("workflow_class_name")
+        if isinstance(wf_class, str) and wf_class:
+            quarantine_lines += f"workflow_class_name: {wf_class}\n"
+
+    body_generated_note = ""
+    if generated:
+        body_generated_note = (
+            "\n> **Generated chore.** This workflow was written specifically "
+            "for you during onboarding by Opus. The first 3 runs execute in "
+            "dry-run mode (no notifications, no vault writes) so we can "
+            "confirm it behaves as expected before going live.\n"
+        )
 
     return (
         f"---\n"
@@ -386,6 +431,7 @@ def _build_chore_content(chore: dict[str, Any], schedule_id: str) -> str:
         f"schedule: {schedule_yaml}\n"
         f"schedule_id: {schedule_id}\n"
         f"params: {params_yaml}\n"
+        f"{quarantine_lines}"
         f"created_by: onboarding_pipeline\n"
         f"created: {now}\n"
         f"last_run: null\n"
@@ -396,6 +442,7 @@ def _build_chore_content(chore: dict[str, Any], schedule_id: str) -> str:
         f"# {chore['name']}\n"
         f"\n"
         f"{chore['description']}\n"
+        f"{body_generated_note}"
         f"\n"
         f"**Template:** `{chore['template']}`\n"
         f"**Schedule:** `{chore['schedule']}` (cron, UTC)\n"
@@ -736,6 +783,150 @@ def _chore_spec_from_opus_match(
     return spec
 
 
+# ---------------------------------------------------------------------------
+# Step 4: generation pipeline for unmatched opportunities (S4-8)
+#
+# For each unmatched opportunity we invoke the full chain:
+#   generate → validate → smoke → deploy
+# and build a chore spec for the successfully generated template. The
+# resulting spec has:
+#   - template = the module_name (unique per generated template)
+#   - workflow_class_name = the CamelCase class name from generation
+#   - params = {"chore_slug": slug}   (generated templates load their
+#     context via load_chore_context, so they only need the slug)
+#   - schedule = profile-derived schedule
+#   - generated = True (triggers quarantine metadata in _build_chore_content)
+#
+# The caller (onboarding_pipeline) is responsible for calling
+# restart_learn_worker ONCE after all generations so the worker picks
+# up the newly deployed templates.
+# ---------------------------------------------------------------------------
+
+# Hard cap to keep generation time bounded. 3 opportunities × ~4 min each
+# (1 Opus call + 3 activities) = ~12 minutes at worst case, bounded by
+# _call_llm's total timeout.
+_MAX_GENERATED_CHORES_PER_ONBOARDING = 3
+
+
+def _slug_from_module_name(module_name: str) -> str:
+    """Convert snake_case module name to kebab-case slug for the chore record."""
+    return module_name.replace("_", "-")
+
+
+async def _generate_chore_from_opportunity(
+    opportunity: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Run the full generation chain for one unmatched opportunity.
+
+    Returns a result dict:
+      {"ok": True, "spec": <chore spec>, "phases": [...]}
+      OR
+      {"ok": False, "error": str, "phase": str, "opportunity_id": str}
+
+    Never raises — failures are returned as structured errors so the
+    caller can continue with the next opportunity.
+    """
+    from src.activities.chore_generation import (
+        deploy_generated_template,
+        generate_chore_template_code,
+        smoke_test_generated_template,
+        validate_generated_template,
+        ChoreGenerationError,
+    )
+
+    opp_id = str(opportunity.get("id", "unknown"))
+    phases: list[str] = []
+
+    # Phase 1: Opus generation
+    activity.heartbeat(f"generating template for {opp_id}")
+    try:
+        gen = await generate_chore_template_code(opportunity, profile)
+    except ChoreGenerationError as exc:
+        return {
+            "ok": False, "opportunity_id": opp_id,
+            "phase": "generate", "error": str(exc), "phases": phases,
+        }
+    except Exception as exc:
+        return {
+            "ok": False, "opportunity_id": opp_id,
+            "phase": "generate", "error": f"{type(exc).__name__}: {exc}", "phases": phases,
+        }
+    phases.append(f"generated:{gen.get('attempts', 1)}attempts")
+    python_source = gen["python_source"]
+    module_name = gen["module_name"]
+    workflow_class_name = gen["workflow_class_name"]
+
+    # Phase 2: static validation
+    activity.heartbeat(f"validating {module_name}")
+    vres = await validate_generated_template(python_source)
+    if not vres["ok"]:
+        return {
+            "ok": False, "opportunity_id": opp_id,
+            "phase": "validate",
+            "error": "; ".join(vres["violations"][:5]),
+            "phases": phases,
+        }
+    phases.append("validated")
+
+    # Phase 3: subprocess smoke test
+    activity.heartbeat(f"smoke testing {module_name}")
+    sres = await smoke_test_generated_template(python_source, module_name, workflow_class_name)
+    if not sres["ok"]:
+        return {
+            "ok": False, "opportunity_id": opp_id,
+            "phase": "smoke",
+            "error": f"{sres.get('phase','?')}: {sres.get('error','')}"[:400],
+            "phases": phases,
+        }
+    phases.append(f"smoke_ok:{sres.get('duration_seconds', 0):.1f}s")
+
+    # Phase 4: deploy to user-chores dir
+    activity.heartbeat(f"deploying {module_name}")
+    dres = await deploy_generated_template(python_source, module_name, workflow_class_name)
+    if not dres["ok"]:
+        return {
+            "ok": False, "opportunity_id": opp_id,
+            "phase": "deploy",
+            "error": dres.get("error", ""),
+            "phases": phases,
+        }
+    phases.append("deployed" + (":idempotent" if dres.get("idempotent") else ""))
+
+    # Build the chore spec for the successfully deployed template
+    name = str(opportunity.get("name") or workflow_class_name).strip()
+    description = str(opportunity.get("description") or "").strip()
+    tags = opportunity.get("tags") or []
+    if not isinstance(tags, list):
+        tags = []
+    tag_set = {str(t) for t in tags if isinstance(t, str)}
+    tag_set.update({"chore", "generated", "quarantine"})
+
+    # Generated templates load their own context via load_chore_context, so
+    # they only need the chore slug in their workflow input dataclass. The
+    # slug of the chore record itself is derived from the module_name.
+    chore_slug = _slug_from_module_name(module_name)
+
+    spec: dict[str, Any] = {
+        "template": module_name,  # unique per generated template
+        "workflow_class_name": workflow_class_name,
+        "name": name,
+        "description": description or f"Generated from opportunity {opp_id}",
+        "schedule": _derive_chore_schedule(module_name, profile),
+        "tags": sorted(tag_set),
+        "params": {"chore_slug": chore_slug},
+        "generated": True,
+    }
+
+    return {
+        "ok": True,
+        "spec": spec,
+        "phases": phases,
+        "source_hash": dres.get("source_hash", ""),
+        "path": dres.get("path", ""),
+    }
+
+
 @activity.defn
 async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, Any]:
     """Decide chores from the profile, write vault records, create schedules.
@@ -845,12 +1036,61 @@ async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, An
         except OSError as e:
             activity.heartbeat(f"warning: failed to persist unmatched opportunities: {e}")
 
+    # --------------------------------------------------------------
+    # Step 4 (S4-8): generation pipeline for unmatched opportunities
+    #
+    # For each unmatched opportunity (capped at _MAX_GENERATED_CHORES_
+    # PER_ONBOARDING) run the full generate → validate → smoke → deploy
+    # chain. Successful generations become new chore specs that get
+    # appended to `decided` and persisted as quarantined chores. The
+    # caller workflow is responsible for calling restart_learn_worker
+    # ONCE after assign_initial_chores returns so the dynamically
+    # deployed templates get picked up.
+    # --------------------------------------------------------------
+    generation_enabled = (
+        os.environ.get("ALFRED_CHORE_GENERATION_ENABLED", "true").lower() != "false"
+    )
+    generated_count = 0
+    generation_failures: list[dict[str, Any]] = []
+    generation_results: list[dict[str, Any]] = []
+    if generation_enabled and unmatched:
+        to_generate = unmatched[:_MAX_GENERATED_CHORES_PER_ONBOARDING]
+        activity.heartbeat(
+            f"S4-8: attempting generation for {len(to_generate)} unmatched opportunities "
+            f"(of {len(unmatched)} total)"
+        )
+        for u in to_generate:
+            opp = u.get("opportunity") or {}
+            if not isinstance(opp, dict):
+                continue
+            result = await _generate_chore_from_opportunity(opp, profile)
+            generation_results.append(result)
+            if result["ok"]:
+                decided.append(result["spec"])
+                generated_count += 1
+                activity.heartbeat(
+                    f"S4-8: generated {result['spec']['template']} "
+                    f"(phases: {','.join(result['phases'])})"
+                )
+            else:
+                generation_failures.append({
+                    "opportunity_id": result.get("opportunity_id", ""),
+                    "phase": result.get("phase", "?"),
+                    "error": result.get("error", ""),
+                })
+                activity.heartbeat(
+                    f"S4-8: generation failed at phase={result.get('phase')} "
+                    f"for {result.get('opportunity_id')}"
+                )
+
     if not decided:
         return {
             "created": [],
             "failed": [],
             "decided": 0,
             "unmatched": len(unmatched),
+            "generated": generated_count,
+            "generation_failures": generation_failures,
             "source": matching_source,
         }
 
@@ -879,7 +1119,7 @@ async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, An
 
                 # 2. Create the Temporal schedule
                 try:
-                    workflow_type = _template_to_workflow_name(chore["template"])
+                    workflow_type = _resolve_workflow_type(chore)
                 except ValueError as e:
                     failed.append(f"{slug}: {e}")
                     continue
@@ -908,5 +1148,7 @@ async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, An
         "failed": failed,
         "decided": len(decided),
         "unmatched": len(unmatched),
+        "generated": generated_count,
+        "generation_failures": generation_failures,
         "source": matching_source,
     }
