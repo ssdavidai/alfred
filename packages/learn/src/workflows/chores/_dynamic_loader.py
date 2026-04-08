@@ -202,6 +202,10 @@ def validate_template_source(source: str) -> ValidationResult:
     #   - Module docstring (Expr wrapping a string Constant) — only as the first stmt
     #   - `with workflow.unsafe.imports_passed_through():` (Temporal's official
     #     import-deferral pattern — used by every existing chore template)
+    #   - Simple constant assignments (Assign / AnnAssign) with literal RHS:
+    #     `_POLL_HOURS = 9`, `MAX_ITEMS: int = 20`, `TAGS: list[str] = ["a"]`.
+    #     Opus naturally writes these and they're deterministic/replay-safe
+    #     because they're evaluated once at module import time.
     for idx, node in enumerate(tree.body):
         if isinstance(node, (ast.Import, ast.ImportFrom, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -217,6 +221,11 @@ def validate_template_source(source: str) -> ValidationResult:
         if isinstance(node, ast.With) and _is_temporal_imports_passed_through(node):
             # Validate imports INSIDE the with body via the same import-whitelist
             # walk we do at module scope (handled by the ast.walk pass below).
+            continue
+        # Simple module-level constants — only literal RHS allowed. This
+        # blocks e.g. `FOO = some_function()` (which would be a side-effect
+        # at import time) while permitting `FOO = 5`, `BAR: list[int] = []`.
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and _is_literal_constant_assignment(node):
             continue
         violations.append(
             f"top-level statement not allowed: {type(node).__name__} at line {node.lineno}"
@@ -244,14 +253,25 @@ def validate_template_source(source: str) -> ValidationResult:
                     f"from-import source not in whitelist: {module} (line {node.lineno})"
                 )
                 continue
-            # If importing from chore_actions, verify each name is in the manifest
+            # If importing from chore_actions, verify each name is in the
+            # manifest AND that the activity's home module is actually
+            # chore_actions. The global manifest includes activities from
+            # many modules (session, vault, clerk, etc.) — a naive `name in
+            # manifest` check would accept hallucinated names that happen
+            # to exist elsewhere in the codebase.
             if module == "src.activities.chore_actions":
                 manifest = get_manifest()
                 for alias in node.names:
-                    if alias.name not in manifest:
+                    descriptor = manifest.get(alias.name)
+                    if descriptor is None:
                         violations.append(
                             f"unknown activity import: {alias.name} from {module} "
                             f"(line {node.lineno})"
+                        )
+                    elif descriptor.module != "src.activities.chore_actions":
+                        violations.append(
+                            f"activity {alias.name} is not exported from chore_actions "
+                            f"(lives in {descriptor.module}) — line {node.lineno}"
                         )
                     else:
                         imported_activity_names.add(alias.name)
@@ -349,6 +369,67 @@ def validate_template_source(source: str) -> ValidationResult:
 # ---------------------------------------------------------------------------
 # Internal AST helpers
 # ---------------------------------------------------------------------------
+
+def _is_literal_constant_assignment(node: ast.Assign | ast.AnnAssign) -> bool:
+    """Return True for a module-level literal constant assignment.
+
+    Allowed forms:
+      FOO = 5
+      FOO = "hello"
+      FOO = True
+      FOO = None
+      FOO = [1, 2, 3]            # list of literals
+      FOO = (1, 2, 3)            # tuple of literals
+      FOO = {"a": 1, "b": 2}     # dict of literals
+      FOO = {1, 2, 3}            # set of literals
+      FOO: int = 5               # annotated
+      FOO: list[str] = ["a"]     # annotated collection
+
+    Rejected:
+      FOO = some_function()      # call at import time → side effects
+      FOO = x + 1                # references other names
+      FOO = SomeClass()          # instantiation at import time
+
+    The target must be a single plain Name (no tuple unpacking, no
+    attribute assignment). The value must reduce to literals all the
+    way down via `_is_literal_value`.
+    """
+    if isinstance(node, ast.Assign):
+        # Must assign to exactly one plain name
+        if len(node.targets) != 1:
+            return False
+        target = node.targets[0]
+        if not isinstance(target, ast.Name):
+            return False
+        value = node.value
+    elif isinstance(node, ast.AnnAssign):
+        # AnnAssign can be annotation-only (`FOO: int`) — that's fine
+        if node.value is None:
+            return isinstance(node.target, ast.Name)
+        if not isinstance(node.target, ast.Name):
+            return False
+        value = node.value
+    else:
+        return False
+    return _is_literal_value(value)
+
+
+def _is_literal_value(node: ast.AST) -> bool:
+    """Return True if an AST expression is a pure literal (no calls, no names)."""
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return all(_is_literal_value(elt) for elt in node.elts)
+    if isinstance(node, ast.Dict):
+        return (
+            all(k is not None and _is_literal_value(k) for k in node.keys)
+            and all(_is_literal_value(v) for v in node.values)
+        )
+    # Unary on a constant (e.g. -1, +0.5, ~3)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd, ast.Invert)):
+        return _is_literal_value(node.operand)
+    return False
+
 
 def _is_temporal_imports_passed_through(node: ast.With) -> bool:
     """Return True if this With statement is `with workflow.unsafe.imports_passed_through():`.

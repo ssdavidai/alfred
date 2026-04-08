@@ -129,21 +129,83 @@ class TestValidationSyntax:
 # Top-level structure
 # ---------------------------------------------------------------------------
 
+def _inject_top_level(source: str, extra: str) -> str:
+    """Insert `extra` after the module docstring of a template source.
+
+    The `_good_template_source()` helper produces a module starting with
+    a docstring. Prepending constants would displace the docstring from
+    tree.body[0] and cause false failures unrelated to the check under
+    test. This helper keeps the docstring at index 0.
+    """
+    lines = source.split("\n")
+    # Docstring is the first triple-quoted string — typically line 0.
+    # Find the end of the docstring (line with closing """).
+    if lines and lines[0].startswith('"""'):
+        # Single-line docstring like `"""foo"""`
+        if lines[0].count('"""') >= 2:
+            end_idx = 0
+        else:
+            end_idx = 0
+            for i in range(1, len(lines)):
+                if '"""' in lines[i]:
+                    end_idx = i
+                    break
+        return "\n".join(lines[: end_idx + 1]) + "\n" + extra + "\n" + "\n".join(lines[end_idx + 1 :])
+    return extra + "\n" + source
+
+
 class TestValidationTopLevelStructure:
-    def test_top_level_assignment_rejected(self):
-        source = _good_template_source()
-        # Inject a top-level assignment
-        source = "x = 5\n" + source
+    def test_top_level_literal_constant_allowed(self):
+        """Literal module-level constants are allowed — Opus writes them
+        naturally and they're deterministic/replay-safe."""
+        source = _inject_top_level(
+            _good_template_source(),
+            "_POLL_HOURS = 9\n_MAX_ITEMS = 20",
+        )
+        result = validate_template_source(source)
+        assert result.ok, f"literal constant rejected: {result.violations}"
+
+    def test_top_level_annotated_constant_allowed(self):
+        source = _inject_top_level(
+            _good_template_source(),
+            'THRESHOLD: float = 0.85\n_TAGS: list[str] = ["a", "b"]',
+        )
+        result = validate_template_source(source)
+        assert result.ok, f"annotated constant rejected: {result.violations}"
+
+    def test_top_level_dict_literal_allowed(self):
+        source = _inject_top_level(
+            _good_template_source(),
+            'CONFIG = {"timeout": 30, "retries": 3}',
+        )
+        result = validate_template_source(source)
+        assert result.ok, f"dict literal rejected: {result.violations}"
+
+    def test_top_level_function_call_rejected(self):
+        """Non-literal RHS at module scope IS rejected — it would run
+        at import time which is a side effect."""
+        source = _inject_top_level(_good_template_source(), "logger = make_logger()")
         result = validate_template_source(source)
         assert not result.ok
         assert any("top-level statement not allowed" in v for v in result.violations)
 
-    def test_top_level_function_call_rejected(self):
-        source = _good_template_source()
-        source = source + "\nprint('hello')\n"
+    def test_top_level_expression_statement_rejected(self):
+        source = _inject_top_level(_good_template_source(), "print('hello')")
         result = validate_template_source(source)
         assert not result.ok
         assert any("top-level statement not allowed" in v for v in result.violations)
+
+    def test_top_level_tuple_unpacking_rejected(self):
+        """Tuple targets aren't literal-simple enough."""
+        source = _inject_top_level(_good_template_source(), "a, b = 1, 2")
+        result = validate_template_source(source)
+        assert not result.ok
+
+    def test_top_level_name_reference_rejected(self):
+        """FOO = BAR would let Opus chain constants into a non-literal RHS."""
+        source = _inject_top_level(_good_template_source(), "BAR = 5\nFOO = BAR")
+        result = validate_template_source(source)
+        assert not result.ok
 
 
 # ---------------------------------------------------------------------------
@@ -189,6 +251,35 @@ class TestValidationImports:
         result = validate_template_source(source)
         assert not result.ok
         assert any("unknown activity import" in v for v in result.violations)
+
+    def test_activity_from_other_module_rejected(self):
+        """An activity that exists in the global manifest but comes from a
+        different module (e.g. session.py, vault.py) must still be
+        rejected when imported from src.activities.chore_actions.
+
+        Regression: on david's first real generation run, Opus hallucinated
+        `from src.activities.chore_actions import fetch_recent_records`.
+        fetch_recent_records exists in src.activities.session — the global
+        manifest has it — but it is NOT exported from chore_actions, so
+        the runtime import crashes. The validator must catch this.
+        """
+        source = _good_template_source()
+        # fetch_recent_records is a real activity but it lives in
+        # src.activities.session, not src.activities.chore_actions.
+        source = source.replace(
+            "from src.activities.chore_actions import fetch_financial_events",
+            "from src.activities.chore_actions import fetch_recent_records",
+        )
+        result = validate_template_source(source)
+        assert not result.ok
+        # Either "not exported from chore_actions" (if manifest built
+        # successfully) or "unknown activity import" (if fetch_recent_records
+        # isn't in the manifest in the test env). Both are acceptable
+        # rejections — the point is the validator refuses the import.
+        assert any(
+            "not exported from chore_actions" in v or "unknown activity import" in v
+            for v in result.violations
+        ), f"expected rejection, got: {result.violations}"
 
 
 # ---------------------------------------------------------------------------
