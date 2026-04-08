@@ -46,6 +46,7 @@ with workflow.unsafe.imports_passed_through():
         generate_instinct_pack,
         generate_errand_pack,
     )
+    from src.activities.packs_opus import generate_matter_pack_opus
     from src.activities.assign_chores import assign_initial_chores
     from src.activities.chore_generation import restart_learn_worker
 
@@ -259,11 +260,16 @@ class OnboardingPipelineWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
 
-            # Run pack generators sequentially
+            # Run pack generators sequentially.
+            # Matter pack uses Opus-authored version (Plan B.1) which
+            # falls back to generate_matter_pack on any failure.
+            # Timeout bumped to 15 minutes to accommodate the Opus call
+            # (typical ~60-120 seconds, retry budget eats the rest).
             await workflow.execute_activity(
-                generate_matter_pack,
+                generate_matter_pack_opus,
                 args=[onboard_path],
-                start_to_close_timeout=timedelta(minutes=5),
+                start_to_close_timeout=timedelta(minutes=15),
+                heartbeat_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
             await workflow.execute_activity(

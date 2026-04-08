@@ -219,6 +219,11 @@ from src.activities.packs import (
     generate_errand_pack,
 )
 
+# Activities — Opus-authored pack generators (Plan B)
+from src.activities.packs_opus import (
+    generate_matter_pack_opus,
+)
+
 # Activities — braindump
 from src.activities.braindump import detect_braindump, extract_braindump
 
@@ -385,6 +390,8 @@ ALL_ACTIVITIES = [
     generate_matter_pack,
     generate_instinct_pack,
     generate_errand_pack,
+    # Opus-authored packs (Plan B)
+    generate_matter_pack_opus,
     # Braindump
     detect_braindump,
     extract_braindump,
