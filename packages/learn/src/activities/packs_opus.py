@@ -937,3 +937,455 @@ async def generate_errand_pack_opus(onboard_path: str) -> dict[str, Any]:
         }
     finally:
         await client.close()
+
+
+# ---------------------------------------------------------------------------
+# Instinct pack (Opus-driven, Plan B.3)
+# ---------------------------------------------------------------------------
+
+# instinct statuses per vault.ts STATUS_BY_TYPE
+_VALID_INSTINCT_STATUSES = {"active", "proposed", "deprecated", "merged"}
+
+# Routing destinations Opus is allowed to pick. Constrains the instinct
+# to existing concepts in the system rather than letting Opus invent new
+# routing targets.
+_VALID_ROUTING_DESTINATIONS = {
+    "stream", "triage", "matter", "errand", "log", "digest",
+    "notification", "draft", "review",
+}
+
+
+def _build_instinct_prompt(
+    facts: list[dict[str, Any]],
+    patterns: list[Any],
+    key_identity_facts: list[dict[str, Any]],
+    profile_summary: dict[str, Any],
+    matters_brief: list[dict[str, Any]],
+) -> str:
+    """Construct the Opus prompt for instinct-pack generation.
+
+    Instincts are rules-of-thumb that the judgment layer applies to incoming
+    inputs (emails, events, requests). The prompt is explicit about what
+    fields are needed because the existing _build_instinct_content function
+    expects a structured dict.
+    """
+    from collections import defaultdict
+
+    # Compact fact summary
+    by_cat: dict[str, list[str]] = defaultdict(list)
+    for f in facts:
+        if isinstance(f, dict):
+            cat = f.get("category", "general")
+            fact_text = f.get("fact", "")
+            if fact_text:
+                by_cat[cat].append(fact_text)
+
+    fact_block_parts: list[str] = []
+    for cat, items in sorted(by_cat.items()):
+        fact_block_parts.append(f"### {cat.title()} ({len(items)})")
+        for item in items[:15]:
+            fact_block_parts.append(f"- {item}")
+    fact_block = "\n".join(fact_block_parts) if fact_block_parts else "(no facts yet)"
+
+    # Patterns are the most important input for instincts
+    pattern_lines: list[str] = []
+    for p in patterns[:30]:
+        if isinstance(p, dict):
+            name = p.get("name") or p.get("title") or "unnamed"
+            desc = p.get("description", "")
+            pattern_lines.append(f"- **{name}**: {desc}")
+        elif isinstance(p, str):
+            pattern_lines.append(f"- {p}")
+    pattern_block = "\n".join(pattern_lines) if pattern_lines else "(no patterns yet)"
+
+    # Profile summary
+    profile_block = ""
+    if isinstance(profile_summary, dict):
+        summary = profile_summary.get("summary", {}) if profile_summary else {}
+        if isinstance(summary, dict):
+            for k in ("inner_circle", "communication_style", "work_hours",
+                      "top_subscriptions", "key_patterns"):
+                v = summary.get(k)
+                if v:
+                    if isinstance(v, list):
+                        v = ", ".join(str(x) for x in v[:8])
+                    profile_block += f"- {k}: {v}\n"
+    if not profile_block:
+        profile_block = "(no profile summary)"
+
+    matter_names: list[str] = []
+    for m in matters_brief[:10]:
+        if isinstance(m, dict):
+            n = m.get("name") or m.get("title") or ""
+            if n:
+                matter_names.append(str(n))
+    matters_block = "\n".join(f"- {n}" for n in matter_names) if matter_names else "(no matters yet)"
+
+    return f"""You are Alfred, a personal AI butler. You are deciding what INSTINCTS to set up — rules-of-thumb your judgment layer can apply to incoming inputs (emails, events, requests) so you can act with discretion instead of asking the user about every single thing.
+
+## What an instinct IS
+
+An instinct is a learned rule that says: "When I see X, I should do Y, with this much confidence." Examples:
+
+- "When an email comes from anyone in the inner circle (Eszter, Stan, Rapali), surface it to triage immediately and never archive without asking."
+- "When a Stripe payment fails or is declined, always escalate to urgent — this user is sensitive about cash flow and missing one creates real downstream pain."
+- "When a newsletter arrives from any of these 12 domains, send straight to the daily digest log — never to inbox triage."
+- "When a calendar invite arrives outside the user's stated work hours (9-6 CET), batch it for evening review rather than interrupting current focus."
+- "When Hanna's nursery is the sender, always elevate urgency and notify both parents, not just the user."
+
+The judgment layer uses these instincts as defaults. The user can always override or refine them later.
+
+## What an instinct is NOT
+
+- A specific errand or task
+- A matter (an ongoing area)
+- A chore (a recurring scheduled automation)
+- A general piece of advice ("be careful about cash flow")
+
+## Your inputs
+
+### Profile summary
+{profile_block}
+
+### Existing matters (so instincts can reference them)
+{matters_block}
+
+### Facts ({sum(len(v) for v in by_cat.values())} total, grouped by category)
+{fact_block}
+
+### Patterns discovered by behavioral analysis (this is your most important input)
+{pattern_block}
+
+## Your task
+
+Derive 5-12 instincts from the patterns and facts. Lean heavily on the patterns — instincts are crystallized rules that explain how to handle inputs that match a pattern. For EACH instinct:
+
+- **name**: short kebab-case slug (max 60 chars), e.g. `route-inner-circle-priority`
+- **description**: 1-2 sentences, plain English description of what this instinct does
+- **status**: `active` (default) or `proposed` (if you're not 100% sure the user would approve)
+- **trigger_summary**: 1 sentence — when does this fire?
+- **action_summary**: 1 sentence — what does Alfred do when it fires?
+- **rationale**: 2-3 paragraphs explaining WHY this rule exists, grounded in the specific patterns and facts you saw. This is the part the user will read when reviewing.
+- **examples**: 2-4 concrete examples drawn from the user's actual facts/patterns. Real names, real domains.
+- **input_patterns**:
+  - sender_domains: list of domain strings (lowercase, like ["stripe.com", "polar.sh"])
+  - subject_keywords: list of keyword strings (lowercase)
+  - input_types: list of input type strings, usually ["email"] or ["event"]
+- **routing_rule**:
+  - destination_type: one of `stream`, `triage`, `matter`, `errand`, `log`, `digest`, `notification`, `draft`, `review`
+  - destination: short label of where to route (e.g. "tier2 stream-log", "priority triage")
+  - process: short label of what to do (e.g. "archive", "urgent-triage", "daily-digest")
+- **discretion_threshold**: float 0.7-0.95. Higher = more confident, fires automatically. Lower = will ask the user first.
+- **confidence_score**: float 0.0-1.0. How confident YOU are this rule is right for this user.
+
+## Output format
+
+Return ONLY valid JSON. No preamble, no fences:
+
+```json
+{{
+  "instincts": [
+    {{
+      "name": "route-inner-circle-priority",
+      "description": "...",
+      "status": "active",
+      "trigger_summary": "...",
+      "action_summary": "...",
+      "rationale": "...",
+      "examples": ["...", "..."],
+      "input_patterns": {{
+        "sender_domains": ["..."],
+        "subject_keywords": ["..."],
+        "input_types": ["email"]
+      }},
+      "routing_rule": {{
+        "destination_type": "triage",
+        "destination": "priority triage queue",
+        "process": "urgent-triage"
+      }},
+      "discretion_threshold": 0.85,
+      "confidence_score": 0.9
+    }}
+  ]
+}}
+```
+
+Be honest: write fewer instincts if the patterns don't support more. Don't invent rules that aren't backed by evidence. Empty `subject_keywords` is fine. But `rationale` and `examples` must always be substantive — these are what justify the rule to the user.
+"""
+
+
+def _validate_instinct(instinct: dict[str, Any]) -> tuple[bool, str]:
+    """Return (ok, reason) for a single instinct dict from the Opus response."""
+    if not isinstance(instinct, dict):
+        return False, "not a dict"
+
+    name = instinct.get("name", "")
+    if not isinstance(name, str) or not name.strip():
+        return False, "missing or empty name"
+    if len(name) > 80:
+        return False, "name too long"
+
+    status = str(instinct.get("status", "active")).strip().lower()
+    if status not in _VALID_INSTINCT_STATUSES:
+        return False, f"invalid status: {status}"
+
+    description = instinct.get("description", "")
+    if not isinstance(description, str) or len(description.strip()) < 10:
+        return False, "description too short"
+
+    rationale = instinct.get("rationale", "")
+    if not isinstance(rationale, str) or len(rationale.strip()) < 60:
+        return False, "rationale too short (needs at least one real paragraph)"
+
+    examples = instinct.get("examples", [])
+    if not isinstance(examples, list) or len(examples) < 1:
+        return False, "examples must be a non-empty list"
+
+    input_patterns = instinct.get("input_patterns", {})
+    if not isinstance(input_patterns, dict):
+        return False, "input_patterns not a dict"
+    if not isinstance(input_patterns.get("sender_domains", []), list):
+        return False, "input_patterns.sender_domains not a list"
+    if not isinstance(input_patterns.get("subject_keywords", []), list):
+        return False, "input_patterns.subject_keywords not a list"
+
+    routing_rule = instinct.get("routing_rule", {})
+    if not isinstance(routing_rule, dict):
+        return False, "routing_rule not a dict"
+    dest_type = str(routing_rule.get("destination_type", "")).strip().lower()
+    if dest_type and dest_type not in _VALID_ROUTING_DESTINATIONS:
+        return False, f"invalid destination_type: {dest_type}"
+
+    threshold = instinct.get("discretion_threshold")
+    if isinstance(threshold, (int, float)):
+        if not (0.0 <= float(threshold) <= 1.0):
+            return False, "discretion_threshold out of range 0..1"
+    elif threshold is not None:
+        return False, "discretion_threshold not a number"
+
+    return True, ""
+
+
+def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
+    """Render a validated instinct dict as a markdown record with rich body.
+
+    Uses the flat-YAML frontmatter pattern (no nested mappings) so it
+    round-trips through the ctrl-api vault parser. The structured pattern
+    fields are JSON-encoded into single-quoted scalars; templates that
+    consume them parse the scalars back to dicts on read.
+
+    Body has Description, Rationale, and Examples sections so users
+    reviewing instincts in the dashboard see real justification.
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    name = str(instinct["name"]).strip()
+    status = str(instinct.get("status", "active")).strip().lower()
+    description = str(instinct["description"]).strip()
+    rationale = str(instinct["rationale"]).strip()
+    examples = [str(e).strip() for e in instinct.get("examples", []) if str(e).strip()]
+    trigger_summary = str(instinct.get("trigger_summary", "")).strip()
+    action_summary = str(instinct.get("action_summary", "")).strip()
+
+    input_patterns = instinct.get("input_patterns") or {}
+    routing_rule = instinct.get("routing_rule") or {}
+    threshold = float(instinct.get("discretion_threshold", 0.85))
+    confidence = float(instinct.get("confidence_score", 0.85))
+
+    # Encode the structured nested fields as JSON-scalar strings so the
+    # flat parser on the read side can round-trip them via json.loads.
+    input_patterns_json = json.dumps(input_patterns, default=str, separators=(",", ":"))
+    routing_rule_json = json.dumps(routing_rule, default=str, separators=(",", ":"))
+
+    fm_lines = [
+        "---",
+        "type: instinct",
+        f"name: {_escape_yaml_scalar(name)}",
+        f"status: {status}",
+        f"description: {_escape_yaml_scalar(description)}",
+        f"created: {now}",
+        f"updated: {now}",
+        f"created_by: onboarding_pipeline",
+        f"generated: true",
+        f"discretion_threshold: {threshold}",
+        f"confidence_score: {confidence}",
+        f"observation_count: 0",
+        f"input_patterns: {_escape_yaml_scalar(input_patterns_json)}",
+        f"routing_rule: {_escape_yaml_scalar(routing_rule_json)}",
+        "tags: [onboarding, instinct, auto-generated]",
+        "---",
+    ]
+
+    body_parts: list[str] = [
+        f"# {name}",
+        "",
+        f"> {description}",
+    ]
+    if trigger_summary or action_summary:
+        body_parts += ["", "## Trigger and action", ""]
+        if trigger_summary:
+            body_parts.append(f"**When:** {trigger_summary}")
+        if action_summary:
+            body_parts.append(f"**Then:** {action_summary}")
+
+    body_parts += [
+        "",
+        "## Rationale",
+        "",
+        rationale,
+    ]
+
+    if examples:
+        body_parts += ["", "## Examples", ""]
+        body_parts += [f"- {e}" for e in examples]
+
+    # Routing summary table for the dashboard
+    dest_type = routing_rule.get("destination_type", "")
+    destination = routing_rule.get("destination", "")
+    process = routing_rule.get("process", "")
+    if dest_type or destination or process:
+        body_parts += ["", "## Routing", ""]
+        if dest_type:
+            body_parts.append(f"- **Destination type:** {dest_type}")
+        if destination:
+            body_parts.append(f"- **Destination:** {destination}")
+        if process:
+            body_parts.append(f"- **Process:** {process}")
+
+    body_parts += [
+        "",
+        f"**Discretion threshold:** {threshold:.2f}  |  **Confidence:** {confidence:.2f}",
+        "",
+        "---",
+        "",
+        f"*Auto-generated by Alfred during onboarding on {now}.*",
+        "",
+    ]
+
+    return "\n".join(fm_lines) + "\n\n" + "\n".join(body_parts)
+
+
+@activity.defn
+async def generate_instinct_pack_opus(onboard_path: str) -> dict[str, Any]:
+    """Opus-driven instinct pack generator (Plan B.3).
+
+    Reads facts + patterns + profile + matters and asks Opus to derive
+    5-12 instincts (rules-of-thumb the judgment layer can apply). Writes
+    rich markdown instinct records.
+
+    Falls back to ``generate_instinct_pack`` on every expected failure mode.
+    """
+    if not _opus_packs_enabled():
+        logger.info("instinct_pack_opus: disabled by env flag, using rule-based")
+        from src.activities.packs import generate_instinct_pack
+        rb = await generate_instinct_pack(onboard_path)
+        return {**rb, "source": "rule_based_env_flag"}
+
+    activity.heartbeat("instinct_pack_opus: reading onboard.json")
+    onboard = _read_onboard_json(onboard_path)
+    facts = onboard.get("facts") or []
+    patterns = onboard.get("patterns") or []
+    key_identity_facts = onboard.get("key_identity_facts") or []
+    profile = onboard.get("profile") or {}
+    matters_brief = onboard.get("matters_brief") or []
+
+    if not patterns and not facts:
+        logger.info("instinct_pack_opus: no patterns/facts, falling back")
+        from src.activities.packs import generate_instinct_pack
+        rb = await generate_instinct_pack(onboard_path)
+        return {**rb, "source": "rule_based_no_context"}
+
+    prompt = _build_instinct_prompt(
+        facts, patterns, key_identity_facts, profile, matters_brief
+    )
+
+    activity.heartbeat(
+        f"instinct_pack_opus: calling Opus ({len(patterns)} patterns)"
+    )
+    try:
+        raw = await _call_llm(
+            prompt,
+            max_tokens=8192,
+            heartbeat_message="instinct_pack_opus: waiting on Opus",
+        )
+    except Exception as exc:
+        logger.error("instinct_pack_opus: LLM failed: %s — falling back", exc)
+        from src.activities.packs import generate_instinct_pack
+        rb = await generate_instinct_pack(onboard_path)
+        return {**rb, "source": "rule_based_llm_error", "llm_error": str(exc)}
+
+    parsed = _parse_json_with_key(raw, "instincts") or {}
+    instincts = parsed.get("instincts") if isinstance(parsed, dict) else None
+    if not isinstance(instincts, list) or not instincts:
+        logger.error(
+            "instinct_pack_opus: failed to parse 'instincts' (len=%d), falling back",
+            len(raw) if isinstance(raw, str) else 0,
+        )
+        from src.activities.packs import generate_instinct_pack
+        rb = await generate_instinct_pack(onboard_path)
+        return {**rb, "source": "rule_based_parse_error"}
+
+    config = load_config()
+    client = VaultClient(config)
+    created = 0
+    skipped_existing = 0
+    skipped_invalid = 0
+    rejected_reasons: list[str] = []
+    try:
+        for instinct in instincts[:12]:
+            ok, reason = _validate_instinct(instinct)
+            if not ok:
+                skipped_invalid += 1
+                rejected_reasons.append(reason)
+                logger.warning("instinct_pack_opus: rejecting: %s", reason)
+                continue
+
+            slug = _slugify(instinct["name"])
+            if not slug:
+                skipped_invalid += 1
+                continue
+
+            try:
+                existing = await client.search_records(slug, record_type="instinct")
+                if existing:
+                    skipped_existing += 1
+                    continue
+            except Exception as exc:
+                logger.warning(
+                    "instinct_pack_opus: search failed for %s: %s (proceeding)",
+                    slug, exc,
+                )
+
+            content = _build_rich_instinct_content(instinct)
+            try:
+                await client.write_record("instinct", slug, content)
+                created += 1
+                activity.heartbeat(f"instinct_pack_opus: wrote {slug}")
+            except Exception as exc:
+                logger.error("instinct_pack_opus: write failed for %s: %s", slug, exc)
+                skipped_invalid += 1
+                rejected_reasons.append(f"write failed: {exc}")
+
+        logger.info(
+            "instinct_pack_opus: created %d, skipped_existing %d, invalid %d",
+            created, skipped_existing, skipped_invalid,
+        )
+
+        if created == 0:
+            logger.warning("instinct_pack_opus: no valid instincts created, falling back")
+            from src.activities.packs import generate_instinct_pack
+            rb = await generate_instinct_pack(onboard_path)
+            return {
+                **rb,
+                "source": "rule_based_no_valid_instincts",
+                "opus_rejected": rejected_reasons[:5],
+            }
+
+        return {
+            "created": created,
+            "skipped_existing": skipped_existing,
+            "skipped_invalid": skipped_invalid,
+            "source": "opus",
+            "rejected_reasons": rejected_reasons[:5] if rejected_reasons else [],
+        }
+    finally:
+        await client.close()

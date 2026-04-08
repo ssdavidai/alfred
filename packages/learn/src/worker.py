@@ -223,6 +223,7 @@ from src.activities.packs import (
 from src.activities.packs_opus import (
     generate_matter_pack_opus,
     generate_errand_pack_opus,
+    generate_instinct_pack_opus,
 )
 
 # Activities — braindump
@@ -394,6 +395,7 @@ ALL_ACTIVITIES = [
     # Opus-authored packs (Plan B)
     generate_matter_pack_opus,
     generate_errand_pack_opus,
+    generate_instinct_pack_opus,
     # Braindump
     detect_braindump,
     extract_braindump,
