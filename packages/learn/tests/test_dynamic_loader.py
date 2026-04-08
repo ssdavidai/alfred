@@ -336,47 +336,71 @@ class TestValidationDeterminism:
 # Filesystem loader
 # ---------------------------------------------------------------------------
 
-class TestPackageStub:
-    def test_alfred_learn_dynamic_registered_in_sys_modules(self):
-        # Importing _dynamic_loader should ensure the stub package exists
-        import sys
-        from src.workflows.chores._dynamic_loader import _ensure_dynamic_package_stub
+class TestStagedPackageDir:
+    def test_ensure_staged_package_dir_creates_init(self, tmp_path):
+        # Patch the staging dir to a temp location and verify it gets created
+        from unittest.mock import patch
+        from src.workflows.chores import _dynamic_loader
 
-        _ensure_dynamic_package_stub()
-        assert "alfred_learn_dynamic" in sys.modules
-        pkg = sys.modules["alfred_learn_dynamic"]
-        assert hasattr(pkg, "__path__")
-        # Idempotent — second call should not duplicate or break
-        _ensure_dynamic_package_stub()
-        assert sys.modules["alfred_learn_dynamic"] is pkg
+        fake_dir = tmp_path / "staged"
+        with patch.object(_dynamic_loader, "_STAGED_PACKAGE_DIR", fake_dir):
+            _dynamic_loader._ensure_staged_package_dir()
+            assert fake_dir.exists()
+            init = fake_dir / "__init__.py"
+            assert init.exists()
+            assert "Auto-staged" in init.read_text()
 
 
 class TestLoadUserChoreTemplates:
-    def test_missing_directory_returns_empty_list(self):
-        with patch("src.workflows.chores._dynamic_loader.USER_CHORES_DIR", "/nonexistent/path/xyz"):
+    """Loader filesystem tests. Each test patches both USER_CHORES_DIR (the
+    source) and _STAGED_PACKAGE_DIR (the staging copy under /app, which
+    doesn't exist outside the container) to temp directories."""
+
+    def _patch_dirs(self, source: str, staged: Path):
+        """Convenience: return a context manager patching both directories."""
+        return _patch_loader_dirs(source, staged)
+
+    def test_missing_directory_returns_empty_list(self, tmp_path):
+        with self._patch_dirs("/nonexistent/path/xyz", tmp_path / "staged"):
             result = load_user_chore_templates()
             assert result == []
 
-    def test_empty_directory_returns_empty_list(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with patch("src.workflows.chores._dynamic_loader.USER_CHORES_DIR", tmp):
-                result = load_user_chore_templates()
-                assert result == []
+    def test_empty_directory_returns_empty_list(self, tmp_path):
+        source = tmp_path / "source"
+        source.mkdir()
+        with self._patch_dirs(str(source), tmp_path / "staged"):
+            result = load_user_chore_templates()
+            assert result == []
 
-    def test_invalid_file_skipped(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            bad_file = Path(tmp) / "bad.py"
-            bad_file.write_text("import os\n@workflow.defn\nclass X: pass\n")
-            with patch("src.workflows.chores._dynamic_loader.USER_CHORES_DIR", tmp):
-                result = load_user_chore_templates()
-                assert result == []  # rejected by validator
+    def test_invalid_file_skipped(self, tmp_path):
+        source = tmp_path / "source"
+        source.mkdir()
+        bad_file = source / "bad.py"
+        bad_file.write_text("import os\n@workflow.defn\nclass X: pass\n")
+        with self._patch_dirs(str(source), tmp_path / "staged"):
+            result = load_user_chore_templates()
+            assert result == []  # rejected by validator
 
-    def test_underscore_files_skipped(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            # __init__.py-style files should be ignored
-            init_file = Path(tmp) / "_helpers.py"
-            init_file.write_text("import os\n")  # would fail validation if scanned
-            with patch("src.workflows.chores._dynamic_loader.USER_CHORES_DIR", tmp):
-                result = load_user_chore_templates()
-                # No error logged because the file was never validated
-                assert result == []
+    def test_underscore_files_skipped(self, tmp_path):
+        source = tmp_path / "source"
+        source.mkdir()
+        init_file = source / "_helpers.py"
+        init_file.write_text("import os\n")  # would fail validation if scanned
+        with self._patch_dirs(str(source), tmp_path / "staged"):
+            result = load_user_chore_templates()
+            assert result == []
+
+
+def _patch_loader_dirs(source: str, staged: Path):
+    """Patch BOTH USER_CHORES_DIR and _STAGED_PACKAGE_DIR for unit tests.
+
+    Outside the alfred-learn container `/app` doesn't exist and is read-only,
+    so the staging directory must be redirected to a writable temp path.
+    """
+    from contextlib import ExitStack
+    from src.workflows.chores import _dynamic_loader
+
+    stack = ExitStack()
+    stack.enter_context(patch.object(_dynamic_loader, "USER_CHORES_DIR", source))
+    stack.enter_context(patch.object(_dynamic_loader, "_STAGED_PACKAGE_DIR", staged))
+    return stack

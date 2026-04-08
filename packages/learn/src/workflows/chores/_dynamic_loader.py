@@ -20,10 +20,10 @@ from this module so generation and runtime loading apply identical checks.
 from __future__ import annotations
 
 import ast
+import importlib
 import importlib.util
 import logging
 import sys
-import types
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,44 +39,43 @@ logger = logging.getLogger("alfred-learn")
 
 
 # ---------------------------------------------------------------------------
-# Package stub registration
+# Stage directory for dynamic templates
 #
-# Temporal's workflow validator re-imports the workflow's defining module
-# by its qualified name to verify sandbox safety. We use the synthetic
-# prefix `alfred_learn_dynamic.<stem>` for dynamically loaded templates,
-# but `alfred_learn_dynamic` isn't a real package on disk — Temporal would
-# fail with ModuleNotFoundError. We fix this by registering an empty
-# package stub in sys.modules at module-import time. The stub has the
-# correct __path__ attribute so importlib treats it as a real namespace
-# package.
+# Temporal's workflow sandbox re-imports each workflow module by qualified
+# name to verify replay-safety. That re-import goes through `importlib`
+# with a normal Python import path lookup — there's no way to satisfy it
+# with a fake `sys.modules` entry because the sandbox runs its own module
+# table.
+#
+# So we COPY each validated template from /alfred-data/user-chores/ (the
+# persistent encrypted volume — source of truth) into /app/src/workflows/
+# chores_dynamic/ at worker startup. /app is on sys.path so the copy
+# becomes a real importable Python module that Temporal can re-import.
+#
+# Stale files (in chores_dynamic but no longer in user-chores) get
+# deleted on each scan so the staged copy converges to the source of truth.
 # ---------------------------------------------------------------------------
 
-_DYNAMIC_PACKAGE_NAME = "alfred_learn_dynamic"
+# The real, importable package the loader stages templates into. /app is on
+# sys.path inside the alfred-learn container, so this resolves as a normal
+# `src.workflows.chores_dynamic.<stem>` import.
+_STAGED_PACKAGE_DIR = Path("/app/src/workflows/chores_dynamic")
+_STAGED_PACKAGE_NAME = "src.workflows.chores_dynamic"
 
 
-def _ensure_dynamic_package_stub() -> None:
-    """Register an empty alfred_learn_dynamic namespace package in sys.modules.
-
-    Idempotent — safe to call multiple times. Required so Temporal's
-    workflow validator can re-import dynamically loaded templates without
-    raising ModuleNotFoundError.
-    """
-    if _DYNAMIC_PACKAGE_NAME in sys.modules:
-        return
-    pkg = types.ModuleType(_DYNAMIC_PACKAGE_NAME)
-    # Mark as a package by setting __path__ to an empty list (PEP 420
-    # namespace package). importlib will use this to treat
-    # alfred_learn_dynamic.<x> as a submodule lookup.
-    pkg.__path__ = []  # type: ignore[attr-defined]
-    pkg.__doc__ = (
-        "Synthetic namespace package for dynamically loaded chore templates. "
-        "See src.workflows.chores._dynamic_loader for the loader."
-    )
-    sys.modules[_DYNAMIC_PACKAGE_NAME] = pkg
-
-
-# Register the stub eagerly so it's available before any dynamic load happens.
-_ensure_dynamic_package_stub()
+def _ensure_staged_package_dir() -> None:
+    """Make sure the staging directory + __init__.py exist."""
+    _STAGED_PACKAGE_DIR.mkdir(parents=True, exist_ok=True)
+    init = _STAGED_PACKAGE_DIR / "__init__.py"
+    if not init.exists():
+        init.write_text(
+            '"""Auto-staged dynamic chore templates.\n\n'
+            "Files in this package are copied at worker startup from the persistent\n"
+            "chore source directory (USER_CHORES_DIR). The loader in\n"
+            "src.workflows.chores._dynamic_loader manages this staging — DO NOT\n"
+            "edit files here directly, they'll be overwritten on next startup.\n"
+            '"""\n'
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -421,27 +420,49 @@ def _attribute_chain(node: ast.Attribute) -> str:
 # ---------------------------------------------------------------------------
 
 def load_user_chore_templates() -> list[type]:
-    """Scan USER_CHORES_DIR for .py files, validate, import, return workflow classes.
+    """Scan USER_CHORES_DIR, validate + stage each file, import, return workflow classes.
+
+    Pipeline per file:
+      1. Read source from /alfred-data/user-chores/<stem>.py
+      2. Validate via Layer 2 static checks (validate_template_source)
+      3. Copy validated source to /app/src/workflows/chores_dynamic/<stem>.py
+         (a real Python package on sys.path so Temporal's sandbox can re-import it)
+      4. importlib.import_module('src.workflows.chores_dynamic.<stem>')
+      5. Collect classes with __temporal_workflow_definition
+
+    Stale staged files (present in chores_dynamic but absent from user-chores)
+    are deleted on each scan so the staged package mirrors the source of truth.
 
     Returns a list of workflow classes that worker.py appends to ALL_WORKFLOWS.
-    Empty list if the directory doesn't exist, contains no .py files, or every
-    file failed validation.
-
-    Each loaded module gets a unique sys.modules name prefix (alfred_learn_dynamic.<stem>)
-    so we don't collide with the real packages and so dynamic reloads (if we ever
-    add them) work cleanly.
     """
     base = Path(USER_CHORES_DIR)
     if not base.exists() or not base.is_dir():
         logger.debug("dynamic_loader: %s does not exist, skipping", base)
         return []
 
+    _ensure_staged_package_dir()
+
+    # 1. Inventory the source-of-truth directory
+    source_files = sorted(
+        f for f in base.glob("*.py") if not f.name.startswith("_")
+    )
+    source_stems = {f.stem for f in source_files}
+
+    # 2. Delete stale staged files (mirror the source directory)
+    for staged in _STAGED_PACKAGE_DIR.glob("*.py"):
+        if staged.name == "__init__.py":
+            continue
+        if staged.stem not in source_stems:
+            try:
+                staged.unlink()
+                logger.info("dynamic_loader: removed stale staged template %s", staged.name)
+            except OSError as exc:
+                logger.warning("dynamic_loader: failed to remove stale %s: %s", staged, exc)
+
     loaded: list[type] = []
     file_count = 0
     skipped_count = 0
-    for py_file in sorted(base.glob("*.py")):
-        if py_file.name.startswith("_"):
-            continue  # skip __init__.py / private files
+    for py_file in source_files:
         file_count += 1
         try:
             source = py_file.read_text()
@@ -450,7 +471,7 @@ def load_user_chore_templates() -> list[type]:
             skipped_count += 1
             continue
 
-        # Layer 2 validation BEFORE importing — never load code that fails checks
+        # 3. Layer 2 validation BEFORE staging — never copy code that fails checks
         result = validate_template_source(source)
         if not result.ok:
             logger.error(
@@ -459,33 +480,37 @@ def load_user_chore_templates() -> list[type]:
                 "; ".join(result.violations),
             )
             skipped_count += 1
+            # Also remove any stale staged copy of a now-invalid file
+            staged_path = _STAGED_PACKAGE_DIR / py_file.name
+            if staged_path.exists():
+                try:
+                    staged_path.unlink()
+                except OSError:
+                    pass
             continue
 
-        # Import via spec_from_file_location, namespacing under the stub
-        # package so Temporal's workflow validator can re-import it.
-        _ensure_dynamic_package_stub()
-        module_name = f"{_DYNAMIC_PACKAGE_NAME}.{py_file.stem}"
+        # 4. Copy validated source into the staging package directory
+        staged_path = _STAGED_PACKAGE_DIR / py_file.name
         try:
-            spec = importlib.util.spec_from_file_location(module_name, py_file)
-            if spec is None or spec.loader is None:
-                logger.error("dynamic_loader: spec_from_file_location returned None for %s", py_file)
-                skipped_count += 1
-                continue
-            module = importlib.util.module_from_spec(spec)
-            module.__package__ = _DYNAMIC_PACKAGE_NAME
-            sys.modules[module_name] = module
-            # Also expose the module as an attribute on the parent package
-            # so Temporal can reach it via getattr(alfred_learn_dynamic, stem).
-            parent_pkg = sys.modules[_DYNAMIC_PACKAGE_NAME]
-            setattr(parent_pkg, py_file.stem, module)
-            spec.loader.exec_module(module)
-        except Exception as exc:
-            logger.error("dynamic_loader: import failed for %s: %s", py_file.name, exc)
-            sys.modules.pop(module_name, None)
+            staged_path.write_text(source)
+        except OSError as exc:
+            logger.error("dynamic_loader: failed to stage %s: %s", py_file.name, exc)
             skipped_count += 1
             continue
 
-        # Find workflow classes in the loaded module
+        # 5. Import via the standard mechanism — staged dir is on sys.path
+        module_name = f"{_STAGED_PACKAGE_NAME}.{py_file.stem}"
+        try:
+            # Drop any cached module so we re-load fresh content (handles
+            # the case where a generated file was overwritten between restarts)
+            sys.modules.pop(module_name, None)
+            module = importlib.import_module(module_name)
+        except Exception as exc:
+            logger.error("dynamic_loader: import failed for %s: %s", py_file.name, exc)
+            skipped_count += 1
+            continue
+
+        # 6. Find workflow classes in the loaded module
         found_in_file = 0
         for attr_name in dir(module):
             attr = getattr(module, attr_name, None)
