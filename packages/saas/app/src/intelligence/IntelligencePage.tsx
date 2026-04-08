@@ -32,8 +32,6 @@ import ChoresContent from "./ChoresContent";
 import {
   Brain,
   ClipboardCheck,
-  BookOpen,
-  Scale,
   Activity,
   Clock,
   Inbox,
@@ -70,22 +68,26 @@ import {
   SelectValue,
 } from "../client/components/ui/select";
 
-type IntelligenceTab = "errands" | "triage" | "matters" | "chores" | "learning" | "judgment" | "activity" | "workflows" | "quarantine";
+// Plan E: streamlined to 5 user-facing tabs.
+// - Inbox absorbs the old Triage tab
+// - Activity absorbs the old Learning, Judgment, and old Activity tabs into one
+//   unified "what Alfred has been doing" view
+// - Chores still shows generated chores from C.3 (and quarantine state inline)
+// - Workflows is moved out of Intelligence — accessible at /dashboard/admin/workflows
+// - Quarantine is no longer a separate tab; chore quarantine state is rendered
+//   on each chore card in the Chores tab and in the chore detail page
+type IntelligenceTab = "inbox" | "matters" | "errands" | "chores" | "activity";
 
 const TABS: { key: IntelligenceTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { key: "errands", label: "Errands", icon: ClipboardCheck },
-  { key: "triage", label: "Triage", icon: Inbox },
+  { key: "inbox", label: "Inbox", icon: Inbox },
   { key: "matters", label: "Matters", icon: Briefcase },
+  { key: "errands", label: "Errands", icon: ClipboardCheck },
   { key: "chores", label: "Chores", icon: CalendarClock },
-  { key: "learning", label: "Learning", icon: BookOpen },
-  { key: "judgment", label: "Judgment", icon: Scale },
   { key: "activity", label: "Activity", icon: Activity },
-  { key: "workflows", label: "Workflows", icon: Settings },
-  { key: "quarantine", label: "Quarantine", icon: AlertTriangle },
 ];
 
 export default function IntelligencePage() {
-  const [activeTab, setActiveTab] = useState<IntelligenceTab>("errands");
+  const [activeTab, setActiveTab] = useState<IntelligenceTab>("inbox");
 
   // Fetch counts for badge indicators
   const { data: tasksData } = useQuery(getTasks, undefined, {
@@ -125,11 +127,15 @@ export default function IntelligencePage() {
   const quarantineCount = quarantineData?.items?.length ?? 0;
 
   const tabBadge = (tab: IntelligenceTab): number | null => {
+    // Plan E: tab badges follow the new 5-tab schema. Inbox shows the
+    // legacy triage count + the unrouted-learning queue count.
+    if (tab === "inbox") {
+      const total = triageCount + queueCount;
+      return total > 0 ? total : null;
+    }
     if (tab === "errands" && approvalCount > 0) return approvalCount;
-    if (tab === "triage" && triageCount > 0) return triageCount;
     if (tab === "matters" && mattersOpenCount > 0) return mattersOpenCount;
-    if (tab === "judgment" && queueCount > 0) return queueCount;
-    if (tab === "quarantine" && quarantineCount > 0) return quarantineCount;
+    if (tab === "chores" && quarantineCount > 0) return quarantineCount;
     return null;
   };
 
@@ -172,7 +178,13 @@ export default function IntelligencePage() {
         })}
       </div>
 
-      {/* Tab Content */}
+      {/* Tab Content (Plan E: 5-tab schema) */}
+      {activeTab === "inbox" && (
+        <div className="space-y-6">
+          <TriageContent />
+        </div>
+      )}
+      {activeTab === "matters" && <MattersContent />}
       {activeTab === "errands" && (
         <div className="space-y-6">
           <CreateErrandForm />
@@ -180,14 +192,18 @@ export default function IntelligencePage() {
           <LedgerSection />
         </div>
       )}
-      {activeTab === "triage" && <TriageContent />}
-      {activeTab === "matters" && <MattersContent />}
       {activeTab === "chores" && <ChoresContent />}
-      {activeTab === "learning" && <LearningContent />}
-      {activeTab === "judgment" && <JudgmentContent />}
-      {activeTab === "activity" && <ActivityTab />}
-      {activeTab === "workflows" && <WorkflowsContent />}
-      {activeTab === "quarantine" && <QuarantineContent />}
+      {activeTab === "activity" && (
+        // Plan E: unified Activity merges Learning + Judgment + the old
+        // Activity tab into one "what Alfred has been doing" view. Each
+        // section is collapsible so the page doesn't become a wall of
+        // counters.
+        <div className="space-y-6">
+          <LearningContent />
+          <JudgmentContent />
+          <ActivityTab />
+        </div>
+      )}
     </DashboardLayout>
   );
 }
