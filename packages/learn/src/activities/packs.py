@@ -42,6 +42,75 @@ def _slugify(name: str) -> str:
     return s.strip("-")
 
 
+def _normalize_sender_tiers(profile: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Normalize sender_tiers to the dict-of-list-of-dicts shape pack generators expect.
+
+    The behavioral profiler currently emits sender_tiers as dict[str, list[str]] —
+    a flat list of domain strings per tier. The pack generators were written
+    against a richer dict-of-list-of-dicts shape with
+    {domain, count, address, subject_keywords}. Rather than change the profiler
+    (which feeds many consumers including LLM prompts and dashboard), this helper
+    wraps strings into the expected dict shape, deriving counts and keywords from
+    other parts of the profile where available.
+
+    Pass-through behavior: if a tier already contains dicts (richer profiler
+    output, future-proof), they are kept as-is.
+    """
+    raw = profile.get("sender_tiers", {})
+    if not isinstance(raw, dict):
+        return {}
+
+    # Build a domain->count map from top_domains if available, else default to 1.
+    top_domains = profile.get("top_domains") or []
+    count_by_domain: dict[str, int] = {}
+    for entry in top_domains:
+        if isinstance(entry, dict):
+            d = (entry.get("domain") or "").lower()
+            if d:
+                count_by_domain[d] = int(entry.get("count", 1))
+        elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+            try:
+                count_by_domain[str(entry[0]).lower()] = int(entry[1])
+            except (TypeError, ValueError):
+                pass
+
+    # Build a domain->subject_keywords map from relationships if available.
+    keywords_by_domain: dict[str, list[str]] = {}
+    for rel in profile.get("relationships", []):
+        if not isinstance(rel, dict):
+            continue
+        d = (rel.get("domain") or "").lower()
+        if not d:
+            continue
+        kws = rel.get("common_topics") or rel.get("keywords") or []
+        if isinstance(kws, list):
+            keywords_by_domain[d] = [str(k) for k in kws[:10]]
+
+    normalized: dict[str, list[dict[str, Any]]] = {}
+    for tier, senders in raw.items():
+        if not isinstance(senders, list):
+            continue
+        out: list[dict[str, Any]] = []
+        for s in senders:
+            if isinstance(s, dict):
+                # Already in the rich format — pass through
+                out.append(s)
+                continue
+            if not isinstance(s, str):
+                continue
+            domain = s.lower().strip()
+            if not domain:
+                continue
+            out.append({
+                "domain": domain,
+                "address": domain,
+                "count": count_by_domain.get(domain, 1),
+                "subject_keywords": keywords_by_domain.get(domain, []),
+            })
+        normalized[tier] = out
+    return normalized
+
+
 # Domain → stream type mapping
 _STREAM_DOMAIN_MAP: dict[str, dict[str, str]] = {
     "github.com": {
@@ -210,16 +279,17 @@ async def generate_stream_pack(onboard_path: str) -> dict[str, Any]:
     profile = _load_profile(onboard_path)
     activity.heartbeat("loaded profile for stream detection")
 
+    sender_tiers = _normalize_sender_tiers(profile)
+
     # Collect all domains from sender tiers and financial services
     detected_domains: set[str] = set()
 
     # From sender_tiers — keys are tier names, values are lists of senders
-    for tier_name, senders in profile.get("sender_tiers", {}).items():
-        if isinstance(senders, list):
-            for sender in senders:
-                domain = sender.get("domain", "") if isinstance(sender, dict) else ""
-                if domain:
-                    detected_domains.add(domain.lower())
+    for tier_name, senders in sender_tiers.items():
+        for sender in senders:
+            domain = sender.get("domain", "")
+            if domain:
+                detected_domains.add(domain.lower())
 
     # From financial.detected_services
     for svc in profile.get("financial", {}).get("detected_services", []):
@@ -268,13 +338,15 @@ async def generate_matter_pack(onboard_path: str) -> dict[str, Any]:
     profile = _load_profile(onboard_path)
     activity.heartbeat("loaded profile for matter generation")
 
+    sender_tiers = _normalize_sender_tiers(profile)
+
     config = load_config()
     client = VaultClient(config)
     try:
         # Gather domain clusters from sender_tiers
         domain_groups: dict[str, dict[str, Any]] = {}  # domain → info
 
-        for tier_name, senders in profile.get("sender_tiers", {}).items():
+        for tier_name, senders in sender_tiers.items():
             if not isinstance(senders, list):
                 continue
             for sender in senders:
@@ -408,7 +480,7 @@ async def generate_instinct_pack(onboard_path: str) -> dict[str, Any]:
     client = VaultClient(config)
     try:
         created = 0
-        sender_tiers = profile.get("sender_tiers", {})
+        sender_tiers = _normalize_sender_tiers(profile)
         payment_issues = profile.get("financial", {}).get("payment_issues", [])
 
         # --- Noise tier instincts ---
