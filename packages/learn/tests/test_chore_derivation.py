@@ -526,3 +526,110 @@ class TestBuildOpportunityHaystack:
         assert "foo" in haystack
         assert "bar" in haystack
         assert haystack == haystack.lower()  # all lowercased
+
+
+# ---------------------------------------------------------------------------
+# Step 3 (S3-3): chore spec from Opus match result
+# ---------------------------------------------------------------------------
+
+from src.activities.assign_chores import _chore_spec_from_opus_match  # noqa: E402
+
+
+class TestChoreSpecFromOpusMatch:
+    def test_subscription_uses_opus_provided_domains(self):
+        opp = _opp(id="x", name="Watch billing")
+        opus_match = {
+            "opportunity_id": "x",
+            "template_id": "subscription_watcher",
+            "params": {
+                "matter_domains": ["stripe.com", "polar.sh"],
+                "alert_threshold": 0.85,
+                "session_id": "main",
+            },
+            "reason": "fits",
+        }
+        profile = {"rhythm": {"work_end_estimate": 17}, "relationships": {}}
+        spec = _chore_spec_from_opus_match(opus_match, opp, profile)
+        assert spec["template"] == "subscription_watcher"
+        assert spec["params"]["matter_domains"] == ["stripe.com", "polar.sh"]
+        assert spec["params"]["alert_threshold"] == 0.85
+        assert spec["params"]["session_id"] == "main"
+
+    def test_subscription_falls_back_to_profile_when_opus_omits_domains(self):
+        opp = _opp(id="x", name="Watch billing")
+        opus_match = {
+            "opportunity_id": "x",
+            "template_id": "subscription_watcher",
+            "params": {},
+        }
+        profile = {
+            "rhythm": {"work_end_estimate": 17},
+            "relationships": {},
+            "financial": {"detected_services": []},
+            "sender_tiers": {"service": [{"domain": "fallback.com"}]},
+        }
+        spec = _chore_spec_from_opus_match(opus_match, opp, profile)
+        assert spec["params"]["matter_domains"] == ["fallback.com"]
+
+    def test_subscription_clamps_invalid_threshold(self):
+        opp = _opp(id="x", name="Watch billing")
+        opus_match = {
+            "opportunity_id": "x",
+            "template_id": "subscription_watcher",
+            "params": {"alert_threshold": "not a number"},
+        }
+        profile = {"rhythm": {}, "relationships": {"communication_style": "responsive"}}
+        spec = _chore_spec_from_opus_match(opus_match, opp, profile)
+        assert spec["params"]["alert_threshold"] == 0.70
+
+    def test_subscription_rejects_out_of_range_threshold(self):
+        opp = _opp(id="x", name="Watch billing")
+        opus_match = {
+            "opportunity_id": "x",
+            "template_id": "subscription_watcher",
+            "params": {"alert_threshold": 1.5},
+        }
+        profile = {"rhythm": {}, "relationships": {}}
+        spec = _chore_spec_from_opus_match(opus_match, opp, profile)
+        assert spec["params"]["alert_threshold"] == 0.70
+
+    def test_matter_digest_uses_opus_slug(self):
+        opp = _opp(id="weekly-foo-digest", name="Weekly foo digest")
+        opus_match = {
+            "opportunity_id": "weekly-foo-digest",
+            "template_id": "weekly_matter_digest",
+            "params": {
+                "matter_slug": "neoterra",
+                "min_events_for_digest": 7,
+                "session_id": "telegram",
+            },
+        }
+        profile = {"rhythm": {"work_end_estimate": 17}, "meta": {"email_count": 3000}}
+        spec = _chore_spec_from_opus_match(opus_match, opp, profile)
+        assert spec["params"]["matter_slug"] == "neoterra"
+        assert spec["params"]["min_events_for_digest"] == 7
+        assert spec["params"]["session_id"] == "telegram"
+
+    def test_matter_digest_falls_back_to_extracted_slug(self):
+        opp = _opp(id="weekly-foo-digest", name="Weekly foo digest")
+        opus_match = {
+            "opportunity_id": "weekly-foo-digest",
+            "template_id": "weekly_matter_digest",
+            "params": {},
+        }
+        profile = {"rhythm": {}, "meta": {}}
+        spec = _chore_spec_from_opus_match(opus_match, opp, profile)
+        assert spec["params"]["matter_slug"] == "foo"
+
+    def test_tags_always_include_chore_and_auto_generated(self):
+        opp = _opp(id="x", name="X", tags=["custom"])
+        opus_match = {
+            "opportunity_id": "x",
+            "template_id": "subscription_watcher",
+            "params": {},
+        }
+        profile = {"rhythm": {}, "relationships": {}}
+        spec = _chore_spec_from_opus_match(opus_match, opp, profile)
+        assert "chore" in spec["tags"]
+        assert "auto-generated" in spec["tags"]
+        assert "custom" in spec["tags"]

@@ -646,18 +646,110 @@ async def _create_schedule(
 # The activity
 # ---------------------------------------------------------------------------
 
+def _chore_spec_from_opus_match(
+    opus_match: dict[str, Any],
+    opportunity: dict[str, Any],
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a chore spec from an Opus matcher result + the original opportunity.
+
+    Differs from `_chore_spec_from_opportunity` (the keyword heuristic version)
+    because Opus has already chosen the template AND proposed bespoke params.
+    We trust Opus's params for the template-specific fields and only fall back
+    to Step 1's profile-derived helpers when Opus omitted a field.
+    """
+    template_id = opus_match["template_id"]
+    opus_params = opus_match.get("params") or {}
+    name = str(opportunity.get("name") or "Chore").strip() or "Chore"
+    description = str(opportunity.get("description") or "").strip()
+    tags = opportunity.get("tags") or []
+    if not isinstance(tags, list):
+        tags = []
+    tag_set = {str(t) for t in tags if isinstance(t, str)}
+    tag_set.update({"chore", "auto-generated"})
+
+    spec: dict[str, Any] = {
+        "template": template_id,
+        "name": name,
+        "schedule": _derive_chore_schedule(template_id, profile),
+        "description": description or f"Generated from opportunity {opportunity.get('id', '')}",
+        "tags": sorted(tag_set),
+    }
+
+    if template_id == "subscription_watcher":
+        # Trust Opus's matter_domains if it provided them, else derive from profile
+        opus_domains = opus_params.get("matter_domains")
+        if isinstance(opus_domains, list) and opus_domains:
+            matter_domains = [str(d).lower() for d in opus_domains if isinstance(d, str)][:30]
+        else:
+            financial_domains: set[str] = set()
+            financial = profile.get("financial") or {}
+            sender_tiers = profile.get("sender_tiers") or {}
+            for entry in financial.get("detected_services") or []:
+                if isinstance(entry, dict):
+                    d = (entry.get("domain") or "").lower()
+                    if d:
+                        financial_domains.add(d)
+                elif isinstance(entry, str):
+                    financial_domains.add(entry.lower())
+            for s in sender_tiers.get("service") or []:
+                if isinstance(s, dict):
+                    d = (s.get("domain") or "").lower()
+                    if d:
+                        financial_domains.add(d)
+                elif isinstance(s, str):
+                    financial_domains.add(s.lower())
+            matter_domains = sorted(financial_domains)[:30]
+        opus_threshold = opus_params.get("alert_threshold")
+        threshold = (
+            float(opus_threshold)
+            if isinstance(opus_threshold, (int, float)) and 0 <= float(opus_threshold) <= 1
+            else _derive_alert_threshold("subscription_watcher", profile)
+        )
+        spec["params"] = {
+            "matter_domains": matter_domains,
+            "alert_threshold": threshold,
+            "session_id": str(opus_params.get("session_id") or _infer_default_session_id(profile)),
+        }
+    elif template_id == "weekly_matter_digest":
+        opus_slug = opus_params.get("matter_slug")
+        if isinstance(opus_slug, str) and opus_slug:
+            matter_slug = opus_slug
+        else:
+            matter_slug = _extract_matter_slug_from_opportunity(opportunity)
+        opus_min = opus_params.get("min_events_for_digest")
+        min_events = (
+            int(opus_min) if isinstance(opus_min, int) and opus_min > 0
+            else _derive_min_events_for_digest(profile)
+        )
+        spec["params"] = {
+            "matter_slug": matter_slug,
+            "session_id": str(opus_params.get("session_id") or _infer_default_session_id(profile)),
+            "min_events_for_digest": min_events,
+        }
+    else:
+        # Unknown template (shouldn't happen since the matcher validates) —
+        # fall through with empty params and let the chore record creation
+        # surface the failure clearly.
+        spec["params"] = opus_params if isinstance(opus_params, dict) else {}
+
+    return spec
+
+
 @activity.defn
 async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, Any]:
     """Decide chores from the profile, write vault records, create schedules.
 
-    Two paths:
-      1. **Opportunity-driven** (preferred, when onboard.json["opportunities"]
-         is populated by Stage 6's write_brief_and_opportunities_opus): each
-         opportunity is keyword-matched to a template via the Step 2 heuristic.
-         Matched ones become chores; unmatched ones are saved to
-         onboard.json["unmatched_opportunities"] for Step 4 (code generation)
-         to handle.
-      2. **Rule-based** (fallback, when no opportunities are present — e.g.
+    Three paths in priority order:
+      1. **Opus-driven matching** (preferred, when opportunities exist): calls
+         match_opportunities_to_templates from chore_matching.py. Opus picks
+         the best template per opportunity with bespoke params. Unmatched
+         opportunities go to onboard.json["unmatched_opportunities"] for
+         Step 4 (code generation).
+      2. **Keyword heuristic fallback** (when Opus matcher fails or is
+         disabled via ALFRED_CHORE_OPUS_MATCHING_ENABLED=false): the
+         _decide_chores_from_opportunities heuristic from S2-3.
+      3. **Rule-based fallback** (when no opportunities are present — e.g.
          tenants onboarded before Step 2 shipped): the original _decide_chores
          flow that hardcoded matching against profile features.
 
@@ -678,26 +770,80 @@ async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, An
 
     unmatched: list[dict[str, Any]] = []
     decided: list[dict[str, Any]]
+    matching_source = "rules"
 
-    if isinstance(opportunities, list) and opportunities:
-        # Path 1: opportunity-driven (Step 2)
+    opus_matching_enabled = (
+        os.environ.get("ALFRED_CHORE_OPUS_MATCHING_ENABLED", "true").lower() != "false"
+    )
+
+    if isinstance(opportunities, list) and opportunities and opus_matching_enabled:
+        # Path 1: Opus-driven matching (Step 3)
+        try:
+            from src.activities.chore_matching import match_opportunities_to_templates
+            opus_result = await match_opportunities_to_templates(onboard_path, opportunities)
+        except Exception as exc:
+            activity.heartbeat(f"opus matcher raised {type(exc).__name__}: {exc}")
+            opus_result = None
+
+        if opus_result and not opus_result.get("fallback"):
+            matching_source = "opus"
+            opus_matched = opus_result.get("matched", [])
+            opus_unmatched_raw = opus_result.get("unmatched", [])
+            # Build a lookup for the original opportunities so we can pull name/description
+            opp_by_id = {
+                o.get("id"): o
+                for o in opportunities
+                if isinstance(o, dict) and isinstance(o.get("id"), str)
+            }
+            decided = []
+            seen_names: set[str] = set()
+            for match in opus_matched:
+                opp = opp_by_id.get(match.get("opportunity_id"))
+                if not opp:
+                    continue
+                spec = _chore_spec_from_opus_match(match, opp, profile)
+                if spec["name"] in seen_names:
+                    continue
+                seen_names.add(spec["name"])
+                decided.append(spec)
+            # Reshape unmatched for the persistence step
+            unmatched = []
+            for u in opus_unmatched_raw:
+                opp = opp_by_id.get(u.get("opportunity_id"))
+                if opp is None:
+                    continue
+                unmatched.append({"opportunity": opp, "reason": u.get("reason", "")})
+            activity.heartbeat(
+                f"opus match: {len(decided)} matched, {len(unmatched)} unmatched"
+            )
+        else:
+            # Opus failed or returned fallback — try the keyword heuristic
+            matching_source = "keyword_fallback"
+            decided, unmatched = _decide_chores_from_opportunities(opportunities, profile)
+            activity.heartbeat(
+                f"keyword fallback: {len(decided)} matched, {len(unmatched)} unmatched"
+            )
+    elif isinstance(opportunities, list) and opportunities:
+        # Path 2: keyword heuristic (when Opus matching is disabled by env flag)
+        matching_source = "keyword"
         decided, unmatched = _decide_chores_from_opportunities(opportunities, profile)
         activity.heartbeat(
-            f"opportunity match: {len(decided)} matched, {len(unmatched)} unmatched"
+            f"keyword match: {len(decided)} matched, {len(unmatched)} unmatched"
         )
-        # Persist unmatched opportunities for Step 4 to pick up later
-        if unmatched:
-            try:
-                onboard["unmatched_opportunities"] = unmatched
-                with open(onboard_path, "w") as f:
-                    json.dump(onboard, f, indent=2, default=str)
-            except OSError as e:
-                # Non-fatal — Step 4 will see the empty list and generate nothing
-                activity.heartbeat(f"warning: failed to persist unmatched opportunities: {e}")
     else:
-        # Path 2: legacy rule-based fallback
+        # Path 3: legacy rule-based fallback
+        matching_source = "rules"
         decided = _decide_chores(profile, facts)
         activity.heartbeat(f"rule-based decision: {len(decided)} chores from profile")
+
+    # Persist unmatched opportunities for Step 4 to pick up later
+    if unmatched:
+        try:
+            onboard["unmatched_opportunities"] = unmatched
+            with open(onboard_path, "w") as f:
+                json.dump(onboard, f, indent=2, default=str)
+        except OSError as e:
+            activity.heartbeat(f"warning: failed to persist unmatched opportunities: {e}")
 
     if not decided:
         return {
@@ -705,7 +851,7 @@ async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, An
             "failed": [],
             "decided": 0,
             "unmatched": len(unmatched),
-            "source": "opportunities" if opportunities else "rules",
+            "source": matching_source,
         }
 
     config = load_config()
@@ -762,5 +908,5 @@ async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, An
         "failed": failed,
         "decided": len(decided),
         "unmatched": len(unmatched),
-        "source": "opportunities" if opportunities else "rules",
+        "source": matching_source,
     }
