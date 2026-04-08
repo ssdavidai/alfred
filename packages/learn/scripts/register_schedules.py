@@ -73,6 +73,18 @@ CALENDAR_SCHEDULES = [
             minute=[ScheduleRange(start=0)],
         ),
     },
+    {
+        # S5-2: Weekly scan for generated chores worth promoting to the
+        # standard library. Runs Sunday 3am (day_of_week=0 is Sunday),
+        # right after Saturday's nightly_maintenance completes.
+        "id": "al-chore-promotion",
+        "workflow": "ChorePromotionReflectionWorkflow",
+        "calendar": ScheduleCalendarSpec(
+            day_of_week=[ScheduleRange(start=0, end=0)],
+            hour=[ScheduleRange(start=3)],
+            minute=[ScheduleRange(start=0)],
+        ),
+    },
 ]
 
 

@@ -23,6 +23,7 @@ from src.workflows.stream_puller import StreamPullerWorkflow
 from src.workflows.onboarding_pipeline import OnboardingPipelineWorkflow
 from src.workflows.omi_processor import OmiAudioProcessorWorkflow
 from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
+from src.workflows.chore_promotion import ChorePromotionReflectionWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -39,6 +40,14 @@ from src.activities.assign_chores import assign_initial_chores
 
 # Activities — chore matching (Step 3, Opus-driven template matcher)
 from src.activities.chore_matching import match_opportunities_to_templates
+
+# Activities — chore promotion (Step 5, weekly reflection workflow)
+from src.activities.chore_promotion import (
+    draft_promotion_proposal,
+    identify_promotion_candidates,
+    save_promotion_draft,
+    scan_user_chores_directory,
+)
 
 # Activities — chore code generation (Step 4, Opus generates Python templates)
 from src.activities.chore_generation import (
@@ -253,6 +262,7 @@ _STATIC_WORKFLOWS = [
     OnboardingPipelineWorkflow,
     OmiAudioProcessorWorkflow,
     NightlyMaintenanceWorkflow,
+    ChorePromotionReflectionWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -411,6 +421,11 @@ ALL_ACTIVITIES = [
     write_matter_digest_via_llm,
     save_digest_to_vault,
     send_chore_notification,
+    # Chore promotion (Step 5)
+    scan_user_chores_directory,
+    identify_promotion_candidates,
+    draft_promotion_proposal,
+    save_promotion_draft,
 ]
 
 
