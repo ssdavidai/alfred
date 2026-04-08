@@ -22,8 +22,8 @@ from __future__ import annotations
 import ast
 import importlib.util
 import logging
-import os
 import sys
+import types
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +36,47 @@ from src.chore_manifest import (
 )
 
 logger = logging.getLogger("alfred-learn")
+
+
+# ---------------------------------------------------------------------------
+# Package stub registration
+#
+# Temporal's workflow validator re-imports the workflow's defining module
+# by its qualified name to verify sandbox safety. We use the synthetic
+# prefix `alfred_learn_dynamic.<stem>` for dynamically loaded templates,
+# but `alfred_learn_dynamic` isn't a real package on disk — Temporal would
+# fail with ModuleNotFoundError. We fix this by registering an empty
+# package stub in sys.modules at module-import time. The stub has the
+# correct __path__ attribute so importlib treats it as a real namespace
+# package.
+# ---------------------------------------------------------------------------
+
+_DYNAMIC_PACKAGE_NAME = "alfred_learn_dynamic"
+
+
+def _ensure_dynamic_package_stub() -> None:
+    """Register an empty alfred_learn_dynamic namespace package in sys.modules.
+
+    Idempotent — safe to call multiple times. Required so Temporal's
+    workflow validator can re-import dynamically loaded templates without
+    raising ModuleNotFoundError.
+    """
+    if _DYNAMIC_PACKAGE_NAME in sys.modules:
+        return
+    pkg = types.ModuleType(_DYNAMIC_PACKAGE_NAME)
+    # Mark as a package by setting __path__ to an empty list (PEP 420
+    # namespace package). importlib will use this to treat
+    # alfred_learn_dynamic.<x> as a submodule lookup.
+    pkg.__path__ = []  # type: ignore[attr-defined]
+    pkg.__doc__ = (
+        "Synthetic namespace package for dynamically loaded chore templates. "
+        "See src.workflows.chores._dynamic_loader for the loader."
+    )
+    sys.modules[_DYNAMIC_PACKAGE_NAME] = pkg
+
+
+# Register the stub eagerly so it's available before any dynamic load happens.
+_ensure_dynamic_package_stub()
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +461,10 @@ def load_user_chore_templates() -> list[type]:
             skipped_count += 1
             continue
 
-        # Import via spec_from_file_location with a unique module name
-        module_name = f"alfred_learn_dynamic.{py_file.stem}"
+        # Import via spec_from_file_location, namespacing under the stub
+        # package so Temporal's workflow validator can re-import it.
+        _ensure_dynamic_package_stub()
+        module_name = f"{_DYNAMIC_PACKAGE_NAME}.{py_file.stem}"
         try:
             spec = importlib.util.spec_from_file_location(module_name, py_file)
             if spec is None or spec.loader is None:
@@ -429,7 +472,12 @@ def load_user_chore_templates() -> list[type]:
                 skipped_count += 1
                 continue
             module = importlib.util.module_from_spec(spec)
+            module.__package__ = _DYNAMIC_PACKAGE_NAME
             sys.modules[module_name] = module
+            # Also expose the module as an attribute on the parent package
+            # so Temporal can reach it via getattr(alfred_learn_dynamic, stem).
+            parent_pkg = sys.modules[_DYNAMIC_PACKAGE_NAME]
+            setattr(parent_pkg, py_file.stem, module)
             spec.loader.exec_module(module)
         except Exception as exc:
             logger.error("dynamic_loader: import failed for %s: %s", py_file.name, exc)

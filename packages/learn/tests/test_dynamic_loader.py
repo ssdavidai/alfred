@@ -336,6 +336,21 @@ class TestValidationDeterminism:
 # Filesystem loader
 # ---------------------------------------------------------------------------
 
+class TestPackageStub:
+    def test_alfred_learn_dynamic_registered_in_sys_modules(self):
+        # Importing _dynamic_loader should ensure the stub package exists
+        import sys
+        from src.workflows.chores._dynamic_loader import _ensure_dynamic_package_stub
+
+        _ensure_dynamic_package_stub()
+        assert "alfred_learn_dynamic" in sys.modules
+        pkg = sys.modules["alfred_learn_dynamic"]
+        assert hasattr(pkg, "__path__")
+        # Idempotent — second call should not duplicate or break
+        _ensure_dynamic_package_stub()
+        assert sys.modules["alfred_learn_dynamic"] is pkg
+
+
 class TestLoadUserChoreTemplates:
     def test_missing_directory_returns_empty_list(self):
         with patch("src.workflows.chores._dynamic_loader.USER_CHORES_DIR", "/nonexistent/path/xyz"):
