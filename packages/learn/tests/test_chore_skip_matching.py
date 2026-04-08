@@ -30,17 +30,17 @@ from src.activities.assign_chores import _max_generated_chores_per_onboarding
 # ---------------------------------------------------------------------------
 
 class TestMaxGeneratedEnvVar:
-    def test_unset_returns_default_3(self, monkeypatch):
+    def test_unset_returns_default_10(self, monkeypatch):
         monkeypatch.delenv("ALFRED_CHORE_MAX_GENERATED", raising=False)
-        assert _max_generated_chores_per_onboarding() == 3
+        assert _max_generated_chores_per_onboarding() == 10
 
     def test_empty_string_returns_default(self, monkeypatch):
         monkeypatch.setenv("ALFRED_CHORE_MAX_GENERATED", "")
-        assert _max_generated_chores_per_onboarding() == 3
+        assert _max_generated_chores_per_onboarding() == 10
 
     def test_whitespace_returns_default(self, monkeypatch):
         monkeypatch.setenv("ALFRED_CHORE_MAX_GENERATED", "   ")
-        assert _max_generated_chores_per_onboarding() == 3
+        assert _max_generated_chores_per_onboarding() == 10
 
     def test_valid_int_returned(self, monkeypatch):
         monkeypatch.setenv("ALFRED_CHORE_MAX_GENERATED", "7")
@@ -48,19 +48,19 @@ class TestMaxGeneratedEnvVar:
 
     def test_zero_treated_as_invalid_uses_default(self, monkeypatch):
         monkeypatch.setenv("ALFRED_CHORE_MAX_GENERATED", "0")
-        assert _max_generated_chores_per_onboarding() == 3
+        assert _max_generated_chores_per_onboarding() == 10
 
     def test_negative_treated_as_invalid_uses_default(self, monkeypatch):
         monkeypatch.setenv("ALFRED_CHORE_MAX_GENERATED", "-5")
-        assert _max_generated_chores_per_onboarding() == 3
+        assert _max_generated_chores_per_onboarding() == 10
 
     def test_non_numeric_returns_default(self, monkeypatch):
         monkeypatch.setenv("ALFRED_CHORE_MAX_GENERATED", "abc")
-        assert _max_generated_chores_per_onboarding() == 3
+        assert _max_generated_chores_per_onboarding() == 10
 
     def test_decimal_treated_as_invalid(self, monkeypatch):
         monkeypatch.setenv("ALFRED_CHORE_MAX_GENERATED", "3.5")
-        assert _max_generated_chores_per_onboarding() == 3
+        assert _max_generated_chores_per_onboarding() == 10
 
     def test_safety_ceiling_enforced(self, monkeypatch):
         """Typos in .env shouldn't let a tenant run 1000 Opus calls."""
@@ -134,20 +134,27 @@ def _sample_opportunities() -> list[dict]:
 
 
 class TestSkipTemplateMatching:
-    def test_flag_unset_runs_normal_matching(self, tmp_path, monkeypatch):
-        """When the flag is unset, the existing Opus matcher path runs.
-        We don't care WHICH path wins — we just care that skip-matching
-        is NOT taken."""
+    def test_flag_unset_defaults_to_skipped(self, tmp_path, monkeypatch):
+        """When the flag is unset, the DEFAULT is now skip-matching —
+        every opportunity becomes a generation candidate without any
+        matcher running. This is the mega-plan's intended default."""
         monkeypatch.delenv("ALFRED_CHORE_SKIP_TEMPLATE_MATCHING", raising=False)
-        # Disable generation + Opus matcher so assign_initial_chores falls
-        # through to the keyword heuristic and then quickly exits via the
-        # `if not decided` path. We just want to observe `source`.
+        monkeypatch.setenv("ALFRED_CHORE_GENERATION_ENABLED", "false")
+
+        onboard = _write_onboard_json(tmp_path, _sample_opportunities())
+        result = _run_assign(onboard)
+        assert result["source"] == "skipped"
+
+    def test_flag_explicit_false_runs_legacy_matcher(self, tmp_path, monkeypatch):
+        """Opt-out path: explicitly setting the flag to false re-enables
+        the legacy matcher-first flow. With Opus matcher also disabled
+        we expect to land in the keyword heuristic path."""
+        monkeypatch.setenv("ALFRED_CHORE_SKIP_TEMPLATE_MATCHING", "false")
         monkeypatch.setenv("ALFRED_CHORE_OPUS_MATCHING_ENABLED", "false")
         monkeypatch.setenv("ALFRED_CHORE_GENERATION_ENABLED", "false")
 
         onboard = _write_onboard_json(tmp_path, _sample_opportunities())
         result = _run_assign(onboard)
-        # Keyword path is the fallback when Opus matcher is disabled
         assert result["source"] == "keyword"
 
     def test_flag_true_uses_skipped_source(self, tmp_path, monkeypatch):
@@ -217,16 +224,6 @@ class TestSkipTemplateMatching:
         result = _run_assign(onboard)
         # Empty opportunities → rules path, not skipped
         assert result["source"] == "rules"
-
-    def test_flag_false_explicit_runs_normal_matching(self, tmp_path, monkeypatch):
-        """Explicit `false` should behave identically to unset."""
-        monkeypatch.setenv("ALFRED_CHORE_SKIP_TEMPLATE_MATCHING", "false")
-        monkeypatch.setenv("ALFRED_CHORE_OPUS_MATCHING_ENABLED", "false")
-        monkeypatch.setenv("ALFRED_CHORE_GENERATION_ENABLED", "false")
-
-        onboard = _write_onboard_json(tmp_path, _sample_opportunities())
-        result = _run_assign(onboard)
-        assert result["source"] == "keyword"
 
     def test_non_dict_opportunities_filtered(self, tmp_path, monkeypatch):
         """Junk entries in the opportunities list should be silently dropped."""

@@ -802,14 +802,17 @@ def _chore_spec_from_opus_match(
 # up the newly deployed templates.
 # ---------------------------------------------------------------------------
 
-# Hard cap to keep generation time bounded. 3 opportunities × ~4 min each
-# (1 Opus call + 3 activities) = ~12 minutes at worst case, bounded by
-# _call_llm's total timeout.
+# Hard cap to keep generation time bounded. ~3 Opus calls per
+# generation × 10 opportunities ≈ 30 Opus calls worst case. Each
+# _call_llm invocation has its own 10-minute timeout so the total wall
+# time is bounded well under Temporal's workflow deadline.
 #
-# Overridable via ALFRED_CHORE_MAX_GENERATED env var. Useful when
-# ALFRED_CHORE_SKIP_TEMPLATE_MATCHING=true and the user wants every
-# opportunity (typically 5-8) turned into a bespoke template.
-_MAX_GENERATED_CHORES_PER_ONBOARDING_DEFAULT = 3
+# Default raised from 3 → 10 when the matcher was made skip-by-default
+# (every opportunity now goes to bespoke generation, so a cap of 3
+# would silently drop most opportunities on typical 5-8-opportunity
+# onboardings). Overridable via ALFRED_CHORE_MAX_GENERATED env var
+# with a hard safety ceiling of 20.
+_MAX_GENERATED_CHORES_PER_ONBOARDING_DEFAULT = 10
 
 
 def _max_generated_chores_per_onboarding() -> int:
@@ -1018,18 +1021,24 @@ async def _generate_chore_from_opportunity(
 async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, Any]:
     """Decide chores from the profile, write vault records, create schedules.
 
-    Three paths in priority order:
-      1. **Opus-driven matching** (preferred, when opportunities exist): calls
-         match_opportunities_to_templates from chore_matching.py. Opus picks
-         the best template per opportunity with bespoke params. Unmatched
-         opportunities go to onboard.json["unmatched_opportunities"] for
-         Step 4 (code generation).
-      2. **Keyword heuristic fallback** (when Opus matcher fails or is
-         disabled via ALFRED_CHORE_OPUS_MATCHING_ENABLED=false): the
+    Four paths in priority order (first match wins):
+      0. **Skip-matching** (DEFAULT, when opportunities exist): every
+         opportunity becomes an unmatched candidate for the Step 4
+         generation pipeline. No Opus matcher, no keyword heuristic —
+         just bespoke Python Temporal workflows for every opportunity.
+         Controlled by ALFRED_CHORE_SKIP_TEMPLATE_MATCHING (default
+         "true"). This is the mega-plan's intended default.
+      1. **Opus-driven matching** (opt-in when SKIP_TEMPLATE_MATCHING=
+         "false" and opportunities exist): calls
+         match_opportunities_to_templates from chore_matching.py. Opus
+         picks the best template per opportunity with bespoke params.
+         Unmatched opportunities still flow into Step 4 generation.
+      2. **Keyword heuristic fallback** (when the Opus matcher fails or
+         is disabled via ALFRED_CHORE_OPUS_MATCHING_ENABLED=false): the
          _decide_chores_from_opportunities heuristic from S2-3.
-      3. **Rule-based fallback** (when no opportunities are present — e.g.
-         tenants onboarded before Step 2 shipped): the original _decide_chores
-         flow that hardcoded matching against profile features.
+      3. **Rule-based fallback** (when no opportunities are present —
+         e.g. tenants onboarded before Step 2 shipped): the original
+         _decide_chores flow matching against profile features.
 
     Idempotent-ish: if a schedule with the same id already exists, the
     ctrl-api call will fail and we record it in `failed` but continue with
@@ -1054,21 +1063,25 @@ async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, An
         os.environ.get("ALFRED_CHORE_OPUS_MATCHING_ENABLED", "true").lower() != "false"
     )
 
-    # NEW: bypass the matcher entirely — every opportunity gets treated
-    # as unmatched and goes straight to the Step 4 generation pipeline.
-    # Set ALFRED_CHORE_SKIP_TEMPLATE_MATCHING=true to force bespoke
-    # Python Temporal workflows for every onboarding opportunity,
-    # regardless of whether an existing standard-library template
-    # would have been a reasonable fit. Intended for tenants where
-    # we want maximum personalization and are willing to spend the
-    # Opus tokens (~3 calls per generation × N opportunities).
+    # DEFAULT: skip the matcher entirely and send every opportunity
+    # through the bespoke generation pipeline. Every onboarded user
+    # gets brand-new Python Temporal workflows tailored to their
+    # specific facts/patterns/profile rather than drawing from a
+    # shared standard-library menu.
     #
-    # When this flag is on, you almost certainly also want to bump
-    # ALFRED_CHORE_MAX_GENERATED above the default 3 — otherwise the
-    # first 3 opportunities get bespoke templates and the rest are
-    # silently dropped.
+    # Set ALFRED_CHORE_SKIP_TEMPLATE_MATCHING=false to opt back INTO
+    # the legacy matcher-first flow (Opus matcher first, keyword
+    # heuristic as fallback). Kept as an opt-out so tenants that want
+    # to save Opus tokens can still reuse existing templates — but
+    # the mega-plan's intent is full personalization, so the default
+    # flipped once the generation pipeline was verified on david.
+    #
+    # Cost implication: ~3 Opus calls per generated template × up to
+    # ALFRED_CHORE_MAX_GENERATED (default 10) = up to 30 Opus calls
+    # per onboarding worst case. ~$10-30/onboarding for code
+    # generation alone.
     skip_template_matching = (
-        os.environ.get("ALFRED_CHORE_SKIP_TEMPLATE_MATCHING", "false").lower() == "true"
+        os.environ.get("ALFRED_CHORE_SKIP_TEMPLATE_MATCHING", "true").lower() != "false"
     )
 
     if isinstance(opportunities, list) and opportunities and skip_template_matching:
