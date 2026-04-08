@@ -864,9 +864,11 @@ async def write_brief_and_opportunities_opus(onboard_path: str) -> dict[str, Any
             continue
 
         # Robust parse: _parse_json_with_key handles code fences, truncation,
-        # brace-depth scanning. We ask for "brief" since it's a required top-
-        # level key — this disambiguates from partial/embedded JSON.
-        parsed = _parse_json_with_key(raw, "brief")
+        # brace-depth scanning. Note the helper requires the keyed value to be
+        # a LIST (it was designed for "facts"/"patterns" extraction), so we
+        # key on "opportunities" which maps to a list. The returned dict will
+        # also contain "brief" as a string which we pull out separately.
+        parsed = _parse_json_with_key(raw, "opportunities")
         if not parsed:
             logger.error(
                 "onboarding_v3: brief+opportunities parse failed (attempt %d), raw[:200]=%r",
