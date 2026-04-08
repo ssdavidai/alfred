@@ -942,7 +942,21 @@ async def deploy_generated_template(
 #   - Call this ONCE per batch of deployments, never per template.
 # ---------------------------------------------------------------------------
 
-_RESTART_LEARN_ENDPOINT = "http://host.docker.internal:3100/api/v1/admin/restart-learn"
+def _resolve_ctrl_api_base() -> str:
+    """Return the ctrl-api base URL reachable from inside alfred-learn.
+
+    In the tenant docker-compose stack ctrl-api is a sibling service
+    reachable as `http://ctrl-api:3100` via Docker's built-in DNS.
+    The `ALFRED_CTRL_URL` env var overrides this (set in
+    docker-compose.yaml). We never use `host.docker.internal` — that
+    hostname only resolves on Docker Desktop (macOS/Windows), not on
+    production Linux hosts.
+    """
+    return os.environ.get("ALFRED_CTRL_URL", "http://ctrl-api:3100").rstrip("/")
+
+
+def _restart_learn_endpoint() -> str:
+    return _resolve_ctrl_api_base() + "/api/v1/admin/restart-learn"
 
 
 def _resolve_ctrl_api_token() -> str:
@@ -1003,10 +1017,11 @@ async def restart_learn_worker() -> dict[str, Any]:
         }
 
     started = time.monotonic()
+    endpoint = _restart_learn_endpoint()
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(
-                _RESTART_LEARN_ENDPOINT,
+                endpoint,
                 headers={"Authorization": f"Bearer {token}"},
             )
     except httpx.ConnectError as exc:
