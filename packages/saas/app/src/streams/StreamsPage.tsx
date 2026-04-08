@@ -10,6 +10,7 @@ import {
   deleteStream,
   regenerateWebhookToken,
   storeIntegrationToken,
+  getStreamSuggestions,
 } from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
 import { Button } from "../client/components/ui/button";
@@ -27,6 +28,8 @@ import {
   Radio,
   Loader2,
   ArrowLeft,
+  Sparkles,
+  X,
 } from "lucide-react";
 import StreamCard from "./components/StreamCard";
 import EventLog from "./components/EventLog";
@@ -259,6 +262,17 @@ export default function StreamsPage() {
         pipeline. Each integration streams events that Alfred can learn from
         and act on.
       </p>
+
+      {/* A.3: Stream suggestions from onboarding */}
+      <StreamSuggestionsBanner
+        onConnect={(sourceId: string) => {
+          const source = SOURCES.find((s) => s.id === sourceId);
+          if (source) {
+            setShowConnectDialog(true);
+            handleSelectSource(source);
+          }
+        }}
+      />
 
       {/* Integration source health overview */}
       {streams && !isLoading && (
@@ -603,5 +617,118 @@ export default function StreamsPage() {
         </DialogContent>
       </Dialog>
     </DashboardLayout>
+  );
+}
+
+
+/* ------------------------------------------------------------------ */
+/*  StreamSuggestionsBanner — A.3                                      */
+/*                                                                     */
+/*  Renders unresolved stream suggestions from onboard.json as cards   */
+/*  with Connect buttons. The user dismisses individual suggestions    */
+/*  via local state (sessionStorage) so they don't keep popping back.  */
+/* ------------------------------------------------------------------ */
+
+interface StreamSuggestionsBannerProps {
+  onConnect: (sourceId: string) => void;
+}
+
+function StreamSuggestionsBanner({ onConnect }: StreamSuggestionsBannerProps) {
+  const { data, isLoading, error } = useQuery(getStreamSuggestions, undefined, {
+    refetchInterval: 60_000,
+    retry: false,
+  });
+
+  // Track dismissed suggestions per session so the user can hide ones they
+  // don't want to see again. We persist to sessionStorage rather than
+  // server-side because the suggestions themselves are ephemeral (they
+  // only exist until onboarding suggestions are processed).
+  const [dismissed, setDismissed] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const raw = window.sessionStorage.getItem("dismissed_stream_suggestions");
+      return new Set(raw ? JSON.parse(raw) : []);
+    } catch {
+      return new Set();
+    }
+  });
+
+  const dismiss = (sourceId: string) => {
+    const next = new Set(dismissed);
+    next.add(sourceId);
+    setDismissed(next);
+    try {
+      window.sessionStorage.setItem(
+        "dismissed_stream_suggestions",
+        JSON.stringify(Array.from(next)),
+      );
+    } catch {
+      // ignore quota errors
+    }
+  };
+
+  if (isLoading || error) return null;
+
+  const unresolved: any[] = (data as any)?.unresolved ?? [];
+  const visible = unresolved.filter((s) => !dismissed.has(s.source_id));
+
+  if (visible.length === 0) return null;
+
+  return (
+    <div className="mb-6">
+      <div className="mb-3 flex items-center gap-2">
+        <Sparkles className="h-3.5 w-3.5 text-purple-400" />
+        <h2 className="font-mono text-[0.7rem] uppercase tracking-wider text-purple-300/80">
+          Suggested integrations from your onboarding
+        </h2>
+        <span className="font-mono text-[0.6rem] text-muted-foreground/40">
+          ({visible.length})
+        </span>
+      </div>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        {visible.map((suggestion: any) => {
+          const sourceDef = SOURCES.find((s) => s.id === suggestion.source_id);
+          const Icon = sourceDef?.icon ?? Radio;
+          return (
+            <SpotlightCard key={suggestion.source_id}>
+              <div className="flex items-start gap-3">
+                <Icon className="mt-0.5 h-4 w-4 flex-shrink-0 text-purple-400/80" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="font-mono text-xs font-medium text-cream">
+                      {suggestion.label}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => dismiss(suggestion.source_id)}
+                      title="Dismiss this suggestion"
+                      className="text-muted-foreground/40 hover:text-muted-foreground"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                  <p className="mt-1 text-[0.65rem] text-muted-foreground line-clamp-2">
+                    {suggestion.description}
+                  </p>
+                  {suggestion.detected_from_domain && (
+                    <p className="mt-1 font-mono text-[0.55rem] text-muted-foreground/40">
+                      Detected from emails on {suggestion.detected_from_domain}
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onConnect(suggestion.source_id)}
+                    className="mt-2 flex items-center gap-1 rounded-sm border border-purple-500/30 bg-purple-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-purple-300 transition-colors hover:bg-purple-500/20"
+                  >
+                    <Plus className="h-3 w-3" />
+                    Connect
+                  </button>
+                </div>
+              </div>
+            </SpotlightCard>
+          );
+        })}
+      </div>
+    </div>
   );
 }

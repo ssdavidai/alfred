@@ -741,6 +741,12 @@ action applyStreamSuggestions {
   entities: [Instance, Stream, IntegrationToken]
 }
 
+// A.3: list unresolved suggestions for the Streams page UI cards
+query getStreamSuggestions {
+  fn: import { getStreamSuggestions } from "@src/streams/operations",
+  entities: [Instance, Stream]
+}
+
 action storeIntegrationToken {
   fn: import { storeIntegrationToken } from "@src/streams/operations",
   entities: [OAuthCredential]

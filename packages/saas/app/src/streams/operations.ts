@@ -273,6 +273,112 @@ import { SOURCES } from "./sources";
 // elsewhere.
 const _AUTO_CREATABLE_SOURCES = new Set(["gmail"]);
 
+// A.3: getStreamSuggestions — return the suggestions that need user
+// action (i.e. would have been skipped by applyStreamSuggestions because
+// they need OAuth/api_key/webhook setup). The Streams page renders these
+// as Connect cards.
+export const getStreamSuggestions = async (
+  _args: void,
+  context: any,
+): Promise<{
+  unresolved: Array<{
+    source_id: string;
+    label: string;
+    description: string;
+    auth_type: string;
+    detected_from_domain: string;
+    suggested_name: string;
+  }>;
+  total_suggested: number;
+}> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+
+  // Fetch suggestions from tenant
+  let suggested: any[] = [];
+  try {
+    const instance = await getUserInstance(context);
+    const data = await proxyToTenant(instance, {
+      method: "GET",
+      path: "/api/v1/onboarding/suggested-streams",
+    });
+    suggested = Array.isArray(data?.suggested_streams)
+      ? data.suggested_streams
+      : [];
+  } catch (err: any) {
+    console.error("[getStreamSuggestions] proxy fetch failed:", err?.message);
+    return { unresolved: [], total_suggested: 0 };
+  }
+
+  if (suggested.length === 0) {
+    return { unresolved: [], total_suggested: 0 };
+  }
+
+  // Look up existing streams to filter duplicates
+  const existing = await prisma.stream.findMany({
+    where: { userId: context.user.id },
+    select: { source: true },
+  });
+  const existingSources = new Set(existing.map((s: any) => s.source));
+
+  const unresolved: Array<{
+    source_id: string;
+    label: string;
+    description: string;
+    auth_type: string;
+    detected_from_domain: string;
+    suggested_name: string;
+  }> = [];
+
+  const seen = new Set<string>();
+
+  for (const suggestion of suggested) {
+    if (typeof suggestion !== "object" || !suggestion) continue;
+    const sourceId = String(
+      suggestion.type ?? suggestion.source ?? "",
+    ).trim();
+    if (!sourceId) continue;
+
+    const sourceDef = SOURCES.find(
+      (s: any) =>
+        s.id === sourceId ||
+        sourceId === `${s.id}_webhook` ||
+        sourceId === `${s.id}_pull` ||
+        sourceId.startsWith(`${s.id}_`),
+    );
+
+    if (!sourceDef) continue;
+    if (seen.has(sourceDef.id)) continue;
+    seen.add(sourceDef.id);
+
+    // Skip already-existing
+    if (existingSources.has(sourceDef.id)) continue;
+
+    // Skip auto-creatable (those flow through applyStreamSuggestions)
+    if (_AUTO_CREATABLE_SOURCES.has(sourceDef.id)) continue;
+
+    // Skip system streams (auto-created elsewhere)
+    if (sourceDef.transport === "system") continue;
+
+    // Skip custom — nothing to suggest about a generic webhook
+    if (sourceDef.id === "custom") continue;
+
+    unresolved.push({
+      source_id: sourceDef.id,
+      label: sourceDef.label,
+      description: sourceDef.description,
+      auth_type: sourceDef.authType,
+      detected_from_domain: String(suggestion.detected_from_domain ?? ""),
+      suggested_name: String(suggestion.name ?? sourceDef.label),
+    });
+  }
+
+  return {
+    unresolved,
+    total_suggested: suggested.length,
+  };
+};
+
+
 export const applyStreamSuggestions = async (
   _args: void,
   context: any,
