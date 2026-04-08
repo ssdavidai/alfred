@@ -692,3 +692,376 @@ async def smoke_test_generated_template(
         )
 
     return report
+
+
+# ---------------------------------------------------------------------------
+# S4-7: deploy_generated_template activity
+#
+# Writes a validated + smoke-tested chore template to the persistent
+# user-chores directory. The deployment is deliberately minimal:
+#
+#   1. Atomic write (temp file + rename) to
+#      /alfred-data/user-chores/<module_name>.py
+#   2. Content-addressed idempotency — skip rewrites if the existing
+#      file has the same SHA256 hash
+#   3. Audit log entry in /alfred-data/chore-generation-audit.jsonl
+#
+# This activity does NOT trigger the worker restart — that's the job
+# of a separate `restart_learn_worker` activity, called once per batch
+# of deployments (the onboarding workflow deploys N templates, then
+# restarts once at the end). See the plan's "batch the restart at the
+# end of Stage 7.5b" note.
+#
+# The worker picks up the new template on its next startup via
+# load_user_chore_templates (S4-1), which re-applies Layer 2 validation
+# as a final defense-in-depth check before importing.
+# ---------------------------------------------------------------------------
+
+# Persistent directory for generated chore templates. Lives on the
+# encrypted volume (/mnt/encrypted/alfred mounts to /alfred-data inside
+# the container) and survives container recreates. Created by the init
+# container (see S4-3).
+_USER_CHORES_DIR_PATH = Path("/alfred-data/user-chores")
+
+# Audit trail for every deployment attempt — one JSONL line per event.
+# The nightly_maintenance workflow will rotate this (Step 5).
+_DEPLOY_AUDIT_LOG = Path("/alfred-data/chore-generation-audit.jsonl")
+
+
+def _append_deploy_audit(entry: dict[str, Any]) -> None:
+    """Best-effort append to the deployment audit log.
+
+    Failures here never propagate — the deployment succeeded, the
+    audit log is just for post-hoc debugging. Swallow OSError so a
+    full disk doesn't block the pipeline.
+    """
+    try:
+        _DEPLOY_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with _DEPLOY_AUDIT_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, default=str) + "\n")
+    except OSError as exc:
+        logger.warning(
+            "deploy_generated_template: failed to write audit log: %s", exc
+        )
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Write text to `path` atomically via a temp file + rename.
+
+    Safe even if the process is killed mid-write — readers either see
+    the old content or the new content, never a half-written file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a sibling temp file so the rename happens on the same
+    # filesystem (rename across filesystems is not atomic).
+    fd, tmp_path_str = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp_path = Path(tmp_path_str)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        # Clean up the temp file if rename failed
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+@activity.defn
+async def deploy_generated_template(
+    python_source: str,
+    module_name: str,
+    workflow_class_name: str,
+) -> dict[str, Any]:
+    """Persist a generated chore template file to the user-chores directory.
+
+    Writes /alfred-data/user-chores/<module_name>.py atomically.
+    Does NOT restart the worker — that's the caller's responsibility
+    (batch all deployments then call restart_learn_worker once).
+
+    Args:
+        python_source: the full Python source to write
+        module_name: snake_case identifier — becomes <module_name>.py
+        workflow_class_name: CamelCase class name (for audit + return)
+
+    Returns:
+        {
+            "ok": bool,
+            "path": str,              # absolute path of the deployed file
+            "source_hash": str,       # sha256 of the written source
+            "bytes_written": int,
+            "idempotent": bool,       # True if file already existed with same hash
+            "error": str,             # only on failure
+        }
+
+    The activity never raises on expected I/O failures — it returns
+    ok=False with an error string. Temporal's retry policy on the
+    caller side handles transient issues.
+    """
+    activity.heartbeat(f"deploying {module_name}.py")
+
+    # Precondition checks
+    if not python_source or not python_source.strip():
+        return {
+            "ok": False,
+            "path": "",
+            "source_hash": "",
+            "bytes_written": 0,
+            "idempotent": False,
+            "error": "python_source is empty",
+        }
+    if not module_name or not module_name.replace("_", "").isalnum():
+        return {
+            "ok": False,
+            "path": "",
+            "source_hash": "",
+            "bytes_written": 0,
+            "idempotent": False,
+            "error": f"invalid module_name: {module_name!r}",
+        }
+
+    target_path = _USER_CHORES_DIR_PATH / f"{module_name}.py"
+    source_hash = hashlib.sha256(python_source.encode("utf-8")).hexdigest()
+
+    # Idempotency: if the file already exists with the same hash,
+    # don't touch it (avoids unnecessary mtime churn for the worker's
+    # next rescan).
+    if target_path.exists():
+        try:
+            existing_hash = hashlib.sha256(
+                target_path.read_bytes()
+            ).hexdigest()
+            if existing_hash == source_hash:
+                logger.info(
+                    "deploy_generated_template: %s already deployed (hash %s) — skipping",
+                    target_path.name,
+                    source_hash[:12],
+                )
+                _append_deploy_audit({
+                    "phase": "deploy",
+                    "status": "idempotent_skip",
+                    "module_name": module_name,
+                    "workflow_class_name": workflow_class_name,
+                    "source_hash": source_hash,
+                    "path": str(target_path),
+                    "bytes": len(python_source),
+                    "timestamp": time.time(),
+                })
+                return {
+                    "ok": True,
+                    "path": str(target_path),
+                    "source_hash": source_hash,
+                    "bytes_written": 0,
+                    "idempotent": True,
+                }
+        except OSError as exc:
+            logger.warning(
+                "deploy_generated_template: couldn't read existing %s: %s",
+                target_path, exc,
+            )
+            # Fall through and try to write
+
+    # Atomic write
+    try:
+        _atomic_write_text(target_path, python_source)
+    except OSError as exc:
+        logger.error(
+            "deploy_generated_template: write failed for %s: %s",
+            target_path, exc,
+        )
+        _append_deploy_audit({
+            "phase": "deploy",
+            "status": "write_failed",
+            "module_name": module_name,
+            "workflow_class_name": workflow_class_name,
+            "source_hash": source_hash,
+            "path": str(target_path),
+            "error": f"{type(exc).__name__}: {exc}",
+            "timestamp": time.time(),
+        })
+        return {
+            "ok": False,
+            "path": str(target_path),
+            "source_hash": source_hash,
+            "bytes_written": 0,
+            "idempotent": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    logger.info(
+        "deploy_generated_template: wrote %s (%d bytes, hash %s)",
+        target_path, len(python_source), source_hash[:12],
+    )
+    _append_deploy_audit({
+        "phase": "deploy",
+        "status": "ok",
+        "module_name": module_name,
+        "workflow_class_name": workflow_class_name,
+        "source_hash": source_hash,
+        "path": str(target_path),
+        "bytes": len(python_source),
+        "timestamp": time.time(),
+    })
+
+    return {
+        "ok": True,
+        "path": str(target_path),
+        "source_hash": source_hash,
+        "bytes_written": len(python_source),
+        "idempotent": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# S4-7 companion: restart_learn_worker activity
+#
+# Calls the ctrl-api /api/v1/admin/restart-learn route (S4-2) to force
+# a graceful recreate of the alfred-learn container. This is how newly
+# deployed chore templates become visible to Temporal — the worker's
+# ALL_WORKFLOWS list is constructed at startup, so we need to restart
+# to pick up new dynamic templates.
+#
+# Important caveats:
+#
+#   - This activity WILL kill the worker process it's running on.
+#     Temporal's activity model handles this: the activity gets marked
+#     as failed with "worker shutting down", the workflow retries it
+#     on the new worker, and the second attempt returns early via the
+#     rate-limit check on the ctrl-api side (30-second minimum interval).
+#
+#   - The caller workflow MUST configure a retry policy that allows
+#     worker-shutdown recoveries (the default Temporal retry policy
+#     handles this automatically).
+#
+#   - Call this ONCE per batch of deployments, never per template.
+# ---------------------------------------------------------------------------
+
+_RESTART_LEARN_ENDPOINT = "http://host.docker.internal:3100/api/v1/admin/restart-learn"
+
+
+def _resolve_ctrl_api_token() -> str:
+    """Return the admin token for the ctrl-api restart route.
+
+    Looks at AAS_API_KEY first (the shared tenant auth token),
+    falls back to reading the gateway token file as a last-resort
+    source — kept as a safety net so a misconfigured env doesn't
+    deadlock the pipeline.
+    """
+    token = os.environ.get("AAS_API_KEY", "")
+    if token:
+        return token
+    token_file = os.environ.get("OPENCLAW_GATEWAY_TOKEN_FILE", "")
+    if token_file:
+        try:
+            return Path(token_file).read_text().strip()
+        except OSError:
+            pass
+    return ""
+
+
+@activity.defn
+async def restart_learn_worker() -> dict[str, Any]:
+    """Trigger ctrl-api to force-recreate the alfred-learn container.
+
+    Called once per onboarding generation batch (after all templates
+    have been deployed). The activity SHOULD be the final step of
+    Stage 7.5b so Temporal picks up the workflow on the restarted
+    worker with all new dynamic templates loaded.
+
+    Returns:
+        {
+            "ok": bool,
+            "status_code": int | None,
+            "response_body": str,     # first 500 chars
+            "duration_seconds": float,
+            "error": str,             # on failure
+        }
+
+    Note: because this activity KILLS its own worker, the HTTP response
+    may not come back before the process dies. The caller's retry policy
+    handles recovery — on the second attempt the ctrl-api rate limiter
+    (30-second window, S4-2) returns 429 and we treat that as success.
+    """
+    import httpx  # local import — keeps worker startup fast
+
+    activity.heartbeat("restart_learn_worker: calling ctrl-api")
+
+    token = _resolve_ctrl_api_token()
+    if not token:
+        return {
+            "ok": False,
+            "status_code": None,
+            "response_body": "",
+            "duration_seconds": 0.0,
+            "error": "no AAS_API_KEY available",
+        }
+
+    started = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                _RESTART_LEARN_ENDPOINT,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.ConnectError as exc:
+        # Likely the ctrl-api already killed us before the HTTP response
+        # came back. Treat as a "probably succeeded" outcome — the next
+        # retry of this activity on the restarted worker will confirm.
+        logger.info(
+            "restart_learn_worker: connect error (likely expected — worker restart in flight): %s",
+            exc,
+        )
+        return {
+            "ok": True,
+            "status_code": None,
+            "response_body": "",
+            "duration_seconds": time.monotonic() - started,
+            "error": f"ConnectError: {exc}",
+            "note": "connection dropped during restart — assuming success",
+        }
+    except Exception as exc:
+        logger.error("restart_learn_worker: unexpected error: %s", exc)
+        return {
+            "ok": False,
+            "status_code": None,
+            "response_body": "",
+            "duration_seconds": time.monotonic() - started,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    duration = time.monotonic() - started
+    body_snippet = resp.text[:500] if resp.text else ""
+
+    # Rate-limited (429) means a restart already happened in the last
+    # 30 seconds — treat as success for our purposes (the worker IS
+    # being restarted by someone). The rate limit exists precisely to
+    # make the restart idempotent during Temporal retry storms.
+    if resp.status_code in (200, 429):
+        logger.info(
+            "restart_learn_worker: ctrl-api responded %d (%.2fs)",
+            resp.status_code, duration,
+        )
+        return {
+            "ok": True,
+            "status_code": resp.status_code,
+            "response_body": body_snippet,
+            "duration_seconds": duration,
+        }
+
+    logger.error(
+        "restart_learn_worker: unexpected status %d: %s",
+        resp.status_code, body_snippet,
+    )
+    return {
+        "ok": False,
+        "status_code": resp.status_code,
+        "response_body": body_snippet,
+        "duration_seconds": duration,
+        "error": f"unexpected status {resp.status_code}",
+    }
