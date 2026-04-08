@@ -130,6 +130,32 @@ export function registerWorkflowRoutes(): void {
     }
   });
 
+  // A.2: Read suggested_streams from onboard.json
+  // generate_stream_pack writes a list of {name, type, description, detected_from_domain}
+  // entries during onboarding Stage 7. The SaaS-side applyStreamSuggestions
+  // action reads these via this route and creates Stream rows for the
+  // sources where we already have credentials (e.g. gmail after Google
+  // signup). The list is consulted by the UI in A.3 too.
+  addRoute("GET", "/api/v1/onboarding/suggested-streams", async ({ res }) => {
+    try {
+      const raw = fs.readFileSync(ONBOARD_JSON_PATH, "utf-8");
+      const data = JSON.parse(raw);
+      const suggestions = Array.isArray(data.suggested_streams)
+        ? data.suggested_streams
+        : [];
+      sendJson(res, 200, {
+        suggested_streams: suggestions,
+        count: suggestions.length,
+      });
+    } catch {
+      // onboard.json may not exist yet
+      sendJson(res, 200, {
+        suggested_streams: [],
+        count: 0,
+      });
+    }
+  });
+
   // Get onboarding progress (reads /mnt/encrypted/alfred/onboard.json)
   addRoute("GET", "/api/v1/onboarding/progress", async ({ res }) => {
     try {

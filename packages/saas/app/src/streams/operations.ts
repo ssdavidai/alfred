@@ -242,3 +242,162 @@ export const storeIntegrationToken: StoreIntegrationToken<any, any> = async (arg
 
   return { status: "stored" };
 };
+
+// ---------------------------------------------------------------------------
+// A.2: applyStreamSuggestions
+//
+// Reads onboard.json["suggested_streams"] from the tenant via proxy and
+// auto-creates Stream rows for sources where we already have credentials
+// (notably gmail, since the user authorized Google during signup). Sources
+// that need user action (github, polar, notion) are returned in the
+// `skipped` list with a `needs_user_action` reason — the UI surfaces those
+// as cards with Connect buttons in A.3.
+//
+// Idempotent: if a Stream of the same source already exists for the user,
+// skipped with reason "already_exists". Safe to re-run.
+//
+// Returns:
+//   {
+//     created: [{id, source, name}],
+//     skipped: [{source, reason}],
+//     errors: [{source, error}],
+//     suggested_count: number,
+//   }
+// ---------------------------------------------------------------------------
+
+import { SOURCES } from "./sources";
+
+// Sources we can auto-create on the user's behalf because we already have
+// the credentials at signup time. Currently just gmail (Google OAuth happens
+// during signup). System streams (openclaw-sessions) are auto-created
+// elsewhere.
+const _AUTO_CREATABLE_SOURCES = new Set(["gmail"]);
+
+export const applyStreamSuggestions = async (
+  _args: void,
+  context: any,
+): Promise<{
+  created: Array<{ id: string; source: string; name: string }>;
+  skipped: Array<{ source: string; reason: string }>;
+  errors: Array<{ source: string; error: string }>;
+  suggested_count: number;
+}> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+
+  // 1. Fetch suggestions from tenant
+  let suggested: any[] = [];
+  try {
+    const instance = await getUserInstance(context);
+    const data = await proxyToTenant(instance, {
+      method: "GET",
+      path: "/api/v1/onboarding/suggested-streams",
+    });
+    suggested = Array.isArray(data?.suggested_streams)
+      ? data.suggested_streams
+      : [];
+  } catch (err: any) {
+    console.error("[applyStreamSuggestions] proxy fetch failed:", err?.message);
+    return {
+      created: [],
+      skipped: [],
+      errors: [{ source: "_proxy", error: err?.message ?? "unknown" }],
+      suggested_count: 0,
+    };
+  }
+
+  if (suggested.length === 0) {
+    return {
+      created: [],
+      skipped: [],
+      errors: [],
+      suggested_count: 0,
+    };
+  }
+
+  // 2. Look up existing streams to avoid duplicates
+  const existing = await prisma.stream.findMany({
+    where: { userId: context.user.id },
+    select: { source: true, name: true },
+  });
+  const existingSources = new Set(existing.map((s: any) => s.source));
+
+  const created: Array<{ id: string; source: string; name: string }> = [];
+  const skipped: Array<{ source: string; reason: string }> = [];
+  const errors: Array<{ source: string; error: string }> = [];
+
+  // 3. For each suggestion, decide what to do
+  for (const suggestion of suggested) {
+    if (typeof suggestion !== "object" || !suggestion) continue;
+    const sourceId = String(
+      suggestion.type ?? suggestion.source ?? "",
+    ).trim();
+    if (!sourceId) {
+      skipped.push({ source: "_unknown", reason: "missing source id" });
+      continue;
+    }
+
+    // Map detection types like "stripe_webhook" to known SOURCES ids
+    // (gmail -> gmail, github_webhook -> github, etc.)
+    const sourceDef = SOURCES.find(
+      (s: any) =>
+        s.id === sourceId ||
+        sourceId === `${s.id}_webhook` ||
+        sourceId === `${s.id}_pull` ||
+        sourceId.startsWith(`${s.id}_`),
+    );
+
+    if (!sourceDef) {
+      skipped.push({ source: sourceId, reason: "unknown source" });
+      continue;
+    }
+
+    // Skip duplicates
+    if (existingSources.has(sourceDef.id)) {
+      skipped.push({ source: sourceDef.id, reason: "already_exists" });
+      continue;
+    }
+
+    // Skip if not auto-creatable (UI surfaces these as Connect cards in A.3)
+    if (!_AUTO_CREATABLE_SOURCES.has(sourceDef.id)) {
+      skipped.push({ source: sourceDef.id, reason: "needs_user_action" });
+      continue;
+    }
+
+    // Determine the stream type from the source's transport
+    const streamType =
+      sourceDef.transport === "pull" ? "scheduled" :
+      sourceDef.transport === "push" ? "webhook" :
+      sourceDef.transport === "system" ? "system" :
+      "scheduled";
+
+    // 4. Create the stream via the existing createStream code path
+    try {
+      const result = await createStream(
+        {
+          name: suggestion.name || sourceDef.label,
+          type: streamType,
+          source: sourceDef.id,
+          config: sourceDef.defaultConfig,
+        },
+        context,
+      );
+      created.push({
+        id: (result as any).id,
+        source: sourceDef.id,
+        name: (result as any).name,
+      });
+    } catch (err: any) {
+      errors.push({
+        source: sourceDef.id,
+        error: err?.message ?? String(err),
+      });
+    }
+  }
+
+  return {
+    created,
+    skipped,
+    errors,
+    suggested_count: suggested.length,
+  };
+};
