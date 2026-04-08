@@ -279,7 +279,19 @@ tags: {tags}
 ---
 """
 
-        raw_name = f"observation-{now[:10]}-{input_type}"
+        # F.2 fix: include a microsecond timestamp + input_ref hash so
+        # multiple observations on the same day with the same input_type
+        # don't collide on disk. Without this, the seeder writes 50
+        # entries and only the last one survives because they all map
+        # to the same filename.
+        import hashlib as _hashlib
+        ref_hash = _hashlib.sha256(
+            (input_ref or input_source or now).encode("utf-8")
+        ).hexdigest()[:8]
+        # now is ISO with microseconds: 2026-04-09T03:14:15.123456+00:00
+        # Use the time part down to microseconds for uniqueness within a tick
+        ts_compact = now.replace(":", "").replace(".", "").replace("-", "").replace("+", "_")[:20]
+        raw_name = f"observation-{ts_compact}-{input_type}-{ref_hash}"
         name = vault_record_path("observation", raw_name)
         path = await client.write_record("observation", name, content)
         return path
