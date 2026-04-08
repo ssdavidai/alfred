@@ -8,6 +8,14 @@ import { parseActivityFeed } from "../activity.js";
 const ENV_PATH = `${COMPOSE_DIR}/.env`;
 const OPENCLAW_JSON_PATH = "/mnt/encrypted/openclaw/openclaw.json";
 
+// In-memory rate limit for the chore-specific learn restart route. Prevents
+// thrashing when an onboarding generates multiple templates and each tries
+// to trigger a restart. The limit is intentionally process-local — restarts
+// during a stuck/looping container would be visible to ops via container
+// uptime anyway.
+let _lastLearnRestartAtMs = 0;
+const _LEARN_RESTART_MIN_INTERVAL_MS = 30_000;
+
 export function registerAdminRoutes(): void {
   // --- Containers ---
 
@@ -45,6 +53,88 @@ export function registerAdminRoutes(): void {
     if (!/^\d+$/.test(tail)) throw new ValidationError("tail must be a number");
     const stdout = await dockerComposeCmd(["logs", "--tail", tail, params.service]);
     sendJson(res, 200, { logs: stdout });
+  });
+
+  // Chore-specific alfred-learn restart with rate limiting.
+  //
+  // The chore generation pipeline (Step 4) calls this after writing a
+  // generated template to /alfred-data/user-chores/ so the worker re-imports
+  // its module list and picks up the new template. The rate limit prevents
+  // thrashing when an onboarding generates multiple templates back-to-back
+  // and each tries to trigger a restart.
+  //
+  // Returns:
+  //   200 { ok, restarted_at, ready_after_seconds }
+  //   429 { error: "rate limited", retry_after_seconds }
+  //   500 { error: <docker error> }
+  addRoute("POST", "/api/v1/admin/restart-learn", async ({ res }) => {
+    const now = Date.now();
+    const elapsed = now - _lastLearnRestartAtMs;
+    if (_lastLearnRestartAtMs > 0 && elapsed < _LEARN_RESTART_MIN_INTERVAL_MS) {
+      const retryAfter = Math.ceil((_LEARN_RESTART_MIN_INTERVAL_MS - elapsed) / 1000);
+      sendJson(res, 429, {
+        error: "rate limited",
+        retry_after_seconds: retryAfter,
+        message: "alfred-learn was restarted recently — wait before triggering another",
+      });
+      return;
+    }
+    _lastLearnRestartAtMs = now;
+
+    const startedAt = new Date().toISOString();
+    try {
+      await dockerComposeCmd(["restart", "alfred-learn"]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: "restart failed", details: message });
+      return;
+    }
+
+    // Best-effort wait for the container to be back in 'running' state.
+    // Capped at 60 seconds. We don't poll healthchecks because alfred-learn
+    // doesn't have one defined — Temporal heartbeats provide health visibility
+    // through other channels.
+    const deadline = Date.now() + 60_000;
+    let readyAfterMs = 0;
+    while (Date.now() < deadline) {
+      try {
+        const stdout = await dockerComposeCmd([
+          "ps",
+          "--format",
+          "json",
+          "alfred-learn",
+        ]);
+        // Each line is a JSON record. We just need to find the alfred-learn
+        // entry and verify its State === "running".
+        let isRunning = false;
+        for (const line of stdout.split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const obj = JSON.parse(trimmed);
+            if (obj.Service === "alfred-learn" && obj.State === "running") {
+              isRunning = true;
+              break;
+            }
+          } catch {
+            // ignore non-JSON lines
+          }
+        }
+        if (isRunning) {
+          readyAfterMs = Date.now() - now;
+          break;
+        }
+      } catch {
+        // ignore poll errors and try again
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+
+    sendJson(res, 200, {
+      ok: true,
+      restarted_at: startedAt,
+      ready_after_seconds: Math.round(readyAfterMs / 1000),
+    });
   });
 
   // --- Activity Feed ---
