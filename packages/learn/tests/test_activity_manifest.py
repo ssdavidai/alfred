@@ -149,6 +149,33 @@ class TestClassification:
         # Name rules take precedence, so this should be vault_read.
         assert cls == "vault_read"
 
+    def test_onboarding_v3_module_classified_as_llm(self):
+        # Regression: onboarding_v3 is checked before onboarding so write_brief_*
+        # gets the right classification despite the substring overlap.
+        cls, _ = _classify_activity(
+            "src.activities.onboarding_v3",
+            "personalize_opus",  # name doesn't match any name-rule, falls to module
+        )
+        assert cls == "llm"
+
+    def test_onboarding_v3_write_method_classified_as_llm(self):
+        # write_brief_and_opportunities_opus would otherwise hit the write_ name
+        # rule, but vault/chore not in module so it falls through to module rule
+        # which (after the fix) correctly identifies onboarding_v3 as llm.
+        cls, _ = _classify_activity(
+            "src.activities.onboarding_v3",
+            "write_brief_and_opportunities_opus",
+        )
+        assert cls == "llm"
+
+    def test_onboarding_module_still_classified_as_pure_python(self):
+        # Bare onboarding (not _v3) is still pure_python
+        cls, _ = _classify_activity(
+            "src.activities.onboarding",
+            "init_onboard_json",
+        )
+        assert cls == "pure_python"
+
 
 # ---------------------------------------------------------------------------
 # Prompt rendering

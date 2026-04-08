@@ -121,7 +121,9 @@ class ActivityDescriptor:
 # Internal: classification heuristics
 # ---------------------------------------------------------------------------
 
-# Module → default classification. Order matters: more specific modules first.
+# Module → default classification. Order matters: longer/more-specific module
+# names MUST come BEFORE shorter prefixes that would substring-match them.
+# E.g. "src.activities.onboarding_v3" before "src.activities.onboarding".
 _MODULE_CLASSIFICATION_RULES: list[tuple[str, str, str]] = [
     # (module_substring, classification, side_effects)
     ("src.activities.clerk", "llm", "calls clerk subagent through OpenClaw gateway"),
@@ -139,12 +141,12 @@ _MODULE_CLASSIFICATION_RULES: list[tuple[str, str, str]] = [
     ("src.activities.session", "vault_write", "session state writes"),
     ("src.activities.classify", "pure_python", "classification logic"),
     ("src.activities.tasks", "vault_write", "task execution writes"),
-    ("src.activities.observe", "vault_read", "observation queue reads"),
     ("src.activities.reflect", "pure_python", "reflection validation"),
     ("src.activities.media", "external", "media file processing"),
     ("src.activities.omi_audio", "external", "Whisper transcription"),
-    ("src.activities.onboarding", "pure_python", "onboarding state"),
+    # MORE-SPECIFIC FIRST: onboarding_v3 must beat onboarding by substring match
     ("src.activities.onboarding_v3", "llm", "Opus onboarding pipeline"),
+    ("src.activities.onboarding", "pure_python", "onboarding state"),
     ("src.workflows.chores._base", "vault_write", "chore record I/O"),
 ]
 
