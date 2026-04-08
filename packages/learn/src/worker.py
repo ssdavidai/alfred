@@ -251,13 +251,6 @@ _STATIC_WORKFLOWS = [
     *ALL_CHORE_TEMPLATES,
 ]
 
-# Dynamically loaded chore templates from /alfred-data/user-chores/.
-# Validated via Layer 2 static checks before import. See
-# src.workflows.chores._dynamic_loader for the safety boundary.
-_DYNAMIC_WORKFLOWS = load_user_chore_templates()
-
-ALL_WORKFLOWS = [*_STATIC_WORKFLOWS, *_DYNAMIC_WORKFLOWS]
-
 ALL_ACTIVITIES = [
     # Clerk
     clerk_classify,
@@ -412,6 +405,24 @@ ALL_ACTIVITIES = [
     save_digest_to_vault,
     send_chore_notification,
 ]
+
+
+# Dynamically loaded chore templates from /alfred-data/user-chores/.
+# Validated via Layer 2 static checks before import. See
+# src.workflows.chores._dynamic_loader for the safety boundary.
+#
+# IMPORTANT: this call MUST come AFTER ALL_ACTIVITIES is defined.
+# load_user_chore_templates triggers the Layer 2 validator, which calls
+# chore_manifest.get_manifest(), which lazily imports src.worker to
+# read ALL_ACTIVITIES. If this call ran before ALL_ACTIVITIES was
+# assigned, the manifest would be built from an empty list and every
+# validated template would fail with "unknown activity import" even
+# when the activities are legitimate. Racy at startup because Python
+# module caching can mask the bug depending on import order — fix the
+# ordering so it's deterministic.
+_DYNAMIC_WORKFLOWS = load_user_chore_templates()
+
+ALL_WORKFLOWS = [*_STATIC_WORKFLOWS, *_DYNAMIC_WORKFLOWS]
 
 
 async def run_worker() -> None:
