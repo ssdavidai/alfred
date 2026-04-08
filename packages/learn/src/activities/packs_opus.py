@@ -1302,9 +1302,13 @@ async def generate_instinct_pack_opus(onboard_path: str) -> dict[str, Any]:
         f"instinct_pack_opus: calling Opus ({len(patterns)} patterns)"
     )
     try:
+        # 16384 tokens because instincts have nested input_patterns and
+        # routing_rule dicts plus 2-3 paragraph rationales each — at
+        # 5-12 instincts the response runs ~30-50KB and 8192 tokens
+        # truncates mid-instinct, defeating the brace-repair fallback.
         raw = await _call_llm(
             prompt,
-            max_tokens=8192,
+            max_tokens=16384,
             heartbeat_message="instinct_pack_opus: waiting on Opus",
         )
     except Exception as exc:
