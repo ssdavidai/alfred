@@ -18,10 +18,18 @@ from src.utils.vault_client import VaultClient
 # ---------------------------------------------------------------------------
 
 def _load_profile(onboard_path: str) -> dict[str, Any]:
-    """Load onboard.json and return the profile sub-dict."""
+    """Load onboard.json and return the profile sub-dict.
+
+    Also injects top_domains from the onboard top level into the returned
+    profile if not already present, since the normalizer needs it for
+    accurate per-domain counts and the rest of the pack logic for filters.
+    """
     with open(onboard_path, "r") as f:
         data: dict[str, Any] = json.load(f)
-    return data.get("profile", {})
+    profile: dict[str, Any] = dict(data.get("profile", {}) or {})
+    if "top_domains" not in profile and data.get("top_domains"):
+        profile["top_domains"] = data["top_domains"]
+    return profile
 
 
 def _save_onboard_key(onboard_path: str, key: str, value: Any) -> None:
