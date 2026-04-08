@@ -592,6 +592,40 @@ action resumeSchedule {
 }
 
 // ============================================================
+// Chores (Plan C — generated chore lifecycle)
+// ============================================================
+
+query getChores {
+  fn: import { getChores } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+query getChore {
+  fn: import { getChore } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+action pauseChore {
+  fn: import { pauseChore } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+action resumeChore {
+  fn: import { resumeChore } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+action deleteChore {
+  fn: import { deleteChore } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+action triggerChore {
+  fn: import { triggerChore } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+// ============================================================
 // Intuition (Learning Engine)
 // ============================================================
 route IntuitionRoute { path: "/dashboard/intuition", to: IntuitionPage }

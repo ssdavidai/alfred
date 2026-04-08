@@ -191,4 +191,35 @@ export function registerChoreRoutes(): void {
     writeChoreStatus(slug, "completed");
     sendJson(res, 200, { slug, status: "completed" });
   });
+
+  // Trigger — fires the chore workflow once outside its normal schedule.
+  // Uses `temporal schedule trigger` which dispatches an immediate run
+  // with the schedule's current input parameters. The Temporal server
+  // returns the new workflow execution id which we surface to the caller.
+  addRoute("POST", "/api/v1/chores/:slug/trigger", async ({ res, params }) => {
+    const slug = params?.slug;
+    if (!slug) throw new ValidationError("slug is required");
+    if (!readChoreFile(slug)) throw new NotFoundError(`chore ${slug} not found`);
+
+    try {
+      await dockerExec("temporal", [
+        "temporal",
+        "schedule",
+        "trigger",
+        "--schedule-id",
+        `chore-${slug}`,
+      ]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new ValidationError(
+        `Failed to trigger chore-${slug}: ${message.slice(0, 200)}`,
+      );
+    }
+
+    sendJson(res, 200, {
+      slug,
+      triggered_at: new Date().toISOString(),
+      message: `Chore ${slug} fired manually — check Workflows tab for execution status`,
+    });
+  });
 }
