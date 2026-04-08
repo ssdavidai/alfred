@@ -79,6 +79,7 @@ from src.activities.onboarding_v3 import (
     discover_patterns_opus,
     personalize_opus,
     write_brief_opus,
+    write_brief_and_opportunities_opus,
 )
 from src.activities.pull import (
     backfill_gmail_as_events,
@@ -264,6 +265,7 @@ ALL_ACTIVITIES = [
     discover_patterns_opus,
     personalize_opus,
     write_brief_opus,
+    write_brief_and_opportunities_opus,
     # Pull
     backfill_gmail_as_events,
     http_pull,

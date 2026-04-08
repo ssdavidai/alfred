@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
         discover_patterns_opus,
         personalize_opus,
         write_brief_opus,
+        write_brief_and_opportunities_opus,
     )
     from src.activities.pull import backfill_gmail_as_events
     from src.activities.batch_processor import process_stream_batch
@@ -233,8 +234,13 @@ class OnboardingPipelineWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
 
+            # Stage 6 now uses write_brief_and_opportunities_opus which
+            # generates the welcome brief AND a structured chore-opportunity
+            # list in one Opus call (see PR S2-1). The old write_brief_opus
+            # is kept as the activity's internal fallback for when the
+            # structured-output parse fails across all retries.
             await workflow.execute_activity(
-                write_brief_opus,
+                write_brief_and_opportunities_opus,
                 args=[onboard_path],
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=60),
