@@ -13,6 +13,7 @@ Steps:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -31,29 +32,68 @@ logger = logging.getLogger("alfred-learn")
 ONBOARD_PATH = "/alfred-data/onboard.json"
 
 
-async def _call_llm(prompt: str, max_tokens: int = 8192) -> str:
-    """Call Sonnet 4.6 via OpenRouter. Returns raw text response."""
+async def _call_llm(
+    prompt: str,
+    max_tokens: int = 8192,
+    total_timeout: float = 600.0,
+    heartbeat_message: str = "waiting on Opus",
+) -> str:
+    """Call Opus via OpenRouter. Returns raw text response.
+
+    Uses an explicit total timeout (wait_for) because httpx's read timeout
+    applies *between bytes*, not total duration — a slow-streaming response
+    can hang the activity until Temporal's StartToClose kills it.
+
+    Also heartbeats periodically so the activity stays alive in Temporal and
+    heartbeat_timeout can catch true stalls faster than StartToClose.
+    """
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY not set")
 
-    async with httpx.AsyncClient(timeout=300.0) as client:
-        resp = await client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "anthropic/claude-opus-4-6",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.4,
-                "max_tokens": max_tokens,
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    # Explicit per-phase timeouts. Note: httpx `read` is between bytes, so
+    # we also enforce a total budget below via asyncio.wait_for.
+    timeout = httpx.Timeout(connect=30.0, read=120.0, write=60.0, pool=30.0)
+
+    async def _do_call() -> str:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "anthropic/claude-opus-4-6",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.4,
+                    "max_tokens": max_tokens,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+    async def _heartbeat_loop() -> None:
+        start = asyncio.get_event_loop().time()
+        while True:
+            await asyncio.sleep(15)
+            elapsed = int(asyncio.get_event_loop().time() - start)
+            try:
+                activity.heartbeat(f"{heartbeat_message} ({elapsed}s)")
+            except Exception:
+                # Not running inside an activity context — ignore.
+                return
+
+    hb_task = asyncio.create_task(_heartbeat_loop())
+    try:
+        return await asyncio.wait_for(_do_call(), timeout=total_timeout)
+    finally:
+        hb_task.cancel()
+        try:
+            await hb_task
+        except (asyncio.CancelledError, Exception):
+            pass
 
 
 def _read_onboard(path: str) -> dict:

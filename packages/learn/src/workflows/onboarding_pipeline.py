@@ -157,9 +157,10 @@ class OnboardingPipelineWorkflow:
             await workflow.execute_activity(
                 extract_facts_opus,
                 args=[onboard_path],
-                start_to_close_timeout=timedelta(minutes=30),
+                start_to_close_timeout=timedelta(minutes=15),
+                heartbeat_timeout=timedelta(seconds=60),
                 schedule_to_start_timeout=timedelta(minutes=15),
-                retry_policy=RetryPolicy(maximum_attempts=2),
+                retry_policy=RetryPolicy(maximum_attempts=4),
             )
 
         # -----------------------------------------------------------------
@@ -175,8 +176,9 @@ class OnboardingPipelineWorkflow:
             await workflow.execute_activity(
                 discover_patterns_opus,
                 args=[onboard_path],
-                start_to_close_timeout=timedelta(minutes=30),
-                retry_policy=RetryPolicy(maximum_attempts=2),
+                start_to_close_timeout=timedelta(minutes=15),
+                heartbeat_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=4),
             )
 
         # -----------------------------------------------------------------
@@ -192,8 +194,9 @@ class OnboardingPipelineWorkflow:
             await workflow.execute_activity(
                 personalize_opus,
                 args=[onboard_path],
-                start_to_close_timeout=timedelta(minutes=30),
-                retry_policy=RetryPolicy(maximum_attempts=2),
+                start_to_close_timeout=timedelta(minutes=15),
+                heartbeat_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=4),
             )
 
         # -----------------------------------------------------------------
@@ -231,8 +234,9 @@ class OnboardingPipelineWorkflow:
             await workflow.execute_activity(
                 write_brief_opus,
                 args=[onboard_path],
-                start_to_close_timeout=timedelta(minutes=30),
-                retry_policy=RetryPolicy(maximum_attempts=2),
+                start_to_close_timeout=timedelta(minutes=15),
+                heartbeat_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=4),
             )
             brief_path = "event/First Brief.md"
 
