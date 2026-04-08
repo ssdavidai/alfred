@@ -187,11 +187,12 @@ Return ONLY valid JSON matching this exact schema. No markdown fences, no preamb
 {{
   "module_name": "<a snake_case slug, e.g. 'gym_attendance_tracker'>",
   "workflow_class_name": "<a CamelCase class name, e.g. 'GymAttendanceTrackerWorkflow' — must end with 'Workflow'>",
+  "user_facing_description": "<2-4 sentences in plain English explaining what this chore actually DOES — not what problem it solves. The user will read this in their dashboard. Write in second person ('You' or 'Your'). Mention the schedule, the data sources, and the trigger condition. Be specific about thresholds and behavior. Example: 'Every Tuesday at 9am, this chore pulls your last 7 days of Stripe + Polar payments and compares them against the prior week. If incoming payment volume drops by more than 20%%, you get an alert. Otherwise it stays silent.'>",
   "python_source": "<the full Python file source as a single string with \\n line breaks>"
 }}
 ```
 
-The `module_name` must be a valid Python identifier (lowercase, snake_case). The `workflow_class_name` must end with `Workflow` and be a valid Python class name. The `python_source` must be the COMPLETE file contents — every line, every import, every blank line. Do NOT abbreviate with "...".
+The `module_name` must be a valid Python identifier (lowercase, snake_case). The `workflow_class_name` must end with `Workflow` and be a valid Python class name. The `user_facing_description` must be 80-1200 characters of plain English (no code, no markdown). The `python_source` must be the COMPLETE file contents — every line, every import, every blank line. Do NOT abbreviate with "...".
 
 {retry_block}
 Begin generating now.

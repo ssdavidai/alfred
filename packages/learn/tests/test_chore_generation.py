@@ -91,6 +91,51 @@ class TestValidateEnvelope:
         assert not ok
         assert "too large" in err
 
+    # C.1: user_facing_description tests
+    def test_user_facing_description_omitted_passes(self):
+        """Backwards compat: envelopes from before C.1 don't have the field."""
+        env = _good_envelope()
+        # field absent
+        ok, err = _validate_envelope(env)
+        assert ok, f"omitted user_facing_description should pass: {err}"
+
+    def test_user_facing_description_empty_passes(self):
+        env = _good_envelope()
+        env["user_facing_description"] = "   "
+        ok, _ = _validate_envelope(env)
+        assert ok  # empty/whitespace skipped (not enforced when absent)
+
+    def test_user_facing_description_too_short_rejected(self):
+        env = _good_envelope()
+        env["user_facing_description"] = "tiny description"
+        ok, err = _validate_envelope(env)
+        assert not ok
+        assert "too short" in err
+
+    def test_user_facing_description_too_long_rejected(self):
+        env = _good_envelope()
+        env["user_facing_description"] = "x" * 1500
+        ok, err = _validate_envelope(env)
+        assert not ok
+        assert "too long" in err
+
+    def test_user_facing_description_non_string_rejected(self):
+        env = _good_envelope()
+        env["user_facing_description"] = 12345
+        ok, err = _validate_envelope(env)
+        assert not ok
+        assert "must be a string" in err
+
+    def test_user_facing_description_valid_passes(self):
+        env = _good_envelope()
+        env["user_facing_description"] = (
+            "Every Tuesday at 9am, this chore pulls your last 7 days of "
+            "Stripe payments and compares them against the prior week. "
+            "If volume drops by more than 20%, you get an alert."
+        )
+        ok, err = _validate_envelope(env)
+        assert ok, err
+
 
 # ---------------------------------------------------------------------------
 # _try_parse_envelope

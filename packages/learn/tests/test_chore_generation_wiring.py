@@ -22,6 +22,7 @@ from src.activities.assign_chores import (
     _append_generation_audit,
     _build_chore_content,
     _generate_chore_from_opportunity,
+    _max_generated_chores_per_onboarding,
     _resolve_workflow_type,
     _slug_from_module_name,
 )
@@ -171,6 +172,71 @@ class TestBuildChoreContentGenerated:
         assert "quarantine: true" in content
         # No workflow_class_name line if not provided
         assert "workflow_class_name:" not in content
+
+    # C.1: user_facing_description handling
+    def test_user_facing_description_emitted_to_frontmatter(self):
+        chore = {
+            "template": "gym_tracker",
+            "workflow_class_name": "GymTrackerWorkflow",
+            "name": "Gym",
+            "schedule": "0 18 * * 5",
+            "description": "Track gym",
+            "user_facing_description": (
+                "Every Friday evening, this chore checks your gym check-in "
+                "history from Apple Health and reminds you if you missed "
+                "your weekly target of 3 sessions."
+            ),
+            "tags": ["chore", "generated"],
+            "params": {"chore_slug": "gym-tracker"},
+            "generated": True,
+        }
+        content = _build_chore_content(chore, "chore-gym-tracker")
+        assert "user_facing_description:" in content
+        assert "Apple Health" in content
+
+    def test_user_facing_description_emitted_to_body(self):
+        chore = {
+            "template": "gym_tracker",
+            "name": "Gym",
+            "schedule": "0 18 * * 5",
+            "description": "Track gym",
+            "user_facing_description": "Every Friday evening, this chore checks your gym attendance and reminds you of your target.",
+            "tags": ["chore"],
+            "params": {"chore_slug": "gym-tracker"},
+            "generated": True,
+        }
+        content = _build_chore_content(chore, "chore-gym-tracker")
+        assert "## What this does" in content
+        # The body section should contain the description
+        body_idx = content.find("## What this does")
+        assert "Every Friday evening" in content[body_idx:]
+
+    def test_no_user_facing_description_omits_section(self):
+        chore = {
+            "template": "x",
+            "name": "X",
+            "schedule": "0 9 * * 1",
+            "description": "X",
+            "tags": ["chore"],
+            "params": {"chore_slug": "x"},
+        }
+        content = _build_chore_content(chore, "chore-x")
+        assert "user_facing_description:" not in content
+        assert "## What this does" not in content
+
+    def test_user_facing_description_with_special_chars_quoted(self):
+        chore = {
+            "template": "x",
+            "name": "X",
+            "schedule": "0 9 * * 1",
+            "description": "X",
+            "user_facing_description": "Watch for emails from foo@bar.com mentioning 'urgent' or 'asap'.",
+            "tags": ["chore"],
+            "params": {"chore_slug": "x"},
+        }
+        content = _build_chore_content(chore, "chore-x")
+        # Should be wrapped in single quotes (the existing _quote_yaml_scalar)
+        assert "user_facing_description: '" in content
 
 
 # ---------------------------------------------------------------------------

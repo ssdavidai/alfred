@@ -413,6 +413,22 @@ def _build_chore_content(chore: dict[str, Any], schedule_id: str) -> str:
         if isinstance(wf_class, str) and wf_class:
             quarantine_lines += f"workflow_class_name: {wf_class}\n"
 
+    # C.1: user_facing_description is a plain-English explanation of what
+    # the chore actually DOES (not what problem it solves). Set on both
+    # generated chores (from the Opus envelope) and standard-library chores
+    # if the caller passes one in. The Chores tab in Intelligence reads
+    # this from frontmatter so we don't have to parse the body to render
+    # the list view.
+    user_facing_description = str(
+        chore.get("user_facing_description", "") or ""
+    ).strip()
+    user_facing_lines = ""
+    if user_facing_description:
+        user_facing_lines = (
+            f"user_facing_description: "
+            f"{_quote_yaml_scalar(user_facing_description)}\n"
+        )
+
     body_generated_note = ""
     if generated:
         body_generated_note = (
@@ -420,6 +436,17 @@ def _build_chore_content(chore: dict[str, Any], schedule_id: str) -> str:
             "for you during onboarding by Opus. The first 3 runs execute in "
             "dry-run mode (no notifications, no vault writes) so we can "
             "confirm it behaves as expected before going live.\n"
+        )
+
+    # C.1: render the user-facing description as a "What this does" body
+    # section right after the title, before the Run log. The Chores
+    # detail page can either parse this section or just read the
+    # frontmatter scalar.
+    what_this_does = ""
+    if user_facing_description:
+        what_this_does = (
+            f"\n## What this does\n\n"
+            f"{user_facing_description}\n"
         )
 
     return (
@@ -431,6 +458,7 @@ def _build_chore_content(chore: dict[str, Any], schedule_id: str) -> str:
         f"schedule: {schedule_yaml}\n"
         f"schedule_id: {schedule_id}\n"
         f"params: {params_yaml}\n"
+        f"{user_facing_lines}"
         f"{quarantine_lines}"
         f"created_by: onboarding_pipeline\n"
         f"created: {now}\n"
@@ -443,6 +471,7 @@ def _build_chore_content(chore: dict[str, Any], schedule_id: str) -> str:
         f"\n"
         f"{chore['description']}\n"
         f"{body_generated_note}"
+        f"{what_this_does}"
         f"\n"
         f"**Template:** `{chore['template']}`\n"
         f"**Schedule:** `{chore['schedule']}` (cron, UTC)\n"
@@ -986,6 +1015,11 @@ async def _generate_chore_from_opportunity(
     # Build the chore spec for the successfully deployed template
     name = str(opportunity.get("name") or workflow_class_name).strip()
     description = str(opportunity.get("description") or "").strip()
+    # C.1: prefer the user_facing_description from the generation envelope
+    # over the opportunity description. The opportunity description was
+    # the *promise* in the brief; the user_facing_description is what
+    # the chore actually does. The Chores tab shows the latter.
+    user_facing_description = str(gen.get("user_facing_description", "") or "").strip()
     tags = opportunity.get("tags") or []
     if not isinstance(tags, list):
         tags = []
@@ -1002,6 +1036,7 @@ async def _generate_chore_from_opportunity(
         "workflow_class_name": workflow_class_name,
         "name": name,
         "description": description or f"Generated from opportunity {opp_id}",
+        "user_facing_description": user_facing_description,
         "schedule": _derive_chore_schedule(module_name, profile),
         "tags": sorted(tag_set),
         "params": {"chore_slug": chore_slug},

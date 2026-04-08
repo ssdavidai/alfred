@@ -135,6 +135,13 @@ def _slice_profile_for_opportunity(
     return sliced
 
 
+# C.1: human-facing description bounds. Anything shorter than 80 chars
+# isn't a real explanation; anything longer than 1200 is probably the
+# whole rationale and shouldn't be in the user-facing summary.
+_USER_FACING_MIN_CHARS = 80
+_USER_FACING_MAX_CHARS = 1200
+
+
 def _validate_envelope(parsed: dict[str, Any]) -> tuple[bool, str]:
     """Validate that the parsed Opus response has the required envelope keys.
 
@@ -145,6 +152,7 @@ def _validate_envelope(parsed: dict[str, Any]) -> tuple[bool, str]:
     module_name = parsed.get("module_name")
     workflow_class_name = parsed.get("workflow_class_name")
     python_source = parsed.get("python_source")
+    user_facing_description = parsed.get("user_facing_description")
 
     if not isinstance(module_name, str) or not module_name:
         return False, "missing or empty 'module_name'"
@@ -165,6 +173,26 @@ def _validate_envelope(parsed: dict[str, Any]) -> tuple[bool, str]:
         return False, "missing or empty 'python_source'"
     if len(python_source) > 100_000:
         return False, f"python_source too large: {len(python_source)} bytes (max 100000)"
+
+    # C.1: user_facing_description is required for the new Chores UI.
+    # We accept missing field for backwards compat but emit a warning,
+    # so already-deployed templates from before C.1 still pass validation
+    # (the calling code substitutes a default).
+    if user_facing_description is not None:
+        if not isinstance(user_facing_description, str):
+            return False, "user_facing_description must be a string"
+        ufd = user_facing_description.strip()
+        if ufd:
+            if len(ufd) < _USER_FACING_MIN_CHARS:
+                return False, (
+                    f"user_facing_description too short ({len(ufd)} chars, "
+                    f"minimum {_USER_FACING_MIN_CHARS})"
+                )
+            if len(ufd) > _USER_FACING_MAX_CHARS:
+                return False, (
+                    f"user_facing_description too long ({len(ufd)} chars, "
+                    f"maximum {_USER_FACING_MAX_CHARS})"
+                )
 
     return True, ""
 
@@ -251,10 +279,23 @@ async def generate_chore_template_code(
             len(parsed["python_source"]),
             attempt,
         )
+        # C.1: pass through user_facing_description if present, else default
+        # to a generic explanation tied to the module name. Backwards-compat
+        # path for envelopes generated before C.1 shipped.
+        ufd = parsed.get("user_facing_description", "") or ""
+        ufd = ufd.strip()
+        if not ufd:
+            ufd = (
+                f"Generated chore '{parsed['module_name']}'. "
+                "No user-facing description was emitted by the generator — "
+                "edit this chore to add one."
+            )
+
         return {
             "module_name": parsed["module_name"],
             "workflow_class_name": parsed["workflow_class_name"],
             "python_source": parsed["python_source"],
+            "user_facing_description": ufd,
             "prompt_hash": prompt_hash,
             "attempts": attempt,
         }
