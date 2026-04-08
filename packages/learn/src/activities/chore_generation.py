@@ -30,6 +30,7 @@ from temporalio import activity
 
 from src.activities.chore_generation_prompts import build_generation_prompt
 from src.activities.onboarding_v3 import _call_llm, _parse_json_with_key
+from src.workflows.chores._dynamic_loader import validate_template_source
 
 logger = logging.getLogger("alfred-learn")
 
@@ -316,3 +317,71 @@ def _try_parse_envelope(raw: Any) -> dict[str, Any] | None:
             pass
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# S4-5: validate_generated_template activity
+#
+# Thin Temporal-activity wrapper around the Layer 2 static validator. The
+# validator implementation itself lives in src.workflows.chores._dynamic_loader
+# so that the worker's startup scan of /alfred-data/user-chores/ and the
+# onboarding-time generation pipeline apply IDENTICAL checks. This activity
+# exists so Temporal workflows (specifically the onboarding Stage 7.5b chain
+# in S4-8) can call the validator as a discrete, retry-able, audited step.
+# ---------------------------------------------------------------------------
+
+
+@activity.defn
+async def validate_generated_template(python_source: str) -> dict[str, Any]:
+    """Run Layer 2 static validation on generated workflow source code.
+
+    This is the single discrete safety step that every generated template
+    must pass before it is smoke tested (S4-6) or deployed (S4-7). It runs
+    all checks from validate_template_source:
+
+      1. Size cap (< 100KB)
+      2. Syntax (ast.parse)
+      3. Top-level structure (only imports, classes, funcs, module docstring,
+         and the Temporal workflow.unsafe.imports_passed_through with-block)
+      4. Import whitelist + manifest check on chore_actions imports
+      5. Exactly one @workflow.defn class with one @workflow.run method
+      6. Forbidden name scan (eval/exec/os.*/sys.* etc.)
+      7. execute_activity calls must reference imported names, not strings
+      8. No non-deterministic calls (datetime.now/random.*/uuid.*) at workflow scope
+
+    Args:
+        python_source: the full generated file contents as a string
+
+    Returns:
+        {
+            "ok": bool,
+            "violations": list[str],  # empty on success
+            "violation_count": int,
+        }
+
+    The activity never raises on validation failure — it returns the
+    structured result so the caller's retry loop can feed violations back
+    into the next generation prompt as retry feedback. Only unexpected
+    exceptions (e.g. an ast.parse bug) propagate up to Temporal.
+    """
+    activity.heartbeat("validating generated template source")
+
+    result = validate_template_source(python_source)
+
+    if result.ok:
+        logger.info(
+            "validate_generated_template: PASS (source %d bytes)",
+            len(python_source),
+        )
+    else:
+        logger.warning(
+            "validate_generated_template: FAIL with %d violation(s): %s",
+            len(result.violations),
+            "; ".join(result.violations[:5]),
+        )
+
+    return {
+        "ok": result.ok,
+        "violations": list(result.violations),
+        "violation_count": len(result.violations),
+    }
