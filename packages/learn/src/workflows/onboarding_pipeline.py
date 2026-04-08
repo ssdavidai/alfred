@@ -46,7 +46,10 @@ with workflow.unsafe.imports_passed_through():
         generate_instinct_pack,
         generate_errand_pack,
     )
-    from src.activities.packs_opus import generate_matter_pack_opus
+    from src.activities.packs_opus import (
+        generate_errand_pack_opus,
+        generate_matter_pack_opus,
+    )
     from src.activities.assign_chores import assign_initial_chores
     from src.activities.chore_generation import restart_learn_worker
 
@@ -278,10 +281,13 @@ class OnboardingPipelineWorkflow:
                 start_to_close_timeout=timedelta(minutes=5),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
+            # Errand pack uses Opus-authored version (Plan B.2) which
+            # falls back to generate_errand_pack on any failure.
             await workflow.execute_activity(
-                generate_errand_pack,
+                generate_errand_pack_opus,
                 args=[onboard_path],
-                start_to_close_timeout=timedelta(minutes=5),
+                start_to_close_timeout=timedelta(minutes=15),
+                heartbeat_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
             await workflow.execute_activity(
