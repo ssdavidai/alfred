@@ -1868,12 +1868,65 @@ function WorkflowsContent() {
   return (
     <div className="space-y-2">
       {schedules.map((schedule: any) => {
-        const id = schedule.scheduleId || schedule.id || schedule.name;
-        const workflowType = schedule.workflowType || schedule.workflow_type || schedule.info?.workflowType || "Unknown";
-        const isPaused = schedule.paused ?? schedule.info?.paused ?? false;
-        const nextRun = schedule.nextActionTime || schedule.next_run || schedule.info?.nextActionTimes?.[0] || null;
-        const lastRun = schedule.lastActionTime || schedule.last_run || schedule.info?.recentActions?.[0]?.scheduledAt || null;
-        const name = schedule.name || schedule.scheduleId || id;
+        // D.2 fix: defensive shape extraction. Temporal's schedule list
+        // returns workflowType as `{name: "..."}` not a string, and rendering
+        // an object as a JSX child throws "Objects are not valid as a React
+        // child". Same risk for any nested timestamp/state field. Coerce
+        // every rendered value to a string here so a future Temporal
+        // schema change can't crash the whole tab again.
+        const id = String(
+          schedule.scheduleId || schedule.id || schedule.name || "unknown",
+        );
+
+        // workflowType can be: a string (older APIs), {name: string} (current
+        // Temporal Cloud SDK output), or undefined.
+        const rawWorkflowType =
+          schedule.workflowType ??
+          schedule.workflow_type ??
+          schedule.info?.workflowType ??
+          null;
+        const workflowType =
+          typeof rawWorkflowType === "string"
+            ? rawWorkflowType
+            : rawWorkflowType?.name
+              ? String(rawWorkflowType.name)
+              : "Unknown";
+
+        const isPaused = Boolean(schedule.paused ?? schedule.info?.paused ?? false);
+
+        // futureActionTimes / recentActions are arrays; their elements may be
+        // proto timestamps with seconds/nanos or already-stringified ISO. Coerce.
+        const _coerceTime = (v: any): string | null => {
+          if (!v) return null;
+          if (typeof v === "string") return v;
+          if (typeof v === "number") return new Date(v * 1000).toISOString();
+          // Proto timestamp shape: {seconds: ..., nanos: ...}
+          if (typeof v === "object" && typeof v.seconds === "number") {
+            return new Date(v.seconds * 1000).toISOString();
+          }
+          // Already a Date-like object
+          if (typeof v === "object" && typeof v.toISOString === "function") {
+            try {
+              return v.toISOString();
+            } catch {
+              return null;
+            }
+          }
+          return null;
+        };
+        const nextRun = _coerceTime(
+          schedule.nextActionTime ??
+            schedule.next_run ??
+            schedule.info?.nextActionTimes?.[0],
+        );
+        const lastRun = _coerceTime(
+          schedule.lastActionTime ??
+            schedule.last_run ??
+            schedule.info?.recentActions?.[0]?.scheduledAt ??
+            schedule.info?.recentActions?.[0]?.actualTime,
+        );
+
+        const name = String(schedule.name || schedule.scheduleId || id);
 
         return (
           <SpotlightCard key={id}>
