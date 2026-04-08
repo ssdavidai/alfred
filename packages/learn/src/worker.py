@@ -24,6 +24,24 @@ from src.workflows.onboarding_pipeline import OnboardingPipelineWorkflow
 from src.workflows.omi_processor import OmiAudioProcessorWorkflow
 from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
 
+# Chore template workflows
+from src.workflows.chores import ALL_CHORE_TEMPLATES
+from src.workflows.chores._base import load_chore_context, record_chore_run
+
+# Activities — chore actions
+from src.activities.chore_actions import (
+    ask_alfred_to_judge_anomalies,
+    diff_subscriptions,
+    fetch_financial_events,
+    fetch_matter_events_last_week,
+    filter_anomalies_by_threshold,
+    load_subscription_snapshot,
+    save_digest_to_vault,
+    save_subscription_snapshot,
+    send_chore_notification,
+    write_matter_digest_via_llm,
+)
+
 # Activities — clerk
 from src.activities.clerk import (
     clerk_classify,
@@ -213,6 +231,7 @@ ALL_WORKFLOWS = [
     OnboardingPipelineWorkflow,
     OmiAudioProcessorWorkflow,
     NightlyMaintenanceWorkflow,
+    *ALL_CHORE_TEMPLATES,
 ]
 
 ALL_ACTIVITIES = [
@@ -347,6 +366,19 @@ ALL_ACTIVITIES = [
     ingest_omi_transcription,
     # Validators
     validate_classification,
+    # Chore template helpers + actions
+    load_chore_context,
+    record_chore_run,
+    fetch_financial_events,
+    load_subscription_snapshot,
+    save_subscription_snapshot,
+    diff_subscriptions,
+    filter_anomalies_by_threshold,
+    ask_alfred_to_judge_anomalies,
+    fetch_matter_events_last_week,
+    write_matter_digest_via_llm,
+    save_digest_to_vault,
+    send_chore_notification,
 ]
 
 
