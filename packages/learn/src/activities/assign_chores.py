@@ -805,7 +805,30 @@ def _chore_spec_from_opus_match(
 # Hard cap to keep generation time bounded. 3 opportunities × ~4 min each
 # (1 Opus call + 3 activities) = ~12 minutes at worst case, bounded by
 # _call_llm's total timeout.
-_MAX_GENERATED_CHORES_PER_ONBOARDING = 3
+#
+# Overridable via ALFRED_CHORE_MAX_GENERATED env var. Useful when
+# ALFRED_CHORE_SKIP_TEMPLATE_MATCHING=true and the user wants every
+# opportunity (typically 5-8) turned into a bespoke template.
+_MAX_GENERATED_CHORES_PER_ONBOARDING_DEFAULT = 3
+
+
+def _max_generated_chores_per_onboarding() -> int:
+    """Read the generation cap from env, fall back to the default.
+
+    Invalid or negative values → default. Capped at 20 as a safety
+    ceiling so a typo in .env can't run an unbounded number of Opus
+    calls per onboarding.
+    """
+    raw = os.environ.get("ALFRED_CHORE_MAX_GENERATED", "").strip()
+    if not raw:
+        return _MAX_GENERATED_CHORES_PER_ONBOARDING_DEFAULT
+    try:
+        n = int(raw)
+    except ValueError:
+        return _MAX_GENERATED_CHORES_PER_ONBOARDING_DEFAULT
+    if n < 1:
+        return _MAX_GENERATED_CHORES_PER_ONBOARDING_DEFAULT
+    return min(n, 20)
 
 
 def _append_generation_audit(entry: dict[str, Any]) -> None:
@@ -1031,7 +1054,40 @@ async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, An
         os.environ.get("ALFRED_CHORE_OPUS_MATCHING_ENABLED", "true").lower() != "false"
     )
 
-    if isinstance(opportunities, list) and opportunities and opus_matching_enabled:
+    # NEW: bypass the matcher entirely — every opportunity gets treated
+    # as unmatched and goes straight to the Step 4 generation pipeline.
+    # Set ALFRED_CHORE_SKIP_TEMPLATE_MATCHING=true to force bespoke
+    # Python Temporal workflows for every onboarding opportunity,
+    # regardless of whether an existing standard-library template
+    # would have been a reasonable fit. Intended for tenants where
+    # we want maximum personalization and are willing to spend the
+    # Opus tokens (~3 calls per generation × N opportunities).
+    #
+    # When this flag is on, you almost certainly also want to bump
+    # ALFRED_CHORE_MAX_GENERATED above the default 3 — otherwise the
+    # first 3 opportunities get bespoke templates and the rest are
+    # silently dropped.
+    skip_template_matching = (
+        os.environ.get("ALFRED_CHORE_SKIP_TEMPLATE_MATCHING", "false").lower() == "true"
+    )
+
+    if isinstance(opportunities, list) and opportunities and skip_template_matching:
+        # Path 0: skip matching entirely — every opportunity becomes a
+        # generation candidate. No Opus matcher, no keyword heuristic.
+        matching_source = "skipped"
+        decided = []
+        unmatched = [
+            {
+                "opportunity": opp,
+                "reason": "template matching skipped via ALFRED_CHORE_SKIP_TEMPLATE_MATCHING",
+            }
+            for opp in opportunities
+            if isinstance(opp, dict)
+        ]
+        activity.heartbeat(
+            f"skip-matching mode: {len(unmatched)} opportunities → all flagged for generation"
+        )
+    elif isinstance(opportunities, list) and opportunities and opus_matching_enabled:
         # Path 1: Opus-driven matching (Step 3)
         try:
             from src.activities.chore_matching import match_opportunities_to_templates
@@ -1118,10 +1174,11 @@ async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, An
     generation_failures: list[dict[str, Any]] = []
     generation_results: list[dict[str, Any]] = []
     if generation_enabled and unmatched:
-        to_generate = unmatched[:_MAX_GENERATED_CHORES_PER_ONBOARDING]
+        max_generated = _max_generated_chores_per_onboarding()
+        to_generate = unmatched[:max_generated]
         activity.heartbeat(
             f"S4-8: attempting generation for {len(to_generate)} unmatched opportunities "
-            f"(of {len(unmatched)} total)"
+            f"(of {len(unmatched)} total, cap={max_generated})"
         )
         for u in to_generate:
             opp = u.get("opportunity") or {}
