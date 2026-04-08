@@ -2,8 +2,15 @@ import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { dockerComposeCmd, dockerExec, execAsync, sudoExec, parseJsonLines, validateServiceName, COMPOSE_DIR, OPENCLAW_CMD } from "../helpers.js";
-import { getVaultContextData, getInboxFiles } from "./vault.js";
+import { getVaultContextData, getInboxFiles, VAULT_PATH } from "./vault.js";
 import { parseActivityFeed } from "../activity.js";
+
+// Host paths for alfred-data and chore directory.
+// The ctrl-api container mounts /mnt/encrypted/alfred to the SAME path
+// (not to /alfred-data like alfred-learn does), so we use the host
+// path directly here. See docker-compose.yaml.njk for the mount config.
+const CHORE_GENERATION_AUDIT_LOG = "/mnt/encrypted/alfred/chore-generation-audit.jsonl";
+const CHORE_VAULT_DIR = `${VAULT_PATH}/chore`;
 
 const ENV_PATH = `${COMPOSE_DIR}/.env`;
 const OPENCLAW_JSON_PATH = "/mnt/encrypted/openclaw/openclaw.json";
@@ -152,7 +159,7 @@ export function registerAdminRoutes(): void {
   // Returns:
   //   200 { entries: Entry[], total_lines_scanned: number, truncated: bool }
   addRoute("GET", "/api/v1/admin/chore-generation-audit", async ({ res, query }) => {
-    const AUDIT_LOG_PATH = "/alfred-data/chore-generation-audit.jsonl";
+    const AUDIT_LOG_PATH = CHORE_GENERATION_AUDIT_LOG;
 
     let limit = 50;
     const limitRaw = query.get("limit");
@@ -229,7 +236,7 @@ export function registerAdminRoutes(): void {
   // Returns:
   //   200 { paused: string[], failed: {slug, error}[], total: number }
   addRoute("POST", "/api/v1/admin/chores/emergency-pause-all", async ({ res }) => {
-    const CHORE_DIR = "/vault/chore";
+    const CHORE_DIR = CHORE_VAULT_DIR;
     if (!fs.existsSync(CHORE_DIR)) {
       sendJson(res, 200, {
         paused: [],
