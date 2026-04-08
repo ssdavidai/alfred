@@ -162,7 +162,7 @@ if ctx.get("status") != "active":
 # Quarantine gate — dry-run for the first 3 executions
 if is_quarantined(ctx):
     remaining = int(ctx.get("quarantine_remaining", 0))
-    summary = f"quarantine dry-run (remaining before this: {remaining})"
+    summary = f"quarantine dry-run (remaining before this: {{remaining}})"
     await workflow.execute_activity(
         record_chore_run,
         args=[input.chore_slug, summary, True],  # dry_run=True
