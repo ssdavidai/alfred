@@ -47,10 +47,19 @@ def build_generation_prompt(
     import json
 
     forbidden = _render_forbidden_imports()
+    # Filter by BOTH module and classification. Without the module filter
+    # Opus can see activities from session/vault/clerk/onboarding and
+    # invents imports like `from src.activities.chore_actions import
+    # fetch_email_metadata` that crash at runtime because the activity
+    # doesn't actually live in chore_actions. Constraining the menu to
+    # ONLY activities truly exported from chore_actions eliminates the
+    # hallucination path at the source (rather than catching it post-hoc
+    # in the validator).
     manifest_block = render_manifest_for_prompt(
         filter_classifications={
             "pure_python", "vault_read", "vault_write", "llm", "notification",
-        }
+        },
+        filter_modules={"src.activities.chore_actions"},
     )
     if len(manifest_block) > 12000:
         manifest_block = manifest_block[:12000] + "\n... (manifest truncated)"

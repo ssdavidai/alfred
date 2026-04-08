@@ -323,13 +323,29 @@ def rebuild_manifest() -> None:
     get_manifest()
 
 
-def render_manifest_for_prompt(filter_classifications: set[str] | None = None) -> str:
+def render_manifest_for_prompt(
+    filter_classifications: set[str] | None = None,
+    filter_modules: set[str] | None = None,
+) -> str:
     """Render the manifest as a string suitable for embedding in an Opus prompt.
 
-    `filter_classifications` lets callers limit to e.g. {"pure_python", "vault_read",
-    "llm"} when generating chore templates so the menu stays focused.
+    Args:
+        filter_classifications: limit to e.g. {"pure_python", "vault_read",
+            "llm"} when generating chore templates so the menu stays focused.
+        filter_modules: limit to activities from specific module paths.
+            The chore code generator (S4-4) passes
+            {"src.activities.chore_actions"} so Opus cannot see — and
+            therefore cannot hallucinate names from — activities that
+            live in other modules. Without this filter Opus sees the full
+            128-activity list (including session/vault/clerk/onboarding
+            activities) and writes imports like
+            `from src.activities.chore_actions import fetch_email_metadata`
+            that crash at import time because fetch_email_metadata
+            lives in onboarding_v3, not chore_actions.
     """
     m = get_manifest_list()
     if filter_classifications:
         m = [d for d in m if d.classification in filter_classifications]
+    if filter_modules:
+        m = [d for d in m if d.module in filter_modules]
     return "\n\n".join(d.to_prompt_block() for d in m)

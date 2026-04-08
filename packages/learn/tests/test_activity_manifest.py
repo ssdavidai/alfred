@@ -220,6 +220,43 @@ class TestPromptRendering:
         for line in lines:
             assert "vault_read" in line
 
+    def test_render_manifest_filter_by_module_chore_actions_only(self):
+        """Regression: when the chore code generator (S4-4) renders the
+        manifest for its Opus prompt, it MUST filter to activities
+        exported from src.activities.chore_actions only. Otherwise Opus
+        sees activities from session/vault/clerk/onboarding and writes
+        imports like `from src.activities.chore_actions import
+        fetch_email_metadata` that crash at runtime. Found on david's
+        first real generation run."""
+        rendered = render_manifest_for_prompt(
+            filter_modules={"src.activities.chore_actions"},
+        )
+        # Must be non-empty — chore_actions has 10+ activities
+        assert len(rendered) > 100
+
+        # Must NOT contain activities from other modules that would
+        # otherwise appear (those names are substring-matched against
+        # the rendered block)
+        assert "fetch_email_metadata" not in rendered
+        assert "fetch_recent_records" not in rendered
+        assert "clerk_classify" not in rendered
+
+        # Should contain a known chore_actions activity
+        assert "fetch_financial_events" in rendered or "send_chore_notification" in rendered
+
+    def test_render_manifest_combined_module_and_classification_filters(self):
+        """Both filters AND together — narrow to chore_actions with a
+        specific classification."""
+        rendered = render_manifest_for_prompt(
+            filter_classifications={"llm"},
+            filter_modules={"src.activities.chore_actions"},
+        )
+        # The chore_actions module has llm-classified activities
+        # (ask_alfred_to_judge_anomalies, write_matter_digest_via_llm)
+        lines = [l for l in rendered.split("\n") if l.strip().startswith("classification:")]
+        for line in lines:
+            assert "llm" in line
+
 
 # ---------------------------------------------------------------------------
 # Idempotency
