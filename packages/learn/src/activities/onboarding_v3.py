@@ -665,3 +665,307 @@ Return ONLY the brief text. No JSON wrapping."""
             pass
 
     return {"brief_length": len(brief)}
+
+
+# ---------------------------------------------------------------------------
+# Step 5.5 (NEW): Write First Brief + Chore Opportunities in one Opus call
+#
+# This is the Step 2 activity from the bespoke chore generation plan. It
+# replaces write_brief_opus in the onboarding pipeline (PR S2-2) but is
+# defined alongside the old activity so rollbacks are trivial. The key
+# architectural change: the welcome brief and the list of chore opportunities
+# are generated in the same Opus call, so every promise in the letter maps
+# to a concrete structured opportunity by construction.
+#
+# Downstream activities (assign_initial_chores) read the opportunity list
+# from onboard.json["opportunities"] and either match each opportunity to
+# an existing template (Step 3) or generate a new template (Step 4).
+# ---------------------------------------------------------------------------
+
+# Internal retry budget for JSON parse failures on the brief+opportunities call.
+_BRIEF_AND_OPPORTUNITIES_MAX_ATTEMPTS = 3
+
+
+def _build_brief_and_opportunities_prompt(
+    user_md: str,
+    soul_md: str,
+    fact_highlights: str,
+    pattern_highlights: str,
+    corrections_text: str,
+    retry_feedback: str = "",
+) -> str:
+    """Build the Opus prompt that generates brief + opportunities together.
+
+    `retry_feedback` is appended on retries to tell Opus exactly what was
+    wrong with its previous response (e.g. "not valid JSON", "missing 'brief'
+    key", specific validation errors). Empty on the first attempt.
+    """
+    retry_block = ""
+    if retry_feedback:
+        retry_block = (
+            "\n\n**IMPORTANT: previous attempt failed** — " + retry_feedback +
+            "\nYou MUST return strictly valid JSON matching the schema below. "
+            "No extra text, no preamble, no markdown fences.\n"
+        )
+
+    return f"""You are Alfred, a personal AI butler, writing your First Brief — the very first letter to your new master.
+{corrections_text}
+You've spent time quietly observing their email life — not just their work, but their LIFE — and have formed an impression of the whole person. You will deliver TWO things in this single response:
+
+1. A **First Brief** letter to the master (beautiful butler-quality prose)
+2. A structured list of **Chore Opportunities** — specific recurring things Alfred should do for this master, derived from what you learned.
+
+Every promise you make in the letter MUST correspond to a specific opportunity in the list. If you say "I'll watch your subscriptions" in the letter, there must be a `watch-subscriptions` opportunity below. If you say "I'll remember birthdays" in the letter, there must be a `remember-birthdays` opportunity. The letter and the list are one coherent proposal.
+
+USER PROFILE:
+{user_md[:3000]}
+
+BUTLER'S SOUL:
+{soul_md[:2000]}
+
+KEY FACTS (top 100):
+{fact_highlights}
+
+PATTERNS DISCOVERED:
+{pattern_highlights}
+
+Return your response as valid JSON matching this exact schema:
+
+{{
+  "brief": "Sir, ...[5-7 paragraphs of butler-quality prose]... At your disposal.",
+  "opportunities": [
+    {{
+      "id": "watch-subscriptions",
+      "name": "Watch subscriptions",
+      "description": "Reviews recurring charges weekly and surfaces failed payments, price hikes, and suspicious new subscriptions.",
+      "goal": "Catch failed charges, unexpected price increases, and zombie subscriptions before they cost the master money.",
+      "trigger": {{"kind": "cron", "hint": "weekly on Friday"}},
+      "data_sources": ["event", "matter"],
+      "frequency_hint": "weekly",
+      "notify_when": "when confidence of anomaly > 0.7",
+      "tags": ["financial", "auto-generated"]
+    }},
+    {{
+      "id": "weekly-neoterra-digest",
+      "name": "Weekly NeoTerra digest",
+      "description": "Summarizes NeoTerra-matter activity each Sunday so the master has a clear picture going into Monday.",
+      "goal": "Prevent the master from walking into Monday without context on the NeoTerra project.",
+      "trigger": {{"kind": "cron", "hint": "Sunday 6pm"}},
+      "data_sources": ["event", "matter/neoterra"],
+      "frequency_hint": "weekly",
+      "notify_when": "if >=3 events occurred this week",
+      "tags": ["digest", "neoterra"]
+    }}
+  ]
+}}
+
+## Rules for the brief
+
+- **About the whole person** — not a business report. Notice their family, health, hobbies, life outside work. A great butler knows the person, not just the professional.
+- **High EQ** — what drives them beyond money and career? What tensions do you sense between different parts of their life?
+- **Practically useful** — mention 3-5 things across their WHOLE life where you can help (not just work). Each thing must correspond to an opportunity in the list.
+- **Honest about uncertainty** — admit what you cannot see, ask gently to learn more.
+- **Butler-quality prose** — elegant, understated, warm, with personality. Not corporate. Not AI-sounding.
+- **Peculiar observations** — what did you find interesting, surprising, or endearing? Notice the HUMAN details.
+- **Length**: 5-7 paragraphs. No headers, no bullet points, no markdown formatting — just prose.
+- **Start** with "Sir," or "Ma'am," (infer from the data).
+- **End** with "At your disposal."
+
+## Rules for opportunities
+
+- 3-8 opportunities. Each one must be specific to THIS master, not generic.
+- Each opportunity's `name` must appear verbatim (or nearly so) in the brief.
+- `id` is a lowercase slug with hyphens only, 1-64 chars, starting and ending with alphanumeric.
+- `trigger.kind` must be "cron", "event", or "on-demand".
+- `data_sources` should name real vault record types (event, matter, task, note, etc.) or stream names (gmail, calendar, github).
+- `frequency_hint` should be "hourly", "daily", "weekly", "biweekly", "monthly", "quarterly", "on-demand", or "continuous".
+- Be specific about `notify_when` — this is the decision gate that prevents false-positive notifications. Bias toward silence.
+- At minimum, include ONE opportunity corresponding to each concrete promise in the brief. Do not promise things in the letter you cannot back with a chore opportunity.
+
+{retry_block}
+Return ONLY the JSON object. No markdown, no preamble, no explanation."""
+
+
+@activity.defn
+async def write_brief_and_opportunities_opus(onboard_path: str) -> dict[str, Any]:
+    """Generate the First Brief AND a structured chore opportunity list in one call.
+
+    Companion to write_brief_opus, intended to replace it in the onboarding
+    pipeline (see PR S2-2). Uses the same context assembly (user_md, soul_md,
+    facts, patterns, corrections) but a prompt that asks Opus to return a JSON
+    envelope with two keys: "brief" (prose) and "opportunities" (list).
+
+    On JSON parse failure: retries up to 3 times total with amended prompts.
+    On repeated failure: falls back to writing just the brief (empty
+    opportunities list) so onboarding still completes.
+
+    Writes:
+      - vault/event/First Brief.md       (same as write_brief_opus)
+      - onboard.json["brief"]            (same as write_brief_opus)
+      - onboard.json["opportunities"]    (NEW — list of validated opportunity dicts)
+
+    Returns: {brief_length: int, opportunities_count: int, attempts: int, fallback: bool}
+    """
+    # Local import so importing onboarding_v3 doesn't pull the schema in every
+    # test — the activity module is already large and we keep coupling explicit.
+    from src.activities.chore_opportunity_schema import (
+        ChoreOpportunity,
+        ChoreOpportunityValidationError,
+    )
+
+    onboard = _read_onboard(onboard_path)
+    facts = onboard.get("facts", [])
+    patterns = onboard.get("patterns", [])
+    user_md = onboard.get("user_md", "")
+    soul_md = onboard.get("soul_md", "")
+
+    fact_highlights = "\n".join(
+        f"- {f.get('fact', '')}"
+        for f in facts[:100]
+        if isinstance(f, dict) and f.get("confidence") == "high"
+    )
+    pattern_highlights = "\n".join(
+        f"- {p.get('name', '')}: {p.get('description', '')}"
+        for p in patterns
+        if isinstance(p, dict)
+    )
+
+    corrections = onboard.get("fact_corrections", {})
+    corrections_text = ""
+    if corrections:
+        corrections_text = "\n\nIMPORTANT CORRECTIONS FROM THE USER (these override anything else):\n"
+        for cfield, cvalue in corrections.items():
+            corrections_text += f"- {cfield}: {cvalue}\n"
+        corrections_text += "\nUse these corrected values. Do NOT use the original values for these fields.\n"
+
+    brief_text = ""
+    opportunities: list[dict[str, Any]] = []
+    attempts = 0
+    last_error = ""
+
+    while attempts < _BRIEF_AND_OPPORTUNITIES_MAX_ATTEMPTS:
+        attempts += 1
+        activity.heartbeat(f"Sending to Opus for brief+opportunities (attempt {attempts})")
+
+        prompt = _build_brief_and_opportunities_prompt(
+            user_md=user_md,
+            soul_md=soul_md,
+            fact_highlights=fact_highlights,
+            pattern_highlights=pattern_highlights,
+            corrections_text=corrections_text,
+            retry_feedback=last_error,
+        )
+
+        try:
+            raw = await _call_llm(prompt, max_tokens=8192)
+        except Exception as exc:
+            logger.error("onboarding_v3: _call_llm failed on attempt %d: %s", attempts, exc)
+            last_error = f"LLM call raised {type(exc).__name__}: {exc}"
+            continue
+
+        # Robust parse: _parse_json_with_key handles code fences, truncation,
+        # brace-depth scanning. We ask for "brief" since it's a required top-
+        # level key — this disambiguates from partial/embedded JSON.
+        parsed = _parse_json_with_key(raw, "brief")
+        if not parsed:
+            logger.error(
+                "onboarding_v3: brief+opportunities parse failed (attempt %d), raw[:200]=%r",
+                attempts, raw[:200]
+            )
+            last_error = "response was not valid JSON matching the schema {brief, opportunities}"
+            continue
+
+        brief_candidate = parsed.get("brief")
+        opps_raw = parsed.get("opportunities")
+
+        if not isinstance(brief_candidate, str) or not brief_candidate.strip():
+            last_error = "response had no 'brief' string field"
+            continue
+        if not isinstance(opps_raw, list):
+            last_error = "response 'opportunities' was not a list"
+            continue
+
+        # Validate each opportunity. Drop bad ones but keep good ones — we'd
+        # rather ship a partially-populated list than reject the whole response.
+        validated: list[dict[str, Any]] = []
+        rejected_count = 0
+        for raw_opp in opps_raw:
+            try:
+                opp = ChoreOpportunity.from_dict(raw_opp)
+            except ChoreOpportunityValidationError as exc:
+                rejected_count += 1
+                logger.warning(
+                    "onboarding_v3: dropping invalid opportunity on attempt %d: %s",
+                    attempts, exc,
+                )
+                continue
+            validated.append(opp.to_dict())
+
+        if not validated:
+            last_error = (
+                f"all {len(opps_raw)} opportunities failed schema validation "
+                f"(example: {last_error or 'see prior logs'})"
+            )
+            continue
+
+        brief_text = brief_candidate.strip()
+        if brief_text.startswith("```"):
+            brief_text = re.sub(r"^```\w*\s*", "", brief_text)
+            brief_text = re.sub(r"\s*```$", "", brief_text)
+        brief_text = brief_text.strip()
+
+        opportunities = validated
+        logger.info(
+            "onboarding_v3: parsed brief (%d chars) and %d opportunities (%d rejected)",
+            len(brief_text), len(opportunities), rejected_count,
+        )
+        break  # success, exit retry loop
+
+    fallback = False
+    if not brief_text:
+        # All retries exhausted — fall back to the old write_brief_opus logic
+        # so onboarding doesn't block. Empty opportunities list.
+        logger.error(
+            "onboarding_v3: brief+opportunities failed after %d attempts; falling back to write_brief_opus",
+            attempts,
+        )
+        fallback = True
+        fallback_result = await write_brief_opus(onboard_path)
+        return {
+            "brief_length": fallback_result.get("brief_length", 0),
+            "opportunities_count": 0,
+            "attempts": attempts,
+            "fallback": True,
+        }
+
+    onboard["brief"] = brief_text
+    onboard["opportunities"] = opportunities
+    _write_onboard(onboard_path, onboard)
+
+    # Write the brief to vault (same path as write_brief_opus for dashboard compat)
+    config = load_config()
+    api_key = os.environ.get("AAS_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    async with httpx.AsyncClient(base_url=config.alfred_ctrl_url, timeout=30.0, headers=headers) as client:
+        try:
+            await client.post(
+                "/api/v1/vault/records",
+                json={
+                    "type": "event",
+                    "name": "First Brief",
+                    "content": (
+                        f"---\ntype: event\nname: First Brief\nstatus: active\n"
+                        f"tags: [onboarding, brief]\n---\n\n"
+                        f"# First Brief\n\n{brief_text}\n"
+                    ),
+                },
+            )
+        except Exception as exc:
+            logger.warning("onboarding_v3: vault write for brief failed (non-fatal): %s", exc)
+
+    return {
+        "brief_length": len(brief_text),
+        "opportunities_count": len(opportunities),
+        "attempts": attempts,
+        "fallback": fallback,
+    }
