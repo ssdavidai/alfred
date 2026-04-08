@@ -3,9 +3,16 @@
 Templates call these as Temporal activities so they can do I/O (vault reads,
 vault appends). The workflow itself stays deterministic; the activities do
 the side effects.
+
+Important: chore params are stored as a JSON-encoded string scalar in the
+chore vault record (e.g. `params: '{"matter_domains": [...], ...}'`) because
+the ctrl-api vault.ts frontmatter parser is intentionally flat-only and
+flattens any nested YAML mapping to an empty list. Parsing the JSON happens
+here in load_chore_context so individual templates always see a real dict.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any
 
@@ -13,6 +20,29 @@ from temporalio import activity
 
 from src.config import load_config
 from src.utils.vault_client import VaultClient
+
+
+def _coerce_params(raw: Any) -> dict[str, Any]:
+    """Normalize whatever the vault parser returned for `params` into a dict.
+
+    The vault.ts frontmatter parser can return:
+      - dict: ideal (e.g. if the parser is upgraded one day, or pass-through)
+      - str:  current canonical case — JSON-encoded params, parse it
+      - list: a nested YAML mapping was flattened by the parser — treat as missing
+      - anything else (None, etc.): return {}
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return {}
+        try:
+            decoded = json.loads(s)
+            return decoded if isinstance(decoded, dict) else {}
+        except (json.JSONDecodeError, ValueError):
+            return {}
+    return {}
 
 
 @activity.defn
@@ -46,7 +76,7 @@ async def load_chore_context(chore_slug: str) -> dict[str, Any]:
         return {
             "chore_slug": chore_slug,
             "template": fm.get("template", ""),
-            "params": fm.get("params", {}) or {},
+            "params": _coerce_params(fm.get("params")),
             "last_run": fm.get("last_run"),
             "status": fm.get("status", "active"),
         }
