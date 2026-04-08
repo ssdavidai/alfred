@@ -24,9 +24,10 @@ from src.workflows.onboarding_pipeline import OnboardingPipelineWorkflow
 from src.workflows.omi_processor import OmiAudioProcessorWorkflow
 from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
 
-# Chore template workflows
+# Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
 from src.workflows.chores._base import load_chore_context, record_chore_run
+from src.workflows.chores._dynamic_loader import load_user_chore_templates
 
 # Activities — chore assignment (onboarding Stage 7.5)
 from src.activities.assign_chores import assign_initial_chores
@@ -225,7 +226,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("alfred-learn")
 
 
-ALL_WORKFLOWS = [
+_STATIC_WORKFLOWS = [
     EventProcessorWorkflow,
     SessionTrackerWorkflow,
     DailyDigestWorkflow,
@@ -240,6 +241,13 @@ ALL_WORKFLOWS = [
     NightlyMaintenanceWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
+
+# Dynamically loaded chore templates from /alfred-data/user-chores/.
+# Validated via Layer 2 static checks before import. See
+# src.workflows.chores._dynamic_loader for the safety boundary.
+_DYNAMIC_WORKFLOWS = load_user_chore_templates()
+
+ALL_WORKFLOWS = [*_STATIC_WORKFLOWS, *_DYNAMIC_WORKFLOWS]
 
 ALL_ACTIVITIES = [
     # Clerk
