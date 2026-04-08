@@ -114,7 +114,7 @@ The generated file goes through a strict static validator before deployment. ANY
 - `from typing import Any, Optional`
 - `from temporalio import workflow`
 - `from temporalio.common import RetryPolicy`
-- `from src.workflows.chores._base import load_chore_context, record_chore_run`
+- `from src.workflows.chores._base import load_chore_context, record_chore_run, is_quarantined, decrement_quarantine_remaining`
 - `from src.activities.chore_actions import <names from manifest>` (inside `with workflow.unsafe.imports_passed_through():`)
 - `import json`
 
@@ -149,6 +149,35 @@ These are the ONLY activities you may call from the generated workflow. Do NOT i
 3. **Heartbeat during long calls.** If you call an activity that takes more than ~30 seconds, the activity itself heartbeats — you don't need to do anything special.
 4. **Idempotent activities.** Activities that write data should tolerate being called twice without side effects piling up.
 5. **Quiet weeks should be silent.** If nothing interesting happened, return early without calling `send_chore_notification`. The user doesn't want a "nothing to report" message every week.
+6. **Quarantine gate (MANDATORY).** Right after `load_chore_context`, check `is_quarantined(ctx)`. If True, call `record_chore_run(slug, "quarantine dry-run", True)` and `decrement_quarantine_remaining(slug)` and return early with an empty result. This ensures the first 3 runs of a newly deployed chore execute in dry-run mode (no notifications, no snapshots saved, no vault writes). After 3 dry-runs the quarantine is cleared automatically.
+
+### Quarantine gate pattern (COPY THIS)
+
+Immediately after the `ctx = await workflow.execute_activity(load_chore_context, ...)` call:
+
+```python
+if ctx.get("status") != "active":
+    return YourResultDataclass(notes="chore not active")
+
+# Quarantine gate — dry-run for the first 3 executions
+if is_quarantined(ctx):
+    remaining = int(ctx.get("quarantine_remaining", 0))
+    summary = f"quarantine dry-run (remaining before this: {remaining})"
+    await workflow.execute_activity(
+        record_chore_run,
+        args=[input.chore_slug, summary, True],  # dry_run=True
+        start_to_close_timeout=timedelta(seconds=15),
+    )
+    await workflow.execute_activity(
+        decrement_quarantine_remaining,
+        args=[input.chore_slug],
+        start_to_close_timeout=timedelta(seconds=30),
+        retry_policy=RetryPolicy(maximum_attempts=2),
+    )
+    return YourResultDataclass(notes=summary)
+```
+
+Every generated template MUST include this block. The validator does not yet enforce it, but templates without it will deliver real notifications on their first run — bypassing the safety check and breaking the user's trust.
 
 ## Your output format
 

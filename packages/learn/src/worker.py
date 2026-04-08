@@ -26,7 +26,11 @@ from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
-from src.workflows.chores._base import load_chore_context, record_chore_run
+from src.workflows.chores._base import (
+    decrement_quarantine_remaining,
+    load_chore_context,
+    record_chore_run,
+)
 from src.workflows.chores._dynamic_loader import load_user_chore_templates
 
 # Activities — chore assignment (onboarding Stage 7.5)
@@ -394,6 +398,7 @@ ALL_ACTIVITIES = [
     restart_learn_worker,
     load_chore_context,
     record_chore_run,
+    decrement_quarantine_remaining,
     fetch_financial_events,
     load_subscription_snapshot,
     save_subscription_snapshot,

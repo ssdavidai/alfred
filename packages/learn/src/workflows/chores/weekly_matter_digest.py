@@ -19,7 +19,12 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from src.workflows.chores._base import load_chore_context, record_chore_run
+    from src.workflows.chores._base import (
+        decrement_quarantine_remaining,
+        is_quarantined,
+        load_chore_context,
+        record_chore_run,
+    )
     from src.activities.chore_actions import (
         fetch_matter_events_last_week,
         save_digest_to_vault,
@@ -53,6 +58,26 @@ class WeeklyMatterDigestWorkflow:
         )
         if ctx.get("status") != "active":
             return WeeklyMatterDigestResult(notes="chore not active")
+
+        # Quarantine gate: same dry-run pattern as subscription_watcher.
+        # First 3 runs after deployment execute only the gate check,
+        # decrement the counter, and return. After 3 successful dry-runs
+        # the chore goes live for real.
+        if is_quarantined(ctx):
+            remaining = int(ctx.get("quarantine_remaining", 0))
+            summary = f"quarantine dry-run (remaining before this: {remaining})"
+            await workflow.execute_activity(
+                record_chore_run,
+                args=[input.chore_slug, summary, True],  # dry_run=True
+                start_to_close_timeout=timedelta(seconds=15),
+            )
+            await workflow.execute_activity(
+                decrement_quarantine_remaining,
+                args=[input.chore_slug],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            return WeeklyMatterDigestResult(notes=summary)
 
         params = ctx.get("params", {})
         matter_slug = params.get("matter_slug", "")

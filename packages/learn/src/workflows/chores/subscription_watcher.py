@@ -23,7 +23,12 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
-    from src.workflows.chores._base import load_chore_context, record_chore_run
+    from src.workflows.chores._base import (
+        decrement_quarantine_remaining,
+        is_quarantined,
+        load_chore_context,
+        record_chore_run,
+    )
     from src.activities.chore_actions import (
         ask_alfred_to_judge_anomalies,
         diff_subscriptions,
@@ -61,6 +66,27 @@ class SubscriptionWatcherWorkflow:
         )
         if ctx.get("status") != "active":
             return SubscriptionWatcherResult(notes="chore not active")
+
+        # Quarantine gate: if this chore is still in its dry-run period,
+        # take the minimal-side-effects path — log the fact that we ran,
+        # decrement the counter, and return early. The scheduler will
+        # re-fire on the next tick. After 3 successful dry-runs the
+        # quarantine is released and this block is skipped.
+        if is_quarantined(ctx):
+            remaining = int(ctx.get("quarantine_remaining", 0))
+            summary = f"quarantine dry-run (remaining before this: {remaining})"
+            await workflow.execute_activity(
+                record_chore_run,
+                args=[input.chore_slug, summary, True],  # dry_run=True
+                start_to_close_timeout=timedelta(seconds=15),
+            )
+            await workflow.execute_activity(
+                decrement_quarantine_remaining,
+                args=[input.chore_slug],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            return SubscriptionWatcherResult(notes=summary)
 
         params = ctx.get("params", {})
         matter_domains = params.get("matter_domains", [])
