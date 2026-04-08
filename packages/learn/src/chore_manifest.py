@@ -275,20 +275,38 @@ def _build_manifest() -> tuple[dict[str, ActivityDescriptor], list[ActivityDescr
 
 
 # ---------------------------------------------------------------------------
-# Public API — built once at first import
+# Public API — built lazily on first access
+#
+# We MUST build lazily because chore_manifest.py is imported by chore_matching.py
+# (and other Step 3+4 modules) which are themselves registered in worker.py.
+# Eager building at module-import time would create a circular import:
+#   chore_manifest -> worker -> chore_matching -> chore_manifest (mid-init)
+# Lazy building defers the worker import until after all modules have finished
+# loading, breaking the cycle.
 # ---------------------------------------------------------------------------
 
-CHORE_ACTIVITY_MANIFEST: dict[str, ActivityDescriptor]
-CHORE_ACTIVITY_LIST: list[ActivityDescriptor]
+# Module-level cache. Start as empty — populated on first get_manifest() call.
+CHORE_ACTIVITY_MANIFEST: dict[str, ActivityDescriptor] = {}
+CHORE_ACTIVITY_LIST: list[ActivityDescriptor] = []
+_MANIFEST_BUILT = False
 
 
 def get_manifest() -> dict[str, ActivityDescriptor]:
-    """Return the built manifest dict. Idempotent — built lazily on first call."""
-    global CHORE_ACTIVITY_MANIFEST, CHORE_ACTIVITY_LIST
-    if "CHORE_ACTIVITY_MANIFEST" not in globals() or not CHORE_ACTIVITY_MANIFEST:
+    """Return the built manifest dict. Idempotent — built lazily on first call.
+
+    Subsequent calls return the cached dict. To force a rebuild (e.g. in
+    tests after dynamically adding activities), call rebuild_manifest().
+    """
+    global CHORE_ACTIVITY_MANIFEST, CHORE_ACTIVITY_LIST, _MANIFEST_BUILT
+    if not _MANIFEST_BUILT:
         m, l = _build_manifest()
         CHORE_ACTIVITY_MANIFEST = m
         CHORE_ACTIVITY_LIST = l
+        _MANIFEST_BUILT = True
+        logger.info(
+            "chore_manifest: built manifest with %d activities",
+            len(CHORE_ACTIVITY_LIST),
+        )
     return CHORE_ACTIVITY_MANIFEST
 
 
@@ -296,6 +314,13 @@ def get_manifest_list() -> list[ActivityDescriptor]:
     """Return the manifest as an ordered list (registration order)."""
     get_manifest()  # ensure built
     return CHORE_ACTIVITY_LIST
+
+
+def rebuild_manifest() -> None:
+    """Force a rebuild of the manifest. Used by tests and hot-reload paths."""
+    global _MANIFEST_BUILT
+    _MANIFEST_BUILT = False
+    get_manifest()
 
 
 def render_manifest_for_prompt(filter_classifications: set[str] | None = None) -> str:
@@ -308,17 +333,3 @@ def render_manifest_for_prompt(filter_classifications: set[str] | None = None) -
     if filter_classifications:
         m = [d for d in m if d.classification in filter_classifications]
     return "\n\n".join(d.to_prompt_block() for d in m)
-
-
-# Build the manifest eagerly at first import. This catches errors early
-# rather than at the first chore_generation call.
-try:
-    CHORE_ACTIVITY_MANIFEST, CHORE_ACTIVITY_LIST = _build_manifest()
-    logger.info(
-        "chore_manifest: built manifest with %d activities",
-        len(CHORE_ACTIVITY_LIST),
-    )
-except Exception as exc:  # noqa: BLE001
-    logger.error("chore_manifest: eager build failed: %s", exc)
-    CHORE_ACTIVITY_MANIFEST = {}
-    CHORE_ACTIVITY_LIST = []

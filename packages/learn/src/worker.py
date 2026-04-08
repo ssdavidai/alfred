@@ -31,6 +31,9 @@ from src.workflows.chores._base import load_chore_context, record_chore_run
 # Activities — chore assignment (onboarding Stage 7.5)
 from src.activities.assign_chores import assign_initial_chores
 
+# Activities — chore matching (Step 3, Opus-driven template matcher)
+from src.activities.chore_matching import match_opportunities_to_templates
+
 # Activities — chore actions
 from src.activities.chore_actions import (
     ask_alfred_to_judge_anomalies,
@@ -371,8 +374,9 @@ ALL_ACTIVITIES = [
     ingest_omi_transcription,
     # Validators
     validate_classification,
-    # Chore template helpers + actions + assignment
+    # Chore template helpers + actions + assignment + matching
     assign_initial_chores,
+    match_opportunities_to_templates,
     load_chore_context,
     record_chore_run,
     fetch_financial_events,

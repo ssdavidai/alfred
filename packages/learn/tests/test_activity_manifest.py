@@ -232,5 +232,10 @@ class TestIdempotency:
         # Should be the same dict object (lazy build, cached)
         assert m1 is m2 or m1 == m2
 
-    def test_module_level_constants_match_get_manifest(self):
-        assert get_manifest() == CHORE_ACTIVITY_MANIFEST or len(get_manifest()) == len(CHORE_ACTIVITY_MANIFEST)
+    def test_module_level_constants_match_after_lazy_build(self):
+        # After get_manifest() runs, the module-level CHORE_ACTIVITY_MANIFEST
+        # is populated. Re-import the constant to get the live value.
+        get_manifest()
+        from src.chore_manifest import CHORE_ACTIVITY_MANIFEST as live_manifest
+        assert len(live_manifest) > 0
+        assert len(live_manifest) == len(get_manifest())
