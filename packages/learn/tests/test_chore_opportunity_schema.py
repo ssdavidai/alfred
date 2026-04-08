@@ -173,11 +173,27 @@ class TestRequiredStringFields:
         with pytest.raises(ChoreOpportunityValidationError, match="'goal'"):
             ChoreOpportunity.from_dict(raw)
 
-    def test_rejects_description_too_long(self):
+    def test_truncates_description_over_cap_instead_of_rejecting(self):
+        # description is prose — too long, we truncate with an ellipsis
         raw = _valid_opportunity_dict()
-        raw["description"] = "x" * 401
-        with pytest.raises(ChoreOpportunityValidationError, match="'description'"):
-            ChoreOpportunity.from_dict(raw)
+        raw["description"] = "x" * 1000
+        opp = ChoreOpportunity.from_dict(raw)
+        assert len(opp.description) == 800  # _MAX_DESCRIPTION_LEN
+        assert opp.description.endswith("…")
+
+    def test_truncates_goal_over_cap_instead_of_rejecting(self):
+        raw = _valid_opportunity_dict()
+        raw["goal"] = "y" * 1500
+        opp = ChoreOpportunity.from_dict(raw)
+        assert len(opp.goal) == 800  # _MAX_GOAL_LEN
+        assert opp.goal.endswith("…")
+
+    def test_description_at_exact_cap_not_truncated(self):
+        raw = _valid_opportunity_dict()
+        raw["description"] = "x" * 800
+        opp = ChoreOpportunity.from_dict(raw)
+        assert opp.description == "x" * 800
+        assert not opp.description.endswith("…")
 
 
 # ---------------------------------------------------------------------------

@@ -26,8 +26,11 @@ from typing import Any
 _ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
 
 _MAX_NAME_LEN = 120
-_MAX_DESCRIPTION_LEN = 400
-_MAX_GOAL_LEN = 400
+# description is Opus's natural-language summary of the opportunity — cap it
+# generously and TRUNCATE rather than reject so we don't lose opportunities
+# just because Opus was verbose. Same approach for goal.
+_MAX_DESCRIPTION_LEN = 800
+_MAX_GOAL_LEN = 800
 _MAX_HINT_LEN = 200
 _MAX_TAG_LEN = 40
 _MAX_TAGS = 10
@@ -115,9 +118,14 @@ class ChoreOpportunity:
                 f"id {id_value!r} is not a valid slug (lowercase, digits, hyphens, 1-64 chars)"
             )
 
+        # `name` is a short human label — reject if it overflows, because
+        # truncating a name produces garbled UI text.
         name = _require_nonempty_str(raw, "name", _MAX_NAME_LEN)
-        description = _require_nonempty_str(raw, "description", _MAX_DESCRIPTION_LEN)
-        goal = _require_nonempty_str(raw, "goal", _MAX_GOAL_LEN)
+        # `description` and `goal` are prose — Opus sometimes writes verbose
+        # versions. We truncate to the cap rather than rejecting so we don't
+        # lose otherwise-valid opportunities over a length technicality.
+        description = _require_truncated_str(raw, "description", _MAX_DESCRIPTION_LEN)
+        goal = _require_truncated_str(raw, "goal", _MAX_GOAL_LEN)
 
         trigger_raw = raw.get("trigger")
         trigger = _validate_trigger(trigger_raw)
@@ -174,7 +182,7 @@ def _require_str(raw: dict[str, Any], key: str, pattern_hint: str = "") -> str:
 
 
 def _require_nonempty_str(raw: dict[str, Any], key: str, max_len: int) -> str:
-    """Pull and validate a non-empty string with a length cap."""
+    """Pull and validate a non-empty string with a length cap (rejects on overflow)."""
     value = _require_str(raw, key)
     if not value:
         raise ChoreOpportunityValidationError(f"{key!r} must be non-empty")
@@ -182,6 +190,21 @@ def _require_nonempty_str(raw: dict[str, Any], key: str, max_len: int) -> str:
         raise ChoreOpportunityValidationError(
             f"{key!r} length {len(value)} exceeds max {max_len}"
         )
+    return value
+
+
+def _require_truncated_str(raw: dict[str, Any], key: str, max_len: int) -> str:
+    """Pull a non-empty string and truncate on overflow rather than rejecting.
+
+    Used for prose fields (description, goal) where the content is still
+    meaningful after truncation. Truncation adds an ellipsis marker so the
+    downstream consumer can tell the text was cut.
+    """
+    value = _require_str(raw, key)
+    if not value:
+        raise ChoreOpportunityValidationError(f"{key!r} must be non-empty")
+    if len(value) > max_len:
+        return value[: max_len - 1].rstrip() + "…"
     return value
 
 
