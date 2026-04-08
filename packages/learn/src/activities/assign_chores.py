@@ -808,6 +808,29 @@ def _chore_spec_from_opus_match(
 _MAX_GENERATED_CHORES_PER_ONBOARDING = 3
 
 
+def _append_generation_audit(entry: dict[str, Any]) -> None:
+    """Best-effort append to the shared chore-generation audit log.
+
+    Writes to the same file `chore_generation._append_deploy_audit` uses
+    (/alfred-data/chore-generation-audit.jsonl) so the ctrl-api
+    /api/v1/admin/chore-generation-audit route returns a unified view of
+    every phase across the pipeline. Failures are swallowed — the audit
+    log is a debugging aid, never load-bearing.
+    """
+    try:
+        from pathlib import Path as _Path
+        import time as _time
+
+        log_path = _Path("/alfred-data/chore-generation-audit.jsonl")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        entry_with_ts = dict(entry)
+        entry_with_ts.setdefault("timestamp", _time.time())
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry_with_ts, default=str) + "\n")
+    except OSError:
+        pass
+
+
 def _slug_from_module_name(module_name: str) -> str:
     """Convert snake_case module name to kebab-case slug for the chore record."""
     return module_name.replace("_", "-")
@@ -843,11 +866,20 @@ async def _generate_chore_from_opportunity(
     try:
         gen = await generate_chore_template_code(opportunity, profile)
     except ChoreGenerationError as exc:
+        _append_generation_audit({
+            "phase": "generate", "status": "failed",
+            "opportunity_id": opp_id, "error": str(exc),
+        })
         return {
             "ok": False, "opportunity_id": opp_id,
             "phase": "generate", "error": str(exc), "phases": phases,
         }
     except Exception as exc:
+        _append_generation_audit({
+            "phase": "generate", "status": "failed",
+            "opportunity_id": opp_id,
+            "error": f"{type(exc).__name__}: {exc}",
+        })
         return {
             "ok": False, "opportunity_id": opp_id,
             "phase": "generate", "error": f"{type(exc).__name__}: {exc}", "phases": phases,
@@ -856,11 +888,25 @@ async def _generate_chore_from_opportunity(
     python_source = gen["python_source"]
     module_name = gen["module_name"]
     workflow_class_name = gen["workflow_class_name"]
+    _append_generation_audit({
+        "phase": "generate", "status": "ok",
+        "opportunity_id": opp_id,
+        "module_name": module_name,
+        "workflow_class_name": workflow_class_name,
+        "attempts": gen.get("attempts", 1),
+        "bytes": len(python_source),
+    })
 
     # Phase 2: static validation
     activity.heartbeat(f"validating {module_name}")
     vres = await validate_generated_template(python_source)
     if not vres["ok"]:
+        _append_generation_audit({
+            "phase": "validate", "status": "failed",
+            "opportunity_id": opp_id,
+            "module_name": module_name,
+            "violations": vres["violations"][:10],
+        })
         return {
             "ok": False, "opportunity_id": opp_id,
             "phase": "validate",
@@ -868,11 +914,23 @@ async def _generate_chore_from_opportunity(
             "phases": phases,
         }
     phases.append("validated")
+    _append_generation_audit({
+        "phase": "validate", "status": "ok",
+        "opportunity_id": opp_id,
+        "module_name": module_name,
+    })
 
     # Phase 3: subprocess smoke test
     activity.heartbeat(f"smoke testing {module_name}")
     sres = await smoke_test_generated_template(python_source, module_name, workflow_class_name)
     if not sres["ok"]:
+        _append_generation_audit({
+            "phase": "smoke", "status": "failed",
+            "opportunity_id": opp_id,
+            "module_name": module_name,
+            "smoke_phase": sres.get("phase"),
+            "error": sres.get("error", "")[:500],
+        })
         return {
             "ok": False, "opportunity_id": opp_id,
             "phase": "smoke",
@@ -880,8 +938,14 @@ async def _generate_chore_from_opportunity(
             "phases": phases,
         }
     phases.append(f"smoke_ok:{sres.get('duration_seconds', 0):.1f}s")
+    _append_generation_audit({
+        "phase": "smoke", "status": "ok",
+        "opportunity_id": opp_id,
+        "module_name": module_name,
+        "duration_seconds": sres.get("duration_seconds", 0),
+    })
 
-    # Phase 4: deploy to user-chores dir
+    # Phase 4: deploy to user-chores dir (deploy writes its own audit entry)
     activity.heartbeat(f"deploying {module_name}")
     dres = await deploy_generated_template(python_source, module_name, workflow_class_name)
     if not dres["ok"]:

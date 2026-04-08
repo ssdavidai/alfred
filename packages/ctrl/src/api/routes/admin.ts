@@ -137,6 +137,172 @@ export function registerAdminRoutes(): void {
     });
   });
 
+  // --- S4-10: chore generation audit log ---
+  //
+  // Returns recent entries from /alfred-data/chore-generation-audit.jsonl,
+  // which is written by the deploy activity (and the S4-8 generation
+  // chain in the onboarding pipeline). One JSON line per deployment
+  // event, containing phase/status/module_name/workflow_class_name/
+  // source_hash/path/bytes/timestamp.
+  //
+  // Query params:
+  //   limit: max number of entries to return (default 50, cap 500)
+  //   since: ISO timestamp — skip entries with earlier timestamps
+  //
+  // Returns:
+  //   200 { entries: Entry[], total_lines_scanned: number, truncated: bool }
+  addRoute("GET", "/api/v1/admin/chore-generation-audit", async ({ res, query }) => {
+    const AUDIT_LOG_PATH = "/alfred-data/chore-generation-audit.jsonl";
+
+    let limit = 50;
+    const limitRaw = query.get("limit");
+    if (limitRaw !== null) {
+      if (!/^\d+$/.test(limitRaw)) {
+        throw new ValidationError("limit must be a non-negative integer");
+      }
+      limit = Math.min(parseInt(limitRaw, 10), 500);
+    }
+
+    // Parse the since filter as a unix timestamp (seconds). The audit
+    // log stores timestamps as epoch seconds via time.time() in Python.
+    let sinceEpoch: number | null = null;
+    const sinceRaw = query.get("since");
+    if (sinceRaw) {
+      const parsed = Date.parse(sinceRaw);
+      if (isNaN(parsed)) {
+        throw new ValidationError("since must be a valid ISO timestamp");
+      }
+      sinceEpoch = parsed / 1000;
+    }
+
+    if (!fs.existsSync(AUDIT_LOG_PATH)) {
+      sendJson(res, 200, {
+        entries: [],
+        total_lines_scanned: 0,
+        truncated: false,
+        note: "audit log does not exist yet — no generation events recorded",
+      });
+      return;
+    }
+
+    // Read the whole file (it's rotated by nightly_maintenance so it
+    // stays bounded). Parse each line as JSON, filter, and take the
+    // last `limit` entries.
+    const content = fs.readFileSync(AUDIT_LOG_PATH, "utf-8");
+    const lines = content.split("\n").filter((l) => l.trim().length > 0);
+    const entries: Array<Record<string, unknown>> = [];
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (sinceEpoch !== null) {
+          const ts = entry.timestamp;
+          if (typeof ts === "number" && ts < sinceEpoch) continue;
+        }
+        entries.push(entry);
+      } catch {
+        // skip malformed lines
+      }
+    }
+
+    // Return newest-first, capped at limit
+    entries.reverse();
+    const truncated = entries.length > limit;
+    sendJson(res, 200, {
+      entries: entries.slice(0, limit),
+      total_lines_scanned: lines.length,
+      truncated,
+    });
+  });
+
+  // --- S4-10: emergency-pause-all for chores ---
+  //
+  // Lists every chore record in vault/chore/ and pauses its Temporal
+  // schedule + flips the vault record status to "paused". Used for
+  // incident response: if a recent deployment or config change causes
+  // chores to misbehave, pause everything at once, investigate, and
+  // resume individually.
+  //
+  // This route is a best-effort batch operation. Failures on individual
+  // chores are collected and returned in the response — the overall
+  // call still returns 200 as long as SOMETHING paused.
+  //
+  // Returns:
+  //   200 { paused: string[], failed: {slug, error}[], total: number }
+  addRoute("POST", "/api/v1/admin/chores/emergency-pause-all", async ({ res }) => {
+    const CHORE_DIR = "/vault/chore";
+    if (!fs.existsSync(CHORE_DIR)) {
+      sendJson(res, 200, {
+        paused: [],
+        failed: [],
+        total: 0,
+        note: "no chore directory — nothing to pause",
+      });
+      return;
+    }
+
+    const files = fs
+      .readdirSync(CHORE_DIR)
+      .filter((name) => name.endsWith(".md"));
+    const paused: string[] = [];
+    const failed: Array<{ slug: string; error: string }> = [];
+
+    for (const filename of files) {
+      const slug = filename.replace(/\.md$/, "");
+      try {
+        // Pause the Temporal schedule (best-effort). If the schedule
+        // doesn't exist we still want to flip the vault status so the
+        // state converges.
+        try {
+          await dockerExec("temporal", [
+            "temporal",
+            "schedule",
+            "toggle",
+            "--schedule-id",
+            `chore-${slug}`,
+            "--pause",
+            "--reason",
+            "emergency-pause-all",
+          ]);
+        } catch (err) {
+          // Don't bail — still try to flip the vault status below.
+          const msg = err instanceof Error ? err.message : String(err);
+          if (!msg.includes("not found") && !msg.includes("NotFound")) {
+            // Unknown schedule error — record it but continue
+            failed.push({ slug, error: `schedule toggle: ${msg}` });
+            continue;
+          }
+        }
+
+        // Flip the vault record status to paused. Uses the same
+        // in-place replace pattern as the single pause route in
+        // chores.ts — safe because we only touch the status: line
+        // inside the frontmatter block.
+        const fp = `${CHORE_DIR}/${filename}`;
+        const content = fs.readFileSync(fp, "utf-8");
+        const end = content.indexOf("\n---", 3);
+        if (end === -1) {
+          failed.push({ slug, error: "no frontmatter terminator" });
+          continue;
+        }
+        const fmBlock = content.slice(0, end);
+        const rest = content.slice(end);
+        const updated = fmBlock.replace(/^status:\s*.*$/m, "status: paused");
+        fs.writeFileSync(fp, updated + rest, "utf-8");
+
+        paused.push(slug);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        failed.push({ slug, error: msg });
+      }
+    }
+
+    sendJson(res, 200, {
+      paused,
+      failed,
+      total: files.length,
+    });
+  });
+
   // --- Activity Feed ---
 
   addRoute("GET", "/api/v1/admin/activity", async ({ res, query }) => {
