@@ -14,12 +14,20 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from temporalio import activity
 
 from src.config import load_config
 from src.utils.vault_client import VaultClient
+
+
+# S5-1: persistent chore run history used by the promotion reflection
+# workflow (S5-2) to identify promotion candidates. One JSONL line per
+# chore tick, lives on the encrypted volume so it survives restarts.
+# Rotation is handled by nightly_maintenance (see S5-1 follow-up note).
+_CHORE_RUN_HISTORY_PATH = Path("/alfred-data/chore-run-history.jsonl")
 
 
 def _coerce_params(raw: Any) -> dict[str, Any]:
@@ -142,39 +150,189 @@ def is_quarantined(ctx: dict[str, Any]) -> bool:
     return remaining > 0
 
 
+def _append_run_history(entry: dict[str, Any]) -> None:
+    """Best-effort append to the chore run history JSONL file (S5-1).
+
+    Used by record_chore_run to persist structured run metrics that the
+    promotion reflection workflow (S5-2) reads for analytics. Failures
+    are swallowed so a disk-full condition never blocks a chore run —
+    the body log on the vault record remains the primary audit trail,
+    this file is the machine-readable secondary source.
+
+    Schema (one object per line):
+        {
+            "timestamp": float,        # epoch seconds
+            "chore_slug": str,
+            "result_summary": str,
+            "was_dry_run": bool,
+            "exception": bool,         # True if the run raised — set by caller
+        }
+    """
+    try:
+        _CHORE_RUN_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with _CHORE_RUN_HISTORY_PATH.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, default=str) + "\n")
+    except OSError:
+        pass
+
+
 @activity.defn
 async def record_chore_run(
     chore_slug: str,
     result_summary: str,
     dry_run: bool = False,
 ) -> None:
-    """Append a one-line run-log entry to the chore record body.
+    """Append a one-line run-log entry to the chore record body AND the
+    machine-readable run history file.
 
-    Best-effort: if the append fails (vault offline, record gone, etc.) we
-    swallow the error so the chore workflow as a whole still reports success.
-    Updating frontmatter fields like last_run/last_result requires a separate
-    endpoint we don't have yet — for now the body log is the audit trail.
+    Two destinations:
+      1. Vault chore record body (`chore/<slug>.md`) — human-readable,
+         used by the dashboard + manual debugging
+      2. `/alfred-data/chore-run-history.jsonl` — machine-readable, one
+         JSONL line per run, used by the promotion reflection workflow
+         (S5-2) to filter chores worth promoting to the standard library
 
-    When `dry_run=True` the log line is prefixed with [dry-run] so the
-    quarantine-log viewer (S4-10 ctrl-api route) can easily filter for
-    quarantine-period runs. Counter decrement is handled separately
-    by `decrement_quarantine_remaining` so this activity stays simple.
+    Both writes are best-effort: if the vault append fails (offline,
+    record gone, etc.) we swallow the error so the chore as a whole
+    still reports success. Same for the JSONL append on disk-full.
+
+    When `dry_run=True`:
+      - The vault log line is prefixed with `[dry-run]`
+      - The history entry sets `was_dry_run: true` so the S5-2
+        analytics path can exclude dry-runs from the "useful for
+        promotion" calculation
     """
+    import time
+
+    ts_iso = datetime.now(timezone.utc).isoformat()
+    ts_epoch = time.time()
+
+    # 1. Vault body log (human)
     config = load_config()
     client = VaultClient(config)
     try:
-        ts = datetime.now(timezone.utc).isoformat()
         prefix = "[dry-run] " if dry_run else ""
         try:
             await client.update_record(
                 f"chore/{chore_slug}.md",
-                f"\n- {ts}: {prefix}{result_summary}",
+                f"\n- {ts_iso}: {prefix}{result_summary}",
             )
         except Exception:
             # Best-effort logging — never fail a chore run because of this.
             pass
     finally:
         await client.close()
+
+    # 2. JSONL run history (machine)
+    _append_run_history({
+        "timestamp": ts_epoch,
+        "chore_slug": chore_slug,
+        "result_summary": result_summary,
+        "was_dry_run": bool(dry_run),
+    })
+
+
+@activity.defn
+async def get_chore_run_statistics(
+    chore_slug: str,
+    since: str = "",
+) -> dict[str, Any]:
+    """Read the chore run history and return aggregate statistics.
+
+    Used by the S5-2 promotion reflection workflow to decide whether a
+    generated chore has enough proof-of-usefulness to be promoted to
+    the standard library via a GitHub PR (S5-3).
+
+    Args:
+        chore_slug: filter to runs for this chore. Pass "" to aggregate
+            across all chores (not typically useful but exposed for
+            future analytics).
+        since: ISO 8601 timestamp — only count runs newer than this.
+            Empty string means no filter (all history).
+
+    Returns:
+        {
+            "chore_slug": str,
+            "total_runs": int,       # all runs including dry-runs
+            "live_runs": int,        # runs where was_dry_run was False
+            "dry_runs": int,         # was_dry_run == True
+            "first_run": float|None, # epoch of earliest matching entry
+            "last_run": float|None,  # epoch of latest matching entry
+            "recent_runs": [         # last 10 result summaries
+                {"timestamp": float, "result_summary": str, "was_dry_run": bool}
+            ],
+        }
+
+    Returns zero counts if the history file doesn't exist or has no
+    matching entries. Never raises on I/O — a corrupt line is skipped.
+    """
+    import time as _time
+
+    since_epoch: float | None = None
+    if since:
+        try:
+            since_epoch = datetime.fromisoformat(
+                since.replace("Z", "+00:00")
+            ).timestamp()
+        except (ValueError, TypeError):
+            since_epoch = None
+
+    stats: dict[str, Any] = {
+        "chore_slug": chore_slug,
+        "total_runs": 0,
+        "live_runs": 0,
+        "dry_runs": 0,
+        "first_run": None,
+        "last_run": None,
+        "recent_runs": [],
+    }
+
+    if not _CHORE_RUN_HISTORY_PATH.exists():
+        return stats
+
+    matching: list[dict[str, Any]] = []
+    try:
+        with _CHORE_RUN_HISTORY_PATH.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                if chore_slug and entry.get("chore_slug") != chore_slug:
+                    continue
+                entry_ts = entry.get("timestamp")
+                if not isinstance(entry_ts, (int, float)):
+                    continue
+                if since_epoch is not None and entry_ts < since_epoch:
+                    continue
+                matching.append(entry)
+    except OSError:
+        return stats
+
+    if not matching:
+        return stats
+
+    matching.sort(key=lambda e: e.get("timestamp", 0))
+    stats["total_runs"] = len(matching)
+    stats["live_runs"] = sum(1 for e in matching if not e.get("was_dry_run"))
+    stats["dry_runs"] = sum(1 for e in matching if e.get("was_dry_run"))
+    stats["first_run"] = matching[0].get("timestamp")
+    stats["last_run"] = matching[-1].get("timestamp")
+    stats["recent_runs"] = [
+        {
+            "timestamp": e.get("timestamp"),
+            "result_summary": str(e.get("result_summary", "")),
+            "was_dry_run": bool(e.get("was_dry_run", False)),
+        }
+        for e in matching[-10:]
+    ]
+
+    return stats
 
 
 @activity.defn

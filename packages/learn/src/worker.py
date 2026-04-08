@@ -28,6 +28,7 @@ from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
 from src.workflows.chores import ALL_CHORE_TEMPLATES
 from src.workflows.chores._base import (
     decrement_quarantine_remaining,
+    get_chore_run_statistics,
     load_chore_context,
     record_chore_run,
 )
@@ -399,6 +400,7 @@ ALL_ACTIVITIES = [
     load_chore_context,
     record_chore_run,
     decrement_quarantine_remaining,
+    get_chore_run_statistics,
     fetch_financial_events,
     load_subscription_snapshot,
     save_subscription_snapshot,
