@@ -35,6 +35,9 @@ from src.activities.assign_chores import assign_initial_chores
 # Activities — chore matching (Step 3, Opus-driven template matcher)
 from src.activities.chore_matching import match_opportunities_to_templates
 
+# Activities — chore code generation (Step 4, Opus generates Python templates)
+from src.activities.chore_generation import generate_chore_template_code
+
 # Activities — chore actions
 from src.activities.chore_actions import (
     ask_alfred_to_judge_anomalies,
@@ -382,9 +385,10 @@ ALL_ACTIVITIES = [
     ingest_omi_transcription,
     # Validators
     validate_classification,
-    # Chore template helpers + actions + assignment + matching
+    # Chore template helpers + actions + assignment + matching + generation
     assign_initial_chores,
     match_opportunities_to_templates,
+    generate_chore_template_code,
     load_chore_context,
     record_chore_run,
     fetch_financial_events,
