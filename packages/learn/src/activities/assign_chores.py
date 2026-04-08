@@ -136,10 +136,31 @@ def _decide_chores(profile: dict[str, Any], facts: list[dict[str, Any]]) -> list
 
     # -----------------------------------------------------------------------
     # 2. Weekly matter digests — top 3 matters by email_count
+    #
+    # The behavioral profiler exposes correspondents under
+    # profile.relationships.top_correspondents (a list of dicts with
+    # {name, domain, email_count, ...}). We also tolerate the legacy shape
+    # where profile.relationships is itself a flat list of correspondent
+    # dicts, in case the profiler schema changes.
     # -----------------------------------------------------------------------
-    relationships = profile.get("relationships") or []
+    rel_block = profile.get("relationships") or []
+    if isinstance(rel_block, dict):
+        correspondents = rel_block.get("top_correspondents") or []
+    elif isinstance(rel_block, list):
+        correspondents = rel_block
+    else:
+        correspondents = []
+    # Skip noisy generic personal-mail domains — they aren't useful matters.
+    _SKIP_REL_DOMAINS = {
+        "gmail.com", "googlemail.com", "yahoo.com", "hotmail.com",
+        "outlook.com", "icloud.com", "me.com", "live.com",
+    }
     top_relationships = sorted(
-        [r for r in relationships if isinstance(r, dict)],
+        [
+            r for r in correspondents
+            if isinstance(r, dict)
+            and (r.get("domain") or "").lower() not in _SKIP_REL_DOMAINS
+        ],
         key=lambda r: int(r.get("email_count", 0) or 0),
         reverse=True,
     )[:3]
