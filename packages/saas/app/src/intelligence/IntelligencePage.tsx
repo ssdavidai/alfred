@@ -28,6 +28,7 @@ import {
   IntuitionActivityContent,
   timeAgo,
 } from "../intuition/IntuitionPage";
+import ChoresContent from "./ChoresContent";
 import {
   Brain,
   ClipboardCheck,
@@ -69,12 +70,13 @@ import {
   SelectValue,
 } from "../client/components/ui/select";
 
-type IntelligenceTab = "errands" | "triage" | "matters" | "learning" | "judgment" | "activity" | "workflows" | "quarantine";
+type IntelligenceTab = "errands" | "triage" | "matters" | "chores" | "learning" | "judgment" | "activity" | "workflows" | "quarantine";
 
 const TABS: { key: IntelligenceTab; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { key: "errands", label: "Errands", icon: ClipboardCheck },
   { key: "triage", label: "Triage", icon: Inbox },
   { key: "matters", label: "Matters", icon: Briefcase },
+  { key: "chores", label: "Chores", icon: CalendarClock },
   { key: "learning", label: "Learning", icon: BookOpen },
   { key: "judgment", label: "Judgment", icon: Scale },
   { key: "activity", label: "Activity", icon: Activity },
@@ -180,6 +182,7 @@ export default function IntelligencePage() {
       )}
       {activeTab === "triage" && <TriageContent />}
       {activeTab === "matters" && <MattersContent />}
+      {activeTab === "chores" && <ChoresContent />}
       {activeTab === "learning" && <LearningContent />}
       {activeTab === "judgment" && <JudgmentContent />}
       {activeTab === "activity" && <ActivityTab />}

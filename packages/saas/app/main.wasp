@@ -490,6 +490,13 @@ page IntelligencePage {
   component: import IntelligencePage from "@src/intelligence/IntelligencePage"
 }
 
+// C.3: per-chore detail page
+route ChoreDetailRoute { path: "/dashboard/chores/:slug", to: ChoreDetailPage }
+page ChoreDetailPage {
+  authRequired: true,
+  component: import ChoreDetailPage from "@src/intelligence/ChoreDetailPage"
+}
+
 query getTasks {
   fn: import { getTasks } from "@src/tasks/operations",
   entities: [Instance]
