@@ -210,4 +210,21 @@ chown -R 1000:1000 /vault 2>/dev/null || true
 mkdir -p /alfred-data
 chmod -R 777 /alfred-data 2>/dev/null || true
 
+# Chore system: where dynamic chore template files live (Step 4 of the
+# bespoke chore generation system). The dynamic loader in alfred-learn
+# scans this directory at startup, validates each .py via Layer 2 static
+# checks, and stages valid templates into /app/src/workflows/chores_dynamic/
+# inside the alfred-learn container. Created here so the directory exists
+# from first boot — the loader handles missing-dir gracefully but pre-
+# creating it avoids spurious "directory not found" log messages on every
+# new tenant.
+mkdir -p /alfred-data/user-chores
+chmod 777 /alfred-data/user-chores 2>/dev/null || true
+
+# Chore system: snapshot directory used by chore template workflows
+# (e.g. SubscriptionWatcherWorkflow saves last-week's events here so
+# the next run can diff). Pre-created for the same reason as user-chores.
+mkdir -p /alfred-data/chore-snapshots
+chmod 777 /alfred-data/chore-snapshots 2>/dev/null || true
+
 echo "=== Init complete ==="
