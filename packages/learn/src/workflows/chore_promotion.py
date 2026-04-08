@@ -27,7 +27,10 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
+    import os as _os
+
     from src.activities.chore_promotion import (
+        create_github_promotion_pr,
         draft_promotion_proposal,
         identify_promotion_candidates,
         save_promotion_draft,
@@ -63,8 +66,11 @@ class PromotionReflectionResult:
     drafts_attempted: int = 0
     drafts_saved: int = 0
     drafts_failed: int = 0
+    prs_opened: int = 0                 # S5-3: count of successful PR creations
+    prs_failed: int = 0                 # S5-3: count of PR-creation failures
     errors: list[str] = field(default_factory=list)
     saved_paths: list[str] = field(default_factory=list)
+    pr_urls: list[str] = field(default_factory=list)  # S5-3: HTML URLs of opened PRs
 
 
 @workflow.defn(name="ChorePromotionReflectionWorkflow")
@@ -193,10 +199,54 @@ class ChorePromotionReflectionWorkflow:
                 result.errors.append(
                     f"save {module_name}: {save_result.get('error', 'unknown')}"
                 )
+                continue
+
+            # Phase 4: auto-create the GitHub PR if the env flag is set.
+            # Default is OFF so ops can inspect drafts on disk and decide
+            # per-tenant when to start auto-creating PRs.
+            auto_pr_enabled = (
+                _os.environ.get("ALFRED_PROMOTION_AUTO_PR", "false").lower() == "true"
+            )
+            if not auto_pr_enabled:
+                continue
+
+            try:
+                pr_result = await workflow.execute_activity(
+                    create_github_promotion_pr,
+                    args=[proposal],
+                    start_to_close_timeout=timedelta(minutes=5),
+                    heartbeat_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as exc:
+                workflow.logger.error(
+                    "ChorePromotionReflection: PR creation activity raised for %s: %s",
+                    module_name, exc,
+                )
+                result.prs_failed += 1
+                result.errors.append(
+                    f"create_pr {module_name}: {type(exc).__name__}: {exc}"
+                )
+                continue
+
+            if pr_result.get("ok"):
+                result.prs_opened += 1
+                result.pr_urls.append(pr_result.get("pr_url", ""))
+                workflow.logger.info(
+                    "ChorePromotionReflection: opened PR #%s for %s",
+                    pr_result.get("pr_number"), module_name,
+                )
+            else:
+                result.prs_failed += 1
+                result.errors.append(
+                    f"create_pr {module_name}: phase={pr_result.get('phase')} "
+                    f"error={pr_result.get('error', 'unknown')}"
+                )
 
         workflow.logger.info(
-            "ChorePromotionReflection complete: scanned=%d candidates=%d drafts_saved=%d drafts_failed=%d",
+            "ChorePromotionReflection complete: scanned=%d candidates=%d drafts_saved=%d drafts_failed=%d prs_opened=%d prs_failed=%d",
             result.scanned, result.candidates_found,
             result.drafts_saved, result.drafts_failed,
+            result.prs_opened, result.prs_failed,
         )
         return result

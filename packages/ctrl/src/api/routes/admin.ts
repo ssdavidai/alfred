@@ -11,6 +11,7 @@ import { parseActivityFeed } from "../activity.js";
 // path directly here. See docker-compose.yaml.njk for the mount config.
 const CHORE_GENERATION_AUDIT_LOG = "/mnt/encrypted/alfred/chore-generation-audit.jsonl";
 const CHORE_VAULT_DIR = `${VAULT_PATH}/chore`;
+const PROMOTION_DRAFTS_DIR = "/mnt/encrypted/alfred/promotion-drafts";
 
 const ENV_PATH = `${COMPOSE_DIR}/.env`;
 const OPENCLAW_JSON_PATH = "/mnt/encrypted/openclaw/openclaw.json";
@@ -308,6 +309,82 @@ export function registerAdminRoutes(): void {
       failed,
       total: files.length,
     });
+  });
+
+  // --- S5-3: list pending promotion drafts ---
+  //
+  // Lists every draft file in /mnt/encrypted/alfred/promotion-drafts/
+  // so operators can see what the weekly reflection workflow (S5-2)
+  // has staged for potential GitHub PR creation. Each draft is a JSON
+  // file written by save_promotion_draft.
+  //
+  // Returns:
+  //   200 {
+  //     drafts: [
+  //       {
+  //         draft_id: string,  // filename stem
+  //         module_name: string,
+  //         workflow_class_name: string,
+  //         pr_title: string,
+  //         drafted_at: number,  // epoch seconds
+  //         candidate_stats: { total_runs, live_runs, ... },
+  //         source_bytes: number,
+  //       }
+  //     ],
+  //     total: number,
+  //   }
+  addRoute("GET", "/api/v1/admin/chore-promotions", async ({ res }) => {
+    if (!fs.existsSync(PROMOTION_DRAFTS_DIR)) {
+      sendJson(res, 200, {
+        drafts: [],
+        total: 0,
+        note: "no promotion-drafts directory — reflection workflow hasn't drafted anything yet",
+      });
+      return;
+    }
+
+    const files = fs
+      .readdirSync(PROMOTION_DRAFTS_DIR)
+      .filter((name) => name.endsWith(".json"));
+
+    const drafts: Array<Record<string, unknown>> = [];
+    for (const filename of files) {
+      const draftId = filename.replace(/\.json$/, "");
+      const fp = `${PROMOTION_DRAFTS_DIR}/${filename}`;
+      try {
+        const content = fs.readFileSync(fp, "utf-8");
+        const parsed = JSON.parse(content) as Record<string, unknown>;
+        const pythonSource = typeof parsed.python_source === "string"
+          ? parsed.python_source
+          : "";
+        drafts.push({
+          draft_id: draftId,
+          module_name: parsed.module_name ?? null,
+          workflow_class_name: parsed.workflow_class_name ?? null,
+          pr_title: parsed.pr_title ?? null,
+          drafted_at: parsed.drafted_at ?? null,
+          candidate_stats: parsed.candidate_stats ?? null,
+          source_bytes: pythonSource.length,
+        });
+      } catch (err) {
+        // Malformed or unreadable drafts are still listed so operators
+        // can manually inspect/delete them. Include the error for context.
+        drafts.push({
+          draft_id: draftId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Newest first by drafted_at (falls back to filename sort for entries
+    // without a timestamp — shouldn't happen but be defensive)
+    drafts.sort((a, b) => {
+      const ta = typeof a.drafted_at === "number" ? a.drafted_at : 0;
+      const tb = typeof b.drafted_at === "number" ? b.drafted_at : 0;
+      return tb - ta;
+    });
+
+    sendJson(res, 200, { drafts, total: drafts.length });
   });
 
   // --- Activity Feed ---

@@ -23,6 +23,7 @@ from temporalio.testing import ActivityEnvironment
 from src.activities import chore_promotion
 from src.activities.chore_promotion import (
     _parse_promotion_response,
+    create_github_promotion_pr,
     draft_promotion_proposal,
     identify_promotion_candidates,
     save_promotion_draft,
@@ -394,3 +395,240 @@ class TestSavePromotionDraft:
         assert r1["ok"] and r2["ok"]
         assert r1["path"] != r2["path"]
         assert len(list(drafts_dir.iterdir())) == 2
+
+
+# ---------------------------------------------------------------------------
+# create_github_promotion_pr (S5-3)
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    """Tiny httpx.Response stand-in for unit tests."""
+
+    def __init__(self, status_code: int, payload=None, text: str = ""):
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = text or (json.dumps(self._payload) if payload else "")
+
+    def json(self):
+        return self._payload
+
+
+class _FakeClient:
+    """AsyncContextManager httpx.AsyncClient stand-in.
+
+    Intercepts get/post/put and returns canned responses from a mapping
+    of (method, url_suffix) → _FakeResponse. Tracks every call for
+    assertion.
+    """
+
+    def __init__(self, responses: dict[tuple[str, str], _FakeResponse]):
+        self.responses = responses
+        self.calls: list[dict] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        pass
+
+    async def _dispatch(self, method: str, url: str, **kwargs) -> _FakeResponse:
+        self.calls.append({"method": method, "url": url, **kwargs})
+        for (m, suffix), resp in self.responses.items():
+            if m == method and suffix in url:
+                return resp
+        raise AssertionError(f"unexpected {method} {url}")
+
+    async def get(self, url, **kwargs):
+        return await self._dispatch("GET", url, **kwargs)
+
+    async def post(self, url, **kwargs):
+        return await self._dispatch("POST", url, **kwargs)
+
+    async def put(self, url, **kwargs):
+        return await self._dispatch("PUT", url, **kwargs)
+
+
+def _good_draft() -> dict:
+    return {
+        "ok": True,
+        "module_name": "test_promotion",
+        "workflow_class_name": "TestPromotionWorkflow",
+        "pr_title": "chore: promote test_promotion to stdlib",
+        "pr_body": "## Why\n\nUseful template.",
+        "python_source": _GOOD_TEMPLATE_SOURCE,
+        "candidate_stats": {"total_runs": 25},
+        "drafted_at": 1234567890.0,
+    }
+
+
+class TestCreateGithubPromotionPRPreconditions:
+    def test_non_dict_draft_rejected(self, monkeypatch):
+        monkeypatch.setenv("ALFRED_PROMOTION_GITHUB_TOKEN", "test-token")
+        result = _run(create_github_promotion_pr, "not a dict")  # type: ignore[arg-type]
+        assert result["ok"] is False
+        assert result["phase"] == "precondition"
+
+    def test_missing_required_fields_rejected(self, monkeypatch):
+        monkeypatch.setenv("ALFRED_PROMOTION_GITHUB_TOKEN", "test-token")
+        # Missing pr_title
+        draft = _good_draft()
+        del draft["pr_title"]
+        result = _run(create_github_promotion_pr, draft)
+        assert result["ok"] is False
+        assert result["phase"] == "precondition"
+        assert "missing required fields" in result["error"]
+
+    def test_empty_string_field_rejected(self, monkeypatch):
+        monkeypatch.setenv("ALFRED_PROMOTION_GITHUB_TOKEN", "test-token")
+        draft = _good_draft()
+        draft["python_source"] = ""
+        result = _run(create_github_promotion_pr, draft)
+        assert result["ok"] is False
+        assert result["phase"] == "precondition"
+
+    def test_missing_token_returns_auth_error(self, monkeypatch):
+        monkeypatch.delenv("ALFRED_PROMOTION_GITHUB_TOKEN", raising=False)
+        result = _run(create_github_promotion_pr, _good_draft())
+        assert result["ok"] is False
+        assert result["phase"] == "auth"
+        assert "not set" in result["error"]
+
+
+class TestCreateGithubPromotionPRHappyPath:
+    def test_full_four_api_calls_happy_path(self, monkeypatch):
+        monkeypatch.setenv("ALFRED_PROMOTION_GITHUB_TOKEN", "test-token")
+        monkeypatch.setenv("ALFRED_PROMOTION_REPO", "test-owner/test-repo")
+        monkeypatch.setenv("ALFRED_PROMOTION_BASE_BRANCH", "main")
+
+        fake_responses = {
+            ("GET", "/git/refs/heads/main"): _FakeResponse(
+                200, {"object": {"sha": "abc123"}}
+            ),
+            ("POST", "/git/refs"): _FakeResponse(201, {"ref": "refs/heads/new"}),
+            ("PUT", "/contents/"): _FakeResponse(
+                201, {"content": {"sha": "def456"}}
+            ),
+            ("POST", "/pulls"): _FakeResponse(
+                201, {"number": 42, "html_url": "https://github.com/test-owner/test-repo/pull/42"}
+            ),
+            ("POST", "/issues/42/labels"): _FakeResponse(200, []),
+        }
+        fake_client = _FakeClient(fake_responses)
+
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            result = _run(create_github_promotion_pr, _good_draft())
+
+        assert result["ok"] is True
+        assert result["phase"] == "done"
+        assert result["pr_number"] == 42
+        assert result["pr_url"] == "https://github.com/test-owner/test-repo/pull/42"
+        assert result["branch"].startswith("chore-promotion/test_promotion-")
+
+        # Verify all four main calls happened
+        methods = [(c["method"], c["url"]) for c in fake_client.calls]
+        assert any(m == "GET" and "/git/refs/heads/main" in u for m, u in methods)
+        assert any(m == "POST" and u.endswith("/git/refs") for m, u in methods)
+        assert any(m == "PUT" and "/contents/" in u for m, u in methods)
+        assert any(m == "POST" and u.endswith("/pulls") for m, u in methods)
+
+    def test_label_failure_does_not_fail_pr(self, monkeypatch):
+        """Label application is best-effort — a 404 on labels must
+        not cause the overall PR creation to report ok=False."""
+        import httpx as _httpx
+
+        monkeypatch.setenv("ALFRED_PROMOTION_GITHUB_TOKEN", "test-token")
+        fake_responses = {
+            ("GET", "/git/refs/heads/main"): _FakeResponse(200, {"object": {"sha": "abc"}}),
+            ("POST", "/git/refs"): _FakeResponse(201, {}),
+            ("PUT", "/contents/"): _FakeResponse(201, {}),
+            ("POST", "/pulls"): _FakeResponse(201, {"number": 99, "html_url": "x"}),
+        }
+
+        class LabelFailClient(_FakeClient):
+            async def post(self, url, **kwargs):
+                if "/labels" in url:
+                    raise _httpx.ConnectError("label endpoint down")
+                return await super().post(url, **kwargs)
+
+        fake_client = LabelFailClient(fake_responses)
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            result = _run(create_github_promotion_pr, _good_draft())
+        assert result["ok"] is True
+        assert result["pr_number"] == 99
+
+
+class TestCreateGithubPromotionPRFailurePaths:
+    def test_get_base_failure(self, monkeypatch):
+        monkeypatch.setenv("ALFRED_PROMOTION_GITHUB_TOKEN", "test-token")
+        fake_client = _FakeClient({
+            ("GET", "/git/refs/heads/main"): _FakeResponse(404, text="not found"),
+        })
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            result = _run(create_github_promotion_pr, _good_draft())
+        assert result["ok"] is False
+        assert result["phase"] == "get_base"
+        assert "404" in result["error"]
+
+    def test_create_branch_failure(self, monkeypatch):
+        monkeypatch.setenv("ALFRED_PROMOTION_GITHUB_TOKEN", "test-token")
+        fake_client = _FakeClient({
+            ("GET", "/git/refs/heads/main"): _FakeResponse(200, {"object": {"sha": "x"}}),
+            ("POST", "/git/refs"): _FakeResponse(422, text="branch already exists"),
+        })
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            result = _run(create_github_promotion_pr, _good_draft())
+        assert result["ok"] is False
+        assert result["phase"] == "create_branch"
+
+    def test_create_file_failure(self, monkeypatch):
+        monkeypatch.setenv("ALFRED_PROMOTION_GITHUB_TOKEN", "test-token")
+        fake_client = _FakeClient({
+            ("GET", "/git/refs/heads/main"): _FakeResponse(200, {"object": {"sha": "x"}}),
+            ("POST", "/git/refs"): _FakeResponse(201, {}),
+            ("PUT", "/contents/"): _FakeResponse(409, text="conflict"),
+        })
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            result = _run(create_github_promotion_pr, _good_draft())
+        assert result["ok"] is False
+        assert result["phase"] == "create_file"
+
+    def test_create_pr_failure(self, monkeypatch):
+        monkeypatch.setenv("ALFRED_PROMOTION_GITHUB_TOKEN", "test-token")
+        fake_client = _FakeClient({
+            ("GET", "/git/refs/heads/main"): _FakeResponse(200, {"object": {"sha": "x"}}),
+            ("POST", "/git/refs"): _FakeResponse(201, {}),
+            ("PUT", "/contents/"): _FakeResponse(201, {}),
+            ("POST", "/pulls"): _FakeResponse(403, text="forbidden"),
+        })
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            result = _run(create_github_promotion_pr, _good_draft())
+        assert result["ok"] is False
+        assert result["phase"] == "create_pr"
+
+    def test_network_error_returned_as_structured(self, monkeypatch):
+        import httpx as _httpx
+
+        monkeypatch.setenv("ALFRED_PROMOTION_GITHUB_TOKEN", "test-token")
+
+        class NetworkFailClient(_FakeClient):
+            async def get(self, url, **kwargs):
+                raise _httpx.ConnectError("connection refused")
+
+        fake_client = NetworkFailClient({})
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            result = _run(create_github_promotion_pr, _good_draft())
+        assert result["ok"] is False
+        assert result["phase"] == "get_base"
+        assert "network error" in result["error"]
+
+    def test_missing_sha_in_base_response(self, monkeypatch):
+        monkeypatch.setenv("ALFRED_PROMOTION_GITHUB_TOKEN", "test-token")
+        # GitHub returned 200 but without the expected sha field
+        fake_client = _FakeClient({
+            ("GET", "/git/refs/heads/main"): _FakeResponse(200, {"object": {}}),
+        })
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            result = _run(create_github_promotion_pr, _good_draft())
+        assert result["ok"] is False
+        assert result["phase"] == "get_base"
+        assert "no sha" in result["error"]

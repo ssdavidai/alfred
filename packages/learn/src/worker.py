@@ -43,6 +43,7 @@ from src.activities.chore_matching import match_opportunities_to_templates
 
 # Activities — chore promotion (Step 5, weekly reflection workflow)
 from src.activities.chore_promotion import (
+    create_github_promotion_pr,
     draft_promotion_proposal,
     identify_promotion_candidates,
     save_promotion_draft,
@@ -426,6 +427,7 @@ ALL_ACTIVITIES = [
     identify_promotion_candidates,
     draft_promotion_proposal,
     save_promotion_draft,
+    create_github_promotion_pr,
 ]
 
 

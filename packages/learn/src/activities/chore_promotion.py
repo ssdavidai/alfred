@@ -31,8 +31,10 @@ failure.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -444,3 +446,246 @@ async def save_promotion_draft(proposal: dict[str, Any]) -> dict[str, Any]:
 
     logger.info("save_promotion_draft: wrote %s", target)
     return {"ok": True, "path": str(target)}
+
+
+# ---------------------------------------------------------------------------
+# S5-3: create_github_promotion_pr activity
+#
+# Takes a drafted proposal (from save_promotion_draft) and opens a real
+# GitHub pull request that adds the template file to the standard
+# library. Uses the GitHub REST API directly via httpx — we deliberately
+# avoid the `gh` CLI because it would bloat the alfred-learn Docker
+# image with a Go binary just for a handful of REST calls.
+#
+# Auth via env:
+#   ALFRED_PROMOTION_GITHUB_TOKEN  — PAT or fine-grained token with
+#                                    repo:write on the target repo
+#   ALFRED_PROMOTION_REPO          — "owner/name" (default: ssdavidai/alfred-platform)
+#   ALFRED_PROMOTION_BASE_BRANCH   — base branch to PR against (default: main)
+#
+# Missing token → activity returns ok=False gracefully (never raises).
+# Wrong token → GitHub returns 401, activity returns structured error.
+# Network failure → returned as structured error for retry.
+# ---------------------------------------------------------------------------
+
+_GITHUB_API_BASE = "https://api.github.com"
+_DEFAULT_PROMOTION_REPO = "ssdavidai/alfred-platform"
+_DEFAULT_PROMOTION_BASE_BRANCH = "main"
+_STANDARD_LIBRARY_DIR = "packages/learn/src/workflows/chores"
+
+
+def _promotion_repo() -> str:
+    return os.environ.get("ALFRED_PROMOTION_REPO", _DEFAULT_PROMOTION_REPO)
+
+
+def _promotion_base_branch() -> str:
+    return os.environ.get("ALFRED_PROMOTION_BASE_BRANCH", _DEFAULT_PROMOTION_BASE_BRANCH)
+
+
+def _promotion_github_token() -> str:
+    return os.environ.get("ALFRED_PROMOTION_GITHUB_TOKEN", "")
+
+
+@activity.defn
+async def create_github_promotion_pr(draft: dict[str, Any]) -> dict[str, Any]:
+    """Open a GitHub PR that promotes the drafted template to the standard library.
+
+    Flow (all via GitHub REST API — no git clone, no gh CLI):
+      1. GET /repos/{repo}/git/refs/heads/{base}       → get base SHA
+      2. POST /repos/{repo}/git/refs                    → create new branch
+      3. PUT /repos/{repo}/contents/{path}              → create file on branch
+      4. POST /repos/{repo}/pulls                       → open the PR
+      5. (best-effort) POST /repos/{repo}/issues/{N}/labels → apply labels
+
+    Args:
+        draft: a proposal dict from draft_promotion_proposal / save_promotion_draft.
+            Must contain: module_name, workflow_class_name, pr_title,
+            pr_body, python_source.
+
+    Returns:
+        {
+            "ok": bool,
+            "pr_url": str,      # HTML url of the created PR
+            "pr_number": int,   # PR number
+            "branch": str,      # name of the created branch
+            "error": str,       # on failure
+            "phase": str,       # which step failed: "auth"|"get_base"|
+                                # "create_branch"|"create_file"|"create_pr"|"label"
+        }
+
+    Never raises on expected failures (missing token, HTTP error, etc.) —
+    returns a structured error dict so the calling workflow can log and
+    move on. Only unexpected Python errors (e.g. malformed draft dict)
+    propagate up to Temporal.
+    """
+    import httpx  # local import — keeps activity discovery cheap
+
+    if not isinstance(draft, dict):
+        return {
+            "ok": False,
+            "phase": "precondition",
+            "error": f"draft is not a dict: {type(draft).__name__}",
+        }
+
+    module_name = draft.get("module_name")
+    python_source = draft.get("python_source")
+    pr_title = draft.get("pr_title")
+    pr_body = draft.get("pr_body")
+
+    if not all(isinstance(v, str) and v for v in [module_name, python_source, pr_title, pr_body]):
+        return {
+            "ok": False,
+            "phase": "precondition",
+            "error": "draft missing required fields (module_name, python_source, pr_title, pr_body)",
+        }
+
+    token = _promotion_github_token()
+    if not token:
+        return {
+            "ok": False,
+            "phase": "auth",
+            "error": "ALFRED_PROMOTION_GITHUB_TOKEN not set — skipping GitHub PR creation",
+        }
+
+    repo = _promotion_repo()
+    base = _promotion_base_branch()
+    branch = f"chore-promotion/{module_name}-{int(time.time())}"
+    file_path = f"{_STANDARD_LIBRARY_DIR}/{module_name}.py"
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "alfred-learn-chore-promotion",
+    }
+
+    activity.heartbeat(f"create_github_promotion_pr: opening PR for {module_name}")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        # 1. Get base branch SHA
+        try:
+            r = await client.get(
+                f"{_GITHUB_API_BASE}/repos/{repo}/git/refs/heads/{base}",
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            return {
+                "ok": False, "phase": "get_base",
+                "error": f"network error: {type(exc).__name__}: {exc}",
+            }
+        if r.status_code != 200:
+            return {
+                "ok": False, "phase": "get_base",
+                "error": f"{r.status_code}: {r.text[:300]}",
+            }
+        base_sha = r.json().get("object", {}).get("sha", "")
+        if not base_sha:
+            return {
+                "ok": False, "phase": "get_base",
+                "error": "no sha in base branch response",
+            }
+
+        # 2. Create new branch from base
+        try:
+            r = await client.post(
+                f"{_GITHUB_API_BASE}/repos/{repo}/git/refs",
+                headers=headers,
+                json={"ref": f"refs/heads/{branch}", "sha": base_sha},
+            )
+        except httpx.HTTPError as exc:
+            return {
+                "ok": False, "phase": "create_branch",
+                "error": f"network error: {type(exc).__name__}: {exc}",
+            }
+        if r.status_code not in (200, 201):
+            return {
+                "ok": False, "phase": "create_branch",
+                "error": f"{r.status_code}: {r.text[:300]}",
+                "branch": branch,
+            }
+
+        # 3. Create the template file on the new branch
+        encoded_source = base64.b64encode(
+            python_source.encode("utf-8")
+        ).decode("ascii")
+        commit_message = (
+            f"chore: promote {module_name} to standard library\n\n"
+            f"Auto-generated by ChorePromotionReflectionWorkflow (S5-2).\n"
+            f"See PR body for rationale + usage stats."
+        )
+        try:
+            r = await client.put(
+                f"{_GITHUB_API_BASE}/repos/{repo}/contents/{file_path}",
+                headers=headers,
+                json={
+                    "message": commit_message,
+                    "content": encoded_source,
+                    "branch": branch,
+                },
+            )
+        except httpx.HTTPError as exc:
+            return {
+                "ok": False, "phase": "create_file",
+                "error": f"network error: {type(exc).__name__}: {exc}",
+                "branch": branch,
+            }
+        if r.status_code not in (200, 201):
+            return {
+                "ok": False, "phase": "create_file",
+                "error": f"{r.status_code}: {r.text[:300]}",
+                "branch": branch,
+            }
+
+        # 4. Open the PR
+        try:
+            r = await client.post(
+                f"{_GITHUB_API_BASE}/repos/{repo}/pulls",
+                headers=headers,
+                json={
+                    "title": pr_title,
+                    "body": pr_body,
+                    "head": branch,
+                    "base": base,
+                    "draft": True,  # Always open as draft — humans decide when to mark ready
+                },
+            )
+        except httpx.HTTPError as exc:
+            return {
+                "ok": False, "phase": "create_pr",
+                "error": f"network error: {type(exc).__name__}: {exc}",
+                "branch": branch,
+            }
+        if r.status_code not in (200, 201):
+            return {
+                "ok": False, "phase": "create_pr",
+                "error": f"{r.status_code}: {r.text[:300]}",
+                "branch": branch,
+            }
+
+        pr_data = r.json()
+        pr_number = pr_data.get("number")
+        pr_url = pr_data.get("html_url", "")
+
+        # 5. Best-effort label application (missing labels silently ignored by GitHub)
+        if isinstance(pr_number, int):
+            try:
+                await client.post(
+                    f"{_GITHUB_API_BASE}/repos/{repo}/issues/{pr_number}/labels",
+                    headers=headers,
+                    json={"labels": ["chore-system", "promotion-candidate", "needs-review"]},
+                )
+            except httpx.HTTPError:
+                # Labels are cosmetic — don't fail the whole PR creation
+                pass
+
+        logger.info(
+            "create_github_promotion_pr: opened PR #%s for %s at %s",
+            pr_number, module_name, pr_url,
+        )
+        return {
+            "ok": True,
+            "phase": "done",
+            "pr_url": pr_url,
+            "pr_number": pr_number,
+            "branch": branch,
+        }
