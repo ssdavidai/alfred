@@ -405,6 +405,208 @@ def _build_chore_content(chore: dict[str, Any], schedule_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Opportunity → template heuristic matcher (Step 2, PR S2-3)
+#
+# This is the interim heuristic that runs between Step 2 (brief generates
+# structured opportunities) and Step 3 (Opus picks templates from the
+# activity manifest). It keyword-matches an opportunity's goal/name/tags
+# against each template's known domain to decide which template applies.
+# Opportunities that don't match any template go to `unmatched_opportunities`
+# in onboard.json for Step 4 to pick up (code generation).
+#
+# The heuristic is intentionally simple and easy to audit — it's a bridge,
+# not a long-term solution.
+# ---------------------------------------------------------------------------
+
+# Keyword → template mapping. Each entry: template_id → list[str] keywords.
+# Keywords are matched case-insensitively against the opportunity's name,
+# goal, and description (all concatenated). First match wins.
+_HEURISTIC_KEYWORD_MAP: list[tuple[str, list[str]]] = [
+    # Financial / subscription patterns
+    (
+        "subscription_watcher",
+        [
+            "subscription", "invoice", "billing", "payment", "charge",
+            "stripe", "polar", "mercury", "cash flow", "cash-flow",
+            "price hike", "renewal", "recurring charge",
+        ],
+    ),
+    # Weekly-digest patterns
+    (
+        "weekly_matter_digest",
+        [
+            "digest", "weekly summary", "weekly review", "weekly update",
+            "matter", "project digest", "client summary",
+        ],
+    ),
+]
+
+
+def _build_opportunity_haystack(opportunity: dict[str, Any]) -> str:
+    """Build the searchable text blob for keyword matching."""
+    parts: list[str] = []
+    for key in ("name", "goal", "description"):
+        val = opportunity.get(key, "")
+        if isinstance(val, str):
+            parts.append(val)
+    tags = opportunity.get("tags") or []
+    if isinstance(tags, list):
+        parts.extend(str(t) for t in tags if isinstance(t, str))
+    return " \n ".join(parts).lower()
+
+
+def _heuristic_match_opportunity(opportunity: dict[str, Any]) -> str | None:
+    """Return the template id best matching this opportunity, or None.
+
+    First-match-wins keyword scan against _HEURISTIC_KEYWORD_MAP.
+    """
+    haystack = _build_opportunity_haystack(opportunity)
+    if not haystack:
+        return None
+    for template_id, keywords in _HEURISTIC_KEYWORD_MAP:
+        for kw in keywords:
+            if kw.lower() in haystack:
+                return template_id
+    return None
+
+
+def _chore_spec_from_opportunity(
+    opportunity: dict[str, Any],
+    template_id: str,
+    profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a chore spec (for _build_chore_content) from a matched opportunity.
+
+    Uses Step 1's profile-derived helpers for bespoke schedule/threshold/
+    session_id defaults. The opportunity's name, description, and tags win
+    over any template defaults because they were generated specifically
+    for this user.
+    """
+    name = str(opportunity.get("name") or "Chore").strip() or "Chore"
+    description = str(opportunity.get("description") or "").strip()
+    tags = opportunity.get("tags") or []
+    if not isinstance(tags, list):
+        tags = []
+    # Ensure "chore" and "auto-generated" are always present
+    tag_set = {str(t) for t in tags if isinstance(t, str)}
+    tag_set.update({"chore", "auto-generated"})
+
+    spec: dict[str, Any] = {
+        "template": template_id,
+        "name": name,
+        "schedule": _derive_chore_schedule(template_id, profile),
+        "description": description or f"Generated from opportunity {opportunity.get('id', '')}",
+        "tags": sorted(tag_set),
+    }
+
+    if template_id == "subscription_watcher":
+        # matter_domains come from the profile's financial footprint since
+        # the opportunity doesn't carry them directly in the schema today.
+        financial = profile.get("financial") or {}
+        sender_tiers = profile.get("sender_tiers") or {}
+        financial_domains: set[str] = set()
+        for entry in financial.get("detected_services") or []:
+            if isinstance(entry, dict):
+                d = (entry.get("domain") or "").lower()
+                if d:
+                    financial_domains.add(d)
+            elif isinstance(entry, str):
+                financial_domains.add(entry.lower())
+        for s in sender_tiers.get("service") or []:
+            if isinstance(s, dict):
+                d = (s.get("domain") or "").lower()
+                if d:
+                    financial_domains.add(d)
+            elif isinstance(s, str):
+                financial_domains.add(s.lower())
+        spec["params"] = {
+            "matter_domains": sorted(financial_domains)[:30],
+            "alert_threshold": _derive_alert_threshold("subscription_watcher", profile),
+            "session_id": _infer_default_session_id(profile),
+        }
+    elif template_id == "weekly_matter_digest":
+        # The matter_slug has to come from somewhere. If the opportunity
+        # description mentions a specific matter, we try to slugify it;
+        # otherwise we fall back to the opportunity's own id stripped of
+        # generic prefixes. This is a heuristic — Step 3 will do this better.
+        matter_slug = _extract_matter_slug_from_opportunity(opportunity)
+        spec["params"] = {
+            "matter_slug": matter_slug,
+            "session_id": _infer_default_session_id(profile),
+            "min_events_for_digest": _derive_min_events_for_digest(profile),
+        }
+    else:
+        spec["params"] = {}
+
+    return spec
+
+
+def _extract_matter_slug_from_opportunity(opportunity: dict[str, Any]) -> str:
+    """Best-effort: find a matter slug in the opportunity id/name/description.
+
+    Looks for patterns like "weekly-foo-digest" (strips weekly- prefix and
+    -digest suffix) or "foo-matter". Falls back to the opportunity id
+    itself if no clean slug can be extracted.
+    """
+    opp_id = str(opportunity.get("id") or "")
+    if opp_id:
+        cleaned = opp_id
+        for prefix in ("weekly-", "daily-", "monthly-"):
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):]
+                break
+        for suffix in ("-digest", "-summary", "-review", "-matter"):
+            if cleaned.endswith(suffix):
+                cleaned = cleaned[: -len(suffix)]
+                break
+        if cleaned:
+            return cleaned
+    return opp_id or "unknown"
+
+
+def _decide_chores_from_opportunities(
+    opportunities: list[dict[str, Any]],
+    profile: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Try to convert each opportunity into a chore spec.
+
+    Returns (matched_chore_specs, unmatched_opportunities). Matched chores
+    go through the normal vault-write + Temporal-schedule path; unmatched
+    opportunities are persisted to onboard.json for Step 4 to generate
+    templates for.
+    """
+    matched_chores: list[dict[str, Any]] = []
+    unmatched: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for opp in opportunities:
+        if not isinstance(opp, dict):
+            continue
+        template_id = _heuristic_match_opportunity(opp)
+        if template_id is None:
+            unmatched.append(
+                {
+                    "opportunity": opp,
+                    "reason": "no template keyword match (step 2 heuristic)",
+                }
+            )
+            continue
+        spec = _chore_spec_from_opportunity(opp, template_id, profile)
+        # De-duplicate by chore name (Opus sometimes proposes multiple
+        # opportunities that reduce to the same template — we pick the first).
+        if spec["name"] in seen_names:
+            unmatched.append(
+                {
+                    "opportunity": opp,
+                    "reason": f"duplicate chore name {spec['name']!r}",
+                }
+            )
+            continue
+        seen_names.add(spec["name"])
+        matched_chores.append(spec)
+    return matched_chores, unmatched
+
+
+# ---------------------------------------------------------------------------
 # Temporal schedule creation (via existing ctrl-api endpoint)
 # ---------------------------------------------------------------------------
 
@@ -448,6 +650,17 @@ async def _create_schedule(
 async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, Any]:
     """Decide chores from the profile, write vault records, create schedules.
 
+    Two paths:
+      1. **Opportunity-driven** (preferred, when onboard.json["opportunities"]
+         is populated by Stage 6's write_brief_and_opportunities_opus): each
+         opportunity is keyword-matched to a template via the Step 2 heuristic.
+         Matched ones become chores; unmatched ones are saved to
+         onboard.json["unmatched_opportunities"] for Step 4 (code generation)
+         to handle.
+      2. **Rule-based** (fallback, when no opportunities are present — e.g.
+         tenants onboarded before Step 2 shipped): the original _decide_chores
+         flow that hardcoded matching against profile features.
+
     Idempotent-ish: if a schedule with the same id already exists, the
     ctrl-api call will fail and we record it in `failed` but continue with
     the rest. Re-running the activity for the same user is safe — vault
@@ -461,12 +674,39 @@ async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, An
 
     profile = onboard.get("profile") or {}
     facts = onboard.get("facts") or []
+    opportunities = onboard.get("opportunities") or []
 
-    decided = _decide_chores(profile, facts)
-    activity.heartbeat(f"decided {len(decided)} chores from profile")
+    unmatched: list[dict[str, Any]] = []
+    decided: list[dict[str, Any]]
+
+    if isinstance(opportunities, list) and opportunities:
+        # Path 1: opportunity-driven (Step 2)
+        decided, unmatched = _decide_chores_from_opportunities(opportunities, profile)
+        activity.heartbeat(
+            f"opportunity match: {len(decided)} matched, {len(unmatched)} unmatched"
+        )
+        # Persist unmatched opportunities for Step 4 to pick up later
+        if unmatched:
+            try:
+                onboard["unmatched_opportunities"] = unmatched
+                with open(onboard_path, "w") as f:
+                    json.dump(onboard, f, indent=2, default=str)
+            except OSError as e:
+                # Non-fatal — Step 4 will see the empty list and generate nothing
+                activity.heartbeat(f"warning: failed to persist unmatched opportunities: {e}")
+    else:
+        # Path 2: legacy rule-based fallback
+        decided = _decide_chores(profile, facts)
+        activity.heartbeat(f"rule-based decision: {len(decided)} chores from profile")
 
     if not decided:
-        return {"created": [], "failed": [], "decided": 0}
+        return {
+            "created": [],
+            "failed": [],
+            "decided": 0,
+            "unmatched": len(unmatched),
+            "source": "opportunities" if opportunities else "rules",
+        }
 
     config = load_config()
     api_key = os.environ.get("AAS_API_KEY", "")
@@ -521,4 +761,6 @@ async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, An
         "created": created,
         "failed": failed,
         "decided": len(decided),
+        "unmatched": len(unmatched),
+        "source": "opportunities" if opportunities else "rules",
     }

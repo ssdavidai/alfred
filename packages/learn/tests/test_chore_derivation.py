@@ -307,3 +307,222 @@ class TestDecideChoresIntegration:
         # Empty profile → no chores (no signal, no action — bounds the blast radius)
         chores = _decide_chores({}, [])
         assert chores == []
+
+
+# ---------------------------------------------------------------------------
+# Step 2 (S2-3): opportunity → template heuristic matcher
+# ---------------------------------------------------------------------------
+
+from src.activities.assign_chores import (  # noqa: E402
+    _build_opportunity_haystack,
+    _chore_spec_from_opportunity,
+    _decide_chores_from_opportunities,
+    _extract_matter_slug_from_opportunity,
+    _heuristic_match_opportunity,
+)
+
+
+def _opp(
+    *,
+    id: str,
+    name: str,
+    goal: str = "",
+    description: str = "",
+    tags: list | None = None,
+) -> dict:
+    """Build a minimal opportunity dict for tests."""
+    return {
+        "id": id,
+        "name": name,
+        "description": description,
+        "goal": goal,
+        "trigger": {"kind": "cron", "hint": "weekly"},
+        "data_sources": [],
+        "frequency_hint": "weekly",
+        "notify_when": "",
+        "tags": tags or [],
+    }
+
+
+class TestHeuristicMatcher:
+    def test_subscription_keyword_in_goal_matches(self):
+        opp = _opp(
+            id="watch-stripe",
+            name="Watch Stripe",
+            goal="Catch failed charges and unexpected price hikes from Stripe.",
+        )
+        assert _heuristic_match_opportunity(opp) == "subscription_watcher"
+
+    def test_subscription_keyword_in_name_matches(self):
+        opp = _opp(id="x", name="Subscription review", goal="quarterly")
+        assert _heuristic_match_opportunity(opp) == "subscription_watcher"
+
+    def test_billing_keyword_matches(self):
+        opp = _opp(id="x", name="Billing watcher", goal="catch billing errors")
+        assert _heuristic_match_opportunity(opp) == "subscription_watcher"
+
+    def test_cash_flow_keyword_matches(self):
+        opp = _opp(id="x", name="Cash flow forecast", goal="weekly review")
+        assert _heuristic_match_opportunity(opp) == "subscription_watcher"
+
+    def test_digest_keyword_matches_matter_template(self):
+        opp = _opp(id="x", name="Weekly NeoTerra digest", goal="weekly summary")
+        assert _heuristic_match_opportunity(opp) == "weekly_matter_digest"
+
+    def test_matter_keyword_matches(self):
+        opp = _opp(id="x", name="X", goal="track the matter activity")
+        assert _heuristic_match_opportunity(opp) == "weekly_matter_digest"
+
+    def test_unknown_topic_returns_none(self):
+        opp = _opp(
+            id="gym-tracker",
+            name="Gym tracker",
+            goal="remind me of workout routine",
+        )
+        assert _heuristic_match_opportunity(opp) is None
+
+    def test_empty_opportunity_returns_none(self):
+        opp = _opp(id="x", name="", goal="", description="")
+        assert _heuristic_match_opportunity(opp) is None
+
+    def test_subscription_keyword_in_tags_matches(self):
+        opp = _opp(id="x", name="Misc", goal="track stuff", tags=["subscription"])
+        assert _heuristic_match_opportunity(opp) == "subscription_watcher"
+
+    def test_first_match_wins_subscription_before_digest(self):
+        # If both keywords match, subscription_watcher wins because it's first
+        opp = _opp(
+            id="x",
+            name="Subscription digest",
+            goal="weekly digest of subscriptions",
+        )
+        assert _heuristic_match_opportunity(opp) == "subscription_watcher"
+
+
+class TestExtractMatterSlug:
+    def test_strips_weekly_prefix(self):
+        opp = _opp(id="weekly-neoterra-digest", name="Weekly NeoTerra digest")
+        assert _extract_matter_slug_from_opportunity(opp) == "neoterra"
+
+    def test_strips_daily_prefix(self):
+        opp = _opp(id="daily-stripe-summary", name="Daily Stripe summary")
+        assert _extract_matter_slug_from_opportunity(opp) == "stripe"
+
+    def test_falls_back_to_id_when_no_pattern(self):
+        opp = _opp(id="custom-thing", name="Custom thing")
+        assert _extract_matter_slug_from_opportunity(opp) == "custom-thing"
+
+    def test_unknown_when_id_missing(self):
+        opp = {"name": "X"}  # no id
+        assert _extract_matter_slug_from_opportunity(opp) == "unknown"
+
+
+class TestChoreSpecFromOpportunity:
+    def test_subscription_spec_uses_profile_financial_domains(self):
+        opp = _opp(
+            id="watch-subscriptions",
+            name="Watch subscriptions",
+            goal="catch billing failures",
+        )
+        profile = {
+            "rhythm": {"work_end_estimate": 17},
+            "financial": {
+                "detected_services": [
+                    {"domain": "stripe.com"},
+                    {"domain": "polar.sh"},
+                ],
+            },
+            "sender_tiers": {
+                "service": [{"domain": "mercury.com"}, {"domain": "whoop.com"}],
+            },
+            "relationships": {"communication_style": "responsive"},
+        }
+        spec = _chore_spec_from_opportunity(opp, "subscription_watcher", profile)
+        assert spec["template"] == "subscription_watcher"
+        assert spec["name"] == "Watch subscriptions"
+        assert spec["schedule"] == "0 18 * * 5"  # work_end+1, Friday
+        assert "stripe.com" in spec["params"]["matter_domains"]
+        assert "polar.sh" in spec["params"]["matter_domains"]
+        assert "mercury.com" in spec["params"]["matter_domains"]
+        assert spec["params"]["alert_threshold"] == 0.70  # responsive
+        assert spec["params"]["session_id"] == "main"
+        assert "chore" in spec["tags"]
+        assert "auto-generated" in spec["tags"]
+
+    def test_matter_digest_spec_extracts_slug(self):
+        opp = _opp(id="weekly-neoterra-digest", name="Weekly NeoTerra digest")
+        profile = {
+            "rhythm": {"work_end_estimate": 17, "weekend_activity_ratio": 0.4},
+            "meta": {"email_count": 3000},
+        }
+        spec = _chore_spec_from_opportunity(opp, "weekly_matter_digest", profile)
+        assert spec["template"] == "weekly_matter_digest"
+        assert spec["params"]["matter_slug"] == "neoterra"
+        assert spec["params"]["min_events_for_digest"] == 5  # high volume
+        assert spec["schedule"] == "0 19 * * 0"  # Sunday because weekend ratio >= 0.3
+
+
+class TestDecideChoresFromOpportunities:
+    def test_matches_some_unmatches_others(self):
+        profile = {
+            "rhythm": {"work_end_estimate": 17},
+            "meta": {"email_count": 3000},
+            "financial": {"detected_services": []},
+            "sender_tiers": {"service": []},
+            "relationships": {"communication_style": "responsive"},
+        }
+        opportunities = [
+            _opp(id="watch-stripe", name="Watch Stripe", goal="catch billing failures"),
+            _opp(id="weekly-foo-digest", name="Weekly Foo digest", goal="weekly summary"),
+            _opp(id="gym-tracker", name="Gym tracker", goal="workout routine"),
+        ]
+        matched, unmatched = _decide_chores_from_opportunities(opportunities, profile)
+        assert len(matched) == 2
+        assert len(unmatched) == 1
+        assert matched[0]["template"] == "subscription_watcher"
+        assert matched[1]["template"] == "weekly_matter_digest"
+        assert unmatched[0]["opportunity"]["id"] == "gym-tracker"
+        assert "no template keyword match" in unmatched[0]["reason"]
+
+    def test_deduplicates_by_chore_name(self):
+        profile = {"rhythm": {}, "meta": {}, "relationships": {}}
+        # Two opportunities that both reduce to the same chore name
+        opportunities = [
+            _opp(id="x1", name="Watch subscriptions", goal="catch billing"),
+            _opp(id="x2", name="Watch subscriptions", goal="another framing"),
+        ]
+        matched, unmatched = _decide_chores_from_opportunities(opportunities, profile)
+        assert len(matched) == 1
+        assert len(unmatched) == 1
+        assert "duplicate" in unmatched[0]["reason"]
+
+    def test_empty_opportunities_returns_empty(self):
+        matched, unmatched = _decide_chores_from_opportunities([], {})
+        assert matched == []
+        assert unmatched == []
+
+    def test_skips_non_dict_entries(self):
+        matched, unmatched = _decide_chores_from_opportunities(
+            ["not a dict", None, _opp(id="x", name="Watch billing", goal="track stuff")],
+            {"rhythm": {}, "relationships": {}},
+        )
+        assert len(matched) == 1
+        assert len(unmatched) == 0  # non-dicts are silently dropped
+
+
+class TestBuildOpportunityHaystack:
+    def test_concatenates_name_goal_description_tags(self):
+        opp = _opp(
+            id="x",
+            name="Watch X",
+            goal="Track Y",
+            description="Description Z",
+            tags=["foo", "bar"],
+        )
+        haystack = _build_opportunity_haystack(opp)
+        assert "watch x" in haystack
+        assert "track y" in haystack
+        assert "description z" in haystack
+        assert "foo" in haystack
+        assert "bar" in haystack
+        assert haystack == haystack.lower()  # all lowercased
