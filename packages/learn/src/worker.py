@@ -28,6 +28,9 @@ from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
 from src.workflows.chores import ALL_CHORE_TEMPLATES
 from src.workflows.chores._base import load_chore_context, record_chore_run
 
+# Activities — chore assignment (onboarding Stage 7.5)
+from src.activities.assign_chores import assign_initial_chores
+
 # Activities — chore actions
 from src.activities.chore_actions import (
     ask_alfred_to_judge_anomalies,
@@ -366,7 +369,8 @@ ALL_ACTIVITIES = [
     ingest_omi_transcription,
     # Validators
     validate_classification,
-    # Chore template helpers + actions
+    # Chore template helpers + actions + assignment
+    assign_initial_chores,
     load_chore_context,
     record_chore_run,
     fetch_financial_events,

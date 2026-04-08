@@ -45,6 +45,7 @@ with workflow.unsafe.imports_passed_through():
         generate_instinct_pack,
         generate_errand_pack,
     )
+    from src.activities.assign_chores import assign_initial_chores
 
 ONBOARD_PATH = "/alfred-data/onboard.json"
 
@@ -57,6 +58,7 @@ STAGE_ORDER = [
     "awaiting_verification", # Stage 5.5: wait for user to verify key facts
     "brief",                 # Stage 6: First Brief (Opus) — with corrections
     "packs",                 # Stage 7: generate four packs from profiler data
+    "chores",                # Stage 7.5: assign initial chores (templates + schedules)
     "done",                  # Stage 8: complete — show brief, start background vault build
 ]
 
@@ -274,6 +276,24 @@ class OnboardingPipelineWorkflow:
                 args=[onboard_path],
                 start_to_close_timeout=timedelta(minutes=5),
                 retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+
+        # -----------------------------------------------------------------
+        # Stage 7.5: Assign initial chores from profile
+        # -----------------------------------------------------------------
+        if resume_idx <= _stage_index("chores"):
+            await workflow.execute_activity(
+                update_onboard_stage,
+                args=[onboard_path, "chores"],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+
+            await workflow.execute_activity(
+                assign_initial_chores,
+                args=[onboard_path, input.user_id],
+                start_to_close_timeout=timedelta(minutes=5),
+                heartbeat_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
         # -----------------------------------------------------------------

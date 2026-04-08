@@ -21,6 +21,7 @@ import { registerToolRoutes } from "./routes/tools.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
 import { registerOmiRoutes } from "./routes/omi.js";
 import { registerCrossTenantRoutes } from "./routes/crossTenant.js";
+import { registerChoreRoutes } from "./routes/chores.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -98,6 +99,7 @@ export function createApiServer(): http.Server {
   registerApprovalRoutes();
   registerOmiRoutes();
   registerCrossTenantRoutes();
+  registerChoreRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
