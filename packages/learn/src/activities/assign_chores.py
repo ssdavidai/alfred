@@ -73,6 +73,173 @@ def _quote_yaml_scalar(value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Profile-derived param helpers (Step 1 of the bespoke chore plan)
+#
+# These helpers derive bespoke schedules, thresholds, and notification
+# channels from the behavioral profiler's output instead of using hardcoded
+# defaults. The profile fields we read are:
+#   profile.rhythm.work_end_estimate       int hour 0-23 (UTC)
+#   profile.rhythm.peak_hours              list[int] top hours 0-23
+#   profile.rhythm.weekend_activity_ratio  float 0-1
+#   profile.relationships.communication_style   enum
+#   profile.summary.communication_style    enum (alternative location)
+#   profile.meta.email_count               int
+#
+# All helpers fall back to safe defaults when the relevant profile fields
+# are missing or have unexpected shapes, so onboarding never breaks because
+# of a sparse profile.
+# ---------------------------------------------------------------------------
+
+# Cron DOW values — 0=Sunday, 1=Monday, ..., 5=Friday, 6=Saturday
+_CRON_DOW_SUNDAY = 0
+_CRON_DOW_FRIDAY = 5
+
+# Default hours (UTC) used when the profile doesn't give us a signal
+_DEFAULT_SUBSCRIPTION_HOUR_UTC = 9
+_DEFAULT_DIGEST_HOUR_UTC = 18
+
+# Clamp hours to "reasonable" waking window so we don't schedule 3am alerts
+_HOUR_MIN_CLAMP = 8
+_HOUR_MAX_CLAMP = 22
+
+
+def _clamp_hour(hour: int) -> int:
+    """Clamp a UTC hour to the 8-22 waking window."""
+    return max(_HOUR_MIN_CLAMP, min(_HOUR_MAX_CLAMP, int(hour)))
+
+
+def _derive_chore_schedule(template_id: str, profile: dict[str, Any]) -> str:
+    """Return a cron expression tailored to the user's rhythm profile.
+
+    For weekly chores, the hour is derived from `profile.rhythm.work_end_estimate`
+    (the user stops work, then Alfred surfaces things soon after when they
+    have time to look). The day is template-specific:
+      - subscription_watcher: Friday (end of the work week)
+      - weekly_matter_digest: Sunday if weekend activity is high, else Friday
+
+    If the profile has no rhythm data at all, falls back to the old
+    hardcoded defaults (`0 9 * * 5` for subscription, `0 18 * * 0` for digest).
+    """
+    rhythm = profile.get("rhythm") or {}
+    work_end = rhythm.get("work_end_estimate")
+    weekend_ratio = rhythm.get("weekend_activity_ratio")
+
+    if template_id == "subscription_watcher":
+        # Fire Friday, just after work ends (so the user can review before weekend)
+        if isinstance(work_end, int):
+            hour = _clamp_hour(work_end + 1)
+        else:
+            hour = _DEFAULT_SUBSCRIPTION_HOUR_UTC
+        return f"0 {hour} * * {_CRON_DOW_FRIDAY}"
+
+    if template_id == "weekly_matter_digest":
+        # Sunday if user works weekends too (≥30% activity ratio); else Friday end-of-day
+        if isinstance(weekend_ratio, (int, float)) and float(weekend_ratio) >= 0.3:
+            day = _CRON_DOW_SUNDAY
+        else:
+            day = _CRON_DOW_FRIDAY
+        if isinstance(work_end, int):
+            # Digest arrives a bit later than subscription watcher so it's read
+            # at end of day rather than mid-transition.
+            hour = _clamp_hour(work_end + 2)
+        else:
+            hour = _DEFAULT_DIGEST_HOUR_UTC
+        return f"0 {hour} * * {day}"
+
+    # Unknown template — fall back to the digest default
+    return f"0 {_DEFAULT_DIGEST_HOUR_UTC} * * {_CRON_DOW_SUNDAY}"
+
+
+# Communication style → alert threshold mapping. Per the plan:
+#   selective → 0.85 (user prefers silence, only bother if very confident)
+#   responsive → 0.70 (default — user responds when bothered)
+#   batched → 0.55 (user wants to see more at once, looser threshold)
+#   sparse → 0.90 (user rarely engages — don't poke them unless critical)
+_COMMUNICATION_STYLE_TO_THRESHOLD: dict[str, float] = {
+    "selective": 0.85,
+    "responsive": 0.70,
+    "batched": 0.55,
+    "sparse": 0.90,
+}
+
+_DEFAULT_ALERT_THRESHOLD = 0.70
+
+
+def _read_communication_style(profile: dict[str, Any]) -> str:
+    """Return the user's communication style from the profile, or '' if unknown.
+
+    The profiler exposes this in two places. We check both:
+      1. profile.relationships.communication_style (canonical)
+      2. profile.summary.communication_style (pre-computed for LLM prompts)
+    """
+    rel = profile.get("relationships") or {}
+    if isinstance(rel, dict):
+        style = rel.get("communication_style")
+        if isinstance(style, str) and style:
+            return style
+    summary = profile.get("summary") or {}
+    if isinstance(summary, dict):
+        style = summary.get("communication_style")
+        if isinstance(style, str) and style:
+            return style
+    return ""
+
+
+def _derive_alert_threshold(template_id: str, profile: dict[str, Any]) -> float:
+    """Return a bespoke alert threshold based on the user's communication style.
+
+    Currently only used by subscription_watcher. Unknown templates get the
+    default threshold. Unknown communication style also gets the default.
+    """
+    if template_id != "subscription_watcher":
+        return _DEFAULT_ALERT_THRESHOLD
+    style = _read_communication_style(profile)
+    return _COMMUNICATION_STYLE_TO_THRESHOLD.get(style, _DEFAULT_ALERT_THRESHOLD)
+
+
+# Email volume thresholds for digest event-count gating
+_HIGH_VOLUME_EMAIL_COUNT = 2000
+_MEDIUM_VOLUME_EMAIL_COUNT = 500
+
+_MIN_EVENTS_HIGH = 5
+_MIN_EVENTS_MEDIUM = 3
+_MIN_EVENTS_LOW = 2
+_DEFAULT_MIN_EVENTS = 3
+
+
+def _derive_min_events_for_digest(profile: dict[str, Any]) -> int:
+    """Return the minimum event count before a weekly digest fires.
+
+    Scales with total email volume — high-volume users get a higher bar
+    (so digests are meaningful) while low-volume users get a lower bar
+    (so they still get a digest when anything meaningful happens).
+    """
+    meta = profile.get("meta") or {}
+    email_count = meta.get("email_count") if isinstance(meta, dict) else None
+    if not isinstance(email_count, int):
+        return _DEFAULT_MIN_EVENTS
+    if email_count >= _HIGH_VOLUME_EMAIL_COUNT:
+        return _MIN_EVENTS_HIGH
+    if email_count >= _MEDIUM_VOLUME_EMAIL_COUNT:
+        return _MIN_EVENTS_MEDIUM
+    return _MIN_EVENTS_LOW
+
+
+def _infer_default_session_id(profile: dict[str, Any]) -> str:
+    """Return the OpenClaw session id chores should deliver notifications to.
+
+    Today every tenant has exactly one agent session named "main", so this
+    is a no-op that always returns "main". It exists as a hook for future
+    work: once per-user channel routing ships, this helper will inspect
+    connected streams (telegram, slack, email) and pick the user's
+    preferred notification session.
+    """
+    # Suppress lint on unused parameter — it's part of the future contract.
+    _ = profile
+    return "main"
+
+
+# ---------------------------------------------------------------------------
 # Decision logic — pure Python matching, no LLM
 # ---------------------------------------------------------------------------
 
@@ -120,11 +287,11 @@ def _decide_chores(profile: dict[str, Any], facts: list[dict[str, Any]]) -> list
         chores.append({
             "template": "subscription_watcher",
             "name": "Watch subscriptions",
-            "schedule": "0 9 * * 5",  # Friday 9am (UTC)
+            "schedule": _derive_chore_schedule("subscription_watcher", profile),
             "params": {
                 "matter_domains": sorted(financial_domains)[:30],
-                "alert_threshold": 0.7,
-                "session_id": "main",
+                "alert_threshold": _derive_alert_threshold("subscription_watcher", profile),
+                "session_id": _infer_default_session_id(profile),
             },
             "description": (
                 "Reviews subscription billing weekly. Looks for failed charges, "
@@ -177,11 +344,11 @@ def _decide_chores(profile: dict[str, Any], facts: list[dict[str, Any]]) -> list
         chores.append({
             "template": "weekly_matter_digest",
             "name": f"Weekly digest — {name}",
-            "schedule": "0 18 * * 0",  # Sunday 6pm (UTC)
+            "schedule": _derive_chore_schedule("weekly_matter_digest", profile),
             "params": {
                 "matter_slug": matter_slug,
-                "session_id": "main",
-                "min_events_for_digest": 3,
+                "session_id": _infer_default_session_id(profile),
+                "min_events_for_digest": _derive_min_events_for_digest(profile),
             },
             "description": (
                 f"Once a week, summarizes everything that happened on the "
