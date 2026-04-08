@@ -34,7 +34,9 @@ VALID_CONFIDENCE_VALUES = frozenset({"human", "machine", "mixed"})
 VALID_ROUTED_BY_VALUES = frozenset({"user", "alfred", "system"})
 
 # Valid observation source values (provenance)
-VALID_OBSERVATION_SOURCES = frozenset({"chat", "alfred_instructions", "dashboard", "manual", "media", "braindump"})
+# F.2: chore_run + system added so the LearningWorkflow can seed observations
+# from chore-run-history.jsonl and other internal signals.
+VALID_OBSERVATION_SOURCES = frozenset({"chat", "alfred_instructions", "dashboard", "manual", "media", "braindump", "chore_run", "system"})
 
 # Required signal keys
 SIGNAL_KEYS = frozenset({"domain_patterns", "keyword_patterns", "input_types", "attachment_patterns"})

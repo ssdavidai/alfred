@@ -169,6 +169,7 @@ from src.activities.observe import (
     execute_routing_hint,
     read_observation_queue,
     scan_alfred_instructions,
+    seed_observations_from_chore_runs,
     validate_observation,
 )
 
@@ -351,6 +352,7 @@ ALL_ACTIVITIES = [
     execute_routing_hint,
     read_observation_queue,
     scan_alfred_instructions,
+    seed_observations_from_chore_runs,
     validate_observation,
     # Reflect
     validate_proposals,

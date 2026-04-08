@@ -18,6 +18,7 @@ with workflow.unsafe.imports_passed_through():
         execute_alfred_instructions,
         read_observation_queue,
         scan_alfred_instructions,
+        seed_observations_from_chore_runs,
         validate_observation,
     )
     from src.activities.vault import write_observation_record
@@ -27,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
 class LearningResult:
     observations: int = 0
     instructions_executed: int = 0
+    chore_runs_seeded: int = 0
 
 
 @workflow.defn(name="LearningWorkflow")
@@ -35,6 +37,27 @@ class LearningWorkflow:
     async def run(self) -> LearningResult:
         observations_created = 0
         instructions_executed = 0
+        chore_runs_seeded = 0
+
+        # Entry Point C (F.2): seed observations from chore-run-history.jsonl
+        # Bypasses the queue+clerk pipeline because chore runs are
+        # pre-structured and don't need an LLM to extract. Cursor-tracked
+        # so each tick only processes new entries since the previous tick.
+        try:
+            seed_result = await workflow.execute_activity(
+                seed_observations_from_chore_runs,
+                args=[50],  # max_per_tick
+                start_to_close_timeout=timedelta(seconds=60),
+                heartbeat_timeout=timedelta(seconds=30),
+            )
+            if isinstance(seed_result, dict):
+                chore_runs_seeded = int(seed_result.get("seeded", 0))
+                observations_created += chore_runs_seeded
+        except Exception as exc:
+            workflow.logger.warning(
+                "LearningWorkflow: seed_observations_from_chore_runs raised: %s — continuing",
+                exc,
+            )
 
         # Entry Point A: Process observation queue (from chat hook)
         queue_items = await workflow.execute_activity(
@@ -112,4 +135,5 @@ class LearningWorkflow:
         return LearningResult(
             observations=observations_created,
             instructions_executed=instructions_executed,
+            chore_runs_seeded=chore_runs_seeded,
         )

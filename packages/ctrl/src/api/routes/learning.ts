@@ -352,12 +352,23 @@ export function registerLearningRoutes(): void {
   // GET /api/v1/learning/status — overall learning subsystem stats
   addRoute("GET", "/api/v1/learning/status", async ({ res }) => {
     const observationDir = path.join(VAULT_PATH, "observation");
-    const instinctDir = path.join(VAULT_PATH, "intuition", "instincts");
+    // F.2 fix: read instincts from BOTH the legacy `intuition/instincts/`
+    // path AND the newer `instinct/` path. The ctrl-api POST handler
+    // routes writes to `vault/<type>/<name>.md` directly (using the type
+    // field as the folder name), so VaultClient.write_record('instinct',
+    // ...) lands at vault/instinct/. The TYPE_DIRECTORY mapping is only
+    // applied on reads via the path resolver elsewhere. Reading both
+    // paths handles both old and new records without a data migration.
+    const instinctDirLegacy = path.join(VAULT_PATH, "intuition", "instincts");
+    const instinctDirNew = path.join(VAULT_PATH, "instinct");
     const reflectionDir = path.join(VAULT_PATH, "reflection");
     const eventDir = path.join(VAULT_PATH, "event");
 
     const observations = readVaultRecords(observationDir);
-    const instincts = readVaultRecords(instinctDir);
+    const instincts = [
+      ...readVaultRecords(instinctDirLegacy),
+      ...readVaultRecords(instinctDirNew),
+    ];
     const reflections = readVaultRecords(reflectionDir);
     const streamProcessed = countStreamEvents("system-openclaw-sessions");
 
@@ -487,9 +498,14 @@ export function registerLearningRoutes(): void {
   });
 
   // GET /api/v1/learning/instincts — list instinct records
+  // F.2 fix: read from BOTH legacy `intuition/instincts/` and new `instinct/`
   addRoute("GET", "/api/v1/learning/instincts", async ({ res }) => {
-    const dir = path.join(VAULT_PATH, "intuition", "instincts");
-    const records = readVaultRecords(dir);
+    const legacyDir = path.join(VAULT_PATH, "intuition", "instincts");
+    const newDir = path.join(VAULT_PATH, "instinct");
+    const records = [
+      ...readVaultRecords(legacyDir),
+      ...readVaultRecords(newDir),
+    ];
     records.sort((a, b) => a.name.localeCompare(b.name));
     sendJson(res, 200, { items: records, total: records.length });
   });
