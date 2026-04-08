@@ -38,6 +38,7 @@ from src.activities.chore_matching import match_opportunities_to_templates
 # Activities — chore code generation (Step 4, Opus generates Python templates)
 from src.activities.chore_generation import (
     generate_chore_template_code,
+    smoke_test_generated_template,
     validate_generated_template,
 )
 
@@ -393,6 +394,7 @@ ALL_ACTIVITIES = [
     match_opportunities_to_templates,
     generate_chore_template_code,
     validate_generated_template,
+    smoke_test_generated_template,
     load_chore_context,
     record_chore_run,
     fetch_financial_events,

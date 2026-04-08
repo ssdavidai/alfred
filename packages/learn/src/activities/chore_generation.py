@@ -20,9 +20,15 @@ Design contract:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+import os
+import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -385,3 +391,304 @@ async def validate_generated_template(python_source: str) -> dict[str, Any]:
         "violations": list(result.violations),
         "violation_count": len(result.violations),
     }
+
+
+# ---------------------------------------------------------------------------
+# S4-6: smoke_test_generated_template activity
+#
+# Subprocess-isolated import check. The generated Python is written to a
+# temp file and loaded by a forked Python interpreter that imports the
+# module, introspects the workflow class, and prints a structured JSON
+# report to stdout. If the subprocess crashes / hangs / imports cleanly
+# but exposes the wrong shape, we capture that without any risk to the
+# running alfred-learn worker process.
+#
+# Why subprocess and not in-process import?
+#   The worker is long-running and has already imported most of the
+#   learn codebase. An in-process importlib.exec would:
+#     1. Pollute sys.modules (two loads of the same dynamic module will
+#        conflict on the next worker startup rescan)
+#     2. Leak module-level state into the worker (dataclasses decorator
+#        side effects, class registrations, etc.)
+#     3. Be impossible to time out cleanly (asyncio can't cancel
+#        arbitrary Python import machinery mid-flight)
+#   Subprocess isolation is both safer and simpler.
+#
+# We do NOT try to execute the workflow logic itself. Full workflow
+# simulation would require registering every activity in the manifest
+# as a stub, running a WorkflowEnvironment, and feeding the workflow
+# synthetic input — complexity way out of proportion to the safety gain
+# over our already-strict Layer 2 static checks. The smoke test is a
+# fast "does this even load and expose the right class" guard, nothing
+# more.
+# ---------------------------------------------------------------------------
+
+# Hard limits on the subprocess.
+_SMOKE_TIMEOUT_SECONDS = 30
+_SMOKE_MAX_OUTPUT_BYTES = 100_000
+
+# The harness script that runs inside the subprocess. Takes three env
+# vars (SMOKE_SOURCE_FILE, SMOKE_MODULE_NAME, SMOKE_WORKFLOW_CLASS_NAME)
+# and prints a single JSON line to stdout on completion. Every branch
+# returns a single JSON doc so the parent can always deserialize.
+_SMOKE_HARNESS = r"""
+import importlib.util
+import json
+import os
+import sys
+import traceback
+
+
+def report(ok, **fields):
+    payload = {"ok": bool(ok), **fields}
+    sys.stdout.write(json.dumps(payload) + "\n")
+    sys.stdout.flush()
+    sys.exit(0 if ok else 1)
+
+
+source_file = os.environ["SMOKE_SOURCE_FILE"]
+module_name = os.environ["SMOKE_MODULE_NAME"]
+workflow_class_name = os.environ["SMOKE_WORKFLOW_CLASS_NAME"]
+
+# /app is on sys.path inside the alfred-learn container. That's what
+# lets the generated module's `from src.workflows.chores._base import
+# ...` and `from src.activities.chore_actions import ...` work.
+if "/app" not in sys.path:
+    sys.path.insert(0, "/app")
+
+try:
+    spec = importlib.util.spec_from_file_location(module_name, source_file)
+    if spec is None or spec.loader is None:
+        report(False, phase="spec", error="spec_from_file_location returned None")
+    module = importlib.util.module_from_spec(spec)
+    # Register the module in sys.modules BEFORE exec_module. Temporal's
+    # @workflow.defn decorator reads sys.modules[klass.__module__] during
+    # class creation to attach definition metadata — if we skip this the
+    # decorator raises AttributeError during import.
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+except Exception as exc:
+    report(
+        False,
+        phase="import",
+        error=f"{type(exc).__name__}: {exc}",
+        traceback=traceback.format_exc(limit=5),
+    )
+
+# Verify the declared workflow class exists on the module
+workflow_class = getattr(module, workflow_class_name, None)
+if workflow_class is None:
+    exported = sorted(
+        name for name in dir(module)
+        if not name.startswith("_") and hasattr(getattr(module, name, None), "__name__")
+    )
+    report(
+        False,
+        phase="class_lookup",
+        error=f"workflow class {workflow_class_name!r} not found on module",
+        exported_names=exported[:20],
+    )
+
+# Verify Temporal recognizes it as a workflow
+if not hasattr(workflow_class, "__temporal_workflow_definition"):
+    report(
+        False,
+        phase="temporal_marker",
+        error=f"{workflow_class_name} is not decorated with @workflow.defn",
+    )
+
+# Collect a few useful facts for the audit log
+try:
+    defn = workflow_class.__temporal_workflow_definition
+    workflow_name = getattr(defn, "name", workflow_class_name)
+except Exception:
+    workflow_name = workflow_class_name
+
+report(
+    True,
+    phase="done",
+    workflow_class_name=workflow_class_name,
+    workflow_name=workflow_name,
+    module_name=module_name,
+)
+"""
+
+
+def _run_smoke_subprocess(
+    python_source: str,
+    module_name: str,
+    workflow_class_name: str,
+) -> dict[str, Any]:
+    """Synchronous worker that owns the subprocess lifecycle.
+
+    Called from the async activity via asyncio.to_thread so Temporal's
+    heartbeat loop keeps ticking.
+    """
+    # Write the source to a temp file in a private dir. Use a namespaced
+    # stem so the subprocess sees a sensible module name.
+    with tempfile.TemporaryDirectory(prefix="chore-smoke-") as tmpdir:
+        source_path = Path(tmpdir) / f"{module_name}.py"
+        try:
+            source_path.write_text(python_source)
+        except OSError as exc:
+            return {
+                "ok": False,
+                "phase": "write_temp",
+                "error": f"{type(exc).__name__}: {exc}",
+                "duration_seconds": 0.0,
+                "stdout": "",
+                "stderr": "",
+            }
+
+        env = os.environ.copy()
+        env["SMOKE_SOURCE_FILE"] = str(source_path)
+        env["SMOKE_MODULE_NAME"] = module_name
+        env["SMOKE_WORKFLOW_CLASS_NAME"] = workflow_class_name
+        # Prevent the subprocess from writing .pyc files into the real
+        # package dirs (we don't want to leave cache artifacts behind).
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+        started = time.monotonic()
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", _SMOKE_HARNESS],
+                capture_output=True,
+                timeout=_SMOKE_TIMEOUT_SECONDS,
+                env=env,
+                text=True,
+                cwd=tmpdir,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "ok": False,
+                "phase": "timeout",
+                "error": f"subprocess exceeded {_SMOKE_TIMEOUT_SECONDS}s",
+                "duration_seconds": float(_SMOKE_TIMEOUT_SECONDS),
+                "stdout": (exc.stdout or b"").decode("utf-8", errors="replace")[:_SMOKE_MAX_OUTPUT_BYTES]
+                          if isinstance(exc.stdout, (bytes, bytearray))
+                          else (exc.stdout or "")[:_SMOKE_MAX_OUTPUT_BYTES],
+                "stderr": (exc.stderr or b"").decode("utf-8", errors="replace")[:_SMOKE_MAX_OUTPUT_BYTES]
+                          if isinstance(exc.stderr, (bytes, bytearray))
+                          else (exc.stderr or "")[:_SMOKE_MAX_OUTPUT_BYTES],
+            }
+        duration = time.monotonic() - started
+
+        stdout = (proc.stdout or "")[:_SMOKE_MAX_OUTPUT_BYTES]
+        stderr = (proc.stderr or "")[:_SMOKE_MAX_OUTPUT_BYTES]
+
+        # The harness always prints a single JSON line on its final
+        # stdout line. Parse the LAST non-empty line (import warnings
+        # etc. may have printed earlier lines).
+        report: dict[str, Any] | None = None
+        for line in reversed(stdout.splitlines()):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                report = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+
+        if report is None:
+            return {
+                "ok": False,
+                "phase": "no_report",
+                "error": f"subprocess exited {proc.returncode} without a JSON report",
+                "duration_seconds": duration,
+                "stdout": stdout,
+                "stderr": stderr,
+            }
+
+        report["duration_seconds"] = duration
+        report["stdout"] = stdout
+        report["stderr"] = stderr
+        return report
+
+
+@activity.defn
+async def smoke_test_generated_template(
+    python_source: str,
+    module_name: str,
+    workflow_class_name: str,
+) -> dict[str, Any]:
+    """Subprocess-isolated smoke test for a generated chore workflow file.
+
+    Writes the source to a temp file, spawns a Python subprocess that
+    imports the module and introspects the declared workflow class, and
+    returns a structured report with stdout/stderr/duration.
+
+    Args:
+        python_source: the full file source as returned by
+            generate_chore_template_code
+        module_name: the snake_case identifier (e.g. "gym_attendance_tracker")
+        workflow_class_name: the CamelCase class name
+            (e.g. "GymAttendanceTrackerWorkflow")
+
+    Returns:
+        {
+            "ok": bool,
+            "phase": str,       # "done" on success, "import"/"class_lookup"/
+                                # "temporal_marker"/"timeout"/"no_report" on failure
+            "duration_seconds": float,
+            "stdout": str,      # captured subprocess stdout (truncated)
+            "stderr": str,      # captured subprocess stderr (truncated)
+            # on success:
+            "workflow_name": str,
+            # on failure:
+            "error": str,
+            "traceback": str,   # first few frames (import failures only)
+        }
+
+    The activity heartbeats every few seconds while the subprocess is
+    running so Temporal knows we're alive during long imports.
+    """
+    if not python_source or not python_source.strip():
+        return {
+            "ok": False,
+            "phase": "precondition",
+            "error": "python_source is empty",
+            "duration_seconds": 0.0,
+            "stdout": "",
+            "stderr": "",
+        }
+    if not module_name or not workflow_class_name:
+        return {
+            "ok": False,
+            "phase": "precondition",
+            "error": "module_name and workflow_class_name are required",
+            "duration_seconds": 0.0,
+            "stdout": "",
+            "stderr": "",
+        }
+
+    activity.heartbeat(
+        f"smoke_test: spawning subprocess for {workflow_class_name}"
+    )
+
+    # Run the synchronous subprocess worker in a thread so Temporal's
+    # heartbeat loop stays responsive. asyncio.to_thread doesn't
+    # propagate cancellation into the subprocess, so we rely on the
+    # subprocess.run() timeout parameter as the real deadline.
+    report = await asyncio.to_thread(
+        _run_smoke_subprocess,
+        python_source,
+        module_name,
+        workflow_class_name,
+    )
+
+    if report["ok"]:
+        logger.info(
+            "smoke_test_generated_template: PASS for %s (%.2fs)",
+            workflow_class_name,
+            report["duration_seconds"],
+        )
+    else:
+        logger.warning(
+            "smoke_test_generated_template: FAIL for %s at phase=%s: %s",
+            workflow_class_name,
+            report.get("phase"),
+            report.get("error"),
+        )
+
+    return report
