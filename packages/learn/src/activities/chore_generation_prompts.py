@@ -188,9 +188,33 @@ Return ONLY valid JSON matching this exact schema. No markdown fences, no preamb
   "module_name": "<a snake_case slug, e.g. 'gym_attendance_tracker'>",
   "workflow_class_name": "<a CamelCase class name, e.g. 'GymAttendanceTrackerWorkflow' — must end with 'Workflow'>",
   "user_facing_description": "<2-4 sentences in plain English explaining what this chore actually DOES — not what problem it solves. The user will read this in their dashboard. Write in second person ('You' or 'Your'). Mention the schedule, the data sources, and the trigger condition. Be specific about thresholds and behavior. Example: 'Every Tuesday at 9am, this chore pulls your last 7 days of Stripe + Polar payments and compares them against the prior week. If incoming payment volume drops by more than 20%%, you get an alert. Otherwise it stays silent.'>",
+  "schedule": "<a 5-field cron expression in UTC that matches the schedule you just described, e.g. '0 9 * * 2' for 'every Tuesday at 9am UTC'>",
   "python_source": "<the full Python file source as a single string with \\n line breaks>"
 }}
 ```
+
+### The `schedule` field (REQUIRED)
+
+This is a standard 5-field cron expression — `minute hour day-of-month month day-of-week` — in **UTC**. It is consumed by Temporal's schedule service and determines when your generated workflow actually fires.
+
+**The cron you emit MUST match what your `user_facing_description` promises.** If the description says "every weekday at 14:30" and you emit `0 18 * * 0` (Sunday 6pm), the chore will NEVER run at 14:30, the brief will lie to the user, and the audit trail is broken. Pick the cron carefully.
+
+Examples — pick the closest shape and fill in the specifics:
+
+| Description says... | Emit |
+|---|---|
+| "Every weekday at 14:30 UTC" | `30 14 * * 1-5` |
+| "Every Monday at 9:00 UTC" | `0 9 * * 1` |
+| "Every Friday at 3pm UTC" | `0 15 * * 5` |
+| "On the 1st of each month at 14:30 UTC" | `30 14 1 * *` |
+| "Every Sunday at 18:00 UTC" | `0 18 * * 0` |
+| "Daily at 7am UTC" | `0 7 * * *` |
+
+**Timezone.** Cron is evaluated in UTC. If the user lives in (say) Warsaw (CET/CEST = UTC+1/+2) and the description says "at 14:30 local", you should emit a cron that fires at approximately 14:30 in the user's timezone — e.g. `30 12 * * 1-5` in summer (CEST) or `30 13 * * 1-5` in winter (CET). Use the profile slice's timezone hints where available. When unsure, prefer the summer offset. State the intended local time clearly in `user_facing_description` so the user can audit it.
+
+**Event-driven chores.** If the opportunity is "react to signals" rather than "run on a calendar" (e.g. "watch Retool emails"), pick a daily or twice-daily polling cadence — e.g. `0 7 * * *` (daily at 7am UTC) for a morning sweep. Never emit `* * * * *` or sub-minute crons — you will be rate-limited and flood the user.
+
+### Other field constraints
 
 The `module_name` must be a valid Python identifier (lowercase, snake_case). The `workflow_class_name` must end with `Workflow` and be a valid Python class name. The `user_facing_description` must be 80-1200 characters of plain English (no code, no markdown). The `python_source` must be the COMPLETE file contents — every line, every import, every blank line. Do NOT abbreviate with "...".
 

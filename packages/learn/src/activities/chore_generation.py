@@ -25,6 +25,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -141,6 +142,65 @@ def _slice_profile_for_opportunity(
 _USER_FACING_MIN_CHARS = 80
 _USER_FACING_MAX_CHARS = 1200
 
+# Schedule field added in the generated-chore-schedule fix. Every generated
+# chore should emit a 5-field cron (minute hour day-of-month month day-of-week)
+# in UTC that matches what user_facing_description promises. Missing field
+# triggers a retry; the caller still has a profile-derived fallback for the
+# edge case where all attempts fail.
+_CRON_FIELD_RE = re.compile(r"^[\d*,\-/]+$")
+
+
+def _validate_cron_expression(cron: str) -> tuple[bool, str]:
+    """Return (ok, error_message) for a 5-field UTC cron expression.
+
+    Rejects common mistakes the LLM has historically made:
+      - English descriptions ("every Tuesday at 9am")
+      - 6-field crons (with seconds, Quartz-style)
+      - The all-wildcards every-minute pattern
+      - Out-of-range field values (e.g. hour 25, day 32)
+
+    Does NOT reject aggressive-but-legal schedules like `*/5 * * * *` —
+    add policy checks in the caller if needed.
+    """
+    if not isinstance(cron, str):
+        return False, f"schedule must be a string, got {type(cron).__name__}"
+    cleaned = cron.strip()
+    if not cleaned:
+        return False, "schedule is empty"
+    parts = cleaned.split()
+    if len(parts) != 5:
+        return False, (
+            f"schedule must be a 5-field cron expression "
+            f"(minute hour day-of-month month day-of-week), got {len(parts)} "
+            f"field(s): {cleaned!r}"
+        )
+    field_names = ("minute", "hour", "day-of-month", "month", "day-of-week")
+    field_ranges = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
+    for name, part, (lo, hi) in zip(field_names, parts, field_ranges):
+        if not _CRON_FIELD_RE.match(part):
+            return False, (
+                f"schedule {name} field {part!r} contains invalid characters "
+                f"(allowed: digits, '*', ',', '-', '/')"
+            )
+        # Pull out all decimal literals and range-check them.
+        for num_str in re.findall(r"\d+", part):
+            try:
+                num = int(num_str)
+            except ValueError:
+                return False, f"schedule {name} field {part!r} has non-integer {num_str!r}"
+            if num < lo or num > hi:
+                return False, (
+                    f"schedule {name} value {num} out of range "
+                    f"(must be {lo}-{hi}); full cron was {cleaned!r}"
+                )
+    if all(p == "*" for p in parts):
+        return False, (
+            "schedule '* * * * *' fires every minute — this is never what a "
+            "chore wants. Pick a specific cadence (e.g. '0 7 * * *' for daily "
+            "7am UTC) that matches the user_facing_description."
+        )
+    return True, ""
+
 
 def _validate_envelope(parsed: dict[str, Any]) -> tuple[bool, str]:
     """Validate that the parsed Opus response has the required envelope keys.
@@ -153,6 +213,7 @@ def _validate_envelope(parsed: dict[str, Any]) -> tuple[bool, str]:
     workflow_class_name = parsed.get("workflow_class_name")
     python_source = parsed.get("python_source")
     user_facing_description = parsed.get("user_facing_description")
+    schedule = parsed.get("schedule")
 
     if not isinstance(module_name, str) or not module_name:
         return False, "missing or empty 'module_name'"
@@ -193,6 +254,16 @@ def _validate_envelope(parsed: dict[str, Any]) -> tuple[bool, str]:
                     f"user_facing_description too long ({len(ufd)} chars, "
                     f"maximum {_USER_FACING_MAX_CHARS})"
                 )
+
+    # schedule: required going forward, but tolerated as missing for
+    # backwards compat — the caller in assign_chores._build_generated_chore_spec
+    # falls back to _derive_chore_schedule if this field is absent. When it
+    # IS present, it must be a valid 5-field UTC cron; otherwise we reject
+    # with precise feedback so Opus can fix the format on retry.
+    if schedule is not None:
+        ok, err = _validate_cron_expression(schedule)
+        if not ok:
+            return False, f"schedule invalid: {err}"
 
     return True, ""
 
@@ -291,11 +362,19 @@ async def generate_chore_template_code(
                 "edit this chore to add one."
             )
 
+        # Schedule: pass through the cron string if the envelope had one.
+        # The validator already checked its shape in _validate_envelope.
+        # If missing, leave as empty string — the caller falls back to
+        # _derive_chore_schedule (pre-fix behavior).
+        schedule = parsed.get("schedule", "") or ""
+        schedule = schedule.strip() if isinstance(schedule, str) else ""
+
         return {
             "module_name": parsed["module_name"],
             "workflow_class_name": parsed["workflow_class_name"],
             "python_source": parsed["python_source"],
             "user_facing_description": ufd,
+            "schedule": schedule,
             "prompt_hash": prompt_hash,
             "attempts": attempt,
         }

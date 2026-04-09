@@ -20,6 +20,7 @@ Design contract:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from datetime import datetime, timezone
@@ -30,6 +31,8 @@ from temporalio import activity
 
 from src.config import load_config
 from src.utils.vault_client import VaultClient
+
+logger = logging.getLogger("alfred-learn")
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +128,13 @@ def _clamp_hour(hour: int) -> int:
 def _derive_chore_schedule(template_id: str, profile: dict[str, Any]) -> str:
     """Return a cron expression tailored to the user's rhythm profile.
 
+    Used for the two standard-library templates (`subscription_watcher` and
+    `weekly_matter_digest`) where the schedule is baked into the template
+    behavior rather than emitted per-user by a generator. For generator-authored
+    templates, the LLM emits a schedule in its envelope and the caller in
+    `_build_generated_chore_spec` prefers that; this function is only hit as
+    a fallback if the envelope was missing the schedule field.
+
     For weekly chores, the hour is derived from `profile.rhythm.work_end_estimate`
     (the user stops work, then Alfred surfaces things soon after when they
     have time to look). The day is template-specific:
@@ -133,6 +143,10 @@ def _derive_chore_schedule(template_id: str, profile: dict[str, Any]) -> str:
 
     If the profile has no rhythm data at all, falls back to the old
     hardcoded defaults (`0 9 * * 5` for subscription, `0 18 * * 0` for digest).
+
+    For unknown template_ids (e.g. generator-authored templates whose envelope
+    was missing a schedule), returns the Sunday-18:00-UTC default as a
+    conservative last resort. The caller logs a warning in that branch.
     """
     rhythm = profile.get("rhythm") or {}
     work_end = rhythm.get("work_end_estimate")
@@ -1031,13 +1045,39 @@ async def _generate_chore_from_opportunity(
     # slug of the chore record itself is derived from the module_name.
     chore_slug = _slug_from_module_name(module_name)
 
+    # Prefer the schedule the LLM emitted in its envelope. It's the field
+    # that actually matches what user_facing_description promises (e.g.
+    # "every weekday at 14:30" → `30 14 * * 1-5`). The old code path fell
+    # through to _derive_chore_schedule for every generated template because
+    # their module_ids don't match the two known standard-library templates,
+    # which quietly stamped all generated chores with Sunday-18:00-UTC. The
+    # generator now emits `schedule` as part of its required output schema
+    # (see chore_generation.py _validate_cron_expression) so this branch is
+    # the normal path; the fallback only fires for backwards-compat envelopes
+    # written before this fix shipped.
+    gen_schedule = str(gen.get("schedule") or "").strip()
+    if gen_schedule:
+        chore_schedule = gen_schedule
+        logger.info(
+            "assign_chores: using LLM-emitted schedule %r for generated template %s",
+            chore_schedule, module_name,
+        )
+    else:
+        chore_schedule = _derive_chore_schedule(module_name, profile)
+        logger.warning(
+            "assign_chores: generation envelope for %s had no schedule field; "
+            "falling back to _derive_chore_schedule → %r. Regenerate on next "
+            "onboarding to get a user-facing-description-accurate cron.",
+            module_name, chore_schedule,
+        )
+
     spec: dict[str, Any] = {
         "template": module_name,  # unique per generated template
         "workflow_class_name": workflow_class_name,
         "name": name,
         "description": description or f"Generated from opportunity {opp_id}",
         "user_facing_description": user_facing_description,
-        "schedule": _derive_chore_schedule(module_name, profile),
+        "schedule": chore_schedule,
         "tags": sorted(tag_set),
         "params": {"chore_slug": chore_slug},
         "generated": True,

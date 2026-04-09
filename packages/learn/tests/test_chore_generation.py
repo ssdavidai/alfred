@@ -9,6 +9,7 @@ from __future__ import annotations
 from src.activities.chore_generation import (
     _slice_profile_for_opportunity,
     _try_parse_envelope,
+    _validate_cron_expression,
     _validate_envelope,
 )
 
@@ -135,6 +136,84 @@ class TestValidateEnvelope:
         )
         ok, err = _validate_envelope(env)
         assert ok, err
+
+    # Schedule field tests (generated-chore-schedule fix)
+    def test_schedule_omitted_passes(self):
+        """Backwards compat: envelopes generated before the fix don't have the field."""
+        env = _good_envelope()
+        ok, err = _validate_envelope(env)
+        assert ok, f"omitted schedule should pass: {err}"
+
+    def test_schedule_valid_passes(self):
+        env = _good_envelope()
+        env["schedule"] = "30 14 * * 1-5"
+        ok, err = _validate_envelope(env)
+        assert ok, err
+
+    def test_schedule_english_prose_rejected(self):
+        env = _good_envelope()
+        env["schedule"] = "every Tuesday at 9am"
+        ok, err = _validate_envelope(env)
+        assert not ok
+        assert "schedule invalid" in err
+
+    def test_schedule_wrong_field_count_rejected(self):
+        env = _good_envelope()
+        env["schedule"] = "0 9 * *"  # 4 fields
+        ok, err = _validate_envelope(env)
+        assert not ok
+        assert "5-field" in err
+
+
+# ---------------------------------------------------------------------------
+# _validate_cron_expression
+# ---------------------------------------------------------------------------
+
+class TestValidateCronExpression:
+    def test_weekday_afternoon(self):
+        ok, err = _validate_cron_expression("30 14 * * 1-5")
+        assert ok, err
+
+    def test_first_of_month(self):
+        ok, err = _validate_cron_expression("30 14 1 * *")
+        assert ok, err
+
+    def test_every_friday_3pm(self):
+        ok, err = _validate_cron_expression("0 15 * * 5")
+        assert ok, err
+
+    def test_step_ranges(self):
+        ok, err = _validate_cron_expression("0 8-18/2 * * 1-5")
+        assert ok, err
+
+    def test_hour_out_of_range(self):
+        ok, err = _validate_cron_expression("0 25 * * *")
+        assert not ok
+        assert "hour" in err and "25" in err
+
+    def test_day_out_of_range(self):
+        ok, err = _validate_cron_expression("0 9 32 * *")
+        assert not ok
+        assert "day-of-month" in err
+
+    def test_english_prose_rejected(self):
+        ok, err = _validate_cron_expression("every Tuesday 9am")
+        assert not ok
+
+    def test_too_many_fields(self):
+        ok, err = _validate_cron_expression("0 9 * * 1 2026")
+        assert not ok
+        assert "5-field" in err
+
+    def test_empty(self):
+        ok, err = _validate_cron_expression("")
+        assert not ok
+        assert "empty" in err
+
+    def test_every_minute_rejected(self):
+        ok, err = _validate_cron_expression("* * * * *")
+        assert not ok
+        assert "every minute" in err
 
 
 # ---------------------------------------------------------------------------
