@@ -220,20 +220,36 @@ export function LearningContent() {
                       <div className="flex items-center justify-between">
                         <div className="min-w-0 flex-1">
                           <p className="font-mono text-xs font-medium text-cream">{instinct.name}</p>
-                          <div className="flex items-center gap-3">
-                            <span className="font-mono text-[0.6rem] text-muted-foreground/60">
-                              {instinct.observationCount ?? 0} observations
+                          {/* Show description from B.3 Opus instincts (frontmatter.description is the one-liner) */}
+                          {(instinct.frontmatter?.description || instinct.description) && (
+                            <p className="mt-0.5 text-[0.65rem] text-muted-foreground/70 line-clamp-2">
+                              {String(instinct.frontmatter?.description || instinct.description).replace(/^['"]|['"]$/g, "")}
+                            </p>
+                          )}
+                          {/* Show body preview (rationale + examples) when available */}
+                          {instinct.body && (
+                            <details className="mt-1.5">
+                              <summary className="cursor-pointer font-mono text-[0.55rem] text-gold/50 hover:text-gold/80">
+                                View rationale &amp; examples
+                              </summary>
+                              <div className="mt-2 rounded-sm bg-black/30 p-2.5">
+                                <p className="whitespace-pre-line text-[0.65rem] leading-relaxed text-cream/60">
+                                  {String(instinct.body).replace(/^#[^\n]*\n+/, "").replace(/^>[^\n]*\n+/, "").slice(0, 1200)}
+                                </p>
+                              </div>
+                            </details>
+                          )}
+                          <div className="mt-1 flex flex-wrap items-center gap-3">
+                            <span className="font-mono text-[0.55rem] text-muted-foreground/50">
+                              threshold: {instinct.frontmatter?.discretion_threshold ?? instinct.discretionThreshold ?? "\u2014"}
                             </span>
-                            <span className="font-mono text-[0.6rem] text-muted-foreground/60">
-                              threshold: {instinct.discretionThreshold ?? "\u2014"}
-                            </span>
-                            {instinct.confidenceScore != null && (
-                              <span className="font-mono text-[0.6rem] text-gold/60">
-                                score: {instinct.confidenceScore}
+                            {(instinct.frontmatter?.confidence_score ?? instinct.confidenceScore) != null && (
+                              <span className="font-mono text-[0.55rem] text-gold/50">
+                                confidence: {instinct.frontmatter?.confidence_score ?? instinct.confidenceScore}
                               </span>
                             )}
                             {instinct.status && instinct.status !== "active" && (
-                              <span className="font-mono text-[0.6rem] text-orange-400/60">
+                              <span className="inline-flex rounded-sm border border-orange-500/30 bg-orange-500/10 px-1 py-0.5 font-mono text-[0.5rem] uppercase tracking-wider text-orange-400">
                                 {instinct.status}
                               </span>
                             )}

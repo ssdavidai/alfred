@@ -326,21 +326,47 @@ export function registerVaultRoutes(): void {
   });
 
   // Vault list by type
-  addRoute("GET", "/api/v1/vault/list/:type", async ({ res, params }) => {
+  // List vault records by type. Returns frontmatter + truncated body preview
+  // so list views can render rich cards without N+1 detail requests.
+  addRoute("GET", "/api/v1/vault/list/:type", async ({ res, params, query }) => {
     const type = params.type;
     if (!KNOWN_TYPES.includes(type)) {
       throw new ValidationError(`Unknown vault type: ${type}. Known types: ${KNOWN_TYPES.join(", ")}`);
     }
+
+    // Optional body_preview length (default 500 chars, max 2000)
+    const previewLen = Math.min(
+      Math.max(0, parseInt(query.get("preview") ?? "500", 10) || 500),
+      2000,
+    );
+
     const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
-    const results: Array<{ path: string; name: string; status: string }> = [];
+    const results: Array<{
+      path: string;
+      name: string;
+      status: string;
+      frontmatter: Record<string, unknown>;
+      body_preview: string;
+      created: string;
+    }> = [];
     for (const relPath of files) {
       const rec = readRecord(relPath);
       if (!rec) continue;
       if (rec.fm.type !== type) continue;
+
+      // Truncate body to preview length for list rendering — the full
+      // body is available via GET /api/v1/vault/records/:path
+      const bodyPreview = rec.body.length > previewLen
+        ? rec.body.slice(0, previewLen) + "…"
+        : rec.body;
+
       results.push({
         path: relPath.replace(/\\/g, "/"),
         name: String(rec.fm.name || rec.fm.subject || rec.stem),
         status: String(rec.fm.status || ""),
+        frontmatter: rec.fm,
+        body_preview: bodyPreview,
+        created: String(rec.fm.created || ""),
       });
     }
     results.sort((a, b) => a.name.localeCompare(b.name));

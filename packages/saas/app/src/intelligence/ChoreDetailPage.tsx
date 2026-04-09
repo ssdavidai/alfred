@@ -207,7 +207,7 @@ export default function ChoreDetailPage() {
           <Badge text="Paused" colorClass="border-amber-500/40 bg-amber-500/10 text-amber-400" />
         )}
         {isCompleted && (
-          <Badge text="Completed" colorClass="border-muted/40 bg-muted/10 text-muted-foreground" />
+          <Badge text="Archived" colorClass="border-muted/40 bg-muted/10 text-muted-foreground" />
         )}
         {!isPaused && !isCompleted && (
           <Badge text="Active" colorClass="border-emerald-500/40 bg-emerald-500/10 text-emerald-400" />

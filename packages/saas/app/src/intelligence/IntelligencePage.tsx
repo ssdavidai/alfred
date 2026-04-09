@@ -690,9 +690,17 @@ function ErrandRow({
           ) : (
             <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/50" />
           )}
-          <span className="truncate font-mono text-xs font-medium text-cream">
-            {fm.name || task.name}
-          </span>
+          <div className="min-w-0 flex-1">
+            <span className="truncate font-mono text-xs font-medium text-cream">
+              {fm.name || task.name}
+            </span>
+            {/* Show why_it_matters from B.2 Opus errands */}
+            {(fm.why_it_matters || task.body_preview) && (
+              <p className="mt-0.5 text-[0.6rem] text-muted-foreground/60 line-clamp-1">
+                {fm.why_it_matters || (task.body_preview ? String(task.body_preview).slice(0, 120) : "")}
+              </p>
+            )}
+          </div>
           {(fm.alfred_instructions || task.alfred_instructions) && (
             <Zap className="h-3 w-3 flex-shrink-0 text-gold/70" />
           )}
@@ -1476,11 +1484,24 @@ function MattersContent() {
                     <p className="truncate font-mono text-xs font-medium text-cream">
                       {name}
                     </p>
-                    {linkedErrands.length > 0 && (
-                      <span className="font-mono text-[0.6rem] text-muted-foreground/60">
-                        {linkedErrands.length} linked errand{linkedErrands.length > 1 ? "s" : ""}
-                      </span>
+                    {/* Show description from frontmatter (B.1 Opus matters have rich descriptions) */}
+                    {fm.description && (
+                      <p className="mt-0.5 text-[0.65rem] text-muted-foreground/70 line-clamp-2">
+                        {String(fm.description)}
+                      </p>
                     )}
+                    <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                      {fm.category && (
+                        <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                          {String(fm.category)}
+                        </span>
+                      )}
+                      {linkedErrands.length > 0 && (
+                        <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+                          {linkedErrands.length} errand{linkedErrands.length > 1 ? "s" : ""}
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <span
                     className={`inline-flex rounded-sm border px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider ${statusClass}`}
@@ -1504,6 +1525,25 @@ function MattersContent() {
                         </span>
                       )}
                     </div>
+
+                    {/* Body preview — shows the rich content from Opus matter records */}
+                    {item.body_preview && (
+                      <div className="rounded-sm bg-black/30 p-3">
+                        <p className="whitespace-pre-line text-xs leading-relaxed text-cream/70">
+                          {String(item.body_preview).replace(/^#[^\n]*\n+/, "").replace(/^>[^\n]*\n+/, "").slice(0, 800)}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Key people */}
+                    {fm.key_people && typeof fm.key_people === "string" && fm.key_people !== "[]" && (
+                      <div>
+                        <span className="font-mono text-[0.6rem] uppercase tracking-wider text-muted-foreground/60">
+                          Key people
+                        </span>
+                        <p className="mt-1 text-xs text-cream/60">{String(fm.key_people).replace(/^\[|\]$/g, "")}</p>
+                      </div>
+                    )}
 
                     {/* Progress bar */}
                     {linkedErrands.length > 0 && (

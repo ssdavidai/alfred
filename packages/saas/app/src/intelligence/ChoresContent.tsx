@@ -326,7 +326,7 @@ export default function ChoresContent() {
                   )}
                   {isCompleted && (
                     <Badge
-                      text="Completed"
+                      text="Archived"
                       colorClass="border-muted/40 bg-muted/10 text-muted-foreground"
                     />
                   )}
