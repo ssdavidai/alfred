@@ -15,6 +15,14 @@ RUN pip install --no-cache-dir --no-deps /alfred-src
 
 COPY init/entrypoint.sh ./entrypoint.sh
 COPY config.yaml.tpl ./config.yaml.tpl
+# Platform-native workspace content: skills that teach the main Alfred
+# agent how to use its ctrl_* tools, plus the canonical TOOLS.md capability
+# reference. These are copied into the tenant's openclaw workspace on every
+# init run so the main agent discovers them immediately after provisioning.
+# Separate from the vault-worker skills (curator/janitor/distiller) which
+# are bundled inside the `alfred` Python package and are for the vault
+# worker daemons, not the user-facing agent.
+COPY workspace-template/ ./workspace-template/
 
 RUN chmod +x entrypoint.sh
 

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'packages/openclaw/init/**'
+      - 'packages/openclaw/workspace-template/**'
       - 'packages/openclaw/dockerfiles/alfred.Dockerfile'
       - 'packages/openclaw/config.yaml.tpl'
       - 'packages/openclaw/openclaw-wrapper'
