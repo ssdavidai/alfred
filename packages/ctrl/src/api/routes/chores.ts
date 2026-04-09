@@ -311,20 +311,49 @@ export function registerChoreRoutes(): void {
     // we return the activity name + the line number + the argument expression
     // as a short snippet. This gives the UI enough to show "at line 47 the
     // workflow calls fetch_financial_events(['stripe.com', 'polar.sh'], 7)".
-    const callRe = /workflow\.execute_activity\s*\(\s*([a-z_][a-z0-9_]*)/gi;
+    //
+    // The regex runs against the FULL source (not per-line) because the
+    // generated templates put the activity name on the line after
+    // `workflow.execute_activity(`, like:
+    //
+    //   ctx = await workflow.execute_activity(
+    //       load_chore_context,
+    //       args=[...],
+    //   )
+    //
+    // We use the `s` (dotAll) flag so `\s*` reliably spans newlines.
+    const callRe = /workflow\.execute_activity\s*\(\s*([a-z_][a-z0-9_]*)/gis;
     const activityCalls: Array<{ name: string; line: number; snippet: string }> = [];
     const lines = source.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const matches = line.matchAll(callRe);
-      for (const m of matches) {
-        const name = m[1];
-        // Capture a few lines of context starting from this line — usually the
-        // args span 3-6 lines (name, args=[...], start_to_close_timeout, retry_policy)
-        const snippetLines = lines.slice(i, Math.min(i + 6, lines.length));
-        const snippet = snippetLines.join("\n").slice(0, 400);
-        activityCalls.push({ name, line: i + 1, snippet });
+    // Precompute cumulative char offsets so we can map match.index → line number
+    const lineOffsets: number[] = [];
+    let runningOffset = 0;
+    for (const line of lines) {
+      lineOffsets.push(runningOffset);
+      runningOffset += line.length + 1; // +1 for the stripped \n
+    }
+    const findLineFromOffset = (offset: number): number => {
+      // Binary search over lineOffsets
+      let lo = 0;
+      let hi = lineOffsets.length - 1;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (lineOffsets[mid] <= offset) lo = mid;
+        else hi = mid - 1;
       }
+      return lo + 1; // 1-based line number
+    };
+    for (const match of source.matchAll(callRe)) {
+      const name = match[1];
+      const idx = match.index ?? 0;
+      const lineNum = findLineFromOffset(idx);
+      // Capture a few lines of context starting from the line containing
+      // `workflow.execute_activity(` — usually the args span 3-6 lines
+      // (name, args=[...], start_to_close_timeout, retry_policy).
+      const startLineIdx = lineNum - 1;
+      const snippetLines = lines.slice(startLineIdx, Math.min(startLineIdx + 6, lines.length));
+      const snippet = snippetLines.join("\n").slice(0, 400);
+      activityCalls.push({ name, line: lineNum, snippet });
     }
 
     // Look up each imported activity in the manifest and run a data-readiness
