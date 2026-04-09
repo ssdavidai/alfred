@@ -899,6 +899,17 @@ function ErrandDetailPanel({
 
   return (
     <div className="border-t border-gold-dim/10 px-4 py-4 space-y-4">
+      {/* Body content FIRST — the user wants to see what the errand is about,
+          not the control fields. For B.2 Opus errands this includes the
+          Context, Why it matters, Dependencies, and First action sections. */}
+      {bodyWithoutActions && (
+        <div className="rounded-sm bg-black/30 p-4">
+          <div className="whitespace-pre-line text-sm leading-relaxed text-cream/80">
+            {bodyWithoutActions}
+          </div>
+        </div>
+      )}
+
       {/* Status with change buttons */}
       <div>
         <FieldLabel>Status</FieldLabel>
@@ -1112,14 +1123,7 @@ function ErrandDetailPanel({
         </div>
       </div>
 
-      {/* Body content */}
-      {bodyWithoutActions && (
-        <div className="rounded-sm bg-[#0A0A0A] px-3 py-2">
-          <p className="whitespace-pre-wrap font-mono text-[0.65rem] leading-relaxed text-muted-foreground/80">
-            {bodyWithoutActions}
-          </p>
-        </div>
-      )}
+      {/* (Body content is now rendered at the top of the panel — see above) */}
     </div>
   );
 }
@@ -1526,12 +1530,15 @@ function MattersContent() {
                       )}
                     </div>
 
-                    {/* Body preview — shows the rich content from Opus matter records */}
+                    {/* Body content — shows the rich content from Opus matter records */}
                     {item.body_preview && (
-                      <div className="rounded-sm bg-black/30 p-3">
-                        <p className="whitespace-pre-line text-xs leading-relaxed text-cream/70">
-                          {String(item.body_preview).replace(/^#[^\n]*\n+/, "").replace(/^>[^\n]*\n+/, "").slice(0, 800)}
-                        </p>
+                      <div className="rounded-sm bg-black/30 p-3 max-h-[600px] overflow-y-auto">
+                        <div className="whitespace-pre-line text-xs leading-relaxed text-cream/70">
+                          {String(item.body_preview)
+                            .replace(/^#[^\n]*\n+/, "")   /* strip h1 title (already shown above) */
+                            .replace(/^>[^\n]*\n+/, "")    /* strip blockquote description (already shown above) */
+                          }
+                        </div>
                       </div>
                     )}
 

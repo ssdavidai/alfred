@@ -4,6 +4,7 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { dockerExec } from "../helpers.js";
 import { VAULT_PATH } from "./vault.js";
+import { lookupChoreActions, type ChoreActionSpec } from "./chore_manifest_data.js";
 
 /**
  * Chore lifecycle routes.
@@ -220,6 +221,205 @@ export function registerChoreRoutes(): void {
       slug,
       triggered_at: new Date().toISOString(),
       message: `Chore ${slug} fired manually — check Workflows tab for execution status`,
+    });
+  });
+
+  // GET /api/v1/chores/:slug/source
+  //
+  // Reads the generated Python workflow file from /alfred-data/user-chores/
+  // for a generated chore. Returns the raw source plus a structured view
+  // of the activity calls it makes (extracted via regex, not AST — we
+  // can't parse Python from Node without bringing in a dep).
+  //
+  // The UI uses this to render the actual code the user can inspect,
+  // plus a dependency list showing which chore_actions the workflow
+  // depends on. That lets the user verify the chore isn't hallucinating
+  // about data sources that don't exist.
+  //
+  // Returns 404 if:
+  //   - the chore record doesn't exist
+  //   - the chore isn't marked as generated
+  //   - the expected .py file isn't in /alfred-data/user-chores/
+  addRoute("GET", "/api/v1/chores/:slug/source", async ({ res, params }) => {
+    const slug = params?.slug;
+    if (!slug) throw new ValidationError("slug is required");
+    const record = readChoreFile(slug);
+    if (!record) throw new NotFoundError(`chore ${slug} not found`);
+
+    const fm = record.frontmatter;
+    const isGenerated = fm.generated === true || fm.generated === "true";
+    if (!isGenerated) {
+      sendJson(res, 200, {
+        slug,
+        generated: false,
+        message: "This is a standard-library chore. Source lives in packages/learn/src/workflows/chores/ in the alfred-platform repo.",
+        template: String(fm.template ?? ""),
+        source: null,
+        imported_activities: [],
+        activity_calls: [],
+      });
+      return;
+    }
+
+    // The module_name in frontmatter is the filename stem
+    const moduleName = String(fm.template ?? slug.replace(/-/g, "_"));
+    const sourcePath = `/mnt/encrypted/alfred/user-chores/${moduleName}.py`;
+
+    let source: string;
+    try {
+      source = fs.readFileSync(sourcePath, "utf-8");
+    } catch {
+      sendJson(res, 404, {
+        slug,
+        generated: true,
+        template: moduleName,
+        source: null,
+        error: `Source file not found at ${sourcePath}`,
+        imported_activities: [],
+        activity_calls: [],
+      });
+      return;
+    }
+
+    // Extract `from src.activities.chore_actions import (name1, name2, ...)` — the
+    // activities the workflow is allowed to call
+    const importBlockRe = /from\s+src\.activities\.chore_actions\s+import\s*\(([^)]+)\)/;
+    const importMatch = source.match(importBlockRe);
+    const importedActivities: string[] = [];
+    if (importMatch) {
+      for (const raw of importMatch[1].split(",")) {
+        const name = raw.trim().replace(/\s+as\s+\w+$/, "");
+        if (/^[a-z_][a-z0-9_]*$/i.test(name)) {
+          importedActivities.push(name);
+        }
+      }
+    } else {
+      // Single-line form: `from src.activities.chore_actions import name1, name2`
+      const singleLine = /from\s+src\.activities\.chore_actions\s+import\s+([^\n]+)/;
+      const match = source.match(singleLine);
+      if (match) {
+        for (const raw of match[1].split(",")) {
+          const name = raw.trim().replace(/\s+as\s+\w+$/, "");
+          if (/^[a-z_][a-z0-9_]*$/i.test(name)) {
+            importedActivities.push(name);
+          }
+        }
+      }
+    }
+
+    // Extract `workflow.execute_activity(name, ...)` calls. For each call
+    // we return the activity name + the line number + the argument expression
+    // as a short snippet. This gives the UI enough to show "at line 47 the
+    // workflow calls fetch_financial_events(['stripe.com', 'polar.sh'], 7)".
+    const callRe = /workflow\.execute_activity\s*\(\s*([a-z_][a-z0-9_]*)/gi;
+    const activityCalls: Array<{ name: string; line: number; snippet: string }> = [];
+    const lines = source.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const matches = line.matchAll(callRe);
+      for (const m of matches) {
+        const name = m[1];
+        // Capture a few lines of context starting from this line — usually the
+        // args span 3-6 lines (name, args=[...], start_to_close_timeout, retry_policy)
+        const snippetLines = lines.slice(i, Math.min(i + 6, lines.length));
+        const snippet = snippetLines.join("\n").slice(0, 400);
+        activityCalls.push({ name, line: i + 1, snippet });
+      }
+    }
+
+    // Look up each imported activity in the manifest and run a data-readiness
+    // check for each one. This is the anti-hallucination check — if a chore
+    // imports fetch_financial_events but the vault has zero event records
+    // tagged with the matter domains the chore cares about, the user sees
+    // "no events to scan" instead of silently running and reporting 0 anomalies.
+    const { found: manifestEntries, unknown: unknownActivities } =
+      lookupChoreActions(importedActivities);
+
+    // Per-activity data readiness probe. Each entry reports whether the data
+    // source has any content at all (non-empty check, not a full validation).
+    const dataReadiness = manifestEntries.map((spec: ChoreActionSpec) => {
+      const checks: Array<{
+        kind: string;
+        resource: string;
+        status: "ok" | "empty" | "missing" | "untested";
+        detail: string;
+      }> = [];
+      for (const read of spec.reads) {
+        if (read.kind === "vault" && read.check_path) {
+          const absPath = path.join(VAULT_PATH, read.check_path.replace(/^vault\//, ""));
+          try {
+            if (!fs.existsSync(absPath)) {
+              checks.push({
+                kind: read.kind,
+                resource: read.resource,
+                status: "missing",
+                detail: `Directory ${absPath} does not exist`,
+              });
+              continue;
+            }
+            const entries = fs.readdirSync(absPath).filter((n) => n.endsWith(".md"));
+            if (entries.length === 0) {
+              checks.push({
+                kind: read.kind,
+                resource: read.resource,
+                status: "empty",
+                detail: `${absPath} has 0 records — the activity will return empty results every run`,
+              });
+            } else {
+              checks.push({
+                kind: read.kind,
+                resource: read.resource,
+                status: "ok",
+                detail: `${entries.length} records available`,
+              });
+            }
+          } catch (err) {
+            checks.push({
+              kind: read.kind,
+              resource: read.resource,
+              status: "missing",
+              detail: err instanceof Error ? err.message : String(err),
+            });
+          }
+        } else if (read.kind === "snapshot") {
+          checks.push({
+            kind: read.kind,
+            resource: read.resource,
+            status: "ok",
+            detail: "Snapshot reads are safe on first run (returns empty dict)",
+          });
+        } else {
+          checks.push({
+            kind: read.kind,
+            resource: read.resource,
+            status: "untested",
+            detail: "Not checked by this probe",
+          });
+        }
+      }
+      return {
+        activity: spec.name,
+        description: spec.description,
+        reads: spec.reads,
+        writes: spec.writes,
+        llm: spec.llm,
+        required_data: spec.required_data,
+        readiness_checks: checks,
+      };
+    });
+
+    sendJson(res, 200, {
+      slug,
+      generated: true,
+      template: moduleName,
+      workflow_class_name: String(fm.workflow_class_name ?? ""),
+      source,
+      source_size_bytes: source.length,
+      source_line_count: lines.length,
+      imported_activities: importedActivities,
+      activity_calls: activityCalls,
+      manifest: dataReadiness,
+      unknown_activities: unknownActivities,
     });
   });
 }

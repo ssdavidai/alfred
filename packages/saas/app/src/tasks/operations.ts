@@ -66,9 +66,13 @@ export const getTriage: GetTriage<void, any> = async (_args, context) => {
 
 export const getMatters: GetMatters<void, any> = async (_args, context) => {
   const instance = await getUserInstance(context);
+  // Request a larger body preview (3000 chars) so the expanded matter card
+  // can render the full Context/Key people/Open questions sections from
+  // B.1 Opus matter records without truncation.
   return proxyToTenant(instance, {
     method: "GET",
     path: "/api/v1/vault/list/matter",
+    query: { preview: "3000" },
   });
 };
 

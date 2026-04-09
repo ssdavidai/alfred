@@ -12,6 +12,7 @@
 import type {
   GetChores,
   GetChore,
+  GetChoreSource,
   PauseChore,
   ResumeChore,
   DeleteChore,
@@ -54,6 +55,28 @@ export const getChore: GetChore<{ slug: string }, any> = async (
   return proxyToTenant(instance, {
     method: "GET",
     path: `/api/v1/chores/${encodeURIComponent(args.slug)}`,
+  });
+};
+
+/**
+ * GET /api/v1/chores/:slug/source
+ *
+ * Returns the full generated Python source + a data-readiness audit
+ * of the chore_actions the workflow calls. Used by the Chores detail
+ * page to render the actual code + an anti-hallucination check showing
+ * whether the tenant has the data each activity depends on.
+ */
+export const getChoreSource: GetChoreSource<{ slug: string }, any> = async (
+  args,
+  context,
+) => {
+  if (!args?.slug || typeof args.slug !== "string") {
+    throw new Error("slug is required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "GET",
+    path: `/api/v1/chores/${encodeURIComponent(args.slug)}/source`,
   });
 };
 

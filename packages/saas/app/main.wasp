@@ -612,6 +612,11 @@ query getChore {
   entities: [Instance]
 }
 
+query getChoreSource {
+  fn: import { getChoreSource } from "@src/chores/operations",
+  entities: [Instance]
+}
+
 action pauseChore {
   fn: import { pauseChore } from "@src/chores/operations",
   entities: [Instance]
