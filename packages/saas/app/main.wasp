@@ -738,7 +738,7 @@ action regenerateWebhookToken {
 // extensible to other auth-already-granted sources later)
 action applyStreamSuggestions {
   fn: import { applyStreamSuggestions } from "@src/streams/operations",
-  entities: [Instance, Stream, IntegrationToken]
+  entities: [Instance, Stream]
 }
 
 // A.3: list unresolved suggestions for the Streams page UI cards
