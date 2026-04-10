@@ -232,14 +232,19 @@ done
 # brings every fresh tenant up to the full 45-tool surface so the agent
 # can actually manage chores, introspect learning, check ops health, etc.
 #
-# Only touches the main openclaw gateway config, NOT openclaw-workers —
-# background agents (curator/janitor/distiller/surveyor) have their own
-# narrow scopes and don't need (shouldn't have) admin-level tools.
+# Touches BOTH the main openclaw gateway AND openclaw-workers.
+# Workers needs the full allowlist at the GATEWAY level so that
+# ephemeral subagents (#378) can reference ctrl_* tools in their
+# per-agent tools.allow blocks. The per-agent policy RESTRICTS
+# from the gateway-level set, so the gateway must know about all tools
+# even though the default workers agents (curator/janitor) don't use them.
 MAIN_CFG=/openclaw-state/openclaw.json
-if [[ -f "$MAIN_CFG" ]]; then
+WORKERS_CFG=/openclaw-workers-state/openclaw.json
+for TARGET_CFG in "$MAIN_CFG" "$WORKERS_CFG"; do
+[[ -f "$TARGET_CFG" ]] || continue
     python3 -c "
 import json
-p = '$MAIN_CFG'
+p = '$TARGET_CFG'
 with open(p) as f: c = json.load(f)
 
 # Canonical full allowlist for the main Alfred agent.
@@ -281,9 +286,9 @@ if added:
     with open(p, 'w') as f: json.dump(c, f, indent=2)
     print(f'[init] Added {len(added)} tools to gateway.tools.allow (now {len(merged)})')
 else:
-    print(f'[init] gateway.tools.allow already has all {len(merged)} tools')
+    print(f'[init] gateway.tools.allow already has all {len(merged)} tools in {p}')
 " 2>/dev/null || true
-fi
+done
 
 # --- 8. Reset stateless agent sessions (prevent QMD/transcript bloat) ---
 # Stateless agents accumulate session history and QMD data that grows unbounded.

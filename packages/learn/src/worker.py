@@ -259,6 +259,13 @@ from src.activities.composio_tools import (
     list_composio_connected_accounts,
 )
 
+# Ephemeral agent lifecycle (#378)
+from src.activities.ephemeral_agent import (
+    create_ephemeral_agent,
+    delete_ephemeral_agent,
+    wait_for_agent_ready,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -454,6 +461,10 @@ ALL_ACTIVITIES = [
     execute_composio_action,
     check_composio_readiness,
     list_composio_connected_accounts,
+    # Ephemeral agent lifecycle (#378)
+    create_ephemeral_agent,
+    delete_ephemeral_agent,
+    wait_for_agent_ready,
 ]
 
 

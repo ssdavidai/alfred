@@ -33,6 +33,11 @@ class Config:
     # Clerk agent (model comes from OpenClaw agent config, not env)
     clerk_agent_id: str = field(default_factory=lambda: os.environ.get("CLERK_AGENT_ID", "learn-clerk"))
 
+    # Execution gateway — separate from main gateway, used by TaskRunner for
+    # ephemeral subagent spawning on openclaw-workers (#378)
+    execution_gateway_url: str = field(default_factory=lambda: os.environ.get("EXECUTION_GATEWAY_URL", "http://openclaw-workers:18790"))
+    workers_openclaw_config_path: str = field(default_factory=lambda: os.environ.get("WORKERS_OPENCLAW_CONFIG", "/mnt/encrypted/openclaw-workers/openclaw.json"))
+
     # Processing limits
     max_events_per_run: int = 20
     session_same_threshold_minutes: int = 30
