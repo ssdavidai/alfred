@@ -251,6 +251,14 @@ from src.activities.media import (
     process_image,
 )
 
+# Composio tool belt activities
+from src.activities.composio_tools import (
+    list_composio_tools,
+    execute_composio_action,
+    check_composio_readiness,
+    list_composio_connected_accounts,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -441,6 +449,11 @@ ALL_ACTIVITIES = [
     draft_promotion_proposal,
     save_promotion_draft,
     create_github_promotion_pr,
+    # Composio tool belt (#376) — third-party tool execution
+    list_composio_tools,
+    execute_composio_action,
+    check_composio_readiness,
+    list_composio_connected_accounts,
 ]
 
 

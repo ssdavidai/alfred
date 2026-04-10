@@ -19,6 +19,7 @@ import { registerModelRoutes } from "./routes/models.js";
 import { registerWorkspaceRoutes } from "./routes/workspace.js";
 import { registerToolRoutes } from "./routes/tools.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
+import { registerIntegrationRoutes } from "./routes/integrations.js";
 import { registerOmiRoutes } from "./routes/omi.js";
 import { registerCrossTenantRoutes } from "./routes/crossTenant.js";
 import { registerChoreRoutes } from "./routes/chores.js";
@@ -97,6 +98,7 @@ export function createApiServer(): http.Server {
   registerWorkspaceRoutes();
   registerToolRoutes();
   registerApprovalRoutes();
+  registerIntegrationRoutes();
   registerOmiRoutes();
   registerCrossTenantRoutes();
   registerChoreRoutes();
