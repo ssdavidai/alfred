@@ -192,6 +192,7 @@ services:
     volumes:
       - /mnt/encrypted/vault:/vault
       - /mnt/encrypted/alfred:/alfred-data
+      - /mnt/encrypted/openclaw-workers:/openclaw-workers-state
     environment:
       - TEMPORAL_HOST=temporal:7233
       - OPENCLAW_GATEWAY_URL=http://openclaw-workers:18790
@@ -201,6 +202,8 @@ services:
       - ALFRED_LEARN_ENABLED=${ALFRED_LEARN_ENABLED:-true}
       - ALFRED_CTRL_URL=http://ctrl-api:3100
       - SAAS_API_URL=https://alfred.black
+      - WORKERS_OPENCLAW_CONFIG=/openclaw-workers-state/openclaw.json
+      - EXECUTION_GATEWAY_URL=http://openclaw-workers:18790
     env_file:
       - .env
     restart: unless-stopped
