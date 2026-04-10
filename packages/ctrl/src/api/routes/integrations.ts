@@ -295,14 +295,14 @@ async function generateComposioSkill(
   if (toolActions.length > 0 || recommended) {
     const examples: string[] = [];
     if (recommended) {
-      examples.push(`- List data: \`composio_execute action="${recommended.action}" arguments=${JSON.stringify(recommended.args)}\``);
+      examples.push(`- List data: \`ctrl_composio_execute action="${recommended.action}" arguments=${JSON.stringify(recommended.args)}\``);
     }
     for (const ta of toolActions.slice(0, 3)) {
       const defaults = DEFAULT_ARGS[ta.slug];
       if (defaults && Object.keys(defaults).length > 0) {
-        examples.push(`- ${ta.description.split(".")[0]}: \`composio_execute action="${ta.slug}" arguments=${JSON.stringify(defaults)}\``);
+        examples.push(`- ${ta.description.split(".")[0]}: \`ctrl_composio_execute action="${ta.slug}" arguments=${JSON.stringify(defaults)}\``);
       } else {
-        examples.push(`- ${ta.description.split(".")[0]}: \`composio_execute action="${ta.slug}" arguments={...}\``);
+        examples.push(`- ${ta.description.split(".")[0]}: \`ctrl_composio_execute action="${ta.slug}" arguments={...}\``);
       }
     }
     usageSection = `\n## Common usage\n\n${examples.join("\n")}\n`;
@@ -316,7 +316,7 @@ async function generateComposioSkill(
 
   const skillContent = `---
 name: alfred-composio-${toolkit}
-description: ${displayName} integration — ${actions.length} available actions via composio_execute.
+description: ${displayName} integration — ${actions.length} available actions via ctrl_composio_execute.
 version: "1.0"
 metadata:
   openclaw:
@@ -328,7 +328,7 @@ metadata:
 
 # ${emoji} ${displayName}
 
-Connected via Composio. Call actions with \`composio_execute\`.
+Connected via Composio. Call actions with \`ctrl_composio_execute\`.
 
 ${streamActions.length > 0 ? `**Stream**: ${recommended ? `${recommended.name} (auto-configured, polling every ${Math.round(recommended.interval / 60)} min)` : "available but not auto-configured"}` : ""}
 **Tool actions**: ${toolActions.length} | **Stream actions**: ${streamActions.length}
@@ -648,7 +648,7 @@ export function registerIntegrationRoutes(): void {
           const remaining = (Array.isArray(remainingData.items) ? remainingData.items : [])
             .filter((a: any) => a.status === "ACTIVE");
           if (remaining.length === 0) {
-            removeToolFromGateway("composio_execute");
+            removeToolFromGateway("ctrl_composio_execute");
             composioExecuteRemoved = true;
           }
         }
@@ -1076,7 +1076,7 @@ print(json.dumps(result, default=str))
       summary.toolkit = toolkit;
 
       // 2. Ensure composio_execute is in gateway.tools.allow (both configs)
-      ensureToolInGateway("composio_execute");
+      ensureToolInGateway("ctrl_composio_execute");
       summary.composio_execute_enabled = true;
 
       // 3. Create recommended stream if available
