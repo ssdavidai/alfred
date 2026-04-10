@@ -250,6 +250,11 @@ with open(p) as f: c = json.load(f)
 # Canonical full allowlist for the main Alfred agent.
 # Must stay in sync with packages/openclaw/workspace-template/docs/TOOLS.md
 # and the ctrl-api tool registry at packages/ctrl/src/api/routes/tools.ts.
+#
+# NOTE: 'composio_execute' is NOT in this static list. It is added/removed
+# dynamically by the auto-config/disconnect endpoints in integrations.ts
+# when users connect/disconnect apps. The set-union merge below preserves
+# it if already present in the tenant's config.
 full_allow = [
     # Session / subagent control
     'sessions_send', 'sessions_spawn', 'sessions_history', 'sessions_list',

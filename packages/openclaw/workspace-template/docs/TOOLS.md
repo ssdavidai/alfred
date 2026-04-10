@@ -94,6 +94,18 @@ All `ctrl_*` tools call the tenant's `ctrl-api` at `http://ctrl-api:3100`, which
 | `ctrl_credentials_list` | Configured provider credentials (masked). |
 | `ctrl_service_restart` `{service}` | Restart a Docker container. **Dangerous — only on explicit request or confirmed wedged state.** |
 
+### Connected Apps (Composio)
+
+| Tool | What it does |
+|---|---|
+| `composio_execute` `{action, arguments?}` | Execute any action on a connected third-party app (Google Calendar, Gmail, Notion, Slack, GitHub, etc.). Check `alfred-composio-*` skill files in `skills/` for available actions and parameters. |
+
+Usage: `composio_execute action="GOOGLECALENDAR_CREATE_EVENT" arguments={"summary": "Team sync", "start": {"dateTime": "2026-04-15T10:00:00Z"}, "calendarId": "primary"}`
+
+Available actions depend on which apps Sir has connected. Each connected app generates a skill file (`alfred-composio-{toolkit}/SKILL.md`) documenting its available actions and parameters. Always read the relevant skill file before calling `composio_execute`.
+
+**Note**: this tool is only present when Sir has connected at least one app via the Connected Apps page. If the tool is missing, no apps are connected.
+
 ### Session / subagent control
 
 | Tool | What it does |
@@ -110,6 +122,7 @@ All `ctrl_*` tools call the tenant's `ctrl-api` at `http://ctrl-api:3100`, which
 - **Sir wants to know why Alfred is doing something** → learning tools.
 - **Something seems broken or slow** → admin / worker / container_logs tools.
 - **Sir asks about the world outside his vault** → `web_search`, `web_fetch`.
+- **Sir wants to interact with a connected app** (create calendar event, send email, post to Slack, etc.) → `composio_execute` + read the relevant `alfred-composio-*` skill first.
 - **Sir wants something done asynchronously in the background** → `sessions_spawn` or `cron`.
 
 ## Hard rules
