@@ -339,6 +339,21 @@ if (process.env.CROSS_TENANT_PEERS) {
   });
 }
 
+// Composio tool — only registered when COMPOSIO_API_KEY is configured
+if (process.env.COMPOSIO_API_KEY) {
+  TOOLS.push({
+    name: "composio_execute",
+    description:
+      "Execute a Composio action on a connected third-party app (Google Calendar, Gmail, Notion, Slack, GitHub, etc.). " +
+      "Check the alfred-composio-* skill files in skills/ for available actions and their parameters.",
+    parameters: {
+      action: { type: "string", required: true },
+      arguments: { type: "object", required: false },
+    },
+    endpoint: "__composio__", // special dispatch — not a real route
+  });
+}
+
 const TOOL_MAP = new Map(TOOLS.map((t) => [t.name, t]));
 
 // ---------------------------------------------------------------------------
@@ -372,6 +387,23 @@ async function dispatchTool(
       args.body,
     );
     sendJson(ctx.res, 200, result);
+    return;
+  }
+
+  // Special dispatch for Composio tool execution
+  if (tool.name === "composio_execute") {
+    const matched = matchRoute("POST", "/api/v1/integrations/execute");
+    if (!matched) throw new NotFoundError("composio_execute: execute route not registered");
+    await matched.handler({
+      req: ctx.req,
+      res: ctx.res,
+      params: {},
+      body: {
+        action: String(args.action || ""),
+        arguments: (args.arguments && typeof args.arguments === "object") ? args.arguments : {},
+      },
+      query: new URLSearchParams(),
+    });
     return;
   }
 

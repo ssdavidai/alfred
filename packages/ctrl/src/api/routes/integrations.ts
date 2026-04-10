@@ -20,6 +20,9 @@ const COMPOSIO_API_V2 = "https://backend.composio.dev/api/v2";
 const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
 const STREAM_CONFIGS_DIR = path.join(STREAMS_DIR, "configs");
 const OPENCLAW_CONFIG_PATH = "/mnt/encrypted/openclaw/openclaw.json";
+const OPENCLAW_WORKERS_CONFIG_PATH = "/mnt/encrypted/openclaw-workers/openclaw.json";
+const OPENCLAW_SKILLS_DIR = "/mnt/encrypted/openclaw/workspace/skills";
+const OPENCLAW_WORKERS_SKILLS_DIR = "/mnt/encrypted/openclaw-workers/workspace/skills";
 
 function getComposioApiKey(): string {
   const key = process.env.COMPOSIO_API_KEY || "";
@@ -163,6 +166,192 @@ function writeOpenclawConfig(data: Record<string, any>): void {
   data.meta = data.meta || {};
   data.meta.lastTouchedAt = new Date().toISOString().replace(/\.\d{3}Z/, ".000Z");
   fs.writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(data, null, 2));
+}
+
+// ---------------------------------------------------------------------------
+// openclaw-workers config helpers
+// ---------------------------------------------------------------------------
+
+function readWorkersConfig(): Record<string, any> {
+  try {
+    return JSON.parse(fs.readFileSync(OPENCLAW_WORKERS_CONFIG_PATH, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+function writeWorkersConfig(data: Record<string, any>): void {
+  data.meta = data.meta || {};
+  data.meta.lastTouchedAt = new Date().toISOString().replace(/\.\d{3}Z/, ".000Z");
+  fs.writeFileSync(OPENCLAW_WORKERS_CONFIG_PATH, JSON.stringify(data, null, 2));
+}
+
+/** Add a tool to gateway.tools.allow in both openclaw configs if not present. */
+function ensureToolInGateway(toolName: string): void {
+  for (const [readFn, writeFn] of [
+    [readOpenclawConfig, writeOpenclawConfig],
+    [readWorkersConfig, writeWorkersConfig],
+  ] as const) {
+    try {
+      const cfg = readFn();
+      if (!cfg.gateway) cfg.gateway = {};
+      if (!cfg.gateway.tools) cfg.gateway.tools = {};
+      if (!Array.isArray(cfg.gateway.tools.allow)) cfg.gateway.tools.allow = [];
+      if (!cfg.gateway.tools.allow.includes(toolName)) {
+        cfg.gateway.tools.allow.push(toolName);
+        cfg.gateway.tools.allow.sort();
+        writeFn(cfg);
+      }
+    } catch { /* best effort */ }
+  }
+}
+
+/** Remove a tool from gateway.tools.allow in both openclaw configs. */
+function removeToolFromGateway(toolName: string): void {
+  for (const [readFn, writeFn] of [
+    [readOpenclawConfig, writeOpenclawConfig],
+    [readWorkersConfig, writeWorkersConfig],
+  ] as const) {
+    try {
+      const cfg = readFn();
+      const allow: string[] = cfg?.gateway?.tools?.allow || [];
+      const idx = allow.indexOf(toolName);
+      if (idx >= 0) {
+        allow.splice(idx, 1);
+        cfg.gateway.tools.allow = allow;
+        writeFn(cfg);
+      }
+    } catch { /* best effort */ }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Recommended streams + default args per toolkit
+// ---------------------------------------------------------------------------
+
+const RECOMMENDED_STREAMS: Record<string, {
+  action: string;
+  name: string;
+  interval: number;
+  args: Record<string, unknown>;
+}> = {
+  googlecalendar: { action: "GOOGLECALENDAR_EVENTS_LIST", name: "Calendar Events", interval: 300, args: { calendarId: "primary" } },
+  gmail:          { action: "GMAIL_FETCH_EMAILS",         name: "Gmail Emails",     interval: 300, args: { userId: "me" } },
+  slack:          { action: "SLACK_LIST_MESSAGES",         name: "Slack Messages",   interval: 120, args: {} },
+  github:         { action: "GITHUB_LIST_NOTIFICATIONS",  name: "GitHub Notifications", interval: 300, args: {} },
+  notion:         { action: "NOTION_LIST_PAGES",          name: "Notion Pages",     interval: 600, args: {} },
+};
+
+const DEFAULT_ARGS: Record<string, Record<string, unknown>> = {
+  GOOGLECALENDAR_EVENTS_LIST: { calendarId: "primary" },
+  GOOGLECALENDAR_FIND_EVENT: { calendarId: "primary" },
+  GOOGLECALENDAR_CREATE_EVENT: { calendarId: "primary" },
+  GMAIL_FETCH_EMAILS: { userId: "me" },
+  GMAIL_SEND_EMAIL: { userId: "me" },
+  GMAIL_LIST_LABELS: { userId: "me" },
+};
+
+const TOOLKIT_EMOJI: Record<string, string> = {
+  gmail: "📧", googlecalendar: "📅", slack: "💬", notion: "📝",
+  github: "🐙", linear: "📋", stripe: "💳", discord: "🎮",
+  trello: "📌", asana: "✅", hubspot: "🔶", salesforce: "☁️",
+  googledrive: "📁", dropbox: "📦", twitter: "🐦", linkedin: "💼",
+};
+
+// ---------------------------------------------------------------------------
+// Skill generation
+// ---------------------------------------------------------------------------
+
+async function generateComposioSkill(
+  toolkit: string,
+  connId: string,
+  apiKey: string,
+): Promise<{ actions_count: number; skill_path: string }> {
+  // Fetch actions from Composio v2 API
+  const resp = await fetch(
+    `${COMPOSIO_API_V2}/actions?apps=${encodeURIComponent(toolkit)}&limit=50`,
+    { headers: { "x-api-key": apiKey } },
+  );
+
+  let actions: Array<{ slug: string; description: string; type: string }> = [];
+  if (resp.ok) {
+    const data = (await resp.json()) as any;
+    const items = Array.isArray(data.items) ? data.items : [];
+    actions = items.map((t: any) => ({
+      slug: t.name ?? t.slug ?? "",
+      description: (t.description ?? "").slice(0, 120),
+      type: classifyAction(t.name ?? t.slug ?? ""),
+    }));
+  }
+
+  const emoji = TOOLKIT_EMOJI[toolkit] || "🔌";
+  const displayName = toolkit.charAt(0).toUpperCase() + toolkit.slice(1);
+  const toolActions = actions.filter((a) => a.type === "tool");
+  const streamActions = actions.filter((a) => a.type === "stream");
+
+  // Build common usage examples from known defaults
+  const recommended = RECOMMENDED_STREAMS[toolkit];
+  let usageSection = "";
+  if (toolActions.length > 0 || recommended) {
+    const examples: string[] = [];
+    if (recommended) {
+      examples.push(`- List data: \`composio_execute action="${recommended.action}" arguments=${JSON.stringify(recommended.args)}\``);
+    }
+    for (const ta of toolActions.slice(0, 3)) {
+      const defaults = DEFAULT_ARGS[ta.slug];
+      if (defaults && Object.keys(defaults).length > 0) {
+        examples.push(`- ${ta.description.split(".")[0]}: \`composio_execute action="${ta.slug}" arguments=${JSON.stringify(defaults)}\``);
+      } else {
+        examples.push(`- ${ta.description.split(".")[0]}: \`composio_execute action="${ta.slug}" arguments={...}\``);
+      }
+    }
+    usageSection = `\n## Common usage\n\n${examples.join("\n")}\n`;
+  }
+
+  // Build action table
+  let actionTable = "| Action | Type | Description |\n|---|---|---|\n";
+  for (const a of actions) {
+    actionTable += `| \`${a.slug}\` | ${a.type} | ${a.description} |\n`;
+  }
+
+  const skillContent = `---
+name: alfred-composio-${toolkit}
+description: ${displayName} integration — ${actions.length} available actions via composio_execute.
+version: "1.0"
+metadata:
+  openclaw:
+    emoji: "${emoji}"
+  generated: true
+  composio_toolkit: "${toolkit}"
+  composio_connection_id: "${connId}"
+---
+
+# ${emoji} ${displayName}
+
+Connected via Composio. Call actions with \`composio_execute\`.
+
+${streamActions.length > 0 ? `**Stream**: ${recommended ? `${recommended.name} (auto-configured, polling every ${Math.round(recommended.interval / 60)} min)` : "available but not auto-configured"}` : ""}
+**Tool actions**: ${toolActions.length} | **Stream actions**: ${streamActions.length}
+
+## Actions
+
+${actionTable}
+${usageSection}`;
+
+  // Write to both workspaces
+  const skillDirName = `alfred-composio-${toolkit}`;
+  for (const baseDir of [OPENCLAW_SKILLS_DIR, OPENCLAW_WORKERS_SKILLS_DIR]) {
+    const skillDir = path.join(baseDir, skillDirName);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, "SKILL.md"), skillContent);
+    // Set ownership to node user (uid 1000) for openclaw containers
+    try {
+      fs.chownSync(skillDir, 1000, 1000);
+      fs.chownSync(path.join(skillDir, "SKILL.md"), 1000, 1000);
+    } catch { /* may fail if not root, that's ok */ }
+  }
+
+  return { actions_count: actions.length, skill_path: skillDirName };
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +625,35 @@ export function registerIntegrationRoutes(): void {
         } catch { /* openclaw config cleanup is best-effort */ }
       }
 
+      // 7. Clean up: remove skill files from both workspaces
+      let skillRemoved = false;
+      if (toolkit) {
+        const skillDirName = `alfred-composio-${toolkit}`;
+        for (const baseDir of [OPENCLAW_SKILLS_DIR, OPENCLAW_WORKERS_SKILLS_DIR]) {
+          try {
+            fs.rmSync(path.join(baseDir, skillDirName), { recursive: true, force: true });
+            skillRemoved = true;
+          } catch { /* ok */ }
+        }
+      }
+
+      // 8. If no Composio connections remain, remove composio_execute from gateway
+      let composioExecuteRemoved = false;
+      try {
+        const remainingResp = await fetch(`${COMPOSIO_API_V3}/connected_accounts`, {
+          headers: { "x-api-key": apiKey },
+        });
+        if (remainingResp.ok) {
+          const remainingData = (await remainingResp.json()) as any;
+          const remaining = (Array.isArray(remainingData.items) ? remainingData.items : [])
+            .filter((a: any) => a.status === "ACTIVE");
+          if (remaining.length === 0) {
+            removeToolFromGateway("composio_execute");
+            composioExecuteRemoved = true;
+          }
+        }
+      } catch { /* best effort */ }
+
       sendJson(res, 200, {
         status: "disconnected",
         connection_id: connId,
@@ -443,6 +661,8 @@ export function registerIntegrationRoutes(): void {
         cleaned_streams: cleanedStreams,
         deleted_schedules: deletedSchedules,
         removed_tools: removedTools,
+        skill_removed: skillRemoved,
+        composio_execute_removed: composioExecuteRemoved,
       });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to disconnect: ${err.message}` });
@@ -754,6 +974,187 @@ export function registerIntegrationRoutes(): void {
       });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to check readiness: ${err.message}` });
+    }
+  });
+
+  // =========================================================================
+  // POST /api/v1/integrations/execute — execute a Composio action via SDK
+  // =========================================================================
+  addRoute("POST", "/api/v1/integrations/execute", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.action !== "string" || !b.action) {
+      throw new ValidationError("action (string) is required");
+    }
+    const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
+    const actionSlug = b.action as string;
+    const userArgs = (b.arguments && typeof b.arguments === "object") ? b.arguments as Record<string, unknown> : {};
+
+    // Merge default args for this action (user args take precedence)
+    const defaults = DEFAULT_ARGS[actionSlug] || {};
+    const mergedArgs = { ...defaults, ...userArgs };
+
+    // Resolve connected account for this toolkit
+    const toolkit = actionSlug.split("_")[0].toLowerCase();
+    let connectedAccountId = "";
+    try {
+      const connResp = await fetch(`${COMPOSIO_API_V3}/connected_accounts`, {
+        headers: { "x-api-key": apiKey },
+      });
+      if (connResp.ok) {
+        const data = (await connResp.json()) as any;
+        const items = Array.isArray(data.items) ? data.items : [];
+        const match = items.find((a: any) =>
+          (a.toolkit?.slug ?? a.appName ?? "").toLowerCase() === toolkit &&
+          a.status === "ACTIVE" &&
+          (userId === "default" || a.member_id === userId || a.user_id === userId),
+        );
+        if (match) connectedAccountId = match.id;
+      }
+    } catch { /* proceed without — SDK may resolve from user_id */ }
+
+    if (!connectedAccountId) {
+      sendJson(res, 400, {
+        error: `No active ${toolkit} connection found. Connect ${toolkit} first via the Apps page.`,
+      });
+      return;
+    }
+
+    try {
+      // Execute via docker exec into alfred-learn container (Python SDK)
+      const script = `
+import json, os, sys
+os.environ.setdefault("COMPOSIO_API_KEY", ${JSON.stringify(apiKey)})
+from src.integrations.composio_client import execute_action
+result = execute_action(
+    ${JSON.stringify(actionSlug)},
+    json.loads(${JSON.stringify(JSON.stringify(mergedArgs))}),
+    connected_account_id=${JSON.stringify(connectedAccountId)},
+)
+print(json.dumps(result, default=str))
+`.trim();
+
+      const output = await dockerExec("alfred-learn", ["python3", "-c", script]);
+      const result = JSON.parse(output.trim());
+      sendJson(res, 200, { action: actionSlug, toolkit, result });
+    } catch (err: any) {
+      sendJson(res, 500, {
+        error: `Composio execute failed: ${err.message?.slice(0, 300)}`,
+        action: actionSlug,
+      });
+    }
+  });
+
+  // =========================================================================
+  // POST /api/v1/integrations/:id/auto-config — auto-configure after connect
+  // =========================================================================
+  addRoute("POST", "/api/v1/integrations/:id/auto-config", async ({ res, params }) => {
+    const apiKey = getComposioApiKey();
+    const connId = params.id;
+    const summary: Record<string, unknown> = { connection_id: connId };
+
+    try {
+      // 1. Validate connection
+      const connResp = await fetch(
+        `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(connId)}`,
+        { headers: { "x-api-key": apiKey } },
+      );
+      if (!connResp.ok) {
+        sendJson(res, connResp.status, { error: `Connection ${connId} not found` });
+        return;
+      }
+      const conn = (await connResp.json()) as any;
+      const toolkit = (conn.toolkit?.slug ?? "").toLowerCase();
+      if (!toolkit) {
+        sendJson(res, 400, { error: "Connection has no toolkit" });
+        return;
+      }
+      if (conn.status !== "ACTIVE") {
+        sendJson(res, 400, { error: `Connection status is ${conn.status}, expected ACTIVE` });
+        return;
+      }
+      summary.toolkit = toolkit;
+
+      // 2. Ensure composio_execute is in gateway.tools.allow (both configs)
+      ensureToolInGateway("composio_execute");
+      summary.composio_execute_enabled = true;
+
+      // 3. Create recommended stream if available
+      const rec = RECOMMENDED_STREAMS[toolkit];
+      if (rec) {
+        const streamId = `composio-${toolkit}-${rec.action.toLowerCase().replace(/_/g, "-")}`;
+        const config = {
+          id: streamId,
+          name: rec.name,
+          type: "composio",
+          source: `composio:${toolkit}`,
+          enabled: true,
+          composio_action: rec.action,
+          composio_connection_id: connId,
+          composio_toolkit: toolkit,
+          parser: "composio",
+          schedule_interval_seconds: rec.interval,
+        };
+
+        // Write stream config
+        fs.mkdirSync(STREAM_CONFIGS_DIR, { recursive: true });
+        fs.writeFileSync(
+          path.join(STREAM_CONFIGS_DIR, `${streamId}.json`),
+          JSON.stringify(config, null, 2),
+        );
+
+        // Register in streams.json
+        const streamsMetaPath = path.join(STREAMS_DIR, "streams.json");
+        let streams: any[] = [];
+        try { streams = JSON.parse(fs.readFileSync(streamsMetaPath, "utf-8")); } catch { /* empty */ }
+        streams = streams.filter((s: any) => s.id !== streamId);
+        streams.push({
+          id: streamId, name: rec.name, type: "composio",
+          source: `composio:${toolkit}`, enabled: true, status: "idle",
+          last_event_at: null, event_count: 0,
+        });
+        fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+
+        // Create Temporal schedule
+        const scheduleId = `al-stream-pull-composio-${streamId.slice(0, 20)}`;
+        const intervalMin = Math.max(Math.round(rec.interval / 60), 1);
+        try {
+          await dockerExec("temporal", [
+            "temporal", "schedule", "create",
+            "--schedule-id", scheduleId,
+            "--type", "StreamPullerWorkflow",
+            "--task-queue", "alfred-learn",
+            "--cron", `*/${intervalMin} * * * *`,
+            "--input", JSON.stringify({ stream_id: streamId }),
+            "--overlap-policy", "Skip",
+          ]);
+          summary.stream_created = streamId;
+          summary.schedule_created = scheduleId;
+        } catch (err: any) {
+          // Schedule might already exist
+          if (err.message?.includes("already exists") || err.message?.includes("AlreadyExists") || err.message?.includes("already registered")) {
+            summary.stream_created = streamId;
+            summary.schedule_created = `${scheduleId} (already exists)`;
+          } else {
+            summary.stream_error = err.message?.slice(0, 200);
+          }
+        }
+      } else {
+        summary.stream_created = null; // No recommended stream for this toolkit
+      }
+
+      // 4. Generate skill file
+      try {
+        const skillResult = await generateComposioSkill(toolkit, connId, apiKey);
+        summary.skill_generated = skillResult.skill_path;
+        summary.actions_count = skillResult.actions_count;
+      } catch (err: any) {
+        summary.skill_error = err.message?.slice(0, 200);
+      }
+
+      sendJson(res, 200, summary);
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Auto-config failed: ${err.message}` });
     }
   });
 }
