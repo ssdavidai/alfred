@@ -255,64 +255,72 @@ export function registerIntegrationRoutes(): void {
       throw new ValidationError("toolkit_slug (string) is required");
     }
     const apiKey = getComposioApiKey();
-    const userId = getComposioUserId();
     const redirectUrl = typeof b.redirect_url === "string" ? b.redirect_url : "";
 
     try {
-      // First, find or create an integration for this toolkit
-      // List existing integrations for this toolkit
-      const integrationsResp = await fetch(
-        `${COMPOSIO_API_V3}/integrations?toolkit=${encodeURIComponent(b.toolkit_slug)}`,
+      // Step 1: Find or create an auth_config for this toolkit.
+      // Check if one already exists.
+      let authConfigId: string | null = null;
+
+      const existingResp = await fetch(
+        `${COMPOSIO_API_V3}/auth_configs?toolkit_slug=${encodeURIComponent(b.toolkit_slug as string)}`,
         { headers: { "x-api-key": apiKey } },
       );
 
-      let integrationId: string | null = null;
-
-      if (integrationsResp.ok) {
-        const intData = (await integrationsResp.json()) as any;
-        const items = Array.isArray(intData.items) ? intData.items : Array.isArray(intData) ? intData : [];
-        // Use the first available integration
-        if (items.length > 0) {
-          integrationId = items[0].id;
+      if (existingResp.ok) {
+        const existingData = (await existingResp.json()) as any;
+        const items = Array.isArray(existingData.items) ? existingData.items : [];
+        // Use first non-disabled auth config
+        const usable = items.find((ac: any) => !ac.is_disabled);
+        if (usable) {
+          authConfigId = usable.id;
         }
       }
 
-      // If no integration found, create one
-      if (!integrationId) {
-        const createIntResp = await fetch(`${COMPOSIO_API_V3}/integrations`, {
+      // If no auth_config exists, create one with Composio-managed OAuth
+      if (!authConfigId) {
+        const createResp = await fetch(`${COMPOSIO_API_V3}/auth_configs`, {
           method: "POST",
           headers: {
             "x-api-key": apiKey,
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            toolkit: b.toolkit_slug,
-            name: `Alfred ${b.toolkit_slug}`,
+            toolkit: { slug: b.toolkit_slug },
+            use_composio_auth: true,
           }),
         });
 
-        if (createIntResp.ok) {
-          const newInt = (await createIntResp.json()) as any;
-          integrationId = newInt.id;
+        if (!createResp.ok) {
+          const errText = await createResp.text().catch(() => "");
+          sendJson(res, createResp.status, {
+            error: `Failed to create auth config: ${createResp.status}`,
+            detail: errText.slice(0, 500),
+          });
+          return;
+        }
+
+        const created = (await createResp.json()) as any;
+        authConfigId = created?.auth_config?.id;
+        if (!authConfigId) {
+          sendJson(res, 500, { error: "Auth config created but no ID returned" });
+          return;
         }
       }
 
-      // Create a connected account (initiates OAuth)
-      const connectBody: Record<string, unknown> = {
-        integrationId,
-        userIdentifier: userId,
-      };
-      if (redirectUrl) {
-        connectBody.redirectUrl = redirectUrl;
-      }
-
+      // Step 2: Create a connected account using the auth_config
       const connectResp = await fetch(`${COMPOSIO_API_V3}/connected_accounts`, {
         method: "POST",
         headers: {
           "x-api-key": apiKey,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(connectBody),
+        body: JSON.stringify({
+          auth_config: { id: authConfigId },
+          connection: {
+            redirect_url: redirectUrl || undefined,
+          },
+        }),
       });
 
       if (!connectResp.ok) {
@@ -326,8 +334,8 @@ export function registerIntegrationRoutes(): void {
 
       const connectData = (await connectResp.json()) as any;
       sendJson(res, 200, {
-        connect_url: connectData.redirectUrl ?? connectData.connectionUrl ?? connectData.url ?? "",
-        connection_id: connectData.id ?? connectData.connectedAccountId ?? "",
+        connect_url: connectData.redirect_url ?? connectData.redirect_uri ?? connectData.redirectUrl ?? "",
+        connection_id: connectData.id ?? "",
         status: connectData.status ?? "INITIATED",
       });
     } catch (err: any) {
