@@ -137,7 +137,18 @@ Return JSON only:
 
 @activity.defn
 async def clerk_extract_observation(item: dict[str, Any]) -> dict[str, Any]:
-    """Ask the Clerk to extract a structured observation from a chat interaction."""
+    """Ask the Clerk to extract a structured observation from a chat interaction.
+
+    Handles two types of queue entries:
+    - type="routing" (existing): assistant made a routing decision
+    - type="instruction|correction|confirmation" (new): user taught a rule,
+      corrected a decision, or confirmed good behavior
+    """
+    item_type = item.get("type", "routing")
+
+    if item_type in ("instruction", "correction", "confirmation"):
+        return await _clerk_extract_user_instruction(item)
+
     prompt = f"""You are a butler's clerk. Analyze this interaction where the master gave routing guidance.
 
 Extract a structured observation of the routing decision.
@@ -167,6 +178,53 @@ Return JSON only:
   }},
   "source": "chat",
   "tags": []
+}}"""
+
+    return await _call_clerk(prompt)
+
+
+async def _clerk_extract_user_instruction(item: dict[str, Any]) -> dict[str, Any]:
+    """Extract a structured observation from a user instruction, correction, or confirmation."""
+    item_type = item.get("type", "instruction")
+    user_input = item.get("user_input", "")
+    assistant_context = item.get("assistant_context", "")
+
+    type_guidance = {
+        "instruction": "The user is TEACHING Alfred a new rule or behavior pattern. Extract the RULE: what trigger condition, what action Alfred should take.",
+        "correction": "The user is CORRECTING a previous routing decision. Extract: what was done wrong, what should have happened instead.",
+        "confirmation": "The user is CONFIRMING that Alfred's previous action was correct. Extract: what pattern was validated, strengthening which routing behavior.",
+    }
+
+    prompt = f"""You are a butler's clerk. The master has given direct feedback during a conversation.
+
+TYPE: {item_type}
+GUIDANCE: {type_guidance.get(item_type, type_guidance["instruction"])}
+
+USER SAID: {user_input}
+{f"ALFRED'S PREVIOUS MESSAGE (context): {assistant_context}" if assistant_context else ""}
+
+Extract a structured observation. Return JSON only:
+{{
+  "input_type": "instruction",
+  "input_source": "chat",
+  "input_ref": "",
+  "routing_decision": {{
+    "destination": "the target/action the user described (if applicable)",
+    "process": "the process or rule being taught",
+    "assigned_to": ""
+  }},
+  "reasoning": "What the user is teaching Alfred — the rule, correction, or validation",
+  "considered_alternatives": [],
+  "signals": {{
+    "domain_patterns": [],
+    "keyword_patterns": [],
+    "input_types": ["instruction"],
+    "attachment_patterns": []
+  }},
+  "source": "chat",
+  "tags": ["{item_type}"],
+  "instruction_type": "{item_type}",
+  "rule_summary": "One-sentence summary of the rule the user is teaching (e.g. 'flag Hetzner emails as infrastructure')"
 }}"""
 
     return await _call_clerk(prompt)
