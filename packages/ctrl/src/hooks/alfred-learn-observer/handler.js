@@ -9,9 +9,9 @@
  * observation queue JSONL file for downstream learning pipeline consumption.
  */
 
-const { randomUUID } = require("crypto");
-const { appendFileSync, mkdirSync } = require("fs");
-const { dirname } = require("path");
+import { randomUUID } from "crypto";
+import { appendFileSync, mkdirSync } from "fs";
+import { dirname } from "path";
 
 const QUEUE_PATH = process.env.OBSERVATION_QUEUE_PATH || "/alfred-data/observation-queue.jsonl";
 
@@ -130,4 +130,4 @@ const handler = async (event) => {
   appendToQueue(observation);
 };
 
-module.exports = { handler };
+export default handler;
