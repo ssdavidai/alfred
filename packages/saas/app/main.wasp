@@ -686,6 +686,11 @@ action disableIntegrationTool {
   entities: [Instance]
 }
 
+action autoConfigIntegration {
+  fn: import { autoConfigIntegration } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
 // ============================================================
 // Intuition (Learning Engine)
 // ============================================================

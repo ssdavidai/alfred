@@ -1,14 +1,11 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   useQuery,
   getIntegrationCatalog,
   getConnectedIntegrations,
-  getIntegrationCapabilities,
   initiateConnect,
   disconnectIntegration,
-  enableIntegrationStream,
-  enableIntegrationTool,
-  disableIntegrationTool,
+  autoConfigIntegration,
 } from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
 import SpotlightCard from "../components/ui/SpotlightCard";
@@ -24,6 +21,8 @@ import {
   Wrench,
   Check,
   RefreshCw,
+  Zap,
+  Settings2,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -49,10 +48,13 @@ interface ConnectedIntegration {
   created_at: string;
 }
 
-interface ActionEntry {
-  slug: string;
-  description: string;
-  enabled?: boolean;
+interface AutoConfigResult {
+  toolkit: string;
+  composio_execute_enabled: boolean;
+  stream_created: string | null;
+  schedule_created?: string;
+  skill_generated: string;
+  actions_count: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +86,10 @@ export default function IntegrationsPage() {
   const [category, setCategory] = useState("all");
   const [expandedConn, setExpandedConn] = useState<string | null>(null);
   const [connectingSlug, setConnectingSlug] = useState<string | null>(null);
+  const [configuringId, setConfiguringId] = useState<string | null>(null);
+  const [configResults, setConfigResults] = useState<Record<string, AutoConfigResult>>({});
   const [toast, setToast] = useState<string | null>(null);
+  const prevConnectedRef = useRef<Set<string>>(new Set());
 
   const {
     data: catalogData,
@@ -101,7 +106,12 @@ export default function IntegrationsPage() {
   const connected: ConnectedIntegration[] = connectedData?.integrations || [];
   const connectedSlugs = new Set(connected.map((c) => c.toolkit));
 
-  // Client-side filter (server also supports search, but we filter locally for speed)
+  // Track previous connected IDs to detect new connections
+  useEffect(() => {
+    prevConnectedRef.current = new Set(connected.map((c) => c.id));
+  }, [connected]);
+
+  // Client-side filter
   const filtered = toolkits.filter((t) => {
     if (category !== "all" && t.category !== category) return false;
     if (search) {
@@ -118,13 +128,33 @@ export default function IntegrationsPage() {
   // Auto-dismiss toast
   useEffect(() => {
     if (toast) {
-      const timer = setTimeout(() => setToast(null), 4000);
+      const timer = setTimeout(() => setToast(null), 5000);
       return () => clearTimeout(timer);
     }
   }, [toast]);
 
   // ---------------------------------------------------------------------------
-  // Connect flow
+  // Auto-config helper
+  // ---------------------------------------------------------------------------
+
+  const runAutoConfig = useCallback(async (connectionId: string, toolkitName: string) => {
+    setConfiguringId(connectionId);
+    try {
+      const result = await autoConfigIntegration({ connectionId });
+      setConfigResults((prev) => ({ ...prev, [connectionId]: result }));
+      const parts: string[] = [];
+      if (result?.stream_created) parts.push("stream active");
+      if (result?.actions_count) parts.push(`${result.actions_count} actions`);
+      if (result?.skill_generated) parts.push("skill generated");
+      setToast(`${toolkitName} configured! ${parts.join(", ")}`);
+    } catch (err: any) {
+      setToast(`Auto-config failed: ${err?.message || "Unknown error"}`);
+    }
+    setConfiguringId(null);
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Connect flow — now includes auto-config
   // ---------------------------------------------------------------------------
 
   const handleConnect = useCallback(
@@ -142,17 +172,26 @@ export default function IntegrationsPage() {
             "composio-connect",
             "width=600,height=700,left=200,top=100",
           );
-          // Poll for popup close
           if (popup) {
-            const interval = setInterval(() => {
+            const interval = setInterval(async () => {
               if (popup.closed) {
                 clearInterval(interval);
                 setConnectingSlug(null);
-                refetchConnected();
-                setToast(`${toolkitSlug} connected!`);
+                // Refetch to find the new connection
+                const refreshed = await refetchConnected();
+                const newConns: ConnectedIntegration[] = refreshed?.data?.integrations || [];
+                const prevIds = prevConnectedRef.current;
+                const newConn = newConns.find(
+                  (c) => !prevIds.has(c.id) && c.toolkit === toolkitSlug && c.status === "ACTIVE",
+                );
+                if (newConn) {
+                  // Auto-configure the new connection
+                  await runAutoConfig(newConn.id, newConn.toolkit_name || newConn.toolkit);
+                } else {
+                  setToast(`${toolkitSlug} connected!`);
+                }
               }
             }, 500);
-            // Safety timeout
             setTimeout(() => {
               clearInterval(interval);
               setConnectingSlug(null);
@@ -167,7 +206,7 @@ export default function IntegrationsPage() {
         setConnectingSlug(null);
       }
     },
-    [refetchConnected],
+    [refetchConnected, runAutoConfig],
   );
 
   // Detect callback from popup redirect
@@ -175,12 +214,14 @@ export default function IntegrationsPage() {
     const params = new URLSearchParams(window.location.search);
     if (params.get("composio_callback") === "success") {
       const toolkit = params.get("toolkit") || "";
-      setToast(toolkit ? `${toolkit} connected!` : "Integration connected!");
       refetchConnected();
-      // Clean URL
       window.history.replaceState({}, "", "/dashboard/integrations");
+      // Auto-config will be triggered by the popup close handler above
+      if (!connectingSlug) {
+        setToast(toolkit ? `${toolkit} connected!` : "Integration connected!");
+      }
     }
-  }, [refetchConnected]);
+  }, [refetchConnected, connectingSlug]);
 
   // ---------------------------------------------------------------------------
   // Disconnect
@@ -188,9 +229,14 @@ export default function IntegrationsPage() {
 
   const handleDisconnect = useCallback(
     async (connId: string, toolkitName: string) => {
-      if (!confirm(`Disconnect ${toolkitName}? This will remove all associated streams.`)) return;
+      if (!confirm(`Disconnect ${toolkitName}? This will remove the stream, skill, and all tool access.`)) return;
       try {
         await disconnectIntegration({ connectionId: connId });
+        setConfigResults((prev) => {
+          const next = { ...prev };
+          delete next[connId];
+          return next;
+        });
         refetchConnected();
         setExpandedConn(null);
         setToast(`${toolkitName} disconnected`);
@@ -237,11 +283,16 @@ export default function IntegrationsPage() {
                   key={conn.id}
                   conn={conn}
                   isExpanded={expandedConn === conn.id}
+                  isConfiguring={configuringId === conn.id}
+                  configResult={configResults[conn.id]}
                   onToggle={() =>
                     setExpandedConn(expandedConn === conn.id ? null : conn.id)
                   }
                   onDisconnect={() =>
                     handleDisconnect(conn.id, conn.toolkit_name || conn.toolkit)
+                  }
+                  onReconfigure={() =>
+                    runAutoConfig(conn.id, conn.toolkit_name || conn.toolkit)
                   }
                 />
               ))}
@@ -397,19 +448,25 @@ function ToolkitCard({
 }
 
 // ---------------------------------------------------------------------------
-// ConnectedCard — connected integration with expandable capabilities
+// ConnectedCard — auto-configured integration with status display
 // ---------------------------------------------------------------------------
 
 function ConnectedCard({
   conn,
   isExpanded,
+  isConfiguring,
+  configResult,
   onToggle,
   onDisconnect,
+  onReconfigure,
 }: {
   conn: ConnectedIntegration;
   isExpanded: boolean;
+  isConfiguring: boolean;
+  configResult?: AutoConfigResult;
   onToggle: () => void;
   onDisconnect: () => void;
+  onReconfigure: () => void;
 }) {
   return (
     <SpotlightCard className="cursor-pointer" title="">
@@ -441,12 +498,13 @@ function ConnectedCard({
                   }`}
                 />
                 <span className="text-[0.65rem] text-[#8A8680]">
-                  {conn.status === "ACTIVE" ? "Active" : conn.status}
+                  {isConfiguring ? "Configuring..." : conn.status === "ACTIVE" ? "Active" : conn.status}
                 </span>
               </div>
             </div>
           </div>
           <div className="flex items-center gap-2">
+            {isConfiguring && <Loader2 className="h-3.5 w-3.5 animate-spin text-[#C9A84C]" />}
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -466,178 +524,87 @@ function ConnectedCard({
         </div>
       </div>
 
-      {isExpanded && <CapabilitiesDrawer connectionId={conn.id} />}
+      {isExpanded && (
+        <ConfigStatus
+          conn={conn}
+          configResult={configResult}
+          onReconfigure={onReconfigure}
+        />
+      )}
     </SpotlightCard>
   );
 }
 
 // ---------------------------------------------------------------------------
-// CapabilitiesDrawer — stream/tool actions with toggles
+// ConfigStatus — replaces old CapabilitiesDrawer with read-only status
 // ---------------------------------------------------------------------------
 
-function CapabilitiesDrawer({ connectionId }: { connectionId: string }) {
-  const { data, isLoading } = useQuery(getIntegrationCapabilities, {
-    connectionId,
-  });
-  const [busy, setBusy] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
-
-  const streamActions: ActionEntry[] = data?.stream_actions || [];
-  const toolActions: ActionEntry[] = data?.tool_actions || [];
-
-  const handleEnableStream = async (slug: string) => {
-    setBusy(slug);
-    try {
-      await enableIntegrationStream({
-        connectionId,
-        action_slug: slug,
-        poll_interval_seconds: 300,
-      });
-      setToast(`Stream enabled: ${slug}`);
-    } catch (err: any) {
-      setToast(`Failed: ${err?.message}`);
-    }
-    setBusy(null);
-  };
-
-  const handleToggleTool = async (slug: string, currentlyEnabled: boolean) => {
-    setBusy(slug);
-    try {
-      if (currentlyEnabled) {
-        await disableIntegrationTool({ action_slug: slug });
-      } else {
-        await enableIntegrationTool({ action_slug: slug });
-      }
-    } catch (err: any) {
-      setToast(`Failed: ${err?.message}`);
-    }
-    setBusy(null);
-  };
-
-  useEffect(() => {
-    if (toast) {
-      const t = setTimeout(() => setToast(null), 3000);
-      return () => clearTimeout(t);
-    }
-  }, [toast]);
-
-  if (isLoading) {
-    return (
-      <div className="mt-3 flex justify-center py-4">
-        <Loader2 className="h-4 w-4 animate-spin text-[#C9A84C]" />
-      </div>
-    );
-  }
-
+function ConfigStatus({
+  conn,
+  configResult,
+  onReconfigure,
+}: {
+  conn: ConnectedIntegration;
+  configResult?: AutoConfigResult;
+  onReconfigure: () => void;
+}) {
   return (
-    <div className="mt-3 space-y-4 border-t border-white/[0.06] pt-3">
-      {/* Stream Actions */}
-      {streamActions.length > 0 && (
-        <div>
-          <div className="mb-2 flex items-center gap-1.5">
-            <Radio className="h-3 w-3 text-blue-400" />
-            <span className="text-[0.65rem] font-medium uppercase tracking-wider text-blue-400">
-              Stream Actions ({streamActions.length})
+    <div className="mt-3 space-y-2.5 border-t border-white/[0.06] pt-3">
+      {configResult ? (
+        <>
+          {/* Stream status */}
+          {configResult.stream_created && (
+            <div className="flex items-center gap-2 rounded-lg bg-blue-500/5 px-3 py-2">
+              <Radio className="h-3.5 w-3.5 text-blue-400" />
+              <span className="text-xs text-[#F0EDE8]">
+                Stream active — polling every 5 min
+              </span>
+            </div>
+          )}
+
+          {/* Actions count */}
+          <div className="flex items-center gap-2 rounded-lg bg-amber-500/5 px-3 py-2">
+            <Wrench className="h-3.5 w-3.5 text-amber-400" />
+            <span className="text-xs text-[#F0EDE8]">
+              {configResult.actions_count} actions available via <code className="text-[0.65rem] text-[#C9A84C]">composio_execute</code>
             </span>
           </div>
-          <div className="space-y-1">
-            {streamActions.map((action) => (
-              <div
-                key={action.slug}
-                className="flex items-center justify-between rounded-lg bg-white/[0.02] px-2.5 py-1.5"
-              >
-                <div className="min-w-0 flex-1">
-                  <span className="block truncate text-xs text-[#F0EDE8]">
-                    {action.slug}
-                  </span>
-                  {action.description && (
-                    <span className="block truncate text-[0.6rem] text-[#8A8680]">
-                      {action.description.slice(0, 80)}
-                    </span>
-                  )}
-                </div>
-                <button
-                  onClick={() => handleEnableStream(action.slug)}
-                  disabled={busy === action.slug || action.enabled}
-                  className={`ml-2 flex-shrink-0 rounded px-2 py-0.5 text-[0.65rem] transition ${
-                    action.enabled
-                      ? "bg-emerald-500/10 text-emerald-400"
-                      : "bg-blue-500/10 text-blue-400 hover:bg-blue-500/20"
-                  } disabled:opacity-50`}
-                >
-                  {busy === action.slug ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : action.enabled ? (
-                    "Active"
-                  ) : (
-                    "Enable"
-                  )}
-                </button>
-              </div>
-            ))}
-          </div>
+
+          {/* Skill file */}
+          {configResult.skill_generated && (
+            <div className="flex items-center gap-2 rounded-lg bg-emerald-500/5 px-3 py-2">
+              <Zap className="h-3.5 w-3.5 text-emerald-400" />
+              <span className="text-xs text-[#F0EDE8]">
+                Skill: <code className="text-[0.65rem] text-[#8A8680]">{configResult.skill_generated}</code>
+              </span>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="flex items-center gap-2 rounded-lg bg-white/[0.02] px-3 py-2">
+          <Settings2 className="h-3.5 w-3.5 text-[#8A8680]" />
+          <span className="text-xs text-[#8A8680]">
+            Not yet configured — click Reconfigure to set up stream + skill
+          </span>
         </div>
       )}
 
-      {/* Tool Actions */}
-      {toolActions.length > 0 && (
-        <div>
-          <div className="mb-2 flex items-center gap-1.5">
-            <Wrench className="h-3 w-3 text-amber-400" />
-            <span className="text-[0.65rem] font-medium uppercase tracking-wider text-amber-400">
-              Tool Actions ({toolActions.length})
-            </span>
-          </div>
-          <div className="space-y-1">
-            {toolActions.map((action) => (
-              <div
-                key={action.slug}
-                className="flex items-center justify-between rounded-lg bg-white/[0.02] px-2.5 py-1.5"
-              >
-                <div className="min-w-0 flex-1">
-                  <span className="block truncate text-xs text-[#F0EDE8]">
-                    {action.slug}
-                  </span>
-                  {action.description && (
-                    <span className="block truncate text-[0.6rem] text-[#8A8680]">
-                      {action.description.slice(0, 80)}
-                    </span>
-                  )}
-                </div>
-                <button
-                  onClick={() => handleToggleTool(action.slug, !!action.enabled)}
-                  disabled={busy === action.slug}
-                  className={`ml-2 flex-shrink-0 rounded px-2 py-0.5 text-[0.65rem] transition ${
-                    action.enabled
-                      ? "bg-emerald-500/10 text-emerald-400 hover:bg-red-500/10 hover:text-red-400"
-                      : "bg-amber-500/10 text-amber-400 hover:bg-amber-500/20"
-                  } disabled:opacity-50`}
-                >
-                  {busy === action.slug ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : action.enabled ? (
-                    "Enabled"
-                  ) : (
-                    "Enable"
-                  )}
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Reconfigure button */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onReconfigure();
+        }}
+        className="inline-flex items-center gap-1.5 rounded-lg bg-white/[0.03] px-3 py-1.5 text-[0.65rem] text-[#8A8680] transition hover:bg-white/[0.06] hover:text-[#F0EDE8]"
+      >
+        <RefreshCw className="h-3 w-3" />
+        {configResult ? "Reconfigure" : "Configure"}
+      </button>
 
-      {streamActions.length === 0 && toolActions.length === 0 && (
-        <p className="text-center text-xs text-[#8A8680]">
-          No actions available for this integration.
-        </p>
-      )}
-
-      {toast && (
-        <div className="rounded-lg bg-[#C9A84C]/10 px-3 py-2 text-xs text-[#C9A84C]">
-          {toast}
-        </div>
-      )}
+      {/* Created at */}
+      <p className="text-[0.6rem] text-[#8A8680]/60">
+        Connected {new Date(conn.created_at).toLocaleDateString()}
+      </p>
     </div>
   );
 }

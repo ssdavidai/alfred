@@ -13,6 +13,7 @@ import type {
   EnableIntegrationStream,
   EnableIntegrationTool,
   DisableIntegrationTool,
+  AutoConfigIntegration,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -155,5 +156,18 @@ export const disableIntegrationTool: DisableIntegrationTool<
     method: "POST",
     path: "/api/v1/integrations/disable-tool",
     body: { action_slug: args.action_slug },
+  });
+};
+
+export const autoConfigIntegration: AutoConfigIntegration<
+  { connectionId: string },
+  any
+> = async (args, context) => {
+  if (!args?.connectionId) throw new Error("connectionId is required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/integrations/${encodeURIComponent(args.connectionId)}/auto-config`,
+    timeoutMs: 30000, // auto-config may take a few seconds
   });
 };
