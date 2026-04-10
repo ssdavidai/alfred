@@ -638,6 +638,55 @@ action triggerChore {
 }
 
 // ============================================================
+// Connected Apps (Composio Integration Marketplace)
+// ============================================================
+route IntegrationsRoute { path: "/dashboard/integrations", to: IntegrationsPage }
+page IntegrationsPage {
+  authRequired: true,
+  component: import IntegrationsPage from "@src/integrations/IntegrationsPage"
+}
+
+query getIntegrationCatalog {
+  fn: import { getIntegrationCatalog } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+query getConnectedIntegrations {
+  fn: import { getConnectedIntegrations } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+query getIntegrationCapabilities {
+  fn: import { getIntegrationCapabilities } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action initiateConnect {
+  fn: import { initiateConnect } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action disconnectIntegration {
+  fn: import { disconnectIntegration } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action enableIntegrationStream {
+  fn: import { enableIntegrationStream } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action enableIntegrationTool {
+  fn: import { enableIntegrationTool } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action disableIntegrationTool {
+  fn: import { disableIntegrationTool } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+// ============================================================
 // Intuition (Learning Engine)
 // ============================================================
 route IntuitionRoute { path: "/dashboard/intuition", to: IntuitionPage }

@@ -19,6 +19,7 @@ import {
   Loader2,
   Brain,
   FolderTree,
+  Puzzle,
 } from "lucide-react";
 import { cn } from "../client/utils";
 import VaultNebula from "../components/nebula/VaultNebula";
@@ -39,6 +40,7 @@ const dashboardNavItems: NavItem[] = [
   { path: "/dashboard/vault", label: "Vault", icon: FolderTree },
   { path: "/dashboard/tasks", label: "Intelligence", icon: Brain },
   { path: "/dashboard/streams", label: "Streams", icon: Radio },
+  { path: "/dashboard/integrations", label: "Apps", icon: Puzzle },
   { path: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
 
