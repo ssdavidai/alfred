@@ -388,6 +388,7 @@ When creating or updating instincts, use the rich schema:
 - input_patterns: {{ sender_domains: [], subject_keywords: [], attachment_types: [], input_types: [] }}
 - routing_rule: {{ destination_type: "project|person|process|hold", destination: "[[wikilink]]", destination_resolver: null, process: "", default_assignee: "[[person/name]]" }}
 - observations: list of wikilinks to observation records
+- execution: OPTIONAL block that enables autonomous task creation when this instinct fires. Include ONLY when the instinct's action goes BEYOND simple routing/filing — i.e., when it should create a task, draft a response, summarize and notify, or take a multi-step action. Do NOT set execution.enabled for pure routing instincts like "file newsletters to digest" or "move to project folder."
 
 Return JSON only:
 {{
@@ -408,6 +409,12 @@ Return JSON only:
         "process": "",
         "default_assignee": "[[...]]"
       }},
+      "execution": {{
+        "enabled": false,
+        "task_title_template": "{{title}}",
+        "tier": 2,
+        "requires_approval": true
+      }},
       "confidence_score": 0.0,
       "observations": ["[[...]]"],
       "tags": []
@@ -423,7 +430,13 @@ Return JSON only:
   "merge": [],
   "deprecate": [],
   "reasoning": "Brief explanation of changes"
-}}"""
+}}
+
+execution field rules:
+- enabled: true ONLY if the instinct should CREATE AN EXECUTION TASK when it fires (e.g. "create an urgent errand with payment details", "draft a reply and notify the user", "summarize the weekly report and write to vault"). Set false for pure routing.
+- tier: 2 (default — user-triggered context), 3 (event-driven, for well-established patterns only)
+- requires_approval: ALWAYS true for newly created instincts. The trust gradient will auto-relax this as observation_count grows.
+- task_title_template: use {{title}} as default; can include variables like {{source}} or {{domain}}"""
 
     return await _call_clerk(prompt)
 

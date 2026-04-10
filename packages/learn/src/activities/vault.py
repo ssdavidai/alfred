@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from typing import Any, Optional
@@ -705,6 +706,21 @@ async def fetch_janitor_flags() -> list[dict[str, Any]]:
         await client.close()
 
 
+def _build_execution_yaml(instinct: dict[str, Any]) -> str:
+    """Build the execution block YAML for an instinct, if present.
+
+    Returns a multi-line string ending with a newline (ready to be
+    interpolated into the frontmatter template), or an empty string
+    if the instinct has no execution block.
+    """
+    execution = instinct.get("execution")
+    if not execution or not isinstance(execution, dict):
+        return ""
+    return (
+        f'execution: \'{json.dumps(execution, separators=(",", ":"))}\'\n'
+    )
+
+
 def _build_instinct_content(instinct: dict[str, Any]) -> str:
     """Build markdown content for an instinct record (rich schema)."""
     from datetime import datetime, timezone
@@ -788,7 +804,7 @@ matching_weights:
   attachment: {weights.get("attachment", 0.15)}
   tags: {weights.get("tags", 0.10)}
 discretion_threshold: {threshold}
-created: {now}
+{_build_execution_yaml(instinct)}created: {now}
 updated: {now}
 tags: {tags}
 ---

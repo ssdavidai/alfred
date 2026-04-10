@@ -1077,6 +1077,7 @@ Derive 5-12 instincts from the patterns and facts. Lean heavily on the patterns 
   - process: short label of what to do (e.g. "archive", "urgent-triage", "daily-digest")
 - **discretion_threshold**: float 0.7-0.95. Higher = more confident, fires automatically. Lower = will ask the user first.
 - **confidence_score**: float 0.0-1.0. How confident YOU are this rule is right for this user.
+- **execution** (OPTIONAL): include ONLY when the instinct's action goes BEYOND simple routing. If the instinct should CREATE A TASK (e.g. "create an urgent errand with specific details", "draft a reply", "summarize and notify"), set `execution.enabled: true`. For pure routing instincts ("file newsletters to digest", "route to project folder"), omit or set `enabled: false`.
 
 ## Output format
 
@@ -1103,12 +1104,23 @@ Return ONLY valid JSON. No preamble, no fences:
         "destination": "priority triage queue",
         "process": "urgent-triage"
       }},
+      "execution": {{
+        "enabled": false,
+        "task_title_template": "{{title}}",
+        "tier": 2,
+        "requires_approval": true
+      }},
       "discretion_threshold": 0.85,
       "confidence_score": 0.9
     }}
   ]
 }}
 ```
+
+execution field rules:
+- enabled: true ONLY if the instinct should spawn an execution task (create errand, draft reply, summarize + notify). false for pure routing.
+- tier: 2 (default), 3 (for event-driven patterns with clear non-destructive actions)
+- requires_approval: ALWAYS true for onboarding-generated instincts. The trust gradient auto-relaxes as observation_count grows.
 
 Be honest: write fewer instincts if the patterns don't support more. Don't invent rules that aren't backed by evidence. Empty `subject_keywords` is fine. But `rationale` and `examples` must always be substantive — these are what justify the rule to the user.
 """
@@ -1163,6 +1175,14 @@ def _validate_instinct(instinct: dict[str, Any]) -> tuple[bool, str]:
     elif threshold is not None:
         return False, "discretion_threshold not a number"
 
+    # execution block is optional — validate structure if present
+    execution = instinct.get("execution")
+    if execution is not None:
+        if not isinstance(execution, dict):
+            return False, "execution must be a dict"
+        if "enabled" in execution and not isinstance(execution["enabled"], bool):
+            return False, "execution.enabled must be a boolean"
+
     return True, ""
 
 
@@ -1211,6 +1231,15 @@ def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
         f"observation_count: 0",
         f"input_patterns: {_escape_yaml_scalar(input_patterns_json)}",
         f"routing_rule: {_escape_yaml_scalar(routing_rule_json)}",
+    ]
+
+    # Persist execution block if the LLM included one
+    execution = instinct.get("execution")
+    if isinstance(execution, dict) and execution:
+        execution_json = json.dumps(execution, default=str, separators=(",", ":"))
+        fm_lines.append(f"execution: {_escape_yaml_scalar(execution_json)}")
+
+    fm_lines += [
         "tags: [onboarding, instinct, auto-generated]",
         "---",
     ]
