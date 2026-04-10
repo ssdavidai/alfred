@@ -75,6 +75,10 @@ interface StreamConfig {
   last_pull_at?: string | null;
   last_pull_status?: string | null;
   last_pull_count?: number;
+  // Composio-backed stream config
+  composio_action?: string;
+  composio_connection_id?: string;
+  composio_toolkit?: string;
 }
 
 const SYSTEM_STREAMS: StreamMeta[] = [
@@ -626,6 +630,7 @@ export function registerStreamRoutes(): void {
       "cursor_field", "cursor_value", "cursor_param",
       "schedule_cron", "schedule_interval_seconds",
       "last_pull_at", "last_pull_status", "last_pull_count",
+      "composio_action", "composio_connection_id", "composio_toolkit",
       "name", "type", "source", "enabled",
     ] as const;
 
