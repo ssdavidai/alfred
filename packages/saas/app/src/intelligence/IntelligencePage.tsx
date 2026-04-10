@@ -443,10 +443,24 @@ function ErrandsContent() {
   const handleApprove = async (path: string) => {
     setApprovingPath(path);
     try {
-      await updateTask({ path, set: { requires_approval: false, status: "queued" } });
+      // Set approved=true so TaskRunner's check_task_prerequisites passes,
+      // plus clear requires_approval and ensure status=queued.
+      await updateTask({ path, set: { approved: true, requires_approval: false, status: "queued" } });
       refetch();
     } catch (err: any) {
       console.error("Approval failed:", err);
+    } finally {
+      setApprovingPath(null);
+    }
+  };
+
+  const handleReject = async (path: string) => {
+    setApprovingPath(path);
+    try {
+      await updateTask({ path, set: { requires_approval: false, status: "cancelled" } });
+      refetch();
+    } catch (err: any) {
+      console.error("Rejection failed:", err);
     } finally {
       setApprovingPath(null);
     }
@@ -513,19 +527,29 @@ function ErrandsContent() {
                 <span className="truncate font-mono text-xs text-cream/80">
                   {t.frontmatter?.name || t.name}
                 </span>
-                <button
-                  type="button"
-                  onClick={() => handleApprove(t.path)}
-                  disabled={approvingPath === t.path}
-                  className="flex items-center gap-1 rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-emerald-400 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
-                >
-                  {approvingPath === t.path ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <CheckCircle className="h-3 w-3" />
-                  )}
-                  Approve
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleApprove(t.path)}
+                    disabled={approvingPath === t.path}
+                    className="flex items-center gap-1 rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-emerald-400 transition-colors hover:bg-emerald-500/20 disabled:opacity-50"
+                  >
+                    {approvingPath === t.path ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <CheckCircle className="h-3 w-3" />
+                    )}
+                    Approve
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleReject(t.path)}
+                    disabled={approvingPath === t.path}
+                    className="flex items-center gap-1 rounded-sm border border-red-500/30 bg-red-500/10 px-2 py-1 font-mono text-[0.6rem] uppercase tracking-wider text-red-400 transition-colors hover:bg-red-500/20 disabled:opacity-50"
+                  >
+                    Reject
+                  </button>
+                </div>
               </div>
             ))}
           </div>

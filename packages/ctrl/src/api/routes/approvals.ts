@@ -41,12 +41,14 @@ export function registerApprovalRoutes(): void {
     sendJson(res, 200, { results, count: results.length });
   });
 
-  // Approve — clear requires_approval and set status to queued so TaskRunner picks it up
+  // Approve — set approved=true so TaskRunner's check_task_prerequisites sees it.
+  // Also clear requires_approval and ensure status=queued so the task is eligible.
   addRoute("POST", "/api/v1/approvals/:path/approve", async ({ res, params }) => {
     const recordPath = params.path;
     const args = [
       ...ALFRED_CMD,
       "vault", "edit", recordPath,
+      "--set", "approved=true",
       "--set", "requires_approval=false",
       "--set", "status=queued",
     ];
