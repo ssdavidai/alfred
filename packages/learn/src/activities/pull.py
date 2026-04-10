@@ -341,6 +341,8 @@ async def composio_pull(
     from src.integrations.composio_client import execute_action
 
     args = arguments or {}
+    # Inject sensible defaults for known actions that require parameters
+    args = {**_default_args(action_slug), **args}
     result = execute_action(action_slug, args)
 
     if "error" in result and not result.get("data"):
@@ -348,6 +350,22 @@ async def composio_pull(
 
     activity.heartbeat(f"Composio pull {action_slug} completed")
     return result
+
+
+# Default arguments for known Composio actions that require parameters.
+# Without these, the action returns empty or errors.
+_ACTION_DEFAULTS: dict[str, dict[str, Any]] = {
+    "GOOGLECALENDAR_EVENTS_LIST": {"calendarId": "primary"},
+    "GOOGLECALENDAR_FIND_EVENT": {"calendarId": "primary"},
+    "GOOGLECALENDAR_LIST_CALENDARS": {},
+    "GMAIL_FETCH_EMAILS": {"userId": "me"},
+    "GMAIL_LIST_LABELS": {"userId": "me"},
+}
+
+
+def _default_args(action_slug: str) -> dict[str, Any]:
+    """Return default arguments for known actions."""
+    return _ACTION_DEFAULTS.get(action_slug, {})
 
 
 def _ctrl_client(config: Any) -> httpx.AsyncClient:

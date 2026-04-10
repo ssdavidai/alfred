@@ -137,6 +137,9 @@ def execute_action(
         if connected_account_id:
             kwargs["connected_account_id"] = connected_account_id
 
+        # The Composio SDK requires either an explicit toolkit version or
+        # dangerously_skip_version_check=True for manual execution.
+        kwargs["dangerously_skip_version_check"] = True
         result = client.tools.execute(**kwargs)
         # Convert to plain dict
         if hasattr(result, "model_dump"):
