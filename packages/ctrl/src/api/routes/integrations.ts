@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
+import { dockerExec } from "../helpers.js";
 
 // Composio REST API bases
 const COMPOSIO_API_V3 = "https://backend.composio.dev/api/v3";
@@ -342,7 +343,20 @@ export function registerIntegrationRoutes(): void {
     const connId = params.id;
 
     try {
-      // Delete the connected account at Composio
+      // 1. Fetch the connection to learn its toolkit before deleting
+      let toolkit = "";
+      try {
+        const connResp = await fetch(
+          `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(connId)}`,
+          { headers: { "x-api-key": apiKey } },
+        );
+        if (connResp.ok) {
+          const conn = (await connResp.json()) as any;
+          toolkit = (conn.toolkit?.slug ?? conn.appName ?? "").toLowerCase();
+        }
+      } catch { /* proceed with deletion anyway */ }
+
+      // 2. Delete the connected account at Composio
       const resp = await fetch(`${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(connId)}`, {
         method: "DELETE",
         headers: { "x-api-key": apiKey },
@@ -353,7 +367,7 @@ export function registerIntegrationRoutes(): void {
         return;
       }
 
-      // Clean up: remove any stream configs backed by this integration
+      // 3. Clean up: remove any stream configs backed by this integration
       const cleanedStreams: string[] = [];
       try {
         fs.mkdirSync(STREAM_CONFIGS_DIR, { recursive: true });
@@ -370,23 +384,57 @@ export function registerIntegrationRoutes(): void {
         }
       } catch { /* stream cleanup is best-effort */ }
 
-      // Clean up: remove Composio tool slugs from gateway.tools.allow
-      try {
-        // Get the toolkit slug for this connection to know which tools to remove
-        // We'll remove any tools that match the connection's toolkit
-        const cfg = readOpenclawConfig();
-        const toolsAllow: string[] = cfg?.gateway?.tools?.allow || [];
-        // We don't know which toolkit this was for certain from just the ID,
-        // so we rely on the caller to handle tool cleanup if needed
-        if (toolsAllow.length > 0) {
-          writeOpenclawConfig(cfg); // Touch lastTouchedAt to trigger reload
-        }
-      } catch { /* openclaw config cleanup is best-effort */ }
+      // 4. Clean up streams.json metadata for cleaned streams
+      if (cleanedStreams.length > 0) {
+        try {
+          const streamsMetaPath = path.join(STREAMS_DIR, "streams.json");
+          let streams: any[] = JSON.parse(fs.readFileSync(streamsMetaPath, "utf-8"));
+          const cleanedSet = new Set(cleanedStreams);
+          streams = streams.filter((s: any) => !cleanedSet.has(s.id));
+          fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+        } catch { /* ok */ }
+      }
+
+      // 5. Clean up: delete Temporal schedules for cleaned streams
+      const deletedSchedules: string[] = [];
+      for (const streamId of cleanedStreams) {
+        const scheduleId = `al-stream-pull-composio-${streamId.slice(0, 20)}`;
+        try {
+          await dockerExec("temporal", [
+            "temporal", "schedule", "delete", "--schedule-id", scheduleId,
+          ]);
+          deletedSchedules.push(scheduleId);
+        } catch { /* schedule may not exist */ }
+      }
+
+      // 6. Clean up: remove Composio tool slugs from gateway.tools.allow
+      const removedTools: string[] = [];
+      if (toolkit) {
+        try {
+          const cfg = readOpenclawConfig();
+          const allow: string[] = cfg?.gateway?.tools?.allow || [];
+          const prefix = toolkit.toUpperCase() + "_";
+          const kept = allow.filter((t) => {
+            if (t.startsWith(prefix)) {
+              removedTools.push(t);
+              return false;
+            }
+            return true;
+          });
+          if (removedTools.length > 0) {
+            cfg.gateway.tools.allow = kept;
+            writeOpenclawConfig(cfg);
+          }
+        } catch { /* openclaw config cleanup is best-effort */ }
+      }
 
       sendJson(res, 200, {
         status: "disconnected",
         connection_id: connId,
+        toolkit,
         cleaned_streams: cleanedStreams,
+        deleted_schedules: deletedSchedules,
+        removed_tools: removedTools,
       });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to disconnect: ${err.message}` });
