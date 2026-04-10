@@ -15,6 +15,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.pull import (
+        composio_pull,
         http_pull,
         http_pull_detail,
         ingest_events,
@@ -58,6 +59,11 @@ class StreamPullerWorkflow:
         if not config.get("enabled", False):
             result.error = "stream_disabled"
             return result
+
+        # ----- Composio-backed stream: call Composio action instead of HTTP -----
+        composio_action = config.get("composio_action", "")
+        if composio_action:
+            return await self._run_composio(stream_id, config, composio_action, result)
 
         pull_endpoint = config.get("pull_endpoint", "")
         if not pull_endpoint:
@@ -196,6 +202,47 @@ class StreamPullerWorkflow:
                     start_to_close_timeout=timedelta(seconds=30),
                 )
                 result.cursor_updated = True
+
+        return result
+
+
+    async def _run_composio(
+        self,
+        stream_id: str,
+        config: dict[str, Any],
+        action_slug: str,
+        result: PullerResult,
+    ) -> PullerResult:
+        """Execute a Composio action and ingest the results as stream events."""
+        # Execute the Composio action
+        raw_response: dict[str, Any] = await workflow.execute_activity(
+            composio_pull,
+            args=[action_slug, {}],
+            start_to_close_timeout=timedelta(seconds=120),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
+
+        # Ingest through the composio parser
+        parser_name = config.get("parser", "composio")
+        stream_type = config.get("type", "composio")
+
+        ingested_count: int = await workflow.execute_activity(
+            ingest_events,
+            args=[stream_id, stream_type, parser_name, [raw_response]],
+            start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+
+        result.events_ingested = ingested_count
+        result.events_pulled = 1  # One Composio action call
+
+        # Update pull timestamp
+        await workflow.execute_activity(
+            update_cursor,
+            args=[stream_id, ""],
+            start_to_close_timeout=timedelta(seconds=30),
+        )
+        result.cursor_updated = True
 
         return result
 

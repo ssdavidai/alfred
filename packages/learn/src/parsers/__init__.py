@@ -23,6 +23,7 @@ from .github_webhook import parse as github_webhook_parse
 from .polar import parse as polar_parse
 from .omi import parse as omi_parse
 from .notion import parse as notion_parse
+from .composio import parse as composio_parse
 
 PARSERS: dict[str, Callable[[dict], list[ParsedEvent]]] = {
     "passthrough": passthrough_parse,
@@ -31,6 +32,7 @@ PARSERS: dict[str, Callable[[dict], list[ParsedEvent]]] = {
     "polar": polar_parse,
     "omi": omi_parse,
     "notion": notion_parse,
+    "composio": composio_parse,
 }
 
 def get_parser(name: str) -> Callable[[dict], list[ParsedEvent]]:

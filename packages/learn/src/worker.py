@@ -111,6 +111,7 @@ from src.activities.onboarding_v3 import (
 )
 from src.activities.pull import (
     backfill_gmail_as_events,
+    composio_pull,
     http_pull,
     http_pull_detail,
     ingest_events,
@@ -320,6 +321,7 @@ ALL_ACTIVITIES = [
     write_brief_and_opportunities_opus,
     # Pull
     backfill_gmail_as_events,
+    composio_pull,
     http_pull,
     http_pull_detail,
     ingest_events,

@@ -327,6 +327,29 @@ async def backfill_gmail_as_events(
     return ingested
 
 
+@activity.defn
+async def composio_pull(
+    action_slug: str,
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Execute a Composio action as a stream pull source.
+
+    Calls the Composio SDK via the composio_client module to execute the action
+    (e.g. GMAIL_FETCH_EMAILS) and returns the raw result dict. The caller
+    passes this through the composio parser to extract events.
+    """
+    from src.integrations.composio_client import execute_action
+
+    args = arguments or {}
+    result = execute_action(action_slug, args)
+
+    if "error" in result and not result.get("data"):
+        logger.warning("Composio pull %s returned error: %s", action_slug, result.get("error"))
+
+    activity.heartbeat(f"Composio pull {action_slug} completed")
+    return result
+
+
 def _ctrl_client(config: Any) -> httpx.AsyncClient:
     """Create an authenticated httpx client for the ctrl API."""
     import os
