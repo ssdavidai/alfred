@@ -5,6 +5,7 @@ import {
   useQuery,
   startOnboarding,
   getFirstBrief,
+  finalizeComposioConnections,
 } from "wasp/client/operations";
 import { motion, AnimatePresence } from "framer-motion";
 import OrbBackground from "../components/ui/OrbBackground";
@@ -80,6 +81,13 @@ export default function OnboardingOrbPage() {
       // Begin transition: fade out orb
       setPhase("transition");
       setOrbVisible(false);
+
+      // Finalize Composio connections (creates streams, skills, disables legacy)
+      // Best-effort — don't block the letter phase if this fails
+      (finalizeComposioConnections as any)().catch((err: any) => {
+        console.error("[onboarding] Composio finalization failed:", err?.message);
+      });
+
       // After orb fades, show letter
       setTimeout(() => {
         setPhase("letter");

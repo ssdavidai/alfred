@@ -14,6 +14,7 @@ import type {
   EnableIntegrationTool,
   DisableIntegrationTool,
   AutoConfigIntegration,
+  FinalizeComposioConnections,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -170,4 +171,36 @@ export const autoConfigIntegration: AutoConfigIntegration<
     path: `/api/v1/integrations/${encodeURIComponent(args.connectionId)}/auto-config`,
     timeoutMs: 30000, // auto-config may take a few seconds
   });
+};
+
+export const finalizeComposioConnections: FinalizeComposioConnections<void, any> = async (
+  _args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+
+  // Get all connected integrations
+  const data = await proxyToTenant(instance, {
+    path: "/api/v1/integrations",
+  });
+  const connections = (data?.integrations || []).filter(
+    (c: any) => c.status === "ACTIVE",
+  );
+
+  // Auto-config each connection (creates streams, skills, disables legacy)
+  const results: any[] = [];
+  for (const conn of connections) {
+    try {
+      const result = await proxyToTenant(instance, {
+        method: "POST",
+        path: `/api/v1/integrations/${encodeURIComponent(conn.id)}/auto-config`,
+        timeoutMs: 30000,
+      });
+      results.push({ toolkit: conn.toolkit, ...result });
+    } catch {
+      // best-effort — don't block onboarding completion
+    }
+  }
+
+  return { configured: results.length, results };
 };

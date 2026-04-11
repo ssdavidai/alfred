@@ -691,6 +691,11 @@ action autoConfigIntegration {
   entities: [Instance]
 }
 
+action finalizeComposioConnections {
+  fn: import { finalizeComposioConnections } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
 // ============================================================
 // Intuition (Learning Engine)
 // ============================================================
