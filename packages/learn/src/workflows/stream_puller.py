@@ -288,21 +288,25 @@ def _is_sync_reset(response: dict) -> bool:
 
 
 def _extract_sync_cursor(response: dict, action_slug: str) -> str:
-    """Extract the continuation/sync token from a Composio response."""
+    """Extract the continuation/sync token from a Composio response.
+
+    Composio wraps responses differently per action — try multiple nesting
+    levels: top-level, data.{field}, data.response_data.{field}.
+    """
     sync_cfg = SYNC_CONFIGS.get(action_slug, {})
     field = sync_cfg.get("cursor_response_field", "")
     if not field:
         return ""
-    # Try top level
-    val = _extract_cursor(response, field)
-    if val:
-        return val
-    # Try inside Composio data wrapper
-    data = response.get("data", {})
-    if isinstance(data, dict):
-        rd = data.get("response_data", data)
-        if isinstance(rd, dict):
-            return _extract_cursor(rd, field)
+    # Try at each nesting level
+    for container in [
+        response,
+        response.get("data", {}),
+        (response.get("data", {}) or {}).get("response_data", {}),
+    ]:
+        if isinstance(container, dict):
+            val = _extract_cursor(container, field)
+            if val:
+                return val
     return ""
 
 

@@ -378,8 +378,6 @@ SYNC_CONFIGS: dict[str, dict[str, Any]] = {
         "backfill_args": {
             "timeMin": "{backfill_start}",
             "timeMax": "{backfill_end}",
-            "singleEvents": True,
-            "orderBy": "startTime",
             "maxResults": 2500,
         },
         "incremental_args": {
