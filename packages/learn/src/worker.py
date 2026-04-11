@@ -121,6 +121,9 @@ from src.activities.pull import (
     update_cursor,
 )
 
+# Activities — stream vault (zero-LLM record creation)
+from src.activities.stream_vault import create_stream_vault_record
+
 # Activities — vault
 from src.activities.vault import (
     apply_instinct_change,
@@ -319,6 +322,8 @@ ALL_ACTIVITIES = [
     personalize_opus,
     write_brief_opus,
     write_brief_and_opportunities_opus,
+    # Stream vault (zero-LLM)
+    create_stream_vault_record,
     # Pull
     backfill_gmail_as_events,
     composio_pull,
