@@ -237,7 +237,7 @@ const RECOMMENDED_STREAMS: Record<string, {
 }> = {
   googlecalendar: { action: "GOOGLECALENDAR_EVENTS_LIST", name: "Calendar Events", interval: 300, args: { calendarId: "primary" } },
   gmail:          { action: "GMAIL_FETCH_EMAILS",         name: "Gmail Emails",     interval: 300, args: { userId: "me" } },
-  slack:          { action: "SLACK_FETCH_CONVERSATION_HISTORY", name: "Slack Messages", interval: 120, args: {} },
+  // slack omitted: SLACK_FETCH_CONVERSATION_HISTORY requires a channel ID (per-tenant config)
   github:         { action: "GITHUB_LIST_NOTIFICATIONS",  name: "GitHub Notifications", interval: 300, args: {} },
   notion:         { action: "NOTION_LIST_PAGES",          name: "Notion Pages",     interval: 600, args: {} },
 };
