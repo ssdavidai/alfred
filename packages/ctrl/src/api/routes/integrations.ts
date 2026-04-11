@@ -1152,7 +1152,42 @@ print(json.dumps(result, default=str))
         summary.stream_created = null; // No recommended stream for this toolkit
       }
 
-      // 4. Generate skill file
+      // 4. Migrate legacy streams: disable any old OAuth-based stream for this toolkit
+      const LEGACY_SOURCE_MAP: Record<string, string> = {
+        gmail: "gmail",
+        googlecalendar: "googlecalendar",
+        notion: "notion",
+        github: "github",
+      };
+      const legacySource = LEGACY_SOURCE_MAP[toolkit];
+      if (legacySource) {
+        try {
+          const streamsMetaPath = path.join(STREAMS_DIR, "streams.json");
+          const streams: any[] = JSON.parse(fs.readFileSync(streamsMetaPath, "utf-8"));
+          const disabledLegacy: string[] = [];
+          for (const s of streams) {
+            // Match legacy streams by source (not composio-prefixed)
+            if (s.source === legacySource && !s.id.startsWith("composio-") && s.enabled) {
+              s.enabled = false;
+              s.status = "migrated-to-composio";
+              disabledLegacy.push(s.id);
+              // Also disable in the config file
+              const legacyConfigPath = path.join(STREAM_CONFIGS_DIR, `${s.id}.json`);
+              try {
+                const legacyCfg = JSON.parse(fs.readFileSync(legacyConfigPath, "utf-8"));
+                legacyCfg.enabled = false;
+                fs.writeFileSync(legacyConfigPath, JSON.stringify(legacyCfg, null, 2));
+              } catch { /* config may not exist */ }
+            }
+          }
+          if (disabledLegacy.length > 0) {
+            fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+            summary.legacy_streams_disabled = disabledLegacy;
+          }
+        } catch { /* migration is best-effort */ }
+      }
+
+      // 5. Generate skill file
       try {
         const skillResult = await generateComposioSkill(toolkit, connId, apiKey);
         summary.skill_generated = skillResult.skill_path;

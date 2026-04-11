@@ -271,6 +271,45 @@ export default function IntegrationsPage() {
           </button>
         </div>
 
+        {/* Recommended Section — show core apps not yet connected via Composio */}
+        {(() => {
+          const RECOMMENDED = [
+            { slug: "gmail", name: "Gmail", why: "Persistent email access — never expires" },
+            { slug: "notion", name: "Notion", why: "Sync pages and databases automatically" },
+            { slug: "googlecalendar", name: "Google Calendar", why: "Calendar events with incremental sync" },
+            { slug: "github", name: "GitHub", why: "Notifications and PR tracking" },
+          ];
+          const missing = RECOMMENDED.filter((r) => !connectedSlugs.has(r.slug));
+          if (missing.length === 0) return null;
+          return (
+            <section>
+              <h2 className="mb-3 font-mono text-xs font-light uppercase tracking-[0.2em] text-[#C9A84C]">
+                Recommended
+              </h2>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {missing.map((r) => (
+                  <div
+                    key={r.slug}
+                    className="flex items-center justify-between rounded-xl border border-[#C9A84C]/20 bg-[#C9A84C]/5 p-4"
+                  >
+                    <div>
+                      <h3 className="text-sm font-medium text-[#F0EDE8]">{r.name}</h3>
+                      <p className="text-xs text-[#8A8680]">{r.why}</p>
+                    </div>
+                    <button
+                      onClick={() => handleConnect(r.slug)}
+                      disabled={connectingSlug === r.slug}
+                      className="rounded-lg bg-[#C9A84C]/10 px-3 py-1.5 text-xs text-[#C9A84C] transition hover:bg-[#C9A84C]/20 disabled:opacity-50"
+                    >
+                      {connectingSlug === r.slug ? "Connecting..." : "Connect"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </section>
+          );
+        })()}
+
         {/* Connected Section */}
         {connected.length > 0 && (
           <section>
