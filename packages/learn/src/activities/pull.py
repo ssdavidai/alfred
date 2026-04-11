@@ -400,7 +400,7 @@ SYNC_CONFIGS: dict[str, dict[str, Any]] = {
         "cursor_response_field": "",
         "backfill_past_days": 30,
     },
-    "SLACK_LIST_MESSAGES": {
+    "SLACK_FETCH_CONVERSATION_HISTORY": {
         "pull_mode": "append",
         "backfill_args": {"oldest": "{backfill_ts}", "limit": 200},
         "incremental_args": {"oldest": "{last_pull_ts}", "limit": 200},
