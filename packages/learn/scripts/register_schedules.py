@@ -46,6 +46,11 @@ INTERVAL_SCHEDULES = [
         "workflow": "TaskRunnerWorkflow",
         "interval": timedelta(minutes=15),
     },
+    {
+        "id": "al-hourly-enrichment",
+        "workflow": "HourlyEnrichmentWorkflow",
+        "interval": timedelta(hours=1),
+    },
 ]
 
 CALENDAR_SCHEDULES = [

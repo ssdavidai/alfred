@@ -24,6 +24,7 @@ from src.workflows.onboarding_pipeline import OnboardingPipelineWorkflow
 from src.workflows.omi_processor import OmiAudioProcessorWorkflow
 from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
 from src.workflows.chore_promotion import ChorePromotionReflectionWorkflow
+from src.workflows.hourly_enrichment import HourlyEnrichmentWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -123,6 +124,14 @@ from src.activities.pull import (
 
 # Activities — stream vault (zero-LLM record creation)
 from src.activities.stream_vault import create_stream_vault_record
+
+# Activities — enrichment (batched hourly LLM)
+from src.activities.enrichment import (
+    apply_enrichments,
+    batch_enrich_events,
+    ensure_enrichment_entities,
+    fetch_pending_enrichment_records,
+)
 
 # Activities — vault
 from src.activities.vault import (
@@ -291,6 +300,7 @@ _STATIC_WORKFLOWS = [
     OmiAudioProcessorWorkflow,
     NightlyMaintenanceWorkflow,
     ChorePromotionReflectionWorkflow,
+    HourlyEnrichmentWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -324,6 +334,11 @@ ALL_ACTIVITIES = [
     write_brief_and_opportunities_opus,
     # Stream vault (zero-LLM)
     create_stream_vault_record,
+    # Enrichment (batched hourly)
+    fetch_pending_enrichment_records,
+    batch_enrich_events,
+    apply_enrichments,
+    ensure_enrichment_entities,
     # Pull
     backfill_gmail_as_events,
     composio_pull,
