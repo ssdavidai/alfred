@@ -4,6 +4,9 @@ import { useAuth } from "wasp/client/auth";
 import {
   useQuery,
   getStreams,
+  getConnectedIntegrations,
+  getIntegrationCatalog,
+  initiateConnect,
   updateWorkspaceFile,
 } from "wasp/client/operations";
 import { Button } from "../client/components/ui/button";
@@ -16,8 +19,12 @@ import {
   Mail,
   User,
   Sparkles,
-  Radio,
   FileText,
+  Calendar,
+  Puzzle,
+  Search,
+  ExternalLink,
+  X,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -208,12 +215,7 @@ export default function OnboardingPage() {
     setStep((s: number) => Math.max(s - 1, 0));
   };
 
-  const handleConnectGmail = () => {
-    if (!user) return;
-    const scopes = "https://www.googleapis.com/auth/gmail.readonly";
-    const redirectAfter = encodeURIComponent("/onboarding?step=3");
-    window.location.href = `/auth/oauth2/google/start?userId=${user.id}&scopes=${scopes}&redirectAfter=${redirectAfter}`;
-  };
+  // Legacy handleConnectGmail removed — Gmail now connects via Composio popup in StepConnectApps
 
   // Restore step from URL param (OAuth redirect back)
   useState(() => {
@@ -285,9 +287,8 @@ export default function OnboardingPage() {
           />
         )}
         {step === 3 && (
-          <StepConnect
-            gmailConnected={gmailConnected}
-            onConnectGmail={handleConnectGmail}
+          <StepConnectApps
+            legacyGmailConnected={gmailConnected}
             onNext={handleNext}
             onBack={handleBack}
           />
@@ -529,71 +530,234 @@ function StepSoul({
   );
 }
 
-function StepConnect({
-  gmailConnected,
-  onConnectGmail,
+function StepConnectApps({
+  legacyGmailConnected,
   onNext,
   onBack,
 }: {
-  gmailConnected: boolean;
-  onConnectGmail: () => void;
+  legacyGmailConnected: boolean;
   onNext: () => void;
   onBack: () => void;
 }) {
+  const [connecting, setConnecting] = useState<string | null>(null);
+  const [connectedApps, setConnectedApps] = useState<Record<string, boolean>>({});
+  const [showCatalog, setShowCatalog] = useState(false);
+  const [catalogSearch, setCatalogSearch] = useState("");
+  const [extraApp, setExtraApp] = useState<{ slug: string; name: string } | null>(null);
+
+  const { data: connectedData, refetch: refetchConnected } = useQuery(getConnectedIntegrations);
+  const { data: catalogData } = useQuery(getIntegrationCatalog, { search: "", category: "" });
+
+  // Track which toolkits are connected via Composio
+  const composioConnected = new Set(
+    (connectedData?.integrations || [])
+      .filter((c: any) => c.status === "ACTIVE")
+      .map((c: any) => c.toolkit),
+  );
+
+  const isGmailConnected = legacyGmailConnected || composioConnected.has("gmail") || connectedApps.gmail;
+  const isCalendarConnected = composioConnected.has("googlecalendar") || connectedApps.googlecalendar;
+  const isExtraConnected = extraApp ? (composioConnected.has(extraApp.slug) || connectedApps[extraApp.slug]) : false;
+
+  const handleComposioConnect = async (toolkitSlug: string) => {
+    setConnecting(toolkitSlug);
+    try {
+      const result = await initiateConnect({
+        toolkit_slug: toolkitSlug,
+        redirect_url: `${window.location.origin}/onboarding?step=3&composio_callback=success&toolkit=${toolkitSlug}`,
+      });
+      const connectUrl = result?.connect_url;
+      if (connectUrl) {
+        const popup = window.open(connectUrl, "composio-connect", "width=600,height=700,left=200,top=100");
+        if (popup) {
+          const interval = setInterval(() => {
+            if (popup.closed) {
+              clearInterval(interval);
+              setConnecting(null);
+              setConnectedApps((prev) => ({ ...prev, [toolkitSlug]: true }));
+              refetchConnected();
+            }
+          }, 500);
+          setTimeout(() => { clearInterval(interval); setConnecting(null); }, 120000);
+        }
+      } else {
+        setConnecting(null);
+      }
+    } catch {
+      setConnecting(null);
+    }
+  };
+
+  // Filter catalog for the "Add another app" picker
+  const catalogApps = (catalogData?.toolkits || []).filter((t: any) => {
+    if (["gmail", "googlecalendar"].includes(t.slug)) return false; // already shown
+    if (composioConnected.has(t.slug)) return false;
+    if (!catalogSearch) return true;
+    const s = catalogSearch.toLowerCase();
+    return t.name.toLowerCase().includes(s) || t.slug.toLowerCase().includes(s);
+  });
+
+  const ConnectRow = ({
+    icon,
+    name,
+    description,
+    connected,
+    connecting: isConnecting,
+    onConnect,
+    required,
+  }: {
+    icon: React.ReactNode;
+    name: string;
+    description: string;
+    connected: boolean;
+    connecting: boolean;
+    onConnect: () => void;
+    required?: boolean;
+  }) => (
+    <div
+      className={cn(
+        "rounded-lg border p-4 flex items-center justify-between transition-colors",
+        connected ? "border-emerald-500/30 bg-emerald-500/5" : "border-[#333] bg-[#111]",
+      )}
+    >
+      <div className="flex items-center gap-3">
+        {icon}
+        <div>
+          <p className="text-sm font-medium text-[#F0EDE8]">
+            {name} {required && <span className="text-[0.6rem] text-[#C9A84C]">(required)</span>}
+          </p>
+          <p className="text-xs text-[#8A8680]">{description}</p>
+        </div>
+      </div>
+      {connected ? (
+        <span className="flex items-center gap-1.5 text-xs text-emerald-400 font-mono uppercase tracking-wider">
+          <Check className="h-3.5 w-3.5" /> Connected
+        </span>
+      ) : (
+        <Button variant="outline" size="sm" onClick={onConnect} disabled={isConnecting}>
+          {isConnecting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ExternalLink className="h-3.5 w-3.5 mr-1.5" />}
+          {isConnecting ? "Connecting..." : "Connect"}
+        </Button>
+      )}
+    </div>
+  );
+
   return (
     <div>
       <div className="flex items-center gap-3 mb-6">
-        <Radio className="h-5 w-5 text-gold" />
-        <h2 className="font-serif text-2xl font-light text-cream">
-          Connect your data sources
+        <Puzzle className="h-5 w-5 text-[#C9A84C]" />
+        <h2 className="font-serif text-2xl font-light text-[#F0EDE8]">
+          Connect your apps
         </h2>
       </div>
 
       <p className="text-[#8A8680] text-sm mb-6">
-        Alfred works best when it can see your world. Connect services to let Alfred
-        monitor and act on your behalf.
+        Alfred works best with access to your world. Connect at least Gmail to get started.
+        All connections are managed securely — your credentials never touch the server.
       </p>
 
-      <div
-        className={cn(
-          "rounded-sm border p-4 flex items-center justify-between",
-          gmailConnected
-            ? "border-green-500/40 bg-green-500/5"
-            : "border-[#333] bg-[#111]",
-        )}
-      >
-        <div className="flex items-center gap-3">
-          <Mail className="h-5 w-5 text-[#8A8680]" />
-          <div>
-            <p className="text-sm font-medium text-cream">Gmail</p>
-            <p className="text-xs text-[#8A8680]">
-              Monitor your inbox for important emails
-            </p>
-          </div>
-        </div>
-        {gmailConnected ? (
-          <span className="flex items-center gap-1.5 text-xs text-green-400 font-mono uppercase tracking-wider">
-            <Check className="h-3.5 w-3.5" />
-            Connected
-          </span>
+      <div className="space-y-3">
+        <ConnectRow
+          icon={<Mail className="h-5 w-5 text-[#8A8680]" />}
+          name="Gmail"
+          description="Email monitoring and actions"
+          connected={isGmailConnected}
+          connecting={connecting === "gmail"}
+          onConnect={() => handleComposioConnect("gmail")}
+          required
+        />
+
+        <ConnectRow
+          icon={<Calendar className="h-5 w-5 text-[#8A8680]" />}
+          name="Google Calendar"
+          description="Calendar events and scheduling"
+          connected={isCalendarConnected}
+          connecting={connecting === "googlecalendar"}
+          onConnect={() => handleComposioConnect("googlecalendar")}
+        />
+
+        {extraApp ? (
+          <ConnectRow
+            icon={<Puzzle className="h-5 w-5 text-[#8A8680]" />}
+            name={extraApp.name}
+            description={`Connected via Composio`}
+            connected={isExtraConnected}
+            connecting={connecting === extraApp.slug}
+            onConnect={() => handleComposioConnect(extraApp.slug)}
+          />
         ) : (
-          <Button variant="outline" size="sm" onClick={onConnectGmail}>
-            Connect
-          </Button>
+          <button
+            type="button"
+            onClick={() => setShowCatalog(true)}
+            className="w-full rounded-lg border border-dashed border-[#333] p-4 flex items-center gap-3 text-left hover:border-[#C9A84C]/30 transition-colors"
+          >
+            <Puzzle className="h-5 w-5 text-[#8A8680]" />
+            <div>
+              <p className="text-sm font-medium text-[#8A8680]">Add another app</p>
+              <p className="text-xs text-[#8A8680]/60">Notion, GitHub, Slack, Linear, and 1000+ more</p>
+            </div>
+          </button>
         )}
       </div>
+
+      {/* Mini catalog modal */}
+      {showCatalog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-md rounded-xl border border-[#333] bg-[#111] p-6 shadow-2xl">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-medium text-[#F0EDE8]">Choose an app</h3>
+              <button onClick={() => setShowCatalog(false)} className="text-[#8A8680] hover:text-[#F0EDE8]">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="relative mb-3">
+              <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#8A8680]" />
+              <input
+                type="text"
+                placeholder="Search apps..."
+                value={catalogSearch}
+                onChange={(e) => setCatalogSearch(e.target.value)}
+                className="w-full rounded-lg border border-[#333] bg-black/50 py-2 pl-9 pr-3 text-sm text-[#F0EDE8] placeholder-[#8A8680]/60 outline-none focus:border-[#C9A84C]/30"
+                autoFocus
+              />
+            </div>
+            <div className="max-h-60 overflow-y-auto space-y-1">
+              {catalogApps.slice(0, 20).map((app: any) => (
+                <button
+                  key={app.slug}
+                  onClick={() => {
+                    setExtraApp({ slug: app.slug, name: app.name });
+                    setShowCatalog(false);
+                    setCatalogSearch("");
+                    handleComposioConnect(app.slug);
+                  }}
+                  className="w-full rounded-lg px-3 py-2 text-left hover:bg-white/[0.04] transition-colors"
+                >
+                  <span className="text-sm text-[#F0EDE8]">{app.name}</span>
+                  {app.category && (
+                    <span className="ml-2 text-[0.6rem] text-[#8A8680]">{app.category}</span>
+                  )}
+                </button>
+              ))}
+              {catalogApps.length === 0 && (
+                <p className="text-center text-xs text-[#8A8680] py-4">No apps found</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="mt-8 flex items-center justify-between">
         <button
           type="button"
           onClick={onBack}
-          className="flex items-center gap-1.5 text-sm text-[#8A8680] hover:text-cream transition-colors"
+          className="flex items-center gap-1.5 text-sm text-[#8A8680] hover:text-[#F0EDE8] transition-colors"
         >
           <ArrowLeft className="h-3.5 w-3.5" />
           Back
         </button>
-        <Button onClick={onNext}>
-          {gmailConnected ? "Next" : "Skip for now"}
+        <Button onClick={onNext} disabled={!isGmailConnected}>
+          {isGmailConnected ? "Next" : "Connect Gmail to continue"}
           <ArrowRight className="ml-2 h-4 w-4" />
         </Button>
       </div>
