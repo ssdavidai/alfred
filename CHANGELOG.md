@@ -2,6 +2,113 @@
 
 All notable changes to the alfred-platform monorepo.
 
+## [2026.04.11] — 2026-04-11
+
+### Connected Apps — Composio Integration Marketplace
+
+- **1000+ app catalog** (#387): browsable toolkit catalog with search and category filtering, cached 1h server-side. Browse Gmail, Notion, Slack, GitHub, Stripe, Linear, and 1000+ more via Composio.
+- **OAuth popup connect flow** (#387, #391): one-click app connection via Composio-managed OAuth. Credentials stored server-side at Composio — never touch the tenant VPS.
+- **`composio_execute` gateway tool** (#391): single tool for executing any Composio action. The agent calls `composio_execute action="GOOGLECALENDAR_CREATE_EVENT" arguments={...}` instead of 300+ individual tools polluting the context window.
+- **Auto-generated skill files** (#391): each connected app gets a `alfred-composio-{toolkit}/SKILL.md` with action tables, type classification, and usage examples. Written to both main and workers workspaces.
+- **Auto-config on connect** (#391, #393): `POST /api/v1/integrations/:id/auto-config` creates the recommended stream, Temporal schedule, skill file, and gateway entry in one call. No manual configuration needed.
+- **Capabilities classification** (#387): actions classified as stream (read verbs: FETCH, LIST, GET) or tool (write verbs: SEND, CREATE, UPDATE, DELETE) using heuristic verb matching.
+- **Disconnect cleanup** (#390, #391): removes streams, schedules, skills, and gateway entries when an app is disconnected. Removes `composio_execute` from gateway if no connections remain.
+- **Recommended apps section** (#397): IntegrationsPage shows Gmail, Notion, Calendar, GitHub as recommended if not yet connected via Composio.
+- **Legacy stream migration** (#397): connecting an app via Composio auto-disables the legacy OAuth stream for that source (status: `migrated-to-composio`).
+
+### Zero-LLM Stream Ingest
+
+- **Pure Python vault record templates** (#394): every stream event creates a vault `event/` record using per-source templates (calendar, email, github, slack, notion, payment, generic). Zero LLM calls at ingest time.
+- **EventProcessor rewrite** (#394): replaces Tier 1 (inbox → curator → 4+ LLM calls) with direct vault record creation. System-inbox uploads still route to curator. 97% reduction in LLM calls.
+- **Stream log for all events** (#394): every non-garbage event gets a one-line entry in `memory/stream-log-YYYY-MM-DD.md`, not just Tier 2 events.
+
+### Hourly Batch Enrichment
+
+- **HourlyEnrichmentWorkflow** (#395): collects all vault event records with `enrichment_status: pending`, sends ONE batched clerk LLM call per 200 records. Extracts entities, topic tags, related matters, action items, priority.
+- **Entity auto-creation** (#395): discovers new people/orgs from enrichment and creates vault records.
+- **Wikilink injection** (#395): adds `[[person/Name]]` and `[[org/Name]]` links to enriched event bodies.
+- **Schedule**: `al-hourly-enrichment`, every 1 hour. Cost: ~25 LLM calls/day regardless of event volume (was 800+).
+
+### Incremental Stream Sync
+
+- **`pull_mode` field** (#396): streams support `snapshot` (blind fetch), `append` (after timestamp), `sync` (backfill + sync token). Unknown apps default to `snapshot`.
+- **`SYNC_CONFIGS` per-action mapping** (#396): configures backfill args, incremental args, cursor extraction, and time windows per Composio action. Placeholder-based templates with recursive resolution.
+- **Google Calendar sync mode** (#396, #400): uses `nextSyncToken` for true delta sync. First run backfills 30 days past + 90 days future. Subsequent runs fetch only created/modified/deleted events (0-3 per poll instead of 250).
+- **Gmail/GitHub/Notion append mode** (#396): time-based incremental filtering using `last_pull_at`.
+- **Sync token reset handling** (#396): detects 410 Gone (stale token), auto-triggers full backfill.
+- **Composio parser status detection** (#396): detects `status: cancelled` in Calendar sync responses for delete handling.
+
+### Onboarding — Connect Your Apps
+
+- **StepConnectApps** (#398): replaces Gmail-only onboarding step 3 with multi-app Composio connection. Gmail (required) + Google Calendar (recommended) + optional third app from 1000+ catalog.
+- **Mini catalog modal** (#398): search-enabled app picker for the optional third connection during onboarding.
+- **Post-onboarding finalization** (#399): after the pipeline completes and brief is ready, `finalizeComposioConnections` auto-configs all Composio connections (streams, skills, legacy migration).
+
+### Composio Stream Pulling
+
+- **Composio parser** (#388): normalizes Composio SDK responses into ParsedEvents. Handles nested data wrappers, email/page/payment type classification, ID extraction.
+- **`composio_pull` activity** (#388): executes Composio actions via SDK with `dangerously_skip_version_check` (#392) and per-action default arguments (#392).
+- **StreamPuller Composio branch** (#388): when stream config has `composio_action`, routes through `composio_pull` instead of HTTP pull.
+
+### Infrastructure & Operations
+
+- **Workers model fix**: all 5 worker agents (curator, janitor, distiller, surveyor, clerk) switched from GPT-5.4 to `google/gemini-3.1-flash-lite-preview` to prevent quota exhaustion.
+- **Compose template**: ctrl-api now mounts `openclaw-workers` volume for cross-workspace skill writes.
+- **TOOLS.md**: updated with Connected Apps section documenting `ctrl_composio_execute`.
+- **init/entrypoint.sh**: comment documenting `composio_execute` is managed dynamically, not in static allowlist.
+
+### Packages Changed
+
+- `packages/ctrl` — 7 new integration routes, `composio_execute` tool dispatch, auto-config endpoint, SYNC_MODE mapping, `pull_mode` schema extension
+- `packages/learn` — composio parser, composio_pull activity, zero-LLM stream_vault templates, hourly enrichment workflow, incremental sync engine, build_sync_args activity
+- `packages/saas` — IntegrationsPage, StepConnectApps onboarding, finalizeComposioConnections, 12 new Wasp operations
+- `packages/openclaw` — TOOLS.md update, init entrypoint comment
+
+---
+
+## [2026.04.09] — 2026-04-09
+
+### Chore System
+
+- **Bespoke chore generation** (S4, #370): Opus generates custom Python Temporal workflows per-tenant, validates statically, smoke-tests in subprocess sandbox, deploys to `/alfred-data/user-chores/`.
+- **Chore quarantine** (#370): first 3 runs of every generated chore are dry-run (no notifications, no vault writes). Auto-releases after 3 clean runs.
+- **Chore source audit** (#370, #371): ChoreDetailPage renders the full Python source + dependency audit showing which activities the workflow imports and what data each depends on.
+- **Per-chore schedule emission** (#372): generated chores emit their own cron schedule in a header comment.
+
+### Opus-Authored Packs (Plan B)
+
+- **Matter pack** (#342): Opus generates rich matter records with detailed bodies.
+- **Errand pack** (#344): Opus generates actionable errands linked to matters.
+- **Instinct pack** (#346): Opus generates instinct records with confidence scores.
+
+### Chores UI (Plan C)
+
+- **Chores tab** (#349, #351, #353): user-facing chore management with pause/resume/trigger/delete, `user_facing_description` field, detail page.
+
+### Intelligence Streamlining (Plan E)
+
+- **5-tab layout** (#367): Inbox, Matters, Errands, Chores, Activity.
+
+### Learning Pipeline Fix (Plan F)
+
+- **Observation filename collisions** (#359): resolved.
+- **Learning zeros bug** (#360): fixed.
+
+### Main Agent Tool Surface
+
+- **45-tool allowlist** (#373): `gateway.tools.allow` merged up from 10 to 45 tools at provision time.
+- **Workspace template system** (#373): `packages/openclaw/workspace-template/` with 4 alfred-* skills + TOOLS.md capability reference.
+
+### Progressive Autonomy Pipeline
+
+- **Observation hook** (#375): captures user instructions from conversations.
+- **Approval flow** (#377, #380): wire approval for execution tasks.
+- **Instinct execution schema** (#374): add execution schema to instinct prompts.
+- **Ephemeral subagents** (#378, #385): spawn scoped agents on openclaw-workers for task execution.
+- **Composio tool belt** (#376, #384): initial Composio SDK integration for tool readiness checking.
+
+---
+
 ## [0.2.0] — 2026-03-22
 
 ### ✨ Features
