@@ -15,6 +15,8 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.pull import (
+        SYNC_CONFIGS,
+        build_sync_args,
         composio_pull,
         http_pull,
         http_pull_detail,
@@ -213,16 +215,41 @@ class StreamPullerWorkflow:
         action_slug: str,
         result: PullerResult,
     ) -> PullerResult:
-        """Execute a Composio action and ingest the results as stream events."""
-        # Execute the Composio action
+        """Execute a Composio action with incremental sync support."""
+        cursor_value = config.get("cursor_value", "")
+        last_pull_at = config.get("last_pull_at", "")
+
+        # 1. Compute sync arguments (backfill or incremental)
+        sync_args: dict[str, Any] = await workflow.execute_activity(
+            build_sync_args,
+            args=[action_slug, cursor_value, last_pull_at],
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+
+        # 2. Execute the Composio action
         raw_response: dict[str, Any] = await workflow.execute_activity(
             composio_pull,
-            args=[action_slug, {}],
+            args=[action_slug, sync_args],
             start_to_close_timeout=timedelta(seconds=120),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
-        # Ingest through the composio parser
+        # 3. Handle sync token reset (e.g. Calendar 410 Gone)
+        if _is_sync_reset(raw_response):
+            # Re-run as backfill with cleared cursor
+            sync_args = await workflow.execute_activity(
+                build_sync_args,
+                args=[action_slug, "", ""],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+            raw_response = await workflow.execute_activity(
+                composio_pull,
+                args=[action_slug, sync_args],
+                start_to_close_timeout=timedelta(seconds=120),
+                retry_policy=RetryPolicy(maximum_attempts=3),
+            )
+
+        # 4. Ingest through the composio parser
         parser_name = config.get("parser", "composio")
         stream_type = config.get("type", "composio")
 
@@ -232,19 +259,51 @@ class StreamPullerWorkflow:
             start_to_close_timeout=timedelta(seconds=60),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
-
         result.events_ingested = ingested_count
-        result.events_pulled = 1  # One Composio action call
+        result.events_pulled = 1
 
-        # Update pull timestamp
+        # 5. Extract cursor from response (for sync mode)
+        new_cursor = _extract_sync_cursor(raw_response, action_slug)
+
+        # 6. Update cursor + timestamp
         await workflow.execute_activity(
             update_cursor,
-            args=[stream_id, ""],
+            args=[stream_id, new_cursor],
             start_to_close_timeout=timedelta(seconds=30),
         )
         result.cursor_updated = True
-
         return result
+
+
+def _is_sync_reset(response: dict) -> bool:
+    """Detect if the API signals a full sync is required (e.g. Calendar 410 Gone)."""
+    for container in [response, response.get("data", {}),
+                      (response.get("data", {}) or {}).get("response_data", {})]:
+        if not isinstance(container, dict):
+            continue
+        error = str(container.get("error", ""))
+        if "410" in error or "fullsyncrequired" in error.lower() or "sync token" in error.lower():
+            return True
+    return False
+
+
+def _extract_sync_cursor(response: dict, action_slug: str) -> str:
+    """Extract the continuation/sync token from a Composio response."""
+    sync_cfg = SYNC_CONFIGS.get(action_slug, {})
+    field = sync_cfg.get("cursor_response_field", "")
+    if not field:
+        return ""
+    # Try top level
+    val = _extract_cursor(response, field)
+    if val:
+        return val
+    # Try inside Composio data wrapper
+    data = response.get("data", {})
+    if isinstance(data, dict):
+        rd = data.get("response_data", data)
+        if isinstance(rd, dict):
+            return _extract_cursor(rd, field)
+    return ""
 
 
 def _extract_cursor(response: dict, cursor_field: str) -> str:

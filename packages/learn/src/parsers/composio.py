@@ -126,6 +126,11 @@ def _item_to_event(item: dict) -> ParsedEvent:
     # Classify event type from common patterns
     event_type = _classify_event_type(item)
 
+    # Detect cancelled/deleted items (e.g. Calendar sync returns status: cancelled)
+    item_status = item.get("status", "")
+    if item_status == "cancelled":
+        event_type = "cancelled"
+
     return ParsedEvent(
         source_ref=source_ref,
         summary=str(summary)[:500],
@@ -140,6 +145,7 @@ def _item_to_event(item: dict) -> ParsedEvent:
                 "subject": item.get("subject"),
                 "labels": item.get("labelIds") or item.get("labels"),
                 "thread_id": item.get("threadId") or item.get("thread_id"),
+                "status": item_status or None,
             }.items()
             if v
         },

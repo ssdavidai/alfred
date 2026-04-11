@@ -242,6 +242,14 @@ const RECOMMENDED_STREAMS: Record<string, {
   notion:         { action: "NOTION_LIST_PAGES",          name: "Notion Pages",     interval: 600, args: {} },
 };
 
+const SYNC_MODE: Record<string, "snapshot" | "append" | "sync"> = {
+  googlecalendar: "sync",
+  gmail: "append",
+  slack: "append",
+  github: "append",
+  notion: "append",
+};
+
 const DEFAULT_ARGS: Record<string, Record<string, unknown>> = {
   GOOGLECALENDAR_EVENTS_LIST: { calendarId: "primary" },
   GOOGLECALENDAR_FIND_EVENT: { calendarId: "primary" },
@@ -1094,6 +1102,7 @@ print(json.dumps(result, default=str))
           composio_toolkit: toolkit,
           parser: "composio",
           schedule_interval_seconds: rec.interval,
+          pull_mode: SYNC_MODE[toolkit] || "snapshot",
         };
 
         // Write stream config

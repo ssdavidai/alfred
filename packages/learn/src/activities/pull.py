@@ -368,6 +368,151 @@ def _default_args(action_slug: str) -> dict[str, Any]:
     return _ACTION_DEFAULTS.get(action_slug, {})
 
 
+# ---------------------------------------------------------------------------
+# Incremental sync configs per Composio action
+# ---------------------------------------------------------------------------
+
+SYNC_CONFIGS: dict[str, dict[str, Any]] = {
+    "GOOGLECALENDAR_EVENTS_LIST": {
+        "pull_mode": "sync",
+        "backfill_args": {
+            "timeMin": "{backfill_start}",
+            "timeMax": "{backfill_end}",
+            "singleEvents": True,
+            "orderBy": "startTime",
+            "maxResults": 2500,
+        },
+        "incremental_args": {
+            "syncToken": "{cursor_value}",
+        },
+        "cursor_response_field": "nextSyncToken",
+        "backfill_past_days": 30,
+        "backfill_future_days": 90,
+    },
+    "GMAIL_FETCH_EMAILS": {
+        "pull_mode": "append",
+        "backfill_args": {
+            "query": "after:{backfill_date} -in:drafts -in:spam -in:trash -in:chats",
+            "max_results": 100,
+        },
+        "incremental_args": {
+            "query": "after:{last_pull_date} -in:drafts -in:spam -in:trash -in:chats",
+            "max_results": 100,
+        },
+        "cursor_response_field": "",
+        "backfill_past_days": 30,
+    },
+    "SLACK_LIST_MESSAGES": {
+        "pull_mode": "append",
+        "backfill_args": {"oldest": "{backfill_ts}", "limit": 200},
+        "incremental_args": {"oldest": "{last_pull_ts}", "limit": 200},
+        "cursor_response_field": "",
+        "backfill_past_days": 7,
+    },
+    "GITHUB_LIST_NOTIFICATIONS": {
+        "pull_mode": "append",
+        "backfill_args": {"since": "{backfill_iso}", "all": True},
+        "incremental_args": {"since": "{last_pull_iso}", "all": True},
+        "cursor_response_field": "",
+        "backfill_past_days": 14,
+    },
+    "NOTION_LIST_PAGES": {
+        "pull_mode": "append",
+        "backfill_args": {
+            "filter": {"timestamp": "last_edited_time", "last_edited_time": {"after": "{backfill_iso}"}},
+        },
+        "incremental_args": {
+            "filter": {"timestamp": "last_edited_time", "last_edited_time": {"after": "{last_pull_iso}"}},
+        },
+        "cursor_response_field": "",
+        "backfill_past_days": 30,
+    },
+}
+
+
+@activity.defn
+async def build_sync_args(
+    action_slug: str,
+    cursor_value: str,
+    last_pull_at: str,
+) -> dict[str, Any]:
+    """Compute arguments for an incremental or backfill pull based on sync config."""
+    sync_cfg = SYNC_CONFIGS.get(action_slug)
+    if not sync_cfg:
+        return {}
+
+    pull_mode = sync_cfg.get("pull_mode", "snapshot")
+
+    # Determine if incremental or backfill
+    if pull_mode == "sync":
+        is_incremental = bool(cursor_value)
+    else:  # append
+        is_incremental = bool(last_pull_at)
+
+    template = sync_cfg["incremental_args"] if is_incremental else sync_cfg["backfill_args"]
+    args = _resolve_placeholders(template, cursor_value, last_pull_at, sync_cfg)
+    logger.info(
+        "build_sync_args: %s mode=%s incremental=%s args_keys=%s",
+        action_slug, pull_mode, is_incremental, list(args.keys()),
+    )
+    return args
+
+
+def _resolve_placeholders(
+    template: Any,
+    cursor_value: str,
+    last_pull_at: str,
+    sync_cfg: dict[str, Any],
+) -> Any:
+    """Recursively replace placeholder strings in a template dict/list/str."""
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    past_days = sync_cfg.get("backfill_past_days", 30)
+    future_days = sync_cfg.get("backfill_future_days", 0)
+    backfill_start = now - timedelta(days=past_days)
+    backfill_end = now + timedelta(days=future_days)
+
+    # Parse last_pull_at into datetime for formatting
+    lp_dt = now - timedelta(days=1)  # default: 1 day ago
+    if last_pull_at:
+        try:
+            lp_dt = datetime.fromisoformat(last_pull_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            pass
+
+    replacements = {
+        "{cursor_value}": cursor_value,
+        "{last_pull_date}": lp_dt.strftime("%Y/%m/%d"),
+        "{last_pull_iso}": lp_dt.isoformat(),
+        "{last_pull_ts}": str(int(lp_dt.timestamp())),
+        "{backfill_start}": backfill_start.isoformat(),
+        "{backfill_end}": backfill_end.isoformat(),
+        "{backfill_date}": backfill_start.strftime("%Y/%m/%d"),
+        "{backfill_iso}": backfill_start.isoformat(),
+        "{backfill_ts}": str(int(backfill_start.timestamp())),
+    }
+
+    return _replace_recursive(template, replacements)
+
+
+def _replace_recursive(value: Any, replacements: dict[str, str]) -> Any:
+    """Recursively replace placeholders in nested structures."""
+    if isinstance(value, str):
+        for placeholder, replacement in replacements.items():
+            if placeholder in value:
+                # If the entire value is just the placeholder, return the replacement directly
+                if value == placeholder:
+                    return replacement
+                value = value.replace(placeholder, replacement)
+        return value
+    if isinstance(value, dict):
+        return {k: _replace_recursive(v, replacements) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_replace_recursive(item, replacements) for item in value]
+    return value
+
+
 def _ctrl_client(config: Any) -> httpx.AsyncClient:
     """Create an authenticated httpx client for the ctrl API."""
     import os

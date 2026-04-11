@@ -79,6 +79,8 @@ interface StreamConfig {
   composio_action?: string;
   composio_connection_id?: string;
   composio_toolkit?: string;
+  // Incremental sync
+  pull_mode?: "snapshot" | "append" | "sync";
 }
 
 const SYSTEM_STREAMS: StreamMeta[] = [
@@ -631,6 +633,7 @@ export function registerStreamRoutes(): void {
       "schedule_cron", "schedule_interval_seconds",
       "last_pull_at", "last_pull_status", "last_pull_count",
       "composio_action", "composio_connection_id", "composio_toolkit",
+      "pull_mode",
       "name", "type", "source", "enabled",
     ] as const;
 

@@ -112,6 +112,7 @@ from src.activities.onboarding_v3 import (
 )
 from src.activities.pull import (
     backfill_gmail_as_events,
+    build_sync_args,
     composio_pull,
     http_pull,
     http_pull_detail,
@@ -341,6 +342,7 @@ ALL_ACTIVITIES = [
     ensure_enrichment_entities,
     # Pull
     backfill_gmail_as_events,
+    build_sync_args,
     composio_pull,
     http_pull,
     http_pull_detail,
