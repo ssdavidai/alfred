@@ -11,9 +11,11 @@
  *   NODE_PATH     — must include /app/node_modules for SDK resolution
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
+// Use absolute paths for imports since this script runs outside /app/
+// and Node ESM doesn't use NODE_PATH for resolution.
+import { McpServer } from "/app/node_modules/@modelcontextprotocol/sdk/dist/esm/server/mcp.js";
+import { StdioServerTransport } from "/app/node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js";
+import { z } from "/app/node_modules/zod/index.js";
 
 const CTRL_URL = process.env.CTRL_API_URL || "http://ctrl-api:3100";
 const API_KEY = process.env.AAS_API_KEY || "";
