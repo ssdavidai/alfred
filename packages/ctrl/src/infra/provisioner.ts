@@ -245,6 +245,10 @@ export async function provision(
     if (config.openrouter_api_key) {
       envLines.push(`OPENROUTER_API_KEY=${config.openrouter_api_key}`);
     }
+    // Platform-level keys — shared across all tenants
+    if (process.env.GROQ_API_KEY) {
+      envLines.push(`GROQ_API_KEY=${process.env.GROQ_API_KEY}`);
+    }
     await ssh.exec(
       server.public_net.ipv4.ip,
       keyPair.privateKeyPath,

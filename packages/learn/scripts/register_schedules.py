@@ -51,6 +51,11 @@ INTERVAL_SCHEDULES = [
         "workflow": "HourlyEnrichmentWorkflow",
         "interval": timedelta(hours=1),
     },
+    {
+        "id": "al-omi-processor",
+        "workflow": "OmiAudioProcessorWorkflow",
+        "interval": timedelta(minutes=10),
+    },
 ]
 
 CALENDAR_SCHEDULES = [
