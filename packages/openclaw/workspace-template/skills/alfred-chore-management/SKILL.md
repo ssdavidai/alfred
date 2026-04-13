@@ -16,26 +16,28 @@ Chores are Sir's recurring background workflows. Each one is a bespoke Python Te
 1. **Vault record** (`chore/<slug>.md`) — the user-facing configuration: name, schedule, status, description, run log, quarantine state.
 2. **Temporal schedule** — the actual recurring invocation, registered with Temporal. Its ID is `chore-<slug>`.
 
-Both layers must stay in sync. The `ctrl_schedules_*` tools manipulate the Temporal side; the `ctrl_vault_*` tools read the vault side.
+Both layers must stay in sync. Use the `ctrl` tool to query both sides.
 
-## Tools available to you
+## Endpoints for chore management
 
 ### Read
 
-- **`ctrl_vault_list`** `type=chore` — list all chore records, with frontmatter (name, schedule, status, template, quarantine, last_run).
-- **`ctrl_vault_read`** `{path}` — read the full chore body, which includes the run log and generated description.
-- **`ctrl_schedules_list`** — list all Temporal schedules on the tenant. Cross-reference with vault records to spot orphans.
+- **`ctrl endpoint="/api/v1/chores"`** — list all chore records, with frontmatter (name, schedule, status, template, quarantine, last_run).
+- **`ctrl endpoint="/api/v1/chores/{slug}"`** — read the full chore body, including run log and generated description.
+- **`ctrl endpoint="/api/v1/chores/{slug}/source"`** — full generated Python source + dependency audit.
+- **`ctrl endpoint="/api/v1/schedules"`** — list all Temporal schedules. Cross-reference with vault records to spot orphans.
 
 ### Act
 
-- **`ctrl_schedules_trigger`** `{schId}` — manually fire a chore once, out of cycle. Returns a workflow execution id. Use when Sir says "run the cashflow forecast now".
-- **`ctrl_schedules_pause`** `{schId}` — pause a schedule. Its vault record's status should also be flipped to `paused` — use `ctrl_vault_update` afterwards.
-- **`ctrl_schedules_unpause`** `{schId}` — resume a paused schedule. Also flip the vault status back to `active`.
+- **`ctrl endpoint="/api/v1/chores/{slug}/trigger" method="POST"`** — manually fire a chore once, out of cycle. Use when Sir says "run the cashflow forecast now".
+- **`ctrl endpoint="/api/v1/chores/{slug}/pause" method="POST"`** — pause a chore (both vault record and Temporal schedule).
+- **`ctrl endpoint="/api/v1/chores/{slug}/resume" method="POST"`** — resume a paused chore.
+- **`ctrl endpoint="/api/v1/chores/{slug}" method="DELETE"`** — remove a chore and its schedule.
 
-### Related tools
+### Related
 
-- **`ctrl_workflows_list`** — find recently executed workflow runs, including chore runs. Use to answer "did the Monday digest run?".
-- **`ctrl_workflows_get`** `{wfId}` — inspect a specific workflow execution. Shows activities, results, failures.
+- **`ctrl endpoint="/api/v1/workflows"`** — find recently executed workflow runs, including chore runs.
+- **`ctrl endpoint="/api/v1/workflows/{wfId}"`** — inspect a specific workflow execution.
 
 ## Chore anatomy (what to tell Sir if he asks)
 
@@ -63,21 +65,21 @@ When onboarding generates a new chore template, the first 3 scheduled runs are m
 
 ## Good behavior
 
-1. **Always cross-reference vault and Temporal.** Before reporting a chore's status, check both `ctrl_vault_list type=chore` (for the frontmatter) AND `ctrl_schedules_list` (for the Temporal reality). Divergence means a bug.
-2. **Manual triggers are non-destructive** if the chore is in dry-run mode; noisy if live. Confirm with Sir before triggering a live chore if it sends notifications.
-3. **Never delete a chore file without also removing its Temporal schedule.** The `delete_chore` API handles both; doing it piecemeal via `ctrl_vault_delete` leaves an orphaned schedule that fires forever.
-4. **Pause > delete.** If Sir wants a chore "off", prefer pausing. It preserves run history and lets him turn it back on later.
+1. **Always cross-reference chore record and schedule.** Before reporting a chore's status, check both `ctrl endpoint="/api/v1/chores"` (vault) AND `ctrl endpoint="/api/v1/schedules"` (Temporal). Divergence means a bug.
+2. **Manual triggers are non-destructive** if the chore is in dry-run mode; noisy if live. Confirm with Sir before triggering a live chore.
+3. **Use the chore API for delete** — `ctrl endpoint="/api/v1/chores/{slug}" method="DELETE"` handles both vault record and Temporal schedule cleanup.
+4. **Pause > delete.** If Sir wants a chore "off", prefer pausing. It preserves run history.
 
 ## Examples
 
 **Sir: "What chores do I have?"**
-→ `ctrl_vault_list type=chore` → group by status, show name + schedule + last_run for each.
+→ `ctrl endpoint="/api/v1/chores"` → group by status, show name + schedule + last_run for each.
 
 **Sir: "Run the weekly matter digest for NeoTerra now."**
-→ `ctrl_vault_search query="NeoTerra" type=chore` → confirm schedule_id → `ctrl_schedules_trigger` → report the workflow execution id and expected completion window.
+→ `ctrl endpoint="/api/v1/vault/search" query={"grep": "NeoTerra", "type": "chore"}` → confirm slug → `ctrl endpoint="/api/v1/chores/{slug}/trigger" method="POST"`.
 
 **Sir: "Pause the gym nudge until next month."**
-→ `ctrl_schedules_pause schId=chore-gym-and-health-check-in` → `ctrl_vault_update path=chore/gym-and-health-check-in.md set={status: paused, paused_until: "2026-05-01"}`.
+→ `ctrl endpoint="/api/v1/chores/gym-and-health-check-in/pause" method="POST"`.
 
 **Sir: "Did the Monday digest fire this week?"**
-→ `ctrl_workflows_list` filter by type `WeeklyMatterDigestWorkflow` → or read the chore record's run log section.
+→ `ctrl endpoint="/api/v1/workflows"` → filter by type → or read the chore record's run log section.

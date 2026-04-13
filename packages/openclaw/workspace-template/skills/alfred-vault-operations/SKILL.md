@@ -25,26 +25,26 @@ The vault is Sir's personal knowledge graph. Every important fact, relationship,
 | `reflection` | `reflection/` | Synthesized insights from the learning pipeline's judgment step. |
 | `note` / `decision` / `project` / `asset` / ... | various | General knowledge entries. |
 
-## Tools available to you
+## How to call vault operations
 
-All of these reach ctrl-api and then the vault filesystem. You never bypass them.
+All vault operations go through the `ctrl` MCP tool. Never bypass it — never `bash cat` vault files or `docker ps` containers.
 
 ### Read
 
-- **`ctrl_vault_context`** — one-shot overview: counts per type + recent records. Use this FIRST if you don't know what's in the vault.
-- **`ctrl_vault_list`** `{type}` — list all records of a given type. Returns path, name, status, frontmatter, and a body preview. Example: `ctrl_vault_list type=matter`.
-- **`ctrl_vault_read`** `{path}` — read a full record by its path relative to the vault root. Example: `matter/growing-family-hannas-first-year.md`.
-- **`ctrl_vault_search`** `{query, type?}` — full-text search. Optional type filter scopes to one kind of record.
-- **`ctrl_vault_graph`** — fetch the relationship graph (who/what links to what). Useful when Sir asks "what's related to X".
-- **`ctrl_vault_schema`** — look up the allowed fields + status enums for a given record type before you write one.
-- **`ctrl_vault_inbox`** — list files sitting in the inbox waiting for the curator. Use to answer "what haven't you processed yet".
+- **`ctrl endpoint="/api/v1/vault/context"`** — one-shot overview: counts per type + recent records. Use this FIRST if you don't know what's in the vault.
+- **`ctrl endpoint="/api/v1/vault/list/{type}"`** — list all records of a given type. Replace `{type}` with `matter`, `task`, `chore`, `note`, `person`, `org`, etc. Returns path, name, status, frontmatter, and a body preview.
+- **`ctrl endpoint="/api/v1/vault/records/{path}"`** — read a full record by its path relative to the vault root. Example: `ctrl endpoint="/api/v1/vault/records/matter/growing-family.md"`.
+- **`ctrl endpoint="/api/v1/vault/search" query={"grep": "Firstbase", "type": "decision"}`** — full-text search. Optional `type` filter scopes to one kind of record.
+- **`ctrl endpoint="/api/v1/vault/graph"`** — fetch the relationship graph (who/what links to what). Useful when Sir asks "what's related to X".
+- **`ctrl endpoint="/api/v1/vault/schema"`** — look up the allowed fields + status enums for a given record type before you write one.
+- **`ctrl endpoint="/api/v1/vault/inbox"`** — list files sitting in the inbox waiting for processing.
 
 ### Write
 
-- **`ctrl_vault_create`** `{path, content, frontmatter?}` — create a brand new record. Body is markdown, frontmatter is a dict of YAML keys. Check the schema first for required fields.
-- **`ctrl_vault_update`** `{path, set}` — patch the frontmatter of an existing record (change status, add a tag, update owner, etc). Body stays unchanged.
-- **`ctrl_vault_inbox_add`** `{path, content}` — drop something into the inbox for the curator to process asynchronously. Use when Sir wants you to remember an unstructured blob without committing to a type.
-- **`ctrl_vault_delete`** `{path}` — delete a record. **Use sparingly and only when Sir explicitly asks you to delete something specific.** Never delete to "clean up" without being asked.
+- **`ctrl endpoint="/api/v1/vault/records" method="POST" body={"type": "task", "name": "my-task", "content": "..."}`** — create a new record. Check the schema first for required fields.
+- **`ctrl endpoint="/api/v1/vault/records/{path}" method="PATCH" body={"set": {"status": "done"}}`** — patch the frontmatter of an existing record (change status, add a tag, update owner, etc).
+- **`ctrl endpoint="/api/v1/vault/inbox" method="POST" body={"filename": "note.md", "content": "..."}`** — drop something into the inbox for processing.
+- **`ctrl endpoint="/api/v1/vault/records/{path}" method="DELETE"`** — delete a record. **Only when Sir explicitly asks.**
 
 ## Good behavior
 
@@ -57,13 +57,13 @@ All of these reach ctrl-api and then the vault filesystem. You never bypass them
 ## Examples
 
 **Sir: "What matters am I actively working on?"**
-→ `ctrl_vault_list type=matter` → filter `status=active` → format as a list grouped by category.
+→ `ctrl endpoint="/api/v1/vault/list/matter"` → filter `status=active` → format as a list grouped by category.
 
 **Sir: "Remind me what we decided about the Firstbase move."**
-→ `ctrl_vault_search query="Firstbase" type=decision` → read the top result with `ctrl_vault_read`.
+→ `ctrl endpoint="/api/v1/vault/search" query={"grep": "Firstbase", "type": "decision"}` → read the top result with `ctrl endpoint="/api/v1/vault/records/{path}"`.
 
 **Sir: "Add an errand to follow up with Robert Clarke next week."**
-→ `ctrl_vault_schema type=task` → `ctrl_vault_create path=task/Follow up with Robert Clarke.md` with frontmatter `{type: task, name: "Follow up with Robert Clarke", status: todo, created: <today>, due: <next week>, owner: human}` and a body referencing `[[person/Robert Clarke]]`.
+→ `ctrl endpoint="/api/v1/vault/schema"` → `ctrl endpoint="/api/v1/vault/records" method="POST" body={"type": "task", "name": "follow-up-robert-clarke", "content": "---\ntype: task\nname: Follow up with Robert Clarke\nstatus: todo\nowner: human\n---\n\n# Follow up with Robert Clarke\n\n[[person/Robert Clarke]]\n"}`
 
 **Sir: "Show me everything related to Ania."**
 → `ctrl_vault_search query=Ania` → for each result, read + present as a linked brief.

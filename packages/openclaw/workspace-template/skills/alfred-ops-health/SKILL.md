@@ -11,30 +11,30 @@ metadata:
 
 Sir's Alfred instance is a Docker stack running on a dedicated VPS. When something is slow, broken, or behaving unexpectedly, these are the tools that let you look under the hood.
 
-## Tools available to you
+## Endpoints
 
 ### Dashboard / health
 
-- **`ctrl_admin_dashboard`** — one-shot snapshot: health, container states, vault stats, recent activity. This is the first place to look.
-- **`ctrl_admin_health`** — runs a health check across all services. Returns pass/fail per service.
-- **`ctrl_admin_system_info`** — CPU / memory / disk / uptime for the host.
+- **`ctrl endpoint="/api/v1/admin/dashboard"`** — one-shot snapshot: health, containers, vault stats, recent activity. **Start here.**
+- **`ctrl endpoint="/api/v1/admin/health"`** — health check across all services. Returns pass/fail per service.
+- **`ctrl endpoint="/api/v1/admin/system/info"`** — CPU / memory / disk / uptime.
 
 ### Containers + workers
 
-- **`ctrl_admin_containers`** — list all Docker containers with status (running / unhealthy / exited).
-- **`ctrl_container_logs`** `{service}` — fetch recent log lines from a given container (e.g. `alfred-learn`, `openclaw`, `ctrl-api`, `temporal`).
-- **`ctrl_workers_status`** — status of the vault worker daemons: `curator` (inbox processor), `janitor` (quality sweeper), `distiller` (latent knowledge), `surveyor` (vector clustering). Each reports last_run, processed_count, error_count.
-- **`ctrl_workers_restart`** — kick a stuck worker. Don't use unless a worker is confirmed stuck.
-- **`ctrl_service_restart`** `{service}` — restart a Docker container. Dangerous — this drops any in-flight work. Only use when Sir explicitly requests it or when a container is definitively wedged.
+- **`ctrl endpoint="/api/v1/admin/containers"`** — list all Docker containers with status.
+- **`ctrl endpoint="/api/v1/admin/containers/{service}/logs"`** — recent logs from a container (e.g. `alfred-learn`, `openclaw`, `ctrl-api`, `temporal`).
+- **`ctrl endpoint="/api/v1/workers/status"`** — curator / janitor / distiller / surveyor status with last_run, processed_count, error_count.
+- **`ctrl endpoint="/api/v1/workers/restart" method="POST"`** — kick a stuck worker. Confirmed stuck only.
+- **`ctrl endpoint="/api/v1/admin/containers/{service}/restart" method="POST"`** — restart a Docker container. **Dangerous — drops in-flight work.**
 
 ### Recent activity
 
-- **`ctrl_admin_activity`** — recent activity log from the tenant API: what endpoints were hit, what workflows fired, what errors occurred.
+- **`ctrl endpoint="/api/v1/admin/activity"`** — recent API activity log.
 
 ### Models + credentials
 
-- **`ctrl_admin_models`** — list AI models available to agents, with which provider credentials are configured.
-- **`ctrl_credentials_list`** — list configured provider credentials (masked). Shows which providers have keys set up (Anthropic, OpenAI, Google, OpenRouter, xAI) and which don't.
+- **`ctrl endpoint="/api/v1/admin/models"`** — available AI models with provider credentials.
+- **`ctrl endpoint="/api/v1/admin/credentials"`** — configured provider credentials (masked).
 
 ## Service map (so you know what to look at)
 
@@ -49,25 +49,22 @@ Sir's Alfred instance is a Docker stack running on a dedicated VPS. When somethi
 
 ## Good behavior
 
-1. **Start with the dashboard.** `ctrl_admin_dashboard` gives you 80% of the picture in one call. Only drill down if it shows something off.
-2. **Never restart without justification.** Every restart interrupts in-flight work. Quote the specific symptom + log evidence before you act.
-3. **Mask secrets when echoing credentials.** `ctrl_credentials_list` returns masked values — don't try to un-mask them or ask Sir to paste the full key.
-4. **Correlate time.** When diagnosing "the digest didn't fire", get the dashboard timestamp, check the schedule's expected cron time, check ctrl_admin_activity around that window, THEN look at container logs if you still don't have an answer.
-5. **Disk space matters.** If `ctrl_admin_system_info` shows disk > 90%, flag it — this causes silent failures across the whole stack (saw it on staging: 102 dangling Docker images filled a 301GB disk).
+1. **Start with the dashboard.** `ctrl endpoint="/api/v1/admin/dashboard"` gives you 80% of the picture in one call.
+2. **Never restart without justification.** Every restart interrupts in-flight work. Quote specific symptom + log evidence.
+3. **Mask secrets.** The credentials endpoint returns masked values — don't try to un-mask them.
+4. **Correlate time.** Dashboard timestamp → schedule cron time → activity log → container logs.
+5. **Disk space matters.** If system info shows disk > 90%, flag it.
 
 ## Examples
 
 **Sir: "Is everything running?"**
-→ `ctrl_admin_dashboard` → summarize container states + any unhealthy services + recent error count.
+→ `ctrl endpoint="/api/v1/admin/dashboard"` → summarize container states + any unhealthy services.
 
 **Sir: "The Monday digest didn't arrive."**
-→ `ctrl_schedules_list` → find the digest → check its last_run → `ctrl_workflows_list` for recent runs of that workflow type → if failed, `ctrl_workflows_get` the failed run → `ctrl_container_logs` alfred-learn for the time window if the workflow ran at all.
+→ `ctrl endpoint="/api/v1/schedules"` → find the digest → `ctrl endpoint="/api/v1/workflows"` for recent runs → if failed, `ctrl endpoint="/api/v1/workflows/{wfId}"` → `ctrl endpoint="/api/v1/admin/containers/alfred-learn/logs"`.
 
 **Sir: "What model is my Alfred using right now?"**
-→ `ctrl_admin_models` → report the currently-configured primary model for the `main` agent + which provider credential is backing it.
-
-**Sir: "Disk space OK on the box?"**
-→ `ctrl_admin_system_info` → report disk usage; flag if > 80%.
+→ `ctrl endpoint="/api/v1/admin/models"` → report primary model + provider.
 
 **Sir: "Why is the inbox not being processed?"**
-→ `ctrl_workers_status` → check curator last_run and error_count → if stale, `ctrl_container_logs` alfred for error messages → only restart if logs show an unrecoverable crash.
+→ `ctrl endpoint="/api/v1/workers/status"` → check curator last_run → if stale, `ctrl endpoint="/api/v1/admin/containers/alfred/logs"` → only restart if logs show crash.

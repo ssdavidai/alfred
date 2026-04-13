@@ -23,6 +23,7 @@ COPY config.yaml.tpl ./config.yaml.tpl
 # are bundled inside the `alfred` Python package and are for the vault
 # worker daemons, not the user-facing agent.
 COPY workspace-template/ ./workspace-template/
+COPY mcp/ ./mcp/
 
 RUN chmod +x entrypoint.sh
 

@@ -94,6 +94,28 @@ if [[ -f "$WORKSPACE_DOCS_SRC" ]]; then
     fi
 fi
 
+# 2d. Deploy MCP server script to openclaw workspace.
+# The ctrl-server.mjs MCP server provides a single `ctrl` tool that calls
+# the tenant's ctrl-api, replacing bash+curl. Deployed to both main openclaw
+# and openclaw-workers state dirs.
+MCP_SRC="/setup/mcp/ctrl-server.mjs"
+if [[ -f "$MCP_SRC" ]]; then
+    SRC_HASH=$(md5sum "$MCP_SRC" | cut -d' ' -f1)
+    for state_dir in /openclaw-state /openclaw-workers-state; do
+        [[ -d "$state_dir" ]] || continue
+        MCP_DST="$state_dir/mcp"
+        mkdir -p "$MCP_DST"
+        HASH_FILE="$MCP_DST/.ctrl-server.content-hash"
+        if [[ -f "$HASH_FILE" ]] && [[ "$(cat "$HASH_FILE")" == "$SRC_HASH" ]]; then
+            echo "[init] MCP ctrl-server unchanged in $state_dir, skipping"
+        else
+            cp "$MCP_SRC" "$MCP_DST/ctrl-server.mjs"
+            echo "$SRC_HASH" > "$HASH_FILE"
+            echo "[init] MCP ctrl-server deployed to $state_dir/mcp/"
+        fi
+    done
+fi
+
 # --- 3. Generate Alfred config.yaml ---
 if [[ ! -f /alfred-data/config.yaml ]]; then
     echo "[init] Generating config.yaml..."
@@ -292,6 +314,41 @@ if added:
     print(f'[init] Added {len(added)} tools to gateway.tools.allow (now {len(merged)})')
 else:
     print(f'[init] gateway.tools.allow already has all {len(merged)} tools in {p}')
+" 2>/dev/null || true
+done
+
+# --- 7c. Register MCP server for ctrl-api access ---
+# Adds mcp.servers.alfred-ctrl so OpenClaw spawns the ctrl MCP server on
+# first session. Env vars must be passed explicitly because MCP child
+# processes only inherit a small set of default env vars.
+for TARGET_CFG in "$MAIN_CFG" "$WORKERS_CFG"; do
+    [[ -f "$TARGET_CFG" ]] || continue
+    python3 -c "
+import json, os
+p = '$TARGET_CFG'
+with open(p) as f: c = json.load(f)
+
+aas_key = os.environ.get('AAS_API_KEY', '')
+
+mcp = c.setdefault('mcp', {})
+servers = mcp.setdefault('servers', {})
+desired = {
+    'command': 'node',
+    'args': ['/home/node/.openclaw/mcp/ctrl-server.mjs'],
+    'env': {
+        'CTRL_API_URL': 'http://ctrl-api:3100',
+        'AAS_API_KEY': aas_key,
+        'NODE_PATH': '/app/node_modules',
+    }
+}
+
+current = servers.get('alfred-ctrl', {})
+if current != desired:
+    servers['alfred-ctrl'] = desired
+    with open(p, 'w') as f: json.dump(c, f, indent=2)
+    print(f'[init] MCP server alfred-ctrl registered in {p}')
+else:
+    print(f'[init] MCP server alfred-ctrl already configured in {p}')
 " 2>/dev/null || true
 done
 
