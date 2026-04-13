@@ -222,6 +222,9 @@ for a in agents:
 # Safe because workers only run stateless agents (clerk, curator, janitor, etc.)
 # The main openclaw instance keeps memory enabled for the user-facing Alfred.
 if is_workers:
+    # Force builtin memory backend — QMD on workers causes OOM crash loops
+    # (it tries to embed the entire vault on boot, exceeding V8 heap limit)
+    c['memory'] = {'backend': 'builtin', 'citations': 'off'}
     plugins = c.setdefault('plugins', {})
     slots = plugins.setdefault('slots', {})
     slots['memory'] = 'none'
