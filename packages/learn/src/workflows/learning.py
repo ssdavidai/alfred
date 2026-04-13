@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.clerk import clerk_extract_instruction_observation, clerk_extract_observation
@@ -71,6 +72,7 @@ class LearningWorkflow:
                 clerk_extract_observation,
                 args=[item],
                 start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
             # Validate (Python)
@@ -100,6 +102,7 @@ class LearningWorkflow:
                 clerk_extract_instruction_observation,
                 args=[hint],
                 start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
             is_valid = await workflow.execute_activity(

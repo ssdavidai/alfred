@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.judge import (
@@ -57,6 +58,7 @@ class JudgmentWorkflow:
                     escalate_to_user,
                     args=[inp, None],
                     start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
                 )
                 escalated += 1
                 continue
@@ -100,6 +102,7 @@ class JudgmentWorkflow:
                     execute_route,
                     args=[inp, destination, routing_context],
                     start_to_close_timeout=timedelta(seconds=120),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
                 )
 
                 # If routing completely failed, escalate instead of silently dropping
@@ -110,6 +113,7 @@ class JudgmentWorkflow:
                         escalate_to_user,
                         args=[inp, best],
                         start_to_close_timeout=timedelta(seconds=15),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
                     )
                     escalated += 1
                     continue
@@ -159,6 +163,7 @@ class JudgmentWorkflow:
                     escalate_to_user,
                     args=[inp, best],
                     start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
                 )
                 escalated += 1
 

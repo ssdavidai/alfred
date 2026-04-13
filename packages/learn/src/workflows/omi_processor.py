@@ -1,8 +1,10 @@
 """Workflow: Omi Audio Processor — scan, group, transcribe, and ingest Omi audio chunks.
 
-Runs every 2 minutes via Temporal schedule. Scans the audio buffer directory for
+Runs every 10 minutes via Temporal schedule. Scans the audio buffer directory for
 unprocessed PCM files, groups them by time proximity into conversations, transcribes
-each group via OpenAI Whisper API, and ingests the transcription as a stream event.
+each group via Groq Whisper API, and ingests the transcription as a stream event.
+
+Caps at 5 groups per run to keep workflows short-lived and resilient to worker restarts.
 """
 
 from __future__ import annotations
@@ -61,14 +63,20 @@ class OmiAudioProcessorWorkflow:
         if not groups:
             return result
 
-        # 3. Transcribe each group and ingest
-        for group in groups:
+        # 3. Transcribe each group and ingest (cap at 5 per run to stay short-lived)
+        max_groups = min(len(groups), 5)
+        if len(groups) > max_groups:
+            workflow.logger.info(
+                "[omi] Capping to %d of %d groups this run", max_groups, len(groups)
+            )
+
+        for group in groups[:max_groups]:
             try:
-                # Transcribe via Whisper API
+                # Transcribe via Groq Whisper API (~3s per group)
                 transcription: dict[str, Any] = await workflow.execute_activity(
                     transcribe_audio_group,
                     args=[group],
-                    start_to_close_timeout=timedelta(minutes=5),
+                    start_to_close_timeout=timedelta(seconds=90),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
                 result.groups_transcribed += 1

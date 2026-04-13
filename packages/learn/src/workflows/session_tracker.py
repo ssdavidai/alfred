@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.clerk import clerk_compare_topics, clerk_match_session_context
@@ -180,6 +181,7 @@ class SessionTrackerWorkflow:
                         recent,
                     ],
                     start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
                 )
 
                 if topic_decision.get("same_topic", False):

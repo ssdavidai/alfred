@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.clerk import clerk_daily_digest
@@ -47,6 +48,7 @@ class DailyDigestWorkflow:
             clerk_daily_digest,
             args=[activity_data],
             start_to_close_timeout=timedelta(seconds=60),
+            retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
         # 3. Write event record
@@ -62,6 +64,7 @@ class DailyDigestWorkflow:
             notify_digest_ready,
             args=[path, summary],
             start_to_close_timeout=timedelta(seconds=15),
+            retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
         # 5. Send interactive EOD prompt via OpenClaw gateway
@@ -76,6 +79,7 @@ class DailyDigestWorkflow:
                 notify_eod_prompt,
                 args=[eod_prompt, path],
                 start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=2),
             )
             eod_sent = True
         except Exception:
