@@ -68,8 +68,8 @@ class OmiAudioProcessorWorkflow:
                 transcription: dict[str, Any] = await workflow.execute_activity(
                     transcribe_audio_group,
                     args=[group],
-                    start_to_close_timeout=timedelta(minutes=30),
-                    retry_policy=RetryPolicy(maximum_attempts=2),
+                    start_to_close_timeout=timedelta(minutes=5),
+                    retry_policy=RetryPolicy(maximum_attempts=3),
                 )
                 result.groups_transcribed += 1
 

@@ -265,9 +265,10 @@ async def group_audio_segments(files: list[dict[str, Any]]) -> list[list[dict[st
 
 @activity.defn
 async def transcribe_audio_group(group: list[dict[str, Any]]) -> dict[str, Any]:
-    """Read and concatenate PCM files in a group, transcribe via local faster-whisper.
+    """Read and concatenate PCM files in a group, transcribe via Groq Whisper API.
 
-    Uses whisper-large-v3 (int8, CPU) baked into the Docker image.
+    Uses Groq's hosted whisper-large-v3 for fast transcription (~3s per 5min).
+    Platform-level API key — tenants don't need to provide their own.
     Returns {text, language, duration_seconds, segment_count}.
     """
     if not group:
@@ -291,23 +292,11 @@ async def transcribe_audio_group(group: list[dict[str, Any]]) -> dict[str, Any]:
     # Calculate duration: PCM16 = 2 bytes per sample
     duration_seconds = len(pcm_bytes) / (sample_rate * 2)
 
-    # Convert to WAV for faster-whisper
+    # Convert to WAV for the API
     wav_bytes = pcm_to_wav(pcm_bytes, sample_rate=sample_rate)
 
-    # Write temp WAV file (faster-whisper needs a file path)
-    import asyncio
-    import tempfile
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        tmp.write(wav_bytes)
-        tmp_path = tmp.name
-
-    try:
-        # Run transcription in executor (faster-whisper is synchronous)
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, _transcribe_sync, tmp_path)
-    finally:
-        os.unlink(tmp_path)
+    # Transcribe via Groq Whisper API
+    result = await _transcribe_groq(wav_bytes, duration_seconds)
 
     text = result.get("text", "")
     language = result.get("language", "")
@@ -330,19 +319,57 @@ async def transcribe_audio_group(group: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _transcribe_sync(wav_path: str) -> dict[str, Any]:
-    """Synchronous transcription via faster-whisper (called from executor)."""
-    from src.whisper_model import get_whisper_model
+# Platform-level Groq API key — shared across all tenants.
+# Groq runs whisper-large-v3 on their LPU hardware (~3s per 5min audio).
+# Set GROQ_API_KEY in the tenant's .env file. The init container provisions it.
+_GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+_GROQ_API_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 
-    model = get_whisper_model()
-    segments, info = model.transcribe(wav_path, beam_size=5, vad_filter=True)
-    text = " ".join(seg.text.strip() for seg in segments)
 
-    return {
-        "text": text,
-        "language": info.language,
-        "language_probability": round(info.language_probability, 2),
-    }
+async def _transcribe_groq(wav_bytes: bytes, duration_seconds: float) -> dict[str, Any]:
+    """Transcribe audio via Groq's Whisper API (OpenAI-compatible).
+
+    Sends WAV bytes as multipart form upload. Returns {text, language, language_probability}.
+    """
+    import tempfile
+
+    # Write temp file — httpx needs a file path for multipart upload
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp.write(wav_bytes)
+        tmp_path = tmp.name
+
+    if not _GROQ_API_KEY:
+        logger.error("[omi] GROQ_API_KEY not set — cannot transcribe audio")
+        return {"text": "", "language": "", "language_probability": 0}
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            with open(tmp_path, "rb") as audio_file:
+                resp = await client.post(
+                    _GROQ_API_URL,
+                    headers={"Authorization": f"Bearer {_GROQ_API_KEY}"},
+                    data={
+                        "model": "whisper-large-v3",
+                        "response_format": "verbose_json",
+                    },
+                    files={"file": ("audio.wav", audio_file, "audio/wav")},
+                )
+
+            if resp.status_code != 200:
+                logger.error("[omi] Groq API error %d: %s", resp.status_code, resp.text[:200])
+                return {"text": "", "language": "", "language_probability": 0}
+
+            data = resp.json()
+            return {
+                "text": data.get("text", ""),
+                "language": data.get("language", ""),
+                "language_probability": 0.95,  # Groq doesn't return probability
+            }
+    except Exception as exc:
+        logger.error("[omi] Groq transcription failed: %s", exc)
+        return {"text": "", "language": "", "language_probability": 0}
+    finally:
+        os.unlink(tmp_path)
 
 
 @activity.defn
