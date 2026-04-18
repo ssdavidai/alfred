@@ -1,10 +1,23 @@
 import crypto from "crypto";
+import express from "express";
 import type { Application } from "express";
 import { prisma } from "wasp/server";
 import { proxyToTenant } from "./tenantProxy";
 
 export function registerWebhookReceiver(app: Application): void {
-  app.post("/webhooks/:webhookToken", async (req, res) => {
+  // NOTE: Wasp's global serverMiddlewareFn customizes middleware for
+  // operations/APIs, not for custom routes registered via setupFn.
+  // Without per-route express.json(), req.body arrives as undefined here.
+  // Same pattern used in oauth2.ts for the internal token endpoint.
+  app.post(
+    "/webhooks/:webhookToken",
+    express.json({
+      limit: "50mb",
+      verify: (req: any, _res, buf) => {
+        req.rawBody = buf;
+      },
+    }),
+    async (req: any, res) => {
     try {
       const webhookToken = req.params["webhookToken"] as string;
 
@@ -35,7 +48,11 @@ export function registerWebhookReceiver(app: Application): void {
           res.status(401).json({ error: "Missing webhook signature" });
           return;
         }
-        const rawBody = JSON.stringify(req.body);
+        // Use raw bytes preserved by express.json's verify hook so HMAC
+        // matches exactly what the client signed. Fallback to JSON.stringify
+        // is defensive only — rawBody should always be populated.
+        const rawBody: Buffer =
+          req.rawBody ?? Buffer.from(JSON.stringify(req.body));
         const expected = crypto.createHmac("sha256", webhookSecret).update(rawBody).digest("hex");
         const sig = signature.replace(/^sha256=/, "");
         if (!crypto.timingSafeEqual(Buffer.from(sig, "hex"), Buffer.from(expected, "hex"))) {
@@ -91,7 +108,8 @@ export function registerWebhookReceiver(app: Application): void {
       console.error("Webhook receiver error:", error);
       res.status(500).json({ error: "Internal error" });
     }
-  });
+  },
+  );
 }
 
 function extractSourceRef(body: unknown): string | null {
