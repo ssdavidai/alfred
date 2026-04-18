@@ -8,6 +8,7 @@ import {
   autoConfigIntegration,
 } from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
+import { useOpenclawStatus } from "../shared/OpenclawStatusContext";
 import SpotlightCard from "../components/ui/SpotlightCard";
 import {
   Search,
@@ -90,6 +91,9 @@ export default function IntegrationsPage() {
   const [configResults, setConfigResults] = useState<Record<string, AutoConfigResult>>({});
   const [toast, setToast] = useState<string | null>(null);
   const prevConnectedRef = useRef<Set<string>>(new Set());
+  const { markReconfiguring, reconfiguringUntil } = useOpenclawStatus();
+  const isReconfiguring =
+    reconfiguringUntil !== null && reconfiguringUntil > new Date();
 
   const {
     data: catalogData,
@@ -142,6 +146,14 @@ export default function IntegrationsPage() {
     try {
       const result = await autoConfigIntegration({ connectionId });
       setConfigResults((prev) => ({ ...prev, [connectionId]: result }));
+      // If ctrl-api reports a gateway restart was triggered (i.e. tools.allow
+      // actually changed), tell the DashboardLayout to show the reconfiguring
+      // banner for ~60s so the user doesn't see a 502 when they click into
+      // Alfred. Connecting a second Composio app is a no-op at the openclaw
+      // layer and won't set this flag — banner stays hidden.
+      if (result?.gateway_restart_triggered) {
+        markReconfiguring(toolkitName);
+      }
       const parts: string[] = [];
       if (result?.stream_created) parts.push("stream active");
       if (result?.actions_count) parts.push(`${result.actions_count} actions`);
@@ -151,7 +163,7 @@ export default function IntegrationsPage() {
       setToast(`Auto-config failed: ${err?.message || "Unknown error"}`);
     }
     setConfiguringId(null);
-  }, []);
+  }, [markReconfiguring]);
 
   // ---------------------------------------------------------------------------
   // Connect flow — now includes auto-config
@@ -231,7 +243,13 @@ export default function IntegrationsPage() {
     async (connId: string, toolkitName: string) => {
       if (!confirm(`Disconnect ${toolkitName}? This will remove the stream, skill, and all tool access.`)) return;
       try {
-        await disconnectIntegration({ connectionId: connId });
+        const result: any = await disconnectIntegration({ connectionId: connId });
+        // Disconnect can mutate gateway.tools.allow (toolkit tool removal
+        // and/or ctrl_composio_execute removal on last disconnect). Show the
+        // banner only when ctrl-api confirms a restart was triggered.
+        if (result?.gateway_restart_triggered) {
+          markReconfiguring(toolkitName);
+        }
         setConfigResults((prev) => {
           const next = { ...prev };
           delete next[connId];
@@ -244,7 +262,7 @@ export default function IntegrationsPage() {
         setToast(`Disconnect failed: ${err?.message}`);
       }
     },
-    [refetchConnected],
+    [refetchConnected, markReconfiguring],
   );
 
   return (
@@ -298,7 +316,8 @@ export default function IntegrationsPage() {
                     </div>
                     <button
                       onClick={() => handleConnect(r.slug)}
-                      disabled={connectingSlug === r.slug}
+                      disabled={connectingSlug === r.slug || isReconfiguring}
+                      title={isReconfiguring ? "Waiting for the gateway to finish restarting…" : undefined}
                       className="rounded-lg bg-[#C9A84C]/10 px-3 py-1.5 text-xs text-[#C9A84C] transition hover:bg-[#C9A84C]/20 disabled:opacity-50"
                     >
                       {connectingSlug === r.slug ? "Connecting..." : "Connect"}
@@ -391,6 +410,7 @@ export default function IntegrationsPage() {
                   toolkit={toolkit}
                   isConnected={connectedSlugs.has(toolkit.slug)}
                   isConnecting={connectingSlug === toolkit.slug}
+                  isReconfiguring={isReconfiguring}
                   onConnect={() => handleConnect(toolkit.slug)}
                 />
               ))}
@@ -423,11 +443,13 @@ function ToolkitCard({
   toolkit,
   isConnected,
   isConnecting,
+  isReconfiguring,
   onConnect,
 }: {
   toolkit: Toolkit;
   isConnected: boolean;
   isConnecting: boolean;
+  isReconfiguring: boolean;
   onConnect: () => void;
 }) {
   return (
@@ -471,7 +493,8 @@ function ToolkitCard({
       ) : (
         <button
           onClick={onConnect}
-          disabled={isConnecting}
+          disabled={isConnecting || isReconfiguring}
+          title={isReconfiguring ? "Waiting for the gateway to finish restarting…" : undefined}
           className="inline-flex items-center gap-1.5 self-start rounded-lg bg-[#C9A84C]/10 px-3 py-1.5 text-xs text-[#C9A84C] transition hover:bg-[#C9A84C]/20 disabled:opacity-50"
         >
           {isConnecting ? (

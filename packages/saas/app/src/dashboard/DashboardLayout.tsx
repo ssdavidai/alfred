@@ -1,8 +1,14 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useAuth, logout } from "wasp/client/auth";
-import { useQuery, getProvisioningStatus } from "wasp/client/operations";
+import {
+  useQuery,
+  getProvisioningStatus,
+  getOpenclawReadiness,
+} from "wasp/client/operations";
 import ProvisioningProgress from "../provisioning/ProvisioningProgress";
+import ReconfiguringBanner from "./ReconfiguringBanner";
+import { useOpenclawStatus } from "../shared/OpenclawStatusContext";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Home,
@@ -368,6 +374,43 @@ export default function DashboardLayout({
   );
   const instanceReady = provStatus?.instance?.status === "running";
 
+  // While the tenant's openclaw gateway is restarting to pick up a
+  // tools.allow change, poll the readiness endpoint and clear the banner
+  // once the gateway is back. Requires two consecutive `ready: true`
+  // responses to guard against a probe landing on the pre-restart process
+  // in the narrow window before SIGUSR1 takes effect.
+  const { reconfiguringUntil, reconfiguringLabel, clearReconfiguring } =
+    useOpenclawStatus();
+  const isReconfiguring =
+    reconfiguringUntil !== null && reconfiguringUntil > new Date();
+  const consecutiveReadyRef = useRef(0);
+
+  const { data: readiness } = useQuery(
+    getOpenclawReadiness,
+    undefined,
+    {
+      enabled: isReconfiguring && !isAdminPage,
+      refetchInterval: isReconfiguring ? 2000 : false,
+      retry: false,
+    },
+  );
+
+  useEffect(() => {
+    if (!isReconfiguring) {
+      consecutiveReadyRef.current = 0;
+      return;
+    }
+    if (readiness?.ready) {
+      consecutiveReadyRef.current += 1;
+      if (consecutiveReadyRef.current >= 2) {
+        clearReconfiguring();
+        consecutiveReadyRef.current = 0;
+      }
+    } else {
+      consecutiveReadyRef.current = 0;
+    }
+  }, [readiness?.ready, isReconfiguring, clearReconfiguring]);
+
   const isActive = (path: string) => {
     if (path === "/dashboard") return location.pathname === "/dashboard";
     if (path === "/admin") return location.pathname === "/admin";
@@ -450,7 +493,12 @@ export default function DashboardLayout({
                   <Loader2 className="h-8 w-8 animate-spin text-[#C9A84C]" />
                 </div>
               ) : instanceReady ? (
-                children
+                <>
+                  {isReconfiguring && (
+                    <ReconfiguringBanner label={reconfiguringLabel} />
+                  )}
+                  {children}
+                </>
               ) : (
                 <ProvisioningProgress
                   data={provStatus ?? null}

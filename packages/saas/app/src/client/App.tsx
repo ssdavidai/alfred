@@ -10,6 +10,7 @@ import {
   dashboardNavigationItems,
 } from "./components/NavBar/constants";
 import CookieConsentBanner from "./components/cookie-consent/Banner";
+import { OpenclawStatusProvider } from "../shared/OpenclawStatusContext";
 
 export default function App() {
   const location = useLocation();
@@ -61,7 +62,7 @@ export default function App() {
   }, [location]);
 
   return (
-    <>
+    <OpenclawStatusProvider>
       <div className="min-h-screen bg-background text-foreground flex flex-col">
         {isAdminDashboard ? (
           <div className="flex-1"><Outlet /></div>
@@ -79,6 +80,6 @@ export default function App() {
       </div>
       <Toaster position="bottom-right" />
       <CookieConsentBanner />
-    </>
+    </OpenclawStatusProvider>
   );
 }

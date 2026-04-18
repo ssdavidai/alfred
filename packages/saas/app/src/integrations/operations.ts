@@ -8,6 +8,7 @@ import type {
   GetIntegrationCatalog,
   GetConnectedIntegrations,
   GetIntegrationCapabilities,
+  GetOpenclawReadiness,
   InitiateConnect,
   DisconnectIntegration,
   EnableIntegrationStream,
@@ -39,6 +40,26 @@ export const getConnectedIntegrations: GetConnectedIntegrations<void, any> = asy
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, {
     path: "/api/v1/integrations",
+  });
+};
+
+/**
+ * Fast readiness probe for the tenant's openclaw gateway. Used by the
+ * dashboard's `ReconfiguringBanner` to detect the ~40s restart window that
+ * follows a `gateway.tools.allow` change (e.g. first Composio connect).
+ * Returns:
+ *   { ready: bool,
+ *     last_config_touch_at: iso | null,
+ *     restart_expected_until: iso | null }
+ */
+export const getOpenclawReadiness: GetOpenclawReadiness<void, any> = async (
+  _args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/openclaw/ready",
+    timeoutMs: 3000, // probe itself is bounded to 1.5s inside ctrl-api
   });
 };
 

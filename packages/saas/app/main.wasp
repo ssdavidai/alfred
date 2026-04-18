@@ -696,6 +696,11 @@ action finalizeComposioConnections {
   entities: [Instance]
 }
 
+query getOpenclawReadiness {
+  fn: import { getOpenclawReadiness } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
 // ============================================================
 // Intuition (Learning Engine)
 // ============================================================
