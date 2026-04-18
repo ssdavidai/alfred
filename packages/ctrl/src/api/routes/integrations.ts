@@ -199,9 +199,50 @@ async function fetchCatalog(apiKey: string): Promise<CatalogEntry[]> {
 
 // ---------------------------------------------------------------------------
 // Helpers for openclaw.json tool management
+//
+// Writes to openclaw.json are debounced: when gateway.tools.allow changes,
+// openclaw detects the config file change and does a full gateway process
+// restart (~40s). If multiple writes land in quick succession (e.g. a
+// disconnect+reconnect cycle), we coalesce them into a single flush so
+// openclaw only restarts once.
 // ---------------------------------------------------------------------------
 
+const OPENCLAW_WRITE_DEBOUNCE_MS = 500;
+
+let pendingMainCfg: Record<string, any> | null = null;
+let pendingWorkersCfg: Record<string, any> | null = null;
+let flushTimer: NodeJS.Timeout | null = null;
+
+function scheduleFlush(): void {
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = setTimeout(flushPendingOpenclawWrites, OPENCLAW_WRITE_DEBOUNCE_MS);
+}
+
+/** Flush any pending openclaw.json writes to disk immediately. Exported so the
+ *  api server can call it on SIGTERM/beforeExit to avoid losing queued writes. */
+export function flushPendingOpenclawWrites(): void {
+  if (flushTimer) {
+    clearTimeout(flushTimer);
+    flushTimer = null;
+  }
+  if (pendingMainCfg) {
+    try {
+      fs.writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(pendingMainCfg, null, 2));
+    } catch { /* best effort */ }
+    pendingMainCfg = null;
+  }
+  if (pendingWorkersCfg) {
+    try {
+      fs.writeFileSync(OPENCLAW_WORKERS_CONFIG_PATH, JSON.stringify(pendingWorkersCfg, null, 2));
+    } catch { /* best effort */ }
+    pendingWorkersCfg = null;
+  }
+}
+
 function readOpenclawConfig(): Record<string, any> {
+  // If a write is pending but not yet flushed, return that in-memory state so
+  // subsequent read-modify-write cycles don't clobber queued changes.
+  if (pendingMainCfg) return pendingMainCfg;
   try {
     return JSON.parse(fs.readFileSync(OPENCLAW_CONFIG_PATH, "utf-8"));
   } catch {
@@ -212,14 +253,12 @@ function readOpenclawConfig(): Record<string, any> {
 function writeOpenclawConfig(data: Record<string, any>): void {
   data.meta = data.meta || {};
   data.meta.lastTouchedAt = new Date().toISOString().replace(/\.\d{3}Z/, ".000Z");
-  fs.writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(data, null, 2));
+  pendingMainCfg = data;
+  scheduleFlush();
 }
 
-// ---------------------------------------------------------------------------
-// openclaw-workers config helpers
-// ---------------------------------------------------------------------------
-
 function readWorkersConfig(): Record<string, any> {
+  if (pendingWorkersCfg) return pendingWorkersCfg;
   try {
     return JSON.parse(fs.readFileSync(OPENCLAW_WORKERS_CONFIG_PATH, "utf-8"));
   } catch {
@@ -230,11 +269,15 @@ function readWorkersConfig(): Record<string, any> {
 function writeWorkersConfig(data: Record<string, any>): void {
   data.meta = data.meta || {};
   data.meta.lastTouchedAt = new Date().toISOString().replace(/\.\d{3}Z/, ".000Z");
-  fs.writeFileSync(OPENCLAW_WORKERS_CONFIG_PATH, JSON.stringify(data, null, 2));
+  pendingWorkersCfg = data;
+  scheduleFlush();
 }
 
-/** Add a tool to gateway.tools.allow in both openclaw configs if not present. */
-function ensureToolInGateway(toolName: string): void {
+/** Add a tool to gateway.tools.allow in both openclaw configs if not present.
+ *  Returns true iff at least one config file was mutated (and will therefore
+ *  trigger an openclaw gateway restart once the debounced flush lands). */
+function ensureToolInGateway(toolName: string): boolean {
+  let changed = false;
   for (const [readFn, writeFn] of [
     [readOpenclawConfig, writeOpenclawConfig],
     [readWorkersConfig, writeWorkersConfig],
@@ -248,13 +291,17 @@ function ensureToolInGateway(toolName: string): void {
         cfg.gateway.tools.allow.push(toolName);
         cfg.gateway.tools.allow.sort();
         writeFn(cfg);
+        changed = true;
       }
     } catch { /* best effort */ }
   }
+  return changed;
 }
 
-/** Remove a tool from gateway.tools.allow in both openclaw configs. */
-function removeToolFromGateway(toolName: string): void {
+/** Remove a tool from gateway.tools.allow in both openclaw configs.
+ *  Returns true iff at least one config file was mutated. */
+function removeToolFromGateway(toolName: string): boolean {
+  let changed = false;
   for (const [readFn, writeFn] of [
     [readOpenclawConfig, writeOpenclawConfig],
     [readWorkersConfig, writeWorkersConfig],
@@ -267,9 +314,11 @@ function removeToolFromGateway(toolName: string): void {
         allow.splice(idx, 1);
         cfg.gateway.tools.allow = allow;
         writeFn(cfg);
+        changed = true;
       }
     } catch { /* best effort */ }
   }
+  return changed;
 }
 
 // ---------------------------------------------------------------------------
@@ -700,6 +749,7 @@ export function registerIntegrationRoutes(): void {
 
       // 6. Clean up: remove Composio tool slugs from gateway.tools.allow
       const removedTools: string[] = [];
+      let toolsAllowMutated = false;
       if (toolkit) {
         try {
           const cfg = readOpenclawConfig();
@@ -715,6 +765,7 @@ export function registerIntegrationRoutes(): void {
           if (removedTools.length > 0) {
             cfg.gateway.tools.allow = kept;
             writeOpenclawConfig(cfg);
+            toolsAllowMutated = true;
           }
         } catch { /* openclaw config cleanup is best-effort */ }
       }
@@ -746,7 +797,9 @@ export function registerIntegrationRoutes(): void {
           const remaining = (Array.isArray(remainingData.items) ? remainingData.items : [])
             .filter((a: any) => a.status === "ACTIVE" && accountMatchesUserId(a, userId));
           if (remaining.length === 0) {
-            removeToolFromGateway("ctrl_composio_execute");
+            if (removeToolFromGateway("ctrl_composio_execute")) {
+              toolsAllowMutated = true;
+            }
             composioExecuteRemoved = true;
           }
         }
@@ -761,6 +814,7 @@ export function registerIntegrationRoutes(): void {
         removed_tools: removedTools,
         skill_removed: skillRemoved,
         composio_execute_removed: composioExecuteRemoved,
+        gateway_restart_triggered: toolsAllowMutated,
       });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to disconnect: ${err.message}` });
@@ -1180,9 +1234,14 @@ print(json.dumps(result, default=str))
       }
       summary.toolkit = toolkit;
 
-      // 2. Ensure composio_execute is in gateway.tools.allow (both configs)
-      ensureToolInGateway("ctrl_composio_execute");
+      // 2. Ensure composio_execute is in gateway.tools.allow (both configs).
+      // If this added the tool (i.e. first Composio connect on this tenant),
+      // openclaw will restart its gateway to pick up the new allow-list.
+      // The dashboard uses `gateway_restart_triggered` to show a
+      // "reconfiguring" banner and mask the ~40s 502 window.
+      const toolAdded = ensureToolInGateway("ctrl_composio_execute");
       summary.composio_execute_enabled = true;
+      summary.gateway_restart_triggered = toolAdded;
 
       // 3. Create recommended stream if available
       const rec = RECOMMENDED_STREAMS[toolkit];

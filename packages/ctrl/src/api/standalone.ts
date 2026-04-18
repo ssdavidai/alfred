@@ -18,6 +18,7 @@ if (fs.existsSync(envPath)) {
 import { setApiKey } from "./auth.js";
 import { createApiServer } from "./server.js";
 import { attachTerminalUpgrade } from "./routes/terminal.js";
+import { flushPendingOpenclawWrites } from "./routes/integrations.js";
 
 const apiKey = process.env.AAS_API_KEY;
 if (!apiKey) {
@@ -44,10 +45,16 @@ server.listen(port, host, () => {
 
 process.on("SIGTERM", () => {
   console.log("SIGTERM received, shutting down...");
+  flushPendingOpenclawWrites();
   server.close(() => process.exit(0));
 });
 
 process.on("SIGINT", () => {
   console.log("SIGINT received, shutting down...");
+  flushPendingOpenclawWrites();
   server.close(() => process.exit(0));
+});
+
+process.on("beforeExit", () => {
+  flushPendingOpenclawWrites();
 });

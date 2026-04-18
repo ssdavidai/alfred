@@ -1,6 +1,15 @@
+import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson } from "../errors.js";
 import { dockerExec, dockerComposeCmd, OPENCLAW_CMD } from "../helpers.js";
+
+const OPENCLAW_CONFIG_PATH = "/mnt/encrypted/openclaw/openclaw.json";
+const OPENCLAW_GATEWAY_URL = "http://openclaw:18789/healthz";
+const HEALTHZ_PROBE_TIMEOUT_MS = 1500;
+// How long after a config touch we still assume an openclaw restart is
+// in-flight. Measured restart time on a fresh Composio connect was ~40s
+// on a cx53 Hetzner VPS; 60s gives us comfortable headroom.
+const RESTART_WINDOW_MS = 60_000;
 
 export function registerOpenClawRoutes(): void {
   // Gateway health
@@ -11,6 +20,48 @@ export function registerOpenClawRoutes(): void {
     } catch {
       sendJson(res, 200, { raw: stdout.trim() });
     }
+  });
+
+  // Gateway readiness — fast, poll-friendly signal for the dashboard to
+  // detect the ~40s 502 window that follows a gateway.tools.allow change.
+  // Response:
+  //   { ready: bool,
+  //     last_config_touch_at: iso | null,
+  //     restart_expected_until: iso | null }
+  // `restart_expected_until` is set iff the probe is failing AND
+  // `meta.lastTouchedAt` is within the last RESTART_WINDOW_MS — meaning
+  // "openclaw is restarting, expect it back by this time".
+  addRoute("GET", "/api/v1/openclaw/ready", async ({ res }) => {
+    let lastTouchedAt: string | null = null;
+    try {
+      const raw = fs.readFileSync(OPENCLAW_CONFIG_PATH, "utf-8");
+      const cfg = JSON.parse(raw);
+      const v = cfg?.meta?.lastTouchedAt;
+      if (typeof v === "string" && v.length > 0) lastTouchedAt = v;
+    } catch { /* file may not exist or be unparseable; treat as null */ }
+
+    let ready = false;
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), HEALTHZ_PROBE_TIMEOUT_MS);
+      const resp = await fetch(OPENCLAW_GATEWAY_URL, { signal: ctrl.signal });
+      clearTimeout(timer);
+      ready = resp.ok;
+    } catch { /* probe failed — not ready */ }
+
+    let restartExpectedUntil: string | null = null;
+    if (!ready && lastTouchedAt) {
+      const touchMs = Date.parse(lastTouchedAt);
+      if (Number.isFinite(touchMs) && Date.now() - touchMs < RESTART_WINDOW_MS) {
+        restartExpectedUntil = new Date(touchMs + RESTART_WINDOW_MS).toISOString();
+      }
+    }
+
+    sendJson(res, 200, {
+      ready,
+      last_config_touch_at: lastTouchedAt,
+      restart_expected_until: restartExpectedUntil,
+    });
   });
 
   // Gateway status
