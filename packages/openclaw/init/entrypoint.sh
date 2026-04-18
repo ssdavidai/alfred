@@ -249,20 +249,21 @@ print(f'[init] Configured stateless agents + memory plugin in {p}')
     fi
 done
 
-# --- 7b. Ensure main openclaw exposes the full Alfred ctrl_* tool set ---
-# Before this step, fresh tenants defaulted to a 10-tool allowlist (just
-# vault CRUD + stream_ingest + sessions). That meant the user-facing Alfred
-# couldn't use any of the 35 platform tools: admin/workers/workflows/
-# schedules/learning/streams-read/vault-delete/vault-graph/etc. This merge
-# brings every fresh tenant up to the full 45-tool surface so the agent
-# can actually manage chores, introspect learning, check ops health, etc.
+# --- 7b. Ensure session/subagent control tools are in gateway.tools.allow ---
+# Historical context: this step previously merged 41 legacy `ctrl_*` tool
+# names into gateway.tools.allow (vault/learning/streams/workflows/schedules/
+# workers/admin). Those names referenced the ctrl-api TOOLS registry but
+# never corresponded to standalone callable tools in OpenClaw — the registry
+# uses unprefixed names ('vault_read', not 'ctrl_vault_read'), and even then
+# the only agent-facing surface for those endpoints is the MCP `ctrl` tool
+# (registered in step 7c) which calls them via /api/v1/tools/invoke or
+# directly via /api/v1/<route>.
 #
-# Touches BOTH the main openclaw gateway AND openclaw-workers.
-# Workers needs the full allowlist at the GATEWAY level so that
-# ephemeral subagents (#378) can reference ctrl_* tools in their
-# per-agent tools.allow blocks. The per-agent policy RESTRICTS
-# from the gateway-level set, so the gateway must know about all tools
-# even though the default workers agents (curator/janitor) don't use them.
+# Removing the legacy entries keeps the allowlist minimal and accurate.
+# `composio_execute` is still managed dynamically by integrations.ts on
+# connect/disconnect — that's preserved.
+#
+# Sessions tools ARE real built-in OpenClaw tools and remain in the list.
 MAIN_CFG=/openclaw-state/openclaw.json
 WORKERS_CFG=/openclaw-workers-state/openclaw.json
 for TARGET_CFG in "$MAIN_CFG" "$WORKERS_CFG"; do
@@ -272,51 +273,32 @@ import json
 p = '$TARGET_CFG'
 with open(p) as f: c = json.load(f)
 
-# Canonical full allowlist for the main Alfred agent.
-# Must stay in sync with packages/openclaw/workspace-template/docs/TOOLS.md
-# and the ctrl-api tool registry at packages/ctrl/src/api/routes/tools.ts.
-#
-# NOTE: 'composio_execute' is NOT in this static list. It is added/removed
-# dynamically by the auto-config/disconnect endpoints in integrations.ts
-# when users connect/disconnect apps. The set-union merge below preserves
-# it if already present in the tenant's config.
-full_allow = [
-    # Session / subagent control
-    'sessions_send', 'sessions_spawn', 'sessions_history', 'sessions_list',
-    # Vault — read
-    'ctrl_vault_read', 'ctrl_vault_list', 'ctrl_vault_search',
-    'ctrl_vault_context', 'ctrl_vault_inbox', 'ctrl_vault_graph', 'ctrl_vault_schema',
-    # Vault — write
-    'ctrl_vault_create', 'ctrl_vault_update', 'ctrl_vault_inbox_add', 'ctrl_vault_delete',
-    # Streams
-    'ctrl_stream_ingest', 'ctrl_streams_list', 'ctrl_streams_events',
-    # Learning
-    'ctrl_learning_status', 'ctrl_learning_observations', 'ctrl_learning_instincts',
-    'ctrl_learning_reflections', 'ctrl_learning_sessions', 'ctrl_learning_queue',
-    'ctrl_learning_enable', 'ctrl_learning_disable',
-    # Workflows
-    'ctrl_workflows_list', 'ctrl_workflows_get', 'ctrl_workflows_start', 'ctrl_workflows_cancel',
-    # Schedules
-    'ctrl_schedules_list', 'ctrl_schedules_trigger', 'ctrl_schedules_pause', 'ctrl_schedules_unpause',
-    # Workers
-    'ctrl_workers_status', 'ctrl_workers_restart',
-    # Admin / ops
-    'ctrl_admin_dashboard', 'ctrl_admin_health', 'ctrl_admin_containers',
-    'ctrl_admin_system_info', 'ctrl_admin_activity', 'ctrl_admin_models',
-    'ctrl_container_logs', 'ctrl_credentials_list', 'ctrl_service_restart',
-]
+# Real built-in OpenClaw session/subagent tools — these correspond to
+# actual callable tools and belong in the allowlist.
+session_tools = {
+    'sessions_send', 'sessions_spawn', 'sessions_history',
+    'sessions_list', 'sessions_delete',
+}
 
 gateway = c.setdefault('gateway', {})
 tools = gateway.setdefault('tools', {})
-before = set(tools.get('allow', []))
-merged = sorted(before | set(full_allow))
-added = set(merged) - before
-if added:
-    tools['allow'] = merged
+current = set(tools.get('allow', []))
+
+# Add missing sessions tools
+to_add = session_tools - current
+# Remove ghost ctrl_* legacy entries (they reference nothing callable)
+to_remove = {t for t in current if t.startswith('ctrl_') and t != 'ctrl_composio_execute'}
+
+if to_add or to_remove:
+    new_allow = sorted((current | to_add) - to_remove)
+    tools['allow'] = new_allow
     with open(p, 'w') as f: json.dump(c, f, indent=2)
-    print(f'[init] Added {len(added)} tools to gateway.tools.allow (now {len(merged)})')
+    msg = []
+    if to_add: msg.append(f'added {len(to_add)} sessions tools')
+    if to_remove: msg.append(f'removed {len(to_remove)} legacy ctrl_* entries')
+    print(f'[init] gateway.tools.allow: {\"; \".join(msg)} (now {len(new_allow)} entries) in {p}')
 else:
-    print(f'[init] gateway.tools.allow already has all {len(merged)} tools in {p}')
+    print(f'[init] gateway.tools.allow already correct ({len(current)} entries) in {p}')
 " 2>/dev/null || true
 done
 
