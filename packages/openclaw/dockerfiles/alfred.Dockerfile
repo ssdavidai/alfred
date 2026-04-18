@@ -6,8 +6,8 @@ ENV PATH="/root/.bun/bin:${PATH}"
 RUN corepack enable
 
 WORKDIR /openclaw
-# Clone OpenClaw at pinned commit
-ARG OPENCLAW_SHA=3e72c0352dde84a0bcb3aabafa99c2d4b12d1c46
+# Clone OpenClaw at pinned commit — v2026.4.15 (includes Slack media download fixes: PR #62239, PR #62996)
+ARG OPENCLAW_SHA=041266a6699cac3baef8ef39db41fa26f29f9db3
 RUN git init . && \
     git fetch --depth 1 https://github.com/openclaw/openclaw.git ${OPENCLAW_SHA} && \
     git checkout FETCH_HEAD
