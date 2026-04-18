@@ -249,6 +249,24 @@ export async function provision(
     if (process.env.GROQ_API_KEY) {
       envLines.push(`GROQ_API_KEY=${process.env.GROQ_API_KEY}`);
     }
+
+    // Composio per-tenant user_id — MUST be unique across the fleet so that
+    // connected OAuth accounts are scoped to this tenant. Without this, the
+    // single shared COMPOSIO_API_KEY would let every tenant see (and execute
+    // against) every other tenant's connections. See #408.
+    //
+    // Format: alfred-<slug>-<instance_id> — the slug is derived from the
+    // customer_name (already validated by VALID_NAME regex) with any stray
+    // non-alphanumeric chars stripped, so e.g. customer_name="rapali-zsolt"
+    // + instance.id=101 → "alfred-rapalizsolt-101".
+    const composioSlug = config.customer_name.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+    const composioUserId = `alfred-${composioSlug}-${instance.id}`;
+    envLines.push(`COMPOSIO_USER_ID=${composioUserId}`);
+    // Inherit the platform-level Composio API key if present — single shared
+    // key across all tenants; isolation comes from the user_id scoping.
+    if (process.env.COMPOSIO_API_KEY) {
+      envLines.push(`COMPOSIO_API_KEY=${process.env.COMPOSIO_API_KEY}`);
+    }
     await ssh.exec(
       server.public_net.ipv4.ip,
       keyPair.privateKeyPath,

@@ -403,4 +403,52 @@ chmod 777 /alfred-data/user-chores 2>/dev/null || true
 mkdir -p /alfred-data/chore-snapshots
 chmod 777 /alfred-data/chore-snapshots 2>/dev/null || true
 
+# --- 10. Backfill COMPOSIO_USER_ID for existing tenants ---
+# Fresh tenants get COMPOSIO_USER_ID injected into .env by the provisioner
+# (packages/ctrl/src/infra/provisioner.ts). Existing tenants provisioned
+# before #408 do not have it set, which means their Composio connections
+# leak across the fleet (everyone shares the "default" namespace).
+#
+# We can't rewrite /opt/alfred/compose/.env from inside the init container
+# (the host compose dir is not mounted), so we write a fallback file that
+# both ctrl-api (TS) and composio_client (Python) read when the env var is
+# missing. The tenant identity is derived from the hostname, which the
+# provisioner sets to `alfred-<customer_name>`.
+#
+# This step is idempotent — skips if the file already has a non-default
+# value, so a newer .env override always wins.
+COMPOSIO_UID_FILE=/alfred-data/.composio-user-id
+EXISTING_UID=""
+if [[ -f "$COMPOSIO_UID_FILE" ]]; then
+    EXISTING_UID=$(tr -d '[:space:]' < "$COMPOSIO_UID_FILE")
+fi
+ENV_UID="${COMPOSIO_USER_ID:-}"
+if [[ -n "$ENV_UID" && "$ENV_UID" != "default" ]]; then
+    # Prefer env-provided value — mirror it into the file so workers (which
+    # read from the file as fallback when their env is stale) stay consistent.
+    if [[ "$EXISTING_UID" != "$ENV_UID" ]]; then
+        echo -n "$ENV_UID" > "$COMPOSIO_UID_FILE"
+        echo "[init] Mirrored COMPOSIO_USER_ID=$ENV_UID to $COMPOSIO_UID_FILE"
+    else
+        echo "[init] COMPOSIO_USER_ID already mirrored to $COMPOSIO_UID_FILE"
+    fi
+elif [[ -n "$EXISTING_UID" && "$EXISTING_UID" != "default" ]]; then
+    echo "[init] COMPOSIO_USER_ID backfill file already present ($EXISTING_UID), env missing — consider adding COMPOSIO_USER_ID=$EXISTING_UID to /opt/alfred/compose/.env"
+else
+    # No env var, no backfill file. We deliberately do NOT derive a value
+    # from hostname: the provisioner writes COMPOSIO_USER_ID as
+    # `alfred-<slug>-<instance_id>` where <instance_id> is the SaaS-side
+    # Instance row id (not available inside the container). Any hostname-
+    # derived value would be a different shape and would NOT match what
+    # the migration script or dashboard expects — producing orphaned
+    # Composio connections that can't be reconciled later.
+    echo "[init] ACTION REQUIRED: COMPOSIO_USER_ID is not set and no backfill file exists."
+    echo "[init]   Composio per-tenant isolation is DISABLED until this is configured."
+    echo "[init]   To fix: on the host, edit /opt/alfred/compose/.env and add:"
+    echo "[init]     COMPOSIO_USER_ID=alfred-<slug>-<instance_id>"
+    echo "[init]   then run: docker compose up -d --force-recreate"
+    echo "[init]   (Composio integration is optional, continuing init with status 0.)"
+fi
+chmod 644 "$COMPOSIO_UID_FILE" 2>/dev/null || true
+
 echo "=== Init complete ==="

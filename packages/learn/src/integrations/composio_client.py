@@ -52,27 +52,64 @@ def _get_client():
 def get_user_id() -> str:
     """Resolve the Composio user_id for this tenant.
 
-    Uses COMPOSIO_USER_ID env if set, otherwise falls back to "default".
-    In production, this should be set to the tenant owner's email.
+    Uses COMPOSIO_USER_ID env, which MUST be set to a tenant-unique value
+    (e.g. ``alfred-<slug>-<instance-id>``) by the provisioner. Raises
+    RuntimeError if missing or set to the old default ``"default"`` — that
+    value caused cross-tenant connection leakage. See #408.
     """
-    return os.environ.get("COMPOSIO_USER_ID", "default")
+    uid = (os.environ.get("COMPOSIO_USER_ID") or "").strip()
+    if not uid or uid == "default":
+        # Fallback: init container writes this file for existing tenants
+        # whose .env has not been backfilled. See init/entrypoint.sh step 10.
+        fallback = "/alfred-data/.composio-user-id"
+        try:
+            if os.path.exists(fallback):
+                with open(fallback) as f:
+                    file_uid = f.read().strip()
+                if file_uid and file_uid != "default":
+                    uid = file_uid
+        except OSError:
+            pass
+    if not uid or uid == "default":
+        raise RuntimeError(
+            "COMPOSIO_USER_ID is not set (or still 'default'). "
+            "Every tenant must have a unique COMPOSIO_USER_ID in .env so that "
+            "Composio connected_accounts are scoped per tenant. "
+            "Set COMPOSIO_USER_ID=alfred-<slug>-<instance-id> and restart."
+        )
+    return uid
 
 
 def list_connected_accounts(user_id: str | None = None) -> list[dict[str, Any]]:
-    """List all connected accounts for the tenant user.
+    """List connected accounts for this tenant user only.
 
-    Returns a list of dicts with: id, toolkit_slug, status, auth_scheme.
+    Passes ``user_id`` to Composio for server-side scoping, with a
+    defense-in-depth client-side filter on top.
     """
     client = _get_client()
     uid = user_id or get_user_id()
     try:
-        response = client.connected_accounts.list()
+        # Try server-side scoping first — accepted by Composio SDK v3.
+        try:
+            response = client.connected_accounts.list(user_id=uid)
+        except TypeError:
+            # Older SDK signature — fall back to unfiltered list + client-side filter.
+            response = client.connected_accounts.list()
+
         results = []
         for acct in response.items:
             d = acct.model_dump()
-            acct_user = d.get("user_id", "")
-            # Filter to this user's accounts (or show all if user_id is "default")
-            if uid != "default" and acct_user and acct_user != uid:
+            acct_user = d.get("user_id") or d.get("member_id")
+            # Defense-in-depth: require an explicit owner match. Accounts
+            # with missing owner fields must NOT be exposed to this tenant —
+            # cross-tenant leakage is the failure mode this guards against.
+            if not acct_user:
+                logger.warning(
+                    "Composio account %s has no owner field; excluding from tenant view",
+                    d.get("id"),
+                )
+                continue
+            if acct_user != uid:
                 continue
             toolkit = d.get("toolkit", {})
             results.append({

@@ -30,8 +30,55 @@ function getComposioApiKey(): string {
   return key;
 }
 
+/**
+ * Resolve the Composio user_id for this tenant.
+ *
+ * Every tenant MUST have a unique COMPOSIO_USER_ID so that connected_accounts
+ * (OAuth credentials, API keys) are scoped to the tenant. Without this, the
+ * single shared platform-level Composio API key lets every tenant see — and
+ * potentially EXECUTE against — every other tenant's connections. See #408.
+ *
+ * `"default"` is treated as "not set" — we refuse to proceed with it, because
+ * that's the old buggy behaviour that caused cross-tenant data leakage.
+ *
+ * Injected at provisioning time by `packages/ctrl/src/infra/provisioner.ts`
+ * and backfilled for existing tenants by `packages/openclaw/init/entrypoint.sh`.
+ */
+// Fallback file written by the init container for tenants provisioned
+// before the provisioner learned to inject COMPOSIO_USER_ID. See
+// packages/openclaw/init/entrypoint.sh step 10.
+const COMPOSIO_USER_ID_FALLBACK_FILE = "/mnt/encrypted/alfred/.composio-user-id";
+
 function getComposioUserId(): string {
-  return process.env.COMPOSIO_USER_ID || "default";
+  let uid = (process.env.COMPOSIO_USER_ID || "").trim();
+  if (!uid || uid === "default") {
+    // Try the init-container-written fallback file for existing tenants
+    // whose .env has not been backfilled yet.
+    try {
+      if (fs.existsSync(COMPOSIO_USER_ID_FALLBACK_FILE)) {
+        const fileUid = fs.readFileSync(COMPOSIO_USER_ID_FALLBACK_FILE, "utf-8").trim();
+        if (fileUid && fileUid !== "default") uid = fileUid;
+      }
+    } catch { /* ignore */ }
+  }
+  if (!uid || uid === "default") {
+    throw new ValidationError(
+      "COMPOSIO_USER_ID is not configured for this tenant. " +
+      "This is required to isolate Composio connected accounts per tenant. " +
+      "Set COMPOSIO_USER_ID=alfred-<slug>-<instance-id> in /opt/alfred/compose/.env and restart ctrl-api.",
+    );
+  }
+  return uid;
+}
+
+/**
+ * Check whether a Composio connected_account payload belongs to the given user_id.
+ * Handles both `member_id` (legacy) and `user_id` field names.
+ */
+function accountMatchesUserId(acct: Record<string, unknown>, userId: string): boolean {
+  const a = acct as any;
+  const m = a.member_id ?? a.user_id ?? a.userId ?? "";
+  return typeof m === "string" && m === userId;
 }
 
 // ---------------------------------------------------------------------------
@@ -373,8 +420,13 @@ export function registerIntegrationRoutes(): void {
   // =========================================================================
   addRoute("GET", "/api/v1/integrations", async ({ res }) => {
     const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
     try {
-      const resp = await fetch(`${COMPOSIO_API_V3}/connected_accounts`, {
+      // Scope server-side via user_id query param. Composio v3 accepts this
+      // to filter connected_accounts to a single end-user (tenant).
+      const url = new URL(`${COMPOSIO_API_V3}/connected_accounts`);
+      url.searchParams.set("user_id", userId);
+      const resp = await fetch(url.toString(), {
         headers: { "x-api-key": apiKey },
       });
       if (!resp.ok) {
@@ -384,9 +436,12 @@ export function registerIntegrationRoutes(): void {
       const data = (await resp.json()) as Record<string, unknown>;
       const items = Array.isArray(data.items) ? data.items : [];
 
-      const userId = getComposioUserId();
+      // Defense-in-depth: if the server-side filter was silently ignored by
+      // Composio (older API versions), drop anything that does not match our
+      // tenant user_id. Better to return empty than to leak another tenant's
+      // connections.
       const filtered = items
-        .filter((a: any) => userId === "default" || a.member_id === userId || a.user_id === userId)
+        .filter((a: any) => accountMatchesUserId(a, userId))
         .map((a: any) => ({
           id: a.id,
           toolkit: a.toolkit?.slug ?? a.appName ?? "",
@@ -452,6 +507,7 @@ export function registerIntegrationRoutes(): void {
       throw new ValidationError("toolkit_slug (string) is required");
     }
     const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
     const redirectUrl = typeof b.redirect_url === "string" ? b.redirect_url : "";
 
     try {
@@ -505,7 +561,10 @@ export function registerIntegrationRoutes(): void {
         }
       }
 
-      // Step 2: Create a connected account using the auth_config
+      // Step 2: Create a connected account using the auth_config.
+      // user_id scopes this connection to the current tenant so that
+      // other tenants sharing the same platform Composio API key cannot
+      // see or execute against it. See #408.
       const connectResp = await fetch(`${COMPOSIO_API_V3}/connected_accounts`, {
         method: "POST",
         headers: {
@@ -515,6 +574,7 @@ export function registerIntegrationRoutes(): void {
         body: JSON.stringify({
           auth_config: { id: authConfigId },
           connection: {
+            user_id: userId,
             redirect_url: redirectUrl || undefined,
           },
         }),
@@ -545,11 +605,15 @@ export function registerIntegrationRoutes(): void {
   // =========================================================================
   addRoute("DELETE", "/api/v1/integrations/:id", async ({ res, params }) => {
     const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
     const connId = params.id;
 
     try {
-      // 1. Fetch the connection to learn its toolkit before deleting
+      // 1. Fetch the connection to learn its toolkit before deleting.
+      //    ALSO validate that the connection belongs to the current tenant —
+      //    otherwise one tenant could delete another tenant's connection.
       let toolkit = "";
+      let ownerUserId = "";
       try {
         const connResp = await fetch(
           `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(connId)}`,
@@ -558,6 +622,21 @@ export function registerIntegrationRoutes(): void {
         if (connResp.ok) {
           const conn = (await connResp.json()) as any;
           toolkit = (conn.toolkit?.slug ?? conn.appName ?? "").toLowerCase();
+          ownerUserId = (conn.member_id ?? conn.user_id ?? conn.userId ?? "") as string;
+          // Defense-in-depth: require explicit ownership match. Treat a
+          // missing/empty owner field as non-matching — otherwise a
+          // connected_account payload without member_id/user_id would
+          // allow cross-tenant deletes to slip through.
+          if (!ownerUserId || ownerUserId !== userId) {
+            sendJson(res, 403, {
+              error: "Connection does not belong to this tenant",
+              connection_id: connId,
+            });
+            return;
+          }
+        } else if (connResp.status === 404) {
+          sendJson(res, 404, { error: `Connected account ${connId} not found` });
+          return;
         }
       } catch { /* proceed with deletion anyway */ }
 
@@ -645,16 +724,20 @@ export function registerIntegrationRoutes(): void {
         }
       }
 
-      // 8. If no Composio connections remain, remove composio_execute from gateway
+      // 8. If no Composio connections remain for THIS tenant, remove
+      //    composio_execute from gateway. Scoped by user_id so one tenant
+      //    disconnecting does not yank the tool from another tenant.
       let composioExecuteRemoved = false;
       try {
-        const remainingResp = await fetch(`${COMPOSIO_API_V3}/connected_accounts`, {
+        const remainingUrl = new URL(`${COMPOSIO_API_V3}/connected_accounts`);
+        remainingUrl.searchParams.set("user_id", userId);
+        const remainingResp = await fetch(remainingUrl.toString(), {
           headers: { "x-api-key": apiKey },
         });
         if (remainingResp.ok) {
           const remainingData = (await remainingResp.json()) as any;
           const remaining = (Array.isArray(remainingData.items) ? remainingData.items : [])
-            .filter((a: any) => a.status === "ACTIVE");
+            .filter((a: any) => a.status === "ACTIVE" && accountMatchesUserId(a, userId));
           if (remaining.length === 0) {
             removeToolFromGateway("ctrl_composio_execute");
             composioExecuteRemoved = true;
@@ -1002,11 +1085,13 @@ export function registerIntegrationRoutes(): void {
     const defaults = DEFAULT_ARGS[actionSlug] || {};
     const mergedArgs = { ...defaults, ...userArgs };
 
-    // Resolve connected account for this toolkit
+    // Resolve connected account for this toolkit, scoped to this tenant.
     const toolkit = actionSlug.split("_")[0].toLowerCase();
     let connectedAccountId = "";
     try {
-      const connResp = await fetch(`${COMPOSIO_API_V3}/connected_accounts`, {
+      const connUrl = new URL(`${COMPOSIO_API_V3}/connected_accounts`);
+      connUrl.searchParams.set("user_id", userId);
+      const connResp = await fetch(connUrl.toString(), {
         headers: { "x-api-key": apiKey },
       });
       if (connResp.ok) {
@@ -1015,11 +1100,11 @@ export function registerIntegrationRoutes(): void {
         const match = items.find((a: any) =>
           (a.toolkit?.slug ?? a.appName ?? "").toLowerCase() === toolkit &&
           a.status === "ACTIVE" &&
-          (userId === "default" || a.member_id === userId || a.user_id === userId),
+          accountMatchesUserId(a, userId),
         );
         if (match) connectedAccountId = match.id;
       }
-    } catch { /* proceed without — SDK may resolve from user_id */ }
+    } catch { /* proceed without — SDK will refuse without a match */ }
 
     if (!connectedAccountId) {
       sendJson(res, 400, {
@@ -1029,14 +1114,19 @@ export function registerIntegrationRoutes(): void {
     }
 
     try {
-      // Execute via docker exec into alfred-learn container (Python SDK)
+      // Execute via docker exec into alfred-learn container (Python SDK).
+      // Pass both COMPOSIO_API_KEY and COMPOSIO_USER_ID so the Python client
+      // scopes the call correctly — the alfred-learn container already has
+      // these from its env_file, but we set them explicitly for robustness.
       const script = `
 import json, os, sys
 os.environ.setdefault("COMPOSIO_API_KEY", ${JSON.stringify(apiKey)})
+os.environ["COMPOSIO_USER_ID"] = ${JSON.stringify(userId)}
 from src.integrations.composio_client import execute_action
 result = execute_action(
     ${JSON.stringify(actionSlug)},
     json.loads(${JSON.stringify(JSON.stringify(mergedArgs))}),
+    user_id=${JSON.stringify(userId)},
     connected_account_id=${JSON.stringify(connectedAccountId)},
 )
 print(json.dumps(result, default=str))
