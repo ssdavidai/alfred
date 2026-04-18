@@ -3,6 +3,7 @@ import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { dockerExec, ALFRED_CMD } from "../helpers.js";
+import { emitStreamEvent } from "./streams.js";
 
 export const VAULT_PATH = "/mnt/encrypted/vault";
 const INBOX_PATH = `${VAULT_PATH}/inbox`;
@@ -248,6 +249,77 @@ function sanitizeFilename(name: string): string {
     throw new ValidationError("Invalid filename");
   }
   return sanitized;
+}
+
+// Extension → media category.
+// Kept in sync with packages/learn/src/activities/media.py — if you add a type
+// here, add it there. `.txt` is intentionally excluded so plain text uploads
+// fall through to the curator/text path instead of MediaIngestionWorkflow.
+const MEDIA_EXT_MAP: Record<string, "audio" | "document" | "image" | "video"> = {
+  mp3: "audio", wav: "audio", ogg: "audio", m4a: "audio",
+  pdf: "document", doc: "document", docx: "document",
+  png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image",
+  mp4: "video", webm: "video", mov: "video",
+};
+
+const MIME_CATEGORY_MAP: Array<[RegExp, "audio" | "document" | "image" | "video"]> = [
+  [/^audio\//, "audio"],
+  [/^image\//, "image"],
+  [/^video\//, "video"],
+  [/^application\/pdf$/, "document"],
+  [/^application\/(ms|vnd\.openxmlformats-officedocument|vnd\.oasis\.opendocument)/, "document"],
+];
+
+function detectMediaCategory(filename: string, mimeType?: string): "audio" | "document" | "image" | "video" | null {
+  if (mimeType) {
+    for (const [re, cat] of MIME_CATEGORY_MAP) {
+      if (re.test(mimeType)) return cat;
+    }
+  }
+  const idx = filename.lastIndexOf(".");
+  if (idx < 0) return null;
+  const ext = filename.slice(idx + 1).toLowerCase();
+  return MEDIA_EXT_MAP[ext] ?? null;
+}
+
+/**
+ * If the uploaded file is media (audio/document/image/video), emit a stream
+ * event with stream_type="media" so EventProcessorWorkflow will route it to
+ * MediaIngestionWorkflow. Non-media files fall through to the normal inbox
+ * scan / curator path.
+ *
+ * Returns the emitted event (with extracted file_type) or null when the file
+ * is not media.
+ */
+function maybeEmitMediaEvent(
+  filename: string,
+  mimeType?: string,
+): { id: string; file_type: string } | null {
+  const category = detectMediaCategory(filename, mimeType);
+  if (!category) return null;
+
+  const containerPath = `/vault/inbox/${filename}`; // path as seen from the learn/alfred containers
+  const event = emitStreamEvent({
+    stream_id: "system-inbox",
+    stream_type: "media",
+    source_ref: `inbox:${filename}`,
+    raw: {
+      filename,
+      path: path.join("inbox", filename),
+      mime_type: mimeType || "",
+    },
+    summary: `Media upload: ${filename}`,
+    metadata: {
+      original_path: path.join("inbox", filename),
+    },
+    extra: {
+      file_name: filename,
+      file_path: containerPath,
+      mime_type: mimeType || "",
+      context: {},
+    },
+  });
+  return { id: event.id, file_type: category };
 }
 
 // ---------------------------------------------------------------------------
@@ -883,12 +955,19 @@ export function registerVaultRoutes(): void {
     }
     const filename = sanitizeFilename(b.filename as string);
     const filePath = path.join(INBOX_PATH, filename);
-    if (b.encoding === "base64") {
+    const isBinary = b.encoding === "base64";
+    if (isBinary) {
       fs.writeFileSync(filePath, Buffer.from(b.content as string, "base64"));
     } else {
       fs.writeFileSync(filePath, b.content as string, "utf-8");
     }
-    sendJson(res, 201, { message: `Uploaded ${filename} to inbox`, filename });
+    const mediaEvent = maybeEmitMediaEvent(filename, typeof b.mime_type === "string" ? b.mime_type : undefined);
+    sendJson(res, 201, {
+      message: `Uploaded ${filename} to inbox`,
+      filename,
+      binary: isBinary,
+      ...(mediaEvent ? { media_event_id: mediaEvent.id, media_type: mediaEvent.file_type } : {}),
+    });
   });
 
   // Upload multiple files to inbox
@@ -897,21 +976,31 @@ export function registerVaultRoutes(): void {
     if (!b || !Array.isArray(b.files)) {
       throw new ValidationError("files array is required");
     }
-    const results: string[] = [];
-    for (const file of b.files as Array<{ filename: string; content: string; encoding?: string }>) {
+    const results: Array<{ filename: string; binary: boolean; media_event_id?: string; media_type?: string }> = [];
+    for (const file of b.files as Array<{ filename: string; content: string; encoding?: string; mime_type?: string }>) {
       if (typeof file.filename !== "string" || typeof file.content !== "string") {
         throw new ValidationError("Each file must have filename and content");
       }
       const filename = sanitizeFilename(file.filename);
       const filePath = path.join(INBOX_PATH, filename);
-      if (file.encoding === "base64") {
+      const isBinary = file.encoding === "base64";
+      if (isBinary) {
         fs.writeFileSync(filePath, Buffer.from(file.content, "base64"));
       } else {
         fs.writeFileSync(filePath, file.content, "utf-8");
       }
-      results.push(filename);
+      const mediaEvent = maybeEmitMediaEvent(filename, typeof file.mime_type === "string" ? file.mime_type : undefined);
+      results.push({
+        filename,
+        binary: isBinary,
+        ...(mediaEvent ? { media_event_id: mediaEvent.id, media_type: mediaEvent.file_type } : {}),
+      });
     }
-    sendJson(res, 201, { message: `Uploaded ${results.length} files to inbox`, filenames: results });
+    sendJson(res, 201, {
+      message: `Uploaded ${results.length} files to inbox`,
+      filenames: results.map((r) => r.filename),
+      files: results,
+    });
   });
 
   // List inbox files

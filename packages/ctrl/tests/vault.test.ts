@@ -1,6 +1,7 @@
 import { mock, describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import crypto from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 // ---------------------------------------------------------------------------
@@ -231,5 +232,183 @@ describe("DELETE /api/v1/vault/records/*", () => {
     assert.strictEqual(status, 200);
     assert.ok(execFileFn.mock.callCount() >= 1, "execFile should be called");
     assert.deepStrictEqual(data, { deleted: true });
+  });
+});
+
+describe("POST /api/v1/vault/inbox (binary upload + media routing)", () => {
+  // A 1x1 transparent PNG
+  const PNG_BASE64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+  const PNG_BYTES = Buffer.from(PNG_BASE64, "base64");
+  // MD5 is used only to assert byte-perfect write
+  const PNG_MD5 = crypto.createHash("md5").update(PNG_BYTES).digest("hex");
+
+  it("decodes base64 content to raw bytes on disk", async () => {
+    writeFileSyncFn.mock.resetCalls();
+    appendFileSyncFn.mock.resetCalls();
+
+    const { status, data } = await req("POST", "/api/v1/vault/inbox", {
+      filename: "pixel.png",
+      content: PNG_BASE64,
+      encoding: "base64",
+    });
+
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.filename, "pixel.png");
+    assert.strictEqual(data.binary, true);
+
+    // First writeFileSync call should be the file write — with raw Buffer bytes
+    const firstCall = writeFileSyncFn.mock.calls[0];
+    assert.ok(firstCall, "writeFileSync should have been called");
+    const writtenPath = firstCall.arguments[0] as string;
+    const writtenBuf = firstCall.arguments[1] as Buffer;
+    assert.ok(writtenPath.endsWith("/inbox/pixel.png"), `path was ${writtenPath}`);
+    assert.ok(Buffer.isBuffer(writtenBuf), "content must be written as a Buffer (raw bytes)");
+    const md5 = crypto.createHash("md5").update(writtenBuf).digest("hex");
+    assert.strictEqual(md5, PNG_MD5, "on-disk bytes must match input md5");
+    assert.strictEqual(writtenBuf.length, PNG_BYTES.length);
+  });
+
+  it("emits a media stream event for image uploads", async () => {
+    writeFileSyncFn.mock.resetCalls();
+    appendFileSyncFn.mock.resetCalls();
+
+    const { status, data } = await req("POST", "/api/v1/vault/inbox", {
+      filename: "shot.png",
+      content: PNG_BASE64,
+      encoding: "base64",
+    });
+
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.media_type, "image");
+    assert.ok(typeof data.media_event_id === "string" && data.media_event_id.length > 0);
+
+    // At least one appendFileSync call should carry a media stream event JSON
+    const mediaCalls = appendFileSyncFn.mock.calls.filter((c) => {
+      const line = c.arguments[1];
+      return typeof line === "string" && line.includes('"stream_type":"media"');
+    });
+    assert.ok(mediaCalls.length >= 1, "expected a stream event with stream_type=media");
+    const line = mediaCalls[0].arguments[1] as string;
+    const evt = JSON.parse(line.trim());
+    assert.strictEqual(evt.stream_type, "media");
+    assert.strictEqual(evt.file_name, "shot.png");
+    assert.ok(String(evt.file_path).endsWith("/vault/inbox/shot.png"));
+  });
+
+  it("does NOT emit a media event for plain text uploads", async () => {
+    writeFileSyncFn.mock.resetCalls();
+    appendFileSyncFn.mock.resetCalls();
+
+    const { status, data } = await req("POST", "/api/v1/vault/inbox", {
+      filename: "note.md",
+      content: "# hello\n",
+    });
+
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.media_type, undefined);
+    const mediaCalls = appendFileSyncFn.mock.calls.filter((c) => {
+      const line = c.arguments[1];
+      return typeof line === "string" && line.includes('"stream_type":"media"');
+    });
+    assert.strictEqual(mediaCalls.length, 0, ".md files should not trigger media routing");
+  });
+
+  it("does NOT emit a media event for .txt uploads (falls through to curator)", async () => {
+    writeFileSyncFn.mock.resetCalls();
+    appendFileSyncFn.mock.resetCalls();
+
+    const { status, data } = await req("POST", "/api/v1/vault/inbox", {
+      filename: "plain.txt",
+      content: "just some text\n",
+    });
+
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.media_type, undefined);
+    const mediaCalls = appendFileSyncFn.mock.calls.filter((c) => {
+      const line = c.arguments[1];
+      return typeof line === "string" && line.includes('"stream_type":"media"');
+    });
+    assert.strictEqual(mediaCalls.length, 0, ".txt files should not trigger media routing");
+  });
+
+  it("does NOT emit a media event for extensions outside learn's supported set (.flac)", async () => {
+    writeFileSyncFn.mock.resetCalls();
+    appendFileSyncFn.mock.resetCalls();
+
+    const { status, data } = await req("POST", "/api/v1/vault/inbox", {
+      filename: "song.flac",
+      content: Buffer.from([0x66, 0x4c, 0x61, 0x43]).toString("base64"),
+      encoding: "base64",
+    });
+
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.media_type, undefined);
+    const mediaCalls = appendFileSyncFn.mock.calls.filter((c) => {
+      const line = c.arguments[1];
+      return typeof line === "string" && line.includes('"stream_type":"media"');
+    });
+    assert.strictEqual(mediaCalls.length, 0, ".flac is not in learn's supported set — should not route as media");
+  });
+
+  it("handles bulk upload with mixed media and text", async () => {
+    writeFileSyncFn.mock.resetCalls();
+    appendFileSyncFn.mock.resetCalls();
+
+    const { status, data } = await req("POST", "/api/v1/vault/inbox/bulk", {
+      files: [
+        { filename: "a.png", content: PNG_BASE64, encoding: "base64" },
+        { filename: "b.md", content: "hi" },
+      ],
+    });
+
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.filenames.length, 2);
+    const pngEntry = data.files.find((f: any) => f.filename === "a.png");
+    const mdEntry = data.files.find((f: any) => f.filename === "b.md");
+    assert.strictEqual(pngEntry.media_type, "image");
+    assert.strictEqual(pngEntry.binary, true);
+    assert.strictEqual(mdEntry.media_type, undefined);
+    assert.strictEqual(mdEntry.binary, false);
+  });
+});
+
+describe("emitStreamEvent reserved-key filtering", () => {
+  it("ignores reserved keys passed via extra and preserves generated values", async () => {
+    appendFileSyncFn.mock.resetCalls();
+    const { emitStreamEvent } = await import("../src/api/routes/streams.js");
+
+    const event = emitStreamEvent({
+      stream_id: "system-inbox",
+      stream_type: "media",
+      source_ref: "inbox:real.png",
+      summary: "real summary",
+      extra: {
+        // Reserved — must be filtered out
+        id: "spoofed-id",
+        stream_id: "spoofed-stream",
+        stream_type: "spoofed-type",
+        tenant_id: "spoofed-tenant",
+        received_at: "1999-01-01T00:00:00Z",
+        source_ref: "spoofed:source",
+        raw: { spoofed: true },
+        summary: "spoofed summary",
+        // Non-reserved — must be preserved
+        file_name: "real.png",
+        custom_field: "ok",
+      },
+    });
+
+    assert.notStrictEqual(event.id, "spoofed-id");
+    assert.strictEqual(event.stream_id, "system-inbox");
+    assert.strictEqual(event.stream_type, "media");
+    assert.strictEqual(event.source_ref, "inbox:real.png");
+    assert.strictEqual(event.summary, "real summary");
+    assert.notStrictEqual(event.received_at, "1999-01-01T00:00:00Z");
+    assert.notDeepStrictEqual(event.raw, { spoofed: true });
+    // @ts-expect-error — dynamic extra field
+    assert.strictEqual(event.file_name, "real.png");
+    // @ts-expect-error — dynamic extra field
+    assert.strictEqual(event.custom_field, "ok");
   });
 });

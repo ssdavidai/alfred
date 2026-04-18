@@ -304,6 +304,69 @@ function getAllEvents(statusFilter?: "unprocessed" | "processed" | "quarantined"
 }
 
 // ---------------------------------------------------------------------------
+// Exported helpers (used by other route modules, e.g. vault.ts inbox upload)
+// ---------------------------------------------------------------------------
+
+/**
+ * Core event fields that must not be overwritten by `extra` — if a caller
+ * accidentally (or deliberately) passes one of these in `extra`, the value
+ * is dropped before spreading so the generated/authoritative values win.
+ */
+const RESERVED_EVENT_KEYS = new Set<string>([
+  "id",
+  "stream_id",
+  "stream_type",
+  "tenant_id",
+  "received_at",
+  "source_ref",
+  "raw",
+  "summary",
+]);
+
+/**
+ * Emit a stream event with the given stream_id/stream_type and extra fields.
+ * Also bumps the stream meta's event_count / last_event_at when the stream
+ * is registered. Used by the inbox upload path so binary files surface as
+ * `stream_type: "media"` events for MediaIngestionWorkflow to pick up.
+ */
+export function emitStreamEvent(args: {
+  stream_id: string;
+  stream_type: string;
+  source_ref?: string;
+  raw?: unknown;
+  summary?: string;
+  metadata?: Record<string, unknown>;
+  extra?: Record<string, unknown>;
+}): StreamEvent {
+  const safeExtra = Object.fromEntries(
+    Object.entries(args.extra || {}).filter(([k]) => !RESERVED_EVENT_KEYS.has(k)),
+  );
+  const event: StreamEvent = {
+    id: crypto.randomUUID(),
+    stream_id: args.stream_id,
+    stream_type: args.stream_type,
+    received_at: new Date().toISOString(),
+    source_ref: args.source_ref,
+    raw: args.raw ?? {},
+    summary: args.summary,
+    metadata: args.metadata,
+    ...safeExtra,
+  };
+  appendEvent(args.stream_id, event);
+
+  // Bump stream meta if registered
+  const meta = loadStreamsMeta();
+  const idx = meta.findIndex((s) => s.id === args.stream_id);
+  if (idx >= 0) {
+    meta[idx].last_event_at = event.received_at;
+    meta[idx].event_count = (meta[idx].event_count || 0) + 1;
+    saveStreamsMeta(meta);
+  }
+
+  return event;
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
