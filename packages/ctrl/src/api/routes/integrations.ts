@@ -344,21 +344,28 @@ async function generateComposioSkill(
   const toolActions = actions.filter((a) => a.type === "tool");
   const streamActions = actions.filter((a) => a.type === "stream");
 
-  // Build common usage examples from known defaults
+  // Build common usage examples — uses the MCP `ctrl` tool to call
+  // POST /api/v1/integrations/execute (no standalone `ctrl_composio_execute`
+  // tool exists; the only callable surface is the MCP `ctrl` tool).
   const recommended = RECOMMENDED_STREAMS[toolkit];
   let usageSection = "";
   if (toolActions.length > 0 || recommended) {
     const examples: string[] = [];
+    const buildCall = (action: string, args: Record<string, unknown> | string): string => {
+      const argsLiteral = typeof args === "string" ? args : JSON.stringify(args);
+      return (
+        `\`ctrl(endpoint="/api/v1/integrations/execute", method="POST", ` +
+        `body={"action": "${action}", "arguments": ${argsLiteral}})\``
+      );
+    };
     if (recommended) {
-      examples.push(`- List data: \`ctrl_composio_execute action="${recommended.action}" arguments=${JSON.stringify(recommended.args)}\``);
+      examples.push(`- List data: ${buildCall(recommended.action, recommended.args)}`);
     }
     for (const ta of toolActions.slice(0, 3)) {
       const defaults = DEFAULT_ARGS[ta.slug];
-      if (defaults && Object.keys(defaults).length > 0) {
-        examples.push(`- ${ta.description.split(".")[0]}: \`ctrl_composio_execute action="${ta.slug}" arguments=${JSON.stringify(defaults)}\``);
-      } else {
-        examples.push(`- ${ta.description.split(".")[0]}: \`ctrl_composio_execute action="${ta.slug}" arguments={...}\``);
-      }
+      const argsExpr =
+        defaults && Object.keys(defaults).length > 0 ? defaults : "{...}";
+      examples.push(`- ${ta.description.split(".")[0]}: ${buildCall(ta.slug, argsExpr)}`);
     }
     usageSection = `\n## Common usage\n\n${examples.join("\n")}\n`;
   }
@@ -371,7 +378,7 @@ async function generateComposioSkill(
 
   const skillContent = `---
 name: alfred-composio-${toolkit}
-description: ${displayName} integration — ${actions.length} available actions via ctrl_composio_execute.
+description: ${displayName} integration — ${actions.length} available actions via the MCP ctrl tool (POST /api/v1/integrations/execute).
 version: "1.0"
 metadata:
   openclaw:
@@ -383,7 +390,7 @@ metadata:
 
 # ${emoji} ${displayName}
 
-Connected via Composio. Call actions with \`ctrl_composio_execute\`.
+Connected via Composio. Call actions through the MCP \`ctrl\` tool: \`ctrl(endpoint="/api/v1/integrations/execute", method="POST", body={"action": "<ACTION_NAME>", "arguments": {...}})\`.
 
 ${streamActions.length > 0 ? `**Stream**: ${recommended ? `${recommended.name} (auto-configured, polling every ${Math.round(recommended.interval / 60)} min)` : "available but not auto-configured"}` : ""}
 **Tool actions**: ${toolActions.length} | **Stream actions**: ${streamActions.length}
