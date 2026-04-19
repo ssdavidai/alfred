@@ -24,20 +24,87 @@ export const getStreams: GetStreams<void, any> = async (_args, context) => {
     orderBy: { createdAt: "desc" },
   });
 
-  // Merge with tenant-side event counts
+  // Merge with tenant-side event counts AND synthesize entries for tenant-only
+  // streams (composio streams live in the tenant's streams.json but have no
+  // Prisma row). Surfacing them here is what makes the Streams page show a
+  // unified list.
   try {
     const instance = await getUserInstance(context);
     const tenantData = await proxyToTenant(instance, { path: "/api/v1/streams" });
     const tenantStreams: any[] = tenantData?.streams || [];
-    // Build lookup by both ID and source — system streams use different IDs on SaaS vs tenant
-    const countById = new Map(tenantStreams.map((s: any) => [s.id, { event_count: s.event_count || 0, last_event_at: s.last_event_at }]));
-    const countBySource = new Map(tenantStreams.map((s: any) => [s.source, { event_count: s.event_count || 0, last_event_at: s.last_event_at }]));
+    const countById = new Map(
+      tenantStreams.map((s: any) => [
+        s.id,
+        { event_count: s.event_count || 0, last_event_at: s.last_event_at, status: s.status, enabled: s.enabled },
+      ]),
+    );
+    const countBySource = new Map(
+      tenantStreams.map((s: any) => [
+        s.source,
+        { event_count: s.event_count || 0, last_event_at: s.last_event_at, status: s.status, enabled: s.enabled },
+      ]),
+    );
 
     const tenantBaseUrl = (instance as any)?.subdomainUrl?.replace(/\/$/, "") || null;
-    return prismaStreams.map((s: any) => {
+
+    const merged = prismaStreams.map((s: any) => {
       const tenant = countById.get(s.id) || countBySource.get(s.source);
-      return { ...s, _count: { events: tenant?.event_count ?? 0 }, lastEventAt: tenant?.last_event_at ?? s.lastEventAt, tenantBaseUrl };
+      return {
+        ...s,
+        _count: { events: tenant?.event_count ?? 0 },
+        lastEventAt: tenant?.last_event_at ?? s.lastEventAt,
+        tenantBaseUrl,
+      };
     });
+
+    // Synthesize "virtual" entries for tenant streams that have no Prisma
+    // counterpart. These are the Composio streams created by auto-config.
+    // They live entirely on the tenant (streams.json + STREAM_CONFIGS_DIR)
+    // — we expose them read-mostly: the user can see event counts + go to
+    // the Integrations page to toggle them, but can't edit them inline.
+    const prismaIds = new Set(prismaStreams.map((s: any) => s.id));
+    const composioConnections = await prisma.composioConnection.findMany({
+      where: { userId: context.user.id },
+      select: { toolkit: true, label: true, iconUrl: true, connectionId: true },
+    });
+    const toolkitMeta = new Map(
+      composioConnections.map((c) => [c.toolkit, c]),
+    );
+
+    const virtualStreams = tenantStreams
+      .filter((t: any) => t.type === "composio" && !prismaIds.has(t.id))
+      .map((t: any) => {
+        const toolkit = String(t.composio_toolkit || (t.source || "").replace(/^composio:/, "") || "").toLowerCase();
+        const meta = toolkitMeta.get(toolkit) ?? null;
+        return {
+          id: t.id,
+          userId: context.user!.id,
+          name: t.name || t.id,
+          type: "composio",
+          source: t.source || `composio:${toolkit}`,
+          isSystem: false,
+          enabled: t.enabled !== false,
+          config: {},
+          webhookToken: null,
+          lastRunAt: null,
+          lastEventAt: t.last_event_at ?? null,
+          status: t.status ?? "idle",
+          errorMessage: null,
+          createdAt: t.created_at ?? new Date().toISOString(),
+          updatedAt: t.updated_at ?? new Date().toISOString(),
+          _count: { events: t.event_count ?? 0 },
+          tenantBaseUrl,
+          // Extra fields for the UI to render this as a Composio-backed stream
+          isComposio: true,
+          composioAction: t.composio_action ?? null,
+          composioConnectionId: t.composio_connection_id ?? meta?.connectionId ?? null,
+          composioToolkit: toolkit || null,
+          composioLabel: meta?.label ?? null,
+          composioIconUrl: meta?.iconUrl ?? null,
+        };
+      });
+
+    return [...merged, ...virtualStreams];
   } catch {
     // Tenant unreachable — return Prisma data with 0 counts
     return prismaStreams.map((s: any) => ({ ...s, _count: { events: 0 } }));
