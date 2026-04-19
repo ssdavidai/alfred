@@ -100,6 +100,10 @@ export default function IntegrationsPage() {
   const [configResults, setConfigResults] = useState<Record<string, AutoConfigResult>>({});
   const [toast, setToast] = useState<string | null>(null);
   const prevConnectedRef = useRef<Set<string>>(new Set());
+  // Track connections we've already auto-fired on this page-load to prevent
+  // a tight-loop where auto-config runs every time the connection list
+  // refetches with auto_config_state still "pending" (e.g. mid-flight).
+  const autoFiredRef = useRef<Set<string>>(new Set());
   const { markReconfiguring, reconfiguringUntil } = useOpenclawStatus();
   const isReconfiguring =
     reconfiguringUntil !== null && reconfiguringUntil > new Date();
@@ -172,7 +176,46 @@ export default function IntegrationsPage() {
       setToast(`Auto-config failed: ${err?.message || "Unknown error"}`);
     }
     setConfiguringId(null);
-  }, [markReconfiguring]);
+    // Refetch so the updated auto_config_state propagates and the
+    // auto-fire effect doesn't attempt this id again.
+    void refetchConnected();
+  }, [markReconfiguring, refetchConnected]);
+
+  // ---------------------------------------------------------------------------
+  // Auto-fire: any ACTIVE connection that isn't yet configured gets
+  // auto-config'd automatically. Handles three cases the popup-close
+  // handler misses:
+  //   1. Composio was still INITIATED when the popup closed (status
+  //      races to ACTIVE a few seconds later); this effect catches
+  //      the transition on the next refetch.
+  //   2. The user refreshed / navigated away before the popup-close
+  //      handler could fire runAutoConfig.
+  //   3. A connection was made from onboarding or another entry point
+  //      and was never auto-configured at all.
+  // autoFiredRef dedupes so the same connection doesn't get fired
+  // repeatedly while state is "running" (auto_config_state flips to
+  // "running" on the SaaS side when autoConfigIntegration starts).
+  // ---------------------------------------------------------------------------
+
+  useEffect(() => {
+    if (!connected.length) return;
+    const toFire = connected.filter(
+      (c) =>
+        c.status === "ACTIVE" &&
+        (c.auto_config_state === "pending" ||
+          c.auto_config_state === "error" ||
+          c.auto_config_state === undefined) &&
+        !autoFiredRef.current.has(c.id),
+    );
+    if (toFire.length === 0) return;
+    for (const conn of toFire) {
+      autoFiredRef.current.add(conn.id);
+      // runAutoConfig handles its own loading state, toast, and refetch.
+      runAutoConfig(conn.id, conn.toolkit_name || conn.toolkit).catch((err) => {
+        console.error("[auto-fire] auto-config failed:", err);
+      });
+    }
+  }, [connected, runAutoConfig]);
 
   // ---------------------------------------------------------------------------
   // Connect flow — now includes auto-config
@@ -198,19 +241,35 @@ export default function IntegrationsPage() {
               if (popup.closed) {
                 clearInterval(interval);
                 setConnectingSlug(null);
-                // Refetch to find the new connection
-                const refreshed = await refetchConnected();
-                const newConns: ConnectedIntegration[] = refreshed?.data?.integrations || [];
+                // Poll up to 6x / 12s for the new connection to become
+                // ACTIVE. Composio can race through INITIATED → ACTIVE over
+                // a few seconds after the popup closes, and we don't want
+                // to miss it — but we also fall through to the auto-fire
+                // effect which catches any late arrivals on the next refetch.
                 const prevIds = prevConnectedRef.current;
-                const newConn = newConns.find(
-                  (c) => !prevIds.has(c.id) && c.toolkit === toolkitSlug && c.status === "ACTIVE",
-                );
-                if (newConn) {
-                  // Auto-configure the new connection
-                  await runAutoConfig(newConn.id, newConn.toolkit_name || newConn.toolkit);
-                } else {
-                  setToast(`${toolkitSlug} connected!`);
+                for (let attempt = 0; attempt < 6; attempt++) {
+                  const refreshed = await refetchConnected();
+                  const newConns: ConnectedIntegration[] =
+                    refreshed?.data?.integrations || [];
+                  const newConn = newConns.find(
+                    (c) =>
+                      !prevIds.has(c.id) &&
+                      c.toolkit === toolkitSlug &&
+                      c.status === "ACTIVE",
+                  );
+                  if (newConn) {
+                    await runAutoConfig(
+                      newConn.id,
+                      newConn.toolkit_name || newConn.toolkit,
+                    );
+                    return;
+                  }
+                  await new Promise((r) => setTimeout(r, 2000));
                 }
+                // Couldn't confirm ACTIVE in 12s — auto-fire effect will
+                // pick it up on the next refetch whenever Composio catches
+                // up.
+                setToast(`${toolkitSlug} connected — configuring shortly…`);
               }
             }, 500);
             setTimeout(() => {
@@ -619,62 +678,100 @@ function ConfigStatus({
   configResult?: AutoConfigResult;
   onReconfigure: () => void;
 }) {
+  // Prefer the authoritative server-side state over the ephemeral
+  // `configResult` (which only exists immediately after the user clicks
+  // Configure). This is what makes the page refresh-safe after PR 1.
+  const state = conn.auto_config_state;
+  const isConfigured = state === "configured" || configResult !== undefined;
+  const isRunning = state === "running";
+  const isError = state === "error";
+
+  // Prefer fields from the live auto-config result if we just ran one,
+  // else fall back to the stored counts on the connection row.
+  const streamCount = configResult?.stream_created
+    ? 1
+    : conn.streams_created ?? 0;
+  const actionsCount = configResult?.actions_count ?? conn.tools_enabled ?? 0;
+  const skillName =
+    configResult?.skill_generated ?? conn.skill_name ?? null;
+
   return (
     <div className="mt-3 space-y-2.5 border-t border-white/[0.06] pt-3">
-      {configResult ? (
-        <>
-          {/* Stream status */}
-          {configResult.stream_created && (
-            <div className="flex items-center gap-2 rounded-lg bg-blue-500/5 px-3 py-2">
-              <Radio className="h-3.5 w-3.5 text-blue-400" />
-              <span className="text-xs text-[#F0EDE8]">
-                Stream active — polling every 5 min
-              </span>
-            </div>
-          )}
-
-          {/* Actions count */}
-          <div className="flex items-center gap-2 rounded-lg bg-amber-500/5 px-3 py-2">
-            <Wrench className="h-3.5 w-3.5 text-amber-400" />
-            <span className="text-xs text-[#F0EDE8]">
-              {configResult.actions_count} actions available via <code className="text-[0.65rem] text-[#C9A84C]">composio_execute</code>
-            </span>
-          </div>
-
-          {/* Skill file */}
-          {configResult.skill_generated && (
-            <div className="flex items-center gap-2 rounded-lg bg-emerald-500/5 px-3 py-2">
-              <Zap className="h-3.5 w-3.5 text-emerald-400" />
-              <span className="text-xs text-[#F0EDE8]">
-                Skill: <code className="text-[0.65rem] text-[#8A8680]">{configResult.skill_generated}</code>
-              </span>
-            </div>
-          )}
-        </>
-      ) : (
-        <div className="flex items-center gap-2 rounded-lg bg-white/[0.02] px-3 py-2">
-          <Settings2 className="h-3.5 w-3.5 text-[#8A8680]" />
-          <span className="text-xs text-[#8A8680]">
-            Not yet configured — click Reconfigure to set up stream + skill
+      {isRunning && (
+        <div className="flex items-center gap-2 rounded-lg bg-white/[0.03] px-3 py-2">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-[#C9A84C]" />
+          <span className="text-xs text-[#F0EDE8]">
+            Configuring… streams, tools, and skill are being set up.
           </span>
         </div>
       )}
 
-      {/* Reconfigure button */}
+      {isError && (
+        <div className="flex items-center gap-2 rounded-lg bg-red-500/10 px-3 py-2">
+          <Settings2 className="h-3.5 w-3.5 text-red-400" />
+          <span className="text-xs text-[#F0EDE8]">
+            Configuration failed{conn.auto_config_error ? `: ${conn.auto_config_error}` : ""}. Click Retry below.
+          </span>
+        </div>
+      )}
+
+      {isConfigured && (
+        <>
+          {streamCount > 0 && (
+            <div className="flex items-center gap-2 rounded-lg bg-blue-500/5 px-3 py-2">
+              <Radio className="h-3.5 w-3.5 text-blue-400" />
+              <span className="text-xs text-[#F0EDE8]">
+                {streamCount === 1 ? "1 stream" : `${streamCount} streams`} active
+              </span>
+            </div>
+          )}
+
+          {actionsCount > 0 && (
+            <div className="flex items-center gap-2 rounded-lg bg-amber-500/5 px-3 py-2">
+              <Wrench className="h-3.5 w-3.5 text-amber-400" />
+              <span className="text-xs text-[#F0EDE8]">
+                {actionsCount} actions available via <code className="text-[0.65rem] text-[#C9A84C]">composio_execute</code>
+              </span>
+            </div>
+          )}
+
+          {skillName && (
+            <div className="flex items-center gap-2 rounded-lg bg-emerald-500/5 px-3 py-2">
+              <Zap className="h-3.5 w-3.5 text-emerald-400" />
+              <span className="text-xs text-[#F0EDE8]">
+                Skill: <code className="text-[0.65rem] text-[#8A8680]">{skillName}</code>
+              </span>
+            </div>
+          )}
+        </>
+      )}
+
+      {!isRunning && !isError && !isConfigured && (
+        <div className="flex items-center gap-2 rounded-lg bg-white/[0.02] px-3 py-2">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-[#8A8680]" />
+          <span className="text-xs text-[#8A8680]">
+            Queued for configuration — this usually starts within a few seconds.
+          </span>
+        </div>
+      )}
+
+      {/* Reconfigure / Retry button */}
       <button
         onClick={(e) => {
           e.stopPropagation();
           onReconfigure();
         }}
-        className="inline-flex items-center gap-1.5 rounded-lg bg-white/[0.03] px-3 py-1.5 text-[0.65rem] text-[#8A8680] transition hover:bg-white/[0.06] hover:text-[#F0EDE8]"
+        disabled={isRunning}
+        className="inline-flex items-center gap-1.5 rounded-lg bg-white/[0.03] px-3 py-1.5 text-[0.65rem] text-[#8A8680] transition hover:bg-white/[0.06] hover:text-[#F0EDE8] disabled:cursor-not-allowed disabled:opacity-50"
       >
         <RefreshCw className="h-3 w-3" />
-        {configResult ? "Reconfigure" : "Configure"}
+        {isError ? "Retry configuration" : isConfigured ? "Reconfigure" : "Configure now"}
       </button>
 
       {/* Created at */}
       <p className="text-[0.6rem] text-[#8A8680]/60">
         Connected {new Date(conn.created_at).toLocaleDateString()}
+        {conn.auto_configured_at && ` · configured ${new Date(conn.auto_configured_at).toLocaleDateString()}`}
       </p>
     </div>
   );
