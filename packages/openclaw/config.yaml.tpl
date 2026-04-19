@@ -53,10 +53,12 @@ surveyor:
   watcher:
     debounce_seconds: 30
   ollama:
-    base_url: "https://openrouter.ai/api/v1"
-    model: "openai/text-embedding-3-small"
-    embedding_dims: 1536
-    api_key: "${OPENROUTER_API_KEY}"
+    # Local embedding via Ollama sidecar (see docker-compose ollama service).
+    # Model is auto-pulled by the ollama container itself on startup.
+    base_url: "http://ollama:11434"
+    model: "nomic-embed-text"
+    embedding_dims: 768
+    api_key: ""
   milvus:
     uri: "${DATA_DIR}/milvus_lite.db"
     collection_name: "vault_embeddings"
@@ -69,7 +71,7 @@ surveyor:
   openrouter:
     api_key: "${OPENROUTER_API_KEY}"
     base_url: "https://openrouter.ai/api/v1"
-    model: "qwen/qwen3.5-35b-a3b"
+    model: "x-ai/grok-4.1-fast"
     temperature: 0.3
   labeler:
     max_files_per_cluster_context: 20
