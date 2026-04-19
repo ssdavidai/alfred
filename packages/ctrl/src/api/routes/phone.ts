@@ -1,11 +1,11 @@
 // AgentPhone — tenant-side ctrl-api routes.
 //
-// Phase 4 lands two endpoints used by the Voice Bridge:
-//   GET  /api/v1/phone/voice-context   — bundle for the Realtime instructions primer
-//   POST /api/v1/phone/transcript      — write call transcript to the streams pipeline
-//
-// Phase 5 will add /sms/inbound + authorized-numbers CRUD.
-// Phase 6 will add outbound /sms + /call.
+//   Phase 4 (#449)  GET  /api/v1/phone/voice-context   — bridge primer bundle
+//   Phase 4 (#449)  POST /api/v1/phone/transcript      — call transcript ingest
+//   Phase 5 (#222)  POST /api/v1/phone/sms/inbound     — SaaS-forwarded SMS
+//   Phase 5 (#222)  CRUD /api/v1/phone/authorized-numbers
+//   Phase 6 (#224)  POST /api/v1/phone/sms             — outbound SMS
+//   Phase 6 (#224)  POST /api/v1/phone/call            — outbound call
 
 import fs from "node:fs";
 import { addRoute } from "../server.js";
@@ -17,9 +17,20 @@ const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
 // the openclaw container; ctrl-api mounts /mnt/encrypted/openclaw → /openclaw-state).
 const WORKSPACE_DIR =
   process.env.OPENCLAW_WORKSPACE_DIR ?? "/openclaw-state/workspace";
+const OPENCLAW_CONFIG_PATH =
+  process.env.OPENCLAW_CONFIG_PATH ?? "/openclaw-state/openclaw.json";
 const OPENCLAW_GATEWAY_URL =
   process.env.OPENCLAW_GATEWAY_URL ?? "http://openclaw:18789";
 const GATEWAY_TOKEN_FILE = "/alfred-data/.gateway-token";
+const ALFRED_DATA_DIR = "/mnt/encrypted/alfred";
+const AUTHORIZED_NUMBERS_FILE = `${ALFRED_DATA_DIR}/.authorized-phone-numbers.json`;
+const SMS_THREAD_PREFIX = "sms-phone-";
+
+// SaaS internal callback (used to ship outbound SMS replies through Twilio)
+const SAAS_INTERNAL_URL =
+  process.env.SAAS_INTERNAL_URL ?? "https://alfred.black";
+const VOICE_BRIDGE_INTERNAL_TOKEN =
+  process.env.VOICE_BRIDGE_INTERNAL_TOKEN ?? "";
 
 // 60 s in-memory cache of the voice context bundle. Voice calls fetch this on
 // connect and we don't want to re-walk the vault per call.
@@ -192,10 +203,371 @@ async function ingestStreamEvent(event: Record<string, unknown>): Promise<void> 
   fs.appendFileSync(path, JSON.stringify(event) + "\n", "utf-8");
 }
 
+// ── Authorised-numbers list ─────────────────────────────────────────────────
+
+function normaliseNumber(n: string): string {
+  return n.trim().replace(/[\s\-()]/g, "");
+}
+
+function readAuthorizedNumbers(): string[] {
+  try {
+    const raw = fs.readFileSync(AUTHORIZED_NUMBERS_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((n) => typeof n === "string");
+  } catch {
+    return [];
+  }
+}
+
+function writeAuthorizedNumbers(numbers: string[]): void {
+  fs.mkdirSync(ALFRED_DATA_DIR, { recursive: true });
+  // Dedup + normalise.
+  const uniq = Array.from(new Set(numbers.map(normaliseNumber))).filter(
+    (n) => n.length > 0,
+  );
+  fs.writeFileSync(
+    AUTHORIZED_NUMBERS_FILE,
+    JSON.stringify(uniq, null, 2),
+    "utf-8",
+  );
+}
+
+// ── Per-sender SMS thread context ────────────────────────────────────────────
+
+interface SmsTurn {
+  role: "user" | "assistant";
+  content: string;
+  ts: string;
+}
+
+function smsThreadPath(from: string): string {
+  const safe = normaliseNumber(from).replace(/[^a-zA-Z0-9_+]/g, "_");
+  return `${STREAMS_DIR}/${SMS_THREAD_PREFIX}${safe}.jsonl`;
+}
+
+function readSmsThread(from: string, maxTurns = 20): SmsTurn[] {
+  try {
+    const text = fs.readFileSync(smsThreadPath(from), "utf-8");
+    const lines = text.split("\n").filter((l: string) => l.trim().length > 0);
+    return lines
+      .slice(-maxTurns)
+      .map((l: string) => JSON.parse(l) as SmsTurn);
+  } catch {
+    return [];
+  }
+}
+
+function appendSmsTurn(from: string, turn: SmsTurn): void {
+  fs.mkdirSync(STREAMS_DIR, { recursive: true });
+  fs.appendFileSync(smsThreadPath(from), JSON.stringify(turn) + "\n", "utf-8");
+}
+
+// ── openclaw chat completions wrapper (synchronous reply path) ───────────────
+
+function readMainAgentModel(): string {
+  try {
+    const raw = fs.readFileSync(OPENCLAW_CONFIG_PATH, "utf-8");
+    const cfg = JSON.parse(raw);
+    const main = (cfg?.agents?.list ?? []).find(
+      (a: any) => a?.id === "main",
+    );
+    return (
+      main?.model?.primary ??
+      cfg?.agents?.defaults?.model?.primary ??
+      "openrouter/x-ai/grok-4.1-fast"
+    );
+  } catch {
+    return "openrouter/x-ai/grok-4.1-fast";
+  }
+}
+
+function buildSmsSystemPrompt(): string {
+  const memoryMd = readFileSafe(`${WORKSPACE_DIR}/MEMORY.md`, 6_000);
+  // No voice persona — SMS is text. Use SOUL.md if present plus a tight
+  // SMS overlay; fall back to the platform persona text.
+  const soul = readFileSafe(`${WORKSPACE_DIR}/SOUL.md`, 6_000);
+
+  const overlay = [
+    "You are Alfred, replying to Sir over SMS.",
+    "Maximum two short sentences per reply. No markdown, no asterisks, no lists.",
+    "Speak names, not IDs. Numbers in full digits are fine for SMS (unlike voice).",
+    "If asked to do something, use the `self` MCP tool — wait, you don't have tools here.",
+    "If you need data you don't have, ask Sir one short clarifying question.",
+    'Goodbye: "Right, sir." Nothing more.',
+  ].join("\n");
+
+  // Fold the cross-channel context bundle into the system prompt so SMS
+  // shares context with voice + Slack.
+  const ctx = getVoiceContextCached();
+  const primer: string[] = [];
+  if (ctx.openMatters?.length) {
+    primer.push(
+      "## Open matters\n" +
+        ctx.openMatters
+          .slice(0, 6)
+          .map((m) => `- ${m.name}`)
+          .join("\n"),
+    );
+  }
+  if (ctx.openTasks?.length) {
+    primer.push(
+      "## Open tasks\n" +
+        ctx.openTasks
+          .slice(0, 6)
+          .map((t) => `- ${t.name}${t.due ? ` (due ${t.due})` : ""}`)
+          .join("\n"),
+    );
+  }
+  if (ctx.recentSessions?.length) {
+    primer.push(
+      "## Recent conversations\n" +
+        ctx.recentSessions
+          .slice(-6)
+          .map((s) => `- [${s.at.slice(0, 16)}] ${s.summary}`)
+          .join("\n"),
+    );
+  }
+
+  const parts = [soul.trim(), overlay, memoryMd.trim(), primer.join("\n\n")]
+    .filter((p) => p && p.length > 0)
+    .join("\n\n");
+  return parts;
+}
+
+interface ChatCompletionRequest {
+  model: string;
+  messages: Array<{ role: string; content: string }>;
+  stream?: boolean;
+  temperature?: number;
+}
+
+async function openclawChatCompletion(
+  req: ChatCompletionRequest,
+): Promise<string> {
+  const token = getGatewayToken();
+  if (!token) throw new Error("Gateway token not available");
+  const res = await fetch(`${OPENCLAW_GATEWAY_URL}/v1/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(req),
+    signal: AbortSignal.timeout(25_000),
+  });
+  if (!res.ok) {
+    throw new Error(
+      `chat completions failed: ${res.status} ${await res.text().catch(() => "")}`,
+    );
+  }
+  const data: any = await res.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (typeof text !== "string") {
+    throw new Error("chat completions returned no message content");
+  }
+  return text.trim();
+}
+
+// ── Outbound SMS shipping (via SaaS) ─────────────────────────────────────────
+
+interface InstanceMeta {
+  tenantId: string;
+  phoneNumber: string;
+}
+
+function readInstanceMeta(): InstanceMeta | null {
+  // Tenant id + phone number live in the .env file the provisioner wrote.
+  // Cheap parse; ctrl-api already sees these env vars but we want freshness.
+  const tenantId = process.env.TENANT_ID ?? "";
+  const phoneNumber =
+    process.env.AGENTPHONE_PHONE_NUMBER ??
+    process.env.TWILIO_PHONE_NUMBER ??
+    "";
+  if (!tenantId || !phoneNumber) return null;
+  return { tenantId, phoneNumber };
+}
+
+async function shipSmsViaSaas(opts: {
+  to: string;
+  body: string;
+}): Promise<{ ok: boolean; error?: string; sid?: string }> {
+  const meta = readInstanceMeta();
+  if (!meta) return { ok: false, error: "TENANT_ID or phone number not set" };
+  if (!VOICE_BRIDGE_INTERNAL_TOKEN) {
+    return { ok: false, error: "VOICE_BRIDGE_INTERNAL_TOKEN not set" };
+  }
+  try {
+    const res = await fetch(`${SAAS_INTERNAL_URL}/api/internal/twilio/send-sms`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${VOICE_BRIDGE_INTERNAL_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        tenantId: meta.tenantId,
+        from: meta.phoneNumber,
+        to: opts.to,
+        body: opts.body,
+      }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: `SaaS send-sms ${res.status}: ${await res.text().catch(() => "")}`,
+      };
+    }
+    const body: any = await res.json().catch(() => ({}));
+    return { ok: true, sid: body?.sid };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? String(err) };
+  }
+}
+
+// ── Cross-channel-memory audit echo ──────────────────────────────────────────
+
+async function auditEchoSmsTurn(
+  from: string,
+  userText: string,
+  assistantText: string,
+): Promise<void> {
+  const token = getGatewayToken();
+  if (!token) return;
+  const message = `[SMS from ${from}]\n> ${userText.slice(0, 400)}\n\nReply: ${assistantText.slice(0, 400)}`;
+  try {
+    await fetch(`${OPENCLAW_GATEWAY_URL}/v1/sessions/message`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        agent_id: "alfred-main",
+        message,
+        metadata: { source: "agentphone", channel: "sms", from },
+      }),
+      signal: AbortSignal.timeout(3_000),
+    });
+  } catch {
+    // best-effort
+  }
+}
+
 export function registerPhoneRoutes(): void {
   // GET /api/v1/phone/voice-context — bundle for the bridge to inline
   addRoute("GET", "/api/v1/phone/voice-context", async ({ res }) => {
     sendJson(res, 200, getVoiceContextCached());
+  });
+
+  // ── Authorised-numbers CRUD ───────────────────────────────────────────────
+  addRoute("GET", "/api/v1/phone/authorized-numbers", async ({ res }) => {
+    sendJson(res, 200, { numbers: readAuthorizedNumbers() });
+  });
+
+  addRoute("PUT", "/api/v1/phone/authorized-numbers", async ({ res, body }) => {
+    const b = body as { numbers?: unknown } | undefined;
+    if (!b || !Array.isArray(b.numbers)) {
+      throw new ValidationError("body.numbers (string[]) required");
+    }
+    writeAuthorizedNumbers(b.numbers as string[]);
+    sendJson(res, 200, { numbers: readAuthorizedNumbers() });
+  });
+
+  addRoute("POST", "/api/v1/phone/authorized-numbers", async ({ res, body }) => {
+    const b = body as { number?: unknown } | undefined;
+    if (!b || typeof b.number !== "string") {
+      throw new ValidationError("body.number (string) required");
+    }
+    const current = readAuthorizedNumbers();
+    writeAuthorizedNumbers([...current, b.number as string]);
+    sendJson(res, 201, { numbers: readAuthorizedNumbers() });
+  });
+
+  addRoute(
+    "DELETE",
+    "/api/v1/phone/authorized-numbers/:number",
+    async ({ res, params }) => {
+      const target = normaliseNumber(decodeURIComponent(params["number"]));
+      const current = readAuthorizedNumbers();
+      const next = current.filter((n) => normaliseNumber(n) !== target);
+      writeAuthorizedNumbers(next);
+      sendJson(res, 200, { numbers: readAuthorizedNumbers() });
+    },
+  );
+
+  // ── Inbound SMS routing (called by SaaS twilio/sms webhook) ──────────────
+  addRoute("POST", "/api/v1/phone/sms/inbound", async ({ res, body }) => {
+    const b = body as
+      | { from?: string; to?: string; body?: string; messageSid?: string }
+      | undefined;
+    if (!b || typeof b.from !== "string" || typeof b.to !== "string") {
+      throw new ValidationError("from, to required");
+    }
+    const from = b.from;
+    const to = b.to;
+    const text = (b.body ?? "").trim();
+    const messageSid = b.messageSid ?? `${from}-${Date.now()}`;
+
+    const authorized = readAuthorizedNumbers().map(normaliseNumber);
+    const isAuthorized = authorized.includes(normaliseNumber(from));
+
+    if (!isAuthorized) {
+      // Stream pipeline. Bridge to the zero-LLM template path so hourly
+      // enrichment can later turn this into vault context.
+      const event = {
+        id: cryptoRandomId(),
+        stream_id: "sms-inbound",
+        stream_type: "sms",
+        received_at: new Date().toISOString(),
+        source_ref: messageSid,
+        raw: { from, to, body: text, direction: "inbound" },
+        summary: `SMS from ${from}: ${text.slice(0, 80)}`,
+      };
+      await ingestStreamEvent(event);
+      sendJson(res, 200, { status: "stream-ingested", event_id: event.id });
+      return;
+    }
+
+    // Authorised → openclaw chat completion → ship reply via Twilio.
+    const ts = new Date().toISOString();
+    const userTurn: SmsTurn = { role: "user", content: text, ts };
+    const priorTurns = readSmsThread(from, 20);
+    appendSmsTurn(from, userTurn);
+
+    let reply = "";
+    try {
+      reply = await openclawChatCompletion({
+        model: readMainAgentModel(),
+        messages: [
+          { role: "system", content: buildSmsSystemPrompt() },
+          ...priorTurns.map((t) => ({ role: t.role, content: t.content })),
+          { role: "user", content: text },
+        ],
+        stream: false,
+      });
+    } catch (err: any) {
+      console.error("[phone/sms] chat completion failed", err);
+      // Even on failure, persist a placeholder so we don't lose the user turn.
+      sendJson(res, 502, { status: "completion-failed", error: err?.message });
+      return;
+    }
+
+    appendSmsTurn(from, {
+      role: "assistant",
+      content: reply,
+      ts: new Date().toISOString(),
+    });
+
+    const ship = await shipSmsViaSaas({ to: from, body: reply });
+    void auditEchoSmsTurn(from, text, reply);
+
+    if (!ship.ok) {
+      console.error("[phone/sms] ship failed", ship.error);
+      sendJson(res, 502, { status: "ship-failed", error: ship.error, reply });
+      return;
+    }
+    sendJson(res, 200, { status: "replied", reply, sid: ship.sid });
   });
 
   // POST /api/v1/phone/transcript — bridge posts the full call transcript
