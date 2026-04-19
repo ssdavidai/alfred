@@ -48,7 +48,7 @@ jobs:
       - name: Patch Prisma to use db push (no migration files in this project)
         run: |
           cd packages/saas/app/.wasp/build/server
-          sed -i 's/"db-migrate-prod": "prisma migrate deploy --schema=..\/db\/schema.prisma"/"db-migrate-prod": "prisma db push --schema=..\/db\/schema.prisma --skip-generate"/' package.json
+          sed -i 's/"db-migrate-prod": "prisma migrate deploy --schema=..\/db\/schema.prisma"/"db-migrate-prod": "prisma db push --schema=..\/db\/schema.prisma --skip-generate --accept-data-loss"/' package.json
 
       - name: Build web-app client
         run: cd packages/saas/app/.wasp/build/web-app && REACT_APP_API_URL=https://alfred.black npx vite build
@@ -125,7 +125,7 @@ jobs:
             # memory on the VM, this should be rare.
             for attempt in 1 2 3; do
               if docker compose run --rm --no-deps --entrypoint "" app \
-                   npx prisma db push --schema="../db/schema.prisma" --skip-generate; then
+                   npx prisma db push --schema="../db/schema.prisma" --skip-generate --accept-data-loss; then
                 echo "prisma db push succeeded (attempt $attempt)"
                 break
               fi
