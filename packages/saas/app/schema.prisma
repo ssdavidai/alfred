@@ -43,23 +43,29 @@ model ApiKey {
 }
 
 model Instance {
-  id                String    @id @default(uuid())
-  userId            String    @unique
-  user              User      @relation(fields: [userId], references: [id])
-  customerName      String    @unique    // "alfred-<slug>"
-  tier              String               // PREMIUM, BLACK (grandfathered: STARTER, PRO)
-  serverType        String               // cx53 (grandfathered: cx33, cx43)
-  status            String    @default("provisioning")  // provisioning|running|suspended|error|destroyed
-  tailscaleHostname String?
-  subdomainUrl      String?              // e.g. https://acme.alfred.black
-  apiKey            String?              // encrypted AAS_API_KEY for tenant API
-  ipAddress         String?
-  provisionedAt     DateTime?
-  suspendedAt       DateTime?
-  lastHealthCheck   DateTime?
-  lastHealthStatus  String?              // ok|degraded|down|unreachable
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  id                    String    @id @default(uuid())
+  userId                String    @unique
+  user                  User      @relation(fields: [userId], references: [id])
+  customerName          String    @unique    // "alfred-<slug>"
+  tier                  String               // PREMIUM, BLACK (grandfathered: STARTER, PRO)
+  serverType            String               // cx53 (grandfathered: cx33, cx43)
+  status                String    @default("provisioning")  // provisioning|running|suspended|error|destroyed
+  tailscaleHostname     String?
+  subdomainUrl          String?              // e.g. https://acme.alfred.black
+  apiKey                String?              // encrypted AAS_API_KEY for tenant API
+  ipAddress             String?
+  provisionedAt         DateTime?
+  suspendedAt           DateTime?
+  lastHealthCheck       DateTime?
+  lastHealthStatus      String?              // ok|degraded|down|unreachable
+
+  // AgentMail — per-tenant email inbox (see deploy/agentmail-bootstrap.md)
+  agentmailInboxId      String?              // AgentMail internal inbox_id
+  agentmailInboxAddress String?              // e.g. "alfred.david@mail.alfred.black"
+  agentmailInboxApiKey  String?              // inbox-scoped API key, encrypted via COLUMN_ENCRYPTION_KEY
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 }
 
 model ProvisioningJob {
