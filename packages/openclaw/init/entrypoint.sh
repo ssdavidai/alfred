@@ -52,15 +52,32 @@ for skill in vault-curator vault-janitor vault-distiller; do
 done
 
 # 2b. Main-agent skills from the platform workspace template. These teach
-# the user-facing Alfred how to use its ctrl_* tools (vault operations,
-# chore management, learning introspection, ops health). Content lives in
-# packages/openclaw/workspace-template/skills/ in the alfred-platform repo
-# and gets baked into the init container image via the Dockerfile COPY.
+# the user-facing Alfred how to use its MCP tools (self for local ctrl-api,
+# plus vault / chore / learning / ops-health operation patterns). Content
+# lives in packages/openclaw/workspace-template/skills/ in the
+# alfred-platform repo and gets baked into the init container image via
+# the Dockerfile COPY.
+#
+# The alfred-prime-federation skill is Prime-only (explains the `tenant`
+# and `ask_alfred` cross-tenant tools). It's copied only when ALFRED_PRIME
+# is set — non-prime tenants never see documentation for tools they don't
+# have, so the agent can't be tempted to try calling them.
 MAIN_SKILLS_SRC="/setup/workspace-template/skills"
 if [[ -d "$MAIN_SKILLS_SRC" ]]; then
     for skill_dir in "$MAIN_SKILLS_SRC"/*/; do
         [[ -d "$skill_dir" ]] || continue
         skill=$(basename "$skill_dir")
+
+        # Gate Prime-only skills
+        if [[ "$skill" == "alfred-prime-federation" && "${ALFRED_PRIME:-}" != "true" ]]; then
+            # If somehow present from a previous prime-enabled run, remove it
+            if [[ -d "$SKILLS_DST/$skill" ]]; then
+                rm -rf "${SKILLS_DST:?}/$skill"
+                echo "[init] Main skill $skill removed (tenant is not Alfred Prime)"
+            fi
+            continue
+        fi
+
         SRC_HASH=$(find "$skill_dir" -type f -exec md5sum {} \; | sort | md5sum | cut -d' ' -f1)
         HASH_FILE="$SKILLS_DST/$skill/.content-hash"
 
@@ -311,6 +328,11 @@ done
 # Adds mcp.servers.alfred-ctrl so OpenClaw spawns the ctrl MCP server on
 # first session. Env vars must be passed explicitly because MCP child
 # processes only inherit a small set of default env vars.
+#
+# The MCP server exposes `self` on all tenants. When ALFRED_PRIME=true is
+# set on the host (only on David's instance), it additionally exposes the
+# `tenant` and `ask_alfred` cross-tenant tools and reads CROSS_TENANT_PEERS
+# for peer discovery.
 for TARGET_CFG in "$MAIN_CFG" "$WORKERS_CFG"; do
     [[ -f "$TARGET_CFG" ]] || continue
     python3 -c "
@@ -319,24 +341,36 @@ p = '$TARGET_CFG'
 with open(p) as f: c = json.load(f)
 
 aas_key = os.environ.get('AAS_API_KEY', '')
+alfred_prime = os.environ.get('ALFRED_PRIME', '')
+cross_tenant_peers = os.environ.get('CROSS_TENANT_PEERS', '')
+
+env_block = {
+    'CTRL_API_URL': 'http://ctrl-api:3100',
+    'AAS_API_KEY': aas_key,
+    'NODE_PATH': '/app/node_modules',
+}
+# Only forward prime vars when actually set on the host, so non-prime
+# tenants never see these keys and can't accidentally register the
+# cross-tenant tools.
+if alfred_prime:
+    env_block['ALFRED_PRIME'] = alfred_prime
+if cross_tenant_peers:
+    env_block['CROSS_TENANT_PEERS'] = cross_tenant_peers
 
 mcp = c.setdefault('mcp', {})
 servers = mcp.setdefault('servers', {})
 desired = {
     'command': 'node',
     'args': ['/home/node/.openclaw/mcp/ctrl-server.mjs'],
-    'env': {
-        'CTRL_API_URL': 'http://ctrl-api:3100',
-        'AAS_API_KEY': aas_key,
-        'NODE_PATH': '/app/node_modules',
-    }
+    'env': env_block,
 }
 
 current = servers.get('alfred-ctrl', {})
 if current != desired:
     servers['alfred-ctrl'] = desired
     with open(p, 'w') as f: json.dump(c, f, indent=2)
-    print(f'[init] MCP server alfred-ctrl registered in {p}')
+    mode = 'prime' if alfred_prime == 'true' else 'self-only'
+    print(f'[init] MCP server alfred-ctrl registered ({mode}) in {p}')
 else:
     print(f'[init] MCP server alfred-ctrl already configured in {p}')
 " 2>/dev/null || true
