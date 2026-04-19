@@ -44,9 +44,18 @@ interface ConnectedIntegration {
   toolkit: string;
   toolkit_name: string;
   toolkit_icon: string;
-  status: string;
+  status: string;               // Composio status: INITIATED|ACTIVE|INACTIVE|ORPHAN
   auth_scheme: string;
   created_at: string;
+  // SaaS-side auto-config lifecycle (PR 1). "pending" for freshly-connected,
+  // "running" while auto-config is in flight, "configured" once streams/tools
+  // are live, "error" if auto-config failed. See ComposioConnection model.
+  auto_config_state?: "pending" | "running" | "configured" | "error";
+  auto_config_error?: string | null;
+  auto_configured_at?: string | null;
+  streams_created?: number;
+  tools_enabled?: number;
+  skill_name?: string | null;
 }
 
 interface AutoConfigResult {
