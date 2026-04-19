@@ -1,0 +1,63 @@
+name: Twilio provision (one-off)
+
+# Manual Twilio number provisioning for a single tenant. Calls the SaaS
+# /api/internal/twilio/provision endpoint (which buys the number, sets
+# webhooks, updates the Instance row) from the SaaS host itself so we
+# don't have to expose VOICE_BRIDGE_INTERNAL_TOKEN externally.
+#
+# Trigger:
+#   gh workflow run "Twilio provision (one-off)" \
+#     -f tenant_id=<uuid> -f country=HU -f area_code=
+#
+# Delete this workflow after all 3 tenants have numbers.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant_id:
+        required: true
+        description: "Instance.id on SaaS"
+      country:
+        required: true
+        description: "ISO-3166-1 alpha-2 (HU, PL, DE, IE, NL, GB)"
+      area_code:
+        required: false
+        description: "optional area code"
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/saas_key
+          chmod 600 ~/.ssh/saas_key
+
+      - name: Provision number
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          TENANT_ID: ${{ inputs.tenant_id }}
+          COUNTRY: ${{ inputs.country }}
+          AREA_CODE: ${{ inputs.area_code }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/saas_key deploy@$DEPLOY_HOST bash <<EOF
+          set -e
+          TOKEN=\$(grep '^VOICE_BRIDGE_INTERNAL_TOKEN=' /opt/alfred-saas/.env.server | cut -d= -f2)
+          if [ -z "\$TOKEN" ]; then
+            echo "VOICE_BRIDGE_INTERNAL_TOKEN not set on SaaS — Twilio creds probably absent too"; exit 1
+          fi
+
+          BODY='{"tenantId":"${TENANT_ID}","country":"${COUNTRY}"'
+          if [ -n "${AREA_CODE}" ]; then BODY=\$BODY',"areaCode":"${AREA_CODE}"'; fi
+          BODY=\$BODY'}'
+
+          echo "Request body: \$BODY"
+          RESP=\$(curl -sS -X POST -H "Authorization: Bearer \$TOKEN" -H "Content-Type: application/json" \
+            -d "\$BODY" http://localhost:3000/api/internal/twilio/provision)
+          echo "Response: \$RESP"
+
+          # Verify DB updated
+          docker exec alfred-saas-postgres-1 psql -U postgres -d alfred_saas -c \
+            "SELECT id, \"customerName\", \"phoneNumber\", \"phoneCountry\" FROM \"Instance\" WHERE id = '${TENANT_ID}';"
+          EOF
