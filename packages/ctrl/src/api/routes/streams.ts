@@ -696,6 +696,7 @@ export function registerStreamRoutes(): void {
       "schedule_cron", "schedule_interval_seconds",
       "last_pull_at", "last_pull_status", "last_pull_count",
       "composio_action", "composio_connection_id", "composio_toolkit",
+      "composio_args",
       "pull_mode",
       "name", "type", "source", "enabled",
     ] as const;

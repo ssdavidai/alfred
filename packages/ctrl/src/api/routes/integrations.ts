@@ -334,7 +334,10 @@ const RECOMMENDED_STREAMS: Record<string, {
   googlecalendar: { action: "GOOGLECALENDAR_EVENTS_LIST", name: "Calendar Events", interval: 300, args: { calendarId: "primary" } },
   gmail:          { action: "GMAIL_FETCH_EMAILS",         name: "Gmail Emails",     interval: 300, args: { userId: "me" } },
   // slack omitted: SLACK_FETCH_CONVERSATION_HISTORY requires a channel ID (per-tenant config)
-  github:         { action: "GITHUB_LIST_NOTIFICATIONS",  name: "GitHub Notifications", interval: 300, args: {} },
+  // GITHUB_LIST_NOTIFICATIONS was renamed by Composio in early 2026 to
+  // GITHUB_LIST_NOTIFICATIONS_FOR_THE_AUTHENTICATED_USER. Same behavior;
+  // pulls the auth'd user's unread notifications feed.
+  github:         { action: "GITHUB_LIST_NOTIFICATIONS_FOR_THE_AUTHENTICATED_USER",  name: "GitHub Notifications", interval: 300, args: {} },
   // NOTION_LIST_PAGES was removed from Composio's catalog in early 2026
   // (replaced by NOTION_FETCH_DATA which wraps Notion's search API). The new
   // action has no last_edited_time filter, so we run snapshot-mode: every
@@ -1016,9 +1019,13 @@ export function registerIntegrationRoutes(): void {
         return;
       }
 
-      // 2. Fetch Composio's current action catalog for this toolkit
+      // 2. Fetch Composio's current action catalog for this toolkit.
+      // Composio's v2 /actions caps at 500 items/page. GitHub ships ~400
+      // actions — the old limit=100 missed the renamed
+      // GITHUB_LIST_NOTIFICATIONS_FOR_THE_AUTHENTICATED_USER (was on page 2),
+      // which made David's github stream appear permanently stale.
       const actionsResp = await fetch(
-        `${COMPOSIO_API_V2}/actions?apps=${encodeURIComponent(toolkit)}&limit=100`,
+        `${COMPOSIO_API_V2}/actions?apps=${encodeURIComponent(toolkit)}&limit=500`,
         { headers: { "x-api-key": apiKey } },
       );
       if (!actionsResp.ok) {
@@ -1197,6 +1204,16 @@ export function registerIntegrationRoutes(): void {
     const toolkit = actionSlug.split("_")[0].toLowerCase();
     const streamId = `composio-${toolkit}-${actionSlug.toLowerCase().replace(/_/g, "-")}`;
 
+    // Default composio_args: prefer RECOMMENDED_STREAMS for this toolkit if
+    // the slug matches (the common case — user re-enabling the recommended
+    // stream), else fall back to DEFAULT_ARGS[action], else empty. Any
+    // composio_args on the prior config are lost when this endpoint
+    // overwrites, but learn-side SYNC_CONFIGS provides a final safety net
+    // for known actions.
+    const rec = RECOMMENDED_STREAMS[toolkit];
+    const recArgs = rec?.action === actionSlug ? rec.args : undefined;
+    const composioArgs = recArgs ?? DEFAULT_ARGS[actionSlug] ?? {};
+
     // Create stream config
     const config = {
       id: streamId,
@@ -1207,6 +1224,7 @@ export function registerIntegrationRoutes(): void {
       composio_action: actionSlug,
       composio_connection_id: connId,
       composio_toolkit: toolkit,
+      composio_args: composioArgs,
       parser: "composio",
       schedule_interval_seconds: pollInterval,
     };
@@ -1784,6 +1802,7 @@ print(json.dumps(result, default=str))
           composio_action: rec.action,
           composio_connection_id: connId,
           composio_toolkit: toolkit,
+          composio_args: rec.args,
           parser: "composio",
           schedule_interval_seconds: rec.interval,
           pull_mode: SYNC_MODE[toolkit] || "snapshot",

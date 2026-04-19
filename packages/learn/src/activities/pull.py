@@ -408,6 +408,15 @@ SYNC_CONFIGS: dict[str, dict[str, Any]] = {
         "backfill_past_days": 7,
     },
     "GITHUB_LIST_NOTIFICATIONS": {
+        # Legacy slug — Composio renamed in early 2026. Retained for tenants
+        # still on pre-migration configs; new auto-configs pick the new slug.
+        "pull_mode": "append",
+        "backfill_args": {"since": "{backfill_iso}", "all": True},
+        "incremental_args": {"since": "{last_pull_iso}", "all": True},
+        "cursor_response_field": "",
+        "backfill_past_days": 14,
+    },
+    "GITHUB_LIST_NOTIFICATIONS_FOR_THE_AUTHENTICATED_USER": {
         "pull_mode": "append",
         "backfill_args": {"since": "{backfill_iso}", "all": True},
         "incremental_args": {"since": "{last_pull_iso}", "all": True},
