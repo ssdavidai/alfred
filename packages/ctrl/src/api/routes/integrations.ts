@@ -988,6 +988,85 @@ export function registerIntegrationRoutes(): void {
   });
 
   // =========================================================================
+  // POST /api/v1/integrations/:id/disable-stream — tear down a Composio stream
+  //
+  // Inverse of enable-stream: finds the stream config that matches
+  // (composio_action, composio_connection_id), deletes the config file, removes
+  // the entry from streams.json, and best-effort deletes the Temporal schedule.
+  //
+  // The schedule delete is best-effort because a stale config with no schedule
+  // is harmless (StreamPullerWorkflow won't fire), whereas failing the whole
+  // request because of a Temporal hiccup would block the user from disabling
+  // the stream from the UI.
+  // =========================================================================
+  addRoute("POST", "/api/v1/integrations/:id/disable-stream", async ({ res, params, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.action_slug !== "string") {
+      throw new ValidationError("action_slug (string) is required");
+    }
+    const connId = params.id;
+    const actionSlug = b.action_slug as string;
+
+    try {
+      fs.mkdirSync(STREAM_CONFIGS_DIR, { recursive: true });
+      const configFiles = fs.readdirSync(STREAM_CONFIGS_DIR).filter((f) => f.endsWith(".json"));
+
+      let matchedStreamId: string | null = null;
+      for (const file of configFiles) {
+        const full = path.join(STREAM_CONFIGS_DIR, file);
+        try {
+          const cfg = JSON.parse(fs.readFileSync(full, "utf-8"));
+          if (
+            cfg?.composio_action === actionSlug &&
+            cfg?.composio_connection_id === connId
+          ) {
+            matchedStreamId = cfg.id || file.replace(/\.json$/, "");
+            fs.unlinkSync(full);
+            break;
+          }
+        } catch { /* skip malformed */ }
+      }
+
+      // Remove from streams.json metadata
+      const streamsMetaPath = path.join(STREAMS_DIR, "streams.json");
+      try {
+        const raw = fs.readFileSync(streamsMetaPath, "utf-8");
+        let streams = JSON.parse(raw) as any[];
+        if (Array.isArray(streams) && matchedStreamId) {
+          const before = streams.length;
+          streams = streams.filter((s: any) => s.id !== matchedStreamId);
+          if (streams.length !== before) {
+            fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+          }
+        }
+      } catch { /* no metadata file — ok */ }
+
+      // Best-effort schedule delete. Same schedule_id convention as
+      // SaaS-side enableIntegrationStream: al-stream-pull-composio-{streamId.slice(0,20)}.
+      let scheduleDeleted = false;
+      if (matchedStreamId) {
+        const scheduleId = `al-stream-pull-composio-${matchedStreamId.slice(0, 20)}`;
+        try {
+          await dockerExec("temporal", [
+            "temporal", "schedule", "delete",
+            "--schedule-id", scheduleId,
+          ]);
+          scheduleDeleted = true;
+        } catch { /* schedule may not exist — ok */ }
+      }
+
+      sendJson(res, 200, {
+        status: "disabled",
+        action_slug: actionSlug,
+        stream_id: matchedStreamId,
+        schedule_deleted: scheduleDeleted,
+      });
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Failed to disable stream: ${err.message}` });
+    }
+  });
+
+  // =========================================================================
   // POST /api/v1/integrations/enable-tool — add a Composio tool to gateway.tools.allow
   // =========================================================================
   addRoute("POST", "/api/v1/integrations/enable-tool", async ({ res, body }) => {
