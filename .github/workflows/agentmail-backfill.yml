@@ -1,0 +1,127 @@
+name: AgentMail backfill (one-off SaaS-side)
+
+# SaaS-side backfill for existing tenants: encrypts the inbox API key inside
+# the alfred-saas-app container (has COLUMN_ENCRYPTION_KEY) and writes it
+# plus inbox_id + address onto the Prisma Instance row. Also pushes global
+# AGENTMAIL_* env vars to /opt/alfred-saas/.env.server if the first inputs
+# (pod_id + webhook_secret + domain) are provided.
+#
+# Tenant-side push (tenant .env + authorized_senders) is done separately
+# from the operator's laptop using local SSH keys.
+#
+# Trigger:
+#   gh workflow run "AgentMail backfill (one-off SaaS-side)" \
+#     -f instance_id=<uuid> -f inbox_id=... -f inbox_address=... -f api_key=...
+#
+# Delete this file after the three tenants are backfilled.
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        required: true
+        description: "Instance.id (uuid) on the SaaS Prisma DB"
+      inbox_id:
+        required: true
+        description: "AgentMail inbox_id"
+      inbox_address:
+        required: true
+        description: "AgentMail inbox email address"
+      api_key:
+        required: true
+        description: "Inbox-scoped API key (plaintext; encrypted before DB write)"
+      update_global_env:
+        required: false
+        default: "false"
+        description: "Set true on first run to also push pod_id/webhook_secret/domain to .env.server"
+      agentmail_shared_pod_id:
+        required: false
+        description: "Required iff update_global_env=true"
+      agentmail_webhook_secret:
+        required: false
+        description: "Required iff update_global_env=true"
+      agentmail_domain:
+        required: false
+        default: "agent.szabostuban.com"
+        description: "Shared AgentMail domain"
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        env:
+          SAAS_DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "$SAAS_DEPLOY_KEY" > ~/.ssh/saas_key
+          chmod 600 ~/.ssh/saas_key
+
+      - name: Push global AgentMail env vars to SaaS .env.server
+        if: ${{ inputs.update_global_env == 'true' }}
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          AGENTMAIL_MASTER_API_KEY: ${{ secrets.AGENTMAIL_MASTER_API_KEY }}
+          POD_ID: ${{ inputs.agentmail_shared_pod_id }}
+          WEBHOOK_SECRET: ${{ inputs.agentmail_webhook_secret }}
+          DOMAIN: ${{ inputs.agentmail_domain }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/saas_key deploy@$DEPLOY_HOST "
+            ENV_FILE=/opt/alfred-saas/.env.server
+            upsert() {
+              local k=\$1 v=\$2
+              if grep -q \"^\$k=\" \$ENV_FILE 2>/dev/null; then
+                sudo sed -i \"s|^\$k=.*|\$k=\$v|\" \$ENV_FILE
+              else
+                echo \"\$k=\$v\" | sudo tee -a \$ENV_FILE > /dev/null
+              fi
+              echo \"  set \$k\"
+            }
+            upsert AGENTMAIL_ENABLED true
+            upsert AGENTMAIL_MASTER_API_KEY '$AGENTMAIL_MASTER_API_KEY'
+            upsert AGENTMAIL_SHARED_POD_ID '$POD_ID'
+            upsert AGENTMAIL_WEBHOOK_SECRET '$WEBHOOK_SECRET'
+            upsert AGENTMAIL_DOMAIN '$DOMAIN'
+            echo '=== restarting app ==='
+            cd /opt/alfred-saas && docker compose up -d --force-recreate app
+            sleep 10
+            docker ps --format '{{.Names}} {{.Status}}' | grep alfred-saas
+          "
+
+      - name: Encrypt API key + update Instance row
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          INSTANCE_ID: ${{ inputs.instance_id }}
+          INBOX_ID: ${{ inputs.inbox_id }}
+          INBOX_ADDRESS: ${{ inputs.inbox_address }}
+          API_KEY: ${{ inputs.api_key }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/saas_key deploy@$DEPLOY_HOST bash <<EOF
+          set -e
+          cd /opt/alfred-saas
+
+          # 1. Pull encryption key from .env.server
+          ENC_KEY=\$(grep '^COLUMN_ENCRYPTION_KEY=' .env.server | cut -d= -f2)
+          if [ -z "\$ENC_KEY" ]; then
+            echo "COLUMN_ENCRYPTION_KEY not set"; exit 1
+          fi
+
+          # 2. Encrypt the API key inside the app container (node + crypto available)
+          ENCRYPTED=\$(docker exec -e KEY="\$ENC_KEY" -e PLAIN='${API_KEY}' alfred-saas-app-1 node -e '
+            const crypto = require("crypto");
+            const key = Buffer.from(process.env.KEY, "hex");
+            const iv = crypto.randomBytes(12);
+            const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+            let enc = cipher.update(process.env.PLAIN, "utf8", "hex");
+            enc += cipher.final("hex");
+            const tag = cipher.getAuthTag().toString("hex");
+            process.stdout.write(iv.toString("hex")+":"+tag+":"+enc);
+          ')
+          echo "Encrypted length: \${#ENCRYPTED}"
+
+          # 3. Update the Instance row (double-quotes for Pascal-cased columns)
+          docker exec alfred-saas-postgres-1 psql -U postgres -d alfred_saas -c "UPDATE \"Instance\" SET \"agentmailInboxId\" = '${INBOX_ID}', \"agentmailInboxAddress\" = '${INBOX_ADDRESS}', \"agentmailInboxApiKey\" = '\$ENCRYPTED', \"updatedAt\" = NOW() WHERE id = '${INSTANCE_ID}';"
+
+          # 4. Verify
+          docker exec alfred-saas-postgres-1 psql -U postgres -d alfred_saas -c "SELECT id, \"agentmailInboxAddress\" FROM \"Instance\" WHERE id = '${INSTANCE_ID}';"
+          EOF
