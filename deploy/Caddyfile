@@ -1,7 +1,14 @@
 alfred.black {
     root * /opt/alfred-saas/client
+    @voice {
+        path /voice/*
+    }
     @backend {
         path /api/* /auth/* /operations/* /jobs/* /payments/* /webhooks/*
+    }
+    handle @voice {
+        # AgentPhone Voice Bridge — WebSocket upgrade for Twilio Media Streams
+        reverse_proxy localhost:9000
     }
     handle @backend {
         reverse_proxy localhost:3000

@@ -1,0 +1,24 @@
+{
+  "name": "alfred-voice-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Twilio Media Streams ↔ OpenAI Realtime bridge for Alfred AgentPhone voice calls.",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsc --watch"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.6.0"
+  }
+}

@@ -29,6 +29,18 @@ services:
     volumes:
       - ./alfred-ctrl:/app/alfred-ctrl
 
+  # --- AgentPhone Voice Bridge (Twilio Media Streams ↔ OpenAI Realtime) ---
+  voice-bridge:
+    image: ssdavidai00/alfred-voice-bridge:latest
+    restart: always
+    env_file:
+      - .env.server
+    environment:
+      VOICE_BRIDGE_PORT: "9000"
+      SAAS_INTERNAL_URL: "https://alfred.black"
+    ports:
+      - "127.0.0.1:9000:9000"
+
   # --- Plausible Analytics CE ---
   plausible_db:
     image: postgres:16.6-alpine
