@@ -73,6 +73,7 @@ export type ProvisioningStep =
   | "backup_luks_key"
   | "deploy_api"
   | "setup_tunnel"
+  | "provision_phone"
   | "health_check"
   | "done";
 

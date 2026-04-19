@@ -996,6 +996,24 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
       log(`Warning: tenant API finalization failed: ${e}`);
     }
 
+    // --- Provision AgentPhone (Twilio number + tenant .env wiring) ---
+    setStep("provision_phone");
+    log("Provisioning AgentPhone number...");
+    try {
+      await provisionAgentPhone({
+        customerName: config.customer_name,
+        country: process.env.TWILIO_DEFAULT_COUNTRY ?? "HU",
+        serverIp: server.public_net.ipv4.ip,
+        keyPath: keyPair.privateKeyPath,
+        hostKeyOpts,
+        log,
+      });
+    } catch (e) {
+      // Phone is non-blocking — tenant boots without a number, can be
+      // provisioned later via the SaaS dashboard or manual curl.
+      log(`Warning: AgentPhone provisioning failed: ${e}`);
+    }
+
     // --- Health check ---
     setStep("health_check");
     log("Running initial health check...");
@@ -1100,6 +1118,10 @@ export async function destroy(
       log(`Warning: Tunnel deletion failed: ${e}`);
     }
   }
+
+  // Release AgentPhone number (idempotent — SaaS returns noop if none).
+  // Customer name is the only stable identifier this layer knows.
+  await releaseAgentPhone(instance.customer_name, log);
 
   if (instance.server_id) {
     log(`Deleting server ${instance.server_id}...`);
@@ -1490,4 +1512,114 @@ echo "=== Tunnel repair complete ==="
 
   insertEvent(instanceId, "tunnel_repaired", "Cloudflare Tunnel repaired");
   log("Tunnel repair complete");
+}
+
+// ── AgentPhone provisioning helpers ─────────────────────────────────────────
+//
+// `provision_phone` step calls SaaS internal endpoints that own the master
+// Twilio account. Tenants never hold Twilio credentials. Failure here is
+// non-blocking — the tenant boots without a number and can be provisioned
+// later via the SaaS dashboard.
+
+const SAAS_INTERNAL_URL =
+  process.env.SAAS_INTERNAL_URL ?? "https://alfred.black";
+const VOICE_BRIDGE_INTERNAL_TOKEN =
+  process.env.VOICE_BRIDGE_INTERNAL_TOKEN ?? "";
+
+interface ProvisionAgentPhoneOpts {
+  customerName: string;
+  country: string;
+  serverIp: string;
+  keyPath: string;
+  hostKeyOpts?: SSHHostKeyOptions;
+  log: (msg: string) => void;
+}
+
+async function provisionAgentPhone(opts: ProvisionAgentPhoneOpts): Promise<void> {
+  if (!VOICE_BRIDGE_INTERNAL_TOKEN) {
+    opts.log("Skipping AgentPhone — VOICE_BRIDGE_INTERNAL_TOKEN not set");
+    return;
+  }
+
+  // 1. Ask SaaS to buy a number + persist Instance fields. SaaS responds with
+  //    {tenantId, phoneNumber, twilioNumberSid, country}.
+  const res = await fetch(`${SAAS_INTERNAL_URL}/api/internal/twilio/provision`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${VOICE_BRIDGE_INTERNAL_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      customerName: opts.customerName,
+      country: opts.country,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(
+      `SaaS provision failed (${res.status}): ${await res.text().catch(() => "")}`,
+    );
+  }
+  const provision = (await res.json()) as {
+    tenantId: string;
+    phoneNumber: string;
+    twilioNumberSid: string;
+    country: string;
+  };
+  opts.log(
+    `AgentPhone number provisioned: ${provision.phoneNumber} (${provision.country})`,
+  );
+
+  // 2. Push TENANT_ID + AGENTPHONE_PHONE_NUMBER to tenant .env so ctrl-api can
+  //    use them (TENANT_ID is read by phone.ts to call SaaS for outbound, etc.).
+  //    Append rather than rewrite to avoid stomping anything else.
+  const envLines = [
+    `TENANT_ID=${provision.tenantId}`,
+    `AGENTPHONE_PHONE_NUMBER=${provision.phoneNumber}`,
+    `SAAS_INTERNAL_URL=${SAAS_INTERNAL_URL}`,
+    `VOICE_BRIDGE_INTERNAL_TOKEN=${VOICE_BRIDGE_INTERNAL_TOKEN}`,
+  ].join("\n");
+  await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `printf '\\n# AgentPhone\\n%s\\n' "${envLines.replace(/"/g, '\\"').replace(/\n/g, '\\n')}" >> ${DEFAULTS.dockerComposeDir}/.env && cd ${DEFAULTS.dockerComposeDir} && docker compose restart ctrl-api 2>/dev/null || true`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  opts.log("AgentPhone env vars written to tenant .env, ctrl-api restarted");
+
+  // 3. Bootstrap authorised-numbers list. Empty array by default. The
+  //    onboarding pipeline (or the dashboard) will populate this from
+  //    key_identity_facts.phone — that flow lives in alfred-learn, not here.
+  await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `[ -f /mnt/encrypted/alfred/.authorized-phone-numbers.json ] || echo '[]' > /mnt/encrypted/alfred/.authorized-phone-numbers.json`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  opts.log("AgentPhone authorised-numbers list initialised (empty)");
+}
+
+async function releaseAgentPhone(
+  customerName: string,
+  log: (msg: string) => void,
+): Promise<void> {
+  if (!VOICE_BRIDGE_INTERNAL_TOKEN) return;
+  try {
+    const res = await fetch(`${SAAS_INTERNAL_URL}/api/internal/twilio/release`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${VOICE_BRIDGE_INTERNAL_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ customerName }),
+    });
+    if (res.ok) {
+      log("AgentPhone number released");
+    } else {
+      log(`Warning: AgentPhone release returned ${res.status}`);
+    }
+  } catch (e) {
+    log(`Warning: AgentPhone release failed: ${e}`);
+  }
 }

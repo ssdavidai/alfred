@@ -290,6 +290,12 @@ page CredentialsPage {
   component: import CredentialsPage from "@src/dashboard/CredentialsPage"
 }
 
+route PhoneRoute { path: "/dashboard/phone", to: PhonePage }
+page PhonePage {
+  authRequired: true,
+  component: import PhonePage from "@src/dashboard/PhonePage"
+}
+
 route StreamsRoute { path: "/dashboard/streams", to: StreamsPage }
 page StreamsPage {
   authRequired: true,
@@ -433,6 +439,22 @@ query getCredentials {
 
 action updateCredentials {
   fn: import { updateCredentials } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// AgentPhone (Phase 8)
+query getPhoneConfig {
+  fn: import { getPhoneConfig } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action addAuthorizedNumber {
+  fn: import { addAuthorizedNumber } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action removeAuthorizedNumber {
+  fn: import { removeAuthorizedNumber } from "@src/dashboard/operations",
   entities: [Instance]
 }
 

@@ -64,8 +64,24 @@ model Instance {
   agentmailInboxAddress String?              // e.g. "alfred.david@mail.alfred.black"
   agentmailInboxApiKey  String?              // inbox-scoped API key, encrypted via COLUMN_ENCRYPTION_KEY
 
+  // AgentPhone (Twilio + OpenAI Realtime) — see plan
+  phoneNumber           String?   @unique    // E.164, e.g. +36705551234
+  twilioNumberSid       String?              // Twilio resource SID
+  phoneCountry          String?              // ISO-3166-1 alpha-2 (HU, US, ...)
+  audioRecordingEnabled Boolean   @default(false)
+
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
+}
+
+// Spam denylist for AgentPhone — populated at SaaS edge by abandoned-call heuristics.
+// Voice webhook returns <Reject/> early for any caller with attempts >= threshold.
+model SpamNumber {
+  phoneNumber String   @id   // caller E.164
+  firstSeen   DateTime @default(now())
+  lastSeen    DateTime @updatedAt
+  attempts    Int      @default(1)
+  reason      String?  // "abandoned-calls", "manual", etc.
 }
 
 model ProvisioningJob {

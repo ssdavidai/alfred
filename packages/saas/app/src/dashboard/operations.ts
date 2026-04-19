@@ -32,6 +32,40 @@ import type {
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
 // ============================================================
+// AgentPhone (Phase 8 — dashboard PhonePage)
+// ============================================================
+
+export const getPhoneConfig = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/phone/config" });
+};
+
+export const addAuthorizedNumber = async (
+  args: { number: string },
+  context: any,
+) => {
+  if (!args?.number) throw new HttpError(400, "number required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/phone/authorized-numbers",
+    body: { number: args.number },
+  });
+};
+
+export const removeAuthorizedNumber = async (
+  args: { number: string },
+  context: any,
+) => {
+  if (!args?.number) throw new HttpError(400, "number required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/phone/authorized-numbers/${encodeURIComponent(args.number)}`,
+  });
+};
+
+// ============================================================
 // Dashboard Home
 // ============================================================
 

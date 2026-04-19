@@ -6,6 +6,8 @@ import { registerOAuth2Routes } from "./oauth2";
 import { attachTerminalProxy, registerTerminalStatusRoute } from "./terminalProxy";
 import { attachAdminTerminalProxy, registerAdminTerminalStatusRoute } from "./adminTerminalProxy";
 import { registerSSHKeyRoutes } from "./sshKeyDownload";
+import { registerTwilioWebhooks } from "./twilio/webhooks";
+import { registerTwilioInternalRoutes } from "./twilio/internal";
 
 export const serverSetup: ServerSetupFn = async ({ app, server }) => {
   app.use("/api/v1", v1ApiProxy);
@@ -13,6 +15,8 @@ export const serverSetup: ServerSetupFn = async ({ app, server }) => {
   registerAgentMailReceiver(app);
   registerOAuth2Routes(app);
   registerSSHKeyRoutes(app);
+  registerTwilioWebhooks(app);
+  registerTwilioInternalRoutes(app);
   try {
     registerTerminalStatusRoute(app);
     attachTerminalProxy(server);

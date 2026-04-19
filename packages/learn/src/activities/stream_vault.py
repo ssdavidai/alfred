@@ -71,6 +71,12 @@ def _render_event(event: dict[str, Any]) -> tuple[str, str, list[str]]:
     if event_type == "payment" or event_type.startswith("polar"):
         return _template_payment(event, raw, metadata)
 
+    if event_type == "sms" or stream_type in ("sms", "sms-inbound"):
+        return _template_sms(event, raw, metadata)
+
+    if event_type == "voice-call" or stream_type == "voice-call":
+        return _template_voice_call(event, raw, metadata)
+
     return _template_generic(event, raw, metadata)
 
 
@@ -269,6 +275,84 @@ def _template_payment(
         parts.append(f"**Product**: {product}")
 
     return name[:120], "\n".join(parts), ["payment"]
+
+
+def _template_sms(
+    event: dict[str, Any], raw: dict, metadata: dict,
+) -> tuple[str, str, list[str]]:
+    """Phone SMS — both inbound (unauthorised → here) and outbound logging."""
+    from_num = raw.get("from") or metadata.get("from", "")
+    to_num = raw.get("to") or metadata.get("to", "")
+    body = (raw.get("body") or raw.get("message") or "").strip()
+    direction = raw.get("direction") or metadata.get("direction") or "inbound"
+
+    parts: list[str] = []
+    parts.append(f"**Direction**: {direction}")
+    if from_num:
+        parts.append(f"**From**: {from_num}")
+    if to_num:
+        parts.append(f"**To**: {to_num}")
+    if body:
+        parts.append(f"\n{body[:1000]}")
+
+    tags = ["sms", direction]
+
+    if direction == "outbound":
+        name = f"SMS to {to_num or 'unknown'}"
+    else:
+        name = f"SMS from {from_num or 'unknown'}"
+    return name[:120], "\n".join(parts), tags
+
+
+def _template_voice_call(
+    event: dict[str, Any], raw: dict, metadata: dict,
+) -> tuple[str, str, list[str]]:
+    """Voice call transcript — posted by the Voice Bridge after hangup."""
+    from_num = raw.get("from") or metadata.get("from", "")
+    to_num = raw.get("to") or metadata.get("to", "")
+    started = raw.get("started_at", "")
+    ended = raw.get("ended_at", "")
+    duration = raw.get("duration_seconds", 0)
+    direction = raw.get("direction") or "inbound"
+    summary = (
+        event.get("summary")
+        or raw.get("summary")
+        or f"Call from {from_num or 'unknown'}"
+    )
+    transcript = raw.get("transcript", [])
+
+    parts: list[str] = []
+    parts.append(f"**Direction**: {direction}")
+    if from_num:
+        parts.append(f"**From**: {from_num}")
+    if to_num:
+        parts.append(f"**To**: {to_num}")
+    if duration:
+        try:
+            mins, secs = divmod(int(duration), 60)
+            parts.append(f"**Duration**: {mins} min {secs} sec")
+        except (TypeError, ValueError):
+            pass
+    if started:
+        parts.append(f"**Started**: {_format_dt(started)}")
+    if summary:
+        parts.append(f"\n**Summary**: {summary}")
+
+    if isinstance(transcript, list) and transcript:
+        parts.append("\n## Transcript\n")
+        for turn in transcript[:200]:
+            if not isinstance(turn, dict):
+                continue
+            role = turn.get("role", "?")
+            text = (turn.get("text") or turn.get("content") or "").strip()
+            if not text:
+                continue
+            label = "Sir" if role == "user" else "Alfred"
+            parts.append(f"**{label}**: {text[:500]}")
+
+    tags = ["voice-call", direction]
+    name = f"Call: {from_num or 'unknown'}" if direction == "inbound" else f"Call to {to_num or 'unknown'}"
+    return name[:120], "\n".join(parts), tags
 
 
 def _template_generic(

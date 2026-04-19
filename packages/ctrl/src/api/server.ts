@@ -23,6 +23,7 @@ import { registerIntegrationRoutes } from "./routes/integrations.js";
 import { registerOmiRoutes } from "./routes/omi.js";
 import { registerCrossTenantRoutes } from "./routes/crossTenant.js";
 import { registerChoreRoutes } from "./routes/chores.js";
+import { registerPhoneRoutes } from "./routes/phone.js";
 import { registerAuthSendersRoutes } from "./routes/authSenders.js";
 import { registerEmailRoutes } from "./routes/email.js";
 import { registerChannelsEmailRoutes } from "./routes/channelsEmail.js";
@@ -105,6 +106,7 @@ export function createApiServer(): http.Server {
   registerOmiRoutes();
   registerCrossTenantRoutes();
   registerChoreRoutes();
+  registerPhoneRoutes();
   registerAuthSendersRoutes();
   registerEmailRoutes();
   registerChannelsEmailRoutes();
