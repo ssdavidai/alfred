@@ -657,6 +657,147 @@ export function registerIntegrationRoutes(): void {
   });
 
   // =========================================================================
+  // POST /api/v1/integrations/connect-api-key — API-key / bearer-token flow
+  //
+  // Non-OAuth connect flow for toolkits whose auth_scheme is API_KEY or
+  // BEARER_TOKEN (Clockify, Tavily, PostHog, …). The user supplies their
+  // own credential and we go straight from "click Connect" to an ACTIVE
+  // connected_account with no popup or redirect.
+  //
+  // Request body:
+  //   {
+  //     toolkit_slug: string,
+  //     auth_scheme?: "API_KEY" | "BEARER_TOKEN"   // defaults to API_KEY
+  //     credential: string                          // the user's key / token
+  //   }
+  //
+  // Response mirrors /api/v1/integrations/connect so the SaaS side can reuse
+  // the same upsertConnection path. `connect_url` is always empty — there
+  // is nothing for the user to approve in a browser.
+  // =========================================================================
+  addRoute("POST", "/api/v1/integrations/connect-api-key", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.toolkit_slug !== "string") {
+      throw new ValidationError("toolkit_slug (string) is required");
+    }
+    if (typeof b.credential !== "string" || !b.credential.trim()) {
+      throw new ValidationError("credential (string) is required");
+    }
+
+    const authScheme = (typeof b.auth_scheme === "string" ? b.auth_scheme : "API_KEY").toUpperCase();
+    if (authScheme !== "API_KEY" && authScheme !== "BEARER_TOKEN") {
+      throw new ValidationError(`Unsupported auth_scheme "${authScheme}" — must be API_KEY or BEARER_TOKEN`);
+    }
+
+    const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
+    const toolkitSlug = b.toolkit_slug as string;
+    const credential = (b.credential as string).trim();
+
+    try {
+      // Step 1: Find an existing auth_config for this toolkit that uses the
+      // right scheme, OR create one. Auth configs are reusable — we share
+      // one per (toolkit, scheme) across all tenants on our Composio key,
+      // since the actual credential lives in the connected_account, not the
+      // auth_config.
+      let authConfigId: string | null = null;
+
+      const existingResp = await fetch(
+        `${COMPOSIO_API_V3}/auth_configs?toolkit_slug=${encodeURIComponent(toolkitSlug)}`,
+        { headers: { "x-api-key": apiKey } },
+      );
+
+      if (existingResp.ok) {
+        const existingData = (await existingResp.json()) as any;
+        const items = Array.isArray(existingData.items) ? existingData.items : [];
+        // Match on both scheme and "not disabled" — OAuth configs use a
+        // different scheme, we don't want to reuse those.
+        const usable = items.find((ac: any) => {
+          if (ac.is_disabled) return false;
+          const scheme = String(ac.auth_scheme ?? ac.authScheme ?? "").toUpperCase();
+          return scheme === authScheme || scheme === ""; // tolerate older configs without a scheme tag
+        });
+        if (usable) authConfigId = usable.id;
+      }
+
+      if (!authConfigId) {
+        const createResp = await fetch(`${COMPOSIO_API_V3}/auth_configs`, {
+          method: "POST",
+          headers: {
+            "x-api-key": apiKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            toolkit: { slug: toolkitSlug },
+            options: {
+              type: "use_custom_auth",
+              auth_scheme: authScheme,
+              credentials: {},
+            },
+          }),
+        });
+
+        if (!createResp.ok) {
+          const errText = await createResp.text().catch(() => "");
+          sendJson(res, createResp.status, {
+            error: `Failed to create auth config: ${createResp.status}`,
+            detail: errText.slice(0, 500),
+          });
+          return;
+        }
+
+        const created = (await createResp.json()) as any;
+        authConfigId = created?.auth_config?.id ?? created?.id ?? null;
+        if (!authConfigId) {
+          sendJson(res, 500, { error: "Auth config created but no ID returned" });
+          return;
+        }
+      }
+
+      // Step 2: Create a connected_account with the user's credential in
+      // connection.state.val. Composio's REST shape matches the SDK's
+      // initiate(config={auth_scheme, val:{...}}) helper.
+      const credentialField = authScheme === "BEARER_TOKEN" ? "token" : "api_key";
+      const connectResp = await fetch(`${COMPOSIO_API_V3}/connected_accounts`, {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          auth_config: { id: authConfigId },
+          connection: {
+            user_id: userId,
+            state: {
+              authScheme,
+              val: { [credentialField]: credential },
+            },
+          },
+        }),
+      });
+
+      if (!connectResp.ok) {
+        const errText = await connectResp.text().catch(() => "");
+        sendJson(res, connectResp.status, {
+          error: `Composio connect error: ${connectResp.status}`,
+          detail: errText.slice(0, 500),
+        });
+        return;
+      }
+
+      const connectData = (await connectResp.json()) as any;
+      sendJson(res, 200, {
+        connect_url: "",
+        connection_id: connectData.id ?? "",
+        status: connectData.status ?? "ACTIVE",
+        auth_scheme: authScheme,
+      });
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Failed to initiate connection: ${err.message}` });
+    }
+  });
+
+  // =========================================================================
   // DELETE /api/v1/integrations/:id — disconnect an integration
   // =========================================================================
   addRoute("DELETE", "/api/v1/integrations/:id", async ({ res, params }) => {

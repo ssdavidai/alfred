@@ -5,6 +5,7 @@ import {
   getConnectedIntegrations,
   getIntegrationCapabilities,
   initiateConnect,
+  initiateApiKeyConnect,
   disconnectIntegration,
   autoConfigIntegration,
   enableIntegrationStream,
@@ -30,6 +31,8 @@ import {
   Zap,
   Settings2,
   AlertCircle,
+  Key,
+  X as XIcon,
 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
@@ -117,6 +120,10 @@ export default function IntegrationsPage() {
   const [connectingSlug, setConnectingSlug] = useState<string | null>(null);
   const [configuringId, setConfiguringId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  // API-key modal state: a non-null toolkit means the modal is open for that
+  // toolkit. Used for toolkits whose auth_schemes are API_KEY or
+  // BEARER_TOKEN (no OAuth redirect).
+  const [apiKeyModal, setApiKeyModal] = useState<Toolkit | null>(null);
   const prevConnectedRef = useRef<Set<string>>(new Set());
   const autoFiredRef = useRef<Set<string>>(new Set());
   const { markReconfiguring, reconfiguringUntil } = useOpenclawStatus();
@@ -229,8 +236,36 @@ export default function IntegrationsPage() {
   // Connect flow — now includes auto-config
   // ---------------------------------------------------------------------------
 
+  // A toolkit uses the API-key flow iff its auth_schemes list contains
+  // API_KEY or BEARER_TOKEN but NOT OAUTH2. When OAuth is available we
+  // always prefer it (no user-managed credential to rotate, better UX).
+  const resolveAuthFlow = useCallback(
+    (toolkit: Toolkit | null | undefined): "oauth" | "api_key" | "bearer_token" | "unsupported" => {
+      const schemes = new Set((toolkit?.auth_schemes ?? []).map((s) => String(s).toUpperCase()));
+      if (schemes.has("OAUTH2") || schemes.has("OAUTH1") || schemes.has("OAUTH1A")) return "oauth";
+      if (schemes.has("API_KEY")) return "api_key";
+      if (schemes.has("BEARER_TOKEN")) return "bearer_token";
+      // Many toolkits omit the field in the catalog response — default to
+      // OAuth since that covers the majority of Composio's integrations.
+      if (schemes.size === 0) return "oauth";
+      return "unsupported";
+    },
+    [],
+  );
+
   const handleConnect = useCallback(
     async (toolkitSlug: string) => {
+      const toolkit = toolkits.find((t) => t.slug === toolkitSlug);
+      const flow = resolveAuthFlow(toolkit);
+      if (flow === "api_key" || flow === "bearer_token") {
+        setApiKeyModal(toolkit ?? { slug: toolkitSlug, name: toolkitSlug, description: "", icon_url: "", category: "other", auth_schemes: [flow === "bearer_token" ? "BEARER_TOKEN" : "API_KEY"] });
+        return;
+      }
+      if (flow === "unsupported") {
+        setToast(`${toolkit?.name || toolkitSlug} uses an auth scheme Alfred doesn't support yet.`);
+        return;
+      }
+
       setConnectingSlug(toolkitSlug);
       try {
         const result = await initiateConnect({
@@ -288,6 +323,38 @@ export default function IntegrationsPage() {
         }
       } catch (err: any) {
         setToast(`Connection failed: ${err?.message || "Unknown error"}`);
+        setConnectingSlug(null);
+      }
+    },
+    [refetchConnected, runAutoConfig, toolkits, resolveAuthFlow],
+  );
+
+  // Submit handler for the API-key modal. Fires initiateApiKeyConnect, then
+  // refetches the connected list; the existing auto-fire effect will kick
+  // auto-config into gear once the new row is ACTIVE (which it is immediately
+  // — no OAuth redirect).
+  const handleApiKeyConnect = useCallback(
+    async (toolkit: Toolkit, credential: string, authScheme: "API_KEY" | "BEARER_TOKEN") => {
+      setConnectingSlug(toolkit.slug);
+      try {
+        const result: any = await initiateApiKeyConnect({
+          toolkit_slug: toolkit.slug,
+          credential,
+          auth_scheme: authScheme,
+        });
+        const newId = result?.connection_id;
+        setApiKeyModal(null);
+        await refetchConnected();
+        setToast(`${toolkit.name} connected — configuring shortly…`);
+
+        // If Composio already reported ACTIVE (it does for API_KEY), fire
+        // auto-config immediately instead of waiting for the effect.
+        if (newId && result?.status === "ACTIVE") {
+          await runAutoConfig(newId, toolkit.name);
+        }
+      } catch (err: any) {
+        throw new Error(err?.message || "Failed to connect");
+      } finally {
         setConnectingSlug(null);
       }
     },
@@ -485,6 +552,20 @@ export default function IntegrationsPage() {
             </p>
           )}
         </section>
+
+        {apiKeyModal && (
+          <ApiKeyConnectModal
+            toolkit={apiKeyModal}
+            authScheme={
+              apiKeyModal.auth_schemes.map((s) => s.toUpperCase()).includes("BEARER_TOKEN") &&
+              !apiKeyModal.auth_schemes.map((s) => s.toUpperCase()).includes("API_KEY")
+                ? "BEARER_TOKEN"
+                : "API_KEY"
+            }
+            onCancel={() => setApiKeyModal(null)}
+            onSubmit={handleApiKeyConnect}
+          />
+        )}
 
         {toast && (
           <div className="fixed bottom-6 right-6 z-50 rounded-lg border border-[#C9A84C]/20 bg-black/90 px-4 py-3 text-sm text-[#F0EDE8] shadow-lg backdrop-blur-sm">
@@ -1114,4 +1195,159 @@ function intervalLabel(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
   return `${Math.round(seconds / 3600)}h`;
+}
+
+// ---------------------------------------------------------------------------
+// ApiKeyConnectModal — collects a credential for non-OAuth Composio toolkits
+// (Clockify, Tavily, PostHog, …). Single-field prompt; submits via the
+// parent's onSubmit handler which wires initiateApiKeyConnect + auto-config.
+// ---------------------------------------------------------------------------
+
+function ApiKeyConnectModal({
+  toolkit,
+  authScheme,
+  onCancel,
+  onSubmit,
+}: {
+  toolkit: Toolkit;
+  authScheme: "API_KEY" | "BEARER_TOKEN";
+  onCancel: () => void;
+  onSubmit: (toolkit: Toolkit, credential: string, authScheme: "API_KEY" | "BEARER_TOKEN") => Promise<void>;
+}) {
+  const [credential, setCredential] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const fieldLabel = authScheme === "BEARER_TOKEN" ? "Bearer token" : "API key";
+  const placeholder =
+    authScheme === "BEARER_TOKEN" ? "Paste your bearer token" : "Paste your API key";
+
+  const handleSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    const trimmed = credential.trim();
+    if (!trimmed) {
+      setError("Please paste your credential first.");
+      return;
+    }
+    setError(null);
+    setSubmitting(true);
+    try {
+      await onSubmit(toolkit, trimmed, authScheme);
+    } catch (err: any) {
+      setError(err?.message || "Something went wrong.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      onClick={onCancel}
+    >
+      <div
+        className="w-full max-w-md rounded-xl border border-white/[0.08] bg-[#0A0A0A] p-5 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-start justify-between">
+          <div className="flex items-center gap-2.5">
+            {toolkit.icon_url ? (
+              <img
+                src={toolkit.icon_url}
+                alt=""
+                className="h-10 w-10 rounded-lg object-contain"
+                onError={(e) => {
+                  (e.target as HTMLImageElement).style.display = "none";
+                }}
+              />
+            ) : (
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-white/[0.04]">
+                <Key className="h-5 w-5 text-[#8A8680]" />
+              </div>
+            )}
+            <div>
+              <h3 className="font-serif text-lg font-light text-[#F0EDE8]">
+                Connect {toolkit.name}
+              </h3>
+              <p className="text-xs text-[#8A8680]">
+                {toolkit.name} uses an {fieldLabel.toLowerCase()}. Paste it below to finish connecting.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onCancel}
+            disabled={submitting}
+            className="rounded p-1 text-[#8A8680] transition hover:text-[#F0EDE8] disabled:opacity-50"
+          >
+            <XIcon className="h-4 w-4" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div>
+            <label
+              htmlFor="api-key-input"
+              className="mb-1.5 block text-xs font-medium text-[#F0EDE8]"
+            >
+              {fieldLabel}
+            </label>
+            <input
+              id="api-key-input"
+              type="password"
+              autoFocus
+              spellCheck={false}
+              autoComplete="off"
+              value={credential}
+              disabled={submitting}
+              placeholder={placeholder}
+              onChange={(e) => {
+                setCredential(e.target.value);
+                if (error) setError(null);
+              }}
+              className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-[#F0EDE8] placeholder-[#8A8680]/60 outline-none transition focus:border-[#C9A84C]/40 disabled:opacity-50"
+            />
+            <p className="mt-1.5 text-[0.6rem] text-[#8A8680]">
+              Stored securely by Composio — never touches Alfred's filesystem or git history.
+              You can revoke it from {toolkit.name}'s settings at any time.
+            </p>
+          </div>
+
+          {error && (
+            <div className="flex items-start gap-2 rounded-lg border border-red-500/20 bg-red-500/5 p-2.5">
+              <AlertCircle className="mt-0.5 h-3 w-3 flex-shrink-0 text-red-400" />
+              <span className="text-xs text-[#F0EDE8]">{error}</span>
+            </div>
+          )}
+
+          <div className="flex items-center justify-end gap-2 pt-1">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={submitting}
+              className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-1.5 text-xs text-[#8A8680] transition hover:text-[#F0EDE8] disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting || !credential.trim()}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#C9A84C]/15 px-3 py-1.5 text-xs text-[#C9A84C] transition hover:bg-[#C9A84C]/25 disabled:opacity-50"
+            >
+              {submitting ? (
+                <>
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Connecting…
+                </>
+              ) : (
+                <>
+                  <Key className="h-3 w-3" />
+                  Connect
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
 }
