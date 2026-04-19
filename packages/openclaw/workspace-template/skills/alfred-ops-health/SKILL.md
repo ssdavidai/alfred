@@ -15,26 +15,26 @@ Sir's Alfred instance is a Docker stack running on a dedicated VPS. When somethi
 
 ### Dashboard / health
 
-- **`ctrl endpoint="/api/v1/admin/dashboard"`** — one-shot snapshot: health, containers, vault stats, recent activity. **Start here.**
-- **`ctrl endpoint="/api/v1/admin/health"`** — health check across all services. Returns pass/fail per service.
-- **`ctrl endpoint="/api/v1/admin/system/info"`** — CPU / memory / disk / uptime.
+- **`self endpoint="/api/v1/admin/dashboard"`** — one-shot snapshot: health, containers, vault stats, recent activity. **Start here.**
+- **`self endpoint="/api/v1/admin/health"`** — health check across all services. Returns pass/fail per service.
+- **`self endpoint="/api/v1/admin/system/info"`** — CPU / memory / disk / uptime.
 
 ### Containers + workers
 
-- **`ctrl endpoint="/api/v1/admin/containers"`** — list all Docker containers with status.
-- **`ctrl endpoint="/api/v1/admin/containers/{service}/logs"`** — recent logs from a container (e.g. `alfred-learn`, `openclaw`, `ctrl-api`, `temporal`).
-- **`ctrl endpoint="/api/v1/workers/status"`** — curator / janitor / distiller / surveyor status with last_run, processed_count, error_count.
-- **`ctrl endpoint="/api/v1/workers/restart" method="POST"`** — kick a stuck worker. Confirmed stuck only.
-- **`ctrl endpoint="/api/v1/admin/containers/{service}/restart" method="POST"`** — restart a Docker container. **Dangerous — drops in-flight work.**
+- **`self endpoint="/api/v1/admin/containers"`** — list all Docker containers with status.
+- **`self endpoint="/api/v1/admin/containers/{service}/logs"`** — recent logs from a container (e.g. `alfred-learn`, `openclaw`, `ctrl-api`, `temporal`).
+- **`self endpoint="/api/v1/workers/status"`** — curator / janitor / distiller / surveyor status with last_run, processed_count, error_count.
+- **`self endpoint="/api/v1/workers/restart" method="POST"`** — kick a stuck worker. Confirmed stuck only.
+- **`self endpoint="/api/v1/admin/containers/{service}/restart" method="POST"`** — restart a Docker container. **Dangerous — drops in-flight work.**
 
 ### Recent activity
 
-- **`ctrl endpoint="/api/v1/admin/activity"`** — recent API activity log.
+- **`self endpoint="/api/v1/admin/activity"`** — recent API activity log.
 
 ### Models + credentials
 
-- **`ctrl endpoint="/api/v1/admin/models"`** — available AI models with provider credentials.
-- **`ctrl endpoint="/api/v1/admin/credentials"`** — configured provider credentials (masked).
+- **`self endpoint="/api/v1/admin/models"`** — available AI models with provider credentials.
+- **`self endpoint="/api/v1/admin/credentials"`** — configured provider credentials (masked).
 
 ## Service map (so you know what to look at)
 
@@ -43,13 +43,13 @@ Sir's Alfred instance is a Docker stack running on a dedicated VPS. When somethi
 | `alfred-learn` | Python Temporal worker that runs onboarding, chores, learning workflows, reflection, judgment | Chore didn't fire, digest missing, learning not updating |
 | `openclaw` | AI gateway — routes agent calls to LLM providers, handles Slack/Telegram/etc channels | DMs not arriving, agent replies delayed, model errors |
 | `openclaw-workers` | Background agent runtime — hosts curator/janitor/distiller/surveyor agents | Inbox piling up, vault quality issues, no new observations |
-| `ctrl-api` | Tenant HTTP API on `:3100` — the layer between openclaw/alfred-learn and the Docker socket | Any ctrl_* tool returning 500, TUI dashboard broken |
+| `ctrl-api` | Tenant HTTP API on `:3100` — the layer between openclaw/alfred-learn and the Docker socket | Any `self` call returning 500, TUI dashboard broken |
 | `temporal` | Workflow engine for alfred-learn | Workflows stuck pending, schedule not firing |
 | `alfred` (worker) | Vault worker daemons (curator/janitor/distiller/surveyor as python processes) | Inbox not moving, janitor not sweeping |
 
 ## Good behavior
 
-1. **Start with the dashboard.** `ctrl endpoint="/api/v1/admin/dashboard"` gives you 80% of the picture in one call.
+1. **Start with the dashboard.** `self endpoint="/api/v1/admin/dashboard"` gives you 80% of the picture in one call.
 2. **Never restart without justification.** Every restart interrupts in-flight work. Quote specific symptom + log evidence.
 3. **Mask secrets.** The credentials endpoint returns masked values — don't try to un-mask them.
 4. **Correlate time.** Dashboard timestamp → schedule cron time → activity log → container logs.
@@ -58,13 +58,13 @@ Sir's Alfred instance is a Docker stack running on a dedicated VPS. When somethi
 ## Examples
 
 **Sir: "Is everything running?"**
-→ `ctrl endpoint="/api/v1/admin/dashboard"` → summarize container states + any unhealthy services.
+→ `self endpoint="/api/v1/admin/dashboard"` → summarize container states + any unhealthy services.
 
 **Sir: "The Monday digest didn't arrive."**
-→ `ctrl endpoint="/api/v1/schedules"` → find the digest → `ctrl endpoint="/api/v1/workflows"` for recent runs → if failed, `ctrl endpoint="/api/v1/workflows/{wfId}"` → `ctrl endpoint="/api/v1/admin/containers/alfred-learn/logs"`.
+→ `self endpoint="/api/v1/schedules"` → find the digest → `self endpoint="/api/v1/workflows"` for recent runs → if failed, `self endpoint="/api/v1/workflows/{wfId}"` → `self endpoint="/api/v1/admin/containers/alfred-learn/logs"`.
 
 **Sir: "What model is my Alfred using right now?"**
-→ `ctrl endpoint="/api/v1/admin/models"` → report primary model + provider.
+→ `self endpoint="/api/v1/admin/models"` → report primary model + provider.
 
 **Sir: "Why is the inbox not being processed?"**
-→ `ctrl endpoint="/api/v1/workers/status"` → check curator last_run → if stale, `ctrl endpoint="/api/v1/admin/containers/alfred/logs"` → only restart if logs show crash.
+→ `self endpoint="/api/v1/workers/status"` → check curator last_run → if stale, `self endpoint="/api/v1/admin/containers/alfred/logs"` → only restart if logs show crash.
