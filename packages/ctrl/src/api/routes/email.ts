@@ -109,7 +109,8 @@ export function registerEmailRoutes(): void {
   });
 
   // Send a new message (new thread).
-  // Body: { to, subject, text, html?, cc?, bcc?, reply_to?, labels? }
+  // Body: { to, subject, text, html?, cc?, bcc?, reply_to?, labels?, attachments? }
+  // attachments: Array<{content: base64, filename?, content_type?}>
   addRoute("POST", "/api/v1/email/send", async ({ res, body }) => {
     const b = (body ?? {}) as Record<string, unknown>;
     const to = stringArray(b.to);
@@ -129,6 +130,7 @@ export function registerEmailRoutes(): void {
     if (typeof b.reply_to === "string") payload.reply_to = b.reply_to;
     const labels = stringArray(b.labels);
     if (labels) payload.labels = labels;
+    if (Array.isArray(b.attachments)) payload.attachments = b.attachments;
 
     const r = await am(creds, "POST", `/inboxes/${creds.inbox_id}/messages/send`, payload);
     assertOk(r, "send failed");
@@ -158,7 +160,7 @@ export function registerEmailRoutes(): void {
   });
 
   // Forward a message.
-  // Body: { message_id, to, subject?, text?, html? }
+  // Body: { message_id, to, subject?, text?, html?, attachments? }
   addRoute("POST", "/api/v1/email/forward", async ({ res, body }) => {
     const b = (body ?? {}) as Record<string, unknown>;
     if (typeof b.message_id !== "string" || !b.message_id)
@@ -171,6 +173,7 @@ export function registerEmailRoutes(): void {
     if (typeof b.subject === "string") payload.subject = b.subject;
     if (typeof b.text === "string") payload.text = b.text;
     if (typeof b.html === "string") payload.html = b.html;
+    if (Array.isArray(b.attachments)) payload.attachments = b.attachments;
 
     const r = await am(
       creds,
