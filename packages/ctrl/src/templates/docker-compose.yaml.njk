@@ -199,6 +199,11 @@ services:
       - AAS_HOST=0.0.0.0
       - AAS_PORT=3100
       - NODE_ENV=production
+      # AgentMail channels/email inbound needs the openclaw gateway token to
+      # spawn an agent session. The file lives on the shared /mnt/encrypted/alfred
+      # mount (same path inside this container — we don't remap to /alfred-data
+      # here like alfred-learn does).
+      - OPENCLAW_GATEWAY_TOKEN_FILE=/mnt/encrypted/alfred/.gateway-token
     ports:
       - "127.0.0.1:3100:3100"
     healthcheck:
