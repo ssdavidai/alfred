@@ -148,6 +148,22 @@ export class OpenAIRealtimeClient {
     this.send({ type: "response.create" });
   }
 
+  // Submit a function-call result back to the model + ask it to continue.
+  // Sequence per OpenAI Realtime docs:
+  //   1. conversation.item.create  (function_call_output)
+  //   2. response.create           (resume the turn)
+  submitToolResult(callId: string, output: string): void {
+    this.send({
+      type: "conversation.item.create",
+      item: {
+        type: "function_call_output",
+        call_id: callId,
+        output,
+      },
+    });
+    this.send({ type: "response.create" });
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;

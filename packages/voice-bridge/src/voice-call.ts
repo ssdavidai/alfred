@@ -18,6 +18,12 @@ import { OpenAIRealtimeClient } from "./openai-realtime.js";
 import { fetchTenantContext, type TenantContext } from "./tenant.js";
 import { buildInstructions } from "./instructions.js";
 import { config } from "./config.js";
+import {
+  ALL_TOOLS,
+  dispatchComposioExecute,
+  dispatchSelf,
+  serializeToolResult,
+} from "./tools.js";
 
 export interface VoiceCallOpts {
   tenantId: string;
@@ -74,7 +80,7 @@ export class VoiceCall {
           initiator: this.opts.initiator,
           intent: this.opts.intent,
         }),
-        // tools left undefined for Phase 2; Phase 3 wires self + composio_execute
+        tools: ALL_TOOLS,
       });
     } catch (err) {
       console.error(`[call ${this.callId}] OpenAI Realtime connect failed`, err);
@@ -151,11 +157,47 @@ export class VoiceCall {
       case "response.done":
         this.speaking = false;
         break;
+      case "response.function_call_arguments.done":
+        // Tool dispatch. The model has finished emitting JSON-encoded args
+        // for a function call; parse, run, return the result, ask for the
+        // next response cycle.
+        this.handleToolCall(event).catch((err) => {
+          console.error(`[call ${this.callId}] tool dispatch error`, err);
+        });
+        break;
       case "error":
         // logged inside the client; nothing extra here
         break;
-      // response.function_call_arguments.done lands in Phase 3 (tool dispatch)
     }
+  }
+
+  private async handleToolCall(event: any): Promise<void> {
+    if (!this.tenantCtx || !this.realtime) return;
+    const { name, call_id: callId, arguments: argsRaw } = event;
+    let args: Record<string, unknown> = {};
+    try {
+      args = argsRaw ? JSON.parse(argsRaw) : {};
+    } catch (err) {
+      const errStr = (err as Error)?.message ?? String(err);
+      this.realtime.submitToolResult(
+        callId,
+        serializeToolResult({
+          ok: false,
+          error: `Failed to parse tool arguments: ${errStr}`,
+        }),
+      );
+      return;
+    }
+
+    let result;
+    if (name === "self") {
+      result = await dispatchSelf(this.tenantCtx, args);
+    } else if (name === "composio_execute") {
+      result = await dispatchComposioExecute(this.tenantCtx, args);
+    } else {
+      result = { ok: false, error: `Unknown tool: ${name}` };
+    }
+    this.realtime.submitToolResult(callId, serializeToolResult(result));
   }
 
   private handleBargeIn(): void {
