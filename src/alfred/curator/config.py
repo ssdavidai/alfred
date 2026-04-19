@@ -95,7 +95,13 @@ class WatcherConfig:
     poll_interval: int = 5
     debounce_seconds: int = 10
     rescan_interval: int = 60
-    max_concurrent: int = 4  # number of inbox files to process in parallel
+    max_concurrent: int = 2  # number of inbox files to process in parallel
+    # Reduced from 4 to 2 to prevent openclaw-workers OOM on bulk uploads.
+    # Each concurrent curator session holds ~1-1.5GB of heap in openclaw-workers
+    # (agent context + transcript + 4-stage pipeline state). At 4 concurrent,
+    # a 10-file bulk upload spikes workers to 4-5GB and crashes the V8 heap.
+    # At 2 concurrent: ~3GB peak, ~9 min for 10 files. Safe + predictable.
+    # Tune per-tenant via config.yaml: curator.watcher.max_concurrent
 
 
 @dataclass
