@@ -23,10 +23,41 @@ function verifySig(tenantId: string, sig: string | null): boolean {
   return crypto.timingSafeEqual(a, b);
 }
 
+// ── Process-local metrics ────────────────────────────────────────────────────
+// Kept tiny; no Prom client lib — emit plaintext Prometheus exposition so we
+// can scrape from Grafana when it's wired up.
+const metrics = {
+  callsAccepted: 0,
+  callsRejected403: 0,
+  callsDisposed: 0,
+  toolDispatches: 0,
+  errors: 0,
+};
+
+export function bumpMetric(name: keyof typeof metrics, n = 1): void {
+  metrics[name] += n;
+}
+
+function renderMetrics(): string {
+  return (
+    Object.entries(metrics)
+      .map(
+        ([k, v]) =>
+          `# TYPE voice_bridge_${k} counter\nvoice_bridge_${k} ${v}\n`,
+      )
+      .join("") + "\n"
+  );
+}
+
 const httpServer = http.createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ status: "ok" }));
+    return;
+  }
+  if (req.url === "/metrics") {
+    res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
+    res.end(renderMetrics());
     return;
   }
   res.writeHead(404);
@@ -47,10 +78,12 @@ httpServer.on("upgrade", (req, socket, head) => {
     const tenantId = decodeURIComponent(match[1]);
     const sig = url.searchParams.get("sig");
     if (!verifySig(tenantId, sig)) {
+      bumpMetric("callsRejected403");
       socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
       socket.destroy();
       return;
     }
+    bumpMetric("callsAccepted");
     const initiator =
       url.searchParams.get("initiator") === "alfred" ? "alfred" : "user";
     const intent = url.searchParams.get("intent") ?? undefined;

@@ -10,6 +10,7 @@ import crypto from "crypto";
 import { prisma } from "wasp/server";
 import { proxyToTenant } from "../tenantProxy";
 import { validateTwilioSignature } from "./client";
+import { isSpamNumber } from "./spam";
 
 // Sign a tenantId so the Voice Bridge can verify the WS upgrade query came from us.
 // HMAC-SHA256 over `${tenantId}` keyed with VOICE_BRIDGE_INTERNAL_TOKEN. Hex.
@@ -47,8 +48,20 @@ export function registerTwilioWebhooks(app: Application): void {
       }
 
       const to = params.To;
+      const from = params.From ?? "";
       if (!to) {
         res.status(400).send("Missing To");
+        return;
+      }
+      // Spam pre-filter — reject before burning Realtime minutes.
+      if (from && (await isSpamNumber(from))) {
+        console.log(`[twilio/voice] rejecting spam caller ${from}`);
+        res
+          .type("text/xml")
+          .status(200)
+          .send(
+            `<?xml version="1.0" encoding="UTF-8"?><Response><Reject reason="busy"/></Response>`,
+          );
         return;
       }
       const instance = await prisma.instance.findUnique({

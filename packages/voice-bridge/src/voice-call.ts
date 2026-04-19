@@ -221,6 +221,14 @@ export class VoiceCall {
 
   private async handleToolCall(event: any): Promise<void> {
     if (!this.tenantCtx || !this.realtime) return;
+    // Metrics bump — best-effort import to avoid circular type deps at compile
+    // time in case server.ts is not yet built when this is loaded.
+    try {
+      const { bumpMetric } = await import("./server.js");
+      bumpMetric("toolDispatches");
+    } catch {
+      /* ignore */
+    }
     const { name, call_id: callId, arguments: argsRaw } = event;
     let args: Record<string, unknown> = {};
     try {

@@ -13,6 +13,7 @@ import {
   createCall,
 } from "./client";
 import { decryptApiKey } from "../tenantProxy";
+import { recordAttempt, removeSpamNumber } from "./spam";
 
 // ── Token-bucket rate limiter (in-memory) ────────────────────────────────────
 // Per-tenant per-action. Resets every minute. Process-local — fine for a single
@@ -312,6 +313,39 @@ export function registerTwilioInternalRoutes(app: Application): void {
         console.error("[internal/provision] error:", err);
         res.status(502).json({ error: err?.message ?? "Provision failed" });
       }
+    },
+  );
+
+  // ── Spam list admin ───────────────────────────────────────────────────────
+  app.post(
+    "/api/internal/twilio/spam/add",
+    requireInternalToken,
+    json,
+    async (req: Request, res: Response) => {
+      const { phoneNumber, reason } = (req.body ?? {}) as {
+        phoneNumber?: string;
+        reason?: string;
+      };
+      if (!phoneNumber) {
+        res.status(400).json({ error: "phoneNumber required" });
+        return;
+      }
+      await recordAttempt(phoneNumber, reason);
+      res.status(200).json({ status: "added", phoneNumber });
+    },
+  );
+  app.post(
+    "/api/internal/twilio/spam/remove",
+    requireInternalToken,
+    json,
+    async (req: Request, res: Response) => {
+      const { phoneNumber } = (req.body ?? {}) as { phoneNumber?: string };
+      if (!phoneNumber) {
+        res.status(400).json({ error: "phoneNumber required" });
+        return;
+      }
+      await removeSpamNumber(phoneNumber);
+      res.status(200).json({ status: "removed", phoneNumber });
     },
   );
 
