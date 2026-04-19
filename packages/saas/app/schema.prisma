@@ -28,6 +28,7 @@ model User {
   streams                   Stream[]
   streamEvents              StreamEvent[]
   oauthCredentials          OAuthCredential[]
+  composioConnections       ComposioConnection[]
 }
 
 model ApiKey {
@@ -174,6 +175,36 @@ model StreamEvent {
   @@index([streamId, receivedAt])
   @@index([userId, processed])
   @@unique([streamId, sourceRef])
+}
+
+/// SaaS-side source of truth for each Composio connection's auto-config state.
+/// The actual connection lives at Composio and the auto-config side-effects
+/// (streams, tools, skills) live on the tenant filesystem — this row stitches
+/// them together so the dashboard can answer "is this app fully live?" with
+/// a single query and survive page refreshes. Created on initiateConnect,
+/// updated on autoConfigIntegration, deleted on disconnectIntegration.
+model ComposioConnection {
+  id               String    @id @default(uuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id])
+  connectionId     String    @unique          // Composio's connected_account id
+  toolkit          String                     // "gmail", "slack", "notion", …
+  label            String?                    // human-readable (toolkit display name)
+  iconUrl          String?                    // toolkit logo URL
+  authScheme       String?                    // "oauth2" | "api_key" | …
+  status           String    @default("INITIATED") // mirror of Composio status: INITIATED|ACTIVE|INACTIVE|…
+  autoConfigState  String    @default("pending")   // "pending" | "running" | "configured" | "error"
+  autoConfigError  String?
+  autoConfiguredAt DateTime?
+  streamsCreated   Int       @default(0)
+  toolsEnabled     Int       @default(0)
+  skillName        String?                    // e.g. "alfred-composio-gmail"
+  lastSyncedAt     DateTime  @default(now())  // updated whenever we re-read tenant state
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@unique([userId, toolkit])
+  @@index([userId, status])
 }
 
 model OAuthCredential {

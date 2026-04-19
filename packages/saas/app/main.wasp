@@ -653,7 +653,7 @@ query getIntegrationCatalog {
 
 query getConnectedIntegrations {
   fn: import { getConnectedIntegrations } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: [Instance, ComposioConnection]
 }
 
 query getIntegrationCapabilities {
@@ -663,12 +663,12 @@ query getIntegrationCapabilities {
 
 action initiateConnect {
   fn: import { initiateConnect } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: [Instance, ComposioConnection]
 }
 
 action disconnectIntegration {
   fn: import { disconnectIntegration } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: [Instance, ComposioConnection]
 }
 
 action enableIntegrationStream {
@@ -688,12 +688,12 @@ action disableIntegrationTool {
 
 action autoConfigIntegration {
   fn: import { autoConfigIntegration } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: [Instance, ComposioConnection]
 }
 
 action finalizeComposioConnections {
   fn: import { finalizeComposioConnections } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: [Instance, ComposioConnection]
 }
 
 query getOpenclawReadiness {
