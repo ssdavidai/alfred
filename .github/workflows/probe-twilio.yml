@@ -1,0 +1,16 @@
+name: Probe Twilio config
+on:
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/saas_key
+          chmod 600 ~/.ssh/saas_key
+      - name: Probe
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/saas_key deploy@${{ secrets.DEPLOY_HOST }} \
+            "grep -E '^(TWILIO|VOICE_BRIDGE)' /opt/alfred-saas/.env.server 2>/dev/null | awk -F= '{print \$1}' || echo 'none set'"
