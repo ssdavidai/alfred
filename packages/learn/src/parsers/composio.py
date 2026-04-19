@@ -41,6 +41,7 @@ def parse(raw: dict) -> list[ParsedEvent]:
             or data.get("records", [])
             or data.get("entries", [])
             or data.get("events", [])
+            or data.get("values", [])  # NOTION_FETCH_DATA returns {values: [{id,title,type}]}
         )
         if isinstance(items, list) and items:
             return [_item_to_event(item) for item in items if isinstance(item, dict)]

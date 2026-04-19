@@ -184,18 +184,27 @@ export function registerOpenClawRoutes(): void {
   });
 
   // =========================================================================
-  // GET /api/v1/openclaw/allowed-tools — list every tool Alfred can invoke
+  // GET /api/v1/openclaw/allowed-tools — the built-in + MCP tool inventory
   //
-  // Reads the tenant's gateway.tools.allow + mcp.servers from openclaw.json
-  // and classifies each entry so the SaaS Tools page can render a grouped
-  // view. Classification is heuristic but deterministic:
-  //   - mcp        → server names declared under mcp.servers (e.g. "self",
-  //                  "tenant", "ask_alfred" for Prime)
-  //   - composio   → UPPERCASE_SNAKE_CASE action slugs (GMAIL_FETCH_EMAILS)
-  //                  — we also split off the toolkit prefix so the page
-  //                  can group them
-  //   - builtin    → everything else (sessions_*, web_search, web_fetch,
-  //                  composio_execute gateway tool, ...)
+  // Returns the two tool surfaces that live outside of Composio:
+  //
+  //   builtin_tools[] — openclaw gateway tools registered in
+  //                     `gateway.tools.allow`, excluding Composio action
+  //                     slugs (those belong to per-app capabilities, not
+  //                     the global allowlist). Includes sessions_*,
+  //                     web_search, web_fetch, composio_execute.
+  //
+  //   mcp_tools[]     — the actual tool names exposed by each MCP server
+  //                     under `mcp.servers`, not the server keys. We have
+  //                     a small known-servers table (alfred-ctrl → self,
+  //                     tenant, ask_alfred) so we don't need to probe the
+  //                     MCP server at list time. `prime` flag indicates
+  //                     whether tenant/ask_alfred are exposed (gated on
+  //                     ALFRED_PRIME=true + CROSS_TENANT_PEERS).
+  //
+  // Composio app actions are NOT in this response — the SaaS Tools page
+  // fans out per-connection to /api/v1/integrations/:id/capabilities for
+  // the displayName + description metadata Composio provides.
   // =========================================================================
   addRoute("GET", "/api/v1/openclaw/allowed-tools", async ({ res }) => {
     let cfg: any = {};
@@ -212,39 +221,81 @@ export function registerOpenClawRoutes(): void {
     const mcpServers: string[] = cfg?.mcp?.servers
       ? Object.keys(cfg.mcp.servers)
       : [];
-    const mcpNames = new Set<string>();
-    for (const s of mcpServers) {
-      // Some MCP servers declare the tool names they expose; others don't.
-      // Either way, the server key itself is usually also the tool name
-      // (e.g. "self"). Collect both.
-      mcpNames.add(s);
-      const tools = cfg.mcp.servers?.[s]?.tools;
-      if (Array.isArray(tools)) {
-        for (const t of tools) {
-          if (typeof t === "string") mcpNames.add(t);
-          else if (t && typeof t.name === "string") mcpNames.add(t.name);
-        }
+
+    // Strip Composio action slugs from the allowlist — they're per-app
+    // tools, described separately via the capabilities endpoint.
+    const builtinTools = allow
+      .filter((name) => !/^[A-Z][A-Z0-9]+(_[A-Z0-9]+)+$/.test(name))
+      .map((name) => ({
+        name,
+        description: BUILTIN_TOOL_DESCRIPTIONS[name] ?? null,
+      }));
+    builtinTools.sort((a, b) => a.name.localeCompare(b.name));
+
+    // MCP tools — known-servers table keyed by server name. Prime tools
+    // only ship when the env flag is set (they're gated in ctrl-server.mjs).
+    const primeEnabled = process.env.ALFRED_PRIME === "true";
+    const mcpTools: Array<{ name: string; server: string; description: string; prime_only: boolean }> = [];
+    for (const server of mcpServers) {
+      const known = MCP_SERVER_TOOLS[server];
+      if (!known) continue;
+      for (const t of known) {
+        if (t.prime_only && !primeEnabled) continue;
+        mcpTools.push({ name: t.name, server, description: t.description, prime_only: t.prime_only });
       }
     }
-
-    const tools = allow.map((name: string) => {
-      let group: "builtin" | "mcp" | "composio" = "builtin";
-      let toolkit: string | null = null;
-
-      if (mcpNames.has(name)) {
-        group = "mcp";
-      } else if (/^[A-Z][A-Z0-9]+(_[A-Z0-9]+)+$/.test(name)) {
-        group = "composio";
-        toolkit = name.split("_")[0].toLowerCase();
-      }
-
-      return { name, group, toolkit };
-    });
+    mcpTools.sort((a, b) => a.name.localeCompare(b.name));
 
     sendJson(res, 200, {
-      tools,
-      count: tools.length,
+      builtin_tools: builtinTools,
+      mcp_tools: mcpTools,
       mcp_servers: mcpServers,
+      prime_enabled: primeEnabled,
     });
   });
 }
+
+// -----------------------------------------------------------------------------
+// Known MCP servers → tool names. Update this table when a new MCP server is
+// added to the tenant workspace. Keeping it static here is cheaper and more
+// reliable than probing the MCP server on every list request.
+// -----------------------------------------------------------------------------
+const MCP_SERVER_TOOLS: Record<string, Array<{ name: string; description: string; prime_only: boolean }>> = {
+  "alfred-ctrl": [
+    {
+      name: "self",
+      description:
+        "Call this tenant's ctrl-api. Alfred's primary way to read the vault, manage streams, create chores, etc.",
+      prime_only: false,
+    },
+    {
+      name: "tenant",
+      description:
+        "Call a peer tenant's ctrl-api over Tailscale. Alfred Prime only — lets David operate on Miguel/Rapali/other tenants.",
+      prime_only: true,
+    },
+    {
+      name: "ask_alfred",
+      description:
+        "Hand a prompt to a peer tenant's Alfred and get their reasoned reply. Alfred Prime only.",
+      prime_only: true,
+    },
+  ],
+};
+
+// Short human-readable descriptions for the built-in gateway tools. These
+// ship with openclaw — we hardcode the stable core set here since the tenant
+// has no other metadata source for them.
+const BUILTIN_TOOL_DESCRIPTIONS: Record<string, string> = {
+  web_search: "Search the web via the configured search provider.",
+  web_fetch: "Fetch a URL and return the cleaned text contents.",
+  composio_execute:
+    "Dispatch any Composio action (Gmail, Slack, Notion, …) on a connected account.",
+  ctrl_composio_execute:
+    "(legacy dispatch name, superseded by composio_execute — kept for in-flight sessions)",
+  sessions_list: "List active openclaw sessions on this tenant.",
+  sessions_spawn: "Spawn a new openclaw session / subagent.",
+  sessions_send: "Send a message to a running openclaw session.",
+  sessions_history: "Read the message history of an openclaw session.",
+  sessions_delete: "Delete an openclaw session.",
+};

@@ -335,7 +335,12 @@ const RECOMMENDED_STREAMS: Record<string, {
   gmail:          { action: "GMAIL_FETCH_EMAILS",         name: "Gmail Emails",     interval: 300, args: { userId: "me" } },
   // slack omitted: SLACK_FETCH_CONVERSATION_HISTORY requires a channel ID (per-tenant config)
   github:         { action: "GITHUB_LIST_NOTIFICATIONS",  name: "GitHub Notifications", interval: 300, args: {} },
-  notion:         { action: "NOTION_LIST_PAGES",          name: "Notion Pages",     interval: 600, args: {} },
+  // NOTION_LIST_PAGES was removed from Composio's catalog in early 2026
+  // (replaced by NOTION_FETCH_DATA which wraps Notion's search API). The new
+  // action has no last_edited_time filter, so we run snapshot-mode: every
+  // pull returns the 50 most-recently-edited items; StreamEvent dedupes via
+  // the (streamId, sourceRef) unique index.
+  notion:         { action: "NOTION_FETCH_DATA",          name: "Notion Pages",     interval: 600, args: { get_all: false, get_pages: true, get_databases: true, page_size: 50 } },
 };
 
 const SYNC_MODE: Record<string, "snapshot" | "append" | "sync"> = {
@@ -343,7 +348,7 @@ const SYNC_MODE: Record<string, "snapshot" | "append" | "sync"> = {
   gmail: "append",
   slack: "append",
   github: "append",
-  notion: "append",
+  notion: "snapshot",
 };
 
 const DEFAULT_ARGS: Record<string, Record<string, unknown>> = {
@@ -963,97 +968,211 @@ export function registerIntegrationRoutes(): void {
   });
 
   // =========================================================================
-  // GET /api/v1/integrations/:id/capabilities — classify actions for a connection
+  // GET /api/v1/integrations/:id/capabilities — enriched action inventory
+  //
+  // Returns what this specific connection can do, with:
+  //   - display_name + description from Composio (human-friendly, not raw slugs)
+  //   - deprecated flag (default excluded from response, include_deprecated=1 to see)
+  //   - stream_actions[].enabled / .stream_id / .schedule_interval_seconds /
+  //     .last_event_at / .last_pull_status — read from the live stream config
+  //     AND matched by composio_connection_id (robust to Composio renaming a slug)
+  //   - tool_actions[] — always available once composio_execute is in the
+  //     gateway allowlist; no per-action toggle (the tool dispatches them all)
+  //   - stale_streams[] — stream configs on disk whose composio_action is NOT
+  //     in Composio's current catalog for this toolkit. These are broken (404
+  //     on every pull) until migrated. Surfaces cleanly in the UI for a
+  //     one-click migrate.
   // =========================================================================
-  addRoute("GET", "/api/v1/integrations/:id/capabilities", async ({ res, params }) => {
+  addRoute("GET", "/api/v1/integrations/:id/capabilities", async ({ res, params, query }) => {
     const apiKey = getComposioApiKey();
     const connId = params.id;
+    const includeDeprecated = query.get("include_deprecated") === "1";
 
     try {
-      // First, get the connected account to find its toolkit
+      // 1. Resolve connection → toolkit
       const connResp = await fetch(
         `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(connId)}`,
         { headers: { "x-api-key": apiKey } },
       );
-
       if (!connResp.ok) {
         if (connResp.status === 404) throw new NotFoundError(`Connected account ${connId} not found`);
         sendJson(res, connResp.status, { error: `Composio API error: ${connResp.status}` });
         return;
       }
-
       const conn = (await connResp.json()) as any;
-      const toolkit = conn.toolkit?.slug ?? conn.appName ?? "";
+      const toolkit = (conn.toolkit?.slug ?? conn.appName ?? "").toLowerCase();
+      const toolkitName = conn.toolkit?.displayName ?? conn.toolkit?.name ?? toolkit;
 
       if (!toolkit) {
-        sendJson(res, 200, { toolkit: "", stream_actions: [], tool_actions: [] });
+        sendJson(res, 200, {
+          connection_id: connId,
+          toolkit: "",
+          toolkit_name: "",
+          stream_actions: [],
+          tool_actions: [],
+          stale_streams: [],
+          composio_execute_enabled: false,
+        });
         return;
       }
 
-      // Fetch available actions for this toolkit (v2 API uses apps= param)
+      // 2. Fetch Composio's current action catalog for this toolkit
       const actionsResp = await fetch(
         `${COMPOSIO_API_V2}/actions?apps=${encodeURIComponent(toolkit)}&limit=100`,
         { headers: { "x-api-key": apiKey } },
       );
-
       if (!actionsResp.ok) {
         sendJson(res, actionsResp.status, { error: `Composio actions error: ${actionsResp.status}` });
         return;
       }
-
       const actionsData = (await actionsResp.json()) as any;
       const tools = Array.isArray(actionsData.items) ? actionsData.items
         : Array.isArray(actionsData.tools) ? actionsData.tools : [];
 
-      const streamActions: Array<{ slug: string; description: string }> = [];
-      const toolActions: Array<{ slug: string; description: string }> = [];
-
-      // Check which tools are currently enabled in openclaw.json
-      let enabledTools: Set<string>;
-      try {
-        const cfg = readOpenclawConfig();
-        enabledTools = new Set(cfg?.gateway?.tools?.allow || []);
-      } catch {
-        enabledTools = new Set();
+      const catalogSlugs = new Set<string>();
+      for (const t of tools) {
+        const s = (t.name ?? t.slug ?? "") as string;
+        if (s) catalogSlugs.add(s);
       }
 
-      // Check which actions are currently backing streams
-      const activeStreamActions = new Set<string>();
+      // 3. Read live stream configs for THIS connection (matched by
+      //    composio_connection_id — survives a Composio slug rename).
+      //    streamConfigByAction: map current slug → on-disk config
+      //    stale: configs whose composio_action is no longer in the catalog
+      type StreamRecord = {
+        stream_id: string;
+        action: string;
+        interval_seconds: number;
+        last_pull_at: string | null;
+        last_pull_status: string | null;
+        event_count: number;
+        last_event_at: string | null;
+      };
+      const streamByAction = new Map<string, StreamRecord>();
+      const staleStreams: StreamRecord[] = [];
+
       try {
         fs.mkdirSync(STREAM_CONFIGS_DIR, { recursive: true });
         const configFiles = fs.readdirSync(STREAM_CONFIGS_DIR).filter((f) => f.endsWith(".json"));
+        // Also look up event counts / last_event_at from streams.json
+        let streamsMeta: any[] = [];
+        try {
+          streamsMeta = JSON.parse(fs.readFileSync(path.join(STREAMS_DIR, "streams.json"), "utf-8"));
+        } catch { /* ok */ }
+        const metaById = new Map(streamsMeta.map((s: any) => [s.id, s]));
+
         for (const file of configFiles) {
           try {
-            const config = JSON.parse(fs.readFileSync(path.join(STREAM_CONFIGS_DIR, file), "utf-8"));
-            if (config.composio_action) activeStreamActions.add(config.composio_action);
-          } catch { /* skip */ }
+            const cfg = JSON.parse(fs.readFileSync(path.join(STREAM_CONFIGS_DIR, file), "utf-8"));
+            if (cfg?.composio_connection_id !== connId) continue;
+            const action = cfg.composio_action ?? "";
+            const streamId = cfg.id ?? file.replace(/\.json$/, "");
+            const meta = metaById.get(streamId) as any;
+            const record: StreamRecord = {
+              stream_id: streamId,
+              action,
+              interval_seconds: typeof cfg.schedule_interval_seconds === "number"
+                ? cfg.schedule_interval_seconds
+                : 300,
+              last_pull_at: cfg.last_pull_at ?? null,
+              last_pull_status: cfg.last_pull_status ?? null,
+              event_count: typeof meta?.event_count === "number" ? meta.event_count : 0,
+              last_event_at: meta?.last_event_at ?? null,
+            };
+            if (action && catalogSlugs.has(action)) {
+              streamByAction.set(action, record);
+            } else if (action) {
+              staleStreams.push(record);
+            }
+          } catch { /* skip unreadable configs */ }
         }
       } catch { /* ok */ }
 
+      // 4. Check if composio_execute is in the openclaw gateway allowlist —
+      //    that's the real binary "can Alfred invoke tools on this toolkit"
+      //    signal. Per-action toggles on gateway.tools.allow don't exist.
+      let composioExecuteEnabled = false;
+      try {
+        const cfg = readOpenclawConfig();
+        const allow: string[] = cfg?.gateway?.tools?.allow || [];
+        composioExecuteEnabled = allow.includes("composio_execute") || allow.includes("ctrl_composio_execute");
+      } catch { /* ok */ }
+
+      // 5. Build enriched stream_actions + tool_actions with pretty names
+      type Entry = {
+        slug: string;
+        display_name: string;
+        description: string;
+        deprecated: boolean;
+        // Stream-only:
+        enabled?: boolean;
+        stream_id?: string | null;
+        schedule_interval_seconds?: number | null;
+        last_pull_at?: string | null;
+        last_pull_status?: string | null;
+        event_count?: number;
+        last_event_at?: string | null;
+      };
+      const streamActions: Entry[] = [];
+      const toolActions: Entry[] = [];
+
       for (const tool of tools) {
-        const slug = tool.name ?? tool.slug ?? "";
-        const description = tool.description ?? "";
+        const slug = (tool.name ?? tool.slug ?? "") as string;
+        if (!slug) continue;
+        const deprecated = Boolean(tool.deprecated);
+        if (deprecated && !includeDeprecated) continue;
+        const display_name = (tool.displayName ?? tool.display_name ?? "") as string;
+        const description = (tool.description ?? "") as string;
         const type = classifyAction(slug);
 
-        const entry = {
-          slug,
-          description,
-          enabled: type === "stream" ? activeStreamActions.has(slug) : enabledTools.has(slug),
-        };
-
         if (type === "stream") {
-          streamActions.push(entry);
+          const live = streamByAction.get(slug);
+          streamActions.push({
+            slug,
+            display_name,
+            description,
+            deprecated,
+            enabled: Boolean(live),
+            stream_id: live?.stream_id ?? null,
+            schedule_interval_seconds: live?.interval_seconds ?? null,
+            last_pull_at: live?.last_pull_at ?? null,
+            last_pull_status: live?.last_pull_status ?? null,
+            event_count: live?.event_count ?? 0,
+            last_event_at: live?.last_event_at ?? null,
+          });
         } else {
-          toolActions.push(entry);
+          toolActions.push({ slug, display_name, description, deprecated });
         }
       }
+
+      // Stable, read-before-write ordering (enabled streams first, then
+      // alphabetical by display_name for readability)
+      streamActions.sort((a, b) => {
+        if ((a.enabled ? 1 : 0) !== (b.enabled ? 1 : 0)) return b.enabled ? 1 : -1;
+        return (a.display_name || a.slug).localeCompare(b.display_name || b.slug);
+      });
+      toolActions.sort((a, b) =>
+        (a.display_name || a.slug).localeCompare(b.display_name || b.slug),
+      );
 
       sendJson(res, 200, {
         connection_id: connId,
         toolkit,
-        toolkit_name: conn.toolkit?.displayName ?? conn.toolkit?.name ?? toolkit,
+        toolkit_name: toolkitName,
+        toolkit_icon: conn.toolkit?.logo ?? conn.toolkit?.iconUrl ?? null,
+        composio_execute_enabled: composioExecuteEnabled,
         stream_actions: streamActions,
         tool_actions: toolActions,
+        stale_streams: staleStreams.map((s) => ({
+          stream_id: s.stream_id,
+          action: s.action,
+          interval_seconds: s.interval_seconds,
+          last_pull_at: s.last_pull_at,
+          last_pull_status: s.last_pull_status,
+          event_count: s.event_count,
+          last_event_at: s.last_event_at,
+          suggested_replacement: (RECOMMENDED_STREAMS[toolkit]?.action) ?? null,
+        })),
       });
     } catch (err: any) {
       if (err instanceof NotFoundError) throw err;
@@ -1125,6 +1244,183 @@ export function registerIntegrationRoutes(): void {
       });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to create stream: ${err.message}` });
+    }
+  });
+
+  // =========================================================================
+  // POST /api/v1/integrations/:id/migrate-stream — replace a stream's action
+  //
+  // When Composio renames/removes an action, the on-disk stream config still
+  // references the old slug and every pull 404s. This endpoint rewrites the
+  // stream config to the new slug (and new id), deletes the stale Temporal
+  // schedule, and creates a fresh one on the same interval.
+  //
+  // Request body:
+  //   {
+  //     old_action_slug: string,          // e.g. "NOTION_LIST_PAGES"
+  //     new_action_slug?: string,         // default: RECOMMENDED_STREAMS[toolkit]
+  //     new_args?: Record<string, unknown>, // default: RECOMMENDED_STREAMS[toolkit].args
+  //   }
+  //
+  // Returns the new stream config. The SaaS side then refetches capabilities
+  // and the stale_streams banner disappears.
+  // =========================================================================
+  addRoute("POST", "/api/v1/integrations/:id/migrate-stream", async ({ res, params, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.old_action_slug !== "string") {
+      throw new ValidationError("old_action_slug (string) is required");
+    }
+    const connId = params.id;
+    const oldSlug = b.old_action_slug as string;
+
+    // Resolve toolkit from the live connected account
+    const apiKey = getComposioApiKey();
+    let toolkit = "";
+    try {
+      const connResp = await fetch(
+        `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(connId)}`,
+        { headers: { "x-api-key": apiKey } },
+      );
+      if (connResp.ok) {
+        const conn = (await connResp.json()) as any;
+        toolkit = (conn.toolkit?.slug ?? conn.appName ?? "").toLowerCase();
+      }
+    } catch { /* best effort */ }
+
+    const recommended = toolkit ? RECOMMENDED_STREAMS[toolkit] : undefined;
+    const newSlug = typeof b.new_action_slug === "string" && b.new_action_slug.trim()
+      ? (b.new_action_slug as string)
+      : recommended?.action;
+    if (!newSlug) {
+      throw new ValidationError(
+        `No new_action_slug provided and no RECOMMENDED_STREAMS entry for toolkit "${toolkit}"`,
+      );
+    }
+
+    try {
+      fs.mkdirSync(STREAM_CONFIGS_DIR, { recursive: true });
+      const configFiles = fs.readdirSync(STREAM_CONFIGS_DIR).filter((f) => f.endsWith(".json"));
+
+      let oldConfigPath: string | null = null;
+      let oldConfig: Record<string, unknown> | null = null;
+      for (const file of configFiles) {
+        const full = path.join(STREAM_CONFIGS_DIR, file);
+        try {
+          const cfg = JSON.parse(fs.readFileSync(full, "utf-8"));
+          if (
+            cfg?.composio_connection_id === connId &&
+            cfg?.composio_action === oldSlug
+          ) {
+            oldConfigPath = full;
+            oldConfig = cfg;
+            break;
+          }
+        } catch { /* skip */ }
+      }
+
+      if (!oldConfig || !oldConfigPath) {
+        throw new NotFoundError(
+          `No stream config found for connection ${connId} with action ${oldSlug}`,
+        );
+      }
+
+      const oldStreamId = (oldConfig.id as string) ?? oldConfigPath.split("/").pop()?.replace(/\.json$/, "") ?? "";
+      const intervalSeconds = typeof oldConfig.schedule_interval_seconds === "number"
+        ? (oldConfig.schedule_interval_seconds as number)
+        : (recommended?.interval ?? 300);
+
+      const newStreamId = `composio-${toolkit}-${newSlug.toLowerCase().replace(/_/g, "-")}`;
+      const newArgs = (b.new_args && typeof b.new_args === "object")
+        ? (b.new_args as Record<string, unknown>)
+        : (recommended?.args ?? {});
+      const newConfig: Record<string, unknown> = {
+        id: newStreamId,
+        name: (oldConfig.name as string) || recommended?.name || newSlug,
+        type: "composio",
+        source: `composio:${toolkit}`,
+        enabled: true,
+        composio_action: newSlug,
+        composio_connection_id: connId,
+        composio_toolkit: toolkit,
+        composio_args: newArgs,
+        parser: "composio",
+        schedule_interval_seconds: intervalSeconds,
+        pull_mode: SYNC_MODE[toolkit] ?? "append",
+        cursor_value: "",
+        last_pull_at: "",
+        last_pull_status: "migrated",
+      };
+
+      // Write new config file
+      const newPath = path.join(STREAM_CONFIGS_DIR, `${newStreamId}.json`);
+      fs.writeFileSync(newPath, JSON.stringify(newConfig, null, 2));
+
+      // If the new file is different from the old (new id), delete the old
+      if (oldConfigPath !== newPath) {
+        try { fs.unlinkSync(oldConfigPath); } catch { /* ok */ }
+      }
+
+      // Update streams.json metadata
+      try {
+        const streamsMetaPath = path.join(STREAMS_DIR, "streams.json");
+        let streams: any[] = JSON.parse(fs.readFileSync(streamsMetaPath, "utf-8"));
+        streams = streams.filter((s: any) => s.id !== oldStreamId && s.id !== newStreamId);
+        streams.push({
+          id: newStreamId,
+          name: (oldConfig.name as string) || recommended?.name || newSlug,
+          type: "composio",
+          source: `composio:${toolkit}`,
+          enabled: true,
+          status: "idle",
+          last_event_at: null,
+          event_count: 0,
+        });
+        fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+      } catch { /* ok */ }
+
+      // Delete old Temporal schedule (best-effort; the stream-puller picks up
+      // the new config once the new schedule is created)
+      const oldScheduleId = `al-stream-pull-composio-${oldStreamId.slice(0, 20)}`;
+      try {
+        await dockerExec("temporal", [
+          "temporal", "schedule", "delete",
+          "--schedule-id", oldScheduleId,
+        ]);
+      } catch { /* schedule may not exist */ }
+
+      // Create new schedule if stream id actually changed
+      const newScheduleId = `al-stream-pull-composio-${newStreamId.slice(0, 20)}`;
+      if (oldScheduleId !== newScheduleId) {
+        const intervalMin = Math.max(Math.round(intervalSeconds / 60), 1);
+        try {
+          await dockerExec("temporal", [
+            "temporal", "schedule", "create",
+            "--schedule-id", newScheduleId,
+            "--type", "StreamPullerWorkflow",
+            "--task-queue", "alfred-learn",
+            "--cron", `*/${intervalMin} * * * *`,
+            "--input", JSON.stringify({ stream_id: newStreamId }),
+            "--overlap-policy", "Skip",
+          ]);
+        } catch (err: any) {
+          // Not fatal — log and continue. Operator can manually trigger if needed.
+          console.error(`[migrate-stream] schedule create failed: ${err?.message}`);
+        }
+      }
+
+      sendJson(res, 200, {
+        status: "migrated",
+        old_action: oldSlug,
+        new_action: newSlug,
+        old_stream_id: oldStreamId,
+        new_stream_id: newStreamId,
+        schedule_interval_seconds: intervalSeconds,
+        config: newConfig,
+      });
+    } catch (err: any) {
+      if (err instanceof NotFoundError) throw err;
+      if (err instanceof ValidationError) throw err;
+      sendJson(res, 500, { error: `Failed to migrate stream: ${err.message}` });
     }
   });
 
