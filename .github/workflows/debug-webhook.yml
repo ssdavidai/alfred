@@ -1,0 +1,26 @@
+name: Debug webhook routing
+on: workflow_dispatch
+jobs:
+  dbg:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/k && chmod 600 ~/.ssh/k
+      - run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/k deploy@${{ secrets.DEPLOY_HOST }} bash <<'REMOTE'
+          echo "=== test local webhook endpoint ==="
+          curl -sS -o /dev/null -w "local:3000 /webhooks/agentmail -> HTTP %{http_code}\n" -X POST http://localhost:3000/webhooks/agentmail -H "Content-Type: application/json" -d '{"test":1}'
+          echo
+          echo "=== test via Caddy from outside (public URL) ==="
+          curl -sS -o /dev/null -w "public /webhooks/agentmail -> HTTP %{http_code}\n" -X POST https://alfred.black/webhooks/agentmail -H "Content-Type: application/json" -d '{"test":1}'
+          echo
+          echo "=== Caddyfile agentmail route ==="
+          sudo grep -A 3 -B 1 "agentmail\|webhooks" /etc/caddy/Caddyfile 2>/dev/null | head -20 || grep -A 3 -B 1 "agentmail\|webhooks" /etc/caddy/Caddyfile 2>/dev/null | head -20
+          echo
+          echo "=== route list in Caddy config ==="
+          curl -s http://localhost:2019/config/ 2>/dev/null | python3 -c "import json,sys;d=json.load(sys.stdin);print(json.dumps(d,indent=2))" 2>/dev/null | grep -iE "webhook|agentmail" | head -10 || echo "(caddy admin API not accessible)"
+          echo
+          echo "=== recent POST to alfred-saas-app (any path) ==="
+          docker logs --since 15m alfred-saas-app-1 2>&1 | grep -E "POST " | grep -vE "operations/get-provisioning-status|operations/get-dashboard" | tail -10
+          REMOTE
