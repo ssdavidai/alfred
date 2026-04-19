@@ -1,4 +1,4 @@
-name: Tail SaaS logs
+name: Tail SaaS logs 2
 on: workflow_dispatch
 jobs:
   tail:
@@ -9,4 +9,4 @@ jobs:
           echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/k && chmod 600 ~/.ssh/k
       - run: |
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/k deploy@${{ secrets.DEPLOY_HOST }} \
-            'docker logs --since 10m alfred-saas-app-1 2>&1 | grep -iE "agentmail|webhook|/webhooks|svix|inbox" | tail -40'
+            'echo "=== all POST requests last 10m ==="; docker logs --since 10m alfred-saas-app-1 2>&1 | grep -E "POST|4[0-9][0-9]|5[0-9][0-9]" | tail -30; echo; echo "=== app errors last 10m ==="; docker logs --since 10m alfred-saas-app-1 2>&1 | grep -iE "error|exception|fail|reject" | tail -20; echo; echo "=== env check ==="; grep -E "^(AGENTMAIL|NODE_ENV)" /opt/alfred-saas/.env.server 2>/dev/null | awk -F= "{print \$1}"'
