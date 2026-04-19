@@ -105,38 +105,41 @@ jobs:
             cd /opt/alfred-saas/wasp-build
             docker build -t alfred-saas:latest .
             cd /opt/alfred-saas
+
             # Clean up any stale app containers from a previous failed deploy.
             # When `docker compose up --force-recreate` hits a broken-pipe mid-
             # recreate, it renames the old container to "<hash>_alfred-saas-app-1"
             # which then blocks the next recreate with a name conflict.
             docker ps -a --filter "name=alfred-saas-app-1" -q | xargs -r docker rm -f
-            docker compose up -d --force-recreate app
-            # Wait for the container to be responsive (up to 90s). Running
-            # `prisma db push` in parallel with app startup has OOM-killed
-            # the VM on previous deploys (exit 137) — wait until the app is
-            # settled before pushing the schema.
-            echo "Waiting for app container to accept exec..."
-            for i in $(seq 1 30); do
-              if docker exec alfred-saas-app-1 true 2>/dev/null; then
-                sleep 3
-                break
-              fi
-              sleep 3
-            done
-            # Retry prisma db push up to 3 times — transient OOM or SSH
-            # broken-pipe during schema push has left the DB mid-migrated
-            # in the past, and the only safe recovery is to retry.
+
+            # Stop the old app container BEFORE pushing schema. If we push
+            # schema while the old container is still running, the in-flight
+            # Prisma client is briefly out of sync with the DB and the server
+            # starts serving 500s. Postgres stays up (it has its own service).
+            docker compose stop app || true
+            docker compose rm -f app || true
+
+            # Push the new schema using a one-shot container from the new
+            # image. Prisma runs to completion and exits. Retrying up to 3x
+            # handles transient OOM — now that nothing else is competing for
+            # memory on the VM, this should be rare.
             for attempt in 1 2 3; do
-              if docker exec alfred-saas-app-1 \
+              if docker compose run --rm --no-deps --entrypoint "" app \
                    npx prisma db push --schema="../db/schema.prisma" --skip-generate; then
                 echo "prisma db push succeeded (attempt $attempt)"
-                exit 0
+                break
+              fi
+              if [ $attempt -eq 3 ]; then
+                echo "prisma db push failed after 3 attempts"
+                exit 1
               fi
               echo "prisma db push failed (attempt $attempt), retrying in 10s..."
               sleep 10
             done
-            echo "prisma db push failed after 3 attempts"
-            exit 1
+
+            # Now start the app container with the schema already in place.
+            # The server boots cleanly without crash-looping on missing columns.
+            docker compose up -d app
           '
 
       - name: Configure Caddy and Plausible
