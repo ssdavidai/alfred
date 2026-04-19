@@ -460,6 +460,56 @@ export function registerPhoneRoutes(): void {
     sendJson(res, 200, getVoiceContextCached());
   });
 
+  // GET /api/v1/phone/config — single endpoint for the dashboard PhonePage.
+  // Returns: tenant phone number, authorized list, last N call/SMS records.
+  addRoute("GET", "/api/v1/phone/config", async ({ res }) => {
+    const meta = readInstanceMeta();
+    const phoneNumber = meta?.phoneNumber ?? null;
+
+    // Recent activity: tail the relevant streams. We sample multiple sources
+    // because inbound vs outbound + SMS vs voice all live in different files.
+    const sources = [
+      "voice-call",
+      "voice-call-outbound",
+      "sms-inbound",
+      "sms-outbound",
+    ];
+    const events: Array<{
+      kind: "voice" | "sms";
+      direction: "inbound" | "outbound";
+      from?: string;
+      to?: string;
+      summary: string;
+      at: string;
+    }> = [];
+    for (const source of sources) {
+      const lines = readJsonlTail(`${STREAMS_DIR}/${source}.jsonl`, 30);
+      for (const e of lines) {
+        const raw = (e.raw ?? {}) as Record<string, unknown>;
+        const kind = source.startsWith("voice") ? "voice" : "sms";
+        const direction = source.endsWith("outbound") ? "outbound" : "inbound";
+        events.push({
+          kind,
+          direction,
+          from: typeof raw.from === "string" ? raw.from : undefined,
+          to: typeof raw.to === "string" ? raw.to : undefined,
+          summary: typeof e.summary === "string" ? e.summary : "",
+          at:
+            typeof e.received_at === "string"
+              ? e.received_at
+              : new Date().toISOString(),
+        });
+      }
+    }
+    events.sort((a, b) => (a.at < b.at ? 1 : -1));
+
+    sendJson(res, 200, {
+      phoneNumber,
+      authorizedNumbers: readAuthorizedNumbers(),
+      recentActivity: events.slice(0, 30),
+    });
+  });
+
   // ── Authorised-numbers CRUD ───────────────────────────────────────────────
   addRoute("GET", "/api/v1/phone/authorized-numbers", async ({ res }) => {
     sendJson(res, 200, { numbers: readAuthorizedNumbers() });
