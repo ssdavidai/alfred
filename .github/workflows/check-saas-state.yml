@@ -1,0 +1,12 @@
+name: Check SaaS state
+on: workflow_dispatch
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/k && chmod 600 ~/.ssh/k
+      - run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/k deploy@${{ secrets.DEPLOY_HOST }} \
+            'echo "=== containers ==="; docker ps -a --format "{{.Names}} {{.Status}}"; echo; echo "=== alfred-saas stack ==="; cd /opt/alfred-saas && docker compose ps 2>&1 | tail -10; echo; echo "=== app logs tail ==="; docker logs --tail=20 alfred-saas-app-1 2>&1 | tail -20 || echo "(no app container)"'
