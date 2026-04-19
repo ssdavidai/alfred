@@ -128,6 +128,11 @@ else
     echo "[init] config.yaml exists, preserving user edits"
 fi
 
+# Note: Ollama embedding model (nomic-embed-text) is auto-pulled by the
+# ollama service itself at startup via its command override. See the
+# `ollama` service in docker-compose.yaml.njk. Idempotent — Ollama skips
+# if the model is already present in the persistent volume.
+
 # --- 4. Auto-generate gateway token if blank ---
 TOKEN_FILE="/alfred-data/.gateway-token"
 if [[ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]]; then

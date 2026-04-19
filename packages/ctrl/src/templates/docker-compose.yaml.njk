@@ -35,6 +35,36 @@ services:
     mem_limit: 2g
     pids_limit: 256
 
+  ollama:
+    # Local embedding server for surveyor (and future local-LLM uses).
+    # On startup: boots ollama, waits for ready, pulls nomic-embed-text
+    # (~275MB, 768 dims). `ollama pull` is idempotent — skips if the model
+    # is already in the persistent volume.
+    image: ollama/ollama:latest
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        SERVE_PID=$$!
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull nomic-embed-text || echo "[ollama] pull failed, will retry next boot"
+        wait $$SERVE_PID
+    volumes:
+      - /mnt/encrypted/ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    pids_limit: 256
+
   openclaw:
     image: ssdavidai00/alfred-openclaw:latest
     depends_on:
