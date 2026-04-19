@@ -1378,34 +1378,46 @@ export function registerIntegrationRoutes(): void {
         fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
       } catch { /* ok */ }
 
-      // Delete old Temporal schedule (best-effort; the stream-puller picks up
-      // the new config once the new schedule is created)
+      // Delete both old + new schedule ids (they can collide when
+      // slice(0,20) truncates identically, e.g. composio-notion-notion-{list-pages,
+      // fetch-data} both → composio-notion-noti). Then always recreate with
+      // the new stream_id as input so the schedule points at the migrated
+      // config. The previous guard `if (oldScheduleId !== newScheduleId)`
+      // silently skipped creation in the common rename-within-the-same-
+      // toolkit case, leaving the stream scheduled-less.
       const oldScheduleId = `al-stream-pull-composio-${oldStreamId.slice(0, 20)}`;
+      const newScheduleId = `al-stream-pull-composio-${newStreamId.slice(0, 20)}`;
       try {
         await dockerExec("temporal", [
           "temporal", "schedule", "delete",
           "--schedule-id", oldScheduleId,
         ]);
       } catch { /* schedule may not exist */ }
-
-      // Create new schedule if stream id actually changed
-      const newScheduleId = `al-stream-pull-composio-${newStreamId.slice(0, 20)}`;
       if (oldScheduleId !== newScheduleId) {
-        const intervalMin = Math.max(Math.round(intervalSeconds / 60), 1);
         try {
           await dockerExec("temporal", [
-            "temporal", "schedule", "create",
+            "temporal", "schedule", "delete",
             "--schedule-id", newScheduleId,
-            "--type", "StreamPullerWorkflow",
-            "--task-queue", "alfred-learn",
-            "--cron", `*/${intervalMin} * * * *`,
-            "--input", JSON.stringify({ stream_id: newStreamId }),
-            "--overlap-policy", "Skip",
           ]);
-        } catch (err: any) {
-          // Not fatal — log and continue. Operator can manually trigger if needed.
-          console.error(`[migrate-stream] schedule create failed: ${err?.message}`);
-        }
+        } catch { /* ok */ }
+      }
+
+      const intervalMin = Math.max(Math.round(intervalSeconds / 60), 1);
+      try {
+        await dockerExec("temporal", [
+          "temporal", "schedule", "create",
+          "--schedule-id", newScheduleId,
+          "--type", "StreamPullerWorkflow",
+          "--task-queue", "alfred-learn",
+          "--cron", `*/${intervalMin} * * * *`,
+          "--input", JSON.stringify({ stream_id: newStreamId }),
+          "--overlap-policy", "Skip",
+        ]);
+      } catch (err: any) {
+        // Not fatal for the migrate itself (stream config is written and
+        // can be retriggered via the schedules endpoint), but warn loudly
+        // so the operator knows a retry is needed.
+        console.error(`[migrate-stream] schedule create failed: ${err?.message}`);
       }
 
       sendJson(res, 200, {
