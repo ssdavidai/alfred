@@ -14,7 +14,10 @@ import {
   RefreshCw,
   Copy,
   Loader2,
+  ExternalLink,
+  Puzzle,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 
 interface StreamCardProps {
   stream: {
@@ -30,6 +33,13 @@ interface StreamCardProps {
     errorMessage: string | null;
     tenantBaseUrl?: string | null;
     _count?: { events: number };
+    // Composio-backed stream fields (synthesized server-side; see getStreams)
+    isComposio?: boolean;
+    composioAction?: string | null;
+    composioConnectionId?: string | null;
+    composioToolkit?: string | null;
+    composioLabel?: string | null;
+    composioIconUrl?: string | null;
   };
   sourceIcon?: React.ComponentType<{ className?: string }>;
   onPause: (id: string) => void;
@@ -101,12 +111,28 @@ export default function StreamCard({
             />
             <div className="min-w-0">
               <div className="flex items-center gap-2">
+                {stream.isComposio && stream.composioIconUrl ? (
+                  <img
+                    src={stream.composioIconUrl}
+                    alt=""
+                    className="h-4 w-4 flex-shrink-0 rounded-sm object-contain"
+                    onError={(e) => {
+                      (e.target as HTMLImageElement).style.display = "none";
+                    }}
+                  />
+                ) : null}
                 <p className="font-mono text-sm font-medium uppercase tracking-wide text-cream">
                   {stream.name}
                 </p>
                 {stream.isSystem && (
                   <span className="rounded-sm bg-gold/20 px-1.5 py-0.5 font-mono text-[0.5rem] font-medium uppercase tracking-wider text-gold">
                     System
+                  </span>
+                )}
+                {stream.isComposio && (
+                  <span className="inline-flex items-center gap-1 rounded-sm bg-[#C9A84C]/10 px-1.5 py-0.5 font-mono text-[0.5rem] font-medium uppercase tracking-wider text-[#C9A84C]">
+                    <Puzzle className="h-2.5 w-2.5" />
+                    {stream.composioLabel || stream.composioToolkit || "Composio"}
                   </span>
                 )}
               </div>
@@ -147,7 +173,23 @@ export default function StreamCard({
             </div>
           </div>
 
-          {!stream.isSystem && (
+          {stream.isComposio ? (
+            // Composio streams are managed from the Integrations page — link
+            // there rather than exposing pause/delete here, since their
+            // lifecycle is tied to the Composio connection.
+            <div
+              className="flex items-center gap-2"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <Link
+                to="/dashboard/integrations"
+                className="inline-flex h-7 items-center gap-1 rounded-sm border border-[#C9A84C]/30 bg-[#C9A84C]/5 px-2 font-mono text-[0.55rem] text-[#C9A84C] transition hover:bg-[#C9A84C]/10"
+              >
+                <ExternalLink className="h-3 w-3" />
+                Manage
+              </Link>
+            </div>
+          ) : !stream.isSystem && (
             <div
               className="flex items-center gap-2"
               onClick={(e) => e.stopPropagation()}

@@ -707,6 +707,20 @@ query getOpenclawReadiness {
 }
 
 // ============================================================
+// Tools (Gateway Allowlist Inspector)
+// ============================================================
+route ToolsRoute { path: "/dashboard/tools", to: ToolsPage }
+page ToolsPage {
+  authRequired: true,
+  component: import ToolsPage from "@src/tools/ToolsPage"
+}
+
+query getAllowedTools {
+  fn: import { getAllowedTools } from "@src/tools/operations",
+  entities: [Instance, ComposioConnection]
+}
+
+// ============================================================
 // Intuition (Learning Engine)
 // ============================================================
 route IntuitionRoute { path: "/dashboard/intuition", to: IntuitionPage }
@@ -770,7 +784,7 @@ action updateInstinct {
 // ============================================================
 query getStreams {
   fn: import { getStreams } from "@src/streams/operations",
-  entities: [Stream, StreamEvent, Instance]
+  entities: [Stream, StreamEvent, Instance, ComposioConnection]
 }
 
 query getStreamEvents {

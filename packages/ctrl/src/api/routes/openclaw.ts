@@ -182,4 +182,69 @@ export function registerOpenClawRoutes(): void {
       sendJson(res, 200, { raw: stdout.trim() });
     }
   });
+
+  // =========================================================================
+  // GET /api/v1/openclaw/allowed-tools — list every tool Alfred can invoke
+  //
+  // Reads the tenant's gateway.tools.allow + mcp.servers from openclaw.json
+  // and classifies each entry so the SaaS Tools page can render a grouped
+  // view. Classification is heuristic but deterministic:
+  //   - mcp        → server names declared under mcp.servers (e.g. "self",
+  //                  "tenant", "ask_alfred" for Prime)
+  //   - composio   → UPPERCASE_SNAKE_CASE action slugs (GMAIL_FETCH_EMAILS)
+  //                  — we also split off the toolkit prefix so the page
+  //                  can group them
+  //   - builtin    → everything else (sessions_*, web_search, web_fetch,
+  //                  composio_execute gateway tool, ...)
+  // =========================================================================
+  addRoute("GET", "/api/v1/openclaw/allowed-tools", async ({ res }) => {
+    let cfg: any = {};
+    try {
+      cfg = JSON.parse(fs.readFileSync(OPENCLAW_CONFIG_PATH, "utf-8"));
+    } catch {
+      // No config → nothing to return, but still succeed so the SaaS page
+      // can render an "(empty)" state rather than a 500.
+    }
+
+    const allow: string[] = Array.isArray(cfg?.gateway?.tools?.allow)
+      ? cfg.gateway.tools.allow
+      : [];
+    const mcpServers: string[] = cfg?.mcp?.servers
+      ? Object.keys(cfg.mcp.servers)
+      : [];
+    const mcpNames = new Set<string>();
+    for (const s of mcpServers) {
+      // Some MCP servers declare the tool names they expose; others don't.
+      // Either way, the server key itself is usually also the tool name
+      // (e.g. "self"). Collect both.
+      mcpNames.add(s);
+      const tools = cfg.mcp.servers?.[s]?.tools;
+      if (Array.isArray(tools)) {
+        for (const t of tools) {
+          if (typeof t === "string") mcpNames.add(t);
+          else if (t && typeof t.name === "string") mcpNames.add(t.name);
+        }
+      }
+    }
+
+    const tools = allow.map((name: string) => {
+      let group: "builtin" | "mcp" | "composio" = "builtin";
+      let toolkit: string | null = null;
+
+      if (mcpNames.has(name)) {
+        group = "mcp";
+      } else if (/^[A-Z][A-Z0-9]+(_[A-Z0-9]+)+$/.test(name)) {
+        group = "composio";
+        toolkit = name.split("_")[0].toLowerCase();
+      }
+
+      return { name, group, toolkit };
+    });
+
+    sendJson(res, 200, {
+      tools,
+      count: tools.length,
+      mcp_servers: mcpServers,
+    });
+  });
 }
