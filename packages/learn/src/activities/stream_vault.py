@@ -56,7 +56,7 @@ def _render_event(event: dict[str, Any]) -> tuple[str, str, list[str]]:
     if raw.get("start") and raw.get("end"):
         return _template_calendar(event, raw, metadata)
 
-    if event_type in ("email", "gmail") or stream_type in ("gmail", "email"):
+    if event_type in ("email", "gmail") or stream_type in ("gmail", "email", "agentmail"):
         return _template_email(event, raw, metadata)
 
     if event_type.startswith("github") or stream_type.startswith("github"):

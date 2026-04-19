@@ -58,11 +58,18 @@ model Instance {
   suspendedAt           DateTime?
   lastHealthCheck       DateTime?
   lastHealthStatus      String?              // ok|degraded|down|unreachable
+
+  // AgentMail — per-tenant email inbox (see deploy/agentmail-bootstrap.md)
+  agentmailInboxId      String?              // AgentMail internal inbox_id
+  agentmailInboxAddress String?              // e.g. "alfred.david@mail.alfred.black"
+  agentmailInboxApiKey  String?              // inbox-scoped API key, encrypted via COLUMN_ENCRYPTION_KEY
+
   // AgentPhone (Twilio + OpenAI Realtime) — see plan
   phoneNumber           String?   @unique    // E.164, e.g. +36705551234
   twilioNumberSid       String?              // Twilio resource SID
   phoneCountry          String?              // ISO-3166-1 alpha-2 (HU, US, ...)
   audioRecordingEnabled Boolean   @default(false)
+
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 }

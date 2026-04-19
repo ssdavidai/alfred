@@ -159,6 +159,7 @@ export const getDashboardData: GetDashboardData<void, any> = async (
       tier: instance!.tier,
       tailscaleHostname: instance!.tailscaleHostname ?? null,
       subdomainUrl: (instance as any).subdomainUrl ?? null,
+      agentmailInboxAddress: (instance as any).agentmailInboxAddress ?? null,
     },
     inbox: inboxRaw ? { count: inboxFiles.length } : null,
     devices: devicesRaw ? { paired, pending } : null,

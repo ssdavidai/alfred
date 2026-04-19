@@ -24,6 +24,7 @@ from .polar import parse as polar_parse
 from .omi import parse as omi_parse
 from .notion import parse as notion_parse
 from .composio import parse as composio_parse
+from .agentmail import parse as agentmail_parse
 
 PARSERS: dict[str, Callable[[dict], list[ParsedEvent]]] = {
     "passthrough": passthrough_parse,
@@ -33,6 +34,7 @@ PARSERS: dict[str, Callable[[dict], list[ParsedEvent]]] = {
     "omi": omi_parse,
     "notion": notion_parse,
     "composio": composio_parse,
+    "agentmail": agentmail_parse,
 }
 
 def get_parser(name: str) -> Callable[[dict], list[ParsedEvent]]:

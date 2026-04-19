@@ -6,6 +6,10 @@ import type {
 } from "wasp/server/operations";
 import { provisionInstance } from "wasp/server/jobs";
 import { tierToServerType, SubscriptionStatus } from "../payment/plans";
+import {
+  provisionAgentMailForTenant,
+  isAgentMailEnabled,
+} from "../server/agentmail";
 
 export const getProvisioningStatus: GetProvisioningStatus<
   void,
@@ -217,6 +221,39 @@ export const provisionNewUser: ProvisionNewUser<void, any> = async (
   console.info(
     `[provisionNewUser] New instance for ${user.email}: ${customerName} (${serverType})`,
   );
+
+  // AgentMail: provision an inbox up front so the address can be displayed
+  // on the onboarding screen while the Hetzner VM is still coming up.
+  // Non-blocking — failure logs but does not stop VM provisioning; the
+  // inbox can be provisioned later via a backfill/retry path.
+  if (isAgentMailEnabled()) {
+    try {
+      const am = await provisionAgentMailForTenant({
+        userId: user.id,
+        userEmail: user.email || "",
+        displayName: user.username || user.email || undefined,
+      });
+      if (am) {
+        await context.entities.Instance.update({
+          where: { id: instance.id },
+          data: {
+            agentmailInboxId: am.inboxId,
+            agentmailInboxAddress: am.inboxAddress,
+            agentmailInboxApiKey: am.inboxApiKeyEncrypted,
+          },
+        });
+        console.info(
+          `[provisionNewUser] AgentMail inbox for ${user.email}: ${am.inboxAddress}`,
+        );
+      }
+    } catch (err) {
+      console.error(
+        `[provisionNewUser] AgentMail provisioning failed for user ${user.id}:`,
+        err,
+      );
+      // swallow — don't block VM provisioning on email setup
+    }
+  }
 
   await provisionInstance.submit({});
 

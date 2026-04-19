@@ -61,7 +61,9 @@ export async function buyNumberWithWebhooks(opts: BuyNumberOpts): Promise<{
   };
   if (opts.areaCode) searchOpts.areaCode = opts.areaCode;
 
-  let available = await client
+  // Twilio types local/mobile as distinct Instance[] shapes. We only read
+  // .phoneNumber from either, so widen to any[] to allow the fallback.
+  let available: Array<{ phoneNumber: string }> = await client
     .availablePhoneNumbers(opts.country)
     .local.list(searchOpts);
 

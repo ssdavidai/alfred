@@ -10,6 +10,7 @@ import {
   Bot,
   Smartphone,
   Loader2,
+  Copy,
 } from "lucide-react";
 import FileUploadDialog from "./FileUploadDialog";
 import AnimatedCounter from "../../components/ui/AnimatedCounter";
@@ -55,6 +56,7 @@ export default function TopBar({
   const isDevicesLoading = !data.devices;
 
   const subdomainUrl = data.instance?.subdomainUrl ?? null;
+  const agentmailAddress = (data.instance as any)?.agentmailInboxAddress ?? null;
   const gatewayToken = data.gatewayToken ?? null;
 
   return (
@@ -226,6 +228,23 @@ export default function TopBar({
                 <ExternalLink className="h-3 w-3" />
                 OpenClaw
               </a>
+            </Button>
+          )}
+
+          {agentmailAddress && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 font-mono text-[0.65rem] text-muted-foreground hover:text-[#F0EDE8]"
+              title={`Email Alfred directly at ${agentmailAddress} — click to copy`}
+              onClick={() => {
+                void navigator.clipboard
+                  .writeText(agentmailAddress)
+                  .catch(() => {});
+              }}
+            >
+              <Copy className="h-3 w-3" />
+              {agentmailAddress}
             </Button>
           )}
         </div>

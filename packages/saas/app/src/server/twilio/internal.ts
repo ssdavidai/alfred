@@ -221,7 +221,12 @@ export function registerTwilioInternalRoutes(app: Application): void {
     "/api/internal/voice-bridge/tenant/:tenantId",
     requireInternalToken,
     async (req: Request, res: Response) => {
-      const tenantId = req.params["tenantId"];
+      const rawTenantId = req.params["tenantId"];
+      const tenantId = Array.isArray(rawTenantId) ? rawTenantId[0] : rawTenantId;
+      if (!tenantId) {
+        res.status(400).json({ error: "tenantId required" });
+        return;
+      }
       const instance = await prisma.instance.findUnique({
         where: { id: tenantId },
       });

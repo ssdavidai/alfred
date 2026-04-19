@@ -24,6 +24,9 @@ import { registerOmiRoutes } from "./routes/omi.js";
 import { registerCrossTenantRoutes } from "./routes/crossTenant.js";
 import { registerChoreRoutes } from "./routes/chores.js";
 import { registerPhoneRoutes } from "./routes/phone.js";
+import { registerAuthSendersRoutes } from "./routes/authSenders.js";
+import { registerEmailRoutes } from "./routes/email.js";
+import { registerChannelsEmailRoutes } from "./routes/channelsEmail.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -104,6 +107,9 @@ export function createApiServer(): http.Server {
   registerCrossTenantRoutes();
   registerChoreRoutes();
   registerPhoneRoutes();
+  registerAuthSendersRoutes();
+  registerEmailRoutes();
+  registerChannelsEmailRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
