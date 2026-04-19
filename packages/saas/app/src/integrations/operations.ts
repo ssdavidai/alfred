@@ -26,6 +26,7 @@ import type {
   DisconnectIntegration,
   EnableIntegrationStream,
   DisableIntegrationStream,
+  MigrateIntegrationStream,
   EnableIntegrationTool,
   DisableIntegrationTool,
   AutoConfigIntegration,
@@ -376,6 +377,31 @@ export const enableIntegrationStream: EnableIntegrationStream<
   }
 
   return streamResult;
+};
+
+/**
+ * Migrate a stale stream to a new Composio action slug. Used when Composio
+ * removes/renames an action (e.g. NOTION_LIST_PAGES → NOTION_FETCH_DATA) —
+ * without this, the stream keeps 404'ing every pull forever.
+ *
+ * If new_action_slug is omitted, ctrl-api falls back to RECOMMENDED_STREAMS
+ * for the toolkit.
+ */
+export const migrateIntegrationStream: MigrateIntegrationStream<
+  { connectionId: string; old_action_slug: string; new_action_slug?: string },
+  any
+> = async (args, context) => {
+  if (!args?.connectionId) throw new Error("connectionId is required");
+  if (!args?.old_action_slug) throw new Error("old_action_slug is required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/integrations/${encodeURIComponent(args.connectionId)}/migrate-stream`,
+    body: {
+      old_action_slug: args.old_action_slug,
+      new_action_slug: args.new_action_slug,
+    },
+  });
 };
 
 /**

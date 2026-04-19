@@ -415,6 +415,9 @@ SYNC_CONFIGS: dict[str, dict[str, Any]] = {
         "backfill_past_days": 14,
     },
     "NOTION_LIST_PAGES": {
+        # Legacy — Composio removed this action in early 2026. Kept here for
+        # tenants still running pre-migration; the auto-config migration path
+        # in ctrl-api now rewrites these configs to NOTION_FETCH_DATA.
         "pull_mode": "append",
         "backfill_args": {
             "filter": {"timestamp": "last_edited_time", "last_edited_time": {"after": "{backfill_iso}"}},
@@ -422,6 +425,17 @@ SYNC_CONFIGS: dict[str, dict[str, Any]] = {
         "incremental_args": {
             "filter": {"timestamp": "last_edited_time", "last_edited_time": {"after": "{last_pull_iso}"}},
         },
+        "cursor_response_field": "",
+        "backfill_past_days": 30,
+    },
+    "NOTION_FETCH_DATA": {
+        # NOTION_FETCH_DATA has no last_edited_time filter — it wraps Notion's
+        # /search endpoint which sorts by last_edited_time desc. We run it in
+        # snapshot mode and rely on StreamEvent's (streamId, sourceRef) unique
+        # index to dedupe across pulls.
+        "pull_mode": "snapshot",
+        "backfill_args": {"get_all": False, "get_pages": True, "get_databases": True, "page_size": 50},
+        "incremental_args": {"get_all": False, "get_pages": True, "get_databases": True, "page_size": 50},
         "cursor_response_field": "",
         "backfill_past_days": 30,
     },

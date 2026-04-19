@@ -10,8 +10,7 @@ import {
   autoConfigIntegration,
   enableIntegrationStream,
   disableIntegrationStream,
-  enableIntegrationTool,
-  disableIntegrationTool,
+  migrateIntegrationStream,
 } from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
 import { useOpenclawStatus } from "../shared/OpenclawStatusContext";
@@ -67,18 +66,46 @@ interface ConnectedIntegration {
   skill_name?: string | null;
 }
 
-interface CapabilityAction {
+interface StreamCapability {
   slug: string;
+  display_name: string;
   description: string;
+  deprecated: boolean;
   enabled: boolean;
+  stream_id: string | null;
+  schedule_interval_seconds: number | null;
+  last_pull_at: string | null;
+  last_pull_status: string | null;
+  event_count: number;
+  last_event_at: string | null;
+}
+
+interface ToolCapability {
+  slug: string;
+  display_name: string;
+  description: string;
+  deprecated: boolean;
+}
+
+interface StaleStream {
+  stream_id: string;
+  action: string;
+  interval_seconds: number;
+  last_pull_status: string | null;
+  event_count: number;
+  last_event_at: string | null;
+  suggested_replacement: string | null;
 }
 
 interface Capabilities {
   connection_id: string;
   toolkit: string;
   toolkit_name: string;
-  stream_actions: CapabilityAction[];
-  tool_actions: CapabilityAction[];
+  toolkit_icon: string | null;
+  composio_execute_enabled: boolean;
+  stream_actions: StreamCapability[];
+  tool_actions: ToolCapability[];
+  stale_streams: StaleStream[];
 }
 
 // ---------------------------------------------------------------------------
@@ -760,8 +787,18 @@ function ConnectedAppCard({
 }
 
 // ---------------------------------------------------------------------------
-// AppDrawer — expanded per-app panel. Fetches capabilities once on open,
-// then renders the Streams / Tools / Skill / Danger sections.
+// AppDrawer — expanded per-app panel. Lazy-loads /capabilities on open.
+//
+// Sections:
+//   1. stale_streams[] banner (visible only when Composio removed an action
+//      that a live stream still points at — one-click Migrate fixes it)
+//   2. Streams — per-action toggle + interval selector (this is the real
+//      per-action binary state; backed by stream_configs + Temporal schedules)
+//   3. Actions — informational list; all available once composio_execute is
+//      in gateway.tools.allow; no per-action toggle (there's no mechanism to
+//      scope by-action, and the old UI's toggle did nothing observable)
+//   4. Skill — read-only reference
+//   5. Advanced — Reconfigure + Disconnect
 // ---------------------------------------------------------------------------
 
 function AppDrawer({
@@ -792,13 +829,12 @@ function AppDrawer({
 
   const caps = capabilities as Capabilities | undefined;
 
-  // Running / error state takes precedence — no point showing empty tables
   if (isRunning) {
     return (
       <div className="mt-4 flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-4">
         <Loader2 className="h-3.5 w-3.5 animate-spin text-[#C9A84C]" />
         <span className="text-xs text-[#F0EDE8]">
-          Configuring… streams, tools, and skill are being set up on your tenant.
+          Configuring… streams, actions, and skill are being set up on your tenant.
         </span>
       </div>
     );
@@ -817,13 +853,23 @@ function AppDrawer({
         </div>
       )}
 
+      {/* Stale streams banner — Composio dropped an action slug we depend on */}
+      {caps?.stale_streams && caps.stale_streams.length > 0 && (
+        <StaleStreamsBanner
+          connectionId={conn.id}
+          staleStreams={caps.stale_streams}
+          onMigrated={() => refetchCapabilities()}
+          onToast={onToast}
+        />
+      )}
+
       {/* Streams */}
       <section>
         <div className="mb-2 flex items-center gap-2">
           <Radio className="h-3.5 w-3.5 text-blue-400" />
           <h4 className="text-xs font-medium text-[#F0EDE8]">Streams</h4>
           <span className="text-[0.65rem] text-[#8A8680]">
-            Data collected automatically on a schedule
+            Data Alfred collects from this app on a schedule
           </span>
         </div>
         {capLoading ? (
@@ -831,7 +877,7 @@ function AppDrawer({
         ) : capError ? (
           <SectionError message="Couldn't load actions for this app." />
         ) : !caps?.stream_actions?.length ? (
-          <EmptySectionRow message="No stream actions available for this toolkit." />
+          <EmptySectionRow message="No streamable actions on this toolkit." />
         ) : (
           <div className="space-y-1">
             {caps.stream_actions.map((a) => (
@@ -847,13 +893,15 @@ function AppDrawer({
         )}
       </section>
 
-      {/* Tools */}
+      {/* Actions (informational — no toggle) */}
       <section>
         <div className="mb-2 flex items-center gap-2">
           <Wrench className="h-3.5 w-3.5 text-amber-400" />
-          <h4 className="text-xs font-medium text-[#F0EDE8]">Tools</h4>
+          <h4 className="text-xs font-medium text-[#F0EDE8]">Actions</h4>
           <span className="text-[0.65rem] text-[#8A8680]">
-            Actions Alfred can invoke on this app
+            {caps?.composio_execute_enabled
+              ? "Alfred can invoke these via composio_execute"
+              : "Waiting for composio_execute to be wired into the gateway"}
           </span>
         </div>
         {capLoading ? (
@@ -861,16 +909,11 @@ function AppDrawer({
         ) : capError ? (
           <SectionError message="Couldn't load actions for this app." />
         ) : !caps?.tool_actions?.length ? (
-          <EmptySectionRow message="No tool actions available for this toolkit." />
+          <EmptySectionRow message="No callable actions on this toolkit." />
         ) : (
           <div className="space-y-1">
             {caps.tool_actions.map((a) => (
-              <ToolRow
-                key={a.slug}
-                action={a}
-                onChanged={() => refetchCapabilities()}
-                onToast={onToast}
-              />
+              <ActionRow key={a.slug} action={a} />
             ))}
           </div>
         )}
@@ -937,7 +980,112 @@ function AppDrawer({
 }
 
 // ---------------------------------------------------------------------------
+// StaleStreamsBanner — shows when Composio removed an action a stream uses
+// ---------------------------------------------------------------------------
+
+function StaleStreamsBanner({
+  connectionId,
+  staleStreams,
+  onMigrated,
+  onToast,
+}: {
+  connectionId: string;
+  staleStreams: StaleStream[];
+  onMigrated: () => void;
+  onToast: (msg: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  const handleMigrate = useCallback(
+    async (stale: StaleStream) => {
+      if (!stale.suggested_replacement) {
+        onToast(
+          `No replacement mapped for ${stale.action} — contact support to migrate manually.`,
+        );
+        return;
+      }
+      setBusy(true);
+      try {
+        const result: any = await migrateIntegrationStream({
+          connectionId,
+          old_action_slug: stale.action,
+          new_action_slug: stale.suggested_replacement,
+        });
+        onToast(
+          `Migrated ${stale.action} → ${result?.new_action || stale.suggested_replacement}`,
+        );
+        onMigrated();
+      } catch (err: any) {
+        onToast(`Migration failed: ${err?.message || "Unknown error"}`);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [connectionId, onMigrated, onToast],
+  );
+
+  return (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+      <div className="flex items-start gap-2">
+        <AlertCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-400" />
+        <div className="flex-1">
+          <p className="text-xs font-medium text-[#F0EDE8]">
+            {staleStreams.length === 1
+              ? "A stream action was removed from Composio's catalog"
+              : `${staleStreams.length} stream actions were removed from Composio's catalog`}
+          </p>
+          <p className="mt-1 text-[0.65rem] text-[#8A8680]">
+            Every pull for these streams is 404ing. Migrate to the replacement
+            action to reconnect.
+          </p>
+          <div className="mt-2 space-y-1">
+            {staleStreams.map((s) => (
+              <div
+                key={s.stream_id}
+                className="flex items-center justify-between gap-2 rounded bg-black/20 px-2 py-1.5"
+              >
+                <div className="min-w-0 flex-1">
+                  <code className="block text-[0.6rem] text-amber-200 font-mono truncate">
+                    {s.action}
+                  </code>
+                  {s.suggested_replacement ? (
+                    <span className="text-[0.55rem] text-[#8A8680]">
+                      → <code className="font-mono">{s.suggested_replacement}</code>
+                    </span>
+                  ) : (
+                    <span className="text-[0.55rem] text-red-300">
+                      no replacement mapped
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={() => handleMigrate(s)}
+                  disabled={busy || !s.suggested_replacement}
+                  className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-2 py-1 font-mono text-[0.55rem] uppercase tracking-wider text-amber-300 transition hover:bg-amber-500/25 disabled:opacity-40"
+                >
+                  {busy ? (
+                    <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-2.5 w-2.5" />
+                  )}
+                  Migrate
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // StreamRow — per-action toggle + interval editor
+//
+// Reads live config from capabilities: display_name, description,
+// enabled, schedule_interval_seconds, last_event_at, event_count. Interval
+// selector is always visible (greyed when disabled — pre-selects the value
+// that applies on enable).
 // ---------------------------------------------------------------------------
 
 function StreamRow({
@@ -946,30 +1094,38 @@ function StreamRow({
   onChanged,
   onToast,
 }: {
-  action: CapabilityAction;
+  action: StreamCapability;
   connectionId: string;
   onChanged: () => void;
   onToast: (msg: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const [intervalSeconds, setIntervalSeconds] = useState<number>(300);
-  // Track the interval currently on the tenant — starts at the default;
-  // we don't fetch the live value because enable-stream is idempotent and
-  // the user can always apply again with a new value.
-  const [appliedInterval, setAppliedInterval] = useState<number>(300);
+  // Seed the interval from the live on-disk config when enabled, else a
+  // sensible default from INTERVAL_PRESETS.
+  const initialInterval = action.schedule_interval_seconds ?? 300;
+  const [intervalSeconds, setIntervalSeconds] = useState<number>(initialInterval);
+  // The currently-applied value on the tenant. Kept separate so we can
+  // highlight the Apply button when the user picks a new value.
+  const [appliedInterval, setAppliedInterval] = useState<number>(initialInterval);
 
-  const pretty = slugToTitle(action.slug);
+  // If capabilities refetches after external changes, resync local state.
+  useEffect(() => {
+    const live = action.schedule_interval_seconds ?? 300;
+    setIntervalSeconds(live);
+    setAppliedInterval(live);
+    // Only when the server-reported interval changes — local user-driven
+    // picks stay sticky until the next mutation completes.
+  }, [action.schedule_interval_seconds]);
+
+  const humanName = action.display_name || slugToTitle(action.slug);
   const intervalDirty = action.enabled && intervalSeconds !== appliedInterval;
 
   const handleToggle = useCallback(async () => {
     setBusy(true);
     try {
       if (action.enabled) {
-        await disableIntegrationStream({
-          connectionId,
-          action_slug: action.slug,
-        });
-        onToast(`${pretty} stream disabled`);
+        await disableIntegrationStream({ connectionId, action_slug: action.slug });
+        onToast(`${humanName} stream disabled`);
       } else {
         await enableIntegrationStream({
           connectionId,
@@ -977,143 +1133,152 @@ function StreamRow({
           poll_interval_seconds: intervalSeconds,
         });
         setAppliedInterval(intervalSeconds);
-        onToast(`${pretty} stream enabled`);
+        onToast(`${humanName} stream enabled`);
       }
       onChanged();
     } catch (err: any) {
-      onToast(`${pretty} failed: ${err?.message || "Unknown error"}`);
+      onToast(`${humanName} failed: ${err?.message || "Unknown error"}`);
     } finally {
       setBusy(false);
     }
-  }, [action, connectionId, intervalSeconds, pretty, onChanged, onToast]);
+  }, [action, connectionId, intervalSeconds, humanName, onChanged, onToast]);
 
   const handleApplyInterval = useCallback(async () => {
     setBusy(true);
     try {
-      // Idempotent: enable-stream overwrites the config with the new interval
-      // and recreates the schedule on the SaaS side.
-      await disableIntegrationStream({
-        connectionId,
-        action_slug: action.slug,
-      });
+      // disable + re-enable is the idempotent way to change interval without
+      // leaving an orphan Temporal schedule. ctrl-api tears down the old
+      // schedule on disable; enable creates a fresh one at the new cron.
+      await disableIntegrationStream({ connectionId, action_slug: action.slug });
       await enableIntegrationStream({
         connectionId,
         action_slug: action.slug,
         poll_interval_seconds: intervalSeconds,
       });
       setAppliedInterval(intervalSeconds);
-      onToast(`${pretty} interval updated to ${intervalLabel(intervalSeconds)}`);
+      onToast(`${humanName} interval updated to ${intervalLabel(intervalSeconds)}`);
       onChanged();
     } catch (err: any) {
       onToast(`Interval update failed: ${err?.message || "Unknown error"}`);
     } finally {
       setBusy(false);
     }
-  }, [action, connectionId, intervalSeconds, pretty, onChanged, onToast]);
+  }, [action, connectionId, intervalSeconds, humanName, onChanged, onToast]);
+
+  const lastEventAgo = action.last_event_at ? timeAgo(action.last_event_at) : null;
 
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-white/[0.04] bg-white/[0.01] px-3 py-2">
-      <Toggle
-        checked={action.enabled}
-        disabled={busy}
-        onChange={handleToggle}
-      />
-      <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2">
-          <span className="text-xs text-[#F0EDE8]">{pretty}</span>
-          <code className="text-[0.6rem] text-[#8A8680]/70 font-mono truncate">
-            {action.slug}
-          </code>
-        </div>
-        {action.description && (
-          <p className="mt-0.5 text-[0.6rem] text-[#8A8680] line-clamp-1">
-            {action.description}
-          </p>
-        )}
-      </div>
-      {action.enabled && (
-        <div className="flex items-center gap-1.5">
-          <select
-            value={intervalSeconds}
-            disabled={busy}
-            onChange={(e) => setIntervalSeconds(parseInt(e.target.value, 10))}
-            className="rounded border border-white/[0.06] bg-white/[0.02] px-1.5 py-1 text-[0.65rem] text-[#F0EDE8] outline-none disabled:opacity-50"
-          >
-            {INTERVAL_PRESETS.map((p) => (
-              <option key={p.seconds} value={p.seconds}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-          {intervalDirty && (
-            <button
-              onClick={handleApplyInterval}
-              disabled={busy}
-              className="rounded bg-[#C9A84C]/10 px-2 py-1 text-[0.6rem] text-[#C9A84C] transition hover:bg-[#C9A84C]/20 disabled:opacity-50"
+    <div
+      className={`rounded-lg border px-3 py-2.5 ${
+        action.enabled
+          ? "border-blue-500/20 bg-blue-500/5"
+          : "border-white/[0.04] bg-white/[0.01]"
+      }`}
+    >
+      <div className="flex items-start gap-3">
+        <Toggle checked={action.enabled} disabled={busy} onChange={handleToggle} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <span className="text-xs text-[#F0EDE8]">{humanName}</span>
+            {action.deprecated && (
+              <span className="rounded-sm bg-red-500/10 px-1 py-0 font-mono text-[0.5rem] uppercase text-red-400">
+                Deprecated
+              </span>
+            )}
+            <code
+              className="text-[0.55rem] text-[#8A8680]/60 font-mono truncate"
+              title={action.slug}
             >
-              Apply
-            </button>
+              {action.slug}
+            </code>
+          </div>
+          {action.description && (
+            <p className="mt-0.5 text-[0.65rem] leading-relaxed text-[#8A8680] line-clamp-2">
+              {action.description}
+            </p>
+          )}
+          {action.enabled && (
+            <p className="mt-1 text-[0.55rem] text-[#8A8680]/80">
+              {action.event_count} events collected
+              {lastEventAgo ? ` · last ${lastEventAgo}` : ""}
+              {action.last_pull_status && action.last_pull_status !== "ok" && action.last_pull_status !== "migrated"
+                ? ` · status: ${action.last_pull_status}`
+                : ""}
+            </p>
           )}
         </div>
-      )}
-      {busy && <Loader2 className="h-3 w-3 animate-spin text-[#8A8680]" />}
+        <div className="flex flex-col items-end gap-1">
+          <div className="flex items-center gap-1.5">
+            <select
+              value={intervalSeconds}
+              disabled={busy}
+              onChange={(e) => setIntervalSeconds(parseInt(e.target.value, 10))}
+              className="rounded border border-white/[0.06] bg-white/[0.02] px-1.5 py-1 text-[0.65rem] text-[#F0EDE8] outline-none disabled:opacity-50"
+              title={action.enabled ? "Pull interval" : "Pull interval (on enable)"}
+            >
+              {INTERVAL_PRESETS.map((p) => (
+                <option key={p.seconds} value={p.seconds}>
+                  every {p.label}
+                </option>
+              ))}
+            </select>
+            {intervalDirty && (
+              <button
+                onClick={handleApplyInterval}
+                disabled={busy}
+                className="rounded bg-[#C9A84C]/10 px-2 py-1 text-[0.6rem] text-[#C9A84C] transition hover:bg-[#C9A84C]/20 disabled:opacity-50"
+              >
+                Apply
+              </button>
+            )}
+          </div>
+          {busy && <Loader2 className="h-3 w-3 animate-spin text-[#8A8680]" />}
+        </div>
+      </div>
     </div>
   );
 }
 
 // ---------------------------------------------------------------------------
-// ToolRow — per-action toggle (no interval)
+// ActionRow — read-only action tile. No toggle (there's no per-action
+// enablement — all actions dispatch through composio_execute).
 // ---------------------------------------------------------------------------
 
-function ToolRow({
-  action,
-  onChanged,
-  onToast,
-}: {
-  action: CapabilityAction;
-  onChanged: () => void;
-  onToast: (msg: string) => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const pretty = slugToTitle(action.slug);
-
-  const handleToggle = useCallback(async () => {
-    setBusy(true);
-    try {
-      if (action.enabled) {
-        await disableIntegrationTool({ action_slug: action.slug });
-        onToast(`${pretty} tool disabled`);
-      } else {
-        await enableIntegrationTool({ action_slug: action.slug });
-        onToast(`${pretty} tool enabled`);
-      }
-      onChanged();
-    } catch (err: any) {
-      onToast(`${pretty} failed: ${err?.message || "Unknown error"}`);
-    } finally {
-      setBusy(false);
-    }
-  }, [action, pretty, onChanged, onToast]);
-
+function ActionRow({ action }: { action: ToolCapability }) {
+  const humanName = action.display_name || slugToTitle(action.slug);
   return (
-    <div className="flex items-center gap-3 rounded-lg border border-white/[0.04] bg-white/[0.01] px-3 py-2">
-      <Toggle checked={action.enabled} disabled={busy} onChange={handleToggle} />
-      <div className="flex-1 min-w-0">
-        <div className="flex items-baseline gap-2">
-          <span className="text-xs text-[#F0EDE8]">{pretty}</span>
-          <code className="text-[0.6rem] text-[#8A8680]/70 font-mono truncate">
-            {action.slug}
-          </code>
-        </div>
-        {action.description && (
-          <p className="mt-0.5 text-[0.6rem] text-[#8A8680] line-clamp-1">
-            {action.description}
-          </p>
+    <div className="rounded-lg border border-white/[0.04] bg-white/[0.01] px-3 py-2">
+      <div className="flex items-baseline gap-2 flex-wrap">
+        <span className="text-xs text-[#F0EDE8]">{humanName}</span>
+        {action.deprecated && (
+          <span className="rounded-sm bg-red-500/10 px-1 py-0 font-mono text-[0.5rem] uppercase text-red-400">
+            Deprecated
+          </span>
         )}
+        <code className="text-[0.55rem] text-[#8A8680]/60 font-mono truncate">
+          {action.slug}
+        </code>
       </div>
-      {busy && <Loader2 className="h-3 w-3 animate-spin text-[#8A8680]" />}
+      {action.description && (
+        <p className="mt-0.5 text-[0.65rem] leading-relaxed text-[#8A8680] line-clamp-2">
+          {action.description}
+        </p>
+      )}
     </div>
   );
+}
+
+function timeAgo(iso: string | null): string | null {
+  if (!iso) return null;
+  const diff = Date.now() - new Date(iso).getTime();
+  if (isNaN(diff) || diff < 0) return null;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
 }
 
 // ---------------------------------------------------------------------------

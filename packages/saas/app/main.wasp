@@ -686,6 +686,11 @@ action disableIntegrationStream {
   entities: [Instance]
 }
 
+action migrateIntegrationStream {
+  fn: import { migrateIntegrationStream } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
 action enableIntegrationTool {
   fn: import { enableIntegrationTool } from "@src/integrations/operations",
   entities: [Instance]
