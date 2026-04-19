@@ -570,6 +570,138 @@ export function registerPhoneRoutes(): void {
     sendJson(res, 200, { status: "replied", reply, sid: ship.sid });
   });
 
+  // ── Outbound SMS (agent-initiated) ───────────────────────────────────────
+  addRoute("POST", "/api/v1/phone/sms", async ({ res, body }) => {
+    const b = body as { to?: unknown; body?: unknown } | undefined;
+    if (!b || typeof b.to !== "string" || typeof b.body !== "string") {
+      throw new ValidationError("to (string), body (string) required");
+    }
+    const to = b.to.trim();
+    const text = b.body.trim();
+    if (!to || !text) {
+      throw new ValidationError("to and body must be non-empty");
+    }
+
+    const ship = await shipSmsViaSaas({ to, body: text });
+    if (!ship.ok) {
+      sendJson(res, 502, { status: "ship-failed", error: ship.error });
+      return;
+    }
+
+    // Log outbound to the streams pipeline for vault visibility + dashboard.
+    const meta = readInstanceMeta();
+    const event = {
+      id: cryptoRandomId(),
+      stream_id: "sms-outbound",
+      stream_type: "sms",
+      received_at: new Date().toISOString(),
+      source_ref: ship.sid ?? cryptoRandomId(),
+      raw: {
+        from: meta?.phoneNumber ?? "",
+        to,
+        body: text,
+        direction: "outbound",
+      },
+      summary: `SMS to ${to}: ${text.slice(0, 80)}`,
+    };
+    await ingestStreamEvent(event);
+
+    sendJson(res, 200, { status: "sent", sid: ship.sid });
+  });
+
+  // ── Outbound call (agent-initiated) ──────────────────────────────────────
+  // mode: "tts"      — one-shot TTS playback via SaaS /api/twiml/say
+  // mode: "realtime" — opens a live Voice Bridge session with initiator=alfred
+  addRoute("POST", "/api/v1/phone/call", async ({ res, body }) => {
+    const b = body as
+      | { to?: unknown; message?: unknown; mode?: unknown }
+      | undefined;
+    if (!b || typeof b.to !== "string" || typeof b.message !== "string") {
+      throw new ValidationError("to (string), message (string) required");
+    }
+    const mode = b.mode === "realtime" ? "realtime" : "tts";
+    const to = b.to.trim();
+    const message = b.message.trim();
+    if (!to || !message) {
+      throw new ValidationError("to and message must be non-empty");
+    }
+
+    const meta = readInstanceMeta();
+    if (!meta) {
+      sendJson(res, 409, {
+        status: "no-tenant-meta",
+        error: "TENANT_ID or phone number not set",
+      });
+      return;
+    }
+    if (!VOICE_BRIDGE_INTERNAL_TOKEN) {
+      sendJson(res, 500, {
+        status: "misconfigured",
+        error: "VOICE_BRIDGE_INTERNAL_TOKEN not set",
+      });
+      return;
+    }
+
+    let sid: string | undefined;
+    try {
+      const res2 = await fetch(
+        `${SAAS_INTERNAL_URL}/api/internal/twilio/initiate-call`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${VOICE_BRIDGE_INTERNAL_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            tenantId: meta.tenantId,
+            to,
+            mode,
+            message,
+          }),
+          signal: AbortSignal.timeout(8_000),
+        },
+      );
+      if (!res2.ok) {
+        sendJson(res, 502, {
+          status: "saas-call-failed",
+          error: `${res2.status}: ${await res2.text().catch(() => "")}`,
+        });
+        return;
+      }
+      const out: any = await res2.json().catch(() => ({}));
+      sid = out?.sid;
+    } catch (err: any) {
+      sendJson(res, 502, {
+        status: "saas-unreachable",
+        error: err?.message ?? String(err),
+      });
+      return;
+    }
+
+    // Log outbound call kickoff (the real transcript lands later via
+    // POST /api/v1/phone/transcript when the bridge ends the call, in
+    // the realtime mode case).
+    const event = {
+      id: cryptoRandomId(),
+      stream_id: "voice-call-outbound",
+      stream_type: "voice-call",
+      received_at: new Date().toISOString(),
+      source_ref: sid ?? cryptoRandomId(),
+      raw: {
+        from: meta.phoneNumber,
+        to,
+        direction: "outbound",
+        mode,
+        intent: message,
+        callId: sid ?? "",
+      },
+      summary: `${mode === "realtime" ? "Live call" : "TTS call"} to ${to}: ${message.slice(0, 80)}`,
+    };
+    await ingestStreamEvent(event);
+
+    sendJson(res, 200, { status: "initiated", sid, mode });
+  });
+
   // POST /api/v1/phone/transcript — bridge posts the full call transcript
   addRoute("POST", "/api/v1/phone/transcript", async ({ res, body }) => {
     const b = body as Record<string, unknown> | undefined;
