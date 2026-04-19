@@ -1,7 +1,6 @@
 import { addRoute, matchRoute } from "../server.js";
 import type { ApiRequest } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
-import { crossTenantAsk, crossTenantProxy } from "./crossTenant.js";
 
 // ---------------------------------------------------------------------------
 // Tool definitions — each maps to an existing ctrl API endpoint
@@ -301,43 +300,14 @@ const TOOLS: ToolDef[] = [
   },
 ];
 
-// Cross-tenant tool — only registered when CROSS_TENANT_PEERS is configured
-if (process.env.CROSS_TENANT_PEERS) {
-  TOOLS.push({
-    name: "ask_alfred",
-    description:
-      "Ask another tenant's Alfred a question. The question is sent to the target tenant's Alfred agent, " +
-      "which processes it using that tenant's vault context and returns an answer. Admin-only.",
-    parameters: {
-      tenant: { type: "string", required: true },
-      prompt: { type: "string", required: true },
-      timeout_seconds: { type: "number", required: false },
-    },
-    endpoint: "__cross_tenant__", // special dispatch — not a real route
-  });
-
-  TOOLS.push({
-    name: "tenant_api",
-    description:
-      "Execute any ctrl-api operation on a peer tenant (IDDQD). Full CRUD access to vault, streams, " +
-      "workflows, schedules, learning, workers, admin, openclaw, and workspace. " +
-      "See the IDDQD API Reference in TOOLS.md for available endpoints.",
-    parameters: {
-      tenant: { type: "string", required: true },
-      method: { type: "string", required: true, enum: ["GET", "POST", "PATCH", "DELETE"] },
-      path: { type: "string", required: true },
-      body: { type: "object", required: false },
-    },
-    endpoint: "__cross_tenant_proxy__",
-  });
-
-  TOOLS.push({
-    name: "tenant_list",
-    description: "List available peer tenants that can be targeted with tenant_api or ask_alfred.",
-    parameters: {},
-    endpoint: "GET /api/v1/cross-tenant/peers",
-  });
-}
+// Cross-tenant access is now provided by the MCP server (alfred-ctrl),
+// not as gateway tools here. Alfred Prime sees `tenant` + `ask_alfred`
+// tools via MCP when ALFRED_PRIME=true + CROSS_TENANT_PEERS are set;
+// non-prime tenants see neither. See packages/openclaw/mcp/ctrl-server.mjs.
+// The previous gateway-tool registrations (ask_alfred / tenant_api /
+// tenant_list) were never invoked on any live tenant — CROSS_TENANT_PEERS
+// was never populated by the provisioner — so removing them is a no-op
+// for every tenant and removes a misleading surface.
 
 // Composio tool — only registered when COMPOSIO_API_KEY is configured
 if (process.env.COMPOSIO_API_KEY) {
@@ -369,26 +339,9 @@ async function dispatchTool(
   args: Record<string, unknown>,
   ctx: ApiRequest,
 ): Promise<void> {
-  // Special dispatch for cross-tenant tools
-  if (tool.name === "ask_alfred") {
-    const tenant = String(args.tenant || "");
-    const prompt = String(args.prompt || "");
-    const timeout = Number(args.timeout_seconds) || 300;
-    const result = await crossTenantAsk(tenant, prompt, timeout);
-    sendJson(ctx.res, 200, result);
-    return;
-  }
-
-  if (tool.name === "tenant_api") {
-    const result = await crossTenantProxy(
-      String(args.tenant || ""),
-      String(args.method || "GET"),
-      String(args.path || ""),
-      args.body,
-    );
-    sendJson(ctx.res, 200, result);
-    return;
-  }
+  // Cross-tenant dispatch (ask_alfred, tenant_api) lived here but is now
+  // handled by the alfred-ctrl MCP server (self/tenant/ask_alfred tools),
+  // gated on ALFRED_PRIME. See packages/openclaw/mcp/ctrl-server.mjs.
 
   // Special dispatch for Composio tool execution
   if (tool.name === "composio_execute") {
