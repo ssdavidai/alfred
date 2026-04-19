@@ -43,23 +43,38 @@ model ApiKey {
 }
 
 model Instance {
-  id                String    @id @default(uuid())
-  userId            String    @unique
-  user              User      @relation(fields: [userId], references: [id])
-  customerName      String    @unique    // "alfred-<slug>"
-  tier              String               // PREMIUM, BLACK (grandfathered: STARTER, PRO)
-  serverType        String               // cx53 (grandfathered: cx33, cx43)
-  status            String    @default("provisioning")  // provisioning|running|suspended|error|destroyed
-  tailscaleHostname String?
-  subdomainUrl      String?              // e.g. https://acme.alfred.black
-  apiKey            String?              // encrypted AAS_API_KEY for tenant API
-  ipAddress         String?
-  provisionedAt     DateTime?
-  suspendedAt       DateTime?
-  lastHealthCheck   DateTime?
-  lastHealthStatus  String?              // ok|degraded|down|unreachable
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  id                    String    @id @default(uuid())
+  userId                String    @unique
+  user                  User      @relation(fields: [userId], references: [id])
+  customerName          String    @unique    // "alfred-<slug>"
+  tier                  String               // PREMIUM, BLACK (grandfathered: STARTER, PRO)
+  serverType            String               // cx53 (grandfathered: cx33, cx43)
+  status                String    @default("provisioning")  // provisioning|running|suspended|error|destroyed
+  tailscaleHostname     String?
+  subdomainUrl          String?              // e.g. https://acme.alfred.black
+  apiKey                String?              // encrypted AAS_API_KEY for tenant API
+  ipAddress             String?
+  provisionedAt         DateTime?
+  suspendedAt           DateTime?
+  lastHealthCheck       DateTime?
+  lastHealthStatus      String?              // ok|degraded|down|unreachable
+  // AgentPhone (Twilio + OpenAI Realtime) — see plan
+  phoneNumber           String?   @unique    // E.164, e.g. +36705551234
+  twilioNumberSid       String?              // Twilio resource SID
+  phoneCountry          String?              // ISO-3166-1 alpha-2 (HU, US, ...)
+  audioRecordingEnabled Boolean   @default(false)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+}
+
+// Spam denylist for AgentPhone — populated at SaaS edge by abandoned-call heuristics.
+// Voice webhook returns <Reject/> early for any caller with attempts >= threshold.
+model SpamNumber {
+  phoneNumber String   @id   // caller E.164
+  firstSeen   DateTime @default(now())
+  lastSeen    DateTime @updatedAt
+  attempts    Int      @default(1)
+  reason      String?  // "abandoned-calls", "manual", etc.
 }
 
 model ProvisioningJob {
