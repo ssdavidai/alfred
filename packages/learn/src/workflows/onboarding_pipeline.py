@@ -53,6 +53,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from src.activities.assign_chores import assign_initial_chores
     from src.activities.chore_generation import restart_learn_worker
+    from src.activities.first_brief_email import send_first_brief_email
 
 ONBOARD_PATH = "/alfred-data/onboard.json"
 
@@ -354,6 +355,27 @@ class OnboardingPipelineWorkflow:
             args=[onboard_path, "done"],
             start_to_close_timeout=timedelta(seconds=10),
         )
+
+        # -----------------------------------------------------------------
+        # Send the First Brief via email as the user-visible finale of
+        # onboarding. Non-blocking: failures here (AgentMail disabled,
+        # network hiccup) just log and continue — Sir can still read the
+        # brief on the dashboard, and this is recoverable via a manual
+        # resend later. No retries: if AgentMail isn't configured, further
+        # attempts won't help.
+        # -----------------------------------------------------------------
+        try:
+            await workflow.execute_activity(
+                send_first_brief_email,
+                args=[brief_path],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+        except Exception as err:  # pragma: no cover — advisory
+            workflow.logger.warning(
+                "send_first_brief_email failed, continuing with background: %s",
+                err,
+            )
 
         # -----------------------------------------------------------------
         # Background: full email backfill → batch to inbox → curator
