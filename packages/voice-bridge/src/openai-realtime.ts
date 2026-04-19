@@ -87,6 +87,11 @@ export class OpenAIRealtimeClient {
                 type: "semantic_vad",
                 eagerness: "medium",
               },
+              // Capture user speech as text so the bridge can build a transcript
+              // for vault write-back at hangup. Whisper-based, fast.
+              input_audio_transcription: {
+                model: "gpt-4o-mini-transcribe",
+              },
               ...(sessionConfig.tools
                 ? { tools: sessionConfig.tools, tool_choice: "auto" }
                 : {}),

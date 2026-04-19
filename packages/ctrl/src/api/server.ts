@@ -23,6 +23,7 @@ import { registerIntegrationRoutes } from "./routes/integrations.js";
 import { registerOmiRoutes } from "./routes/omi.js";
 import { registerCrossTenantRoutes } from "./routes/crossTenant.js";
 import { registerChoreRoutes } from "./routes/chores.js";
+import { registerPhoneRoutes } from "./routes/phone.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -102,6 +103,7 @@ export function createApiServer(): http.Server {
   registerOmiRoutes();
   registerCrossTenantRoutes();
   registerChoreRoutes();
+  registerPhoneRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
