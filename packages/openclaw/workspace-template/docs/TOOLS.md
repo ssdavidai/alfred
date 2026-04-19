@@ -123,12 +123,24 @@ Sir's inbox at `alfred.<username>@mail.alfred.black` is an ongoing conversation 
 | Endpoint | What it does |
 |---|---|
 | `GET /api/v1/email/status` | Check whether AgentMail is configured on this tenant. Returns `{ configured, inbox_id, inbox_address }`. |
-| `POST /api/v1/email/send` | Send a new email (new thread). Body: `{ to, subject, text, html?, cc?, bcc?, reply_to?, labels? }`. |
-| `POST /api/v1/email/reply` | Reply in an existing thread. Body: `{ message_id, text, html?, reply_all?: boolean }`. Set `reply_all: true` only when the user's instruction implies it (cc chain should stay informed). |
-| `POST /api/v1/email/forward` | Forward a message. Body: `{ message_id, to, subject?, text?, html? }`. |
+| `POST /api/v1/email/send` | Send a new email (new thread). Body: `{ to, subject, text, html?, cc?, bcc?, reply_to?, labels?, attachments? }`. |
+| `POST /api/v1/email/reply` | Reply in an existing thread. Body: `{ message_id, text, html?, reply_all?: boolean, attachments? }`. Set `reply_all: true` only when the user's instruction implies it (cc chain should stay informed). |
+| `POST /api/v1/email/forward` | Forward a message. Body: `{ message_id, to, subject?, text?, html?, attachments? }`. |
 | `GET /api/v1/email/message/:message_id` | Fetch a single message (use this if webhook payload was truncated at 1 MB). |
 | `GET /api/v1/email/thread/:thread_id` | Fetch the full thread — always read this before composing a reply so you have complete context, including quoted history. |
 | `GET /api/v1/email/attachment/:message_id/:attachment_id` | Download an attachment's content. |
+
+**Attachments shape (send, reply, forward all accept this):**
+
+```json
+"attachments": [
+  { "content": "<base64-encoded file bytes>", "filename": "report.pdf", "content_type": "application/pdf" }
+]
+```
+
+- `content` is REQUIRED and must be base64-encoded bytes of the file (no data-URL prefix).
+- `filename` and `content_type` are optional but recommended.
+- If you promise an attachment in the body text ("please find attached"), you MUST include a real attachments array on the same request. Claiming an attachment without including one is a hallucination — Sir will notice and you will have damaged trust. If you can't actually produce the file, say so plainly or send the content inline as HTML instead.
 
 Also: `GET/POST/DELETE /api/v1/auth/senders` — manage the authorized-senders allowlist that drives the channel/stream dispatch. Only addresses on this list get the conversational channel path; everyone else is ingested as stream events.
 
