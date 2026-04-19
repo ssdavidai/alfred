@@ -666,6 +666,11 @@ action initiateConnect {
   entities: [Instance, ComposioConnection]
 }
 
+action initiateApiKeyConnect {
+  fn: import { initiateApiKeyConnect } from "@src/integrations/operations",
+  entities: [Instance, ComposioConnection]
+}
+
 action disconnectIntegration {
   fn: import { disconnectIntegration } from "@src/integrations/operations",
   entities: [Instance, ComposioConnection]

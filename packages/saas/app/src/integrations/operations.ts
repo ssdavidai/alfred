@@ -22,6 +22,7 @@ import type {
   GetIntegrationCapabilities,
   GetOpenclawReadiness,
   InitiateConnect,
+  InitiateApiKeyConnect,
   DisconnectIntegration,
   EnableIntegrationStream,
   DisableIntegrationStream,
@@ -242,6 +243,53 @@ export const initiateConnect: InitiateConnect<
       });
     } catch (err) {
       console.error("[initiateConnect] upsert failed:", err);
+    }
+  }
+
+  return result;
+};
+
+/**
+ * API-key / bearer-token connect flow for toolkits that don't use OAuth
+ * (Clockify, Tavily, PostHog, …). Same end state as initiateConnect — a
+ * tracked ComposioConnection row plus a live Composio connected_account —
+ * but without the popup: the user supplies their key inline, we exchange
+ * it for an ACTIVE connection in one round trip.
+ */
+export const initiateApiKeyConnect: InitiateApiKeyConnect<
+  { toolkit_slug: string; credential: string; auth_scheme?: string },
+  any
+> = async (args, context) => {
+  if (!args?.toolkit_slug) throw new Error("toolkit_slug is required");
+  if (!args?.credential || !args.credential.trim()) {
+    throw new Error("credential is required");
+  }
+  const user = requireUser(context);
+  const instance = await getUserInstance(context);
+  const toolkit = args.toolkit_slug.toLowerCase();
+
+  const result = await proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/integrations/connect-api-key",
+    body: {
+      toolkit_slug: toolkit,
+      credential: args.credential.trim(),
+      auth_scheme: args.auth_scheme,
+    },
+  });
+
+  const connectionId = result?.connection_id || result?.connectionId;
+  if (connectionId) {
+    try {
+      await upsertConnection(context.entities.ComposioConnection, {
+        userId: user.id,
+        connectionId,
+        toolkit,
+        authScheme: result?.auth_scheme || args.auth_scheme || "API_KEY",
+        status: result?.status || "ACTIVE",
+      });
+    } catch (err) {
+      console.error("[initiateApiKeyConnect] upsert failed:", err);
     }
   }
 
