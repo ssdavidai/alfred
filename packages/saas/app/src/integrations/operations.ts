@@ -24,6 +24,7 @@ import type {
   InitiateConnect,
   DisconnectIntegration,
   EnableIntegrationStream,
+  DisableIntegrationStream,
   EnableIntegrationTool,
   DisableIntegrationTool,
   AutoConfigIntegration,
@@ -327,6 +328,27 @@ export const enableIntegrationStream: EnableIntegrationStream<
   }
 
   return streamResult;
+};
+
+/**
+ * Disable a Composio-backed stream for a connection. Inverse of
+ * enableIntegrationStream: ctrl-api removes the config file + streams.json
+ * entry + deletes the Temporal schedule. Safe to call even if the stream
+ * was never enabled (the endpoint no-ops cleanly).
+ */
+export const disableIntegrationStream: DisableIntegrationStream<
+  { connectionId: string; action_slug: string },
+  any
+> = async (args, context) => {
+  if (!args?.connectionId || !args?.action_slug) {
+    throw new Error("connectionId and action_slug are required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/integrations/${encodeURIComponent(args.connectionId)}/disable-stream`,
+    body: { action_slug: args.action_slug },
+  });
 };
 
 export const enableIntegrationTool: EnableIntegrationTool<
