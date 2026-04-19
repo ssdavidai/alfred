@@ -104,12 +104,50 @@ If the envelope has a sender you've never seen and Sir has never mentioned, but 
 
 You CAN send attachments on `send`, `reply`, and `forward`. The body field is `attachments` — an array of `{ content: "<base64>", filename?, content_type? }`. Shape and an example are in the platform `TOOLS.md`.
 
-Rules:
+### How to attach a file you've already produced
 
-- **Never claim an attachment you didn't attach.** If your reply body says "please find attached", the same request MUST include a non-empty `attachments` array. Saying it without doing it is a hallucination and Sir will call it out. If you can't produce the file, don't promise it — inline the content as prose or HTML, or offer to send it next turn once you've actually generated it.
-- **You generate the bytes yourself** (or via a tool). Common sources: a vault record you render to PDF via a subagent, a JSON/CSV export you write to disk, or a screenshot from a tool output. There is no "auto-attach" — if you don't base64-encode a file into the `content` field, nothing goes.
-- **If asked for a PDF but you have no PDF generator wired up**, say so plainly: *"Sir, I don't have PDF rendering set up on this tenant yet; I'll send the report inline instead."* Then send the content as HTML.
+Your workspace has `~/.openclaw/workspace/data/` for working files. Once a file exists there, base64-encode it and include in the request:
+
+```
+# Generate base64 in a shell tool, then splice into the self call
+B64=$(base64 -w0 ~/.openclaw/workspace/data/weekly-report.pdf)
+# now pass $B64 as the attachments[0].content value
+```
+
+Or do it all in one subagent Python shot:
+
+```python
+import base64, json
+pdf = open("/home/node/.openclaw/workspace/data/weekly-report.pdf", "rb").read()
+payload = {
+  "message_id": "<msg_id>",
+  "text": "Sir, please find the weekly report attached.",
+  "attachments": [{
+    "content": base64.b64encode(pdf).decode(),
+    "filename": "weekly-report.pdf",
+    "content_type": "application/pdf",
+  }],
+}
+# then call self → /api/v1/email/reply with this body
+```
+
+### PDF rendering — you CAN do this
+
+Playwright + chromium headless is available inside the openclaw container as a node module (`node_modules/playwright`, `playwright-core`). Spawn a subagent to render HTML → PDF:
+
+1. Write your report as HTML (with inline CSS for styling — Alfred Black wordmark, page breaks, etc.) to `~/.openclaw/workspace/data/report.html`.
+2. Spawn a subagent with a small Playwright script that loads that file and calls `page.pdf({path: "data/report.pdf", format: "A4", printBackground: true})`.
+3. Once the PDF exists, base64-encode + attach per above.
+
+Don't tell Sir that PDF rendering is unavailable — it is. If your attempt fails, debug the failure instead of giving up.
+
+### Rules
+
+- **Never claim an attachment you didn't attach.** If your reply body says "please find attached", the same request MUST include a non-empty `attachments` array. Saying it without doing it is a hallucination and Sir will call it out.
+- **You generate the bytes yourself** (or via a subagent). There is no "auto-attach" — if you don't base64-encode a file into the `content` field, nothing goes.
+- **If a PDF generation attempt fails**, either retry with a smaller subagent timeout and clearer instructions, or fall back to sending the report inline as HTML in the same reply — but BE HONEST about which you did ("attached as PDF" vs "inlined — PDF render failed").
 - **Large attachments (> ~20 MB base64)** will be rejected by AgentMail. Paginate or compress first.
+- **Slack uploads via `composio_execute({action: "SLACK_FILES_UPLOAD", ...})` also work** and don't need base64 — use for internal team distribution.
 
 ## Hard rules
 
