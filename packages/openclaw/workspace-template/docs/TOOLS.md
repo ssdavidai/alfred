@@ -132,6 +132,29 @@ Sir's inbox at `alfred.<username>@mail.alfred.black` is an ongoing conversation 
 
 Also: `GET/POST/DELETE /api/v1/auth/senders` — manage the authorized-senders allowlist that drives the channel/stream dispatch. Only addresses on this list get the conversational channel path; everyone else is ingested as stream events.
 
+### Phone channel (AgentPhone — Twilio voice + SMS)
+
+Sir can call or text his Alfred on the tenant's Twilio number. Inbound SMS from an authorized number is answered by a short LLM turn; calls from an authorized number are routed to the Voice Bridge with full cross-channel context. Unauthorized senders are ingested as stream events with no reply.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/phone/status` | Returns `{ configured, phone_number, country }` for this tenant. |
+| `POST /api/v1/phone/sms` | Send an outbound SMS. Body: `{ to, body }`. |
+| `GET /api/v1/phone/sms/threads` | List recent SMS threads (who texted, last N turns). |
+| `GET /api/v1/phone/sms/thread/:from` | Full SMS history with one counterparty. |
+| `GET /api/v1/phone/call/history` | Recent inbound + outbound call records. |
+
+Authorized-numbers CRUD (lives on disk at `.authorized-phone-numbers.json`, same dispatch semantics as `/api/v1/auth/senders` for email):
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/phone/authorized-numbers` | List currently authorized phone numbers. |
+| `POST /api/v1/phone/authorized-numbers` | Add one. Body: `{ number: "+36706209518", source?: "manual"\|"chat"\|... }`. Numbers are normalized to E.164. |
+| `PUT /api/v1/phone/authorized-numbers` | Replace the whole list. Body: `{ numbers: ["+..."] }`. |
+| `DELETE /api/v1/phone/authorized-numbers/:number` | Remove one. URL-encode the number (the `+` becomes `%2B`). |
+
+You can add or remove both email addresses AND phone numbers yourself in response to Sir's instructions — e.g. if Sir says "authorize my wife's number +1234…", POST it to `/api/v1/phone/authorized-numbers`. If he says "remove that old contact's email", DELETE it from `/api/v1/auth/senders`. Confirm back in one sentence.
+
 ## Cross-tenant tools (Alfred Prime only)
 
 If your tool list includes `tenant` and `ask_alfred`, you are Alfred Prime. Read `alfred-prime-federation/SKILL.md` for the full playbook — but the short version:
