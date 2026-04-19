@@ -20,6 +20,27 @@ import { proxyToTenant } from "./tenantProxy";
 const AGENTMAIL_WEBHOOK_SECRET = process.env.AGENTMAIL_WEBHOOK_SECRET || "";
 const AUTHORIZED_CACHE_MS = 60_000; // 60s — list changes slowly
 
+/**
+ * Extract the bare email address from an RFC 5322-ish `from` field.
+ *   "David Szabo-Stuban <david@szabostuban.com>"  → "david@szabostuban.com"
+ *   "david@szabostuban.com"                       → "david@szabostuban.com"
+ *   ""                                            → ""
+ * Returns lowercased, trimmed. Empty string on no match.
+ */
+function extractEmailAddress(raw: string): string {
+  if (!raw) return "";
+  const s = String(raw).trim();
+  // Angle-bracket form wins
+  const bracketMatch = s.match(/<([^>]+)>/);
+  if (bracketMatch && bracketMatch[1]) {
+    return bracketMatch[1].trim().toLowerCase();
+  }
+  // Otherwise: first "word@domain" token in the string
+  const bareMatch = s.match(/[^\s<>,;]+@[^\s<>,;]+/);
+  if (bareMatch) return bareMatch[0].trim().toLowerCase();
+  return "";
+}
+
 // Per-tenant cache of { senders: Set<string>, expiresAt: number }
 const authorizedCache = new Map<
   string,
@@ -133,13 +154,21 @@ export function registerAgentMailReceiver(app: Application): void {
       res.status(204).send();
 
       try {
-        // 3. Authorization
-        const fromList: string[] = Array.isArray(message.from_)
-          ? message.from_
-          : [];
-        const sender = (fromList[0] ?? "").toLowerCase();
+        // 3. Authorization. AgentMail's `from` field comes in two shapes
+        // depending on the event schema version:
+        //   - a plain string: `"David Szabo-Stuban <david@szabostuban.com>"`
+        //   - an array of strings (legacy `from_`)
+        // And the string may be in RFC 5322 display-name form, which means
+        // the bare email is inside the angle brackets. We compare the
+        // extracted email (lowercased) against authorized_senders which
+        // stores bare addresses.
+        const fromRaw: string | string[] = message.from ?? message.from_ ?? "";
+        const fromString = Array.isArray(fromRaw)
+          ? (fromRaw[0] ?? "")
+          : String(fromRaw);
+        const sender = extractEmailAddress(fromString);
         const authorized = await fetchAuthorizedSenders(instance as any);
-        const isAuthorized = sender && authorized?.has(sender) === true;
+        const isAuthorized = !!sender && authorized?.has(sender) === true;
 
         // 4. Dispatch
         if (isAuthorized) {
