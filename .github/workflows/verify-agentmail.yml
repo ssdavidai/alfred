@@ -1,0 +1,15 @@
+name: Verify AgentMail Instance rows
+on:
+  workflow_dispatch:
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/saas_key
+          chmod 600 ~/.ssh/saas_key
+      - run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/saas_key deploy@${{ secrets.DEPLOY_HOST }} \
+            "docker exec alfred-saas-postgres-1 psql -U postgres -d alfred_saas -c \
+              'SELECT \"customerName\", \"agentmailInboxAddress\", \"phoneNumber\" FROM \"Instance\" WHERE status = '\''running'\'' ORDER BY \"createdAt\";'"
