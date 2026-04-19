@@ -1,0 +1,30 @@
+[
+  {
+    "slug": "david",
+    "email": "david@szabostuban.com",
+    "ssh_key": "/Users/administrator/.ssh/alfred-david-99",
+    "host": "100.119.63.29",
+    "ssh_user": "deploy"
+  },
+  {
+    "slug": "miguel",
+    "email": "miguel@upstring.com",
+    "ssh_key": "/Users/administrator/.ssh/alfred-miguel-103",
+    "host": "100.72.147.32",
+    "ssh_user": "deploy"
+  },
+  {
+    "slug": "rapali",
+    "email": "rapali.zsolt@avenirsolutions.com",
+    "ssh_key": "/Users/administrator/.ssh/alfred-rapali-101",
+    "host": "100.121.134.35",
+    "ssh_user": "deploy"
+  },
+  {
+    "slug": "staging",
+    "email": "staging@alfred.black",
+    "ssh_key": "/Users/administrator/.ssh/alfred-staging-79",
+    "host": "100.81.42.126",
+    "ssh_user": "deploy"
+  }
+]

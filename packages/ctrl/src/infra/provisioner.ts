@@ -267,6 +267,28 @@ export async function provision(
     if (process.env.COMPOSIO_API_KEY) {
       envLines.push(`COMPOSIO_API_KEY=${process.env.COMPOSIO_API_KEY}`);
     }
+
+    // AgentMail — per-tenant inbox credentials, provisioned by SaaS before
+    // this job spawns and threaded through as TENANT_AGENTMAIL_* env vars
+    // on the ctrl process. Tenant isolation here comes from the inbox-scoped
+    // API key (single shared pod on the Developer plan;
+    // see deploy/agentmail-bootstrap.md).
+    const amInboxId = process.env.TENANT_AGENTMAIL_INBOX_ID;
+    const amInboxAddress = process.env.TENANT_AGENTMAIL_INBOX_ADDRESS;
+    const amInboxKey = process.env.TENANT_AGENTMAIL_API_KEY;
+    if (amInboxId && amInboxAddress && amInboxKey) {
+      envLines.push(`AGENTMAIL_INBOX_ID=${amInboxId}`);
+      envLines.push(`AGENTMAIL_INBOX_ADDRESS=${amInboxAddress}`);
+      envLines.push(`AGENTMAIL_API_KEY=${amInboxKey}`);
+      log(`AgentMail: ${amInboxAddress}`);
+    }
+
+    // Owner email — used by the init container to seed authorized_senders.json
+    // and by outbound email defaults (Reply-To, From display name).
+    if (process.env.TENANT_OWNER_EMAIL) {
+      envLines.push(`OWNER_EMAIL=${process.env.TENANT_OWNER_EMAIL}`);
+    }
+
     await ssh.exec(
       server.public_net.ipv4.ip,
       keyPair.privateKeyPath,
@@ -284,6 +306,38 @@ export async function provision(
       hostKeyOpts,
     );
     log("Env uploaded");
+
+    // AgentMail fallback file — survives .env rewrites and can be read by
+    // the init container even before docker compose loads env. Mirrors the
+    // Composio fallback pattern (.composio-user-id).
+    if (amInboxId && amInboxAddress && amInboxKey) {
+      const amFallback = JSON.stringify(
+        {
+          inbox_id: amInboxId,
+          inbox_address: amInboxAddress,
+          api_key: amInboxKey,
+        },
+        null,
+        2,
+      );
+      await ssh.exec(
+        server.public_net.ipv4.ip,
+        keyPair.privateKeyPath,
+        `sudo mkdir -p /mnt/encrypted/alfred`,
+        undefined,
+        hostKeyOpts,
+      );
+      await ssh.upload(
+        server.public_net.ipv4.ip,
+        keyPair.privateKeyPath,
+        amFallback,
+        `/mnt/encrypted/alfred/.agentmail-credentials.json`,
+        0o600,
+        undefined,
+        hostKeyOpts,
+      );
+      log("AgentMail credentials fallback file written");
+    }
 
     // --- Configure restic backups ---
     const s3AccessKey = process.env.HETZNER_S3_ACCESS_KEY;

@@ -472,4 +472,35 @@ else
 fi
 chmod 644 "$COMPOSIO_UID_FILE" 2>/dev/null || true
 
+# --- 11. Seed /vault/.auth/authorized_senders.json for the email channel ---
+#
+# Email inbound to the tenant's AgentMail inbox is dispatched in one of two
+# modes: authorized-sender → openclaw main agent (channel), anyone else →
+# learn zero-LLM stream ingest. The authorized list is seeded here with
+# exactly the tenant owner's email (from the OWNER_EMAIL env var set by the
+# provisioner); no auto-promote, no wildcards. Sir adds others later via
+# dashboard or /api/v1/auth/senders.
+#
+# Idempotent: only seeds if the file doesn't exist yet. Respects any manual
+# edits Sir makes later.
+AUTH_DIR=/vault/.auth
+AUTH_FILE="$AUTH_DIR/authorized_senders.json"
+if [[ -f "$AUTH_FILE" ]]; then
+    echo "[init] authorized_senders.json already present, leaving alone"
+elif [[ -n "${OWNER_EMAIL:-}" ]]; then
+    mkdir -p "$AUTH_DIR"
+    OWNER_EMAIL_LOWER=$(echo "$OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')
+    cat > "$AUTH_FILE" <<JSON
+{
+  "senders": ["$OWNER_EMAIL_LOWER"],
+  "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+JSON
+    chmod 644 "$AUTH_FILE" 2>/dev/null || true
+    echo "[init] Seeded authorized_senders.json with $OWNER_EMAIL_LOWER"
+else
+    echo "[init] OWNER_EMAIL not set — skipping authorized_senders.json seed."
+    echo "[init]   (Email channel will have NO authorized senders until manually configured.)"
+fi
+
 echo "=== Init complete ==="

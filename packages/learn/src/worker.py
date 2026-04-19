@@ -60,6 +60,9 @@ from src.activities.chore_generation import (
     validate_generated_template,
 )
 
+# Activities — AgentMail email delivery (First Brief + future outbound)
+from src.activities.first_brief_email import send_first_brief_email
+
 # Activities — chore actions
 from src.activities.chore_actions import (
     ask_alfred_to_judge_anomalies,
@@ -460,6 +463,7 @@ ALL_ACTIVITIES = [
     smoke_test_generated_template,
     deploy_generated_template,
     restart_learn_worker,
+    send_first_brief_email,
     load_chore_context,
     record_chore_run,
     decrement_quarantine_remaining,
