@@ -1,0 +1,26 @@
+name: Recover SaaS
+on: workflow_dispatch
+jobs:
+  rec:
+    timeout-minutes: 3
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/k && chmod 600 ~/.ssh/k
+      - run: |
+          ssh -o ConnectTimeout=10 -o ServerAliveInterval=30 -o StrictHostKeyChecking=no -i ~/.ssh/k deploy@${{ secrets.DEPLOY_HOST }} bash <<'REMOTE'
+          echo "=== kill any stuck prisma/docker processes ==="
+          pkill -f "prisma db push" || true
+          # Cancelling a workflow doesn't kill the remote processes. Find and kill.
+          ps aux | grep -E "docker compose run|prisma" | grep -v grep | awk '{print $2}' | xargs -r kill -9 2>/dev/null || true
+          echo "=== current state ==="
+          cd /opt/alfred-saas
+          docker ps -a --format '{{.Names}} {{.Status}}' | grep alfred-saas
+          echo "=== clean stale run/app containers ==="
+          docker ps -a --filter "name=alfred-saas-app" -q | xargs -r docker rm -f
+          echo "=== start app fresh ==="
+          docker compose up -d app
+          sleep 5
+          docker ps --format '{{.Names}} {{.Status}}' | grep alfred-saas-app
+          REMOTE
