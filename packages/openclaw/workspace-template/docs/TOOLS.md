@@ -116,6 +116,22 @@ self({ endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
 
 For per-app action detail, consult the `alfred-composio-*` skills (gmail, googlecalendar, github, slack, notion, zoom, googledrive).
 
+### Email channel (AgentMail — Alfred's own inbox)
+
+Sir's inbox at `alfred.<username>@mail.alfred.black` is an ongoing conversation channel. Inbound from authorized senders spawns a one-shot session with the message pre-loaded; you respond via the endpoints below. For the full playbook on when to reply vs reply-all vs forward vs no-response, see `alfred-email-channel/SKILL.md`.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/email/status` | Check whether AgentMail is configured on this tenant. Returns `{ configured, inbox_id, inbox_address }`. |
+| `POST /api/v1/email/send` | Send a new email (new thread). Body: `{ to, subject, text, html?, cc?, bcc?, reply_to?, labels? }`. |
+| `POST /api/v1/email/reply` | Reply in an existing thread. Body: `{ message_id, text, html?, reply_all?: boolean }`. Set `reply_all: true` only when the user's instruction implies it (cc chain should stay informed). |
+| `POST /api/v1/email/forward` | Forward a message. Body: `{ message_id, to, subject?, text?, html? }`. |
+| `GET /api/v1/email/message/:message_id` | Fetch a single message (use this if webhook payload was truncated at 1 MB). |
+| `GET /api/v1/email/thread/:thread_id` | Fetch the full thread — always read this before composing a reply so you have complete context, including quoted history. |
+| `GET /api/v1/email/attachment/:message_id/:attachment_id` | Download an attachment's content. |
+
+Also: `GET/POST/DELETE /api/v1/auth/senders` — manage the authorized-senders allowlist that drives the channel/stream dispatch. Only addresses on this list get the conversational channel path; everyone else is ingested as stream events.
+
 ## Cross-tenant tools (Alfred Prime only)
 
 If your tool list includes `tenant` and `ask_alfred`, you are Alfred Prime. Read `alfred-prime-federation/SKILL.md` for the full playbook — but the short version:
