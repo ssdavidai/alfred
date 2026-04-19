@@ -241,26 +241,32 @@ export function registerTwilioInternalRoutes(app: Application): void {
     },
   );
 
-  // POST /api/internal/twilio/provision { tenantId, country, areaCode? }
+  // POST /api/internal/twilio/provision { tenantId? | customerName?, country?, areaCode? }
   // Buys a number for the tenant, sets webhooks, persists Instance fields.
+  // The provisioner running on the SaaS host doesn't have the SaaS tenant
+  // UUID, so we accept customerName as an alternate lookup key.
   app.post(
     "/api/internal/twilio/provision",
     requireInternalToken,
     json,
     async (req: Request, res: Response) => {
       try {
-        const { tenantId, country, areaCode } = (req.body ?? {}) as {
+        const { tenantId, customerName, country, areaCode } = (req.body ??
+          {}) as {
           tenantId?: string;
+          customerName?: string;
           country?: string;
           areaCode?: string;
         };
-        if (!tenantId) {
-          res.status(400).json({ error: "tenantId required" });
+        if (!tenantId && !customerName) {
+          res.status(400).json({ error: "tenantId or customerName required" });
           return;
         }
-        const instance = await prisma.instance.findUnique({
-          where: { id: tenantId },
-        });
+        const instance = tenantId
+          ? await prisma.instance.findUnique({ where: { id: tenantId } })
+          : await prisma.instance.findUnique({
+              where: { customerName: customerName! },
+            });
         if (!instance) {
           res.status(404).json({ error: "Unknown tenant" });
           return;
@@ -288,7 +294,7 @@ export function registerTwilioInternalRoutes(app: Application): void {
         });
 
         await prisma.instance.update({
-          where: { id: tenantId },
+          where: { id: instance.id },
           data: {
             phoneNumber,
             twilioNumberSid: sid,
@@ -296,9 +302,12 @@ export function registerTwilioInternalRoutes(app: Application): void {
           },
         });
 
-        res
-          .status(200)
-          .json({ phoneNumber, twilioNumberSid: sid, country: resolvedCountry });
+        res.status(200).json({
+          tenantId: instance.id,
+          phoneNumber,
+          twilioNumberSid: sid,
+          country: resolvedCountry,
+        });
       } catch (err: any) {
         console.error("[internal/provision] error:", err);
         res.status(502).json({ error: err?.message ?? "Provision failed" });
@@ -306,25 +315,43 @@ export function registerTwilioInternalRoutes(app: Application): void {
     },
   );
 
-  // POST /api/internal/twilio/release { twilioNumberSid }
+  // POST /api/internal/twilio/release { twilioNumberSid? | customerName? | tenantId? }
+  // Either pass the SID directly (idempotent fast path), or a tenant
+  // identifier so we look up the SID first.
   app.post(
     "/api/internal/twilio/release",
     requireInternalToken,
     json,
     async (req: Request, res: Response) => {
       try {
-        const { twilioNumberSid, tenantId } = (req.body ?? {}) as {
+        const { twilioNumberSid, tenantId, customerName } = (req.body ??
+          {}) as {
           twilioNumberSid?: string;
           tenantId?: string;
+          customerName?: string;
         };
-        if (!twilioNumberSid) {
-          res.status(400).json({ error: "twilioNumberSid required" });
+        let sid = twilioNumberSid ?? "";
+        let instanceId: string | null = tenantId ?? null;
+        if (!sid && (tenantId || customerName)) {
+          const instance = tenantId
+            ? await prisma.instance.findUnique({ where: { id: tenantId } })
+            : await prisma.instance.findUnique({
+                where: { customerName: customerName! },
+              });
+          if (instance) {
+            sid = instance.twilioNumberSid ?? "";
+            instanceId = instance.id;
+          }
+        }
+        if (!sid) {
+          // Nothing to release; treat as success so destroy is idempotent.
+          res.status(200).json({ status: "noop" });
           return;
         }
-        await releaseNumber(twilioNumberSid);
-        if (tenantId) {
+        await releaseNumber(sid);
+        if (instanceId) {
           await prisma.instance.update({
-            where: { id: tenantId },
+            where: { id: instanceId },
             data: {
               phoneNumber: null,
               twilioNumberSid: null,
