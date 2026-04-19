@@ -1,0 +1,17 @@
+name: Get Instance IDs (one-off)
+on:
+  workflow_dispatch:
+jobs:
+  query:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/saas_key
+          chmod 600 ~/.ssh/saas_key
+      - name: Query
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/saas_key deploy@${{ secrets.DEPLOY_HOST }} \
+            "docker exec alfred-saas-postgres-1 psql -U postgres -d alfred_saas -c \
+              'SELECT i.id, i.\"customerName\", u.email FROM \"Instance\" i JOIN \"User\" u ON u.id = i.\"userId\" WHERE i.status = '\''running'\'' ORDER BY i.\"createdAt\";'"
