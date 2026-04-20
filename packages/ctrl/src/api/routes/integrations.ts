@@ -81,6 +81,52 @@ function accountMatchesUserId(acct: Record<string, unknown>, userId: string): bo
   return typeof m === "string" && m === userId;
 }
 
+/**
+ * Fetch a Composio connected_account by id and verify it belongs to THIS tenant.
+ *
+ * Composio's server-side `user_id` filter on `connected_accounts` list queries
+ * has been observed to silently return accounts that don't match the filter
+ * (see PR #469). That doesn't affect lookups by id, but every endpoint that
+ * takes a connection-id path param and then operates on the connection MUST
+ * verify ownership itself — otherwise one tenant could read/mutate another
+ * tenant's connection by guessing or scraping the id.
+ *
+ * Returns the connection JSON on success. On 404 / 403 / network error it
+ * sends the response and returns null; callers must return early when null.
+ */
+async function assertConnectionOwnedByTenant(
+  res: any,
+  connId: string,
+  userId: string,
+  apiKey: string,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const connResp = await fetch(
+      `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(connId)}`,
+      { headers: { "x-api-key": apiKey } },
+    );
+    if (connResp.status === 404) {
+      sendJson(res, 404, { error: `Connected account ${connId} not found` });
+      return null;
+    }
+    if (!connResp.ok) {
+      sendJson(res, connResp.status, { error: `Composio API error: ${connResp.status}` });
+      return null;
+    }
+    const conn = (await connResp.json()) as Record<string, unknown>;
+    if (!accountMatchesUserId(conn, userId)) {
+      // Treat ownership mismatch as 404 rather than 403 so enumeration can't
+      // confirm a victim's connection id exists.
+      sendJson(res, 404, { error: `Connected account ${connId} not found` });
+      return null;
+    }
+    return conn;
+  } catch (err: any) {
+    sendJson(res, 500, { error: `Failed to verify connection ownership: ${err?.message ?? err}` });
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Catalog cache (1h TTL)
 // ---------------------------------------------------------------------------
@@ -988,21 +1034,16 @@ export function registerIntegrationRoutes(): void {
   // =========================================================================
   addRoute("GET", "/api/v1/integrations/:id/capabilities", async ({ res, params, query }) => {
     const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
     const connId = params.id;
     const includeDeprecated = query.get("include_deprecated") === "1";
 
     try {
-      // 1. Resolve connection → toolkit
-      const connResp = await fetch(
-        `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(connId)}`,
-        { headers: { "x-api-key": apiKey } },
-      );
-      if (!connResp.ok) {
-        if (connResp.status === 404) throw new NotFoundError(`Connected account ${connId} not found`);
-        sendJson(res, connResp.status, { error: `Composio API error: ${connResp.status}` });
-        return;
-      }
-      const conn = (await connResp.json()) as any;
+      // 1. Resolve connection → toolkit. Ownership check enforced here so one
+      //    tenant cannot scrape another tenant's connection capabilities by id.
+      const connJson = await assertConnectionOwnedByTenant(res, connId, userId, apiKey);
+      if (!connJson) return;
+      const conn = connJson as any;
       const toolkit = (conn.toolkit?.slug ?? conn.appName ?? "").toLowerCase();
       const toolkitName = conn.toolkit?.displayName ?? conn.toolkit?.name ?? toolkit;
 
@@ -1291,19 +1332,13 @@ export function registerIntegrationRoutes(): void {
     const connId = params.id;
     const oldSlug = b.old_action_slug as string;
 
-    // Resolve toolkit from the live connected account
+    // Resolve toolkit from the live connected account. Enforces ownership so
+    // one tenant cannot migrate a stream attached to another tenant's connection.
     const apiKey = getComposioApiKey();
-    let toolkit = "";
-    try {
-      const connResp = await fetch(
-        `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(connId)}`,
-        { headers: { "x-api-key": apiKey } },
-      );
-      if (connResp.ok) {
-        const conn = (await connResp.json()) as any;
-        toolkit = (conn.toolkit?.slug ?? conn.appName ?? "").toLowerCase();
-      }
-    } catch { /* best effort */ }
+    const userId = getComposioUserId();
+    const conn = await assertConnectionOwnedByTenant(res, connId, userId, apiKey);
+    if (!conn) return;
+    const toolkit = (((conn as any).toolkit?.slug ?? (conn as any).appName ?? "") as string).toLowerCase();
 
     const recommended = toolkit ? RECOMMENDED_STREAMS[toolkit] : undefined;
     const newSlug = typeof b.new_action_slug === "string" && b.new_action_slug.trim()
@@ -1635,8 +1670,16 @@ export function registerIntegrationRoutes(): void {
       throw new ValidationError("tools_required (string[]) is required");
     }
     const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
     try {
-      const resp = await fetch(`${COMPOSIO_API_V3}/connected_accounts`, {
+      // MUST scope by this tenant's user_id. Without it Composio returns the
+      // fleet-wide connected_accounts list and we'd report "yes you have
+      // googlecalendar" to any tenant whose peer connected it. Defense in depth:
+      // also filter client-side on user_id match (Composio's server filter has
+      // been observed to silently return unmatched accounts — see PR #469).
+      const url = new URL(`${COMPOSIO_API_V3}/connected_accounts`);
+      url.searchParams.set("user_id", userId);
+      const resp = await fetch(url.toString(), {
         headers: { "x-api-key": apiKey },
       });
       if (!resp.ok) {
@@ -1648,7 +1691,7 @@ export function registerIntegrationRoutes(): void {
 
       const connectedToolkits = new Set(
         items
-          .filter((a: any) => a.status === "ACTIVE")
+          .filter((a: any) => a.status === "ACTIVE" && accountMatchesUserId(a, userId))
           .map((a: any) => (a.toolkit?.slug ?? a.appName ?? "").toLowerCase()),
       );
 
@@ -1755,20 +1798,17 @@ print(json.dumps(result, default=str))
   // =========================================================================
   addRoute("POST", "/api/v1/integrations/:id/auto-config", async ({ res, params }) => {
     const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
     const connId = params.id;
     const summary: Record<string, unknown> = { connection_id: connId };
 
     try {
-      // 1. Validate connection
-      const connResp = await fetch(
-        `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(connId)}`,
-        { headers: { "x-api-key": apiKey } },
-      );
-      if (!connResp.ok) {
-        sendJson(res, connResp.status, { error: `Connection ${connId} not found` });
-        return;
-      }
-      const conn = (await connResp.json()) as any;
+      // 1. Validate connection + enforce ownership — without this, one tenant
+      //    could auto-configure streams/skills/tools on their own system
+      //    pointing at another tenant's Composio connection.
+      const connJson = await assertConnectionOwnedByTenant(res, connId, userId, apiKey);
+      if (!connJson) return;
+      const conn = connJson as any;
       const toolkit = (conn.toolkit?.slug ?? "").toLowerCase();
       if (!toolkit) {
         sendJson(res, 400, { error: "Connection has no toolkit" });
