@@ -75,6 +75,23 @@ function formatContextPrimer(bundle: VoiceContextBundle): string {
     sections.push(`## Recent conversations across channels\n\n${lines.join("\n")}`);
   }
 
+  if (bundle.composioToolkits?.length) {
+    // Inline the exact action names for every connected Composio app, so the
+    // voice agent doesn't hallucinate slugs. Kept compact (name + <=120-char
+    // description per action). Without this primer, `composio_execute` calls
+    // routinely guess wrong and produce "I couldn't retrieve your calendar"
+    // responses.
+    const toolkitBlocks = bundle.composioToolkits.map((tk) => {
+      const lines = tk.actions.map(
+        (a) => `- \`${a.name}\` — ${a.description}`,
+      );
+      return `### ${tk.toolkit}\n\n${lines.join("\n")}`;
+    });
+    sections.push(
+      `## Available composio_execute actions\n\nCall via \`composio_execute({action, arguments})\`. Use the EXACT action name below; do not paraphrase.\n\n${toolkitBlocks.join("\n\n")}`,
+    );
+  }
+
   if (sections.length === 0) return "";
   return `\n\n# Cross-channel context\n\n${sections.join("\n\n")}`;
 }

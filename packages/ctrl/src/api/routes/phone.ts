@@ -50,7 +50,55 @@ interface VoiceContextBundle {
   openMatters: Array<{ name: string; summary?: string }>;
   openTasks: Array<{ name: string; due?: string; summary?: string }>;
   recentSessions: Array<{ at: string; channel: string; summary: string }>;
+  composioToolkits: Array<{
+    toolkit: string;
+    actions: Array<{ name: string; description: string }>;
+  }>;
   generatedAt: string;
+}
+
+function readComposioToolkits(): Array<{
+  toolkit: string;
+  actions: Array<{ name: string; description: string }>;
+}> {
+  const skillsDir = `${WORKSPACE_DIR}/skills`;
+  let dirs: string[];
+  try {
+    dirs = fs
+      .readdirSync(skillsDir)
+      .filter((d: string) => d.startsWith("alfred-composio-"));
+  } catch {
+    return [];
+  }
+  const out: Array<{
+    toolkit: string;
+    actions: Array<{ name: string; description: string }>;
+  }> = [];
+  for (const d of dirs) {
+    const toolkit = d.replace(/^alfred-composio-/, "");
+    const skillPath = `${skillsDir}/${d}/SKILL.md`;
+    let body: string;
+    try {
+      body = fs.readFileSync(skillPath, "utf-8");
+    } catch {
+      continue;
+    }
+    // Extract rows of the "## Actions" markdown table.
+    //   | `ACTION_NAME` | type | description |
+    const actions: Array<{ name: string; description: string }> = [];
+    const tableMatch = body.match(/##\s*Actions[\s\S]+?(?=\n##|\n?$)/);
+    const tableSrc = tableMatch ? tableMatch[0] : "";
+    const rowRe = /\|\s*`([A-Z][A-Z0-9_]+)`\s*\|[^|]*\|\s*([^|\n]+?)\s*\|/g;
+    let m: RegExpExecArray | null;
+    while ((m = rowRe.exec(tableSrc)) !== null) {
+      actions.push({
+        name: m[1],
+        description: m[2].slice(0, 120).trim(),
+      });
+    }
+    if (actions.length > 0) out.push({ toolkit, actions });
+  }
+  return out;
 }
 
 function readFileSafe(path: string, max = 16_000): string {
@@ -153,6 +201,7 @@ function buildVoiceContext(): VoiceContextBundle {
     openMatters,
     openTasks,
     recentSessions,
+    composioToolkits: readComposioToolkits(),
     generatedAt: new Date().toISOString(),
   };
 }
