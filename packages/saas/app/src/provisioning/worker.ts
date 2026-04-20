@@ -186,34 +186,35 @@ export async function provisionInstanceJob(
 
     logs.push(`Available locations: ${availableLocations.join(", ")}`);
 
+    // Build the per-tenant env overlay ONCE, before the retry loop. Nothing
+    // in here changes between location attempts — running `User.findUnique`
+    // N times is wasted DB traffic (and hides the "no User in entities list"
+    // bug deeper in the stack trace when it throws, see #446 followup).
+    const agentmailEnv: Record<string, string> = {};
+    if (
+      instance.agentmailInboxId &&
+      instance.agentmailInboxAddress &&
+      instance.agentmailInboxApiKey
+    ) {
+      agentmailEnv.TENANT_AGENTMAIL_INBOX_ID = instance.agentmailInboxId;
+      agentmailEnv.TENANT_AGENTMAIL_INBOX_ADDRESS = instance.agentmailInboxAddress;
+      agentmailEnv.TENANT_AGENTMAIL_API_KEY = decryptApiKey(instance.agentmailInboxApiKey);
+    }
+    // Owner email — used by init container to seed /vault/.auth/authorized_senders.json
+    // and by outbound email defaults. Derive from the user record.
+    const owner = await context.entities.User.findUnique({
+      where: { id: instance.userId },
+    });
+    if (owner?.email) {
+      agentmailEnv.TENANT_OWNER_EMAIL = owner.email;
+    }
+
     for (const location of availableLocations) {
       logs.push(`Trying location: ${location}`);
       console.info(
         `[provision:${instance.customerName}] Trying location: ${location}`,
       );
       lastStderr = "";
-
-      // AgentMail: thread the tenant's inbox-scoped key + owner email through
-      // to the ctrl provisioner, which will push them to the tenant .env and
-      // write a fallback file for the init container to read.
-      const agentmailEnv: Record<string, string> = {};
-      if (
-        instance.agentmailInboxId &&
-        instance.agentmailInboxAddress &&
-        instance.agentmailInboxApiKey
-      ) {
-        agentmailEnv.TENANT_AGENTMAIL_INBOX_ID = instance.agentmailInboxId;
-        agentmailEnv.TENANT_AGENTMAIL_INBOX_ADDRESS = instance.agentmailInboxAddress;
-        agentmailEnv.TENANT_AGENTMAIL_API_KEY = decryptApiKey(instance.agentmailInboxApiKey);
-      }
-      // Owner email — used by init container to seed /vault/.auth/authorized_senders.json
-      // and by outbound email defaults. Derive from the user record.
-      const owner = await context.entities.User.findUnique({
-        where: { id: instance.userId },
-      });
-      if (owner?.email) {
-        agentmailEnv.TENANT_OWNER_EMAIL = owner.email;
-      }
 
       // Use spawn instead of execFileAsync for streaming output
       finalExitCode = await new Promise<number>((resolve, reject) => {

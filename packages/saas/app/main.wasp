@@ -213,7 +213,13 @@ job provisionInstance {
   schedule: {
     cron: "*/1 * * * *" // poll for pending jobs every minute (backup)
   },
-  entities: [Instance, ProvisioningJob]
+  // `User` is read by worker.ts to source `TENANT_OWNER_EMAIL` (fed through
+  // to ctrl provisioner → tenant .env → init container for
+  // authorized_senders.json seeding + AgentMail defaults). Omitting it made
+  // every tenant signup after #446 landed crash at the first location-retry
+  // with `Cannot read properties of undefined (reading 'findUnique')` —
+  // Wasp only populates `context.entities.X` for X declared here.
+  entities: [Instance, ProvisioningJob, User]
 }
 
 job destroyInstance {
