@@ -1,8 +1,25 @@
 // Voice Bridge entry — HTTP server + WebSocket server on :9000.
 //
-// Caddy proxies wss://alfred.black/voice/<tenantId>?sig=<hmac>&initiator=...&intent=...
-// to this process. We validate the signed query, then hand the WS off to a
-// VoiceCall instance that runs the Twilio MS ↔ OpenAI Realtime bridge.
+// Caddy proxies wss://voice.alfred.black/voice/<tenantId> to this process.
+// (The `voice.alfred.black` subdomain is DNS-only at Cloudflare — orange cloud
+// off — because Cloudflare's WAF drops Twilio Media Stream WS upgrades with
+// error 31920 on proxied hostnames.)
+//
+// Authentication: the TwiML <Stream> emitted by SaaS carries a signed HMAC in
+// a <Parameter name="sig"> child element. Twilio strips query strings from the
+// Stream URL, so we CANNOT verify the sig on WS upgrade — it arrives inside
+// the first `start` event on the stream. `VoiceCall` reads + verifies it before
+// doing any billable work (tenant lookup, OpenAI Realtime connect).
+//
+// On-wire flow:
+//   1. Client opens WS to /voice/<tenantId>
+//   2. We accept the upgrade iff the path shape is valid.
+//   3. VoiceCall waits for Twilio `start` event; verifies customParameters.sig;
+//      if bad, disposes immediately.
+//   4. Valid sig → fetch tenant context + connect OpenAI Realtime + greet.
+//
+// See packages/saas/app/src/server/twilio/webhooks.ts for the matching
+// `<Parameter name="sig">` emission.
 
 import http from "http";
 import crypto from "crypto";
@@ -10,15 +27,21 @@ import { WebSocketServer } from "ws";
 import { config } from "./config.js";
 import { VoiceCall } from "./voice-call.js";
 
-function verifySig(tenantId: string, sig: string | null): boolean {
+export function verifySig(tenantId: string, sig: string | null | undefined): boolean {
   if (!sig) return false;
   const expected = crypto
     .createHmac("sha256", config.internalToken)
     .update(tenantId)
     .digest("hex");
-  // Constant-time compare
-  const a = Buffer.from(sig, "hex");
-  const b = Buffer.from(expected, "hex");
+  // Constant-time compare; any length mismatch = reject.
+  let a: Buffer;
+  let b: Buffer;
+  try {
+    a = Buffer.from(sig, "hex");
+    b = Buffer.from(expected, "hex");
+  } catch {
+    return false;
+  }
   if (a.length !== b.length) return false;
   return crypto.timingSafeEqual(a, b);
 }
@@ -28,7 +51,8 @@ function verifySig(tenantId: string, sig: string | null): boolean {
 // can scrape from Grafana when it's wired up.
 const metrics = {
   callsAccepted: 0,
-  callsRejected403: 0,
+  callsRejectedBadPath: 0,
+  callsRejectedBadSig: 0,
   callsDisposed: 0,
   toolDispatches: 0,
   errors: 0,
@@ -71,22 +95,19 @@ httpServer.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const match = url.pathname.match(/^\/voice\/([^/]+)$/);
     if (!match) {
+      bumpMetric("callsRejectedBadPath");
       socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
       socket.destroy();
       return;
     }
     const tenantId = decodeURIComponent(match[1]);
-    const sig = url.searchParams.get("sig");
-    if (!verifySig(tenantId, sig)) {
-      bumpMetric("callsRejected403");
-      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
-      socket.destroy();
-      return;
-    }
-    bumpMetric("callsAccepted");
+    // Sig arrives in the Twilio `start` event (customParameters) — NOT in the
+    // WS URL query string, since Twilio strips query params from Stream URLs.
+    // VoiceCall verifies it before any billable work.
     const initiator =
       url.searchParams.get("initiator") === "alfred" ? "alfred" : "user";
     const intent = url.searchParams.get("intent") ?? undefined;
+    bumpMetric("callsAccepted");
 
     wss.handleUpgrade(req, socket, head, (ws) => {
       const call = new VoiceCall(ws, { tenantId, initiator, intent });

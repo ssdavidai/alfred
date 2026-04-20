@@ -4,7 +4,7 @@
 //   self              — proxy to THIS tenant's ctrl-api (mirrors the MCP
 //                       `self` tool defined in packages/openclaw/mcp/ctrl-server.mjs:159)
 //   composio_execute  — dispatch a Composio action via the tenant's
-//                       /api/v1/integrations/composio_execute endpoint
+//                       /api/v1/integrations/execute endpoint
 //
 // Dispatch happens by HTTP from the bridge to the tenant's ctrl-api over
 // Tailscale, using the per-call AAS_API_KEY fetched at call setup.
@@ -162,7 +162,7 @@ export async function dispatchComposioExecute(
     return { ok: false, error: "action argument required" };
   }
   return ctrlFetch(tenant, {
-    endpoint: "/api/v1/integrations/composio_execute",
+    endpoint: "/api/v1/integrations/execute",
     method: "POST",
     body: { action: args.action, arguments: args.arguments ?? {} },
   });

@@ -1,15 +1,21 @@
 // VoiceCall — one bridge session for one phone call.
 //
 // Lifecycle:
-//   1. ctor: stash WS + tenantId + signed-query metadata
-//   2. start(): fetch tenant, open Realtime WS, await Twilio `start` event
-//   3. bidirectional bridge until either side closes
-//   4. on Twilio `stop` or hard cap: dispose
+//   1. ctor: stash WS + tenantId
+//   2. start(): wire Twilio WS listeners; return immediately.
+//   3. onTwilioMessage 'start': verify sig from customParameters; if valid,
+//      fetch tenant context + open OpenAI Realtime. If invalid, dispose
+//      immediately — no tenant lookup, no OpenAI minutes burned.
+//   4. bidirectional bridge until either side closes.
+//   5. on Twilio `stop` or hard cap: dispose.
+//
+// Sig lives in customParameters (not query string) because Twilio <Stream>
+// silently strips `?k=v` from stream URLs — see ../../saas/app/src/server/
+// twilio/webhooks.ts and ./server.ts for the matching emission + verify.
 
 import type { WebSocket as WsSocket } from "ws";
 import {
   parseTwilioMessage,
-  sendTwilioClear,
   sendTwilioMark,
   sendTwilioMedia,
 } from "./twilio-stream.js";
@@ -24,6 +30,7 @@ import {
 } from "./tenant.js";
 import { buildInstructions } from "./instructions.js";
 import { config } from "./config.js";
+import { verifySig, bumpMetric } from "./server.js";
 import {
   ALL_TOOLS,
   dispatchComposioExecute,
@@ -48,7 +55,7 @@ export class VoiceCall {
   private realtime: OpenAIRealtimeClient | null = null;
   private hardCapTimer: NodeJS.Timeout | null = null;
   private idleTimer: NodeJS.Timeout | null = null;
-  private speaking = false;
+  private _startDeadline: NodeJS.Timeout | null = null;
   private disposed = false;
   private startedAt: string;
   private transcript: TranscriptTurn[] = [];
@@ -62,7 +69,11 @@ export class VoiceCall {
   }
 
   async start(): Promise<void> {
-    // Wire up Twilio first so we can react to `start` (which has streamSid).
+    // Wire up Twilio listeners and return. We intentionally do NOT fetch the
+    // tenant or open OpenAI Realtime yet — sig verification happens on the
+    // first `start` Twilio event (which carries customParameters.sig), and
+    // we don't want to burn tenant-lookup or OpenAI connect cost on a call
+    // that fails the sig check.
     this.twilioWs.on("message", (data: Buffer) => this.onTwilioMessage(data));
     this.twilioWs.on("close", () => this.dispose("twilio-closed"));
     this.twilioWs.on("error", (err) => {
@@ -70,7 +81,22 @@ export class VoiceCall {
       this.dispose("twilio-error");
     });
 
-    // Look up tenant. Failure = bail out; we cannot bridge a call we can't tag.
+    // Safety net: if Twilio never sends `start`, dispose after 10s so we don't
+    // hold an idle WS indefinitely.
+    const startDeadline = setTimeout(() => {
+      if (!this.streamSid && !this.disposed) {
+        console.log(
+          `[call ${this.callId}] never received Twilio start event; disposing`,
+        );
+        this.dispose("no-twilio-start");
+      }
+    }, 10_000);
+    // Clear the deadline once we're running.
+    this._startDeadline = startDeadline;
+  }
+
+  // Runs after sig verification on the Twilio `start` event.
+  private async initialise(): Promise<void> {
     try {
       this.tenantCtx = await fetchTenantContext(this.opts.tenantId);
     } catch (err) {
@@ -115,6 +141,10 @@ export class VoiceCall {
 
     this.resetIdleTimer();
 
+    // Trigger Alfred to speak first so we don't have dead air after pickup.
+    // Semantic VAD would otherwise wait for user audio.
+    this.realtime?.triggerGreeting();
+
     console.log(
       `[call ${this.callId}] bridge started for tenant ${this.opts.tenantId} (${this.opts.initiator})`,
     );
@@ -129,26 +159,43 @@ export class VoiceCall {
       case "connected":
         // No-op; Twilio acks the WS.
         break;
-      case "start":
+      case "start": {
         this.streamSid = event.streamSid;
-        // Twilio includes the caller's E.164 number in start.start.customParameters
-        // when set on the TwiML <Stream> — but we didn't set it. Fall back to the
-        // top-level `from` field via Twilio's start payload (callSid is the SID).
-        // For Phase 4 we just record the streamSid; the actual From comes from the
-        // earlier voice webhook (we'll read it from the call leg in Phase 9 if
-        // needed, or pass it in the TwiML <Parameter> when we tighten this up).
-        // Trigger Alfred to speak first so we don't have dead air after pickup.
-        // Semantic VAD would otherwise wait for user audio.
-        this.realtime?.triggerGreeting();
+        if (this._startDeadline) {
+          clearTimeout(this._startDeadline);
+          this._startDeadline = null;
+        }
+        // Verify sig from customParameters BEFORE any billable work.
+        // SaaS emits <Parameter name="sig" value="<hmac>"/> in the <Stream>;
+        // it arrives as event.start.customParameters.sig.
+        const params = (event as any).start?.customParameters ?? {};
+        const sig: string | undefined = params.sig;
+        if (!verifySig(this.opts.tenantId, sig)) {
+          bumpMetric("callsRejectedBadSig");
+          console.warn(
+            `[call ${this.callId}] sig verification failed — disposing`,
+          );
+          this.dispose("bad-sig");
+          return;
+        }
+        // Capture caller number if SaaS included it as a parameter (optional).
+        if (typeof params.from === "string") {
+          this.callerNumber = params.from;
+        }
+        // Sig is valid → fetch tenant + connect OpenAI. Fire-and-forget; the
+        // `start` handler itself returns synchronously.
+        this.initialise().catch((err) => {
+          console.error(`[call ${this.callId}] initialise failed`, err);
+          this.dispose("initialise-failed");
+        });
         break;
+      }
       case "media":
         this.resetIdleTimer();
-        // Barge-in: if we're mid-response and the user starts talking, cancel.
-        // OpenAI's semantic VAD will drive the next turn.
-        if (this.speaking) {
-          this.handleBargeIn();
-        }
-        // Forward μ-law bytes verbatim.
+        // Forward μ-law bytes verbatim. Barge-in is handled by the OpenAI
+        // server-side VAD (`interrupt_response: true`), NOT by cancelling on
+        // every media packet — the preview API required client-side cancellation
+        // which in GA causes `status: "cancelled"` responses with zero tokens.
         this.realtime?.appendAudio(event.media.payload);
         break;
       case "mark":
@@ -166,26 +213,25 @@ export class VoiceCall {
 
     switch (event.type) {
       case "response.created":
-        this.speaking = true;
         this.currentAssistantText = "";
         break;
-      case "response.audio.delta":
+      case "response.output_audio.delta":
+        // GA event name (was `response.audio.delta` in the preview API).
         if (event.delta) {
           sendTwilioMedia(this.twilioWs, this.streamSid, event.delta);
         }
         break;
-      case "response.audio_transcript.delta":
+      case "response.output_audio_transcript.delta":
         // Assistant's TTS transcript streamed as we speak — accumulate.
         if (typeof event.delta === "string") {
           this.currentAssistantText += event.delta;
         }
         break;
-      case "response.audio.done":
+      case "response.output_audio.done":
         // Mark playback so we know when Twilio finishes the buffer.
         sendTwilioMark(this.twilioWs, this.streamSid, `seg-${Date.now()}`);
         break;
       case "response.done":
-        this.speaking = false;
         if (this.currentAssistantText.trim()) {
           this.transcript.push({
             role: "assistant",
@@ -256,15 +302,6 @@ export class VoiceCall {
     this.realtime.submitToolResult(callId, serializeToolResult(result));
   }
 
-  private handleBargeIn(): void {
-    if (!this.streamSid) return;
-    // Drop any audio Twilio is still buffering for playback,
-    // and tell OpenAI to stop generating + clear its input scratch.
-    sendTwilioClear(this.twilioWs, this.streamSid);
-    this.realtime?.cancelResponse();
-    this.speaking = false;
-  }
-
   private resetIdleTimer(): void {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
@@ -278,6 +315,8 @@ export class VoiceCall {
     this.disposed = true;
     if (this.hardCapTimer) clearTimeout(this.hardCapTimer);
     if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (this._startDeadline) clearTimeout(this._startDeadline);
+    bumpMetric("callsDisposed");
 
     // Fire-and-forget transcript write-back BEFORE closing the OpenAI WS,
     // so we still have the captured text in scope.

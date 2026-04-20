@@ -11,14 +11,21 @@ import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 
-const VAULT_PATH = process.env.VAULT_PATH ?? "/vault";
+// Defaults match the ctrl-api container's actual mounts (see
+// packages/ctrl/src/templates/docker-compose.yaml.njk): vault is bind-mounted
+// from the host at /mnt/encrypted/vault, and the openclaw state dir at
+// /mnt/encrypted/openclaw. Env-var overrides are honoured.
+//
+// Prior defaults (`/vault`, `/openclaw-state/...`) were wrong for the ctrl-api
+// container and caused `/api/v1/phone/voice-context` to silently return empty
+// MEMORY.md, empty voice skill, and zero matters/tasks — making the voice
+// agent "not know who Sir is" at call start.
+const VAULT_PATH = process.env.VAULT_PATH ?? "/mnt/encrypted/vault";
 const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
-// In-tenant view of the openclaw workspace (mounted at /home/node/.openclaw in
-// the openclaw container; ctrl-api mounts /mnt/encrypted/openclaw → /openclaw-state).
 const WORKSPACE_DIR =
-  process.env.OPENCLAW_WORKSPACE_DIR ?? "/openclaw-state/workspace";
+  process.env.OPENCLAW_WORKSPACE_DIR ?? "/mnt/encrypted/openclaw/workspace";
 const OPENCLAW_CONFIG_PATH =
-  process.env.OPENCLAW_CONFIG_PATH ?? "/openclaw-state/openclaw.json";
+  process.env.OPENCLAW_CONFIG_PATH ?? "/mnt/encrypted/openclaw/openclaw.json";
 const OPENCLAW_GATEWAY_URL =
   process.env.OPENCLAW_GATEWAY_URL ?? "http://openclaw:18789";
 const GATEWAY_TOKEN_FILE = "/alfred-data/.gateway-token";

@@ -1,22 +1,33 @@
 // OpenAI Realtime API client — persistent WS per call.
 //
-// Reference: https://platform.openai.com/docs/api-reference/realtime
+// Reference: https://platform.openai.com/docs/api-reference/realtime (GA schema,
+// used by `gpt-realtime` / `gpt-realtime-1.5`). This is NOT the older preview
+// API — the session shape is nested under `audio.input` / `audio.output`, and
+// output events are renamed `response.output_audio.*`. Sending the preview
+// shape causes the server to silently ignore codec config and cancel responses
+// with `status: "cancelled"`, `reason: "client_cancelled"` — see
+// openai-realtime-ga migration notes in deploy/AGENTPHONE_ROLLOUT.md.
 //
 // Outbound events to OpenAI:
-//   session.update             — set instructions, voice, formats, VAD, tools
-//   input_audio_buffer.append  — append base64 audio (we forward Twilio's μ-law as-is)
-//   input_audio_buffer.clear   — drop pending input (used on barge-in)
-//   response.cancel            — cancel an in-flight response (used on barge-in)
+//   session.update             — set instructions, audio codecs, VAD, tools
+//   input_audio_buffer.append  — append base64 audio (we forward Twilio's μ-law verbatim)
+//   input_audio_buffer.clear   — drop pending input (rarely needed; VAD handles barge-in)
+//   response.cancel            — cancel an in-flight response (manual barge-in only)
 //   response.create            — request a turn (mostly automatic with semantic VAD)
-//   conversation.item.create   — Phase 3, used for function_call_output
+//   conversation.item.create   — used for function_call_output
 //
 // Inbound events we care about:
-//   session.created / session.updated  — connection acks
-//   response.audio.delta               — base64 audio chunk (forward to Twilio)
-//   response.audio.done                — audio finished (request a Twilio mark)
-//   response.done                      — full response complete
-//   response.function_call_arguments.done — Phase 3 tool call dispatch
-//   error                              — log + continue
+//   session.created / session.updated           — connection acks (diag: compare
+//                                                 session.updated echo vs what we sent)
+//   response.output_audio.delta                 — base64 audio chunk → forward to Twilio
+//   response.output_audio_transcript.delta      — assistant TTS transcript
+//   response.output_audio.done                  — audio finished (cue a Twilio mark)
+//   response.done                               — full response complete
+//   response.function_call_arguments.done       — tool-call dispatch point
+//   input_audio_buffer.speech_started           — user started talking (server
+//                                                 auto-cancels assistant per VAD config)
+//   conversation.item.input_audio_transcription.completed — user-utterance transcript
+//   error                                       — log + continue
 
 import { WebSocket as WsSocket } from "ws";
 import { config } from "./config.js";
@@ -52,10 +63,12 @@ export class OpenAIRealtimeClient {
   async connect(sessionConfig: RealtimeSessionConfig): Promise<void> {
     const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(config.openaiModel)}`;
     return new Promise((resolve, reject) => {
+      // GA endpoint does NOT want the `OpenAI-Beta: realtime=v1` header — it
+      // silently flips the session into a compat mode that rejects GA-shape
+      // session.update payloads.
       const ws = new WsSocket(url, {
         headers: {
           Authorization: `Bearer ${config.openaiApiKey}`,
-          "OpenAI-Beta": "realtime=v1",
         },
       });
       this.ws = ws;
@@ -75,22 +88,39 @@ export class OpenAIRealtimeClient {
         }
 
         if (event.type === "session.created") {
-          // Configure the session now that it's alive.
+          // Configure the session now that it's alive — GA schema:
+          //   session.type: "realtime"  (required discriminator)
+          //   output_modalities: ["audio"]  (replaces preview `modalities`)
+          //   audio.{input,output}.format.type = "audio/pcmu"  (replaces
+          //     flat input_audio_format / output_audio_format)
+          //   audio.input.{turn_detection,transcription,noise_reduction}
+          //   audio.output.voice  (replaces top-level `voice`)
           this.send({
             type: "session.update",
             session: {
+              type: "realtime",
+              output_modalities: ["audio"],
               instructions: sessionConfig.instructions,
-              voice: sessionConfig.voice ?? config.openaiVoice,
-              input_audio_format: "g711_ulaw",
-              output_audio_format: "g711_ulaw",
-              turn_detection: {
-                type: "semantic_vad",
-                eagerness: "medium",
-              },
-              // Capture user speech as text so the bridge can build a transcript
-              // for vault write-back at hangup. Whisper-based, fast.
-              input_audio_transcription: {
-                model: "gpt-4o-mini-transcribe",
+              audio: {
+                input: {
+                  format: { type: "audio/pcmu" },
+                  turn_detection: {
+                    type: "semantic_vad",
+                    eagerness: "medium",
+                    // With `interrupt_response: true` the server auto-cancels the
+                    // in-flight response when the user starts talking — the
+                    // bridge does NOT need to send `response.cancel` itself.
+                    create_response: true,
+                    interrupt_response: true,
+                  },
+                  // Capture user speech as text so the bridge can build a transcript
+                  // for vault write-back at hangup.
+                  transcription: { model: "gpt-4o-mini-transcribe" },
+                },
+                output: {
+                  format: { type: "audio/pcmu" },
+                  voice: sessionConfig.voice ?? config.openaiVoice,
+                },
               },
               ...(sessionConfig.tools
                 ? { tools: sessionConfig.tools, tool_choice: "auto" }

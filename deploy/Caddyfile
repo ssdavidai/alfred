@@ -32,3 +32,12 @@ app.alfred.black {
 plausible.alfred.black {
     reverse_proxy localhost:8000
 }
+
+voice.alfred.black {
+    # Dedicated host for AgentPhone Voice Bridge WebSocket upgrade.
+    #
+    # MUST be DNS-only (grey cloud) at Cloudflare — proxied hostnames make
+    # Cloudflare's WAF drop Twilio Media Stream WS upgrades with error 31920.
+    # See deploy/AGENTPHONE_ROLLOUT.md for the DNS + TLS setup.
+    reverse_proxy localhost:9000
+}
