@@ -77,14 +77,23 @@ export function registerTwilioWebhooks(app: Application): void {
       }
 
       const sigParam = signTenantId(instance.id);
-      const wsUrl = `wss://${req.headers["x-forwarded-host"] || req.headers.host}/voice/${instance.id}?sig=${sigParam}`;
+      // Route WS via `voice.alfred.black` (DNS-only subdomain, bypasses the
+      // Cloudflare WAF which drops Twilio Media Stream WS upgrades with error
+      // 31920). Override via VOICE_BRIDGE_WS_HOST env var if needed.
+      const wsHost = process.env.VOICE_BRIDGE_WS_HOST || "voice.alfred.black";
+      const wsUrl = `wss://${wsHost}/voice/${instance.id}`;
 
-      // <Connect><Stream> establishes a bidirectional Media Stream over WS to the
-      // Voice Bridge. Twilio keeps the call leg alive while the bridge is connected.
+      // Twilio <Stream> strips query strings from the URL — the sig MUST be
+      // passed as a child <Parameter>, which Twilio relays as
+      // `customParameters.sig` in the WS `start` event. The Voice Bridge
+      // verifies it before doing any billable work.
       const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="${escapeXml(wsUrl)}"/>
+    <Stream url="${escapeXml(wsUrl)}">
+      <Parameter name="sig" value="${escapeXml(sigParam)}"/>
+      <Parameter name="from" value="${escapeXml(from)}"/>
+    </Stream>
   </Connect>
 </Response>`;
       res.type("text/xml").status(200).send(twiml);

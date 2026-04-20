@@ -21,6 +21,14 @@ export interface VoiceContextBundle {
   openMatters: Array<{ name: string; summary?: string }>;
   openTasks: Array<{ name: string; due?: string; summary?: string }>;
   recentSessions: Array<{ at: string; channel: string; summary: string }>;
+  // Connected Composio toolkits, with the exact action names + one-line
+  // descriptions the voice agent can pass to `composio_execute`. Without this
+  // the agent tends to hallucinate plausible-sounding action names (e.g.
+  // `GOOGLECALENDAR_LIST_EVENTS` vs the real `GOOGLECALENDAR_EVENTS_LIST`).
+  composioToolkits?: Array<{
+    toolkit: string;
+    actions: Array<{ name: string; description: string }>;
+  }>;
   generatedAt: string;
 }
 

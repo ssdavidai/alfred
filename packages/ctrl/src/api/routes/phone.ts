@@ -11,14 +11,21 @@ import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 
-const VAULT_PATH = process.env.VAULT_PATH ?? "/vault";
+// Defaults match the ctrl-api container's actual mounts (see
+// packages/ctrl/src/templates/docker-compose.yaml.njk): vault is bind-mounted
+// from the host at /mnt/encrypted/vault, and the openclaw state dir at
+// /mnt/encrypted/openclaw. Env-var overrides are honoured.
+//
+// Prior defaults (`/vault`, `/openclaw-state/...`) were wrong for the ctrl-api
+// container and caused `/api/v1/phone/voice-context` to silently return empty
+// MEMORY.md, empty voice skill, and zero matters/tasks — making the voice
+// agent "not know who Sir is" at call start.
+const VAULT_PATH = process.env.VAULT_PATH ?? "/mnt/encrypted/vault";
 const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
-// In-tenant view of the openclaw workspace (mounted at /home/node/.openclaw in
-// the openclaw container; ctrl-api mounts /mnt/encrypted/openclaw → /openclaw-state).
 const WORKSPACE_DIR =
-  process.env.OPENCLAW_WORKSPACE_DIR ?? "/openclaw-state/workspace";
+  process.env.OPENCLAW_WORKSPACE_DIR ?? "/mnt/encrypted/openclaw/workspace";
 const OPENCLAW_CONFIG_PATH =
-  process.env.OPENCLAW_CONFIG_PATH ?? "/openclaw-state/openclaw.json";
+  process.env.OPENCLAW_CONFIG_PATH ?? "/mnt/encrypted/openclaw/openclaw.json";
 const OPENCLAW_GATEWAY_URL =
   process.env.OPENCLAW_GATEWAY_URL ?? "http://openclaw:18789";
 const GATEWAY_TOKEN_FILE = "/alfred-data/.gateway-token";
@@ -43,7 +50,55 @@ interface VoiceContextBundle {
   openMatters: Array<{ name: string; summary?: string }>;
   openTasks: Array<{ name: string; due?: string; summary?: string }>;
   recentSessions: Array<{ at: string; channel: string; summary: string }>;
+  composioToolkits: Array<{
+    toolkit: string;
+    actions: Array<{ name: string; description: string }>;
+  }>;
   generatedAt: string;
+}
+
+function readComposioToolkits(): Array<{
+  toolkit: string;
+  actions: Array<{ name: string; description: string }>;
+}> {
+  const skillsDir = `${WORKSPACE_DIR}/skills`;
+  let dirs: string[];
+  try {
+    dirs = fs
+      .readdirSync(skillsDir)
+      .filter((d: string) => d.startsWith("alfred-composio-"));
+  } catch {
+    return [];
+  }
+  const out: Array<{
+    toolkit: string;
+    actions: Array<{ name: string; description: string }>;
+  }> = [];
+  for (const d of dirs) {
+    const toolkit = d.replace(/^alfred-composio-/, "");
+    const skillPath = `${skillsDir}/${d}/SKILL.md`;
+    let body: string;
+    try {
+      body = fs.readFileSync(skillPath, "utf-8");
+    } catch {
+      continue;
+    }
+    // Extract rows of the "## Actions" markdown table.
+    //   | `ACTION_NAME` | type | description |
+    const actions: Array<{ name: string; description: string }> = [];
+    const tableMatch = body.match(/##\s*Actions[\s\S]+?(?=\n##|\n?$)/);
+    const tableSrc = tableMatch ? tableMatch[0] : "";
+    const rowRe = /\|\s*`([A-Z][A-Z0-9_]+)`\s*\|[^|]*\|\s*([^|\n]+?)\s*\|/g;
+    let m: RegExpExecArray | null;
+    while ((m = rowRe.exec(tableSrc)) !== null) {
+      actions.push({
+        name: m[1],
+        description: m[2].slice(0, 120).trim(),
+      });
+    }
+    if (actions.length > 0) out.push({ toolkit, actions });
+  }
+  return out;
 }
 
 function readFileSafe(path: string, max = 16_000): string {
@@ -146,6 +201,7 @@ function buildVoiceContext(): VoiceContextBundle {
     openMatters,
     openTasks,
     recentSessions,
+    composioToolkits: readComposioToolkits(),
     generatedAt: new Date().toISOString(),
   };
 }

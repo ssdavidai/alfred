@@ -127,6 +127,50 @@ After David is stable:
    respective dashboards. Alert thresholds (suggested): >$5/day Twilio, >$20/day
    OpenAI, per tenant.
 
+## DNS: `voice.alfred.black` (DNS-only, MUST NOT be proxied)
+
+Twilio's Media Stream WS upgrades fail with error 31920 when routed through
+Cloudflare's proxy (WAF drops the Upgrade). Use a dedicated DNS-only subdomain
+for the Voice Bridge, keep everything else (dashboard, webhooks, APIs) proxied.
+
+**At Cloudflare (zone `alfred.black`):**
+
+```bash
+CF_KEY=...     # CLOUDFLARE_API_KEY (legacy global key — email + key, not a scoped token)
+CF_EMAIL=...   # CLOUDFLARE_EMAIL
+ZONE=f13033654094bba0fdfb4c5605496e47
+
+# A record
+curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE}/dns_records" \
+  -H "X-Auth-Email: ${CF_EMAIL}" -H "X-Auth-Key: ${CF_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"A","name":"voice","content":"138.199.236.244","proxied":false}'
+
+# AAAA record (SaaS VM has both)
+curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${ZONE}/dns_records" \
+  -H "X-Auth-Email: ${CF_EMAIL}" -H "X-Auth-Key: ${CF_KEY}" \
+  -H "Content-Type: application/json" \
+  -d '{"type":"AAAA","name":"voice","content":"2a01:4f8:c012:5470::1","proxied":false}'
+```
+
+Verify DNS-only (grey cloud) from the dashboard or:
+
+```bash
+dig +short voice.alfred.black
+# Should return the raw VM IPs (138.199.236.244 / 2a01:...), NOT Cloudflare's
+# edge IPs (104.21.x.x / 172.67.x.x). If you see Cloudflare edges, proxy is ON.
+```
+
+**At the SaaS VM**: the `voice.alfred.black` Caddyfile block (in [deploy/Caddyfile](./Caddyfile))
+reverse-proxies to `localhost:9000`. Caddy auto-obtains the LetsEncrypt cert
+via `tls-alpn-01` on first request. No rollback needed unless renaming.
+
+**At Twilio**: no change. The SaaS-side TwiML emitter (`packages/saas/app/src/server/twilio/webhooks.ts`)
+reads `VOICE_BRIDGE_WS_HOST` env var (default `voice.alfred.black`) and emits
+`wss://voice.alfred.black/voice/<tenantId>` with the HMAC sig in a
+`<Parameter name="sig">` child element — Twilio strips query strings from
+`<Stream>` URLs, so sig MUST NOT be in the URL query.
+
 ## Rollback
 
 - **Disable a tenant's phone line** (emergency): manually clear

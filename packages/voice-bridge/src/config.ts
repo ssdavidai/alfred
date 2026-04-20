@@ -24,9 +24,9 @@ export const config = {
   // with SaaS on the same VM, so this is reachable over the host network.
   saasInternalUrl: optional("SAAS_INTERNAL_URL", "https://alfred.black"),
 
-  // OpenAI Realtime config
+  // OpenAI Realtime config. Default model tracks the latest GA slug.
   openaiApiKey: required("OPENAI_API_KEY"),
-  openaiModel: optional("OPENAI_REALTIME_MODEL", "gpt-realtime"),
+  openaiModel: optional("OPENAI_REALTIME_MODEL", "gpt-realtime-1.5"),
   openaiVoice: optional("OPENAI_REALTIME_VOICE", "cedar"),
 
   // Per-call hard cap to prevent runaway minutes
