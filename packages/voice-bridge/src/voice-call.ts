@@ -119,6 +119,7 @@ export class VoiceCall {
       await this.realtime.connect({
         instructions: buildInstructions({
           tenantPhoneNumber: this.tenantCtx.phoneNumber,
+          callerNumber: this.callerNumber,
           initiator: this.opts.initiator,
           intent: this.opts.intent,
           voiceContext: this.voiceCtx,

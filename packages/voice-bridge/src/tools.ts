@@ -169,10 +169,17 @@ export async function dispatchComposioExecute(
 }
 
 // ── Result formatting ────────────────────────────────────────────────────────
-// OpenAI Realtime function-call results are short JSON strings the model
-// reads on the next `response.create`. Cap size to avoid blowing context.
+// OpenAI Realtime function-call results are JSON strings the model reads on
+// the next `response.create`. Cap size to avoid blowing context — but large
+// enough that real tool outputs (e.g. GOOGLECALENDAR_EVENTS_LIST, GMAIL_FETCH_
+// EMAILS) don't get chopped mid-array, which is how the voice agent ends up
+// confabulating missing items from surrounding context instead of saying
+// "the result is truncated."
+//
+// 24 KB ≈ 6k tokens — small vs. gpt-realtime-1.5's context window, large
+// enough for ~10-20 real calendar/email items.
 
-const MAX_RESULT_BYTES = 8_000;
+const MAX_RESULT_BYTES = 24_000;
 
 export function serializeToolResult(result: ToolResult): string {
   let json = JSON.stringify(result);
