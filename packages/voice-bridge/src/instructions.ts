@@ -11,6 +11,10 @@ import type { VoiceContextBundle } from "./tenant.js";
 
 export interface InstructionContext {
   tenantPhoneNumber: string | null;
+  // Caller E.164 number, as passed by SaaS via <Parameter name="from"> in
+  // the TwiML <Stream>. Without this, the agent routinely hallucinates
+  // placeholders like "your-number" when Sir asks to receive an SMS.
+  callerNumber?: string | null;
   initiator?: "user" | "alfred";
   intent?: string;
   voiceContext?: VoiceContextBundle | null;
@@ -104,5 +108,13 @@ export function buildInstructions(ctx: InstructionContext): string {
 
   const primer = ctx.voiceContext ? formatContextPrimer(ctx.voiceContext) : "";
 
-  return `${persona}${primer}`;
+  // Include caller identity inline at the top of the primer so the model
+  // always sees it. Used when Sir asks for an SMS back — prevents the
+  // `"your-number"` placeholder bug (see alfred-voice/SKILL.md § Caller
+  // number handling).
+  const callerLine = ctx.callerNumber
+    ? `\n\nCaller: ${ctx.callerNumber} (use this number for any SMS the caller asks you to send).`
+    : "";
+
+  return `${persona}${callerLine}${primer}`;
 }
