@@ -171,6 +171,41 @@ reads `VOICE_BRIDGE_WS_HOST` env var (default `voice.alfred.black`) and emits
 `<Parameter name="sig">` child element — Twilio strips query strings from
 `<Stream>` URLs, so sig MUST NOT be in the URL query.
 
+## Backfilling pre-#455 tenants (existing fleet without the env vars)
+
+The `provisionAgentPhone` step (`packages/ctrl/src/infra/provisioner.ts:1538`)
+writes four env vars into each tenant's `/opt/alfred/compose/.env`:
+`AGENTPHONE_PHONE_NUMBER`, `TENANT_ID`, `VOICE_BRIDGE_INTERNAL_TOKEN`,
+`SAAS_INTERNAL_URL`. They're required by `ctrl-api`'s `shipSmsViaSaas` path
+(outbound SMS from the voice agent) — without them, `self({endpoint:
+"/api/v1/phone/sms", ...})` returns `TENANT_ID or phone number not set`.
+
+**New tenants** provisioned through the normal `ctrl provision` flow get
+these automatically — no operator action needed.
+
+**Pre-#455 tenants** that have a `phoneNumber` in Prisma but were
+provisioned before the step landed need a one-time backfill. Run this
+from a workstation that has:
+  - `~/.ssh/id_ed25519` with access to the SaaS VM (`alfred-control`)
+  - the tenant's deploy SSH key (`~/.ssh/alfred-<customer>-<id>`)
+
+```bash
+scripts/agentphone-backfill.sh <customer-slug> <tenant-ssh-key> <tenant-tailscale-ip>
+
+# Example:
+scripts/agentphone-backfill.sh david   ~/.ssh/alfred-david-99   100.119.63.29
+scripts/agentphone-backfill.sh miguel  ~/.ssh/alfred-miguel-103 100.72.147.32
+scripts/agentphone-backfill.sh rapali  ~/.ssh/alfred-rapali-101 100.121.134.35
+```
+
+The script reads the tenant's phone number + Instance id from Prisma
+(via SaaS postgres) and the shared token from SaaS `.env.server`, then
+upserts the four vars onto the tenant's `/opt/alfred/compose/.env` and
+restarts `ctrl-api`. Idempotent — safe to re-run.
+
+**Initial fleet backfill (2026-04-20)** already applied on david, miguel,
+rapali manually; the script captures that procedure for future cases.
+
 ## Rollback
 
 - **Disable a tenant's phone line** (emergency): manually clear
