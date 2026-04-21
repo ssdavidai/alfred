@@ -2,12 +2,13 @@ import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 
-// The ctrl-api container mounts /mnt/encrypted/alfred at the same path
-// (NOT remapped to /alfred-data like alfred-learn does — see
+// The ctrl-api container mounts /mnt/encrypted/alfred at the same path (NOT
+// remapped to /alfred-data like alfred-learn does — see
 // packages/ctrl/src/templates/docker-compose.yaml.njk and PR #463). Read the
 // env var the compose template already sets, and fall back to both common
 // paths for older tenants where the env wasn't in the compose template yet.
 const OPENCLAW_GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL || "http://openclaw:18789";
+const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || "/mnt/encrypted/openclaw/openclaw.json";
 const GATEWAY_TOKEN_CANDIDATES = [
   process.env.OPENCLAW_GATEWAY_TOKEN_FILE,
   "/mnt/encrypted/alfred/.gateway-token",
@@ -26,48 +27,123 @@ function getGatewayToken(): string {
   return "";
 }
 
+// Pick the tenant's primary outbound channel. Preference order: slack →
+// telegram → webchat. Reads openclaw.json's `channels` map and returns the
+// first one that's `enabled: true`. Falls back to "webchat".
+function pickPrimaryChannel(): string {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(OPENCLAW_CONFIG_PATH, "utf-8")) as {
+      channels?: Record<string, { enabled?: boolean }>;
+    };
+    const channels = cfg.channels ?? {};
+    for (const name of ["slack", "telegram", "discord", "whatsapp", "webchat"]) {
+      if (channels[name]?.enabled) return name;
+    }
+  } catch {
+    // fall through
+  }
+  return "webchat";
+}
+
+// Resolve Sir's recipient id on a given channel by asking the gateway's
+// sessions_list for the most-recent session bound to that channel. We
+// extract `deliveryContext.to` — e.g. `user:U08UGBQL5J5` on Slack or a
+// chat id on Telegram. Fails soft: returns undefined if nothing found.
+async function resolveRecipient(channel: string, token: string): Promise<string | undefined> {
+  try {
+    const resp = await fetch(`${OPENCLAW_GATEWAY_URL}/tools/invoke`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ tool: "sessions_list", args: {} }),
+    });
+    if (!resp.ok) return undefined;
+    const envelope = await resp.json() as { result?: { content?: Array<{ type: string; text?: string }> } };
+    const content = envelope?.result?.content ?? [];
+    for (const item of content) {
+      if (item?.type !== "text" || typeof item.text !== "string") continue;
+      const payload = JSON.parse(item.text) as { sessions?: Array<Record<string, any>> };
+      const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
+      const matching = sessions
+        .filter((s) => (s?.channel ?? "") === channel && s?.deliveryContext?.to)
+        .sort((a, b) => Number(b?.updatedAt ?? 0) - Number(a?.updatedAt ?? 0));
+      const top = matching[0];
+      if (top?.deliveryContext?.to) {
+        const raw = String(top.deliveryContext.to);
+        // openclaw stores slack recipients as "user:U08UGBQL5J5" — the
+        // `message.send` tool wants the bare id. Strip the `user:` prefix.
+        return raw.startsWith("user:") ? raw.slice("user:".length) : raw;
+      }
+    }
+  } catch {
+    // fall through
+  }
+  return undefined;
+}
+
 export function registerNotificationRoutes(): void {
-  // POST /api/v1/notifications — send a notification through OpenClaw gateway
+  // POST /api/v1/notifications — send an agent-initiated message to Sir on a
+  // configured channel (Slack, Telegram, etc). Used by every chore + any
+  // platform code that needs to push to Sir proactively.
+  //
+  // Body: {
+  //   message:  string (required)          — the text Sir sees
+  //   channel?: "slack" | "telegram" | …   — defaults to tenant's primary
+  //   to?:      channel-specific recipient — auto-resolved if omitted
+  //   urgency?: "low" | "normal" | "high"  — passthrough to channel adapter
+  // }
+  //
+  // Delivers via openclaw's `message.send` tool, which routes through the
+  // channel adapter (chat.postMessage for Slack, sendMessage for Telegram,
+  // etc.). This is OPENCLAW'S OWN outbound primitive — sessions_send stores
+  // replies in session state but never pushes to channels for agent-initiated
+  // turns, so we don't use it here. See `openclaw-tools.js:6425` for the
+  // `message` tool definition.
   addRoute("POST", "/api/v1/notifications", async ({ res, body }) => {
     const b = body as Record<string, unknown> | undefined;
 
-    if (!b || typeof b.message !== "string") {
+    if (!b || typeof b.message !== "string" || !b.message.trim()) {
       throw new ValidationError("message is required");
     }
 
     const message = b.message as string;
     const urgency = typeof b.urgency === "string" ? b.urgency : "normal";
-    const rawSessionId = typeof b.session_id === "string" ? b.session_id : "main";
-    const agentId = typeof b.agent_id === "string" ? b.agent_id : "main";
-
-    // sessions_send accepts `sessionKey` (full `agent:<agent>:<session>` form)
-    // or `label`. Plain `session_id` → `agent:<agentId>:<session_id>` is the
-    // shape the gateway actually stores for openclaw-hosted sessions. If the
-    // caller already passed a fully-qualified key (starts with `agent:`), use
-    // it verbatim.
-    const sessionKey = rawSessionId.startsWith("agent:")
-      ? rawSessionId
-      : `agent:${agentId}:${rawSessionId}`;
+    const channelHint = typeof b.channel === "string" && b.channel.length > 0
+      ? b.channel
+      : "auto";
 
     const token = getGatewayToken();
     if (!token) {
       throw new ValidationError("Gateway token not available");
     }
 
+    const channel = channelHint === "auto" ? pickPrimaryChannel() : channelHint;
+    const to = typeof b.to === "string" && b.to.length > 0
+      ? (b.to as string)
+      : await resolveRecipient(channel, token);
+
+    if (!to) {
+      sendJson(res, 424, {
+        status: "error",
+        error: `no recipient on channel=${channel} — pass body.to explicitly or have Sir send at least one inbound message first`,
+      });
+      return;
+    }
+
     try {
-      // Call OpenClaw gateway to send notification
       const response = await fetch(`${OPENCLAW_GATEWAY_URL}/tools/invoke`, {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${token}`,
+          Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          tool: "sessions_send",
+          tool: "message",
           args: {
-            sessionKey: sessionKey,
-            message: message,
-            urgency: urgency,
+            action: "send",
+            channel,
+            to,
+            message,
+            urgency,
           },
         }),
       });
@@ -78,7 +154,7 @@ export function registerNotificationRoutes(): void {
       }
 
       const data = await response.json();
-      sendJson(res, 200, { status: "sent", data });
+      sendJson(res, 200, { status: "sent", channel, to, data });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       sendJson(res, 500, { status: "error", error: errorMessage });

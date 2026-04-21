@@ -295,9 +295,12 @@ import json
 p = '$TARGET_CFG'
 with open(p) as f: c = json.load(f)
 
-# Real built-in OpenClaw session/subagent tools — these correspond to
-# actual callable tools and belong in the allowlist.
+# Real built-in OpenClaw session/subagent + outbound messaging tools —
+# these correspond to actual callable tools and belong in the allowlist.
+# `message` is openclaw's outbound channel-delivery primitive (Slack,
+# Telegram, etc.). Chores and platform notifications go through it.
 session_tools = {
+    'message',
     'sessions_send', 'sessions_spawn', 'sessions_history',
     'sessions_list', 'sessions_delete',
 }
