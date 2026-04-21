@@ -42,6 +42,65 @@ export interface ChoreActionSpec {
 }
 
 export const CHORE_ACTION_MANIFEST: Record<string, ChoreActionSpec> = {
+  // ---- Generic primitives — the three passthroughs a chore is composed from.
+  // Prefer these over the bespoke activities below. The bespoke ones are kept
+  // for backwards compatibility with existing generated chores and will be
+  // retired as those chores are rewritten to compose from these primitives.
+
+  call_self: {
+    name: "call_self",
+    description:
+      "HTTP passthrough to the tenant ctrl-api (:3100). Same surface as the `self` MCP tool the main agent uses — list/read/write vault records, fetch streams, trigger sessions, read schedules, etc. Arguments: endpoint (path), method (default GET), body (JSON for writes), query (querystring). Returns parsed JSON. Raises on non-2xx.",
+    reads: [
+      { kind: "vault", resource: "any ctrl-api endpoint" },
+    ],
+    writes: [
+      { kind: "vault", resource: "any ctrl-api write endpoint" },
+    ],
+    llm: false,
+    required_data: [
+      "Works on every tenant — ctrl-api is always running.",
+      "Data availability depends on which endpoint the chore calls. Confirm the target endpoint's prerequisites in TOOLS.md before relying on the response shape.",
+    ],
+  },
+
+  call_composio: {
+    name: "call_composio",
+    description:
+      "Execute any Composio action (Gmail, Calendar, Notion, GitHub, Slack, Stripe, 1000+ others). Wraps ctrl-api `/api/v1/composio/execute`. Arguments: action (action name), arguments (per-action payload). Returns the action result. The skill for each connected app documents its actions + schemas.",
+    reads: [
+      { kind: "stream", resource: "any Composio-connected app" },
+    ],
+    writes: [
+      { kind: "notification", resource: "any Composio-connected app" },
+    ],
+    llm: false,
+    required_data: [
+      "Requires the relevant Composio app to be connected on this tenant (check /api/v1/integrations).",
+      "Requires COMPOSIO_API_KEY + COMPOSIO_USER_ID to be set (default on every tenant since PR #428).",
+    ],
+  },
+
+  spawn_subagent: {
+    name: "spawn_subagent",
+    description:
+      "Fire-and-wait an openclaw-workers subagent with a prompt. Use when a chore step genuinely needs LLM reasoning — filtering / formatting / aggregation should stay in the workflow's Python body instead. Arguments: prompt (string), agent_id (default `learn-clerk`), timeout_s (default 300). Returns the subagent's final text. Subagents on workers run maxConcurrent=1 — two LLM-bearing chores firing the same minute will serialise.",
+    reads: [
+      { kind: "llm_context", resource: "openclaw-workers subagent on grok-4.1-fast (default)" },
+    ],
+    writes: [
+      { kind: "llm_output", resource: "assistant text reply" },
+    ],
+    llm: true,
+    required_data: [
+      "Requires openclaw-workers gateway healthy (check /api/v1/admin/containers).",
+      "Default agent learn-clerk is pre-registered on every tenant.",
+      "Specialized agents (alfred-vault-curator, alfred-voice, etc.) also available; custom tool sets require a follow-up platform change to register a new agent.",
+    ],
+  },
+
+  // ---- Bespoke activities (legacy). Retained for backwards compatibility.
+
   fetch_financial_events: {
     name: "fetch_financial_events",
     description:

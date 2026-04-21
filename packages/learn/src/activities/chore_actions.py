@@ -306,6 +306,121 @@ async def send_chore_notification(chore_slug: str, session_id: str, message: str
 
 
 # ---------------------------------------------------------------------------
+# Generic chore primitives — the three activities Alfred composes chores from.
+#
+# A generated chore's workflow is limited (by the dynamic-loader allowlist) to
+# calling activities imported from this module. Instead of adding a new
+# bespoke activity for every "fetch X / format Y / write Z" recipe, we expose
+# three generic passthroughs that mirror the primitives the main agent already
+# has: the ctrl-api surface, the Composio gateway, and LLM reasoning via a
+# subagent spawn. A chore workflow then becomes plain Python plus calls to
+# these three.
+#
+#   call_self(endpoint, method, body?, query?) -> dict
+#       Same shape as the `self` MCP tool. HTTP to tenant ctrl-api :3100
+#       with the AAS bearer already attached.
+#
+#   call_composio(action, arguments?) -> dict
+#       Dispatch any Composio action (Gmail, Calendar, Notion, GitHub,
+#       Stripe, Slack, ...). Credentials + user_id routing are handled by
+#       ctrl-api; caller just names the action.
+#
+#   spawn_subagent(prompt, agent_id?, timeout_s?) -> str
+#       Fire-and-wait an openclaw-workers subagent with the given prompt.
+#       Returns the assistant's final text. Use only when the step genuinely
+#       needs reasoning — filtering / formatting / aggregation should stay
+#       in the workflow's Python body. Default agent is `learn-clerk`
+#       (pre-registered with self + composio tools).
+# ---------------------------------------------------------------------------
+
+
+@activity.defn
+async def call_self(
+    endpoint: str,
+    method: str = "GET",
+    body: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """HTTP → tenant ctrl-api :3100. Same surface as the `self` MCP tool.
+
+    `endpoint` is the path (e.g. `/api/v1/vault/list/matter`). `method`
+    defaults to GET; use POST/PATCH/DELETE for writes. `body` is the JSON
+    payload (ignored for GET). `query` is the query-string dict.
+
+    Returns the parsed JSON response. Raises on non-2xx (Temporal will
+    retry per the workflow's retry policy).
+    """
+    config = load_config()
+    api_key = os.environ.get("AAS_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    url = f"{config.alfred_ctrl_url}{endpoint}"
+    method_upper = method.upper()
+    async with httpx.AsyncClient(timeout=60.0) as http:
+        resp = await http.request(
+            method_upper,
+            url,
+            headers=headers,
+            params=query or None,
+            json=body if method_upper not in {"GET", "DELETE"} else None,
+        )
+        resp.raise_for_status()
+        if not resp.content:
+            return {}
+        try:
+            return resp.json()
+        except ValueError:
+            return {"raw": resp.text}
+
+
+@activity.defn
+async def call_composio(
+    action: str,
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Execute any Composio action via ctrl-api's composio dispatcher.
+
+    `action` is the Composio action name (e.g. `GMAIL_SEND_EMAIL`,
+    `GOOGLECALENDAR_CREATE_EVENT`, `NOTION_CREATE_PAGE`). `arguments` is
+    the per-action payload — check the per-app SKILL.md or the Composio
+    docs for schemas.
+
+    Returns the action result as a dict. Delegates to `call_self` since
+    the composio dispatcher is just a ctrl-api endpoint.
+    """
+    return await call_self(
+        endpoint="/api/v1/composio/execute",
+        method="POST",
+        body={"action": action, "arguments": arguments or {}},
+    )
+
+
+@activity.defn
+async def spawn_subagent(
+    prompt: str,
+    agent_id: str = "learn-clerk",
+    timeout_s: int = 300,
+) -> str:
+    """Run a prompt through an openclaw-workers subagent, return its text.
+
+    Default `agent_id` is `learn-clerk` which is pre-registered with the
+    self + composio tool surface. For specialized personas use
+    `alfred-vault-curator` (curator prose) or `alfred-voice` (voice-tuned).
+    Custom tool sets require a follow-up PR to register a new agent in
+    the workers openclaw.json.
+
+    The subagent runs with maxConcurrent=1 on workers — two chores firing
+    at the same minute will serialise. Keep `timeout_s` tight enough that
+    one slow subagent doesn't block the next chore's tick.
+    """
+    return await _workers_spawn_subagent(
+        agent_id=agent_id,
+        prompt=prompt,
+        run_timeout_s=min(timeout_s, 600),
+        poll_timeout_s=timeout_s,
+    )
+
+
+# ---------------------------------------------------------------------------
 # daily_morning_briefing v2 — matter-structured, multi-subagent architecture.
 #
 # One orchestrating activity because the chore dynamic-loader allowlist (see
