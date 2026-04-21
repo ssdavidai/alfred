@@ -1,7 +1,24 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { execAsync, dockerExec, dockerComposeCmd, OPENCLAW_CMD } from "../helpers.js";
+
+const GATEWAY_TOKEN_CANDIDATES = [
+  process.env.OPENCLAW_GATEWAY_TOKEN_FILE,
+  "/mnt/encrypted/alfred/.gateway-token",
+  "/alfred-data/.gateway-token",
+].filter((p): p is string => typeof p === "string" && p.length > 0);
+
+function readGatewayToken(): string {
+  for (const candidate of GATEWAY_TOKEN_CANDIDATES) {
+    try {
+      const v = fs.readFileSync(candidate, "utf-8").trim();
+      if (v) return v;
+    } catch { /* try next */ }
+  }
+  return "";
+}
 
 const CONFIG_PATH = "/mnt/encrypted/alfred/config.yaml";
 
@@ -319,6 +336,61 @@ export function registerAgentRoutes(): void {
       ? (b.name as string)
       : `agent-task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+    // Resolve delivery target. Openclaw's `--channel last` doesn't auto-
+    // resolve reliably across tenants — it works when Sir has an active
+    // recent session on that channel but fails with "Delivering to Slack
+    // requires target" when the resolution can't find a prior thread. So
+    // we explicitly resolve: if caller passed `to`, use it; else find the
+    // most-recent session on the requested channel via openclaw
+    // sessions_list and extract deliveryContext.to (same helper
+    // /api/v1/notifications uses).
+    let toTarget: string | undefined = typeof b.to === "string" && (b.to as string).length > 0
+      ? (b.to as string)
+      : undefined;
+    // Resolve toTarget by asking the gateway for the most-recent session on
+    // the requested channel (or any delivery-capable channel when channel is
+    // "last"), and extracting deliveryContext.to. Also re-infers the effective
+    // channel when caller asked for "last" and we found a session on a specific
+    // channel, so the cron job passes both --channel and --to concretely.
+    let effectiveChannel = channel;
+    if (announce && !toTarget) {
+      try {
+        const gatewayToken = readGatewayToken();
+        const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || "http://openclaw:18789";
+        const resp = await fetch(`${gatewayUrl}/tools/invoke`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${gatewayToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ tool: "sessions_list", args: {} }),
+        });
+        if (resp.ok) {
+          const envelope = await resp.json() as { result?: { content?: Array<{ type: string; text?: string }> } };
+          for (const item of envelope?.result?.content ?? []) {
+            if (item?.type !== "text" || typeof item.text !== "string") continue;
+            const payload = JSON.parse(item.text) as { sessions?: Array<Record<string, any>> };
+            const sessions = payload?.sessions ?? [];
+            const filter = channel === "last"
+              ? (s: Record<string, any>) => s?.deliveryContext?.to && s?.channel && s.channel !== "webchat"
+              : (s: Record<string, any>) => (s?.channel ?? "") === channel && s?.deliveryContext?.to;
+            const matching = sessions.filter(filter).sort(
+              (a, b) => Number(b?.updatedAt ?? 0) - Number(a?.updatedAt ?? 0),
+            );
+            if (matching[0]?.deliveryContext?.to) {
+              toTarget = String(matching[0].deliveryContext.to);
+              if (channel === "last" && matching[0]?.channel) {
+                effectiveChannel = String(matching[0].channel);
+              }
+              break;
+            }
+          }
+        }
+      } catch {
+        /* fall through — openclaw cron will error and we'll surface it */
+      }
+    }
+
     const args = [
       ...OPENCLAW_CMD,
       "cron", "add",
@@ -331,7 +403,10 @@ export function registerAgentRoutes(): void {
       "--json",
     ];
     if (announce) {
-      args.push("--announce", "--channel", channel);
+      args.push("--announce", "--channel", effectiveChannel);
+      if (toTarget) {
+        args.push("--to", toTarget);
+      }
     } else {
       args.push("--no-deliver");
     }
