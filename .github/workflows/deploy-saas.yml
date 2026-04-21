@@ -154,10 +154,11 @@ jobs:
             echo "OPERATOR_ADMIN_TOKEN secret not set — skipping operator auth path"
             exit 0
           fi
-          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} "grep -q '^OPERATOR_ADMIN_TOKEN=' /opt/alfred-saas/.env 2>/dev/null && sed -i 's|^OPERATOR_ADMIN_TOKEN=.*|OPERATOR_ADMIN_TOKEN=$OPERATOR_ADMIN_TOKEN|' /opt/alfred-saas/.env || echo 'OPERATOR_ADMIN_TOKEN=$OPERATOR_ADMIN_TOKEN' >> /opt/alfred-saas/.env"
-          # docker compose up -d is a no-op when the config already matches;
-          # we need an explicit recreate so the app container picks up the new
-          # env var from .env.
+          # Wasp's app container reads env_file: .env.server (see
+          # deploy/docker-compose.yaml line 25-26), NOT .env. The prior
+          # revision wrote to the wrong file, which is why the token was
+          # never visible to the running process.
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} "grep -q '^OPERATOR_ADMIN_TOKEN=' /opt/alfred-saas/.env.server 2>/dev/null && sed -i 's|^OPERATOR_ADMIN_TOKEN=.*|OPERATOR_ADMIN_TOKEN=$OPERATOR_ADMIN_TOKEN|' /opt/alfred-saas/.env.server || echo 'OPERATOR_ADMIN_TOKEN=$OPERATOR_ADMIN_TOKEN' >> /opt/alfred-saas/.env.server"
           ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} 'cd /opt/alfred-saas && docker compose up -d --force-recreate app'
       - name: Update Caddy for domain migration
         run: |
