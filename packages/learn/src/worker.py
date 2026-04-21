@@ -66,6 +66,7 @@ from src.activities.first_brief_email import send_first_brief_email
 # Activities — chore actions
 from src.activities.chore_actions import (
     ask_alfred_to_judge_anomalies,
+    build_daily_briefing_v2,
     diff_subscriptions,
     fetch_financial_events,
     fetch_matter_events_last_week,
@@ -478,6 +479,8 @@ ALL_ACTIVITIES = [
     write_matter_digest_via_llm,
     save_digest_to_vault,
     send_chore_notification,
+    # daily_morning_briefing v2 — multi-subagent orchestration on workers
+    build_daily_briefing_v2,
     # Chore promotion (Step 5)
     scan_user_chores_directory,
     identify_promotion_candidates,
