@@ -339,12 +339,16 @@ export function registerWorkflowRoutes(): void {
       );
     }
     // Preserve input args if any were recorded.
-    const inputsRaw = startWorkflow?.input || startWorkflow?.args || [];
-    let inputJson: string | undefined;
-    if (Array.isArray(inputsRaw) && inputsRaw.length > 0) {
-      // Temporal CLI accepts JSON per-arg; join as an array.
-      inputJson = JSON.stringify(inputsRaw[0]);
-    }
+    //
+    // Temporal's describe output shape for `input` is NOT a bare array — it's
+    // an envelope: { payloads: [{ metadata: {encoding: "<b64>"}, data: "<b64>" }] }.
+    // The old code tested `Array.isArray(input)` which always fails on this
+    // object shape, so the --input flag never made it to `schedule create` and
+    // rewritten schedules lost their workflow args (see #482).
+    //
+    // Decode the first payload's base64 `data` field as JSON — that's the
+    // single positional arg the workflow receives.
+    const inputJson = _extractCurrentInput(startWorkflow);
 
     // Preserve overlap policy (Skip / BufferOne / BufferAll / CancelOther /
     // TerminateOther / AllowAll). Fall back to SKIP which is Temporal default.
@@ -378,6 +382,40 @@ export function registerWorkflowRoutes(): void {
       raw: createOut.trim() || undefined,
     });
   });
+}
+
+function _extractCurrentInput(startWorkflow: any): string | undefined {
+  // Decode Temporal's describe payload envelope into the raw JSON arg the
+  // schedule was originally created with. The CLI's describe output puts
+  // args under startWorkflow.input.payloads[].data (base64-encoded JSON).
+  // We support the older startWorkflow.args shape as a fallback for any
+  // non-Temporal origin describes, but 1.27+ consistently uses payloads.
+  const envelope = startWorkflow?.input;
+  const payloads = Array.isArray(envelope?.payloads) ? envelope.payloads : null;
+  if (payloads && payloads.length > 0) {
+    const first = payloads[0];
+    const data: unknown = first?.data;
+    if (typeof data === "string" && data.length > 0) {
+      try {
+        const raw = Buffer.from(data, "base64").toString("utf-8");
+        // Validate it parses so we don't inject garbage on `create --input`.
+        JSON.parse(raw);
+        return raw;
+      } catch {
+        // Fall through — return undefined rather than pass unparseable json.
+      }
+    }
+  }
+  // Fallback: legacy `args` shape.
+  const args = startWorkflow?.args;
+  if (Array.isArray(args) && args.length > 0) {
+    try {
+      return JSON.stringify(args[0]);
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 function _overlapPolicyToCli(policy: string | undefined): string | undefined {
