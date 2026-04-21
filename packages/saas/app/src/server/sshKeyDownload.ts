@@ -8,9 +8,11 @@ import { getSessionAndUserFromBearerToken } from "wasp/auth/session";
 import { prisma } from "wasp/server";
 import fs from "fs";
 import path from "path";
+import { execSync } from "child_process";
 
 // The ctrl stores SSH keys at this path inside the SaaS container
 const CTRL_DATA_DIR = "/app/alfred-ctrl/data";
+const CTRL_DB_PATH = path.join(CTRL_DATA_DIR, "alfred-ctrl.db");
 
 async function getUserIdFromRequest(req: Request): Promise<string | null> {
   // Support token in query param (for direct browser downloads) or Authorization header
@@ -21,6 +23,38 @@ async function getUserIdFromRequest(req: Request): Promise<string | null> {
   const result = await getSessionAndUserFromBearerToken(req as any);
   if (!result) return null;
   return result.user.id;
+}
+
+async function getAdminFromRequest(
+  req: Request,
+): Promise<{ userId: string; isAdmin: boolean } | null> {
+  const queryToken = req.query.token as string | undefined;
+  if (queryToken) {
+    (req as any).headers = { ...req.headers, authorization: `Bearer ${queryToken}` };
+  }
+  const result = await getSessionAndUserFromBearerToken(req as any);
+  if (!result) return null;
+  return { userId: result.user.id, isAdmin: !!(result.user as any).isAdmin };
+}
+
+// Look up the ctrl SQLite DB to get the integer instance ID + IP for a customer
+// name. Mirrors the helper in adminTerminalProxy.ts — both endpoints need the
+// same join across the Wasp Instance (customerName, tailscaleHostname) and the
+// ctrl DB (id, ip_address, tailscale_ip) to resolve the on-disk key path.
+function lookupCtrlInstance(customerName: string): { id: number; ip: string } | null {
+  if (!fs.existsSync(CTRL_DB_PATH)) return null;
+  try {
+    const result = execSync(
+      `sqlite3 -json "${CTRL_DB_PATH}" "SELECT id, ip_address, tailscale_ip FROM instances WHERE customer_name = '${customerName.replace(/'/g, "''")}' LIMIT 1"`,
+      { encoding: "utf-8", timeout: 5000 },
+    ).trim();
+    const rows = JSON.parse(result || "[]");
+    if (!rows.length) return null;
+    const row = rows[0];
+    return { id: row.id, ip: row.tailscale_ip || row.ip_address };
+  } catch {
+    return null;
+  }
 }
 
 export function registerSSHKeyRoutes(app: Application): void {
@@ -169,6 +203,53 @@ export function registerSSHKeyRoutes(app: Application): void {
         ],
       });
     } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /api/admin/ssh-key — admin-gated fetch of ANY tenant's private key,
+  // keyed by customerName. Needed for operator shell access to tenants the
+  // admin doesn't own via their own Instance row (e.g. verifying a freshly
+  // provisioned tenant's onboarding status). Parallels the admin terminal
+  // proxy's SSH-key lookup but returns the PEM file for local use with
+  // `ssh -i`.
+  app.get("/api/admin/ssh-key", async (req: Request, res: Response) => {
+    try {
+      const admin = await getAdminFromRequest(req);
+      if (!admin || !admin.isAdmin) {
+        res.status(403).json({ error: "Admin access required" });
+        return;
+      }
+
+      const customerName = (req.query.customerName as string | undefined)?.trim();
+      if (!customerName || !/^[a-zA-Z0-9_-]+$/.test(customerName)) {
+        res.status(400).json({ error: "customerName query param required (alnum/-/_ only)" });
+        return;
+      }
+
+      const ctrl = lookupCtrlInstance(customerName);
+      if (!ctrl) {
+        res.status(404).json({ error: `No ctrl instance row for customer '${customerName}'` });
+        return;
+      }
+
+      const keyPath = path.join(CTRL_DATA_DIR, "ssh_keys", String(ctrl.id), "id_ed25519");
+      if (!fs.existsSync(keyPath)) {
+        res.status(404).json({ error: `SSH key not found at ${keyPath}` });
+        return;
+      }
+
+      const keyContent = fs.readFileSync(keyPath, "utf-8");
+      res.setHeader("Content-Type", "application/x-pem-file");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="alfred-${customerName}.pem"`,
+      );
+      res.setHeader("X-Tenant-IP", ctrl.ip);
+      res.setHeader("X-Tenant-Id", String(ctrl.id));
+      res.send(keyContent);
+    } catch (err: any) {
+      console.error("[ssh-key/admin] Error:", err);
       res.status(500).json({ error: err.message });
     }
   });
