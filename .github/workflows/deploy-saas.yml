@@ -155,7 +155,10 @@ jobs:
             exit 0
           fi
           ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} "grep -q '^OPERATOR_ADMIN_TOKEN=' /opt/alfred-saas/.env 2>/dev/null && sed -i 's|^OPERATOR_ADMIN_TOKEN=.*|OPERATOR_ADMIN_TOKEN=$OPERATOR_ADMIN_TOKEN|' /opt/alfred-saas/.env || echo 'OPERATOR_ADMIN_TOKEN=$OPERATOR_ADMIN_TOKEN' >> /opt/alfred-saas/.env"
-          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} 'cd /opt/alfred-saas && docker compose up -d app'
+          # docker compose up -d is a no-op when the config already matches;
+          # we need an explicit recreate so the app container picks up the new
+          # env var from .env.
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} 'cd /opt/alfred-saas && docker compose up -d --force-recreate app'
       - name: Update Caddy for domain migration
         run: |
           scp -i ~/.ssh/deploy_key deploy/Caddyfile deploy@${{ secrets.DEPLOY_HOST }}:/tmp/Caddyfile
