@@ -1121,11 +1121,21 @@ Write the briefing. Your reply is the message Sir sees."""
         activity.logger.info("preview written to %s (%d bytes)", path, len(briefing))
         return {"mode": "preview", "path": path, "delivered": False, "briefing": briefing}
 
-    # Live delivery: POST the instruction prompt to Alfred's main session.
-    # His response is the briefing; it lands in Slack as his message. The
-    # existing /api/v1/notifications path wraps sessions_send which injects
-    # the prompt as a user turn and delivers the assistant's reply to the
-    # configured channel — exactly what we want here.
+    # Live delivery: first render the briefing text via a workers subagent
+    # (same as preview mode), then POST the rendered text to ctrl-api's
+    # /api/v1/notifications, which pushes it outbound via openclaw's
+    # `message.send` tool → Slack/Telegram/etc. The notifications route
+    # handles channel + recipient resolution from the tenant's config.
+    briefing = await _workers_spawn_subagent(
+        agent_id="learn-clerk",
+        prompt=prompt,
+        run_timeout_s=180,
+        poll_timeout_s=240,
+    )
+    briefing = (briefing or "").strip() or (
+        f"{triage.get('headline', '').strip()}\n\nTriage produced "
+        f"{len(triage.get('buckets') or [])} matter buckets."
+    )
     config = load_config()
     api_key = os.environ.get("AAS_API_KEY", "")
     url = f"{config.alfred_ctrl_url}/api/v1/notifications"
@@ -1134,7 +1144,7 @@ Write the briefing. Your reply is the message Sir sees."""
         resp = await http.post(
             url,
             json={
-                "message": prompt,
+                "message": briefing,
                 "urgency": "normal",
                 "session_id": session_id,
                 # agent_id defaults to "main" server-side
