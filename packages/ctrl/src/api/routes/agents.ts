@@ -271,4 +271,89 @@ export function registerAgentRoutes(): void {
       },
     });
   });
+
+  // POST /api/v1/agents/main/task
+  //
+  // Submit a one-shot task to the main Alfred agent and (by default)
+  // deliver his reply to his configured channel (Slack/Telegram/etc.).
+  //
+  // Under the hood this creates an openclaw cron job with `--at <Ns>` +
+  // `--delete-after-run`: the job fires almost immediately, runs on an
+  // isolated main-agent session with Alfred's full workspace bootstrapped
+  // (all skills + TOOLS.md injected), and self-deletes. The main
+  // agent's model, memory, and channel bindings are used natively — no
+  // subagent, no workers clerk, no re-routing. The same path `openclaw
+  // cron add` uses from the CLI.
+  //
+  // Used by platform code that needs Alfred to DO something on its
+  // behalf and (optionally) tell Sir about the result. Today: the daily
+  // morning briefing chore — Temporal fires at 05:30 CET, chore
+  // workflow calls this endpoint with a task like "deliver the morning
+  // briefing per the alfred-daily-briefing skill", Alfred runs the
+  // skill, posts to Slack.
+  //
+  // Body:
+  //   task:        string   required — the prompt Alfred sees
+  //   channel?:    string   default "last" (the agent's most-recent
+  //                         active channel). "slack" / "telegram" /
+  //                         etc. to force a specific one.
+  //   at_seconds?: number   default 1 — seconds from now before fire.
+  //   name?:       string   default "agent-task-<ts>-<rand>".
+  //   announce?:   boolean  default true. false = run silently (no
+  //                         delivery; used when the agent's job is
+  //                         background work that shouldn't DM Sir).
+  addRoute("POST", "/api/v1/agents/main/task", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.task !== "string" || !(b.task as string).trim()) {
+      throw new ValidationError("task is required (non-empty string)");
+    }
+    const task = b.task as string;
+    const channel = typeof b.channel === "string" && (b.channel as string).length > 0
+      ? (b.channel as string)
+      : "last";
+    const atSeconds = typeof b.at_seconds === "number" && (b.at_seconds as number) > 0
+      ? Math.floor(b.at_seconds as number)
+      : 1;
+    const announce = b.announce !== false;
+    const jobName = typeof b.name === "string" && (b.name as string).length > 0
+      ? (b.name as string)
+      : `agent-task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    const args = [
+      ...OPENCLAW_CMD,
+      "cron", "add",
+      "--name", jobName,
+      "--agent", "main",
+      "--at", `${atSeconds}s`,
+      "--delete-after-run",
+      "--message", task,
+      "--best-effort-deliver",
+      "--json",
+    ];
+    if (announce) {
+      args.push("--announce", "--channel", channel);
+    } else {
+      args.push("--no-deliver");
+    }
+
+    try {
+      const stdout = await dockerExec("openclaw", args);
+      let envelope: unknown = null;
+      try {
+        envelope = JSON.parse(stdout.trim() || "{}");
+      } catch {
+        envelope = { raw: stdout.trim().slice(0, 2000) };
+      }
+      sendJson(res, 202, {
+        status: "scheduled",
+        name: jobName,
+        channel: announce ? channel : null,
+        at_seconds: atSeconds,
+        job: envelope,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { status: "error", error: message });
+    }
+  });
 }
