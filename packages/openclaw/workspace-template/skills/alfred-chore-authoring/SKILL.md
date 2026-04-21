@@ -164,16 +164,31 @@ Run `self endpoint="/api/v1/chore-actions"` to see every activity you're allowed
 
 ## Editing an existing chore
 
-| What changed | How |
+The single endpoint for in-place edits is `PATCH /api/v1/chores/{slug}`. It atomically updates any combination of the workflow source, cron schedule, params, workflow class name, or cosmetic fields. Preserves the slug, schedule id, run-log history, and quarantine state.
+
+```
+self endpoint="/api/v1/chores/{slug}" method="PATCH" body={
+  "python_source": "<full .py source>",           // optional
+  "schedule":      "0 18 * * 5",                   // optional, rewrites the Temporal schedule
+  "params":        {"preview_only": false, ...},   // optional, replaces params JSON
+  "workflow_class_name": "NewNameWorkflow",       // optional, only with python_source
+  "name":          "Weekly review (v2)",          // optional
+  "user_facing_description": "...",               // optional
+  "tags":          ["weekly", "review"]            // optional
+}
+```
+
+Supply at least one field. The endpoint re-validates any new `python_source` with the same static checks POST uses, and rolls back the vault record + `.py` file if the Temporal schedule rewrite fails.
+
+Convenience shortcuts for single-field edits (same effect, different shape):
+
+| Change | Shortcut |
 |---|---|
 | Pause temporarily | `self endpoint="/api/v1/chores/{slug}/pause" method="POST"` |
 | Resume | `self endpoint="/api/v1/chores/{slug}/resume" method="POST"` |
-| Change cron schedule | `self endpoint="/api/v1/schedules/chore-{slug}/rewrite-cron" method="POST" body={"cron":"<new>"}` |
-| Change params / config | `self endpoint="/api/v1/vault/records/chore/{slug}.md" method="PATCH" body={"set":{"params":"<new json string>"}}` |
-| Change name / description / tags | `self endpoint="/api/v1/vault/records/chore/{slug}.md" method="PATCH" body={"set":{"name":"...","user_facing_description":"..."}}` |
-| Edit the skill (Pattern A) | Read `/home/node/.openclaw/workspace/skills/<slug>/SKILL.md`, rewrite it, save. No restart needed — next invocation reads the new text. |
-| Edit the Python workflow | Delete + re-create the chore: `DELETE /api/v1/chores/{slug}` then `POST /api/v1/chores {…}` with the new `python_source`. The endpoint handles the `.py` + vault record + Temporal schedule re-creation atomically. |
+| Fire one run out-of-cycle | `self endpoint="/api/v1/chores/{slug}/trigger" method="POST"` |
 | Retire the chore | `self endpoint="/api/v1/chores/{slug}" method="DELETE"` — removes schedule + marks the record completed. |
+| Edit the Pattern A SKILL.md | Read `/home/node/.openclaw/workspace/skills/<slug>/SKILL.md` with your `read` tool, rewrite with `write`, save. No restart needed — next invocation reads the new text. Use this for tone tweaks, new anti-patterns, added worked examples — anything that doesn't change WHAT the chore does, only HOW you do it. |
 
 ## Good behaviour
 

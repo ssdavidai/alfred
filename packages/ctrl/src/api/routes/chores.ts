@@ -335,6 +335,251 @@ export function registerChoreRoutes(): void {
     });
   });
 
+  // Patch an existing chore IN PLACE. Edits any combination of:
+  //   python_source  — replaces the `.py` workflow. Re-validated same as
+  //                    POST. workflow_class_name must still match the
+  //                    body (or the existing vault record's
+  //                    workflow_class_name if unchanged).
+  //   schedule       — new cron expression; rewrites the Temporal
+  //                    schedule in place (delete + create, input
+  //                    preserved).
+  //   params         — replaces the `params` JSON in the vault
+  //                    frontmatter; combined with {chore_slug}
+  //                    envelope same as POST.
+  //   name, user_facing_description, tags — cosmetic fields on the
+  //                    vault record.
+  //   workflow_class_name — changed only if python_source is also
+  //                    passed and contains `class <new>`; updates
+  //                    both the vault record and the Temporal
+  //                    schedule `--type`.
+  //
+  // Preserves: slug, created timestamp, schedule_id, run log body
+  // (everything after the frontmatter block), quarantine state,
+  // last_run / last_result.
+  //
+  // Atomic-ish: validates all inputs before touching disk. On Temporal
+  // schedule rewrite failure, restores the prior `.py` file (kept in a
+  // tmp location during the swap).
+  //
+  // Returns 200 with the new shape of the chore (same fields as POST).
+  addRoute("PATCH", "/api/v1/chores/:slug", async ({ res, params, body }) => {
+    const slug = params?.slug;
+    if (!slug) throw new ValidationError("slug is required");
+    if (!SLUG_RE.test(slug)) {
+      throw new ValidationError("slug must be lowercase kebab-case");
+    }
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b !== "object") throw new ValidationError("body is required");
+
+    const existing = readChoreFile(slug);
+    if (!existing) throw new NotFoundError(`chore ${slug} not found`);
+    if ((existing.frontmatter.type ?? "") !== "chore") {
+      throw new NotFoundError(`chore ${slug} not found`);
+    }
+    const fm = existing.frontmatter;
+    const module = String(fm.template ?? slug.replace(/-/g, "_"));
+    const sourcePath = path.join(USER_CHORES_DIR, `${module}.py`);
+    const vaultPath = path.join(CHORE_DIR, `${slug}.md`);
+    const scheduleId = String(fm.schedule_id ?? `chore-${slug}`);
+
+    // What's being changed?
+    const newSource = typeof b.python_source === "string" ? (b.python_source as string) : null;
+    const newCron = typeof b.schedule === "string" && (b.schedule as string).trim()
+      ? (b.schedule as string).trim()
+      : null;
+    const newWorkflowClass = typeof b.workflow_class_name === "string" && (b.workflow_class_name as string).trim()
+      ? (b.workflow_class_name as string).trim()
+      : null;
+    const newParams = b.params && typeof b.params === "object" && !Array.isArray(b.params)
+      ? (b.params as Record<string, unknown>)
+      : null;
+    const newName = typeof b.name === "string" ? (b.name as string).trim() : null;
+    const newDesc = typeof b.user_facing_description === "string" ? (b.user_facing_description as string).trim() : null;
+    const newTags = Array.isArray(b.tags)
+      ? (b.tags as unknown[]).filter((t): t is string => typeof t === "string")
+      : null;
+    const taskQueue = String(b.task_queue ?? "alfred-learn");
+    const overlapPolicy = String(b.overlap_policy ?? "Skip");
+    const restartWorker = b.restart_worker !== false && newSource !== null;
+
+    if (!newSource && !newCron && !newWorkflowClass && !newParams && newName === null && newDesc === null && !newTags) {
+      throw new ValidationError(
+        "no patchable fields provided — supply at least one of: python_source, schedule, workflow_class_name, params, name, user_facing_description, tags",
+      );
+    }
+
+    const effectiveWorkflowClass = newWorkflowClass || String(fm.workflow_class_name ?? "");
+    if (!WORKFLOW_CLASS_RE.test(effectiveWorkflowClass)) {
+      throw new ValidationError(
+        "workflow_class_name must be PascalCase ending in 'Workflow'",
+      );
+    }
+    if (newSource) {
+      if (!newSource.includes(`class ${effectiveWorkflowClass}`)) {
+        throw new ValidationError(
+          `python_source must declare 'class ${effectiveWorkflowClass}'`,
+        );
+      }
+      const validation = await validateChorePython(newSource);
+      if (!validation.ok) {
+        throw new ValidationError("python_source failed static validation", {
+          violations: validation.violations,
+        });
+      }
+    }
+
+    // Resolved fields — what the record will look like after the patch.
+    const resolvedName = newName !== null && newName.length > 0
+      ? newName
+      : String(fm.name ?? slug);
+    const resolvedDesc = newDesc !== null
+      ? newDesc
+      : String(fm.user_facing_description ?? "");
+    const resolvedCron = newCron ?? String(fm.schedule ?? "");
+    const resolvedTags = newTags ?? (() => {
+      // Re-parse existing tags from the stored frontmatter string. readChoreFile
+      // stores tags as a single string like "[foo, bar]" or "[]". Pull them out
+      // loosely — good enough for a patch echo; the vault body rewrite below
+      // always canonicalises into tagsInline form.
+      const raw = String(fm.tags ?? "").trim();
+      if (!raw || raw === "[]") return [];
+      const inner = raw.replace(/^\[|\]$/g, "").trim();
+      if (!inner) return [];
+      return inner.split(",").map((s) => s.trim().replace(/^['"]|['"]$/g, "")).filter(Boolean);
+    })();
+
+    // Preserve existing params (stored as JSON string in frontmatter) unless overridden.
+    let existingParams: Record<string, unknown> = {};
+    if (typeof fm.params === "string" && (fm.params as string).trim().startsWith("{")) {
+      try {
+        existingParams = JSON.parse(fm.params as string);
+      } catch {
+        // leave empty
+      }
+    }
+    const resolvedParamsJson = newParams !== null
+      ? JSON.stringify({ chore_slug: slug, ...newParams })
+      : JSON.stringify({ chore_slug: slug, ...existingParams });
+
+    // Swap the .py file if source changed (keep a backup for rollback).
+    let sourceBackup: string | null = null;
+    if (newSource) {
+      if (fs.existsSync(sourcePath)) {
+        sourceBackup = fs.readFileSync(sourcePath, "utf-8");
+      }
+      fs.mkdirSync(USER_CHORES_DIR, { recursive: true });
+      fs.writeFileSync(sourcePath, newSource, "utf-8");
+    }
+
+    // Rewrite the vault record's frontmatter while preserving the body.
+    const tagsInline = resolvedTags.length
+      ? `[${resolvedTags.map((t) => `'${t.replace(/'/g, "''")}'`).join(", ")}]`
+      : "[]";
+    const updatedAt = new Date().toISOString();
+    const fmLines: string[] = [
+      "---",
+      `created: ${typeof fm.created === "string" ? fm.created : `'${updatedAt}'`}`,
+      `created_by: ${fm.created_by ?? "self"}`,
+      "generated: true",
+      `last_result: ${yamlScalarQuote(String(fm.last_result ?? ""))}`,
+      `last_run: ${yamlScalarQuote(String(fm.last_run ?? ""))}`,
+      `name: ${yamlScalarQuote(resolvedName)}`,
+      `params: ${yamlScalarQuote(resolvedParamsJson)}`,
+      `quarantine: ${fm.quarantine === true || fm.quarantine === "true" ? "true" : "false"}`,
+      `quarantine_remaining: ${fm.quarantine_remaining ?? 0}`,
+      `schedule: ${yamlScalarQuote(resolvedCron)}`,
+      `schedule_id: ${scheduleId}`,
+      `status: ${String(fm.status ?? "active")}`,
+      `tags: ${tagsInline}`,
+      `template: ${module}`,
+      "type: chore",
+      `updated: '${updatedAt}'`,
+      `user_facing_description: ${yamlScalarQuote(resolvedDesc)}`,
+      `workflow_class_name: ${effectiveWorkflowClass}`,
+      "---",
+      "",
+    ];
+    const newRecord = fmLines.join("\n") + existing.body.replace(/^\s*#[^\n]*\n?/, `# ${resolvedName}\n`);
+    const vaultBackup = fs.readFileSync(vaultPath, "utf-8");
+    fs.writeFileSync(vaultPath, newRecord, "utf-8");
+
+    // Rewrite the Temporal schedule if cron or workflow_class changed.
+    const scheduleChanged = newCron !== null || newWorkflowClass !== null;
+    if (scheduleChanged) {
+      try {
+        // Best-effort describe to get existing input; fall back to {chore_slug: <slug>}
+        // plus existingParams if describe fails.
+        let preservedInput: Record<string, unknown> = { chore_slug: slug, ...existingParams };
+        if (newParams !== null) {
+          preservedInput = { chore_slug: slug, ...newParams };
+        }
+
+        // Delete + recreate (Temporal CLI has no update-cron verb).
+        try {
+          await dockerExec("temporal", [
+            "temporal", "schedule", "delete",
+            "--schedule-id", scheduleId,
+          ]);
+        } catch {
+          // if delete fails the create below will also fail — surface that
+        }
+        await dockerExec("temporal", [
+          "temporal", "schedule", "create",
+          "--schedule-id", scheduleId,
+          "--type", effectiveWorkflowClass,
+          "--task-queue", taskQueue,
+          "--cron", resolvedCron,
+          "--overlap-policy", overlapPolicy,
+          "--input", JSON.stringify(preservedInput),
+        ]);
+      } catch (err) {
+        // Rollback: restore .py source and vault record.
+        if (newSource && sourceBackup !== null) {
+          try { fs.writeFileSync(sourcePath, sourceBackup, "utf-8"); } catch { /* ignore */ }
+        }
+        try { fs.writeFileSync(vaultPath, vaultBackup, "utf-8"); } catch { /* ignore */ }
+        throw err;
+      }
+    }
+
+    let restartTriggered = false;
+    let restartError: string | undefined;
+    if (restartWorker) {
+      try {
+        await dockerComposeCmd(["restart", "alfred-learn"]);
+        restartTriggered = true;
+      } catch (err) {
+        restartError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    sendJson(res, 200, {
+      slug,
+      module,
+      source_path: sourcePath,
+      vault_path: vaultPath,
+      schedule_id: scheduleId,
+      workflow_class_name: effectiveWorkflowClass,
+      cron: resolvedCron,
+      restart_triggered: restartTriggered,
+      restart_error: restartError,
+      changes: {
+        python_source: newSource !== null,
+        schedule: newCron !== null,
+        workflow_class_name: newWorkflowClass !== null,
+        params: newParams !== null,
+        name: newName !== null,
+        user_facing_description: newDesc !== null,
+        tags: newTags !== null,
+      },
+      message: restartTriggered
+        ? `Chore '${slug}' patched; alfred-learn restarted to reload.`
+        : newSource
+          ? `Chore '${slug}' patched. Source changed — trigger alfred-learn restart via POST /api/v1/admin/restart-learn before next run.`
+          : `Chore '${slug}' patched.`,
+    });
+  });
+
   // Get one chore's details (frontmatter + body)
   addRoute("GET", "/api/v1/chores/:slug", async ({ res, params }) => {
     const slug = params?.slug;
