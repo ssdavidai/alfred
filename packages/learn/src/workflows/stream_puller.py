@@ -219,56 +219,77 @@ class StreamPullerWorkflow:
         cursor_value = config.get("cursor_value", "")
         last_pull_at = config.get("last_pull_at", "")
 
-        # 1. Compute sync arguments (backfill or incremental)
+        # 1. Compute sync arguments (backfill or incremental).
         sync_args: dict[str, Any] = await workflow.execute_activity(
             build_sync_args,
             args=[action_slug, cursor_value, last_pull_at],
             start_to_close_timeout=timedelta(seconds=10),
         )
 
-        # 2. Execute the Composio action
+        # Merge per-stream composio_args on top of computed sync_args. Lets a
+        # stream config pin per-tenant overrides (e.g. a specific userId or
+        # calendarId) without fighting the incremental-filter template.
+        stream_args = config.get("composio_args") or {}
+        if isinstance(stream_args, dict):
+            merged_args = {**sync_args, **stream_args}
+        else:
+            merged_args = sync_args
+
+        # 2. Execute the Composio action.
         raw_response: dict[str, Any] = await workflow.execute_activity(
             composio_pull,
-            args=[action_slug, sync_args],
+            args=[action_slug, merged_args],
             start_to_close_timeout=timedelta(seconds=120),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
 
-        # 3. Handle sync token reset (e.g. Calendar 410 Gone)
+        # 3. Handle sync token reset (e.g. Calendar 410 Gone).
         if _is_sync_reset(raw_response):
-            # Re-run as backfill with cleared cursor
+            # Re-run as backfill with cleared cursor.
             sync_args = await workflow.execute_activity(
                 build_sync_args,
                 args=[action_slug, "", ""],
                 start_to_close_timeout=timedelta(seconds=10),
             )
+            if isinstance(stream_args, dict):
+                merged_args = {**sync_args, **stream_args}
+            else:
+                merged_args = sync_args
             raw_response = await workflow.execute_activity(
                 composio_pull,
-                args=[action_slug, sync_args],
+                args=[action_slug, merged_args],
                 start_to_close_timeout=timedelta(seconds=120),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
-        # 4. Ingest through the composio parser
-        parser_name = config.get("parser", "composio")
-        stream_type = config.get("type", "composio")
+        # 4. Determine pull status BEFORE ingest so we record it even if the
+        #    ingest step silently drops everything.
+        pull_status = _classify_composio_response(raw_response)
 
-        ingested_count: int = await workflow.execute_activity(
-            ingest_events,
-            args=[stream_id, stream_type, parser_name, [raw_response]],
-            start_to_close_timeout=timedelta(seconds=60),
-            retry_policy=RetryPolicy(maximum_attempts=2),
-        )
+        # 5. Ingest through the composio parser only if the response carries
+        #    real data. An error envelope with no `data` would just produce
+        #    an empty ingest anyway.
+        ingested_count = 0
+        if pull_status == "ok":
+            parser_name = config.get("parser", "composio")
+            stream_type = config.get("type", "composio")
+            ingested_count = await workflow.execute_activity(
+                ingest_events,
+                args=[stream_id, stream_type, parser_name, [raw_response]],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
         result.events_ingested = ingested_count
         result.events_pulled = 1
 
-        # 5. Extract cursor from response (for sync mode)
+        # 6. Extract cursor from response (for sync mode).
         new_cursor = _extract_sync_cursor(raw_response, action_slug)
 
-        # 6. Update cursor + timestamp
+        # 7. Update cursor + timestamp with the REAL status, so downstream
+        #    monitoring can detect 413s and other upstream failures.
         await workflow.execute_activity(
             update_cursor,
-            args=[stream_id, new_cursor],
+            args=[stream_id, new_cursor, pull_status],
             start_to_close_timeout=timedelta(seconds=30),
         )
         result.cursor_updated = True
@@ -285,6 +306,40 @@ def _is_sync_reset(response: dict) -> bool:
         if "410" in error or "fullsyncrequired" in error.lower() or "sync token" in error.lower():
             return True
     return False
+
+
+def _classify_composio_response(response: dict) -> str:
+    """Classify a Composio response for last_pull_status.
+
+    Returns one of:
+      - "ok"                : real data came back
+      - "payload_too_large" : Composio 413 (needs smaller batch / tighter filter)
+      - "tool_not_found"    : Composio 404 (deprecated action — #476 handles)
+      - "error"             : any other upstream failure
+
+    Composio wraps HTTP errors inside a {error: "..."} envelope rather than
+    raising — so a 200 response can still be a failure. Previously every pull
+    stamped "ok" regardless (#474).
+    """
+    if not isinstance(response, dict):
+        return "error"
+    # Nested containers where the error might land:
+    containers = [response, response.get("data") or {}]
+    if isinstance(response.get("data"), dict):
+        containers.append(response["data"].get("response_data") or {})
+    for c in containers:
+        if not isinstance(c, dict):
+            continue
+        err = c.get("error")
+        if not err:
+            continue
+        err_str = str(err)
+        if "413" in err_str or "payload" in err_str.lower():
+            return "payload_too_large"
+        if "404" in err_str or "not found" in err_str.lower():
+            return "tool_not_found"
+        return "error"
+    return "ok"
 
 
 def _extract_sync_cursor(response: dict, action_slug: str) -> str:

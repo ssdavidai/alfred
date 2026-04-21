@@ -214,6 +214,16 @@ Examples — pick the closest shape and fill in the specifics:
 
 **Event-driven chores.** If the opportunity is "react to signals" rather than "run on a calendar" (e.g. "watch Retool emails"), pick a daily or twice-daily polling cadence — e.g. `0 7 * * *` (daily at 7am UTC) for a morning sweep. Never emit `* * * * *` or sub-minute crons — you will be rate-limited and flood the user.
 
+**Minute field must be a concrete number.** A chore firing every minute of a pinned hour (e.g. `* 18 * * *`) fires 60 times between 18:00 and 18:59 — we've had this bug before (#475). Always use an integer 0-59 for the minute field when any other field is specific:
+
+- ✅ `0 18 * * *` — daily at 18:00 UTC (fires **once** per day)
+- ✅ `30 14 * * 1-5` — weekdays at 14:30 UTC
+- ❌ `* 18 * * *` — every minute between 18:00-18:59 (would be 60 firings)
+- ❌ `*/5 18 * * *` — every 5 minutes between 18:00-18:59 (still too many)
+- ❌ `*/10 * * * *` — every 10 minutes, all day (too frequent for any chore)
+
+No chore should fire more frequently than once per hour. If the opportunity needs closer monitoring, that belongs in a stream + enrichment pipeline, not a chore. The validator will reject sub-hourly patterns and the generation retries.
+
 ### Other field constraints
 
 The `module_name` must be a valid Python identifier (lowercase, snake_case). The `workflow_class_name` must end with `Workflow` and be a valid Python class name. The `user_facing_description` must be 80-1200 characters of plain English (no code, no markdown). The `python_source` must be the COMPLETE file contents — every line, every import, every blank line. Do NOT abbreviate with "...".

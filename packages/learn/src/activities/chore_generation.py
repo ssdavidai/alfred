@@ -158,9 +158,12 @@ def _validate_cron_expression(cron: str) -> tuple[bool, str]:
       - 6-field crons (with seconds, Quartz-style)
       - The all-wildcards every-minute pattern
       - Out-of-range field values (e.g. hour 25, day 32)
+      - Minute-wildcard with any other specific field (#475) — fires 60x/hour
+      - Sub-hourly step intervals in minute field with any specific other
+        field — no chore should fire more than once per hour
 
-    Does NOT reject aggressive-but-legal schedules like `*/5 * * * *` —
-    add policy checks in the caller if needed.
+    Does NOT reject hour-granularity aggressive schedules like `0 * * * *`
+    (top of every hour). That's legal and occasionally useful.
     """
     if not isinstance(cron, str):
         return False, f"schedule must be a string, got {type(cron).__name__}"
@@ -199,6 +202,29 @@ def _validate_cron_expression(cron: str) -> tuple[bool, str]:
             "chore wants. Pick a specific cadence (e.g. '0 7 * * *' for daily "
             "7am UTC) that matches the user_facing_description."
         )
+
+    # No chore should fire sub-hourly when any other field is pinned. The LLM
+    # historically emitted patterns like '* 18 * * *' reading "every day at
+    # 6pm" and translating it to "every minute when hour==18". Temporal parses
+    # that as 60 firings per hour.
+    minute = parts[0]
+    other_specific = any(f not in ("*", "*/1") for f in parts[1:])
+    if minute in ("*", "*/1") and other_specific:
+        return False, (
+            f"schedule minute field {minute!r} with a specific hour/day/month/"
+            f"day-of-week would fire every minute of the scheduled window "
+            f"(up to 60 firings per hour). Use a concrete minute (e.g. '0' "
+            f"for top of hour). Full cron: {cleaned!r}"
+        )
+    m = re.match(r"^\*/([0-9]+)$", minute)
+    if m:
+        step = int(m.group(1))
+        if step < 60 and other_specific:
+            return False, (
+                f"schedule fires every {step} minute(s) within a pinned "
+                f"hour/day window — too frequent. Chores should fire at most "
+                f"once per hour. Full cron: {cleaned!r}"
+            )
     return True, ""
 
 

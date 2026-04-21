@@ -299,4 +299,99 @@ export function registerWorkflowRoutes(): void {
     await dockerExec("temporal", ["temporal", "schedule", "trigger", "--schedule-id", params.schId]);
     sendJson(res, 200, { message: "Schedule triggered" });
   });
+
+  // Rewrite a schedule's cron in place by DELETE + CREATE. Preserves workflow
+  // type, task queue, and input. Needed because Temporal CLI has no
+  // update-cron verb and the old schedules on fleet are wrong — see #475.
+  addRoute("POST", "/api/v1/schedules/:schId/rewrite-cron", async ({ res, params, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.cron !== "string" || !(b.cron as string).trim()) {
+      throw new ValidationError("body.cron (string) is required");
+    }
+    const schId = params.schId;
+    const newCron = (b.cron as string).trim();
+
+    // 1. Describe the existing schedule so we can preserve workflow metadata.
+    const describeOut = await dockerExec("temporal", [
+      "temporal", "schedule", "describe",
+      "--schedule-id", schId,
+      "--output", "json",
+    ]);
+    let described: any;
+    try {
+      described = JSON.parse(describeOut);
+    } catch {
+      throw new ValidationError(`Could not parse describe output for ${schId}`);
+    }
+
+    const action = described?.scheduleInfo?.action || described?.schedule?.action || {};
+    const startWorkflow = action?.startWorkflow || action;
+    const workflowType =
+      startWorkflow?.workflowType?.name ||
+      startWorkflow?.workflowType ||
+      startWorkflow?.type;
+    const taskQueue =
+      startWorkflow?.taskQueue?.name ||
+      startWorkflow?.taskQueue;
+    if (!workflowType || !taskQueue) {
+      throw new ValidationError(
+        `Schedule ${schId} is missing workflowType or taskQueue in describe output`,
+      );
+    }
+    // Preserve input args if any were recorded.
+    const inputsRaw = startWorkflow?.input || startWorkflow?.args || [];
+    let inputJson: string | undefined;
+    if (Array.isArray(inputsRaw) && inputsRaw.length > 0) {
+      // Temporal CLI accepts JSON per-arg; join as an array.
+      inputJson = JSON.stringify(inputsRaw[0]);
+    }
+
+    // Preserve overlap policy (Skip / BufferOne / BufferAll / CancelOther /
+    // TerminateOther / AllowAll). Fall back to SKIP which is Temporal default.
+    const overlapPolicy =
+      described?.schedule?.policies?.overlapPolicy ||
+      described?.info?.policies?.overlapPolicy ||
+      "SCHEDULE_OVERLAP_POLICY_SKIP";
+    const overlapFlag = _overlapPolicyToCli(overlapPolicy);
+
+    // 2. Delete the old schedule.
+    await dockerExec("temporal", ["temporal", "schedule", "delete", "--schedule-id", schId]);
+
+    // 3. Create with the new cron, preserving everything else.
+    const createArgs = [
+      "temporal", "schedule", "create",
+      "--schedule-id", schId,
+      "--type", String(workflowType),
+      "--task-queue", String(taskQueue),
+      "--cron", newCron,
+    ];
+    if (inputJson) createArgs.push("--input", inputJson);
+    if (overlapFlag) createArgs.push("--overlap-policy", overlapFlag);
+
+    const createOut = await dockerExec("temporal", createArgs);
+    sendJson(res, 200, {
+      message: "Schedule rewritten",
+      schedule_id: schId,
+      old_cron_replaced: true,
+      new_cron: newCron,
+      workflow_type: workflowType,
+      raw: createOut.trim() || undefined,
+    });
+  });
+}
+
+function _overlapPolicyToCli(policy: string | undefined): string | undefined {
+  if (!policy) return undefined;
+  const p = String(policy).toUpperCase();
+  // Temporal's describe output uses full enum names; the CLI wants the short
+  // form after the last underscore (Skip, BufferOne, etc.)
+  const map: Record<string, string> = {
+    SCHEDULE_OVERLAP_POLICY_SKIP: "Skip",
+    SCHEDULE_OVERLAP_POLICY_BUFFER_ONE: "BufferOne",
+    SCHEDULE_OVERLAP_POLICY_BUFFER_ALL: "BufferAll",
+    SCHEDULE_OVERLAP_POLICY_CANCEL_OTHER: "CancelOther",
+    SCHEDULE_OVERLAP_POLICY_TERMINATE_OTHER: "TerminateOther",
+    SCHEDULE_OVERLAP_POLICY_ALLOW_ALL: "AllowAll",
+  };
+  return map[p] ?? "Skip";
 }

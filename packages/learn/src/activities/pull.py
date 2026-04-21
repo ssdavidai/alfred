@@ -15,14 +15,71 @@ from src.parsers import get_parser
 logger = logging.getLogger("alfred-learn")
 
 
+# Known-deprecated Composio actions get rewritten to their current replacement
+# on the fly. Added because dormant tenants (not visiting the Apps page) never
+# trigger the dashboard's auto-config migration — see #476.
+#
+# To retire another action in future: add an entry here with the replacement
+# composio_action, composio_args, and pull_mode. The stream-load path will
+# PATCH each stream's config in place on first access after deploy.
+_DEPRECATED_COMPOSIO_ACTIONS: dict[str, dict[str, Any]] = {
+    "NOTION_LIST_PAGES": {
+        "composio_action": "NOTION_FETCH_DATA",
+        "pull_mode": "snapshot",
+        "composio_args": {
+            "get_all": False,
+            "get_pages": True,
+            "get_databases": True,
+            "page_size": 50,
+        },
+    },
+    "GITHUB_LIST_NOTIFICATIONS": {
+        "composio_action": "GITHUB_LIST_NOTIFICATIONS_FOR_THE_AUTHENTICATED_USER",
+    },
+}
+
+
 @activity.defn
 async def load_stream_config(stream_id: str) -> dict[str, Any]:
-    """Load stream config from ctrl API (GET /api/v1/streams/:id)."""
+    """Load stream config from ctrl API, auto-migrating deprecated actions.
+
+    Dormant tenants never trigger the dashboard's auto-config migration path,
+    so configs pointing at actions Composio has since removed (e.g.
+    NOTION_LIST_PAGES) keep 404-ing forever. Catch those here and rewrite
+    before handing the config to the pull workflow.
+    """
     config = load_config()
     async with _ctrl_client(config) as client:
         resp = await client.get(f"/api/v1/streams/{stream_id}")
         resp.raise_for_status()
-        return resp.json().get("stream", {})
+        stream_cfg = resp.json().get("stream", {})
+
+        action = stream_cfg.get("composio_action", "")
+        rewrite = _DEPRECATED_COMPOSIO_ACTIONS.get(action)
+        if rewrite:
+            logger.warning(
+                "Auto-migrating stream %s: %s → %s",
+                stream_id, action, rewrite["composio_action"],
+            )
+            stream_cfg.update(rewrite)
+            # Clear stale cursor state so we start fresh on the new action.
+            for k in ("cursor_value", "last_pull_at", "last_pull_status", "last_pull_count"):
+                stream_cfg.pop(k, None)
+            try:
+                patch = await client.patch(
+                    f"/api/v1/streams/{stream_id}",
+                    json=stream_cfg,
+                )
+                patch.raise_for_status()
+            except Exception as exc:
+                # Log and proceed — even if persistence fails, the in-memory
+                # config reaches the puller for this invocation. The next
+                # pull tries to migrate again.
+                logger.warning(
+                    "Failed to persist auto-migration for %s: %s", stream_id, exc,
+                )
+
+        return stream_cfg
 
 
 @activity.defn
@@ -208,8 +265,18 @@ async def ingest_events(
 
 
 @activity.defn
-async def update_cursor(stream_id: str, cursor_value: str) -> None:
-    """Update stream cursor via PATCH /api/v1/streams/:id."""
+async def update_cursor(
+    stream_id: str,
+    cursor_value: str,
+    status: str = "ok",
+) -> None:
+    """Update stream cursor + last-pull state via PATCH /api/v1/streams/:id.
+
+    `status` must be the real outcome of the upstream pull — "ok" on success,
+    "error" / "payload_too_large" / etc. on failure. Previously this was
+    hardcoded to "ok" which masked real failures and caused silent data gaps
+    (#474).
+    """
     config = load_config()
     async with _ctrl_client(config) as client:
         resp = await client.patch(
@@ -217,7 +284,7 @@ async def update_cursor(stream_id: str, cursor_value: str) -> None:
             json={
                 "cursor_value": cursor_value,
                 "last_pull_at": _now_iso(),
-                "last_pull_status": "ok",
+                "last_pull_status": status,
             },
         )
         resp.raise_for_status()
@@ -388,14 +455,18 @@ SYNC_CONFIGS: dict[str, dict[str, Any]] = {
         "backfill_future_days": 90,
     },
     "GMAIL_FETCH_EMAILS": {
+        # Gmail's `after:` operator accepts seconds-since-epoch AND YYYY/MM/DD.
+        # We use the timestamp form so 5-minute pulls actually get ~5 minutes
+        # of new mail, not everything since midnight. Day-granularity caused
+        # snowballing response size → Composio 413 "payload too large" (#474).
         "pull_mode": "append",
         "backfill_args": {
-            "query": "after:{backfill_date} -in:drafts -in:spam -in:trash -in:chats",
-            "max_results": 100,
+            "query": "after:{backfill_ts} -in:drafts -in:spam -in:trash -in:chats",
+            "max_results": 30,
         },
         "incremental_args": {
-            "query": "after:{last_pull_date} -in:drafts -in:spam -in:trash -in:chats",
-            "max_results": 100,
+            "query": "after:{last_pull_ts} -in:drafts -in:spam -in:trash -in:chats",
+            "max_results": 30,
         },
         "cursor_response_field": "",
         "backfill_past_days": 30,
