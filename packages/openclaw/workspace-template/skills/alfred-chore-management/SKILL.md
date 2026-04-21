@@ -29,10 +29,67 @@ Both layers must stay in sync. Use the `self` MCP tool to query both sides.
 
 ### Act
 
+- **`self endpoint="/api/v1/chores" method="POST"`** — create a new chore from scratch. See "Creating a chore" below.
 - **`self endpoint="/api/v1/chores/{slug}/trigger" method="POST"`** — manually fire a chore once, out of cycle. Use when Sir says "run the cashflow forecast now".
 - **`self endpoint="/api/v1/chores/{slug}/pause" method="POST"`** — pause a chore (both vault record and Temporal schedule).
 - **`self endpoint="/api/v1/chores/{slug}/resume" method="POST"`** — resume a paused chore.
 - **`self endpoint="/api/v1/chores/{slug}" method="DELETE"`** — remove a chore and its schedule.
+
+## Creating a chore
+
+When Sir asks for a new recurring job ("every morning, tell me what happened overnight", "every Friday summarize the week"), you are expected to design and install it yourself via `POST /api/v1/chores`.
+
+### Body shape
+
+```
+{
+  "slug": "daily-morning-briefing",            // kebab-case, unique
+  "workflow_class_name": "DailyBriefingWorkflow",
+  "python_source": "<full .py file>",
+  "schedule": "30 4 * * *",                     // 5-field cron
+  "name": "Daily morning briefing",            // optional
+  "user_facing_description": "...",            // optional, shown in dashboard
+  "params": { "preview_only": false },         // optional; chore_slug is auto-added
+  "tags": ["morning", "digest"],                // optional
+  "overlap_policy": "Skip",                    // optional, default "Skip"
+  "restart_worker": true                       // optional, default true
+}
+```
+
+The endpoint writes three things atomically: the `.py` file under `/alfred-data/user-chores/`, the `chore/<slug>.md` vault record, and the Temporal schedule `chore-<slug>`. On failure it rolls back so you never end up with partial state.
+
+### The decision: which activities to compose
+
+A chore's workflow is a sequence of `workflow.execute_activity(<name>, ...)` calls. The dynamic-loader validator REQUIRES that every `<name>` was imported from `src.activities.chore_actions` (or `src.workflows.chores._base`). You cannot call arbitrary Python, and you cannot inline HTTP calls, LLM calls, or filesystem reads at workflow scope — all that work happens inside activities.
+
+**Activities split into three families:**
+
+1. **Data activities** (`llm: false`) — read/write vault, fetch events, diff snapshots, filter, save. Fast, deterministic. Use these for everything whose output is a pure function of its input.
+2. **LLM-bearing activities** (`llm: true`) — internally spawn an openclaw-workers subagent on `grok-4.1-fast` to produce prose or judgement. Examples: `write_matter_digest_via_llm`, `ask_alfred_to_judge_anomalies`, `build_daily_briefing_v2`. Use these for anything that needs "decide what matters" or "write this as a paragraph".
+3. **Notification activities** — `send_chore_notification` delivers a formatted message to Sir's main session.
+
+**Rule of thumb:** if the step's output can be described as "return this structured data", compose from data activities. If it's "return some prose", use an LLM-bearing activity. If the LLM-bearing activity you need doesn't exist yet, that's platform work — tell Sir "I can sketch this chore, but the step that needs reasoning requires a new `chore_actions` activity. Want me to open an issue for it?"
+
+Fetch the full list with `self endpoint="/api/v1/chore-actions"` before writing Python — it returns every allowed activity plus its `reads`/`writes`/`llm`/`required_data` metadata. If you reference an activity not in the manifest, validation will reject the source.
+
+### Writing the Python source
+
+The validator enforces:
+1. Size < 100KB, valid Python syntax.
+2. Only imports from: `__future__`, `dataclasses`, `datetime`, `typing`, `json`, `temporalio.workflow`, `temporalio.common`, `src.workflows.chores._base`, `src.activities.chore_actions`.
+3. Module scope: only class defs, function defs, imports, one docstring, `with workflow.unsafe.imports_passed_through():`, and literal constants.
+4. Exactly one `@workflow.defn` class with exactly one `@workflow.run` method.
+5. No forbidden names: `eval`, `exec`, `open`, `compile`, `__import__`, `getattr`/`setattr`/`delattr`, `globals`/`locals`, `vars`, `dir`, `breakpoint`.
+6. No non-deterministic calls at workflow scope: `datetime.now`, `random.*`, `uuid.*`, `time.time`.
+7. Every `workflow.execute_activity(<name>, ...)` must reference a name imported from the two allowed modules.
+
+Before submitting, sanity-check the `chore_actions` manifest: `self endpoint="/api/v1/chore-actions"` returns every activity name you're allowed to import plus its `reads`/`writes`/`llm` metadata. If the activity you need isn't in the manifest, you can't use it — fall back to a subagent step or propose a new activity to Sir for platform work.
+
+### After creation
+
+- `restart_worker: true` (the default) triggers an alfred-learn restart so the dynamic loader picks up the new template. The first scheduled run then fires normally. If the restart is rate-limited (429), the response includes a `restart_error` and you must call `self endpoint="/api/v1/admin/restart-learn" method="POST"` manually before the first cron tick.
+- New chores start with `quarantine: false` — they run live from the first tick. (Onboarding-generated chores go through 3 dry-runs because they're bulk-generated; chores you create on request have been consciously authored, so we skip quarantine.)
+- Fire one real run via `self endpoint="/api/v1/chores/{slug}/trigger" method="POST"` to verify before the first scheduled tick.
 
 ### Related
 

@@ -1,10 +1,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import { addRoute } from "../server.js";
-import { sendJson, ValidationError, NotFoundError } from "../errors.js";
-import { dockerExec } from "../helpers.js";
+import { sendJson, ValidationError, NotFoundError, ConflictError } from "../errors.js";
+import { dockerExec, dockerComposeCmd } from "../helpers.js";
 import { VAULT_PATH } from "./vault.js";
-import { lookupChoreActions, type ChoreActionSpec } from "./chore_manifest_data.js";
+import { CHORE_ACTION_MANIFEST, lookupChoreActions, type ChoreActionSpec } from "./chore_manifest_data.js";
+
+const USER_CHORES_DIR = "/mnt/encrypted/alfred/user-chores";
+const VALIDATE_STAGING_DIR = "/mnt/encrypted/alfred/.chore-validate";
+const SLUG_RE = /^[a-z0-9][a-z0-9-]*[a-z0-9]$/;
+const WORKFLOW_CLASS_RE = /^[A-Z][a-zA-Z0-9]*Workflow$/;
 
 /**
  * Chore lifecycle routes.
@@ -68,6 +73,40 @@ function readChoreFile(slug: string): { frontmatter: Record<string, unknown>; bo
   return { frontmatter: fm, body };
 }
 
+// YAML-safe single-quoted scalar. Doubles any single quotes inside.
+function yamlScalarQuote(value: string): string {
+  return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+// Validate Python source by delegating to alfred-learn's dynamic-loader validator.
+// Keeps runtime + generation on exactly one validation implementation.
+//
+// We stage the source on the shared /mnt/encrypted/alfred mount (not inside
+// USER_CHORES_DIR, because files under user-chores are picked up by the
+// dynamic loader on worker startup — we don't want half-written candidates
+// to get staged accidentally).
+async function validateChorePython(source: string): Promise<{ ok: boolean; violations: string[] }> {
+  fs.mkdirSync(VALIDATE_STAGING_DIR, { recursive: true });
+  const tmpName = `validate-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.py`;
+  const hostPath = path.join(VALIDATE_STAGING_DIR, tmpName);
+  const containerPath = `/alfred-data/.chore-validate/${tmpName}`;
+  fs.writeFileSync(hostPath, source, "utf-8");
+  const script =
+    "import json,sys\n" +
+    "from src.workflows.chores._dynamic_loader import validate_template_source\n" +
+    `src=open(${JSON.stringify(containerPath)}).read()\n` +
+    "r=validate_template_source(src)\n" +
+    'print(json.dumps({"ok":r.ok,"violations":list(r.violations)}))\n';
+  try {
+    const out = await dockerExec("alfred-learn", ["python3", "-c", script]);
+    const trimmed = out.trim();
+    const parsed = JSON.parse(trimmed) as { ok: boolean; violations: string[] };
+    return parsed;
+  } finally {
+    try { fs.unlinkSync(hostPath); } catch { /* ignore */ }
+  }
+}
+
 function writeChoreStatus(slug: string, status: string): boolean {
   const fp = path.join(CHORE_DIR, `${slug}.md`);
   if (!fs.existsSync(fp)) return false;
@@ -112,6 +151,188 @@ export function registerChoreRoutes(): void {
       });
     }
     sendJson(res, 200, { chores, count: chores.length });
+  });
+
+  // List every activity that generated chore templates are allowed to import
+  // from `src.activities.chore_actions`. Use this before authoring a chore's
+  // Python source to confirm the activity names + understand what data each
+  // one reads/writes.
+  addRoute("GET", "/api/v1/chore-actions", async ({ res }) => {
+    const entries = Object.values(CHORE_ACTION_MANIFEST);
+    sendJson(res, 200, {
+      actions: entries,
+      count: entries.length,
+    });
+  });
+
+  // Create a chore end-to-end: write the generated Python workflow source, the
+  // vault `chore/` record, and a Temporal schedule — in that order, with rollback
+  // on partial failure. Called by Alfred via the `self` MCP when the user asks
+  // him to set up a recurring automation (or when he proposes one unprompted).
+  //
+  // Body:
+  //   slug                    kebab-case, unique, becomes `chore/<slug>.md`
+  //   workflow_class_name     PascalCase, must be `class <name>` in python_source
+  //   python_source           full .py source (< 100KB), validated by the same
+  //                           static checker the dynamic loader runs at startup
+  //   schedule                cron expression (5-field)
+  //   name?                   human-friendly name (defaults to title-cased slug)
+  //   user_facing_description?
+  //   params?                 extra workflow input; `chore_slug` is always added
+  //   tags?                   string list
+  //   overlap_policy?         default "Skip"
+  //   task_queue?             default "alfred-learn"
+  //   restart_worker?         default true — trigger alfred-learn restart so
+  //                           dynamic_loader picks up the new template immediately
+  //
+  // Returns 201 with `slug`, `module`, `source_path`, `vault_path`, `schedule_id`,
+  // `workflow_class_name`, `cron`, `restart_triggered`, `restart_error?`.
+  addRoute("POST", "/api/v1/chores", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b !== "object") throw new ValidationError("body is required");
+
+    const slug = String(b.slug ?? "").trim();
+    const workflowClass = String(b.workflow_class_name ?? "").trim();
+    const pythonSource = typeof b.python_source === "string" ? b.python_source : "";
+    const cron = String(b.schedule ?? "").trim();
+
+    if (!SLUG_RE.test(slug)) {
+      throw new ValidationError("slug must be lowercase kebab-case (a-z, 0-9, hyphens)");
+    }
+    if (!WORKFLOW_CLASS_RE.test(workflowClass)) {
+      throw new ValidationError("workflow_class_name must be PascalCase ending in 'Workflow'");
+    }
+    if (!pythonSource) {
+      throw new ValidationError("python_source is required");
+    }
+    if (!cron) {
+      throw new ValidationError("schedule (cron expression) is required");
+    }
+    if (!pythonSource.includes(`class ${workflowClass}`)) {
+      throw new ValidationError(
+        `python_source must declare 'class ${workflowClass}' (the workflow_class_name)`,
+      );
+    }
+
+    const name = String(b.name ?? slug.replace(/-/g, " ")).trim() || slug;
+    const description = String(b.user_facing_description ?? "").trim();
+    const paramsInput =
+      b.params && typeof b.params === "object" && !Array.isArray(b.params)
+        ? (b.params as Record<string, unknown>)
+        : {};
+    const tags = Array.isArray(b.tags)
+      ? (b.tags as unknown[]).filter((t): t is string => typeof t === "string")
+      : [];
+    const overlapPolicy = String(b.overlap_policy ?? "Skip");
+    const taskQueue = String(b.task_queue ?? "alfred-learn");
+    const restartWorker = b.restart_worker !== false;
+
+    const module = slug.replace(/-/g, "_");
+    const sourcePath = path.join(USER_CHORES_DIR, `${module}.py`);
+    const vaultPath = path.join(CHORE_DIR, `${slug}.md`);
+    const scheduleId = `chore-${slug}`;
+
+    if (fs.existsSync(sourcePath)) {
+      throw new ConflictError(`chore source already exists at ${sourcePath}`);
+    }
+    if (fs.existsSync(vaultPath)) {
+      throw new ConflictError(`chore vault record already exists at ${vaultPath}`);
+    }
+
+    const validation = await validateChorePython(pythonSource);
+    if (!validation.ok) {
+      throw new ValidationError("python_source failed static validation", {
+        violations: validation.violations,
+      });
+    }
+
+    // Combine caller params with the required chore_slug envelope so the
+    // template workflow always receives it as input.
+    const workflowInput = { chore_slug: slug, ...paramsInput };
+    const paramsJson = JSON.stringify(workflowInput);
+    const now = new Date().toISOString();
+    const tagsInline = tags.length
+      ? `[${tags.map((t) => `'${t.replace(/'/g, "''")}'`).join(", ")}]`
+      : "[]";
+    const recordLines = [
+      "---",
+      `created: '${now}'`,
+      "created_by: self",
+      "generated: true",
+      "last_result: ''",
+      "last_run: ''",
+      `name: ${yamlScalarQuote(name)}`,
+      `params: ${yamlScalarQuote(paramsJson)}`,
+      "quarantine: false",
+      "quarantine_remaining: 0",
+      `schedule: ${yamlScalarQuote(cron)}`,
+      `schedule_id: ${scheduleId}`,
+      "status: active",
+      `tags: ${tagsInline}`,
+      `template: ${module}`,
+      "type: chore",
+      `user_facing_description: ${yamlScalarQuote(description)}`,
+      `workflow_class_name: ${workflowClass}`,
+      "---",
+      "",
+      `# ${name}`,
+      "",
+      description || "Generated chore.",
+      "",
+      "> **Generated chore.** Created via `POST /api/v1/chores` (self MCP).",
+      "",
+    ];
+
+    fs.mkdirSync(USER_CHORES_DIR, { recursive: true });
+    fs.writeFileSync(sourcePath, pythonSource, "utf-8");
+
+    fs.mkdirSync(CHORE_DIR, { recursive: true });
+    fs.writeFileSync(vaultPath, recordLines.join("\n"), "utf-8");
+
+    try {
+      await dockerExec("temporal", [
+        "temporal", "schedule", "create",
+        "--schedule-id", scheduleId,
+        "--type", workflowClass,
+        "--task-queue", taskQueue,
+        "--cron", cron,
+        "--overlap-policy", overlapPolicy,
+        "--input", JSON.stringify(workflowInput),
+      ]);
+    } catch (err) {
+      // Best-effort rollback — leave the operator in a clean state if the
+      // schedule create fails. The Python source and vault record are both
+      // inert until a schedule fires them, so removing them is safe.
+      try { fs.unlinkSync(sourcePath); } catch { /* ignore */ }
+      try { fs.unlinkSync(vaultPath); } catch { /* ignore */ }
+      throw err;
+    }
+
+    let restartTriggered = false;
+    let restartError: string | undefined;
+    if (restartWorker) {
+      try {
+        await dockerComposeCmd(["restart", "alfred-learn"]);
+        restartTriggered = true;
+      } catch (err) {
+        restartError = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    sendJson(res, 201, {
+      slug,
+      module,
+      source_path: sourcePath,
+      vault_path: vaultPath,
+      schedule_id: scheduleId,
+      workflow_class_name: workflowClass,
+      cron,
+      restart_triggered: restartTriggered,
+      restart_error: restartError,
+      message: restartTriggered
+        ? `Chore '${slug}' created; alfred-learn restarted to load the new template.`
+        : `Chore '${slug}' created. Trigger alfred-learn restart via POST /api/v1/admin/restart-learn before the first run.`,
+    });
   });
 
   // Get one chore's details (frontmatter + body)
