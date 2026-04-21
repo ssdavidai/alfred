@@ -37,6 +37,27 @@ async function getAdminFromRequest(
   return { userId: result.user.id, isAdmin: !!(result.user as any).isAdmin };
 }
 
+// Alternative auth for the operator CLI path: a long-lived server-to-server
+// bearer token. Lets the platform operator reach admin endpoints from a shell
+// without maintaining a Wasp session (which a CLI can't easily obtain). Same
+// shape as VOICE_BRIDGE_INTERNAL_TOKEN — compare as a constant-time-ish check.
+function isOperatorToken(req: Request): boolean {
+  const expected = process.env.OPERATOR_ADMIN_TOKEN;
+  if (!expected || expected.length < 16) return false;
+  const header = (req.headers.authorization as string | undefined) ?? "";
+  const queryToken = req.query.token as string | undefined;
+  const bearer = header.startsWith("Bearer ")
+    ? header.slice("Bearer ".length)
+    : queryToken ?? "";
+  if (!bearer || bearer.length !== expected.length) return false;
+  // length-equal string compare — good enough at this trust boundary
+  let diff = 0;
+  for (let i = 0; i < bearer.length; i++) {
+    diff |= bearer.charCodeAt(i) ^ expected.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
 // Look up the ctrl SQLite DB to get the integer instance ID + IP for a customer
 // name. Mirrors the helper in adminTerminalProxy.ts — both endpoints need the
 // same join across the Wasp Instance (customerName, tailscaleHostname) and the
@@ -215,10 +236,13 @@ export function registerSSHKeyRoutes(app: Application): void {
   // `ssh -i`.
   app.get("/api/admin/ssh-key", async (req: Request, res: Response) => {
     try {
-      const admin = await getAdminFromRequest(req);
-      if (!admin || !admin.isAdmin) {
-        res.status(403).json({ error: "Admin access required" });
-        return;
+      const operator = isOperatorToken(req);
+      if (!operator) {
+        const admin = await getAdminFromRequest(req);
+        if (!admin || !admin.isAdmin) {
+          res.status(403).json({ error: "Admin access required" });
+          return;
+        }
       }
 
       const customerName = (req.query.customerName as string | undefined)?.trim();

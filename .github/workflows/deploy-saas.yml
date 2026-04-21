@@ -145,6 +145,17 @@ jobs:
       - name: Configure Caddy and Plausible
         run: |
           ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} 'grep -q "PLAUSIBLE_API_KEY" /opt/alfred-saas/.env 2>/dev/null && echo "Plausible API key already set" || { echo "PLAUSIBLE_API_KEY=${{ secrets.PLAUSIBLE_API_KEY }}" >> /opt/alfred-saas/.env && echo "Plausible API key added"; }'
+
+      - name: Configure operator admin token
+        env:
+          OPERATOR_ADMIN_TOKEN: ${{ secrets.OPERATOR_ADMIN_TOKEN }}
+        run: |
+          if [ -z "$OPERATOR_ADMIN_TOKEN" ]; then
+            echo "OPERATOR_ADMIN_TOKEN secret not set — skipping operator auth path"
+            exit 0
+          fi
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} "grep -q '^OPERATOR_ADMIN_TOKEN=' /opt/alfred-saas/.env 2>/dev/null && sed -i 's|^OPERATOR_ADMIN_TOKEN=.*|OPERATOR_ADMIN_TOKEN=$OPERATOR_ADMIN_TOKEN|' /opt/alfred-saas/.env || echo 'OPERATOR_ADMIN_TOKEN=$OPERATOR_ADMIN_TOKEN' >> /opt/alfred-saas/.env"
+          ssh -i ~/.ssh/deploy_key deploy@${{ secrets.DEPLOY_HOST }} 'cd /opt/alfred-saas && docker compose up -d app'
       - name: Update Caddy for domain migration
         run: |
           scp -i ~/.ssh/deploy_key deploy/Caddyfile deploy@${{ secrets.DEPLOY_HOST }}:/tmp/Caddyfile
