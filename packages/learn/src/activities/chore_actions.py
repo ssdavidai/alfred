@@ -668,8 +668,12 @@ path: {path}
 
 ## Your task
 
-1. Read the matter record — use the `self` tool: self({{endpoint: "/api/v1/vault/records/{path}"}})
-2. Scan related records: self({{endpoint: "/api/v1/vault/search", query: {{q: "{name}"}}}}) — look at recent events, persons, orgs.
+The tool for vault I/O is `alfred-ctrl__self` (MCP-namespaced — NOT plain `self`). All three steps MUST use that exact tool name.
+
+1. Read the matter record:
+   `alfred-ctrl__self({{"endpoint": "/api/v1/vault/records/{path}"}})`
+2. Scan related records:
+   `alfred-ctrl__self({{"endpoint": "/api/v1/vault/search", "query": {{"q": "{name}"}}}})` — look at recent events, persons, orgs.
 3. Synthesise these fields (best effort — empty lists are fine if nothing found):
    - `domains`: list of email/website domains associated with this matter (e.g. ["bakerynext.hu", "szamlazz.hu"])
    - `related_persons`: list of person names OR emails that appear in events about this matter
@@ -677,9 +681,11 @@ path: {path}
    - `keywords`: 3-5 short tags (single words or hyphenated) that a router could match against email subjects
    - `parent_matter`: if this matter is a sub-project of a larger business (e.g. "B9 Penthouse" belongs to a property-development parent), set the parent matter's slug. Leave null if this IS a top-level matter.
 4. PATCH the matter:
-   self({{endpoint: "/api/v1/vault/records/{path}", method: "PATCH", body: {{set: {{domains: […], related_persons: […], related_orgs: […], keywords: […], parent_matter: "…" or null}}}}}}
+   `alfred-ctrl__self({{"endpoint": "/api/v1/vault/records/{path}", "method": "PATCH", "body": {{"set": {{"domains": […], "related_persons": […], "related_orgs": […], "keywords": […], "parent_matter": "…" or null}}}}}})`
 
 5. Your FINAL message must be a single line: "enriched {name} with D domains, P persons, O orgs, K keywords, parent=<parent-or-none>". Nothing else.
+
+CRITICAL: If you report success without having actually called `alfred-ctrl__self` at least twice (read + PATCH), the enrichment has NOT happened — do not hallucinate. When the tool doesn't exist or args are wrong, say so explicitly instead of fabricating a success line.
 """
     reply = await _workers_spawn_subagent(
         agent_id="vault-curator",
@@ -720,9 +726,17 @@ def _compact_events_for_prompt(
 
 
 def _compact_matter_for_prompt(m: dict[str, Any]) -> dict[str, Any]:
+    # body_preview gives the LLM enough semantic context to route even when
+    # routing metadata (domains/persons/orgs/keywords) is bare. Trim to keep
+    # the prompt small when there are lots of matters.
+    body = str(m.get("body_preview") or "").strip()
+    if body.startswith("#"):
+        # Drop the leading heading line — redundant with `name`.
+        body = "\n".join(body.split("\n")[1:]).strip()
     return {
         "slug": m.get("slug") or (m.get("path", "").split("/")[-1].replace(".md", "")),
         "name": m.get("name", ""),
+        "body_preview": body[:400],
         "domains": m.get("domains") or [],
         "related_persons": m.get("related_persons") or [],
         "related_orgs": m.get("related_orgs") or [],
@@ -789,7 +803,7 @@ async def _route_and_triage(
 ## Your task
 
 For each event, decide:
-  (a) Which matter it belongs to — match against matter.domains / related_persons / related_orgs / keywords. If nothing matches, assign "other".
+  (a) Which matter it belongs to. Route by SEMANTIC MATCH against the matter's `name` + `body_preview`. If routing metadata (domains / related_persons / related_orgs / keywords) is populated, use it as a fast-path; otherwise use your judgment against the body preview. When nothing convincingly matches, assign "other" — do NOT force a weak match.
   (b) Whether it needs attention. Attention criteria:
       - Sent by a HUMAN (not no-reply, no-reply@, not auto-submitted, not newsletter/bulk)
       - AND asks a question / requests a reply / has a deadline / is a reply thread with pending action / concerns >$500 or significant amount
@@ -990,20 +1004,15 @@ async def build_daily_briefing_v2(
 
     matters = await _load_active_matters()
     bare = [m for m in matters if _matter_is_bare(m)]
-    activity.logger.info("matters: %d active, %d bare (enriching)", len(matters), len(bare))
+    activity.logger.info("matters: %d active, %d bare", len(matters), len(bare))
 
+    # Per the redesign: skip pre-enrichment. The triage LLM sees the full
+    # matter list inline + has qmd memory over the vault (so it can retrieve
+    # matter body content on demand while reasoning). Enrichment is reserved
+    # for a future background "enrich-bare-matters" chore that runs on its
+    # own cadence — not inline in every briefing run. Keeping the helper
+    # function for when that lands.
     enriched_count = 0
-    for matter in bare[:12]:  # hard cap — never enrich more than 12 in one run
-        try:
-            await _enrich_bare_matter(matter)
-            enriched_count += 1
-            activity.heartbeat(f"enriched {enriched_count}/{len(bare)}")
-        except Exception as exc:
-            activity.logger.warning("enrich_bare_matter skipped %s: %s", matter.get("name"), exc)
-
-    if enriched_count > 0:
-        # Reload matters so the router sees the freshly-patched metadata.
-        matters = await _load_active_matters()
 
     triage = await _route_and_triage(bundle=bundle, matters=matters)
     activity.logger.info(
