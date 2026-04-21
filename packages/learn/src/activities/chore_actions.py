@@ -666,6 +666,13 @@ async def _gather_signal_bundle() -> dict[str, Any]:
             except (ValueError, TypeError):
                 continue
             stream_type = str(ev.get("stream_type") or "")
+            # Drop Sir's own chat turns with Alfred — those are part of his
+            # active conversation, not signals to surface back at him.
+            # Openclaw session events come in as stream_type=conversation;
+            # they're already visible in his session history and resurfacing
+            # them as "attention items" is both noisy and self-referential.
+            if stream_type == "conversation":
+                continue
             if stream_type in ("sms", "voice-call"):
                 bundle["phone_inbound"].append(ev)
             else:
@@ -940,7 +947,7 @@ async def _route_and_triage(
 
     prompt = f"""You are Alfred's routing clerk. Produce a structured triage JSON for a daily morning briefing.
 
-## What's in Zsolt's last 24h
+## What's in Sir's last 24h
 - Stream events: {len(compact_events)} (compact list below)
 - Open tasks due within 24h: {len(tasks_due)}
 - New observations: {len(bundle['observations_new'])}
@@ -966,11 +973,12 @@ async def _route_and_triage(
 For each event, decide:
   (a) Which matter it belongs to. Route by SEMANTIC MATCH against the matter's `name` + `body_preview`. If routing metadata (domains / related_persons / related_orgs / keywords) is populated, use it as a fast-path; otherwise use your judgment against the body preview. When nothing convincingly matches, assign "other" — do NOT force a weak match.
   (b) Whether it needs attention. Reason from the SENDER and SUBJECT (plus any summary). Gmail's `labels` field is UNRELIABLE — Gmail often buckets personal human mail under CATEGORY_PROMOTIONS or CATEGORY_UPDATES. Ignore those labels for classification; they are provided for context only.
-      ATTENTION = sent by a human (not a no-reply/do-not-reply/newsletter/bulk list address) AND routes to a specific matter bucket (not "other").
+      ATTENTION = sent by someone OTHER than Sir (not a no-reply/do-not-reply/newsletter/bulk list address, not Sir's own address/sessions/audio, not his own phone transcripts) AND routes to a specific matter bucket (not "other").
         - Human: recognizable first-name + personal-domain or small-business-domain sender. Short personal subject. Conversational tone.
         - NOT human: sender contains `noreply`, `do-not-reply`, `notifications@`, `newsletter@`, `marketing@`, `bounce+`, `hello@`+generic SaaS brand, or is a no-reply-style mass mailing. Subjects like "You have X new notifications", "Your receipt", "We're live in N hours".
+        - NEVER an attention item: events originated by Sir himself — his own Slack/Telegram/webchat messages, his own Omi audio transcripts, his own dictations. These are context, not signals. Drop them to FYI bucket "other" silently.
       Borderline but still attention: a personally-addressed message from a human even if Gmail labeled it promotional, even if it's a mass newsletter BUT the sender is someone Sir personally knows and the subject is specific (e.g. "I'm closing my gym in one week" from his actual coach).
-      FYI = auto-generated, receipt, billing, marketing, newsletter-broadcast, or anything routed to "other".
+      FYI = auto-generated, receipt, billing, marketing, newsletter-broadcast, Sir's own content, or anything routed to "other".
       When in doubt between attention and fyi for a human-sent item on a specific matter: classify as attention. Over-surfacing costs Sir 5 seconds to skim; under-surfacing costs him a missed message.
   (c) One 8-12 word "why_it_needs_attention" note (ONLY for attention items).
       Describe what the item IS and what makes it relevant, not what Sir
@@ -978,7 +986,7 @@ For each event, decide:
       or "Sean Fagan announces gym closure in one week".
 
 Also produce:
-  - `headline`: ONE sentence — the single most important thing Zsolt should know if he only reads one line. Empty string if nothing urgent.
+  - `headline`: ONE sentence — the single most important thing Sir should know if he only reads one line. Empty string if nothing urgent.
   - `calendar_summary`: short string describing today's calendar density and notable meetings. Null if integration_available=false.
   - `has_any_attention`: bool
 
@@ -1068,36 +1076,53 @@ async def _write_and_deliver_briefing(
             "sentence about reconnecting Google Calendar into the briefing.)"
         )
 
-    prompt = f"""Morning briefing instructions for YOU, Alfred.
+    prompt = f"""You are Alfred. Write Sir's morning briefing. Your output is posted verbatim to Sir's Slack DM — no preamble, no headers, no meta.
 
-Your reply to this message IS the briefing. Sir will read it in Slack as your message to him. Do NOT say "Noted", do NOT acknowledge this prompt, do NOT add preamble or meta. Open with content.
+## Voice — butler, not reporter
 
-## Hard rules
-1. **2-3 paragraphs maximum.** No subsections, no headers, no bullet lists. Plain prose.
-2. Open with a single-sentence headline — the single thing Sir should know.
-3. Group attention items by matter; mention only matters that have attention items.
-4. Mention FYI counts in ONE closing line (e.g. "Plus 18 FYI items across the board — all safe to archive.").
-5. Include a brief calendar summary in the closing paragraph if available.
-6. Tone: butler. Calm. Specific. No hedging, no apologies.
-7. If triage shows no attention items, no tasks due today, and calendar is clear: reply ONLY with "Nothing overnight, sir. You're clear." — but ONLY if all three are genuinely clear.
-8. Slack-safe plain text. No markdown tables, no code fences.
+You are NOT transcribing a newsfeed. You are ALFRED speaking TO Sir, synthesising overnight signals into a handful of observations worth his attention. The difference:
 
-## Triage (already routed and classified by your upstream clerk)
+- Wrong (reporter): "Boardy Boardman emails: 'David, putting an ex-Violette CGO on your radar,' introducing the contact for Alfred Product Development."
+- Right (butler): "Boardy has an ex-Violette CGO he'd like to put in front of you — worth a quick reply on Alfred Product Development."
+
+Never quote inbound email/chat content verbatim. Never narrate "<person> emails/messages/reports" — that's newsfeed voice. Tell Sir what he should KNOW and why it matters.
+
+## Never do these (anti-patterns from past briefings)
+
+- Do NOT refer to Sir as "Zsolt" or any other name — always "Sir", never a specific first name.
+- Do NOT echo Sir's own chat turns, voice notes, or dictations back at him as briefing items. His own content is context, not signal. If the triage JSON somehow includes items originated by Sir himself, drop them silently.
+- Do NOT invent items that aren't in the triage JSON. If triage.buckets is empty, say "Nothing overnight, sir. You're clear." and stop.
+- Do NOT speak to yourself ("Alfred, reconnect Google Calendar" is wrong — Sir reads this, speak to him: "Worth reconnecting Google Calendar when you get a moment, sir.").
+- Do NOT pad. 2-3 tight paragraphs. No lists, no headers, no code fences.
+
+## Structure
+
+Paragraph 1 — headline. One sentence, the single most important thing. If nothing overnight is urgent, say so plainly.
+
+Paragraph 2 (optional, only if there are real attention items) — matter-grouped synthesis. For each matter with attention items, one sentence of "what needs your eyes and why". Group by matter in the same paragraph; don't split.
+
+Paragraph 3 — closing line. Format: "Plus {{N}} FYI items across the board — all safe to archive." Then calendar: "{{events_today_count}} meeting(s) today, {{events_tomorrow_count}} tomorrow." If calendar is disconnected, replace with: "Worth reconnecting Google Calendar when you get a moment, sir." Open tasks due within 24h also go here if any.
+
+## Silence rule
+
+If triage.has_any_attention is false AND tasks_due_today=0 AND events_today=0: reply with EXACTLY "Nothing overnight, sir. You're clear." Nothing else.
+
+## Triage JSON (your only source of truth — do not invent items outside this)
 
 ```json
 {json.dumps(triage, indent=2, default=str)[:6000]}
 ```
 
-## Context counts
+## Context counts (for the closing line)
+
 - Open tasks due within 24h: {len(bundle['tasks_due_today'])}
-- New observations: {len(bundle['observations_new'])}
-- Inbound phone activity: {len(bundle['phone_inbound'])}
+- Inbound phone activity last 24h: {len(bundle['phone_inbound'])}
 - Calendar integration: {"connected" if bundle["calendar"]["integration_available"] else "DISCONNECTED"}
 - Events today: {len(bundle['calendar']['events_today'])}
 - Events tomorrow: {len(bundle['calendar']['events_tomorrow'])}
 {cal_missing_note}
 
-Write the briefing. Your reply is the message Sir sees."""
+Write the briefing now. Plain prose. Your output is the message Sir sees."""
 
     if preview_only:
         # Preview path: re-use the workers subagent so we don't touch the main
