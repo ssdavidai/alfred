@@ -388,7 +388,7 @@ async def call_composio(
     the composio dispatcher is just a ctrl-api endpoint.
     """
     return await call_self(
-        endpoint="/api/v1/composio/execute",
+        endpoint="/api/v1/integrations/execute",
         method="POST",
         body={"action": action, "arguments": arguments or {}},
     )
@@ -598,6 +598,23 @@ async def _ctrl_get(path: str, params: dict[str, str] | None = None) -> dict[str
         return resp.json()
 
 
+async def _ctrl_post(path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    config = load_config()
+    api_key = os.environ.get("AAS_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    url = f"{config.alfred_ctrl_url}{path}"
+    async with httpx.AsyncClient(timeout=60.0) as http:
+        resp = await http.post(url, headers=headers, json=body or {})
+        # ctrl-api returns {error: "..."} at 200 for some dispatchers; keep
+        # non-2xx as raises so real failures surface.
+        if resp.status_code >= 500:
+            resp.raise_for_status()
+        try:
+            return resp.json()
+        except ValueError:
+            return {"error": f"non-JSON response (status {resp.status_code})"}
+
+
 async def _gather_signal_bundle() -> dict[str, Any]:
     """Pull last-24h signals from all tenant-side sources. Pure I/O, no LLM.
 
@@ -695,28 +712,50 @@ async def _gather_signal_bundle() -> dict[str, Any]:
     except Exception as exc:
         activity.logger.warning("signal_bundle: observations list failed: %s", exc)
 
-    # Calendar — check for composio googlecalendar stream + pull events.
+    # Calendar — fetch fresh from the Composio googlecalendar integration at
+    # bundle-build time. The stream-puller's periodic pulls store the full
+    # envelope (metadata + items[]) as one event per pull and the `items` list
+    # is often empty; relying on those stream events misses everything. A
+    # direct call to GOOGLECALENDAR_EVENTS_LIST with a tight time window
+    # returns the real event list every time, and surfaces disconnection
+    # explicitly so the briefing can tell Sir to reconnect.
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    time_min = datetime(today.year, today.month, today.day, tzinfo=timezone.utc).isoformat()
+    time_max = (
+        datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+        + timedelta(days=2)
+    ).isoformat()
     try:
-        streams_resp = await _ctrl_get("/api/v1/streams")
-        streams = streams_resp.get("streams") or []
-        has_calendar = any(
-            (s.get("source") or "").startswith("composio:googlecalendar")
-            or "googlecalendar" in (s.get("id") or "")
-            for s in streams
+        cal_result = await _ctrl_post(
+            "/api/v1/integrations/execute",
+            body={
+                "action": "GOOGLECALENDAR_EVENTS_LIST",
+                "arguments": {
+                    "calendar_id": "primary",
+                    "time_min": time_min,
+                    "time_max": time_max,
+                    "max_results": 50,
+                    "single_events": True,
+                    "order_by": "startTime",
+                },
+            },
         )
-        bundle["calendar"]["integration_available"] = has_calendar
-
-        if has_calendar:
-            # Pull calendar events from the stream — they're already in our feed
-            # but calendar entries live there as raw google-shape dicts.
-            cal_events = [
-                e for e in bundle["events"]
-                if "googlecalendar" in (e.get("source") or e.get("stream_id") or "")
-            ]
-            today = datetime.now(timezone.utc).date()
-            for ce in cal_events:
-                raw = ce.get("raw") or {}
-                start = raw.get("start", {})
+        # Disconnection signal: ctrl-api returns {"error": "No active ..."}
+        # when the tenant has no live Composio connection. Keep
+        # integration_available=False so the briefing prompt nudges a reconnect.
+        err = cal_result.get("error") if isinstance(cal_result, dict) else None
+        data = cal_result.get("data") if isinstance(cal_result, dict) else None
+        items = (data or {}).get("items") or (data or {}).get("event_list") or []
+        if err or not data:
+            bundle["calendar"]["integration_available"] = False
+            activity.logger.warning(
+                "signal_bundle: calendar fetch returned no data (err=%s)", str(err)[:200]
+            )
+        else:
+            bundle["calendar"]["integration_available"] = True
+            for item in items:
+                start = item.get("start") or {}
                 start_str = start.get("dateTime") or start.get("date") or ""
                 try:
                     start_dt = datetime.fromisoformat(str(start_str).replace("Z", "+00:00"))
@@ -725,11 +764,11 @@ async def _gather_signal_bundle() -> dict[str, Any]:
                 except (ValueError, TypeError):
                     continue
                 summary = {
-                    "title": raw.get("summary", "(no title)"),
+                    "title": item.get("summary") or "(no title)",
                     "start": start_str,
                     "attendees": [
                         a.get("email") or a.get("displayName", "")
-                        for a in (raw.get("attendees") or [])[:5]
+                        for a in (item.get("attendees") or [])[:5]
                     ],
                 }
                 if start_dt.date() == today:
@@ -737,7 +776,8 @@ async def _gather_signal_bundle() -> dict[str, Any]:
                 elif start_dt.date() == today + timedelta(days=1):
                     bundle["calendar"]["events_tomorrow"].append(summary)
     except Exception as exc:
-        activity.logger.warning("signal_bundle: calendar probe failed: %s", exc)
+        activity.logger.warning("signal_bundle: calendar fetch failed: %s", exc)
+        bundle["calendar"]["integration_available"] = False
 
     return bundle
 
@@ -925,21 +965,17 @@ async def _route_and_triage(
 
 For each event, decide:
   (a) Which matter it belongs to. Route by SEMANTIC MATCH against the matter's `name` + `body_preview`. If routing metadata (domains / related_persons / related_orgs / keywords) is populated, use it as a fast-path; otherwise use your judgment against the body preview. When nothing convincingly matches, assign "other" — do NOT force a weak match.
-  (b) Whether it needs attention. ATTENTION CRITERIA (relaxed):
-      - Sent by a HUMAN (not no-reply@, not auto-submitted, not newsletter/bulk list-id)
-      - AND routes to a specific matter bucket (NOT "other")
-      That's it. If both are true, it's attention. Don't require a question mark
-      or a deadline or a dollar amount — any human-to-human activity on an
-      active matter is worth surfacing, because Sir's matters are what he's
-      actively working on.
-      FYI CRITERIA:
-      - Auto-generated (receipts, notifications, calendar invites, GitHub digests, billing emails)
-      - Promotional / newsletter / marketing / list-broadcast
-      - Routes to "other" (not tied to any active matter) — even if human-sent
+  (b) Whether it needs attention. Reason from the SENDER and SUBJECT (plus any summary). Gmail's `labels` field is UNRELIABLE — Gmail often buckets personal human mail under CATEGORY_PROMOTIONS or CATEGORY_UPDATES. Ignore those labels for classification; they are provided for context only.
+      ATTENTION = sent by a human (not a no-reply/do-not-reply/newsletter/bulk list address) AND routes to a specific matter bucket (not "other").
+        - Human: recognizable first-name + personal-domain or small-business-domain sender. Short personal subject. Conversational tone.
+        - NOT human: sender contains `noreply`, `do-not-reply`, `notifications@`, `newsletter@`, `marketing@`, `bounce+`, `hello@`+generic SaaS brand, or is a no-reply-style mass mailing. Subjects like "You have X new notifications", "Your receipt", "We're live in N hours".
+      Borderline but still attention: a personally-addressed message from a human even if Gmail labeled it promotional, even if it's a mass newsletter BUT the sender is someone Sir personally knows and the subject is specific (e.g. "I'm closing my gym in one week" from his actual coach).
+      FYI = auto-generated, receipt, billing, marketing, newsletter-broadcast, or anything routed to "other".
+      When in doubt between attention and fyi for a human-sent item on a specific matter: classify as attention. Over-surfacing costs Sir 5 seconds to skim; under-surfacing costs him a missed message.
   (c) One 8-12 word "why_it_needs_attention" note (ONLY for attention items).
       Describe what the item IS and what makes it relevant, not what Sir
       should do about it. E.g. "BakeryNext Q3 packaging reply from Laszlo"
-      or "Krem supplier invoice query from Andrea".
+      or "Sean Fagan announces gym closure in one week".
 
 Also produce:
   - `headline`: ONE sentence — the single most important thing Zsolt should know if he only reads one line. Empty string if nothing urgent.
@@ -1001,100 +1037,112 @@ Only include matter buckets that have content (attention OR fyi_count >= 1). Sil
         }
 
 
-async def _format_final_briefing(
-    *, triage: dict[str, Any], bundle: dict[str, Any]
-) -> str:
-    """Spawn a second learn-clerk subagent to turn the triage JSON into a
-    2-3 paragraph plain-text briefing with Alfred's butler tone.
+async def _write_and_deliver_briefing(
+    *,
+    chore_slug: str,
+    session_id: str,
+    triage: dict[str, Any],
+    bundle: dict[str, Any],
+    preview_only: bool,
+) -> dict[str, Any]:
+    """Ask the main Alfred session to write the briefing and deliver it itself.
 
-    The triage step already did the hard cognitive work (routing, attention
-    classification). This call just wordsmiths.
+    Previous design had a subagent pre-render the briefing and then POST it
+    into the main session via sessions_send — which treats the text as a
+    USER TURN, so Alfred sees it as a user message and replies "Noted, sir"
+    (which is the message that actually lands in Slack). The briefing
+    itself never rendered.
+
+    Correct shape: send the structured triage to the main Alfred session as
+    an instructional prompt. His response IS the briefing, in his voice,
+    on his channel (Slack). No double roundtrip, no reversed role.
+
+    For preview mode we still route through the main session but write the
+    reply to a file instead of returning normally — the session_id is set to
+    a throwaway preview key so nothing posts to Slack.
     """
     cal_missing_note = ""
     if not bundle["calendar"]["integration_available"]:
         cal_missing_note = (
-            "\n\nIMPORTANT: Calendar integration is NOT connected. The briefing "
-            "MUST mention this in one short closing sentence so Zsolt knows to "
-            "connect it. Suggested phrasing: 'Calendar still not connected, "
-            "sir — worth hooking up Google Calendar for tomorrow.'"
+            "\n\n(Calendar integration is NOT connected — weave ONE short "
+            "sentence about reconnecting Google Calendar into the briefing.)"
         )
 
-    prompt = f"""You are Alfred, a precise English butler, writing Zsolt's morning briefing.
+    prompt = f"""Morning briefing instructions for YOU, Alfred.
 
-Below is a structured triage of last night's signals. Turn it into a SHORT morning briefing.
+Your reply to this message IS the briefing. Sir will read it in Slack as your message to him. Do NOT say "Noted", do NOT acknowledge this prompt, do NOT add preamble or meta. Open with content.
 
 ## Hard rules
-
 1. **2-3 paragraphs maximum.** No subsections, no headers, no bullet lists. Plain prose.
-2. Open with a single-sentence **headline** — the single thing Zsolt should know.
-3. Group attention items by matter, mention only matters that have attention items (not quiet ones).
-4. Mention FYI counts in ONE closing line ("Plus 18 FYI items across the board — all safe to archive.").
-5. If calendar summary is available, include it in the closing paragraph.
-6. Tone: butler. Calm. Specific. No hedging, no flourish, no apologies.
-7. If no matter has attention items AND no tasks due today AND calendar is clear: reply ONLY with "Nothing overnight, sir. You're clear."
-8. Output is delivered as a Slack DM — plain text, Slack-safe (no markdown tables).
+2. Open with a single-sentence headline — the single thing Sir should know.
+3. Group attention items by matter; mention only matters that have attention items.
+4. Mention FYI counts in ONE closing line (e.g. "Plus 18 FYI items across the board — all safe to archive.").
+5. Include a brief calendar summary in the closing paragraph if available.
+6. Tone: butler. Calm. Specific. No hedging, no apologies.
+7. If triage shows no attention items, no tasks due today, and calendar is clear: reply ONLY with "Nothing overnight, sir. You're clear." — but ONLY if all three are genuinely clear.
+8. Slack-safe plain text. No markdown tables, no code fences.
 
-## Triage JSON (input)
+## Triage (already routed and classified by your upstream clerk)
 
 ```json
 {json.dumps(triage, indent=2, default=str)[:6000]}
 ```
 
-## Quick reference for context
-
-- Tasks due within 24h: {len(bundle['tasks_due_today'])}
+## Context counts
+- Open tasks due within 24h: {len(bundle['tasks_due_today'])}
 - New observations: {len(bundle['observations_new'])}
 - Inbound phone activity: {len(bundle['phone_inbound'])}
+- Calendar integration: {"connected" if bundle["calendar"]["integration_available"] else "DISCONNECTED"}
+- Events today: {len(bundle['calendar']['events_today'])}
+- Events tomorrow: {len(bundle['calendar']['events_tomorrow'])}
 {cal_missing_note}
 
-Write the briefing now. Return ONLY the briefing text, no preamble or meta.
-"""
-    reply = await _workers_spawn_subagent(
-        agent_id="learn-clerk",
-        prompt=prompt,
-        run_timeout_s=180,
-        poll_timeout_s=240,
-    )
-    return reply.strip()
+Write the briefing. Your reply is the message Sir sees."""
 
-
-async def _deliver_or_preview(
-    *,
-    chore_slug: str,
-    session_id: str,
-    briefing: str,
-    preview_only: bool,
-) -> dict[str, Any]:
-    """Either call send_chore_notification (live delivery to Slack via
-    sessions_send) OR write to a preview file and skip notification.
-
-    Returns {mode: "slack"|"preview", path: str|null, delivered: bool}.
-    """
     if preview_only:
+        # Preview path: re-use the workers subagent so we don't touch the main
+        # Slack-connected session. Falls back to a minimal briefing if the
+        # subagent flakes.
+        briefing = await _workers_spawn_subagent(
+            agent_id="learn-clerk",
+            prompt=prompt,
+            run_timeout_s=180,
+            poll_timeout_s=240,
+        )
+        briefing = (briefing or "").strip() or (
+            f"{triage.get('headline', '').strip()}\n\nTriage produced "
+            f"{len(triage.get('buckets') or [])} matter buckets."
+        )
         os.makedirs(_PREVIEW_OUTPUT_DIR, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
         path = os.path.join(_PREVIEW_OUTPUT_DIR, f"{chore_slug}-{ts}.md")
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(briefing)
         activity.logger.info("preview written to %s (%d bytes)", path, len(briefing))
-        return {"mode": "preview", "path": path, "delivered": False}
+        return {"mode": "preview", "path": path, "delivered": False, "briefing": briefing}
 
-    # Live delivery — reuse the existing notification path.
+    # Live delivery: POST the instruction prompt to Alfred's main session.
+    # His response is the briefing; it lands in Slack as his message. The
+    # existing /api/v1/notifications path wraps sessions_send which injects
+    # the prompt as a user turn and delivers the assistant's reply to the
+    # configured channel — exactly what we want here.
     config = load_config()
     api_key = os.environ.get("AAS_API_KEY", "")
     url = f"{config.alfred_ctrl_url}/api/v1/notifications"
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    async with httpx.AsyncClient(timeout=30.0) as http:
-        await http.post(
+    async with httpx.AsyncClient(timeout=60.0) as http:
+        resp = await http.post(
             url,
             json={
-                "message": f"[Chore: {chore_slug}]\n\n{briefing}",
+                "message": prompt,
                 "urgency": "normal",
                 "session_id": session_id,
+                # agent_id defaults to "main" server-side
             },
             headers=headers,
         )
-    return {"mode": "slack", "path": None, "delivered": True}
+        status = resp.status_code
+    return {"mode": "slack", "path": None, "delivered": status < 400, "http_status": status}
 
 
 @activity.defn
@@ -1108,14 +1156,18 @@ async def build_daily_briefing_v2(
     Steps (all I/O inside this one activity — the chore workflow stays
     inside the dynamic-loader allowlist by calling only this activity):
 
-      1. Gather signal bundle (streams + tasks + observations + phone).
+      1. Gather signal bundle (streams + tasks + observations + phone +
+         fresh Google Calendar via composio at bundle-build time).
       2. Load active matters; detect bare ones.
-      3. Enrich bare matters via vault-curator subagent on workers (one per
-         matter, serialised through workers maxConcurrent=1).
+      3. Enrich bare matters via vault-curator subagent on workers (skipped
+         in the current tuning — matters get enriched via the regular
+         curator flow instead).
       4. Route + triage via learn-clerk subagent (single call with all data).
-      5. Format final briefing via a second learn-clerk subagent.
-      6. Deliver to Slack (send_chore_notification path) OR write preview
-         file at /alfred-data/briefing-previews/<slug>-<ts>.md.
+      5. Write + deliver in one step: prompt the main Alfred session with
+         the triage JSON; his reply IS the briefing and posts to Slack as
+         his message in his voice. (Preview mode uses a workers subagent
+         and writes to /alfred-data/briefing-previews/<slug>-<ts>.md
+         instead, so we never touch the live channel.)
 
     Returns a dict with diagnostic counts so the workflow can record run
     metadata. Never raises on subagent flake — best-effort on each stage.
@@ -1148,30 +1200,13 @@ async def build_daily_briefing_v2(
         triage.get("has_any_attention"), len(triage.get("buckets") or []),
     )
 
-    # Silence short-circuit — save a model call if there's literally nothing
-    # to say AND the triage agent didn't fall through to a parse error.
-    if (
-        not triage.get("has_any_attention")
-        and not bundle["tasks_due_today"]
-        and not bundle["calendar"]["events_today"]
-        and not triage.get("_parse_error")
-    ):
-        briefing = "Nothing overnight, sir. You're clear."
-    else:
-        briefing = await _format_final_briefing(triage=triage, bundle=bundle)
-        if not briefing:
-            # Fallback if the formatter subagent returned empty.
-            briefing = (
-                f"{triage.get('headline', '').strip()}\n\n"
-                f"Triage data available but formatter returned empty — "
-                f"{len(triage.get('buckets') or [])} matter buckets, "
-                f"{len(bundle['tasks_due_today'])} tasks due today."
-            )
-
-    delivery = await _deliver_or_preview(
+    # Ask the main Alfred session to write + deliver in one turn. His reply
+    # is the briefing; it posts to Slack as his message, in his voice.
+    delivery = await _write_and_deliver_briefing(
         chore_slug=chore_slug,
         session_id=session_id,
-        briefing=briefing,
+        triage=triage,
+        bundle=bundle,
         preview_only=preview_only,
     )
 
@@ -1185,6 +1220,8 @@ async def build_daily_briefing_v2(
         "matters_enriched": enriched_count,
         "buckets": len(triage.get("buckets") or []),
         "has_any_attention": bool(triage.get("has_any_attention")),
+        "calendar_connected": bundle["calendar"]["integration_available"],
+        "calendar_events_today": len(bundle["calendar"]["events_today"]),
         "delivery": delivery,
-        "briefing_preview": briefing[:400],
+        "briefing_preview": (delivery.get("briefing") or "")[:400] if delivery.get("mode") == "preview" else None,
     }
