@@ -490,15 +490,21 @@ async def _gather_signal_bundle() -> dict[str, Any]:
       events: list of stream events (normalised)
       tasks_open: list of vault tasks with status active/overdue
       tasks_due_today: subset of tasks_open with due within 24h
-      observations_new: list of observations created in the last 24h
-      phone_inbound: SMS + voice-call events last 24h
+      observations_new: list of observations created recently
+      phone_inbound: SMS + voice-call events in the window
       calendar: {
         integration_available: bool,
         events_today: list[{title, start, attendees}],
         events_tomorrow: list[...],
       }
+
+    Window: 72 hours. We look back 3 days rather than 24 because if the
+    briefing missed a day (weekend, outage, dormant user), a pure 24-hour
+    cutoff drops anything from that gap. 72h gives a soft catch-up.
+    Attention classification in the triage LLM decides what's fresh enough
+    to surface.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=72)
     bundle: dict[str, Any] = {
         "events": [],
         "tasks_open": [],
@@ -804,14 +810,21 @@ async def _route_and_triage(
 
 For each event, decide:
   (a) Which matter it belongs to. Route by SEMANTIC MATCH against the matter's `name` + `body_preview`. If routing metadata (domains / related_persons / related_orgs / keywords) is populated, use it as a fast-path; otherwise use your judgment against the body preview. When nothing convincingly matches, assign "other" — do NOT force a weak match.
-  (b) Whether it needs attention. Attention criteria:
-      - Sent by a HUMAN (not no-reply, no-reply@, not auto-submitted, not newsletter/bulk)
-      - AND asks a question / requests a reply / has a deadline / is a reply thread with pending action / concerns >$500 or significant amount
-      FYI criteria:
-      - Auto-generated (receipts, notifications, calendar invites from recurring meetings, GitHub activity digests)
-      - Promotional / newsletter / marketing
-      - Read-only informational
+  (b) Whether it needs attention. ATTENTION CRITERIA (relaxed):
+      - Sent by a HUMAN (not no-reply@, not auto-submitted, not newsletter/bulk list-id)
+      - AND routes to a specific matter bucket (NOT "other")
+      That's it. If both are true, it's attention. Don't require a question mark
+      or a deadline or a dollar amount — any human-to-human activity on an
+      active matter is worth surfacing, because Sir's matters are what he's
+      actively working on.
+      FYI CRITERIA:
+      - Auto-generated (receipts, notifications, calendar invites, GitHub digests, billing emails)
+      - Promotional / newsletter / marketing / list-broadcast
+      - Routes to "other" (not tied to any active matter) — even if human-sent
   (c) One 8-12 word "why_it_needs_attention" note (ONLY for attention items).
+      Describe what the item IS and what makes it relevant, not what Sir
+      should do about it. E.g. "BakeryNext Q3 packaging reply from Laszlo"
+      or "Krem supplier invoice query from Andrea".
 
 Also produce:
   - `headline`: ONE sentence — the single most important thing Zsolt should know if he only reads one line. Empty string if nothing urgent.
