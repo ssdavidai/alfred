@@ -32,6 +32,7 @@ class EnrichmentResult:
     records_found: int = 0
     records_enriched: int = 0
     entities_created: int = 0
+    tasks_created: int = 0
     batches: int = 0
     error: str | None = None
 
@@ -71,14 +72,16 @@ class HourlyEnrichmentWorkflow:
             if not enrichments:
                 continue
 
-            # 4. Apply enrichments to vault records
-            applied: int = await workflow.execute_activity(
+            # 4. Apply enrichments to vault records + materialize
+            #    action_items into first-class task/ records.
+            applied: dict[str, int] = await workflow.execute_activity(
                 apply_enrichments,
                 args=[enrichments, [r["path"] for r in batch]],
                 start_to_close_timeout=timedelta(seconds=120),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-            result.records_enriched += applied
+            result.records_enriched += applied.get("records_enriched", 0)
+            result.tasks_created += applied.get("tasks_created", 0)
 
             # 5. Create missing entity records
             created: int = await workflow.execute_activity(

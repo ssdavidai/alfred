@@ -7,6 +7,7 @@ applies the enrichments back to the vault records.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -195,11 +196,22 @@ Return ONLY the JSON array. No explanation, no markdown fences."""
 async def apply_enrichments(
     enrichments: list[dict[str, Any]],
     record_paths: list[str],
-) -> int:
-    """Apply enrichment results to vault records."""
+) -> dict[str, int]:
+    """Apply enrichment results to vault records.
+
+    Returns a dict with:
+      - records_enriched: how many source records had their frontmatter
+        updated (entities, topic_tags, related_matters, etc.)
+      - tasks_created: how many task/ vault records were materialized
+        from the LLM-extracted action_items.
+
+    Task creation is idempotent via hash-prefix slugs so repeated
+    enrichment runs don't duplicate commitments.
+    """
     config = load_config()
     client = VaultClient(config)
-    applied = 0
+    records_enriched = 0
+    tasks_created = 0
     try:
         for enrichment in enrichments:
             idx = enrichment.get("event_index", -1)
@@ -253,18 +265,170 @@ async def apply_enrichments(
                 entities_section = "\n## Entities\n\n" + "\n".join(f"- {link}" for link in entity_links) + "\n"
                 new_content = new_content.rstrip() + "\n" + entities_section
 
-            # Write back
+            # Derive the source record's type from its vault path
+            # (path looks like "event/foo.md" / "conversation/bar.md" etc.).
+            # Previously hardcoded to "event", which silently fell back to
+            # a new event/ file whenever the source was a conversation.
+            rtype, rslug = _split_vault_path(path)
+            if not rtype or not rslug:
+                logger.warning("enrichment: could not parse path %s", path)
+                continue
+
+            # Write back to the SAME record type the source came from.
             try:
-                # Extract the record name/slug from path for write_record
-                await client.write_record("event", path.replace("event/", "").replace(".md", ""), new_content)
-                applied += 1
+                await client.write_record(rtype, rslug, new_content)
+                records_enriched += 1
             except Exception as exc:
                 logger.warning("enrichment: failed to write %s: %s", path, exc)
+                continue
 
-        logger.info("enrichment: applied %d/%d enrichments", applied, len(enrichments))
-        return applied
+            # Materialize action_items as first-class task/ records. The
+            # clerk's action_items list is otherwise invisible to
+            # dashboard errands, daily brief, surveyor linking, and the
+            # agent's task CRUD. Propagate related_* from the source.
+            source_related_persons: list[str] = []
+            source_related_orgs: list[str] = []
+            # Entity wikilinks above are the authoritative person/org
+            # anchors for this event; strip them into flat paths for
+            # task frontmatter.
+            for e in entities:
+                ename = (e.get("name") or "").strip()
+                etype = e.get("type") or ""
+                if not ename:
+                    continue
+                ref = f"{etype}/{ename}.md"
+                if etype == "person":
+                    source_related_persons.append(ref)
+                elif etype == "org":
+                    source_related_orgs.append(ref)
+
+            for item_text in action_items:
+                if not isinstance(item_text, str) or not item_text.strip():
+                    continue
+                if await _create_task_for_action_item(
+                    client=client,
+                    action_item=item_text.strip(),
+                    source_event_path=path,
+                    related_matters=list(related) if isinstance(related, list) else [],
+                    related_persons=source_related_persons,
+                    related_orgs=source_related_orgs,
+                ):
+                    tasks_created += 1
+
+        logger.info(
+            "enrichment: applied %d/%d enrichments, created %d tasks",
+            records_enriched, len(enrichments), tasks_created,
+        )
+        return {"records_enriched": records_enriched, "tasks_created": tasks_created}
     finally:
         await client.close()
+
+
+def _split_vault_path(path: str) -> tuple[str, str]:
+    """Split a vault-relative path into (record_type, slug).
+
+    Examples:
+        event/foo.md           -> ("event", "foo")
+        conversation/bar.md    -> ("conversation", "bar")
+        note/deeply/nested.md  -> ("note", "deeply/nested")
+    """
+    if not path:
+        return ("", "")
+    stripped = path.removeprefix("/").removesuffix(".md")
+    parts = stripped.split("/", 1)
+    if len(parts) != 2:
+        return ("", "")
+    return parts[0], parts[1]
+
+
+def _slug_for_action_item(source_path: str, text: str) -> str:
+    """Generate a stable, idempotent slug for a task derived from an action item.
+
+    Hash prefix guarantees uniqueness + replayability — the SAME action
+    item on the SAME source event always produces the SAME slug, so
+    re-running enrichment is a no-op (the vault writer either PUTs or the
+    idempotency check short-circuits).
+    """
+    h = hashlib.sha1(f"{source_path}|{text}".encode("utf-8")).hexdigest()[:8]
+    # Kebab-case summary of the action, capped for filename friendliness.
+    summary = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:50] or "task"
+    return f"{h}-{summary}"
+
+
+async def _create_task_for_action_item(
+    client: VaultClient,
+    action_item: str,
+    source_event_path: str,
+    related_matters: list[str],
+    related_persons: list[str],
+    related_orgs: list[str],
+) -> bool:
+    """Create a task/ vault record for one enrichment action_item.
+
+    Returns True if a new record was written, False if it already exists
+    (idempotent) or write failed. Related_* lists are the union of:
+      - propagated from the source event's enrichment result
+      - extracted from wikilinks inline in the action_item text itself
+    """
+    # Parse inline wikilinks like [[person/Name]] out of the action text
+    for m in re.finditer(r"\[\[(person|org|matter|project)/([^\]|]+)", action_item):
+        etype, ename = m.group(1), m.group(2).strip()
+        ref = f"{etype}/{ename}.md"
+        if etype == "matter" and ref not in related_matters:
+            related_matters.append(ref)
+        elif etype == "person" and ref not in related_persons:
+            related_persons.append(ref)
+        elif etype == "org" and ref not in related_orgs:
+            related_orgs.append(ref)
+        # project links on tasks aren't populated today, ignored.
+
+    slug = _slug_for_action_item(source_event_path, action_item)
+    task_path = f"task/{slug}.md"
+
+    # Idempotency: if the task already exists, don't overwrite.
+    try:
+        existing = await client.read_record(task_path)
+        if existing:
+            return False
+    except Exception:
+        # 404 etc. — record doesn't exist, which is what we want.
+        pass
+
+    def _yaml_list(items: list[str]) -> str:
+        if not items:
+            return "[]"
+        return "[" + ", ".join(items) + "]"
+
+    now = datetime.now(timezone.utc).isoformat()
+    safe_name = action_item.replace('"', '\\"').replace("\n", " ")[:180]
+    source_link = source_event_path.removesuffix(".md")
+
+    content = f"""---
+type: task
+created: {now}
+status: pending
+name: "{safe_name}"
+source_event: "{source_event_path}"
+related_matters: {_yaml_list(related_matters)}
+related_persons: {_yaml_list(related_persons)}
+related_orgs: {_yaml_list(related_orgs)}
+tags: [auto-from-enrichment]
+enrichment_status: pending
+---
+
+{action_item}
+
+Extracted from [[{source_link}]].
+"""
+
+    try:
+        await client.write_record("task", slug, content)
+        return True
+    except Exception as exc:
+        logger.warning(
+            "enrichment: task creation failed for %s: %s", slug[:20], exc
+        )
+        return False
 
 
 @activity.defn
