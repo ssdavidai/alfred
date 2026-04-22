@@ -305,8 +305,25 @@ async def apply_enrichments(
                 logger.warning("enrichment: could not read %s", path)
                 continue
 
-            # Parse existing content
-            full_content = record.get("content", record.get("body", ""))
+            # Reconstruct the record's raw markdown from the
+            # ctrl-api vault read response. The read endpoint returns
+            # `{path, frontmatter: {...parsed YAML...}, body: "..."}` —
+            # NOT a `content` field. Previously this code did
+            # `.get("content", .get("body"))` and fell through to body,
+            # writing back body-only (no frontmatter) which stripped the
+            # YAML block from the record. Instead: re-serialize the
+            # frontmatter dict into YAML and prepend it to the body so
+            # `_inject_frontmatter_fields` sees the full markdown and
+            # can cleanly update the fields in place.
+            full_content = record.get("content")
+            if not full_content:
+                fm_dict = record.get("frontmatter") or {}
+                body = record.get("body") or ""
+                if fm_dict:
+                    fm_lines = [_format_fm_line(k, v) for k, v in fm_dict.items()]
+                    full_content = "---\n" + "\n".join(fm_lines) + "\n---\n" + body
+                else:
+                    full_content = body
             if not full_content:
                 continue
 
