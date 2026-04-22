@@ -20,6 +20,12 @@ from .writer import VaultWriter
 log = structlog.get_logger()
 
 LOOP_INTERVAL = 5.0  # seconds
+# How often to persist state during the labeling pass. Each label +
+# suggest_relationships call costs 1-2 LLM round-trips; checkpointing
+# every N clusters means a mid-pass kill loses at most this many
+# clusters of work. 10 is a good balance — ~5s of extra disk I/O per
+# full 200-cluster pass, minimal in the big picture.
+LABEL_CHECKPOINT_EVERY = 10
 
 
 class Daemon:
@@ -51,9 +57,11 @@ class Daemon:
         log.info("daemon.starting")
         self.state.load()
 
-        # Initial sync if no state exists
-        if not self.state.files:
-            await self._initial_sync()
+        # Always run a startup sync — this reconciles any drift between the
+        # vault on disk and persisted state (files added while surveyor was
+        # down never fire watcher events). compute_diff makes this cheap —
+        # only truly-new-or-changed files get re-embedded.
+        await self._startup_sync()
 
         # Start filesystem watcher
         self.watcher.start()
@@ -65,20 +73,53 @@ class Daemon:
         finally:
             await self.shutdown()
 
-    async def _initial_sync(self) -> None:
-        """Full scan → embed all → cluster → label."""
-        log.info("daemon.initial_sync_start")
+    async def _startup_sync(self) -> None:
+        """Reconcile full vault against persisted state on boot.
+
+        Runs a full filesystem rescan, diffs against state.files, and
+        embeds only what's actually new or changed. Deleted files are
+        purged. Unlike the prior `_initial_sync`, this path is idempotent:
+        a partially-complete previous run (e.g. killed mid-labeling by
+        alfred-update.timer) resumes cleanly instead of redoing everything
+        from scratch.
+
+        Also handles drift for tenants whose state file is intact but
+        stale (files added to the vault while surveyor was down — the
+        watcher only fires inotify events after startup, so those files
+        are otherwise invisible to `_tick`).
+        """
+        log.info("daemon.startup_sync_start")
 
         hashes = self.watcher.full_scan()
-        for rel, md5 in hashes.items():
-            self.state.update_file(rel, md5)
+        diff = self.state.compute_diff(hashes)
 
-        all_paths = list(hashes.keys())
-        records = await self.embedder.process_diff(all_paths, [], [])
+        log.info(
+            "daemon.startup_sync_diff",
+            on_disk=len(hashes),
+            in_state=len(self.state.files),
+            new=len(diff.new),
+            changed=len(diff.changed),
+            deleted=len(diff.deleted),
+        )
 
-        # Need all records for clustering — parse any we didn't get from embedder
+        # Update state md5s for new/changed files BEFORE embedding.
+        for rel in diff.new + diff.changed:
+            if rel in hashes:
+                self.state.update_file(rel, hashes[rel])
+
+        # Embed only the delta. On a cold start this is everything; on a
+        # resumed-after-restart case this is often zero or a handful.
+        records = await self.embedder.process_diff(diff.new, diff.changed, diff.deleted)
+
+        # Checkpoint here so the ~2min (cloud) / ~30min (local) embed work
+        # survives even if the labeling pass crashes or gets killed.
+        self.state.save()
+        log.info("daemon.startup_embed_checkpoint", embedded=len(records))
+
+        # Parse records that weren't freshly embedded so clustering sees
+        # the full vault in memory.
         all_records = dict(records)
-        for rel in all_paths:
+        for rel in hashes:
             if rel not in all_records:
                 try:
                     all_records[rel] = parse_file(self.cfg.vault.path, rel)
@@ -87,7 +128,7 @@ class Daemon:
 
         await self._cluster_and_label(all_records)
         self.state.save()
-        log.info("daemon.initial_sync_complete", files=len(hashes))
+        log.info("daemon.startup_sync_complete", files=len(hashes))
 
     async def _tick(self) -> None:
         """One iteration of the main loop."""
@@ -178,6 +219,11 @@ class Daemon:
         from datetime import datetime, timezone
 
         semaphore = asyncio.Semaphore(self.cfg.labeler.max_concurrent)
+        # Checkpoint state every N clusters so a mid-pass SIGKILL (e.g. the
+        # tenant's alfred-update.timer recreating the container every 15
+        # min) loses at most `LABEL_CHECKPOINT_EVERY` clusters of labeling
+        # work, not the whole pass.
+        processed_counter = {"count": 0}
 
         async def _process_cluster(cid: int) -> None:
             members = cluster_members.get(cid, [])
@@ -203,6 +249,15 @@ class Daemon:
                     source = rel.get("source", "")
                     if source in records:
                         self.writer.write_relationships(source, [rel])
+
+                processed_counter["count"] += 1
+                if processed_counter["count"] % LABEL_CHECKPOINT_EVERY == 0:
+                    self.state.save()
+                    log.info(
+                        "daemon.label_checkpoint",
+                        completed=processed_counter["count"],
+                        total=len(all_changed),
+                    )
 
         # gather() with return_exceptions=True keeps the pass running even
         # if one cluster's LLM call blows up — we'd rather log and keep
