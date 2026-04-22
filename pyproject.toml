@@ -29,7 +29,12 @@ surveyor = [
     "numpy>=1.26",
     "openai>=1.30",
 ]
+test = ["pytest>=8.0", "pytest-asyncio>=0.23"]
 all = ["alfred-vault[surveyor]", "alfred-vault[temporal]"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
 
 [project.urls]
 Homepage = "https://github.com/ssdavidai/alfred"

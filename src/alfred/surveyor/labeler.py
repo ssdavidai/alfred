@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import PurePosixPath
 
 import structlog
 from openai import AsyncOpenAI
@@ -12,6 +13,23 @@ from .config import LabelerConfig, OpenRouterConfig
 from .parser import VaultRecord
 
 log = structlog.get_logger()
+
+# Record types that are first-class entities in the vault taxonomy. When a
+# cluster contains one of these, its filename stem becomes a canonical
+# cluster tag so every member inherits the entity slug and downstream
+# consumers can match on `alfred_tags: [<entity-slug>]`.
+ENTITY_RECORD_TYPES = frozenset({"matter", "person", "org", "project"})
+
+
+def _slug_from_rel_path(rel_path: str) -> str:
+    """Derive the slug from a vault rel_path — filename stem, no extension.
+
+    `matter/alfred-product-development-launch.md` → `alfred-product-development-launch`
+    """
+    name = PurePosixPath(rel_path).name
+    if name.lower().endswith(".md"):
+        name = name[:-3]
+    return name
 
 CLUSTER_LABEL_PROMPT = """\
 You are labeling a cluster of related documents from an Obsidian vault.
@@ -73,26 +91,62 @@ class Labeler:
         member_paths: list[str],
         records: dict[str, VaultRecord],
     ) -> list[str]:
-        """Get 1-3 descriptive tags for a cluster from the LLM."""
+        """Get 1-3 descriptive tags for a cluster from the LLM.
+
+        When the cluster contains one or more first-class entity records
+        (matter/person/org/project), their slugs are added as canonical
+        tags alongside the LLM-generated descriptive labels. This lets
+        downstream consumers match on a stable slug ("erste-makerspace")
+        rather than the LLM's occasionally-drifting descriptive labels.
+        Entity slugs come FIRST in the tag list so they have priority
+        across the 3-tag cap in existing consumers.
+        """
         if len(member_paths) < self.min_cluster_size:
             return []
 
-        # Build member summaries
+        # Collect entity slugs from the cluster's members. These are
+        # added unconditionally — no LLM judgement needed, the slug is
+        # derived deterministically from the record's rel_path.
+        entity_slugs: list[str] = []
+        seen_slugs: set[str] = set()
+        for path in member_paths:
+            record = records.get(path)
+            if record is None:
+                continue
+            if record.record_type not in ENTITY_RECORD_TYPES:
+                continue
+            slug = _slug_from_rel_path(path)
+            if slug and slug not in seen_slugs:
+                entity_slugs.append(slug)
+                seen_slugs.add(slug)
+
+        # Build member summaries and get LLM-generated descriptive tags.
         members_text = self._build_member_summaries(member_paths, records)
         prompt = CLUSTER_LABEL_PROMPT.format(members=members_text)
 
         response = await self._llm_call(prompt)
-        if response is None:
-            return []
+        llm_tags: list[str] = []
+        if response is not None:
+            try:
+                parsed = json.loads(response)
+                if isinstance(parsed, list) and all(isinstance(t, str) for t in parsed):
+                    llm_tags = parsed[:3]
+            except (json.JSONDecodeError, TypeError):
+                log.warning(
+                    "labeler.parse_error",
+                    cluster_id=cluster_id,
+                    response=response[:200],
+                )
 
-        try:
-            tags = json.loads(response)
-            if isinstance(tags, list) and all(isinstance(t, str) for t in tags):
-                return tags[:3]
-        except (json.JSONDecodeError, TypeError):
-            log.warning("labeler.parse_error", cluster_id=cluster_id, response=response[:200])
+        # Merge: entity slugs first (canonical), then LLM tags, dedupe
+        # (LLM tags that happen to match a slug get dropped).
+        merged: list[str] = list(entity_slugs)
+        for tag in llm_tags:
+            if tag not in seen_slugs:
+                merged.append(tag)
+                seen_slugs.add(tag)
 
-        return []
+        return merged
 
     async def suggest_relationships(
         self,
