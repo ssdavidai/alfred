@@ -39,6 +39,30 @@ def extract_wikilinks(text: str) -> list[str]:
     return WIKILINK_RE.findall(text)
 
 
+def _coerce_record_type(raw) -> str:
+    """Normalise a `type:` frontmatter value into a scalar string.
+
+    Curator-generated records have occasionally been written with a one-element
+    YAML block-list (`type:\n- contradiction`) instead of a scalar — pyyaml
+    parses that as a Python `list`, and Milvus's VARCHAR `record_type` field
+    rejects it with a schema-mismatch error that crashes the entire surveyor
+    subprocess. Coerce defensively so a single malformed record can never
+    stop the embed pipeline.
+    """
+    if raw is None:
+        return "unknown"
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, list):
+        # Take the first non-empty string; fall back to "unknown".
+        for item in raw:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
+        return "unknown"
+    # Any other scalar (int/float/bool) — stringify so Milvus accepts it.
+    return str(raw)
+
+
 def parse_file(vault_path: Path, rel_path: str) -> VaultRecord:
     """Parse a vault markdown file into a VaultRecord."""
     full_path = vault_path / rel_path
@@ -47,7 +71,7 @@ def parse_file(vault_path: Path, rel_path: str) -> VaultRecord:
 
     fm = dict(post.metadata)
     body = post.content
-    record_type = fm.get("type", "unknown")
+    record_type = _coerce_record_type(fm.get("type"))
 
     # Extract wikilinks from the entire raw text (both frontmatter and body)
     wikilinks = extract_wikilinks(raw_text)
