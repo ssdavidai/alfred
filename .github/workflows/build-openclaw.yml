@@ -35,6 +35,7 @@ jobs:
         run: |
           eval "$(grep -E '^(OPENCLAW_SHA|ALFRED_SHA)=' packages/openclaw/VERSION)"
           echo "openclaw_sha=${OPENCLAW_SHA}" >> "$GITHUB_OUTPUT"
+          echo "alfred_sha=${ALFRED_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Free disk space for Docker build
         run: |
@@ -62,6 +63,9 @@ jobs:
           context: packages/openclaw
           file: packages/openclaw/dockerfiles/alfred.Dockerfile
           push: true
+          build-args: |
+            OPENCLAW_SHA=${{ steps.pinned.outputs.openclaw_sha }}
+            ALFRED_SHA=${{ steps.pinned.outputs.alfred_sha }}
           tags: |
             ssdavidai00/alfred-worker:latest
             ssdavidai00/alfred-worker:sha-${{ steps.image_tag.outputs.short_sha }}
