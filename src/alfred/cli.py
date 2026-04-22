@@ -114,12 +114,88 @@ def cmd_down(args: argparse.Namespace) -> None:
         print("Alfred is not running.")
 
 
+def _scan_entity_linking_coverage(vault_path: Path) -> dict:
+    """Walk the vault once, tally related_* frontmatter coverage.
+
+    Returns a summary dict suitable for both human-readable status
+    output and machine-readable JSON telemetry. Groups matter counts
+    by slug so a tenant can see per-matter link density at a glance.
+    """
+    from collections import Counter
+
+    try:
+        import frontmatter  # only imported here so `alfred status` still
+                            # works in environments where frontmatter is
+                            # not installed — they just lose the breakdown.
+    except Exception:
+        return {"available": False}
+
+    totals = {
+        "records_with_related_matters": 0,
+        "records_with_related_persons": 0,
+        "records_with_related_orgs": 0,
+        "records_with_related_projects": 0,
+        "records_with_any_related": 0,
+        "unlinked_non_entity_records": 0,
+        "total_records_scanned": 0,
+    }
+    per_matter: Counter = Counter()
+    ENTITY_TYPES = {"matter", "person", "org", "project"}
+
+    for md_path in vault_path.rglob("*.md"):
+        if ".git" in md_path.parts:
+            continue
+        try:
+            post = frontmatter.load(md_path)
+        except Exception:
+            continue
+        md = post.metadata
+        totals["total_records_scanned"] += 1
+        record_type = md.get("type")
+        if isinstance(record_type, list):
+            record_type = record_type[0] if record_type else None
+
+        touched_any = False
+        for field, key in [
+            ("related_matters", "records_with_related_matters"),
+            ("related_persons", "records_with_related_persons"),
+            ("related_orgs", "records_with_related_orgs"),
+            ("related_projects", "records_with_related_projects"),
+        ]:
+            v = md.get(field)
+            if isinstance(v, list) and v:
+                totals[key] += 1
+                touched_any = True
+                if field == "related_matters":
+                    for p in v:
+                        if isinstance(p, str):
+                            slug = p.rsplit("/", 1)[-1].removesuffix(".md")
+                            per_matter[slug] += 1
+
+        if touched_any:
+            totals["records_with_any_related"] += 1
+        elif record_type not in ENTITY_TYPES:
+            totals["unlinked_non_entity_records"] += 1
+
+    return {
+        "available": True,
+        **totals,
+        "per_matter": dict(per_matter.most_common(20)),
+    }
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     raw = _load_unified_config(args.config)
 
-    print("=" * 60)
-    print("ALFRED STATUS")
-    print("=" * 60)
+    # --json: emit a single machine-readable blob instead of the
+    # printed status. Used by `alfred status --json | jq .surveyor…`.
+    as_json = bool(getattr(args, "json", False))
+    payload: dict[str, Any] = {}
+
+    if not as_json:
+        print("=" * 60)
+        print("ALFRED STATUS")
+        print("=" * 60)
 
     # Daemon status
     log_cfg = raw.get("logging", {})
@@ -127,26 +203,39 @@ def cmd_status(args: argparse.Namespace) -> None:
     pid_path = Path(log_dir) / "alfred.pid"
     from alfred.daemon import check_already_running
     running_pid = check_already_running(pid_path)
-    if running_pid:
+    if as_json:
+        payload["daemon"] = {"running": bool(running_pid), "pid": running_pid}
+    elif running_pid:
         print(f"Daemon: running (pid {running_pid})")
     else:
         print("Daemon: not running")
 
     # Curator status
-    print("\n--- Curator ---")
+    curator_info: dict = {}
     try:
         from alfred.curator.config import load_from_unified as curator_cfg
         cfg = curator_cfg(raw)
         from alfred.curator.state import StateManager
         sm = StateManager(cfg.state.path)
         sm.load()
-        print(f"  Processed files: {len(sm.state.processed)}")
-        print(f"  Last run: {sm.state.last_run or 'never'}")
+        curator_info = {
+            "processed_files": len(sm.state.processed),
+            "last_run": sm.state.last_run or None,
+        }
     except Exception as e:
-        print(f"  (unavailable: {e})")
+        curator_info = {"error": str(e)}
+    if as_json:
+        payload["curator"] = curator_info
+    else:
+        print("\n--- Curator ---")
+        if "error" in curator_info:
+            print(f"  (unavailable: {curator_info['error']})")
+        else:
+            print(f"  Processed files: {curator_info['processed_files']}")
+            print(f"  Last run: {curator_info['last_run'] or 'never'}")
 
     # Janitor status
-    print("\n--- Janitor ---")
+    janitor_info: dict = {}
     try:
         from alfred.janitor.config import load_from_unified as janitor_cfg
         cfg = janitor_cfg(raw)
@@ -154,14 +243,26 @@ def cmd_status(args: argparse.Namespace) -> None:
         st = JanitorState(cfg.state.path, cfg.state.max_sweep_history)
         st.load()
         files_with_issues = sum(1 for fs in st.files.values() if fs.open_issues)
-        print(f"  Tracked files: {len(st.files)}")
-        print(f"  Files with issues: {files_with_issues}")
-        print(f"  Sweeps recorded: {len(st.sweeps)}")
+        janitor_info = {
+            "tracked_files": len(st.files),
+            "files_with_issues": files_with_issues,
+            "sweeps_recorded": len(st.sweeps),
+        }
     except Exception as e:
-        print(f"  (unavailable: {e})")
+        janitor_info = {"error": str(e)}
+    if as_json:
+        payload["janitor"] = janitor_info
+    else:
+        print("\n--- Janitor ---")
+        if "error" in janitor_info:
+            print(f"  (unavailable: {janitor_info['error']})")
+        else:
+            print(f"  Tracked files: {janitor_info['tracked_files']}")
+            print(f"  Files with issues: {janitor_info['files_with_issues']}")
+            print(f"  Sweeps recorded: {janitor_info['sweeps_recorded']}")
 
     # Distiller status
-    print("\n--- Distiller ---")
+    distiller_info: dict = {}
     try:
         from alfred.distiller.config import load_from_unified as distiller_cfg
         cfg = distiller_cfg(raw)
@@ -169,27 +270,78 @@ def cmd_status(args: argparse.Namespace) -> None:
         st = DistillerState(cfg.state.path, cfg.state.max_run_history)
         st.load()
         total_learns = sum(len(fs.learn_records_created) for fs in st.files.values())
-        print(f"  Tracked source files: {len(st.files)}")
-        print(f"  Learn records created: {total_learns}")
-        print(f"  Runs recorded: {len(st.runs)}")
+        distiller_info = {
+            "tracked_source_files": len(st.files),
+            "learn_records_created": total_learns,
+            "runs_recorded": len(st.runs),
+        }
     except Exception as e:
-        print(f"  (unavailable: {e})")
+        distiller_info = {"error": str(e)}
+    if as_json:
+        payload["distiller"] = distiller_info
+    else:
+        print("\n--- Distiller ---")
+        if "error" in distiller_info:
+            print(f"  (unavailable: {distiller_info['error']})")
+        else:
+            print(f"  Tracked source files: {distiller_info['tracked_source_files']}")
+            print(f"  Learn records created: {distiller_info['learn_records_created']}")
+            print(f"  Runs recorded: {distiller_info['runs_recorded']}")
 
-    # Surveyor status
-    print("\n--- Surveyor ---")
+    # Surveyor status + entity-linking telemetry (#26)
+    surveyor_info: dict = {}
     try:
         from alfred.surveyor.config import load_from_unified as surveyor_cfg
-        cfg = surveyor_cfg(raw)
+        scfg = surveyor_cfg(raw)
         from alfred.surveyor.state import PipelineState
-        st = PipelineState(cfg.state.path)
+        st = PipelineState(scfg.state.path)
         st.load()
-        print(f"  Tracked files: {len(st.files)}")
-        print(f"  Clusters: {len(st.clusters)}")
-        print(f"  Last run: {st.last_run or 'never'}")
+        surveyor_info = {
+            "tracked_files": len(st.files),
+            "clusters": len(st.clusters),
+            "last_run": st.last_run or None,
+        }
+        # Walk vault frontmatter once for coverage stats. Only run on
+        # --json or when vault is small enough that the full scan stays
+        # fast — for a 3500-record vault this is ~2s, acceptable.
+        vault_cfg = raw.get("vault", {}) or {}
+        vault_path_str = vault_cfg.get("path") or os.environ.get("ALFRED_VAULT_PATH")
+        if vault_path_str:
+            vault_path = Path(vault_path_str).expanduser().resolve()
+            if vault_path.is_dir():
+                surveyor_info["entity_linking"] = _scan_entity_linking_coverage(vault_path)
     except Exception as e:
-        print(f"  (unavailable: {e})")
+        surveyor_info = {"error": str(e)}
+    if as_json:
+        payload["surveyor"] = surveyor_info
+    else:
+        print("\n--- Surveyor ---")
+        if "error" in surveyor_info:
+            print(f"  (unavailable: {surveyor_info['error']})")
+        else:
+            print(f"  Tracked files: {surveyor_info['tracked_files']}")
+            print(f"  Clusters: {surveyor_info['clusters']}")
+            print(f"  Last run: {surveyor_info['last_run'] or 'never'}")
+            el = surveyor_info.get("entity_linking", {})
+            if el.get("available"):
+                print(f"  Entity linking:")
+                print(f"    Records scanned:       {el['total_records_scanned']}")
+                print(f"    Any related_* field:   {el['records_with_any_related']}")
+                print(f"    related_matters:       {el['records_with_related_matters']}")
+                print(f"    related_persons:       {el['records_with_related_persons']}")
+                print(f"    related_orgs:          {el['records_with_related_orgs']}")
+                print(f"    related_projects:      {el['records_with_related_projects']}")
+                print(f"    Non-entity unlinked:   {el['unlinked_non_entity_records']}")
+                top = el.get("per_matter", {})
+                if top:
+                    print(f"  Top matters by link count:")
+                    for slug, n in list(top.items())[:10]:
+                        print(f"    {slug:<50} {n:>4}")
 
-    print()
+    if as_json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print()
 
 
 def cmd_curator(args: argparse.Namespace) -> None:
@@ -525,7 +677,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("down", help="Stop the background daemon")
 
     # status
-    sub.add_parser("status", help="Show status from all tools")
+    status_p = sub.add_parser("status", help="Show status from all tools")
+    status_p.add_argument(
+        "--json", action="store_true", default=False,
+        help="Emit a machine-readable JSON blob instead of printed output.",
+    )
 
     # curator
     sub.add_parser("curator", help="Start curator daemon")
