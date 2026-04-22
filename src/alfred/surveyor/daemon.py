@@ -286,6 +286,17 @@ class Daemon:
             all_changed, cluster_members, records, paths, vectors,
         )
 
+        # Stage 6: noise-point entity linking. HDBSCAN assigns cluster id -1
+        # to records that don't fit any cluster. Those records still deserve
+        # related_* frontmatter — we just can't infer it from cluster
+        # co-membership. Instead, compare each noise point directly against
+        # every entity record in the vault and link above threshold.
+        noise_paths = [p for p, cid in result.semantic.items() if cid == -1]
+        if noise_paths:
+            self._link_noise_points_to_entities(
+                noise_paths, records, paths, vectors,
+            )
+
     def _link_entities_in_clusters(
         self,
         changed_cluster_ids: set[int],
@@ -380,6 +391,108 @@ class Daemon:
             log.info(
                 "daemon.entity_linking_complete",
                 clusters_processed=clusters_processed,
+                links_added=total_added,
+                threshold=threshold,
+                max_per_record=max_per,
+            )
+
+    def _link_noise_points_to_entities(
+        self,
+        noise_paths: list[str],
+        records: dict[str, "VaultRecord"],
+        all_paths: list[str],
+        all_vectors,
+    ) -> None:
+        """Write related_* frontmatter for records that HDBSCAN assigned to
+        noise (cluster id -1).
+
+        These records aren't members of any cluster, so
+        `_link_entities_in_clusters` never touches them — they'd stay
+        unlinked forever. Instead, compare each noise point's embedding
+        directly against every matter/person/org/project record in the
+        vault and write the same typed frontmatter fields above threshold.
+
+        Entity records that are themselves noise points are excluded as
+        link *targets* (we don't want matter→matter self-links); they're
+        still included as *sources* (their own related_* fields get
+        populated if they sit alone in cluster-noise).
+        """
+        import numpy as np
+        from .labeler import ENTITY_RECORD_TYPES
+
+        path_to_vec: dict[str, "np.ndarray"] = {}
+        for p, v in zip(all_paths, all_vectors):
+            path_to_vec[p] = np.asarray(v, dtype=np.float32)
+
+        # Collect entity paths by type from the FULL vault, not just cluster
+        # members — we want to be able to link to an entity even when that
+        # entity lives in a different cluster (or noise) from the source.
+        all_entities_by_type: dict[str, list[str]] = {}
+        for path, record in records.items():
+            if record.record_type in ENTITY_RECORD_TYPES:
+                all_entities_by_type.setdefault(record.record_type, []).append(path)
+
+        if not all_entities_by_type:
+            return
+
+        writer_methods = {
+            "matter": self.writer.write_related_matters,
+            "person": self.writer.write_related_persons,
+            "org": self.writer.write_related_orgs,
+            "project": self.writer.write_related_projects,
+        }
+
+        threshold = self.cfg.entity_link.threshold
+        max_per = self.cfg.entity_link.max_per_record
+
+        total_added = 0
+        noise_processed = 0
+        for np_path in noise_paths:
+            record = records.get(np_path)
+            if record is None:
+                continue
+            np_vec = path_to_vec.get(np_path)
+            if np_vec is None:
+                continue
+
+            # Determine this noise point's own record_type so we can skip
+            # linking an entity to itself (and so matter→matter / person→
+            # person self-links don't propagate through).
+            src_type = record.record_type
+            noise_processed += 1
+
+            for entity_type, entity_paths in all_entities_by_type.items():
+                scored: list[tuple[str, float]] = []
+                for e_path in entity_paths:
+                    if e_path == np_path:
+                        continue  # self-link
+                    # Also skip cross-type self-reference (e.g. linking a
+                    # matter TO another matter via related_matters): the
+                    # source was itself an entity of the same type, so that
+                    # field shouldn't be used as a graph link for peers.
+                    if src_type == entity_type:
+                        continue
+                    e_vec = path_to_vec.get(e_path)
+                    if e_vec is None:
+                        continue
+                    sim = float(np.dot(np_vec, e_vec))
+                    if sim >= threshold:
+                        scored.append((e_path, sim))
+
+                if not scored:
+                    continue
+
+                scored.sort(key=lambda x: x[1], reverse=True)
+                to_write = [p for p, _ in scored[:max_per]]
+
+                method = writer_methods[entity_type]
+                added = method(np_path, to_write, max_total=max_per)
+                total_added += added
+
+        if noise_processed > 0:
+            log.info(
+                "daemon.noise_linking_complete",
+                noise_processed=noise_processed,
                 links_added=total_added,
                 threshold=threshold,
                 max_per_record=max_per,
