@@ -447,9 +447,12 @@ async function generateComposioSkill(
   const toolActions = actions.filter((a) => a.type === "tool");
   const streamActions = actions.filter((a) => a.type === "stream");
 
-  // Build common usage examples — uses the MCP `ctrl` tool to call
-  // POST /api/v1/integrations/execute (no standalone `ctrl_composio_execute`
-  // tool exists; the only callable surface is the MCP `ctrl` tool).
+  // Build common usage examples — uses the MCP `self` tool to call
+  // POST /api/v1/integrations/execute. The MCP server (ctrl-server.mjs)
+  // was renamed from `ctrl` to `self` in platform#438; this generator
+  // was missed and kept producing skill files with the dead tool name,
+  // so every connected tenant saw their agent say "no Gmail integration"
+  // when it actually tried to dispatch.
   const recommended = RECOMMENDED_STREAMS[toolkit];
   let usageSection = "";
   if (toolActions.length > 0 || recommended) {
@@ -457,8 +460,8 @@ async function generateComposioSkill(
     const buildCall = (action: string, args: Record<string, unknown> | string): string => {
       const argsLiteral = typeof args === "string" ? args : JSON.stringify(args);
       return (
-        `\`ctrl(endpoint="/api/v1/integrations/execute", method="POST", ` +
-        `body={"action": "${action}", "arguments": ${argsLiteral}})\``
+        `\`self({endpoint: "/api/v1/integrations/execute", method: "POST", ` +
+        `body: {action: "${action}", arguments: ${argsLiteral}}})\``
       );
     };
     if (recommended) {
@@ -481,7 +484,7 @@ async function generateComposioSkill(
 
   const skillContent = `---
 name: alfred-composio-${toolkit}
-description: ${displayName} integration — ${actions.length} available actions via the MCP ctrl tool (POST /api/v1/integrations/execute).
+description: ${displayName} integration — ${actions.length} available actions via the MCP self tool (POST /api/v1/integrations/execute).
 version: "1.0"
 metadata:
   openclaw:
@@ -493,7 +496,7 @@ metadata:
 
 # ${emoji} ${displayName}
 
-Connected via Composio. Call actions through the MCP \`ctrl\` tool: \`ctrl(endpoint="/api/v1/integrations/execute", method="POST", body={"action": "<ACTION_NAME>", "arguments": {...}})\`.
+Connected via Composio. Call actions through the MCP \`self\` tool: \`self({endpoint: "/api/v1/integrations/execute", method: "POST", body: {action: "<ACTION_NAME>", arguments: {...}}})\`.
 
 ${streamActions.length > 0 ? `**Stream**: ${recommended ? `${recommended.name} (auto-configured, polling every ${Math.round(recommended.interval / 60)} min)` : "available but not auto-configured"}` : ""}
 **Tool actions**: ${toolActions.length} | **Stream actions**: ${streamActions.length}
@@ -1942,6 +1945,51 @@ print(json.dumps(result, default=str))
       sendJson(res, 200, summary);
     } catch (err: any) {
       sendJson(res, 500, { error: `Auto-config failed: ${err.message}` });
+    }
+  });
+
+  // =========================================================================
+  // POST /api/v1/integrations/regenerate-skills — rebuild every connected
+  // app's SKILL.md from scratch. Needed after a template change (like the
+  // ctrl→self tool rename) — without this, already-connected tenants would
+  // have to click "Reconfigure" on every app one-at-a-time in the dashboard
+  // to pick up the new template.
+  // =========================================================================
+  addRoute("POST", "/api/v1/integrations/regenerate-skills", async ({ res }) => {
+    const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
+    const results: Array<Record<string, unknown>> = [];
+
+    try {
+      const url = new URL(`${COMPOSIO_API_V3}/connected_accounts`);
+      url.searchParams.set("user_id", userId);
+      const resp = await fetch(url.toString(), { headers: { "x-api-key": apiKey } });
+      if (!resp.ok) {
+        sendJson(res, resp.status, { error: `Composio API error: ${resp.status}` });
+        return;
+      }
+      const data = (await resp.json()) as Record<string, unknown>;
+      const items = Array.isArray(data.items) ? data.items : [];
+      const mine = (items as any[]).filter((a: any) => accountMatchesUserId(a, userId));
+
+      for (const a of mine) {
+        const connId = a.id;
+        const toolkit = (a.toolkit?.slug ?? a.appName ?? "").toLowerCase();
+        if (!toolkit || a.status !== "ACTIVE") {
+          results.push({ connection_id: connId, toolkit, skipped: true, status: a.status });
+          continue;
+        }
+        try {
+          const out = await generateComposioSkill(toolkit, connId, apiKey);
+          results.push({ connection_id: connId, toolkit, ok: true, actions: out.actions_count });
+        } catch (err: any) {
+          results.push({ connection_id: connId, toolkit, error: err.message?.slice(0, 200) });
+        }
+      }
+
+      sendJson(res, 200, { regenerated: results.length, results });
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Regenerate failed: ${err.message}`, partial_results: results });
     }
   });
 }
