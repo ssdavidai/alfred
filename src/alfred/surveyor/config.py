@@ -66,6 +66,12 @@ class LabelerConfig:
     max_files_per_cluster_context: int = 20
     body_preview_chars: int = 200
     min_cluster_size_to_label: int = 2
+    # Max LLM calls in flight during the cluster-labeling pass. Each cluster
+    # fires 2 sequential calls (label_cluster + suggest_relationships), and
+    # we fan out across clusters. 8 keeps well under OpenRouter's default
+    # rate limits for the fast-tier models while shortening full-vault
+    # labeling from tens of minutes to single digits.
+    max_concurrent: int = 8
 
 
 @dataclass

@@ -170,36 +170,57 @@ class Daemon:
                 continue
             cluster_members.setdefault(cid, []).append(path)
 
-        for cid in all_changed:
+        # Clusters are independent — their label calls and relationship
+        # suggestions don't share state. Fan them out through an asyncio
+        # semaphore so we can keep up to `max_concurrent` LLM calls in
+        # flight instead of serialising 208 × 2 calls at ~5-10s each.
+        from .state import ClusterState
+        from datetime import datetime, timezone
+
+        semaphore = asyncio.Semaphore(self.cfg.labeler.max_concurrent)
+
+        async def _process_cluster(cid: int) -> None:
             members = cluster_members.get(cid, [])
             if len(members) < self.cfg.labeler.min_cluster_size_to_label:
-                continue
+                return
 
-            # Label the cluster
-            tags = await self.labeler.label_cluster(cid, members, records)
-            if tags:
-                # Write tags to all members
-                for path in members:
-                    self.writer.write_alfred_tags(path, tags)
+            async with semaphore:
+                tags = await self.labeler.label_cluster(cid, members, records)
+                if tags:
+                    for path in members:
+                        self.writer.write_alfred_tags(path, tags)
+                    cluster_key = f"semantic_{cid}"
+                    self.state.clusters[cluster_key] = ClusterState(
+                        label=tags,
+                        member_files=members,
+                        last_labeled=datetime.now(timezone.utc).isoformat(),
+                    )
 
-                # Update cluster state
-                cluster_key = f"semantic_{cid}"
-                from .state import ClusterState
-                from datetime import datetime, timezone
-                self.state.clusters[cluster_key] = ClusterState(
-                    label=tags,
-                    member_files=members,
-                    last_labeled=datetime.now(timezone.utc).isoformat(),
+                rels = await self.labeler.suggest_relationships(
+                    cid, members, records
                 )
+                for rel in rels:
+                    source = rel.get("source", "")
+                    if source in records:
+                        self.writer.write_relationships(source, [rel])
 
-            # Suggest relationships
-            rels = await self.labeler.suggest_relationships(cid, members, records)
-            for rel in rels:
-                source = rel.get("source", "")
-                if source in records:
-                    self.writer.write_relationships(source, [rel])
+        # gather() with return_exceptions=True keeps the pass running even
+        # if one cluster's LLM call blows up — we'd rather log and keep
+        # labeling the rest than abort the whole surveyor tick.
+        results = await asyncio.gather(
+            *(_process_cluster(cid) for cid in all_changed),
+            return_exceptions=True,
+        )
+        failures = [r for r in results if isinstance(r, Exception)]
+        for err in failures:
+            log.warning("daemon.cluster_label_error", error=str(err)[:200])
 
-        log.info("daemon.labeling_complete", clusters_processed=len(all_changed))
+        log.info(
+            "daemon.labeling_complete",
+            clusters_processed=len(all_changed),
+            failed=len(failures),
+            concurrency=self.cfg.labeler.max_concurrent,
+        )
 
         # Stage 5: structured entity-link writeback. For each cluster whose
         # membership changed, walk non-entity members and add typed
