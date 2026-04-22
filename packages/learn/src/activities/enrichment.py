@@ -165,8 +165,12 @@ async def fetch_pending_enrichment_records() -> list[dict[str, Any]]:
     try:
         for rtype in ENRICHED_RECORD_TYPES:
             try:
-                # 10k cap per type keeps post-rematerialize backlog (1–6k
-                # pending per tenant) fully reachable in one workflow run.
+                # Fetch the full set so we can report total backlog + pick
+                # what fits this workflow run. The workflow downstream caps
+                # at MAX_PENDING_PER_WORKFLOW_RUN (1000) to avoid Temporal
+                # deadlock warnings — holding thousands of 20k-char bodies
+                # in workflow memory violates the 2s yield budget during
+                # replay.
                 records = await client.list_records(rtype, limit=10_000)
             except Exception as exc:
                 logger.warning("enrichment: list_records(%s) failed: %s", rtype, exc)

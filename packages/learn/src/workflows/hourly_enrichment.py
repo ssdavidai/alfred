@@ -27,9 +27,19 @@ with workflow.unsafe.imports_passed_through():
     )
 
 
+# Cap records processed per workflow run. Holding thousands of 20k-char
+# bodies in workflow memory triggers Temporal's "workflow didn't yield
+# within 2 seconds" deadlock warnings during replay — the state is too
+# big to (de)serialize quickly between activations. 1000 records fits
+# well under the budget, and a post-rematerialize backlog of 5800
+# drains in ~6 hourly runs (~5hr end-to-end).
+MAX_PENDING_PER_WORKFLOW_RUN = 1_000
+
+
 @dataclass
 class EnrichmentResult:
     records_found: int = 0
+    records_processed: int = 0
     records_enriched: int = 0
     entities_created: int = 0
     tasks_created: int = 0
@@ -54,6 +64,19 @@ class HourlyEnrichmentWorkflow:
 
         if not pending:
             return result
+
+        # 1b. Cap per-run to avoid Temporal workflow-deadlock warnings.
+        # Anything over MAX_PENDING_PER_WORKFLOW_RUN gets picked up by
+        # the next hourly tick (or a manual schedule trigger).
+        if len(pending) > MAX_PENDING_PER_WORKFLOW_RUN:
+            workflow.logger.info(
+                "HourlyEnrichment: backlog %d exceeds per-run cap %d; "
+                "processing first %d, remaining deferred to next run",
+                len(pending), MAX_PENDING_PER_WORKFLOW_RUN,
+                MAX_PENDING_PER_WORKFLOW_RUN,
+            )
+            pending = pending[:MAX_PENDING_PER_WORKFLOW_RUN]
+        result.records_processed = len(pending)
 
         # 2. Size-based packing. A batch of 200 short emails is one call;
         #    a batch with two long Omi transcripts may be two calls. Keeps
