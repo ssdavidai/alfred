@@ -82,6 +82,50 @@ function accountMatchesUserId(acct: Record<string, unknown>, userId: string): bo
 }
 
 /**
+ * Walk every page of Composio's /connected_accounts list, applying the local
+ * user_id filter per page. Returns every account that actually belongs to the
+ * tenant.
+ *
+ * Why this needs to loop: Composio's server-side `user_id` query-string filter
+ * is silently broken — it ignores the filter and returns accounts across every
+ * tenant in the workspace, paginated at 10 per page. A tenant whose accounts
+ * happen to land on page 2+ of the global list sees an empty
+ * `/api/v1/integrations` response even though their connections are healthy.
+ *
+ * Pagination: Composio v3 returns `next_cursor` per page. We loop until
+ * `next_cursor` is falsy or we hit `PAGINATION_MAX_PAGES` (safety cap against
+ * runaway loops in case the server misbehaves).
+ */
+const PAGINATION_MAX_PAGES = 100;
+async function fetchAllOwnedConnectedAccounts(
+  apiKey: string,
+  userId: string,
+): Promise<any[]> {
+  const owned: any[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < PAGINATION_MAX_PAGES; page++) {
+    const url = new URL(`${COMPOSIO_API_V3}/connected_accounts`);
+    url.searchParams.set("user_id", userId);
+    if (cursor) url.searchParams.set("cursor", cursor);
+    const resp = await fetch(url.toString(), {
+      headers: { "x-api-key": apiKey },
+    });
+    if (!resp.ok) {
+      throw new Error(`Composio API error: ${resp.status}`);
+    }
+    const data = (await resp.json()) as Record<string, unknown>;
+    const items = Array.isArray(data.items) ? data.items : [];
+    for (const a of items as any[]) {
+      if (accountMatchesUserId(a, userId)) owned.push(a);
+    }
+    const nextCursor = (data.next_cursor ?? data.nextCursor ?? null) as string | null;
+    if (!nextCursor) break;
+    cursor = nextCursor;
+  }
+  return owned;
+}
+
+/**
  * Fetch a Composio connected_account by id and verify it belongs to THIS tenant.
  *
  * Composio's server-side `user_id` filter on `connected_accounts` list queries
@@ -535,37 +579,17 @@ export function registerIntegrationRoutes(): void {
     const apiKey = getComposioApiKey();
     const userId = getComposioUserId();
     try {
-      // Scope server-side via user_id query param. Composio v3 accepts this
-      // to filter connected_accounts to a single end-user (tenant).
-      const url = new URL(`${COMPOSIO_API_V3}/connected_accounts`);
-      url.searchParams.set("user_id", userId);
-      const resp = await fetch(url.toString(), {
-        headers: { "x-api-key": apiKey },
-      });
-      if (!resp.ok) {
-        sendJson(res, resp.status, { error: `Composio API error: ${resp.status}` });
-        return;
-      }
-      const data = (await resp.json()) as Record<string, unknown>;
-      const items = Array.isArray(data.items) ? data.items : [];
-
-      // Defense-in-depth: if the server-side filter was silently ignored by
-      // Composio (older API versions), drop anything that does not match our
-      // tenant user_id. Better to return empty than to leak another tenant's
-      // connections.
-      const filtered = items
-        .filter((a: any) => accountMatchesUserId(a, userId))
-        .map((a: any) => ({
-          id: a.id,
-          toolkit: a.toolkit?.slug ?? a.appName ?? "",
-          toolkit_name: a.toolkit?.displayName ?? a.toolkit?.name ?? a.appName ?? "",
-          toolkit_icon: a.toolkit?.logo ?? "",
-          status: a.status,
-          auth_scheme: a.authScheme ?? "",
-          user_id: a.member_id ?? a.user_id ?? "",
-          created_at: a.createdAt ?? a.created_at ?? "",
-        }));
-
+      const owned = await fetchAllOwnedConnectedAccounts(apiKey, userId);
+      const filtered = owned.map((a: any) => ({
+        id: a.id,
+        toolkit: a.toolkit?.slug ?? a.appName ?? "",
+        toolkit_name: a.toolkit?.displayName ?? a.toolkit?.name ?? a.appName ?? "",
+        toolkit_icon: a.toolkit?.logo ?? "",
+        status: a.status,
+        auth_scheme: a.authScheme ?? "",
+        user_id: a.member_id ?? a.user_id ?? "",
+        created_at: a.createdAt ?? a.created_at ?? "",
+      }));
       sendJson(res, 200, { integrations: filtered, count: filtered.length });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to fetch integrations: ${err.message}` });
@@ -1961,16 +1985,7 @@ print(json.dumps(result, default=str))
     const results: Array<Record<string, unknown>> = [];
 
     try {
-      const url = new URL(`${COMPOSIO_API_V3}/connected_accounts`);
-      url.searchParams.set("user_id", userId);
-      const resp = await fetch(url.toString(), { headers: { "x-api-key": apiKey } });
-      if (!resp.ok) {
-        sendJson(res, resp.status, { error: `Composio API error: ${resp.status}` });
-        return;
-      }
-      const data = (await resp.json()) as Record<string, unknown>;
-      const items = Array.isArray(data.items) ? data.items : [];
-      const mine = (items as any[]).filter((a: any) => accountMatchesUserId(a, userId));
+      const mine = await fetchAllOwnedConnectedAccounts(apiKey, userId);
 
       for (const a of mine) {
         const connId = a.id;
