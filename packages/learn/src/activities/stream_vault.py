@@ -22,15 +22,23 @@ logger = logging.getLogger("alfred-learn")
 
 @activity.defn
 async def create_stream_vault_record(event: dict[str, Any]) -> str:
-    """Create a vault event record from a parsed stream event. Zero LLM calls."""
+    """Create a vault record from a parsed stream event. Zero LLM calls.
+
+    Record type is chosen per-template — most streams land as `event`,
+    but voice transcripts (Omi / voice-call) land as `conversation` since
+    they're multi-speaker dialogue with its own semantic shape.
+    """
     config = load_config()
     client = VaultClient(config)
     try:
-        name, body, tags = _render_event(event)
-        content = _build_vault_content(name, event, body, tags)
+        name, body, tags, record_type = _render_event(event)
+        content = _build_vault_content(name, event, body, tags, record_type)
         slug = _event_slug(event)
-        path = await client.write_record("event", slug, content)
-        logger.info("stream_vault: created %s from %s", path, event.get("source_ref", "?")[:40])
+        path = await client.write_record(record_type, slug, content)
+        logger.info(
+            "stream_vault: created %s from %s", path,
+            event.get("source_ref", "?")[:40],
+        )
         return path
     finally:
         await client.close()
@@ -40,8 +48,8 @@ async def create_stream_vault_record(event: dict[str, Any]) -> str:
 # Template dispatcher
 # ---------------------------------------------------------------------------
 
-def _render_event(event: dict[str, Any]) -> tuple[str, str, list[str]]:
-    """Dispatch to the right template based on event type. Returns (name, body, tags)."""
+def _render_event(event: dict[str, Any]) -> tuple[str, str, list[str], str]:
+    """Dispatch to the right template. Returns (name, body, tags, record_type)."""
     raw = event.get("raw", {})
     if not isinstance(raw, dict):
         raw = {}
@@ -51,6 +59,11 @@ def _render_event(event: dict[str, Any]) -> tuple[str, str, list[str]]:
 
     event_type = metadata.get("event_type", event.get("stream_type", ""))
     stream_type = event.get("stream_type", "")
+
+    # Omi audio — full transcripts. Check first so it doesn't fall through
+    # to the generic path and lose the body past 500 chars.
+    if stream_type == "omi-audio" or event_type == "omi-audio":
+        return _template_omi(event, raw, metadata)
 
     # Calendar detection: check for start/end fields in raw
     if raw.get("start") and raw.get("end"):
@@ -86,7 +99,7 @@ def _render_event(event: dict[str, Any]) -> tuple[str, str, list[str]]:
 
 def _template_calendar(
     event: dict[str, Any], raw: dict, metadata: dict,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], str]:
     summary = raw.get("summary") or raw.get("title") or "Untitled Event"
     start = raw.get("start", {})
     end = raw.get("end", {})
@@ -128,12 +141,12 @@ def _template_calendar(
     if raw.get("conferenceData"):
         tags.append("meeting")
 
-    return summary[:120], "\n".join(parts), tags
+    return summary[:120], "\n".join(parts), tags, "event"
 
 
 def _template_email(
     event: dict[str, Any], raw: dict, metadata: dict,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], str]:
     subject = raw.get("subject") or metadata.get("subject") or "(no subject)"
     sender = raw.get("from") or metadata.get("from") or "unknown"
     recipient = raw.get("to") or metadata.get("to") or ""
@@ -156,12 +169,12 @@ def _template_email(
     # Build name from sender + subject
     sender_name = sender.split("<")[0].strip().strip('"') or sender
     name = f"{sender_name}: {subject}"[:120]
-    return name, "\n".join(parts), tags
+    return name, "\n".join(parts), tags, "event"
 
 
 def _template_github(
     event: dict[str, Any], raw: dict, metadata: dict,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], str]:
     action = raw.get("action", metadata.get("action", ""))
     repo = raw.get("repo", metadata.get("repo", ""))
     actor = raw.get("actor", metadata.get("actor", ""))
@@ -177,14 +190,14 @@ def _template_github(
         branch = pr.get("head", {}).get("ref", "")
         if branch:
             body += f"\n**Branch**: {branch}"
-        return name[:120], body, ["github", "pull-request"]
+        return name[:120], body, ["github", "pull-request"], "event"
 
     if issue:
         title = issue.get("title", "")
         number = issue.get("number", "")
         name = f"Issue #{number}: {title}" if number else title or "Issue"
         body = f"**Repo**: {repo}\n**Author**: {actor}\n**Action**: {action}"
-        return name[:120], body, ["github", "issue"]
+        return name[:120], body, ["github", "issue"], "event"
 
     # Notification / push / release / etc.
     subject = raw.get("subject", {})
@@ -197,12 +210,12 @@ def _template_github(
     body = f"**Repo**: {repo}\n**Actor**: {actor}"
     if action:
         body += f"\n**Action**: {action}"
-    return name[:120], body, ["github"]
+    return name[:120], body, ["github"], "event"
 
 
 def _template_slack(
     event: dict[str, Any], raw: dict, metadata: dict,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], str]:
     sender = raw.get("user", raw.get("sender", raw.get("username", "")))
     channel = raw.get("channel", raw.get("channel_name", ""))
     text = raw.get("text", raw.get("message", ""))[:500]
@@ -216,12 +229,12 @@ def _template_slack(
         parts.append(f"\n{text}")
 
     name = f"{sender} in #{channel}" if channel else f"Message from {sender}"
-    return name[:120], "\n".join(parts), ["slack"]
+    return name[:120], "\n".join(parts), ["slack"], "event"
 
 
 def _template_notion(
     event: dict[str, Any], raw: dict, metadata: dict,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], str]:
     title = (
         raw.get("title")
         or raw.get("name")
@@ -252,12 +265,12 @@ def _template_notion(
     if content:
         parts.append(f"\n{content[:500]}")
 
-    return str(title)[:120], "\n".join(parts), ["notion"]
+    return str(title)[:120], "\n".join(parts), ["notion"], "event"
 
 
 def _template_payment(
     event: dict[str, Any], raw: dict, metadata: dict,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], str]:
     amount = raw.get("amount", metadata.get("amount", ""))
     currency = raw.get("currency", metadata.get("currency", ""))
     customer = raw.get("customer_name", raw.get("customer_email", ""))
@@ -274,12 +287,12 @@ def _template_payment(
     if product:
         parts.append(f"**Product**: {product}")
 
-    return name[:120], "\n".join(parts), ["payment"]
+    return name[:120], "\n".join(parts), ["payment"], "event"
 
 
 def _template_sms(
     event: dict[str, Any], raw: dict, metadata: dict,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], str]:
     """Phone SMS — both inbound (unauthorised → here) and outbound logging."""
     from_num = raw.get("from") or metadata.get("from", "")
     to_num = raw.get("to") or metadata.get("to", "")
@@ -301,12 +314,12 @@ def _template_sms(
         name = f"SMS to {to_num or 'unknown'}"
     else:
         name = f"SMS from {from_num or 'unknown'}"
-    return name[:120], "\n".join(parts), tags
+    return name[:120], "\n".join(parts), tags, "event"
 
 
 def _template_voice_call(
     event: dict[str, Any], raw: dict, metadata: dict,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], str]:
     """Voice call transcript — posted by the Voice Bridge after hangup."""
     from_num = raw.get("from") or metadata.get("from", "")
     to_num = raw.get("to") or metadata.get("to", "")
@@ -352,12 +365,12 @@ def _template_voice_call(
 
     tags = ["voice-call", direction]
     name = f"Call: {from_num or 'unknown'}" if direction == "inbound" else f"Call to {to_num or 'unknown'}"
-    return name[:120], "\n".join(parts), tags
+    return name[:120], "\n".join(parts), tags, "conversation"
 
 
 def _template_generic(
     event: dict[str, Any], raw: dict, metadata: dict,
-) -> tuple[str, str, list[str]]:
+) -> tuple[str, str, list[str], str]:
     name = (
         event.get("summary", "")
         or raw.get("title", "")
@@ -374,7 +387,65 @@ def _template_generic(
             break
 
     stream_type = event.get("stream_type", "unknown")
-    return name, body, [stream_type]
+    return name, body, [stream_type], "event"
+
+
+def _template_omi(
+    event: dict[str, Any], raw: dict, metadata: dict,
+) -> tuple[str, str, list[str], str]:
+    """Omi audio transcript → conversation record with FULL body preserved.
+
+    The Omi ingest activity packs the date, time range, language, and part
+    number into `raw.text` as a prefix, followed by the full transcript.
+    We keep the whole thing so downstream enrichment can see mid-transcript
+    content (e.g. ambient "Erste" / "makerspace" mentions that never appear
+    in the first sentence).
+
+    Metadata fields like `conversation_id`, `languages`, `duration_seconds`,
+    `segment_count`, `part`, `total_parts` are propagated into frontmatter
+    via `_build_vault_content` (which reads the top-level `metadata` field
+    on the event payload).
+    """
+    # Pull the full transcript — no 500-char truncation like generic.
+    body = raw.get("text", "") or ""
+    if not body:
+        # Fall back to any other text-ish field
+        for key in ("body", "content", "summary"):
+            val = raw.get(key) or event.get(key)
+            if val and isinstance(val, str):
+                body = val
+                break
+
+    date = raw.get("date") or metadata.get("date") or ""
+    time_range = raw.get("time_range") or metadata.get("time_range") or ""
+    languages = raw.get("languages") or metadata.get("languages") or []
+    part = raw.get("part") or metadata.get("part") or 1
+    total_parts = raw.get("total_parts") or metadata.get("total_parts") or 1
+
+    lang_str = (
+        "/".join(str(l) for l in languages) if isinstance(languages, list) and languages
+        else ""
+    )
+    part_suffix = f" pt {part}/{total_parts}" if total_parts and int(total_parts) > 1 else ""
+    name_parts = ["Omi conversation"]
+    if date:
+        name_parts.append(date)
+    if time_range:
+        name_parts.append(time_range)
+    if lang_str:
+        name_parts.append(f"({lang_str})")
+    name = " — ".join(name_parts)[:120] + part_suffix
+
+    tags = ["omi-audio"]
+    if lang_str:
+        for l in (languages if isinstance(languages, list) else [lang_str]):
+            if l and isinstance(l, str):
+                tags.append(f"lang/{l}")
+
+    # Record type: conversation (multi-speaker dialogue captured in full),
+    # so surveyor's ENTITY_RECORD_TYPES still sees it as a non-entity
+    # record that links to matters/persons/orgs/projects.
+    return name, body, tags, "conversation"
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +457,7 @@ def _build_vault_content(
     event: dict[str, Any],
     body: str,
     tags: list[str],
+    record_type: str = "event",
 ) -> str:
     received_at = event.get("received_at", datetime.now(timezone.utc).isoformat())
     stream_id = event.get("stream_id", "")
@@ -395,8 +467,37 @@ def _build_vault_content(
 
     safe_name = name.replace('"', '\\"')
 
+    # Extra frontmatter for rich streams (Omi etc.) — surface useful metadata
+    # without hardcoding into every template.
+    extra_fm_lines: list[str] = []
+    metadata = event.get("metadata") or {}
+    raw = event.get("raw") or {}
+    if stream_type == "omi-audio":
+        # Pull from either metadata or raw, whichever has the field.
+        def _get(key: str, default: Any = "") -> Any:
+            return metadata.get(key) if metadata.get(key) is not None else raw.get(key, default)
+        conv_id = _get("conversation_id")
+        duration = _get("duration_seconds")
+        segments = _get("segments") or _get("segment_count")
+        word_count = _get("word_count")
+        langs = _get("languages") or []
+        part = _get("part")
+        total_parts = _get("total_parts")
+        if conv_id: extra_fm_lines.append(f'conversation_id: "{conv_id}"')
+        if isinstance(langs, list) and langs:
+            langs_yaml = ", ".join(f'"{l}"' for l in langs if l)
+            extra_fm_lines.append(f"languages: [{langs_yaml}]")
+        if duration: extra_fm_lines.append(f"duration_seconds: {duration}")
+        if segments: extra_fm_lines.append(f"segments: {segments}")
+        if word_count: extra_fm_lines.append(f"word_count: {word_count}")
+        if part and total_parts and int(total_parts) > 1:
+            extra_fm_lines.append(f"part: {part}")
+            extra_fm_lines.append(f"total_parts: {total_parts}")
+
+    extra_fm = ("\n" + "\n".join(extra_fm_lines)) if extra_fm_lines else ""
+
     return f"""---
-type: event
+type: {record_type}
 created: {received_at}
 status: active
 name: "{safe_name}"
@@ -404,7 +505,7 @@ source: "{stream_id}"
 source_ref: "{source_ref}"
 stream_type: {stream_type}
 tags: [{tag_str}]
-enrichment_status: pending
+enrichment_status: pending{extra_fm}
 ---
 
 # {name}

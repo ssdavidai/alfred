@@ -21,27 +21,96 @@ from src.utils.vault_client import VaultClient
 logger = logging.getLogger("alfred-learn")
 
 
+# Per-event body cap. Long transcripts (Omi 30-min meetings can run
+# 30-50k chars) still need to be trimmed somewhere, but 20k chars is
+# roughly 5-7k tokens — enough to cover mid-transcript matter mentions
+# (Erste/makerspace cases) without blowing a single event's cost.
+MAX_BODY_CHARS_PER_EVENT = 20_000
+
+# Size-based batch target. Clerk (fast-tier OpenRouter models) comfortably
+# takes 128k tokens of context; we want to leave room for output (entities
+# + action_items JSON can run 5-10k tokens for a busy batch). 80k chars of
+# input is ~20-25k tokens under the ~3 chars/token rule of thumb for mixed
+# content (shorter for ASCII-heavy English, longer for Hungarian/UTF-8).
+# Well under any provider cap.
+MAX_INPUT_CHARS_PER_BATCH = 80_000
+
+
+def pack_enrichment_batches(
+    records: list[dict[str, Any]],
+    max_chars: int = MAX_INPUT_CHARS_PER_BATCH,
+) -> list[list[dict[str, Any]]]:
+    """Pack records into batches whose total input size is under max_chars.
+
+    - A single record larger than max_chars goes in its own batch (the
+      per-event cap in fetch_pending_enrichment_records keeps that from
+      blowing up the prompt — MAX_BODY_CHARS_PER_EVENT is well under
+      max_chars by design).
+    - Within a batch, pack greedily by record order (preserves the
+      clerk's per-event index semantics when downstream inspects results).
+    """
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_size = 0
+    for r in records:
+        body = r.get("body") or r.get("body_preview") or ""
+        # Rough size estimate: body + name + metadata overhead. Use
+        # len(body) + 200-char buffer per record for the prompt framing.
+        rec_size = len(body) + 200
+        if current and current_size + rec_size > max_chars:
+            batches.append(current)
+            current = []
+            current_size = 0
+        current.append(r)
+        current_size += rec_size
+    if current:
+        batches.append(current)
+    return batches
+
+# Record types that flow through enrichment. event is the default for
+# stream records, conversation is for Omi / voice transcripts, note +
+# observation cover curator+distiller output that still wants entity
+# and action-item extraction.
+ENRICHED_RECORD_TYPES = ("event", "conversation", "note", "observation")
+
+
 @activity.defn
 async def fetch_pending_enrichment_records() -> list[dict[str, Any]]:
-    """Fetch vault event records with enrichment_status=pending."""
+    """Fetch vault records of enrichable types with enrichment_status=pending.
+
+    Keeps the full body (up to MAX_BODY_CHARS_PER_EVENT) rather than a
+    200-char preview — the batch-enricher prompt used to see only the first
+    sentence of each event, which for long Omi transcripts meant ambient
+    matter/entity mentions mid-conversation were silently lost.
+    """
     config = load_config()
     client = VaultClient(config)
+    pending: list[dict[str, Any]] = []
     try:
-        all_events = await client.list_records("event", limit=500)
-        pending = []
-        for record in all_events:
-            fm = record.get("frontmatter", record)
-            if fm.get("enrichment_status") == "pending":
+        for rtype in ENRICHED_RECORD_TYPES:
+            try:
+                records = await client.list_records(rtype, limit=500)
+            except Exception as exc:
+                logger.warning("enrichment: list_records(%s) failed: %s", rtype, exc)
+                continue
+            for record in records:
+                fm = record.get("frontmatter", record)
+                if fm.get("enrichment_status") != "pending":
+                    continue
+                body = record.get("body", "") or ""
                 pending.append({
                     "path": record.get("path", ""),
                     "name": fm.get("name", record.get("name", "")),
                     "stream_type": fm.get("stream_type", ""),
                     "source_ref": fm.get("source_ref", ""),
+                    "record_type": rtype,
                     "created": fm.get("created", ""),
                     "tags": fm.get("tags", []),
-                    "body_preview": record.get("body", "")[:200],
+                    "body": body[:MAX_BODY_CHARS_PER_EVENT],
+                    "body_truncated": len(body) > MAX_BODY_CHARS_PER_EVENT,
                 })
-        logger.info("enrichment: found %d pending records", len(pending))
+        logger.info("enrichment: found %d pending records across %d types",
+                    len(pending), len(ENRICHED_RECORD_TYPES))
         return pending
     finally:
         await client.close()
@@ -49,22 +118,33 @@ async def fetch_pending_enrichment_records() -> list[dict[str, Any]]:
 
 @activity.defn
 async def batch_enrich_events(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """ONE clerk LLM call to enrich a batch of event records."""
+    """ONE clerk LLM call to enrich a batch of records.
+
+    Uses the full per-event body (up to MAX_BODY_CHARS_PER_EVENT, set by
+    the fetch activity) rather than a 200-char preview. Callers pack the
+    batch to a total-size budget via `pack_enrichment_batches`.
+    """
     if not records:
         return []
 
     from src.activities.clerk import _call_clerk
 
-    # Build the structured events block
+    # Build the structured events block. We feed the full body available on
+    # the record (already capped by fetch_pending_enrichment_records), so a
+    # single long Omi transcript gets its mid-transcript content surfaced to
+    # the clerk.
     events_lines: list[str] = []
     for i, r in enumerate(records):
         name = r.get("name", "?")
         stream_type = r.get("stream_type", "?")
         created = r.get("created", "")[:16]
-        body = r.get("body_preview", "").strip()
-        events_lines.append(f"[{i}] {name} (source: {stream_type}, {created})")
+        # Prefer full body; fall back to body_preview for backwards compat
+        # with any caller still building the old shape.
+        body = (r.get("body") or r.get("body_preview") or "").strip()
+        trunc_note = " [TRUNCATED]" if r.get("body_truncated") else ""
+        events_lines.append(f"[{i}] {name} (source: {stream_type}, {created}){trunc_note}")
         if body:
-            events_lines.append(body[:200])
+            events_lines.append(body)
         events_lines.append("")
 
     events_block = "\n".join(events_lines)

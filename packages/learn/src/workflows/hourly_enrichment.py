@@ -23,10 +23,8 @@ with workflow.unsafe.imports_passed_through():
         batch_enrich_events,
         ensure_enrichment_entities,
         fetch_pending_enrichment_records,
+        pack_enrichment_batches,
     )
-
-
-BATCH_SIZE = 200
 
 
 @dataclass
@@ -44,7 +42,8 @@ class HourlyEnrichmentWorkflow:
     async def run(self) -> EnrichmentResult:
         result = EnrichmentResult()
 
-        # 1. Fetch pending event records
+        # 1. Fetch pending records across all enrichable types. Each record
+        #    carries its full body up to MAX_BODY_CHARS_PER_EVENT (20k chars).
         pending: list[dict[str, Any]] = await workflow.execute_activity(
             fetch_pending_enrichment_records,
             start_to_close_timeout=timedelta(seconds=60),
@@ -55,11 +54,13 @@ class HourlyEnrichmentWorkflow:
         if not pending:
             return result
 
-        # 2. Process in batches of 200
-        for i in range(0, len(pending), BATCH_SIZE):
-            batch = pending[i : i + BATCH_SIZE]
+        # 2. Size-based packing. A batch of 200 short emails is one call;
+        #    a batch with two long Omi transcripts may be two calls. Keeps
+        #    each prompt under ~25k tokens of input without dropping body.
+        batches: list[list[dict[str, Any]]] = pack_enrichment_batches(pending)
 
-            # 3. ONE clerk call for the entire batch
+        for batch in batches:
+            # 3. ONE clerk call per batch
             enrichments: list[dict[str, Any]] = await workflow.execute_activity(
                 batch_enrich_events,
                 args=[batch],
