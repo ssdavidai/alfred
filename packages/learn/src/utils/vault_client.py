@@ -61,6 +61,21 @@ class VaultClient:
         )
         resp.raise_for_status()
 
+    async def delete_record(self, path: str) -> bool:
+        """Delete a vault record by path. Returns True if a record was
+        removed, False if it didn't exist (404). Raises on other errors.
+
+        Used by the streams rematerializer's --delete-orphans pass when
+        a template changed its record_type — e.g. Omi transcripts
+        migrating from event/ to conversation/ leave the old event/
+        file as an orphan that this method clears.
+        """
+        resp = await self._client.delete(f"/api/v1/vault/records/{path}")
+        if resp.status_code == 404:
+            return False
+        resp.raise_for_status()
+        return True
+
     async def list_records(
         self,
         record_type: str,
