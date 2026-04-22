@@ -740,6 +740,14 @@ def cmd_surveyor_relink(args: argparse.Namespace) -> None:
             )
             return 0
 
+        # Optional threshold override: some vaults benefit from 0.65 over
+        # the default 0.75, especially when matter records are short
+        # (structured frontmatter + one-paragraph description) vs.
+        # long-form events + transcripts they should link to.
+        if getattr(args, "threshold", None) is not None:
+            daemon.cfg.entity_link.threshold = float(args.threshold)
+            print(f"Threshold override: {daemon.cfg.entity_link.threshold}")
+
         # Process ALL semantic clusters (not just changed_semantic).
         all_cluster_ids = set(cluster_members.keys())
         print(f"Running entity linking across {total_clusters} clusters…")
@@ -752,6 +760,31 @@ def cmd_surveyor_relink(args: argparse.Namespace) -> None:
             print(f"Running noise-point linking across {len(noise_paths)} records…")
             daemon._link_noise_points_to_entities(
                 noise_paths, records, paths, vectors,
+            )
+
+        # Full-vault entity backfill. This is the critical densification
+        # pass: for each existing entity (not just new ones from diff.new
+        # like #25 does in steady state), walk every non-entity record in
+        # the vault and link above threshold regardless of cluster. Catches
+        # the common case where a matter M is topically close to a cluster
+        # C it isn't actually a member of — cluster-scoped linking misses
+        # that relationship forever.
+        if not getattr(args, "no_backfill", False):
+            from alfred.surveyor.labeler import ENTITY_RECORD_TYPES
+            all_entity_paths = [
+                p for p, r in records.items()
+                if r.record_type in ENTITY_RECORD_TYPES
+            ]
+            by_type: dict[str, int] = {}
+            for p in all_entity_paths:
+                t = records[p].record_type
+                by_type[t] = by_type.get(t, 0) + 1
+            print(
+                f"Running full-vault backfill across {len(all_entity_paths)} entities "
+                f"({', '.join(f'{v} {k}s' for k, v in sorted(by_type.items()))})…"
+            )
+            daemon._backfill_new_entities(
+                all_entity_paths, records, paths, vectors,
             )
 
         # Persist updated state (the writer marked frontmatter writes in
@@ -915,12 +948,21 @@ def build_parser() -> argparse.ArgumentParser:
     surv_relink = surv_sub.add_parser(
         "relink",
         help="One-off re-run of entity linking across ALL semantic clusters + noise points "
-             "using current embeddings. Does NOT re-embed, re-cluster, or re-label — only "
-             "writes related_* frontmatter. Preserves existing links (writer appends).",
+             "+ full-vault entity backfill, using current embeddings. Does NOT re-embed, "
+             "re-cluster, or re-label — only writes related_* frontmatter. Preserves "
+             "existing links (writer appends).",
     )
     surv_relink.add_argument(
         "--dry-run", action="store_true", default=False,
         help="Scan + report, don't write frontmatter",
+    )
+    surv_relink.add_argument(
+        "--no-backfill", action="store_true", default=False,
+        help="Skip the full-vault backfill pass (only walk clusters + noise)",
+    )
+    surv_relink.add_argument(
+        "--threshold", type=float, default=None,
+        help="Override entity_link.threshold for this run only (e.g. 0.65 for denser links)",
     )
 
     # tui
