@@ -617,6 +617,16 @@ def cmd_temporal(args: argparse.Namespace) -> None:
 
 
 def cmd_surveyor(args: argparse.Namespace) -> None:
+    # Dispatch to relink subcommand if specified; otherwise default to
+    # running the daemon (preserves `alfred surveyor` legacy behaviour).
+    subcmd = getattr(args, "surveyor_cmd", None)
+    if subcmd == "relink":
+        return cmd_surveyor_relink(args)
+    # `run` and None both start the daemon.
+    return cmd_surveyor_run(args)
+
+
+def cmd_surveyor_run(args: argparse.Namespace) -> None:
     raw = _load_unified_config(args.config)
     _setup_logging_from_config(raw)
 
@@ -635,6 +645,128 @@ def cmd_surveyor(args: argparse.Namespace) -> None:
         asyncio.run(daemon.run())
     except KeyboardInterrupt:
         print("\nStopped.")
+
+
+def cmd_surveyor_relink(args: argparse.Namespace) -> None:
+    """One-off entity-link pass across ALL clusters + noise points.
+
+    Rebuilds cluster membership from the current Milvus embeddings, then
+    runs the same entity-linking logic the daemon would run — but across
+    every semantic cluster instead of only the `changed_semantic` subset.
+
+    No re-embedding, no re-clustering (in the sense of recomputing labels),
+    no LLM calls. Pure numpy cosine + VaultWriter frontmatter appends.
+    Existing links are preserved — the writer appends new entries to the
+    related_* lists, it never removes.
+
+    Intended for one-time use after surveyor v2 rollout to densify link
+    coverage on a vault whose state shows most clusters unlabeled because
+    only the `changed` subset ever got processed.
+    """
+    raw = _load_unified_config(args.config)
+    _setup_logging_from_config(raw)
+
+    try:
+        from alfred.surveyor.config import load_from_unified
+        from alfred.surveyor.daemon import Daemon
+        from alfred.surveyor.parser import parse_file
+    except ImportError as e:
+        print(f"Surveyor dependencies not installed: {e}")
+        sys.exit(1)
+
+    import asyncio
+
+    async def _run() -> int:
+        config = load_from_unified(raw)
+        daemon = Daemon(config)
+        daemon.state.load()
+
+        # Pull every embedding currently in Milvus.
+        embedding_data = daemon.embedder.get_all_embeddings()
+        if embedding_data is None:
+            print("No embeddings found — run `alfred surveyor run` first to embed the vault.")
+            return 1
+        paths, vectors = embedding_data
+        print(f"Loaded {len(paths)} embeddings from Milvus.")
+
+        # Parse every record so we know record_type for each path. We need
+        # this to tell entities from regulars in the link pass.
+        records = {}
+        for rel in paths:
+            try:
+                records[rel] = parse_file(config.vault.path, rel)
+            except Exception:
+                continue
+        print(f"Parsed {len(records)} records.")
+
+        # Reconstruct cluster membership purely from embeddings — we can't
+        # rely on state.files[rel].semantic_cluster_id alone because fresh
+        # tenants or post-migration vaults may not have those set. So run
+        # the clusterer against the current embeddings. HDBSCAN is cheap
+        # (~1-3s on 3500 vectors) and we need a valid cluster map anyway.
+        result = daemon.clusterer.run(paths, vectors, records)
+        cluster_members: dict[int, list[str]] = {}
+        for p, cid in result.semantic.items():
+            if cid == -1:
+                continue
+            cluster_members.setdefault(cid, []).append(p)
+        noise_paths = [p for p, cid in result.semantic.items() if cid == -1]
+
+        total_clusters = len(cluster_members)
+        print(
+            f"Clustering: {total_clusters} semantic clusters, "
+            f"{len(noise_paths)} noise points."
+        )
+
+        if getattr(args, "dry_run", False):
+            # Tally how many would be touched without actually writing.
+            from alfred.surveyor.labeler import ENTITY_RECORD_TYPES
+            with_entities = 0
+            with_regulars = 0
+            for cid, members in cluster_members.items():
+                has_e = any(
+                    records[m].record_type in ENTITY_RECORD_TYPES
+                    for m in members if m in records
+                )
+                has_r = any(
+                    records[m].record_type not in ENTITY_RECORD_TYPES
+                    for m in members if m in records
+                )
+                if has_e: with_entities += 1
+                if has_r and has_e: with_regulars += 1
+            print(
+                f"[dry-run] {with_entities} clusters contain >=1 entity record; "
+                f"{with_regulars} of those would have links written."
+            )
+            return 0
+
+        # Process ALL semantic clusters (not just changed_semantic).
+        all_cluster_ids = set(cluster_members.keys())
+        print(f"Running entity linking across {total_clusters} clusters…")
+        daemon._link_entities_in_clusters(
+            all_cluster_ids, cluster_members, records, paths, vectors,
+        )
+
+        # And every noise point.
+        if noise_paths:
+            print(f"Running noise-point linking across {len(noise_paths)} records…")
+            daemon._link_noise_points_to_entities(
+                noise_paths, records, paths, vectors,
+            )
+
+        # Persist updated state (the writer marked frontmatter writes in
+        # state.pending_writes; save so the watcher ignores them).
+        daemon.state.save()
+
+        print("\nDone. Check `alfred status --json | jq .surveyor.entity_linking`.")
+        return 0
+
+    try:
+        rc = asyncio.run(_run())
+        sys.exit(rc)
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        sys.exit(130)
 
 
 # --- Argument parser ---
@@ -777,7 +909,19 @@ def build_parser() -> argparse.ArgumentParser:
     temp_sub.add_parser("list", help="List discovered workflows")
 
     # surveyor
-    sub.add_parser("surveyor", help="Start surveyor pipeline")
+    surv = sub.add_parser("surveyor", help="Surveyor pipeline operations")
+    surv_sub = surv.add_subparsers(dest="surveyor_cmd")
+    surv_sub.add_parser("run", help="Start surveyor daemon (same as bare `surveyor`)")
+    surv_relink = surv_sub.add_parser(
+        "relink",
+        help="One-off re-run of entity linking across ALL semantic clusters + noise points "
+             "using current embeddings. Does NOT re-embed, re-cluster, or re-label — only "
+             "writes related_* frontmatter. Preserves existing links (writer appends).",
+    )
+    surv_relink.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="Scan + report, don't write frontmatter",
+    )
 
     # tui
     sub.add_parser("tui", help="Launch interactive Ink TUI dashboard (requires Node.js)")
