@@ -722,4 +722,45 @@ def _extract_json(content: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             pass
 
+    # Last-resort: if content looks like a JSON array (starts with `[`),
+    # salvage every complete object up to the truncation point. Used when
+    # the clerk's response hit its output token budget mid-batch — rather
+    # than losing the entire enrichment run, return what we got.
+    first_bracket = content.find("[")
+    if first_bracket != -1:
+        results: list = []
+        depth = 0
+        in_string = False
+        escape = False
+        obj_start: int | None = None
+        for i in range(first_bracket, len(content)):
+            ch = content[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                if depth == 0:
+                    obj_start = i
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and obj_start is not None:
+                    try:
+                        results.append(json.loads(content[obj_start : i + 1]))
+                    except json.JSONDecodeError:
+                        pass
+                    obj_start = None
+            elif ch == "]" and depth == 0:
+                break
+        if results:
+            return results
+
     raise ValueError(f"Could not parse JSON from Clerk response: {content[:200]}")

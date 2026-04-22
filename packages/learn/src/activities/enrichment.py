@@ -30,18 +30,28 @@ MAX_BODY_CHARS_PER_EVENT = 20_000
 
 # Size-based batch target. Clerk (fast-tier OpenRouter models) comfortably
 # takes 128k tokens of context; we want to leave room for output (entities
-# + action_items JSON can run 5-10k tokens for a busy batch). 80k chars of
-# input is ~20-25k tokens under the ~3 chars/token rule of thumb for mixed
-# content (shorter for ASCII-heavy English, longer for Hungarian/UTF-8).
-# Well under any provider cap.
-MAX_INPUT_CHARS_PER_BATCH = 80_000
+# + action_items JSON can run 5-10k tokens for a busy batch). 40k chars of
+# input gives ~10-13k tokens under the ~3 chars/token rule — leaving
+# plenty of headroom for outputs, which are the real bottleneck.
+MAX_INPUT_CHARS_PER_BATCH = 40_000
+
+# Hard event-count cap per batch. A batch of 200 short events can blow past
+# the clerk's output token budget (grok-fast ≈ 8k output tokens → ~32k
+# chars of JSON → ~40 events at ~800 chars output each). Without this cap,
+# short-body records get packed very tight under the input-char budget and
+# the clerk returns a truncated JSON array that downstream can't parse.
+MAX_EVENTS_PER_BATCH = 40
 
 
 def pack_enrichment_batches(
     records: list[dict[str, Any]],
     max_chars: int = MAX_INPUT_CHARS_PER_BATCH,
+    max_events: int = MAX_EVENTS_PER_BATCH,
 ) -> list[list[dict[str, Any]]]:
-    """Pack records into batches whose total input size is under max_chars.
+    """Pack records into batches whose total input size is under max_chars
+    AND event count is under max_events.
+
+    Either cap can trigger a batch cut — whichever hits first.
 
     - A single record larger than max_chars goes in its own batch (the
       per-event cap in fetch_pending_enrichment_records keeps that from
@@ -58,7 +68,9 @@ def pack_enrichment_batches(
         # Rough size estimate: body + name + metadata overhead. Use
         # len(body) + 200-char buffer per record for the prompt framing.
         rec_size = len(body) + 200
-        if current and current_size + rec_size > max_chars:
+        would_overflow_chars = current and current_size + rec_size > max_chars
+        would_overflow_count = len(current) >= max_events
+        if would_overflow_chars or would_overflow_count:
             batches.append(current)
             current = []
             current_size = 0
@@ -67,6 +79,69 @@ def pack_enrichment_batches(
     if current:
         batches.append(current)
     return batches
+
+
+def _parse_enrichment_array(text: str) -> list[dict[str, Any]]:
+    """Tolerant parser for the clerk's enrichment-array response.
+
+    The clerk returns a JSON array `[{event_index, ...}, {event_index, ...}]`.
+    When the model's output budget runs out, the response truncates mid-
+    object. Rather than discard the whole response, salvage every complete
+    object up to the truncation point.
+
+    Strategy: strip markdown fences, locate the outer `[`, then scan
+    forward at depth 1 (directly inside the array) and emit each complete
+    `{...}` object. Stop at the first incomplete object. Returns what we got.
+    """
+    if not text:
+        return []
+    # Strip markdown fences
+    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
+    text = re.sub(r"\s*```$", "", text)
+    text = text.strip()
+
+    start = text.find("[")
+    if start == -1:
+        return []
+
+    results: list[dict[str, Any]] = []
+    depth = 0
+    in_string = False
+    escape = False
+    obj_start: int | None = None
+
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and obj_start is not None:
+                snippet = text[obj_start : i + 1]
+                try:
+                    parsed = json.loads(snippet)
+                    if isinstance(parsed, dict):
+                        results.append(parsed)
+                except json.JSONDecodeError:
+                    pass
+                obj_start = None
+        elif ch == "]" and depth == 0:
+            # End of outer array — done
+            break
+    return results
 
 # Record types that flow through enrichment. event is the default for
 # stream records, conversation is for Omi / voice transcripts, note +
@@ -90,7 +165,9 @@ async def fetch_pending_enrichment_records() -> list[dict[str, Any]]:
     try:
         for rtype in ENRICHED_RECORD_TYPES:
             try:
-                records = await client.list_records(rtype, limit=500)
+                # 10k cap per type keeps post-rematerialize backlog (1–6k
+                # pending per tenant) fully reachable in one workflow run.
+                records = await client.list_records(rtype, limit=10_000)
             except Exception as exc:
                 logger.warning("enrichment: list_records(%s) failed: %s", rtype, exc)
                 continue

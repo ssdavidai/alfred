@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.activities.enrichment import (  # noqa: E402
     MAX_BODY_CHARS_PER_EVENT,
+    MAX_EVENTS_PER_BATCH,
     MAX_INPUT_CHARS_PER_BATCH,
     pack_enrichment_batches,
 )
@@ -22,11 +23,22 @@ def test_empty_list_gives_empty_batches() -> None:
     assert pack_enrichment_batches([]) == []
 
 
-def test_short_records_fit_one_batch() -> None:
+def test_short_records_split_by_event_count_cap() -> None:
+    # 50 short records × 400 bytes would fit in one batch by char budget
+    # (20k << 40k) BUT we cap at 40 events per batch to keep the clerk's
+    # output token budget under control.
     records = [_r(200, f"r{i}") for i in range(50)]
     batches = pack_enrichment_batches(records)
-    assert len(batches) == 1
-    assert len(batches[0]) == 50
+    assert len(batches) == 2
+    assert len(batches[0]) == MAX_EVENTS_PER_BATCH
+    assert len(batches[1]) == 10
+
+
+def test_event_count_cap_is_enforced() -> None:
+    records = [_r(100, f"r{i}") for i in range(200)]
+    batches = pack_enrichment_batches(records)
+    for batch in batches:
+        assert len(batch) <= MAX_EVENTS_PER_BATCH
 
 
 def test_long_records_split_into_multiple_batches() -> None:
@@ -69,3 +81,52 @@ def test_uses_body_preview_fallback() -> None:
     batches = pack_enrichment_batches(records)
     assert len(batches) == 1
     assert len(batches[0]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Tolerant JSON array parsing (#523)
+# ---------------------------------------------------------------------------
+
+from src.activities.enrichment import _parse_enrichment_array  # noqa: E402
+
+
+def test_parse_full_array() -> None:
+    text = '[{"event_index": 0, "entities": []}, {"event_index": 1, "entities": []}]'
+    assert len(_parse_enrichment_array(text)) == 2
+
+
+def test_parse_truncated_mid_object_returns_complete_items() -> None:
+    """Clerk hit its output token budget mid-second-object; salvage the
+    first complete object rather than losing the whole response."""
+    text = (
+        '[\n'
+        '  {"event_index":0,"entities":[{"name":"Norbi","type":"person"}],"topic_tags":["names"],"related_matters":[],"action_items":[],"priority":"low"},\n'
+        '  {\n'
+    )
+    result = _parse_enrichment_array(text)
+    assert len(result) == 1
+    assert result[0]["event_index"] == 0
+
+
+def test_parse_strips_markdown_fences() -> None:
+    text = '```json\n[{"event_index":0}]\n```'
+    assert _parse_enrichment_array(text) == [{"event_index": 0}]
+
+
+def test_parse_handles_nested_objects_correctly() -> None:
+    text = '[{"event_index":0, "entities":[{"name":"a","type":"person"}]}, {"event_index":1}]'
+    result = _parse_enrichment_array(text)
+    assert len(result) == 2
+    assert result[0]["entities"][0]["name"] == "a"
+
+
+def test_parse_empty_input_returns_empty() -> None:
+    assert _parse_enrichment_array("") == []
+    assert _parse_enrichment_array("   \n") == []
+
+
+def test_parse_ignores_braces_inside_strings() -> None:
+    text = r'[{"note":"has {} in it","event_index":0}]'
+    result = _parse_enrichment_array(text)
+    assert len(result) == 1
+    assert result[0]["event_index"] == 0
