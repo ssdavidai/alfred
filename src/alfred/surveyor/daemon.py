@@ -231,8 +231,19 @@ class Daemon:
         # Stage 3: Cluster
         result = self.clusterer.run(paths, vectors, records)
 
-        # Stage 4: Label changed clusters
-        all_changed = result.changed_semantic | result.changed_structural
+        # Stage 4: Label changed clusters.
+        #
+        # Scope to `changed_semantic` only. `cluster_members` below is built
+        # from `result.semantic` — structural cluster IDs have no member
+        # paths in that map. If we include `changed_structural` in the
+        # union, the numeric overlap between the two namespaces (both are
+        # integers starting from 0) causes spurious re-labeling: a semantic
+        # cluster whose semantic membership didn't change still gets
+        # relabeled whenever a structural cluster with the same ID
+        # changed. On David's vault that's a ~10x LLM-cost multiplier for
+        # zero additional information — every "changed structural" was
+        # hitting an unrelated semantic cluster's members.
+        all_changed = set(result.changed_semantic)
         if not all_changed:
             log.info("daemon.no_changed_clusters")
             return
