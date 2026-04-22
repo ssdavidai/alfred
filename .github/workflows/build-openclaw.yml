@@ -12,7 +12,59 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      openclaw: ${{ steps.decide.outputs.openclaw }}
+      worker: ${{ steps.decide.outputs.worker }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: decide
+        name: Decide which images need rebuilding
+        run: |
+          set -e
+          # workflow_dispatch always rebuilds everything
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "openclaw=true" >> "$GITHUB_OUTPUT"
+            echo "worker=true"   >> "$GITHUB_OUTPUT"
+            echo "Decision (manual): both rebuild"
+            exit 0
+          fi
+          oc=false
+          w=false
+          # Any change to the openclaw image's Dockerfile → rebuild openclaw
+          if ! git diff --quiet HEAD^..HEAD -- packages/openclaw/dockerfiles/openclaw.Dockerfile; then
+            oc=true
+          fi
+          # Any change to the alfred-worker image's build inputs → rebuild worker
+          if ! git diff --quiet HEAD^..HEAD -- \
+              packages/openclaw/dockerfiles/alfred.Dockerfile \
+              packages/openclaw/dockerfiles/alfred-entrypoint.sh \
+              packages/openclaw/openclaw-wrapper 2>/dev/null; then
+            w=true
+          fi
+          # VERSION changes — match the pinned-SHA lines explicitly so an
+          # ALFRED_SHA-only bump doesn't rebuild openclaw, and vice versa.
+          if ! git diff --quiet HEAD^..HEAD -- packages/openclaw/VERSION; then
+            diff=$(git diff HEAD^..HEAD -- packages/openclaw/VERSION)
+            if grep -qE '^[+-]OPENCLAW_SHA=' <<<"$diff"; then
+              oc=true
+              # alfred image clones OpenClaw too (openclaw-builder stage)
+              w=true
+            fi
+            if grep -qE '^[+-]ALFRED_SHA=' <<<"$diff"; then
+              w=true
+            fi
+          fi
+          echo "openclaw=$oc" >> "$GITHUB_OUTPUT"
+          echo "worker=$w"    >> "$GITHUB_OUTPUT"
+          echo "Decision: openclaw=$oc worker=$w"
+
+  build-openclaw:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.openclaw == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,21 +78,16 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Compute image tag
-        id: image_tag
-        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-
-      - name: Read pinned SHAs from VERSION file
-        id: pinned
+      - name: Compute metadata
+        id: meta
         run: |
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           eval "$(grep -E '^(OPENCLAW_SHA|ALFRED_SHA)=' packages/openclaw/VERSION)"
           echo "openclaw_sha=${OPENCLAW_SHA}" >> "$GITHUB_OUTPUT"
-          echo "alfred_sha=${ALFRED_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Free disk space for Docker build
+      - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune -a -f
           df -h /
 
       - name: Build and push openclaw image
@@ -50,12 +97,41 @@ jobs:
           file: packages/openclaw/dockerfiles/openclaw.Dockerfile
           push: true
           build-args: |
-            OPENCLAW_SHA=${{ steps.pinned.outputs.openclaw_sha }}
+            OPENCLAW_SHA=${{ steps.meta.outputs.openclaw_sha }}
           tags: |
             ssdavidai00/alfred-openclaw:latest
-            ssdavidai00/alfred-openclaw:sha-${{ steps.image_tag.outputs.short_sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ssdavidai00/alfred-openclaw:sha-${{ steps.meta.outputs.short_sha }}
+          cache-from: type=gha,scope=openclaw
+          cache-to: type=gha,mode=max,scope=openclaw
+
+  build-worker:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.worker == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute metadata
+        id: meta
+        run: |
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          eval "$(grep -E '^(OPENCLAW_SHA|ALFRED_SHA)=' packages/openclaw/VERSION)"
+          echo "openclaw_sha=${OPENCLAW_SHA}" >> "$GITHUB_OUTPUT"
+          echo "alfred_sha=${ALFRED_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
 
       - name: Build and push alfred-worker image
         uses: docker/build-push-action@v6
@@ -64,14 +140,19 @@ jobs:
           file: packages/openclaw/dockerfiles/alfred.Dockerfile
           push: true
           build-args: |
-            OPENCLAW_SHA=${{ steps.pinned.outputs.openclaw_sha }}
-            ALFRED_SHA=${{ steps.pinned.outputs.alfred_sha }}
+            OPENCLAW_SHA=${{ steps.meta.outputs.openclaw_sha }}
+            ALFRED_SHA=${{ steps.meta.outputs.alfred_sha }}
           tags: |
             ssdavidai00/alfred-worker:latest
-            ssdavidai00/alfred-worker:sha-${{ steps.image_tag.outputs.short_sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            ssdavidai00/alfred-worker:sha-${{ steps.meta.outputs.short_sha }}
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
 
+  trigger-rollout:
+    needs: [build-openclaw, build-worker]
+    if: always() && (needs.build-openclaw.result == 'success' || needs.build-worker.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
       - name: Trigger fleet rollout
         continue-on-error: true
         run: |
