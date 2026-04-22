@@ -200,3 +200,111 @@ class Daemon:
                     self.writer.write_relationships(source, [rel])
 
         log.info("daemon.labeling_complete", clusters_processed=len(all_changed))
+
+        # Stage 5: structured entity-link writeback. For each cluster whose
+        # membership changed, walk non-entity members and add typed
+        # frontmatter links (related_matters / related_persons / related_orgs
+        # / related_projects) to any entity member of the same cluster whose
+        # cosine similarity is above the configured threshold.
+        self._link_entities_in_clusters(
+            all_changed, cluster_members, records, paths, vectors,
+        )
+
+    def _link_entities_in_clusters(
+        self,
+        changed_cluster_ids: set[int],
+        cluster_members: dict[int, list[str]],
+        records: dict[str, "VaultRecord"],
+        all_paths: list[str],
+        all_vectors,
+    ) -> None:
+        """Write structured entity-link frontmatter for records whose cluster
+        contains entity records (matter/person/org/project).
+
+        For each non-entity member of a changed cluster, compute cosine
+        similarity against each entity member. Above threshold → add the
+        entity's vault path to the appropriate typed frontmatter field.
+
+        Requires numpy; surveyor already imports it for embedding work.
+        """
+        import numpy as np
+        from .labeler import ENTITY_RECORD_TYPES
+
+        # Build path → vector lookup once (all_paths + all_vectors come from
+        # embedder.get_all_embeddings()).
+        path_to_vec: dict[str, "np.ndarray"] = {}
+        for p, v in zip(all_paths, all_vectors):
+            path_to_vec[p] = np.asarray(v, dtype=np.float32)
+
+        # Entity type → frontmatter field name → writer method.
+        # Kept local to avoid polluting module namespace.
+        writer_methods = {
+            "matter": self.writer.write_related_matters,
+            "person": self.writer.write_related_persons,
+            "org": self.writer.write_related_orgs,
+            "project": self.writer.write_related_projects,
+        }
+
+        threshold = self.cfg.entity_link.threshold
+        max_per = self.cfg.entity_link.max_per_record
+
+        total_added = 0
+        clusters_processed = 0
+        for cid in changed_cluster_ids:
+            members = cluster_members.get(cid, [])
+            if len(members) < 2:
+                continue
+
+            # Partition: entities by type, regulars separately
+            entities_by_type: dict[str, list[str]] = {}
+            regulars: list[str] = []
+            for path in members:
+                record = records.get(path)
+                if record is None:
+                    continue
+                if record.record_type in ENTITY_RECORD_TYPES:
+                    entities_by_type.setdefault(record.record_type, []).append(path)
+                else:
+                    regulars.append(path)
+
+            if not entities_by_type or not regulars:
+                continue
+            clusters_processed += 1
+
+            for reg_path in regulars:
+                reg_vec = path_to_vec.get(reg_path)
+                if reg_vec is None:
+                    continue
+
+                for entity_type, entity_paths in entities_by_type.items():
+                    # Compute cos(reg_path, each entity), keep those above
+                    # threshold, sort by similarity desc, cap at max_per.
+                    scored: list[tuple[str, float]] = []
+                    for e_path in entity_paths:
+                        e_vec = path_to_vec.get(e_path)
+                        if e_vec is None:
+                            continue
+                        # Vectors are already L2-normalised in the embedder,
+                        # so dot product == cosine similarity.
+                        sim = float(np.dot(reg_vec, e_vec))
+                        if sim >= threshold:
+                            scored.append((e_path, sim))
+
+                    if not scored:
+                        continue
+
+                    scored.sort(key=lambda x: x[1], reverse=True)
+                    to_write = [p for p, _ in scored[:max_per]]
+
+                    method = writer_methods[entity_type]
+                    added = method(reg_path, to_write, max_total=max_per)
+                    total_added += added
+
+        if clusters_processed > 0:
+            log.info(
+                "daemon.entity_linking_complete",
+                clusters_processed=clusters_processed,
+                links_added=total_added,
+                threshold=threshold,
+                max_per_record=max_per,
+            )

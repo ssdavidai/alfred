@@ -69,6 +69,17 @@ class LabelerConfig:
 
 
 @dataclass
+class EntityLinkConfig:
+    """Structured entity-link writeback — when a cluster contains entity
+    records (matter/person/org/project), non-entity members with cosine
+    similarity above threshold get the entity's vault path written into
+    a typed frontmatter field (related_matters / related_persons / etc).
+    """
+    threshold: float = 0.75
+    max_per_record: int = 5
+
+
+@dataclass
 class StateConfig:
     path: str = "./data/state.json"
 
@@ -90,6 +101,7 @@ class PipelineConfig:
     labeler: LabelerConfig
     state: StateConfig
     logging: LoggingConfig
+    entity_link: EntityLinkConfig = field(default_factory=EntityLinkConfig)
 
 
 _ENV_PATTERN = re.compile(r"\$\{(\w+)\}")
@@ -160,6 +172,7 @@ def load_config(config_path: str | Path) -> PipelineConfig:
         labeler=_build_dataclass(LabelerConfig, raw.get("labeler")),
         state=_build_dataclass(StateConfig, raw.get("state")),
         logging=_build_dataclass(LoggingConfig, raw.get("logging")),
+        entity_link=_build_dataclass(EntityLinkConfig, raw.get("entity_link")),
     )
 
 
@@ -177,4 +190,5 @@ def load_from_unified(raw: dict) -> PipelineConfig:
         labeler=_build_dataclass(LabelerConfig, tool.get("labeler")),
         state=_build_dataclass(StateConfig, tool.get("state")),
         logging=_build_dataclass(LoggingConfig, raw.get("logging")),
+        entity_link=_build_dataclass(EntityLinkConfig, tool.get("entity_link")),
     )
