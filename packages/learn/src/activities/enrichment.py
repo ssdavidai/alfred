@@ -64,10 +64,15 @@ def pack_enrichment_batches(
     current: list[dict[str, Any]] = []
     current_size = 0
     for r in records:
-        body = r.get("body") or r.get("body_preview") or ""
-        # Rough size estimate: body + name + metadata overhead. Use
-        # len(body) + 200-char buffer per record for the prompt framing.
-        rec_size = len(body) + 200
+        # Bodies are no longer carried in workflow memory — use body_size
+        # field set by the fetch activity, falling back to actual body
+        # length if present (for legacy / test callers).
+        if "body_size" in r:
+            body_size = int(r.get("body_size") or 0)
+        else:
+            body_size = len(r.get("body") or r.get("body_preview") or "")
+        # Rough size estimate: body + name + metadata overhead.
+        rec_size = body_size + 200
         would_overflow_chars = current and current_size + rec_size > max_chars
         would_overflow_count = len(current) >= max_events
         if would_overflow_chars or would_overflow_count:
@@ -152,12 +157,14 @@ ENRICHED_RECORD_TYPES = ("event", "conversation", "note", "observation")
 
 @activity.defn
 async def fetch_pending_enrichment_records() -> list[dict[str, Any]]:
-    """Fetch vault records of enrichable types with enrichment_status=pending.
+    """Fetch metadata of vault records awaiting enrichment.
 
-    Keeps the full body (up to MAX_BODY_CHARS_PER_EVENT) rather than a
-    200-char preview — the batch-enricher prompt used to see only the first
-    sentence of each event, which for long Omi transcripts meant ambient
-    matter/entity mentions mid-conversation were silently lost.
+    Returns light metadata only — path, name, stream_type, source_ref,
+    created, tags, record_type. The FULL body is NOT included. The
+    batch-enrich activity re-fetches bodies by path when it's actually
+    about to call the clerk — this keeps the workflow's in-memory state
+    tiny so Temporal's 2-second yield budget isn't blown during replay
+    (see [TMPRL1101] deadlock warnings in production).
     """
     config = load_config()
     client = VaultClient(config)
@@ -165,12 +172,9 @@ async def fetch_pending_enrichment_records() -> list[dict[str, Any]]:
     try:
         for rtype in ENRICHED_RECORD_TYPES:
             try:
-                # Fetch the full set so we can report total backlog + pick
-                # what fits this workflow run. The workflow downstream caps
-                # at MAX_PENDING_PER_WORKFLOW_RUN (1000) to avoid Temporal
-                # deadlock warnings — holding thousands of 20k-char bodies
-                # in workflow memory violates the 2s yield budget during
-                # replay.
+                # Fetch full set so the workflow can report total backlog.
+                # Body payloads are stripped here — too big for workflow
+                # state — and re-fetched per batch in batch_enrich_events.
                 records = await client.list_records(rtype, limit=10_000)
             except Exception as exc:
                 logger.warning("enrichment: list_records(%s) failed: %s", rtype, exc)
@@ -179,7 +183,7 @@ async def fetch_pending_enrichment_records() -> list[dict[str, Any]]:
                 fm = record.get("frontmatter", record)
                 if fm.get("enrichment_status") != "pending":
                     continue
-                body = record.get("body", "") or ""
+                body_size = len(record.get("body", "") or "")
                 pending.append({
                     "path": record.get("path", ""),
                     "name": fm.get("name", record.get("name", "")),
@@ -188,8 +192,10 @@ async def fetch_pending_enrichment_records() -> list[dict[str, Any]]:
                     "record_type": rtype,
                     "created": fm.get("created", ""),
                     "tags": fm.get("tags", []),
-                    "body": body[:MAX_BODY_CHARS_PER_EVENT],
-                    "body_truncated": len(body) > MAX_BODY_CHARS_PER_EVENT,
+                    # Size hint for size-based batch packing; actual body
+                    # re-fetched in batch_enrich_events.
+                    "body_size": min(body_size, MAX_BODY_CHARS_PER_EVENT),
+                    "body_truncated": body_size > MAX_BODY_CHARS_PER_EVENT,
                 })
         logger.info("enrichment: found %d pending records across %d types",
                     len(pending), len(ENRICHED_RECORD_TYPES))
@@ -198,18 +204,57 @@ async def fetch_pending_enrichment_records() -> list[dict[str, Any]]:
         await client.close()
 
 
+async def _load_bodies_for_batch(
+    client: VaultClient,
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Re-fetch the full body for each record in a batch. Called inside
+    the batch activity so bodies never live in workflow memory."""
+    hydrated: list[dict[str, Any]] = []
+    for r in records:
+        path = r.get("path", "")
+        if not path:
+            continue
+        try:
+            raw = await client.read_record(path)
+        except Exception as exc:
+            logger.warning("enrichment: re-fetch %s failed: %s", path, exc)
+            continue
+        body = raw.get("body", "") or ""
+        enriched = dict(r)
+        enriched["body"] = body[:MAX_BODY_CHARS_PER_EVENT]
+        hydrated.append(enriched)
+    return hydrated
+
+
 @activity.defn
 async def batch_enrich_events(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """ONE clerk LLM call to enrich a batch of records.
 
-    Uses the full per-event body (up to MAX_BODY_CHARS_PER_EVENT, set by
-    the fetch activity) rather than a 200-char preview. Callers pack the
-    batch to a total-size budget via `pack_enrichment_batches`.
+    Bodies are re-fetched here (not carried in workflow memory) so the
+    workflow can pass lightweight records around without blowing the
+    Temporal 2s yield budget during state replay. Bodies cap at
+    MAX_BODY_CHARS_PER_EVENT per record.
+
+    If a record already has a body (legacy callers, test callers, direct
+    invocation), the pre-loaded body is used as-is.
     """
     if not records:
         return []
 
     from src.activities.clerk import _call_clerk
+
+    # Hydrate bodies if the records don't carry them already. The fetch
+    # activity now strips bodies; batches from it need re-hydration here.
+    if any("body" not in r for r in records):
+        config = load_config()
+        client = VaultClient(config)
+        try:
+            records = await _load_bodies_for_batch(client, records)
+        finally:
+            await client.close()
+        if not records:
+            return []
 
     # Build the structured events block. We feed the full body available on
     # the record (already capped by fetch_pending_enrichment_records), so a
