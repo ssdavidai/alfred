@@ -126,7 +126,17 @@ class Daemon:
                 except Exception:
                     pass
 
-        await self._cluster_and_label(all_records)
+        # Entity records that appeared for the FIRST TIME (diff.new, not
+        # diff.changed) trigger the backfill pass on the next
+        # _cluster_and_label call.
+        from .labeler import ENTITY_RECORD_TYPES
+        new_entity_paths = [
+            p for p in diff.new
+            if all_records.get(p) is not None
+            and all_records[p].record_type in ENTITY_RECORD_TYPES
+        ]
+
+        await self._cluster_and_label(all_records, newly_added_entity_paths=new_entity_paths)
         self.state.save()
         log.info("daemon.startup_sync_complete", files=len(hashes))
 
@@ -181,12 +191,35 @@ class Daemon:
                 except Exception:
                     pass
 
-        # Stage 3 + 4: Cluster and label
-        await self._cluster_and_label(all_records)
+        # Entity records that are genuinely NEW (not just changed) drive
+        # the Stage-7 backfill pass — a renamed or edited matter
+        # shouldn't re-spray related_matters across 3000 events.
+        from .labeler import ENTITY_RECORD_TYPES
+        new_entity_paths = [
+            p for p in diff.new
+            if all_records.get(p) is not None
+            and all_records[p].record_type in ENTITY_RECORD_TYPES
+        ]
+
+        # Stage 3 + 4 + 5 + 6 + 7: Cluster, label, entity-link, noise-link, backfill
+        await self._cluster_and_label(all_records, newly_added_entity_paths=new_entity_paths)
         self.state.save()
 
-    async def _cluster_and_label(self, records: dict[str, VaultRecord]) -> None:
-        """Run clustering then label changed clusters."""
+    async def _cluster_and_label(
+        self,
+        records: dict[str, VaultRecord],
+        newly_added_entity_paths: list[str] | None = None,
+    ) -> None:
+        """Run clustering then label changed clusters.
+
+        If `newly_added_entity_paths` is supplied and entity_link.backfill_enabled
+        is true, a Stage-7 backfill pass runs after cluster + noise linking:
+        for each new entity, scan every non-entity record in the vault and
+        write the link when similarity is above threshold. This is the
+        path that gives brand-new matters / persons / orgs / projects an
+        immediate structural footprint instead of waiting for the next
+        clustering pass to co-cluster them with something.
+        """
         # Get all embeddings for clustering
         embedding_data = self.embedder.get_all_embeddings()
         if embedding_data is None:
@@ -295,6 +328,17 @@ class Daemon:
         if noise_paths:
             self._link_noise_points_to_entities(
                 noise_paths, records, paths, vectors,
+            )
+
+        # Stage 7: backfill links FROM every non-entity record in the vault
+        # TO each newly-created entity. This is the complement of the cluster
+        # + noise passes, which link FROM a record TO nearby entities — here
+        # we link FROM a new entity OUT to every record it's close to, so a
+        # matter added at 3pm has its related-* footprint by 3:01pm rather
+        # than waiting for the next cluster membership shift.
+        if newly_added_entity_paths and self.cfg.entity_link.backfill_enabled:
+            self._backfill_new_entities(
+                newly_added_entity_paths, records, paths, vectors,
             )
 
     def _link_entities_in_clusters(
@@ -493,6 +537,90 @@ class Daemon:
             log.info(
                 "daemon.noise_linking_complete",
                 noise_processed=noise_processed,
+                links_added=total_added,
+                threshold=threshold,
+                max_per_record=max_per,
+            )
+
+    def _backfill_new_entities(
+        self,
+        new_entity_paths: list[str],
+        records: dict[str, "VaultRecord"],
+        all_paths: list[str],
+        all_vectors,
+    ) -> None:
+        """Reverse-direction scan for newly-created entity records.
+
+        For each new entity E, walk every non-entity record R in the vault.
+        If cos(E, R) >= threshold, append E's path to R's related_<E.type>
+        frontmatter (up to max_per_record per field).
+
+        This is the complement of the cluster/noise passes — they link FROM
+        each record TO its nearest entities; this pass links FROM a new
+        entity OUTWARDS to every record it's close to, so the new entity
+        has a structural footprint immediately on creation.
+
+        Cost: |new_entities| × |non_entity_records| numpy dot products.
+        A new matter on David's ~3500-record vault = ~3500 dot products
+        = sub-second.
+        """
+        import numpy as np
+        from .labeler import ENTITY_RECORD_TYPES
+
+        path_to_vec: dict[str, "np.ndarray"] = {}
+        for p, v in zip(all_paths, all_vectors):
+            path_to_vec[p] = np.asarray(v, dtype=np.float32)
+
+        writer_methods = {
+            "matter": self.writer.write_related_matters,
+            "person": self.writer.write_related_persons,
+            "org": self.writer.write_related_orgs,
+            "project": self.writer.write_related_projects,
+        }
+
+        threshold = self.cfg.entity_link.threshold
+        max_per = self.cfg.entity_link.max_per_record
+
+        total_added = 0
+        entities_processed = 0
+        for entity_path in new_entity_paths:
+            entity_record = records.get(entity_path)
+            if entity_record is None:
+                continue
+            entity_type = entity_record.record_type
+            if entity_type not in ENTITY_RECORD_TYPES:
+                continue
+            entity_vec = path_to_vec.get(entity_path)
+            if entity_vec is None:
+                continue
+
+            entities_processed += 1
+            method = writer_methods[entity_type]
+
+            # For each non-entity record in the vault, check similarity.
+            # Entity→entity self-type suppressed (same rule as noise
+            # linking): a new matter doesn't get added to another matter's
+            # related_matters list.
+            for other_path, other_record in records.items():
+                if other_path == entity_path:
+                    continue
+                if other_record.record_type == entity_type:
+                    continue  # self-type suppression
+                other_vec = path_to_vec.get(other_path)
+                if other_vec is None:
+                    continue
+                sim = float(np.dot(entity_vec, other_vec))
+                if sim < threshold:
+                    continue
+                # Write ONE entity at a time so each target record's
+                # max_per_record cap is respected independently.
+                added = method(other_path, [entity_path], max_total=max_per)
+                total_added += added
+
+        if entities_processed > 0:
+            log.info(
+                "daemon.entity_backfill_complete",
+                entities_processed=entities_processed,
                 links_added=total_added,
                 threshold=threshold,
                 max_per_record=max_per,

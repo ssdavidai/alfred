@@ -83,6 +83,12 @@ class EntityLinkConfig:
     """
     threshold: float = 0.75
     max_per_record: int = 5
+    # When a new entity record (matter/person/org/project) is created, run
+    # a reverse scan across the vault and add it to matching records'
+    # related_<type> frontmatter. Without this, brand-new matters show up
+    # as structurally disconnected until the next clustering pass happens
+    # to co-cluster them with something.
+    backfill_enabled: bool = True
 
 
 @dataclass

@@ -146,7 +146,7 @@ async def test_startup_sync_saves_state_after_embed_phase(tmp_path):
 
     daemon.state.save = _traced_save
 
-    async def _trace_label(_records):
+    async def _trace_label(_records, newly_added_entity_paths=None):
         save_order.append("cluster_and_label")
 
     daemon._cluster_and_label = _trace_label
