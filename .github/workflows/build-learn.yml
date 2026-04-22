@@ -25,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r packages/learn/requirements.txt
-          pip install pytest
+          pip install pytest pytest-asyncio
 
       - name: Run tests
         run: python -m pytest tests/ -v
