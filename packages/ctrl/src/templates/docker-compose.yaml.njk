@@ -251,7 +251,7 @@ services:
     pids_limit: 128
 
 {% if plane_enabled %}
-  # ── Plane self-hosted PM (stable-v0.30) ───────────────────────────────────
+  # ── Plane self-hosted PM (stable) ───────────────────────────────────
   # Opt-in sidecar stack (see issue #536). All services bind to the internal
   # compose network; external reach-in is only via plane-proxy:8080 which the
   # provisioner's setup_plane step then talks to over localhost.
@@ -334,7 +334,7 @@ services:
     pids_limit: 128
 
   plane-api:
-    image: makeplane/plane-backend:stable-v0.30
+    image: makeplane/plane-backend:stable
     restart: unless-stopped
     depends_on:
       plane-db:
@@ -383,7 +383,7 @@ services:
     pids_limit: 256
 
   plane-worker:
-    image: makeplane/plane-backend:stable-v0.30
+    image: makeplane/plane-backend:stable
     restart: unless-stopped
     depends_on:
       plane-api:
@@ -415,7 +415,7 @@ services:
     pids_limit: 256
 
   plane-beat:
-    image: makeplane/plane-backend:stable-v0.30
+    image: makeplane/plane-backend:stable
     restart: unless-stopped
     depends_on:
       plane-api:
@@ -441,7 +441,7 @@ services:
     pids_limit: 128
 
   plane-web:
-    image: makeplane/plane-frontend:stable-v0.30
+    image: makeplane/plane-frontend:stable
     restart: unless-stopped
     depends_on:
       plane-api:
@@ -460,7 +460,7 @@ services:
     pids_limit: 256
 
   plane-space:
-    image: makeplane/plane-space:stable-v0.30
+    image: makeplane/plane-space:stable
     restart: unless-stopped
     depends_on:
       plane-api:
@@ -473,7 +473,7 @@ services:
     pids_limit: 128
 
   plane-admin:
-    image: makeplane/plane-admin:stable-v0.30
+    image: makeplane/plane-admin:stable
     restart: unless-stopped
     depends_on:
       plane-api:
@@ -486,7 +486,7 @@ services:
     pids_limit: 128
 
   plane-live:
-    image: makeplane/plane-live:stable-v0.30
+    image: makeplane/plane-live:stable
     restart: unless-stopped
     depends_on:
       plane-api:
@@ -499,7 +499,7 @@ services:
     pids_limit: 128
 
   plane-proxy:
-    image: makeplane/plane-proxy:stable-v0.30
+    image: makeplane/plane-proxy:stable
     restart: unless-stopped
     depends_on:
       plane-api:

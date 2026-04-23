@@ -1807,18 +1807,22 @@ async function writeTenantEnv(
   const sedDeletes = keys
     .map((k) => `-e ${JSON.stringify(`/^${k}=/d`)}`)
     .join(" ");
-  const appendLines = keys
+  // printf '%s\n' repeats the format string once per argument, emitting each
+  // on its own line — this replaces an earlier version that joined with a
+  // literal "\n" sequence that printf's %s does NOT interpret, so every key
+  // landed on a single physical line (#552).
+  const printfArgs = keys
     .map((k) => {
       // Shell-safe single-quoting for the value side. The only forbidden char
       // is a literal single quote; we replace `'` with `'"'"'`.
       const v = entries[k].replace(/'/g, `'"'"'`);
-      return `${k}='${v}'`;
+      return JSON.stringify(`${k}='${v}'`);
     })
-    .join("\n");
+    .join(" ");
   const envPath = `${DEFAULTS.dockerComposeDir}/.env`;
   // Use a tmp file + mv to keep the write atomic. sed -i on Ubuntu creates a
   // backup by default only with -i''; explicitly omit the backup suffix.
-  const cmd = `set -e; _tmp=$(mktemp); sed ${sedDeletes} ${envPath} > "$_tmp" 2>/dev/null || cp ${envPath} "$_tmp"; printf '\\n%s\\n' ${JSON.stringify(appendLines)} >> "$_tmp"; mv "$_tmp" ${envPath}; chmod 600 ${envPath}`;
+  const cmd = `set -e; _tmp=$(mktemp); sed ${sedDeletes} ${envPath} > "$_tmp" 2>/dev/null || cp ${envPath} "$_tmp"; printf '\\n' >> "$_tmp"; printf '%s\\n' ${printfArgs} >> "$_tmp"; mv "$_tmp" ${envPath}; chmod 600 ${envPath}`;
   const result = await ssh.exec(
     opts.serverIp,
     opts.keyPath,
