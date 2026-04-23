@@ -147,9 +147,10 @@ function parseFrontmatter(content: string): ParsedRecord {
       continue;
     }
 
-    // List continuation: "- value"
-    if (listValues !== null && /^\s+-\s/.test(line)) {
-      listValues.push(line.replace(/^\s+-\s*/, "").replace(/^['"]|['"]$/g, "").trim());
+    // List continuation: "- value" (block sequence, YAML permits either
+    // 0-indent at the parent key's column or a nested indent).
+    if (listValues !== null && /^\s*-\s/.test(line)) {
+      listValues.push(line.replace(/^\s*-\s*/, "").replace(/^['"]|['"]$/g, "").trim());
       continue;
     }
     // Flush any pending list
