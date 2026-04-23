@@ -30,7 +30,16 @@ VAULT_TASK_TO_PLANE_STATE_GROUP = {
     "pending":   "backlog",
 }
 PLANE_STATE_GROUP_TO_VAULT_TASK = {
-    "backlog":   "queued",
+    # ``backlog`` collapses to ``todo`` on the reverse trip: the
+    # canonical vault task schema (see alfred/src/alfred/vault/schema.py)
+    # only accepts ``active|blocked|cancelled|done|todo``. Historically
+    # some fleet drift produced ``queued`` but ctrl-api's ``vault edit``
+    # rejects it with 500, breaking every reverse-sync write for issues
+    # Plane considers backlog. Mapping to ``todo`` keeps the round-trip
+    # consistent for tenants following the canonical schema; forward
+    # sync still sends ``backlog`` for any task whose status happens to
+    # be ``queued`` on disk via the other-side mapping above.
+    "backlog":   "todo",
     "unstarted": "todo",
     "started":   "active",
     "completed": "done",
