@@ -1755,10 +1755,18 @@ async function tenantCurl(
   // -s silences progress, -o writes body to a temp file, -w prints the status
   // on stdout only. The bash sequence then emits status + a separator + body.
   const cmd = `set -o pipefail; _tmp=$(mktemp); _code=$(curl -sS -o "$_tmp" -w '%{http_code}' ${cookieArg} -X ${args.method} ${headerArgs} ${dataArg} ${JSON.stringify(url)}); _body=$(cat "$_tmp"); rm -f "$_tmp"; printf '%s\\n__PLANE_SEP__\\n%s' "$_code" "$_body"`;
+  // SSH runs our command through the remote login shell, so any "$(...)" or
+  // "$var" inside a double-quoted wrapper is expanded BEFORE bash sees it.
+  // Passing a JSON.stringify()'d script (which uses double quotes) strips all
+  // our command substitutions. Base64-encoding is the one encoding that's
+  // guaranteed to survive shell quoting unchanged. Decode-and-pipe-into-bash
+  // is the canonical way to ship a shell script over ssh2.exec() without
+  // getting chewed up.
+  const b64 = Buffer.from(cmd, "utf-8").toString("base64");
   const result = await ssh.exec(
     opts.serverIp,
     opts.keyPath,
-    `bash -c ${JSON.stringify(cmd)}`,
+    `echo ${b64} | base64 -d | bash`,
     undefined,
     opts.hostKeyOpts,
   );
