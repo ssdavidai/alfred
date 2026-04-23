@@ -41,6 +41,11 @@ with workflow.unsafe.imports_passed_through():
         plane_reverse_sync_is_enabled,
         save_reverse_sync_cursor,
     )
+    from src.activities.plane_alfred_triggers import (
+        detect_alfred_plane_trigger,
+        resolve_plane_approval,
+        spawn_alfred_for_plane_trigger,
+    )
     from src.utils.plane_mapping import (
         plane_issue_to_vault_patch,
         plane_project_to_matter_patch,
@@ -66,6 +71,15 @@ class PlaneReverseSyncResult:
     skipped_reason: str = ""
     last_event_id: str = ""
     error_messages: list[str] = field(default_factory=list)
+    # B8 — Alfred-as-a-Plane-user counters. Spawned sessions are
+    # fire-and-forget from the workflow's perspective; these counters
+    # let #536 B9 verification correlate reverse-sync ticks with
+    # openclaw session logs.
+    alfred_triggers_seen: int = 0
+    alfred_sessions_spawned: int = 0
+    alfred_spawns_failed: int = 0
+    alfred_approvals_resolved: int = 0
+    alfred_spawn_session_keys: list[str] = field(default_factory=list)
 
 
 def _alfred_external_slug(external_id: Any) -> Optional[str]:
@@ -169,6 +183,13 @@ class PlaneReverseSyncWorkflow:
             result.events_seen += 1
 
             try:
+                # B8 — check for an Alfred-as-user trigger BEFORE vault
+                # dispatch so the spawn fires even when the event would
+                # otherwise be a vault no-op (e.g. a comment mention that
+                # doesn't change any vault field). Spawn is fire-and-
+                # forget; we capture the session id for #536 B9.
+                await self._maybe_spawn_alfred(event=event, result=result, retry=retry)
+
                 await self._dispatch_event(
                     event=event,
                     project_map=project_map,
@@ -420,3 +441,119 @@ class PlaneReverseSyncWorkflow:
 
         # Anything else — cycles, modules, members — is not in B7 scope.
         result.unknown_events += 1
+
+    # ---------------------------------------------------------------------
+    # B8 — Alfred-as-a-Plane-user trigger dispatch.
+    # Runs BEFORE the vault patch so a session spawn still fires when
+    # the event would be a vault no-op (e.g. a comment on an already-
+    # mirrored task, or an assignment update that doesn't change
+    # non-assignee fields). Spawn is fire-and-forget; the workflow
+    # advances its cursor as soon as the spawn call returns.
+    # ---------------------------------------------------------------------
+
+    async def _maybe_spawn_alfred(
+        self,
+        *,
+        event: dict[str, Any],
+        result: PlaneReverseSyncResult,
+        retry: RetryPolicy,
+    ) -> None:
+        """Detect + spawn for a single stream event.
+
+        Never raises — any spawn failure is recorded on the result and
+        the reverse-sync loop continues. The cursor advances on the
+        outer dispatch loop regardless, so a broken Alfred-session
+        spawn never blocks the sync.
+        """
+        raw = event.get("raw") or {}
+        if not isinstance(raw, dict):
+            return
+
+        try:
+            trigger = await workflow.execute_activity(
+                detect_alfred_plane_trigger,
+                args=[raw],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=retry,
+            )
+        except Exception as exc:  # noqa: BLE001
+            workflow.logger.warning(
+                "plane_reverse_sync._maybe_spawn_alfred: detect failed: %s", exc
+            )
+            return
+
+        if not trigger:
+            return
+
+        result.alfred_triggers_seen += 1
+        trigger_type = str(trigger.get("trigger_type") or "")
+
+        if trigger_type == "approval":
+            try:
+                outcome = await workflow.execute_activity(
+                    resolve_plane_approval,
+                    args=[
+                        str(trigger.get("issue_id") or ""),
+                        str(trigger.get("comment_body") or ""),
+                        str(trigger.get("author_id") or ""),
+                    ],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=retry,
+                )
+                if outcome.get("approved"):
+                    result.alfred_approvals_resolved += 1
+                    workflow.logger.info(
+                        "plane_reverse_sync: approval resolved issue=%s "
+                        "session=%s",
+                        trigger.get("issue_id"),
+                        outcome.get("session_id"),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                workflow.logger.warning(
+                    "plane_reverse_sync: approval resolve failed: %s", exc
+                )
+            return
+
+        if trigger_type not in {"mention", "assignment"}:
+            return
+
+        try:
+            spawn_outcome = await workflow.execute_activity(
+                spawn_alfred_for_plane_trigger,
+                args=[trigger],
+                # Spawn POST plus best-effort Plane context fetch should
+                # finish well under a minute; cap firmly so a stalled
+                # gateway can't starve the sync loop.
+                start_to_close_timeout=timedelta(seconds=90),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+        except Exception as exc:  # noqa: BLE001
+            result.alfred_spawns_failed += 1
+            workflow.logger.warning(
+                "plane_reverse_sync: spawn activity failed: %s", exc
+            )
+            return
+
+        if spawn_outcome and spawn_outcome.get("spawned"):
+            result.alfred_sessions_spawned += 1
+            sk = str(spawn_outcome.get("session_key") or "")
+            if sk:
+                result.alfred_spawn_session_keys.append(sk)
+            workflow.logger.info(
+                "plane_reverse_sync: alfred session spawned type=%s "
+                "issue=%s session=%s requires_approval=%s",
+                trigger_type,
+                trigger.get("issue_id"),
+                sk[:12] if sk else "",
+                bool(trigger.get("requires_approval")),
+            )
+        else:
+            result.alfred_spawns_failed += 1
+            err = ""
+            if isinstance(spawn_outcome, dict):
+                err = str(spawn_outcome.get("error") or "")
+            workflow.logger.warning(
+                "plane_reverse_sync: alfred session NOT spawned type=%s "
+                "issue=%s error=%s",
+                trigger_type, trigger.get("issue_id"), err,
+            )

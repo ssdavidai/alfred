@@ -146,3 +146,165 @@ watch -n 2 'cat /mnt/encrypted/alfred/state/plane_reverse_sync_cursor.json 2>/de
 * `plane_reverse_sync_cursor.json` advances monotonically; no resets.
 * Sir's `vault/matter/*.md` and `vault/task/*.md` files show expected
   frontmatter changes but no content drift (body preserved on archive).
+
+---
+
+## Alfred-as-user (B8 — #536)
+
+When a human in Plane @mentions Alfred in a comment OR assigns an issue
+to him, reverse-sync spawns an openclaw session on the main gateway
+(`:18789`) with the issue context. Alfred then acts, posts a reply
+comment, and (when required) waits for an explicit approval comment
+from the requester before taking destructive action.
+
+**Prerequisites**:
+- Tenant `.env` has `PLANE_ALFRED_USER_ID` populated (written by the
+  provisioner in PR #547).
+- Tenant Plane workspace has an "Alfred" user matching that id.
+- `PLANE_SYNC_ENABLED=true`.
+
+### T8 — @alfred mention (autonomous path)
+
+**Goal**: plain `@alfred` mention spawns a session, Alfred replies on
+the issue.
+
+1. In Plane, open any issue (preferably one Alfred has already mirrored
+   from a vault task, so the matter linkage exists).
+2. Post a comment: `@alfred summarise the thread for me`.
+3. Wait 30–60 seconds for the next `al-plane-reverse-sync` tick.
+4. **Expected**:
+   - `al-plane-reverse-sync` result shows
+     `alfred_triggers_seen: 1, alfred_sessions_spawned: 1,
+     alfred_spawns_failed: 0`.
+   - A session appears in openclaw history for `agent: "main"` with
+     `metadata.source = "plane"` and `metadata.trigger_type = "mention"`.
+   - Alfred posts a reply comment on the same Plane issue (usually
+     within 30–120s depending on the main agent's response time).
+5. Check in Temporal UI: `PlaneReverseSyncWorkflow` logs include
+   `plane_reverse_sync: alfred session spawned type=mention
+   issue=<uuid> session=<key> requires_approval=False`.
+6. Check in openclaw logs: `docker compose logs openclaw --tail=200 |
+   grep sessions_spawn` — one entry with `agentId=main` immediately
+   after the reverse-sync tick.
+
+### T9 — @alfred mention with destructive verb (gated path)
+
+**Goal**: destructive verbs force an approval gate, Alfred posts a plan
+and waits.
+
+1. Post a comment: `@alfred please delete the stale drafts`.
+2. Wait 30–60 seconds.
+3. **Expected**:
+   - Reverse-sync result shows
+     `alfred_triggers_seen: 1, alfred_sessions_spawned: 1`.
+   - Spawn metadata in openclaw history has `requires_approval: True`.
+   - Alfred's reply comment on Plane describes the plan and asks for
+     explicit approval (something like "Please confirm with `@alfred
+     approved` before I remove …").
+   - `/mnt/encrypted/alfred/state/plane_pending_approvals.json` has an
+     entry keyed by the Plane issue UUID with the requester's actor id.
+4. Post a follow-up comment from the **same user**:
+   `@alfred approved`.
+5. Wait 30–60 seconds.
+6. **Expected**:
+   - Reverse-sync result shows `alfred_approvals_resolved: 1`.
+   - The pending-approvals file no longer contains the entry.
+   - Alfred sends a `sessions_message` follow-up to the original
+     session (visible in openclaw history) and proceeds with the
+     action.
+
+**Negative case**: if someone OTHER than the original requester posts
+`@alfred approved`, reverse-sync must leave the pending entry untouched
+and log `no_matching_pending`.
+
+### T10 — Assign issue to Alfred
+
+**Goal**: assignment always spawns in gated mode; first response is a
+plan + approval request.
+
+1. In Plane, create a new issue and assign it to the Alfred user at
+   creation time (or assign via the assignee picker on an existing
+   issue).
+2. Wait 30–60 seconds.
+3. **Expected**:
+   - Reverse-sync result shows `alfred_triggers_seen: 1,
+     alfred_sessions_spawned: 1` with spawn metadata
+     `trigger_type: "assignment", requires_approval: True`.
+   - Alfred's reply comment on Plane presents a plan (no destructive
+     action yet) and asks for `@alfred go ahead`.
+   - `plane_pending_approvals.json` has the entry.
+4. Reply with `@alfred go ahead` from the assigner.
+5. **Expected**: same approval resolution as T9.
+
+### T11 — Echo suppression (Alfred's own comments)
+
+**Goal**: Alfred's own reply comment on a Plane issue must NOT
+re-trigger him.
+
+1. Observe the comment Alfred posted in T8. Inspect its id via the
+   Plane API:
+   ```bash
+   curl -H "x-api-key: $PLANE_API_TOKEN" \
+     "$PLANE_API_URL/api/v1/workspaces/$PLANE_WORKSPACE_SLUG/projects/<proj>/issues/<iss>/comments/" \
+     | jq '.[] | {id, actor}'
+   ```
+2. Check that comment id appears in
+   `/mnt/encrypted/alfred/state/plane_self_comments.json` (list of
+   up to 500 most recent self-posted comment ids, FIFO-evicted).
+3. **Expected**:
+   - Reverse-sync result for the tick that processed the echo event:
+     `alfred_triggers_seen: 0`.
+   - No second session in openclaw history matching that comment.
+4. Also verify that if Alfred's user id appears as the comment actor,
+   the detector skips via layer-1 echo defense even if the comment id
+   happens to be missing from the ledger.
+
+### T12 — Assignment update where Alfred was already assigned
+
+**Goal**: editing a title or priority on an issue already assigned to
+Alfred must NOT spawn another session.
+
+1. Open an issue already assigned to Alfred (from T10).
+2. Change the title from the Plane UI (don't touch assignees).
+3. Wait 30–60 seconds.
+4. **Expected**:
+   - Reverse-sync `alfred_triggers_seen: 0` (no new trigger).
+   - Vault-side: the task record's `name` frontmatter field updates
+     via the usual reverse-sync path.
+   - `plane_pending_approvals.json` is unchanged.
+
+### Monitoring for B8
+
+```bash
+# Watch the Alfred trigger fields in the reverse-sync result
+docker compose logs -f alfred-learn | grep -E 'alfred session|alfred_triggers'
+
+# Pending approvals
+watch -n 2 'cat /mnt/encrypted/alfred/state/plane_pending_approvals.json 2>/dev/null | jq .'
+
+# Self-comment ledger (confirm it grows by one after every Alfred reply)
+watch -n 5 'cat /mnt/encrypted/alfred/state/plane_self_comments.json 2>/dev/null | jq "length"'
+```
+
+### Troubleshooting
+
+* **No session spawned on `@alfred ...`** — check that
+  `PLANE_ALFRED_USER_ID` is set in the tenant `.env`; without it the
+  detector no-ops on assignments and only matches plain `@alfred`
+  tokens (not user-mention markup). `docker compose exec alfred-learn
+  env | grep PLANE_ALFRED_USER_ID` confirms.
+* **Spawn fails with `http_error`** — the main openclaw gateway
+  probably restarted (e.g. after a Composio connect). Check
+  `GET /api/v1/openclaw/ready` on the tenant; the next reverse-sync
+  tick will retry.
+* **Alfred's reply re-triggered him** — one of the two defense layers
+  broke. Either (a) the Plane webhook payload didn't include the
+  `actor.id` field and you hit the ledger-miss path, or (b) the
+  `create_comment` call bypassed the self-comment ledger recorder.
+  Verify by checking `plane_self_comments.json` contains the reply
+  comment id shortly after Alfred posts.
+* **Approval ignored** — ensure the approver is the SAME actor id as
+  the original requester. Approvals from other users are deliberately
+  rejected. The workflow log line
+  `resolve_plane_approval: no_matching_pending` indicates either the
+  requester id mismatched or the pending entry expired (24h TTL).

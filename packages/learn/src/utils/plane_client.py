@@ -129,6 +129,15 @@ class PlaneClient:
         """PATCH /api/v1/workspaces/{slug}/projects/{id}/"""
         return await self._patch(f"{self._proj(project_id)}/", json=patch)
 
+    async def get_project(self, project_id: str) -> dict[str, Any]:
+        """GET /api/v1/workspaces/{slug}/projects/{id}/
+
+        Returns the full project record. Used by B8 when composing the
+        prompt for an Alfred-as-user session so the agent knows which
+        project it's operating in.
+        """
+        return await self._get(f"{self._proj(project_id)}/")
+
     async def archive_project(self, project_id: str) -> None:
         """POST /api/v1/workspaces/{slug}/projects/{id}/archive/
 
@@ -162,6 +171,19 @@ class PlaneClient:
         if isinstance(data, dict):
             return data.get("results", [])
         return data  # type: ignore[return-value]
+
+    async def get_issue(
+        self, project_id: str, issue_id: str
+    ) -> dict[str, Any]:
+        """GET /api/v1/workspaces/{slug}/projects/{id}/issues/{issue_id}/
+
+        Returns the full issue record with assignees, labels, state,
+        description. Used by B8 to hydrate the Alfred-as-user prompt
+        beyond what the webhook payload contains.
+        """
+        return await self._get(
+            f"{self._proj(project_id)}/issues/{issue_id}/"
+        )
 
     async def create_issue(
         self,
@@ -299,6 +321,22 @@ class PlaneClient:
             f"{self._proj(project_id)}/issues/{issue_id}/comments/",
             json={"comment_html": text},
         )
+
+    async def list_issue_comments(
+        self, project_id: str, issue_id: str
+    ) -> list[dict[str, Any]]:
+        """GET /api/v1/workspaces/{slug}/projects/{id}/issues/{issue_id}/comments/
+
+        Returns the comment thread oldest → newest. Used by B8 to scan
+        for a follow-up ``@alfred approved`` comment when the normal
+        webhook path is delayed or missed.
+        """
+        data = await self._get(
+            f"{self._proj(project_id)}/issues/{issue_id}/comments/"
+        )
+        if isinstance(data, dict):
+            return data.get("results", [])
+        return data  # type: ignore[return-value]
 
     # ── Webhooks (admin — for provisioner) ──────────────────────────────────
 

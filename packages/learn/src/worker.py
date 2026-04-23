@@ -317,6 +317,15 @@ from src.activities.plane_reverse_sync import (
     save_reverse_sync_cursor,
 )
 
+# Plane Alfred-as-user triggers (#536 B8)
+from src.activities.plane_alfred_triggers import (
+    detect_alfred_plane_trigger,
+    load_alfred_self_comments,
+    record_alfred_self_comment,
+    resolve_plane_approval,
+    spawn_alfred_for_plane_trigger,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -557,6 +566,12 @@ ALL_ACTIVITIES = [
     append_plane_comment_to_vault,
     archive_vault_record,
     mark_plane_event_processed,
+    # Plane Alfred-as-user triggers (#536 B8)
+    detect_alfred_plane_trigger,
+    spawn_alfred_for_plane_trigger,
+    resolve_plane_approval,
+    record_alfred_self_comment,
+    load_alfred_self_comments,
 ]
 
 
