@@ -28,6 +28,8 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.plane_sync import (
+        INBOX_SLUG_SENTINEL,
+        ensure_inbox_project,
         fetch_changed_matters,
         fetch_changed_tasks,
         load_plane_sync_state,
@@ -176,7 +178,29 @@ class PlaneSyncWorkflow:
             if mt > processed_mtime:
                 processed_mtime = mt
 
-        # 5. Tasks → Plane issues
+        # 5. Ensure the Inbox project exists before the task loop. Tasks
+        #    with no matter link go there so Sir has a triage surface in
+        #    Plane instead of invisible "skipped" tasks. Idempotent — the
+        #    activity fast-paths when the sentinel already maps.
+        try:
+            inbox_outcome: dict[str, Any] = await workflow.execute_activity(
+                ensure_inbox_project,
+                args=[project_map],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=retry,
+            )
+            inbox_id = str(inbox_outcome.get("plane_id") or "")
+            if inbox_id:
+                project_map[INBOX_SLUG_SENTINEL] = inbox_id
+        except Exception as exc:  # noqa: BLE001
+            # Soft-fail: tasks with a matter still sync fine; only the
+            # orphan triage path degrades.
+            workflow.logger.warning(
+                "plane_sync.inbox_ensure_failed error=%s — matter-less tasks will skip this run",
+                exc,
+            )
+
+        # 6. Tasks → Plane issues
         for idx, task in enumerate(tasks):
             if idx % HEARTBEAT_EVERY == 0:
                 workflow.logger.info(

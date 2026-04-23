@@ -80,6 +80,66 @@ class TestNormalizeMatterRef:
         assert _normalize_matter_ref(42) is None
 
 
+class TestResolveTaskMatter:
+    """Matter resolution across the three field conventions that
+    co-exist on the fleet today (see #536 follow-up)."""
+
+    def _resolve(self, fm):
+        from src.activities.plane_sync import _resolve_task_matter
+        return _resolve_task_matter(fm)
+
+    def test_empty_frontmatter_returns_none(self):
+        assert self._resolve({}) is None
+
+    def test_scalar_matter_wins(self):
+        assert self._resolve({"matter": "client-x"}) == "client-x"
+
+    def test_scalar_legacy_related_matter(self):
+        assert self._resolve({"related_matter": "legacy-slug"}) == "legacy-slug"
+
+    def test_related_matters_head_of_list(self):
+        assert self._resolve(
+            {"related_matters": ["primary", "secondary"]}
+        ) == "primary"
+
+    def test_related_matters_empty_list_returns_none(self):
+        assert self._resolve({"related_matters": []}) is None
+
+    def test_related_matters_wikilink(self):
+        assert self._resolve(
+            {"related_matters": ["[[matter/foo]]"]}
+        ) == "foo"
+
+    def test_scalar_beats_array(self):
+        # Scalar `matter` explicitly set should win over whatever the
+        # enrichment pipeline wrote into `related_matters`.
+        assert self._resolve(
+            {"matter": "explicit", "related_matters": ["from-enrichment"]}
+        ) == "explicit"
+
+    def test_legacy_scalar_beats_array(self):
+        assert self._resolve(
+            {"related_matter": "legacy", "related_matters": ["from-enrichment"]}
+        ) == "legacy"
+
+    def test_non_list_related_matters_ignored(self):
+        # Guard against malformed frontmatter (string where list expected).
+        assert self._resolve({"related_matters": "not-a-list"}) is None
+
+
+class TestInboxSentinel:
+    """The Inbox project is keyed by a sentinel slug in project_map so
+    it never collides with a real matter slug."""
+
+    def test_sentinel_constant(self):
+        from src.activities.plane_sync import INBOX_SLUG_SENTINEL
+        assert INBOX_SLUG_SENTINEL == "__inbox__"
+        # Dunder prefix ensures it can't collide with a real slug
+        # (vault slugs are lowercase alnum + hyphens, enforced by the
+        # curator).
+        assert INBOX_SLUG_SENTINEL.startswith("__")
+
+
 class TestSlugFromPath:
     def test_matter_path(self):
         assert _slug_from_path("matter/client-x.md") == "client-x"

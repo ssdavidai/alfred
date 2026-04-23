@@ -291,6 +291,7 @@ from src.activities.ephemeral_agent import (
 
 # Plane sync (#536 B4) — vault → Plane one-way sync activities
 from src.activities.plane_sync import (
+    ensure_inbox_project,
     fetch_changed_matters,
     fetch_changed_tasks,
     load_plane_sync_state,
@@ -552,6 +553,7 @@ ALL_ACTIVITIES = [
     fetch_changed_tasks,
     sync_matter_to_plane,
     sync_task_to_plane,
+    ensure_inbox_project,
     # Plane reverse sync (#536 B7)
     plane_reverse_sync_is_enabled,
     load_reverse_sync_state,

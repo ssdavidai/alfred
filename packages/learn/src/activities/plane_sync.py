@@ -281,6 +281,36 @@ def _normalize_matter_ref(value: Any) -> Optional[str]:
     return s or None
 
 
+def _resolve_task_matter(fm: dict[str, Any]) -> Optional[str]:
+    """Resolve a task's matter slug from frontmatter, honoring several
+    field conventions that co-exist on the fleet today:
+
+    1. Scalar ``matter`` — legacy / generator-emitted / manually set
+    2. Scalar ``related_matter`` — older singular name
+    3. Array ``related_matters`` — what the hourly enrichment pipeline
+       (#395) writes; head of list is the primary match
+
+    Returns ``None`` if none of the three resolve to a slug.
+    """
+    direct = _normalize_matter_ref(fm.get("matter"))
+    if direct:
+        return direct
+    legacy = _normalize_matter_ref(fm.get("related_matter"))
+    if legacy:
+        return legacy
+    arr = fm.get("related_matters")
+    if isinstance(arr, list) and arr:
+        return _normalize_matter_ref(arr[0])
+    return None
+
+
+# Sentinel key used in ``project_map`` to refer to the Inbox project —
+# a catch-all destination for tasks that have no matter link yet.
+# Declared here + in plane_mapping so both forward and reverse sync can
+# recognise it without importing across sibling activity modules.
+INBOX_SLUG_SENTINEL = "__inbox__"
+
+
 # ---------------------------------------------------------------------------
 # Plane client lifecycle
 # ---------------------------------------------------------------------------
@@ -426,10 +456,10 @@ async def fetch_changed_tasks(since_mtime: float) -> list[dict[str, Any]]:
             continue
         fm = dict(rec.get("frontmatter") or {})
         # Normalize matter ref so the workflow doesn't have to branch.
-        # Accept both 'matter' and legacy 'related_matter' field names.
-        matter_ref = _normalize_matter_ref(fm.get("matter")) or _normalize_matter_ref(
-            fm.get("related_matter")
-        )
+        # Accepts scalar `matter` / `related_matter` AND the enrichment-
+        # pipeline's `related_matters[0]` (the common case on mature
+        # tenants where surveyor has already linked tasks to matters).
+        matter_ref = _resolve_task_matter(fm)
         changed.append({
             "slug": slug,
             "path": path,
@@ -519,6 +549,49 @@ async def sync_matter_to_plane(
 # ---------------------------------------------------------------------------
 
 @activity.defn
+async def ensure_inbox_project(project_map: dict[str, str]) -> dict[str, str]:
+    """Ensure an "Inbox" project exists in the Plane workspace.
+
+    Returns ``{"plane_id": "...", "action": "existing"|"created"}``.
+    Idempotent — safe to call every workflow run.
+
+    The Inbox is the catch-all destination for vault tasks whose matter
+    cannot be resolved at sync time. Tasks that do have a matter still
+    go to their real project. When a human moves an issue from Inbox
+    into a real project inside Plane, the reverse-sync workflow catches
+    the ``issue.updated`` event with a changed ``project`` field and
+    writes ``related_matters=[<new-slug>]`` back onto the vault task.
+    """
+    existing_id = project_map.get(INBOX_SLUG_SENTINEL)
+    if existing_id:
+        return {"plane_id": existing_id, "action": "existing"}
+
+    client = _plane_client_from_env()
+    try:
+        created = await client.create_project(
+            name="Inbox",
+            identifier="INBOX",
+            description=(
+                "Unsorted tasks without a matter link. Drag an issue into "
+                "a matter project to reassign — the change propagates to "
+                "the vault on the next reverse-sync tick."
+            ),
+        )
+        plane_id = str(created.get("id") or "")
+        if not plane_id:
+            raise RuntimeError(
+                f"ensure_inbox_project: no id returned: {created!r}"
+            )
+        logger.info(
+            "plane_sync.inbox_project_created plane_id=%s",
+            plane_id,
+        )
+        return {"plane_id": plane_id, "action": "created"}
+    finally:
+        await client.close()
+
+
+@activity.defn
 async def sync_task_to_plane(
     task: dict[str, Any],
     project_map: dict[str, str],
@@ -526,29 +599,35 @@ async def sync_task_to_plane(
 ) -> dict[str, str]:
     """Create or update the Plane issue mirroring this task record.
 
-    Skips (returns action='skip') when the task's ``matter`` field doesn't
-    resolve to a known Plane project — those tasks are surfaced in the
-    workflow summary but do not advance the cursor because the next run
-    may succeed once the matter has synced.
+    Resolution order for the destination project:
+    1. ``matter_slug`` resolves to a known Plane project → that project
+    2. Otherwise → the Inbox project (``project_map[INBOX_SLUG_SENTINEL]``)
+    3. If the Inbox isn't in the map yet (first-run race) → skip for
+       this run; next run will have the Inbox after ``ensure_inbox_project``
     """
     slug = task["slug"]
     matter_slug = task.get("matter_slug")
     fm = task.get("frontmatter") or {}
 
-    if not matter_slug:
-        logger.info(
-            "plane_sync.issue_upsert slug=%s action=skip reason=no_matter",
-            slug,
-        )
-        return {"slug": slug, "plane_id": "", "action": "skip"}
-
-    project_id = project_map.get(matter_slug)
-    if not project_id:
-        logger.info(
-            "plane_sync.issue_upsert slug=%s action=skip reason=unknown_matter matter=%s",
-            slug, matter_slug,
-        )
-        return {"slug": slug, "plane_id": "", "action": "skip"}
+    if matter_slug:
+        project_id = project_map.get(matter_slug)
+        if not project_id:
+            logger.info(
+                "plane_sync.issue_upsert slug=%s action=skip reason=unknown_matter matter=%s",
+                slug, matter_slug,
+            )
+            return {"slug": slug, "plane_id": "", "action": "skip"}
+    else:
+        project_id = project_map.get(INBOX_SLUG_SENTINEL)
+        if not project_id:
+            # Inbox hasn't synced yet — defer. ensure_inbox_project
+            # runs before the task loop so this only happens on the
+            # very first workflow run after Plane provisioning.
+            logger.info(
+                "plane_sync.issue_upsert slug=%s action=skip reason=no_inbox",
+                slug,
+            )
+            return {"slug": slug, "plane_id": "", "action": "skip"}
 
     update = vault_task_to_plane_update(fm)
     state_group = update.pop("state_group", None)

@@ -46,6 +46,7 @@ with workflow.unsafe.imports_passed_through():
         resolve_plane_approval,
         spawn_alfred_for_plane_trigger,
     )
+    from src.activities.plane_sync import INBOX_SLUG_SENTINEL
     from src.utils.plane_mapping import (
         plane_issue_to_vault_patch,
         plane_project_to_matter_patch,
@@ -391,6 +392,28 @@ class PlaneReverseSyncWorkflow:
                     return
                 path = _task_path_for_slug(slug)
                 patch = plane_issue_to_vault_patch(data)
+
+                # Detect matter reassignment: if the issue has moved to a
+                # different Plane project, propagate the new matter slug
+                # into the vault task's `related_matters` (and scalar
+                # `matter`). If moved to the Inbox project, clear matter
+                # linkage. `apply_plane_patch_to_vault`'s per-field diff
+                # no-ops when current values already match — safe to
+                # include in every patch without oscillating.
+                new_project_id = str(
+                    data.get("project") or data.get("project_id") or ""
+                )
+                new_matter_slug = (
+                    plane_project_to_slug.get(new_project_id)
+                    if new_project_id else None
+                )
+                if new_matter_slug == INBOX_SLUG_SENTINEL:
+                    patch["related_matters"] = []
+                    patch["matter"] = ""
+                elif new_matter_slug:
+                    patch["related_matters"] = [new_matter_slug]
+                    patch["matter"] = new_matter_slug
+
                 outcome = await workflow.execute_activity(
                     apply_plane_patch_to_vault,
                     args=["task", path, patch, ""],
