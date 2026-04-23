@@ -103,6 +103,12 @@ _PAGE_SIZE = 100
 # per-project count on the fleet.
 _MAX_PAGES = 200
 
+# Plane's self-hosted proxy aggressively rate-limits per-IP (~1 req/s).
+# Back off proactively between project scans AND honour 429 Retry-After
+# headers. 1.0s idle between requests keeps us well under the limit.
+_THROTTLE_SECONDS = 1.0
+_MAX_429_RETRIES = 5
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -222,9 +228,35 @@ async def _list_project_issues(
         if next_cursor:
             params["cursor"] = next_cursor
 
-        resp = await http.get(path, params=params)
+        # 429-aware GET with Retry-After backoff. Plane's self-hosted
+        # proxy has been observed to throttle aggressively when we
+        # request every project back-to-back.
+        resp: Optional[httpx.Response] = None
+        for attempt in range(_MAX_429_RETRIES):
+            resp = await http.get(path, params=params)
+            if resp.status_code != 429:
+                break
+            retry_after = resp.headers.get("Retry-After") or ""
+            try:
+                backoff = float(retry_after) if retry_after else 5.0
+            except ValueError:
+                backoff = 5.0
+            # Cap the per-retry wait so a pathological Retry-After
+            # header (e.g. 300s) doesn't stall the whole script.
+            backoff = min(max(backoff, 1.0), 60.0)
+            logger.info(
+                "rebuild_plane_issue_map: project=%s page=%d 429 received "
+                "attempt=%d/%d Retry-After=%s — sleeping %.1fs",
+                project_id, page, attempt + 1, _MAX_429_RETRIES,
+                retry_after or "(none)", backoff,
+            )
+            await asyncio.sleep(backoff)
+        assert resp is not None  # noqa: S101 — loop always assigns
         resp.raise_for_status()
         data = resp.json()
+
+        # Throttle between pages within a project too.
+        await asyncio.sleep(_THROTTLE_SECONDS)
 
         page_issues: list[dict[str, Any]] = []
         if isinstance(data, list):
@@ -424,6 +456,11 @@ async def _run(args: argparse.Namespace) -> RebuildStats:
                 "rebuild_plane_issue_map: project=%s (%s) issues=%d",
                 proj_id_str, slug_or_sentinel, len(issues),
             )
+
+            # Breathe between projects too — otherwise the
+            # twelve-project walk on David saturates the proxy
+            # immediately and the rest of the walk gets throttled.
+            await asyncio.sleep(_THROTTLE_SECONDS)
 
             for issue in issues:
                 stats.issues_scanned += 1
