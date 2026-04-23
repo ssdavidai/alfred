@@ -2,7 +2,7 @@ import http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { authenticate } from "./auth.js";
 import { handleError, sendJson, ValidationError } from "./errors.js";
-import { setCors, parseBody, logRequest } from "./middleware.js";
+import { setCors, parseBody, readRawBody, logRequest } from "./middleware.js";
 import { registerVaultRoutes } from "./routes/vault.js";
 import { registerDeviceRoutes } from "./routes/devices.js";
 import { registerLogRoutes } from "./routes/logs.js";
@@ -28,6 +28,7 @@ import { registerAuthSendersRoutes } from "./routes/authSenders.js";
 import { registerEmailRoutes } from "./routes/email.js";
 import { registerChannelsEmailRoutes } from "./routes/channelsEmail.js";
 import { registerChannelsAttachmentRoutes } from "./routes/channelsAttachment.js";
+import { registerPlaneRoutes } from "./routes/plane.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -112,6 +113,7 @@ export function createApiServer(): http.Server {
   registerEmailRoutes();
   registerChannelsEmailRoutes();
   registerChannelsAttachmentRoutes();
+  registerPlaneRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
@@ -130,11 +132,17 @@ export function createApiServer(): http.Server {
       const qIdx = url.indexOf("?");
       const pathname = qIdx >= 0 ? url.slice(0, qIdx) : url;
 
-      // Public routes that authenticate via their own mechanism (e.g. webhook token)
-      const isPublic = pathname.startsWith("/api/v1/streams/omi/");
+      // Public routes that authenticate via their own mechanism (e.g. webhook token,
+      // HMAC signature).
+      const isPublic =
+        pathname.startsWith("/api/v1/streams/omi/") ||
+        pathname === "/api/v1/plane/webhook";
       if (!isPublic) {
         authenticate(req);
       }
+      // Routes that receive exact-byte payloads and do their own parsing
+      // (needed for HMAC-over-raw-body signature schemes).
+      const isRawBody = pathname === "/api/v1/plane/webhook";
       const query = new URLSearchParams(qIdx >= 0 ? url.slice(qIdx + 1) : "");
 
       const matched = matchRoute(method, pathname);
@@ -145,10 +153,18 @@ export function createApiServer(): http.Server {
       }
 
       let body: unknown;
-      try {
-        body = await parseBody(req);
-      } catch {
-        throw new ValidationError("Invalid JSON body");
+      if (isRawBody) {
+        try {
+          body = await readRawBody(req);
+        } catch {
+          throw new ValidationError("Failed to read request body");
+        }
+      } else {
+        try {
+          body = await parseBody(req);
+        } catch {
+          throw new ValidationError("Invalid JSON body");
+        }
       }
 
       await matched.handler({
