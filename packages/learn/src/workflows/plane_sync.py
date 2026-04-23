@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Any
+from typing import Any, Optional
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
@@ -34,6 +34,7 @@ with workflow.unsafe.imports_passed_through():
         fetch_changed_tasks,
         load_plane_sync_state,
         plane_sync_is_enabled,
+        preload_project_labels,
         save_plane_sync_state,
         sync_matter_to_plane,
         sync_task_to_plane,
@@ -200,6 +201,46 @@ class PlaneSyncWorkflow:
                 exc,
             )
 
+        # 5b. Preload labels for every project we'll touch this run.
+        #     Before this, ``sync_task_to_plane`` issued a fresh
+        #     ``GET /projects/<id>/labels/`` per task — on David that's
+        #     ~200 extra round-trips every 15 s. The preload hits each
+        #     unique project once and threads the result dict through
+        #     to the task loop as a pure in-memory cache.
+        label_cache: dict[str, dict[str, str]] = {}
+        if tasks:
+            # Collect the destination project_id for every task the
+            # workflow is about to sync. Resolve the same way
+            # sync_task_to_plane does — matter match, else Inbox — so
+            # the preload set equals the touched set.
+            target_projects: set[str] = set()
+            for t in tasks:
+                matter_slug = t.get("matter_slug")
+                pid: Optional[str] = None
+                if matter_slug:
+                    pid = project_map.get(matter_slug)
+                if not pid:
+                    pid = project_map.get(INBOX_SLUG_SENTINEL)
+                if pid:
+                    target_projects.add(pid)
+            if target_projects:
+                try:
+                    label_cache = await workflow.execute_activity(
+                        preload_project_labels,
+                        args=[sorted(target_projects)],
+                        start_to_close_timeout=timedelta(seconds=60),
+                        retry_policy=retry,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # Soft-fail: sync_task_to_plane falls back to the
+                    # legacy per-task fetch when the cache is empty.
+                    workflow.logger.warning(
+                        "plane_sync.preload_labels_failed error=%s — "
+                        "falling back to per-task label fetch",
+                        exc,
+                    )
+                    label_cache = {}
+
         # 6. Tasks → Plane issues
         for idx, task in enumerate(tasks):
             if idx % HEARTBEAT_EVERY == 0:
@@ -209,7 +250,7 @@ class PlaneSyncWorkflow:
             try:
                 outcome = await workflow.execute_activity(
                     sync_task_to_plane,
-                    args=[task, project_map, issue_map],
+                    args=[task, project_map, issue_map, label_cache],
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=retry,
                 )

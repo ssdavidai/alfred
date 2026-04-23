@@ -296,6 +296,7 @@ from src.activities.plane_sync import (
     fetch_changed_tasks,
     load_plane_sync_state,
     plane_sync_is_enabled,
+    preload_project_labels,
     save_plane_sync_state,
     sync_matter_to_plane,
     sync_task_to_plane,
@@ -554,6 +555,7 @@ ALL_ACTIVITIES = [
     sync_matter_to_plane,
     sync_task_to_plane,
     ensure_inbox_project,
+    preload_project_labels,
     # Plane reverse sync (#536 B7)
     plane_reverse_sync_is_enabled,
     load_reverse_sync_state,

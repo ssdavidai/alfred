@@ -9,13 +9,19 @@ import pytest
 from src.utils.plane_mapping import (
     ALFRED_LABELS,
     LOOP_GUARD_FIELDS,
+    MAX_LABELS_PER_ISSUE,
     PLANE_PRIORITY_TO_VAULT,
     PLANE_STATE_GROUP_TO_VAULT_TASK,
     VAULT_PRIORITY_TO_PLANE,
     VAULT_TASK_TO_PLANE_STATE_GROUP,
+    _body_to_description_html,
+    _coerce_label_list,
+    _iso_date_string,
+    _sanitize_label_name,
     compute_loop_guard_hash,
     plane_issue_to_vault_patch,
     plane_project_to_matter_patch,
+    vault_matter_to_plane_update,
     vault_task_to_plane_update,
 )
 
@@ -24,8 +30,22 @@ from src.utils.plane_mapping import (
 
 class TestConstants:
     def test_vault_to_plane_state_group_covers_all_vault_statuses(self):
-        expected = {"queued", "todo", "active", "blocked", "done", "cancelled"}
-        assert set(VAULT_TASK_TO_PLANE_STATE_GROUP.keys()) == expected
+        # The canonical schema set plus fleet-drift values we tolerate —
+        # see mapping file for rationale per extra key.
+        canonical = {"queued", "todo", "active", "blocked", "done", "cancelled"}
+        fleet_drift = {"pending"}
+        assert set(VAULT_TASK_TO_PLANE_STATE_GROUP.keys()) == canonical | fleet_drift
+
+    def test_pending_is_mapped_to_backlog(self):
+        """Fleet-drift value 'pending' must not collapse to 'backlog'
+        via fallback only — explicit mapping keeps the round-trip stable."""
+        assert VAULT_TASK_TO_PLANE_STATE_GROUP["pending"] == "backlog"
+
+    def test_critical_priority_maps_to_urgent(self):
+        """Fleet-drift value 'critical' — curator emits it though the
+        schema doesn't define it. We mirror to Plane's strongest priority
+        instead of collapsing to 'none'."""
+        assert VAULT_PRIORITY_TO_PLANE["critical"] == "urgent"
 
     def test_plane_to_vault_state_group_covers_all_plane_groups(self):
         expected = {"backlog", "unstarted", "started", "completed", "cancelled"}
@@ -425,3 +445,435 @@ class TestLoopGuardHash:
         c = {"name": "X", "priority": None}
         assert compute_loop_guard_hash(a) == compute_loop_guard_hash(b)
         assert compute_loop_guard_hash(a) == compute_loop_guard_hash(c)
+
+
+# ── Label allow-list + list coercion ────────────────────────────────────────
+
+
+class TestSanitizeLabelName:
+    def test_accepts_lowercase_alnum(self):
+        assert _sanitize_label_name("budget") == "budget"
+
+    def test_accepts_hyphens_mid(self):
+        assert _sanitize_label_name("alfred-managed") == "alfred-managed"
+
+    def test_rejects_leading_hyphen(self):
+        assert _sanitize_label_name("-bad") is None
+
+    def test_rejects_uppercase(self):
+        # Deliberate: we don't silently lower-case — leaves the
+        # caller's intent visible and rejects pollution from free-text.
+        assert _sanitize_label_name("Budget") is None
+
+    def test_rejects_whitespace(self):
+        assert _sanitize_label_name("has space") is None
+
+    def test_rejects_special_chars(self):
+        assert _sanitize_label_name("ampersand&") is None
+        assert _sanitize_label_name("dotted.name") is None
+        assert _sanitize_label_name("slash/name") is None
+
+    def test_rejects_too_long(self):
+        # 33 chars — one over the cap
+        assert _sanitize_label_name("a" + "b" * 32) is None
+
+    def test_accepts_exactly_32_chars(self):
+        name = "a" + "b" * 31
+        assert _sanitize_label_name(name) == name
+
+    def test_rejects_empty_string(self):
+        assert _sanitize_label_name("") is None
+
+    def test_rejects_non_string(self):
+        assert _sanitize_label_name(None) is None
+        assert _sanitize_label_name(42) is None
+        assert _sanitize_label_name(["budget"]) is None
+
+
+class TestCoerceLabelList:
+    def test_empty_list(self):
+        assert _coerce_label_list([]) == []
+
+    def test_none(self):
+        assert _coerce_label_list(None) == []
+
+    def test_list_of_valid_strings(self):
+        assert _coerce_label_list(["budget", "urgent", "gtd"]) == [
+            "budget", "urgent", "gtd",
+        ]
+
+    def test_drops_invalid_entries(self):
+        # Valid ones kept, invalid silently dropped
+        assert _coerce_label_list(["budget", "Has Space", "ok", "BAD"]) == [
+            "budget", "ok",
+        ]
+
+    def test_string_split_on_commas(self):
+        assert _coerce_label_list("budget, urgent, gtd") == [
+            "budget", "urgent", "gtd",
+        ]
+
+    def test_string_split_on_whitespace(self):
+        assert _coerce_label_list("budget urgent gtd") == [
+            "budget", "urgent", "gtd",
+        ]
+
+    def test_malformed_type_returns_empty(self):
+        assert _coerce_label_list(42) == []
+        assert _coerce_label_list({"a": "b"}) == []
+
+
+# ── ISO date parsing ────────────────────────────────────────────────────────
+
+
+class TestIsoDateString:
+    def test_none_returns_none(self):
+        assert _iso_date_string(None) is None
+
+    def test_empty_returns_none(self):
+        assert _iso_date_string("") is None
+        assert _iso_date_string("   ") is None
+
+    def test_bare_date_passes_through(self):
+        assert _iso_date_string("2026-04-23") == "2026-04-23"
+
+    def test_iso_datetime_trims_to_date(self):
+        assert _iso_date_string("2026-04-23T12:34:56") == "2026-04-23"
+
+    def test_iso_datetime_with_z_trims(self):
+        assert _iso_date_string("2026-04-23T12:34:56Z") == "2026-04-23"
+
+    def test_iso_datetime_with_tz_offset_trims(self):
+        assert _iso_date_string("2026-04-23T12:34:56+02:00") == "2026-04-23"
+
+    def test_iso_datetime_with_space_separator(self):
+        # Vault frontmatter commonly uses space instead of T
+        assert _iso_date_string("2026-04-23 12:34:56") == "2026-04-23"
+
+    def test_garbage_string_returns_none(self):
+        assert _iso_date_string("not a date") is None
+        assert _iso_date_string("2026-04") is None  # no day
+        assert _iso_date_string("tomorrow") is None
+
+    def test_date_object_passes_through(self):
+        from datetime import date
+        assert _iso_date_string(date(2026, 4, 23)) == "2026-04-23"
+
+    def test_datetime_object_trims_to_date(self):
+        from datetime import datetime
+        assert _iso_date_string(datetime(2026, 4, 23, 12, 0, 0)) == "2026-04-23"
+
+
+# ── Body → HTML rendering ──────────────────────────────────────────────────
+
+
+class TestBodyToDescriptionHtml:
+    def test_empty_body_and_empty_scalar_returns_empty(self):
+        assert _body_to_description_html("", "") == ""
+        assert _body_to_description_html(None, None) == ""
+        assert _body_to_description_html(None, "") == ""
+
+    def test_simple_body_wraps_in_p(self):
+        assert _body_to_description_html("Hello world", None) == "<p>Hello world</p>"
+
+    def test_double_newline_makes_separate_paragraphs(self):
+        html = _body_to_description_html("First paragraph\n\nSecond paragraph", None)
+        assert html == "<p>First paragraph</p><p>Second paragraph</p>"
+
+    def test_single_newline_becomes_br(self):
+        html = _body_to_description_html("Line one\nLine two", None)
+        assert html == "<p>Line one<br>Line two</p>"
+
+    def test_leading_h1_heading_stripped(self):
+        """Curator commonly emits '# Title\n\nbody' — the title duplicates
+        the task name so drop it from the HTML body."""
+        html = _body_to_description_html(
+            "# My Task Title\n\nThe real body.", None,
+        )
+        assert html == "<p>The real body.</p>"
+
+    def test_h1_heading_without_blank_line_also_stripped(self):
+        html = _body_to_description_html("# Title\nBody", None)
+        assert html == "<p>Body</p>"
+
+    def test_falls_back_to_scalar_when_body_empty(self):
+        html = _body_to_description_html("", "Summary only")
+        assert html == "<p>Summary only</p>"
+
+    def test_body_wins_over_scalar(self):
+        html = _body_to_description_html("Full body", "Scalar summary")
+        assert html == "<p>Full body</p>"
+
+    def test_html_injection_is_escaped(self):
+        """HARD RULE: a '<script>' in the vault must become inert text."""
+        body = "<script>alert('pwned')</script>"
+        html = _body_to_description_html(body, None)
+        assert "<script>" not in html
+        assert "&lt;script&gt;" in html
+        assert "&lt;/script&gt;" in html
+
+    def test_ampersand_escaped(self):
+        html = _body_to_description_html("A & B", None)
+        assert html == "<p>A &amp; B</p>"
+
+    def test_gt_lt_escaped(self):
+        html = _body_to_description_html("a<b and x>y", None)
+        assert "&lt;" in html
+        assert "&gt;" in html
+
+    def test_only_whitespace_returns_empty(self):
+        assert _body_to_description_html("   \n\n   ", None) == ""
+
+    def test_only_heading_returns_empty(self):
+        # A body that is JUST the heading strips to empty
+        assert _body_to_description_html("# Just a heading", None) == ""
+
+    def test_preserves_paragraph_order(self):
+        body = "para1\n\npara2\n\npara3"
+        html = _body_to_description_html(body, None)
+        assert html == "<p>para1</p><p>para2</p><p>para3</p>"
+
+
+# ── Rich vault_task_to_plane_update extensions ──────────────────────────────
+
+
+class TestVaultTaskToPlaneUpdateRich:
+    """Coverage of the new fields added by the rich-mapping rollout."""
+
+    def test_description_html_from_body(self):
+        fm = {"name": "Task", "status": "todo"}
+        result = vault_task_to_plane_update(fm, body="The body text.")
+        assert result["description_html"] == "<p>The body text.</p>"
+
+    def test_description_html_omitted_when_body_and_scalar_empty(self):
+        fm = {"name": "Task", "status": "todo"}
+        result = vault_task_to_plane_update(fm)
+        assert "description_html" not in result
+
+    def test_description_falls_back_to_scalar(self):
+        fm = {"name": "Task", "status": "todo", "description": "Short note."}
+        result = vault_task_to_plane_update(fm)
+        assert result["description_html"] == "<p>Short note.</p>"
+
+    def test_body_beats_scalar(self):
+        fm = {"name": "Task", "status": "todo", "description": "summary"}
+        result = vault_task_to_plane_update(fm, body="Full body content")
+        assert "Full body content" in result["description_html"]
+        assert "summary" not in result["description_html"]
+
+    def test_body_heading_duplicate_stripped(self):
+        fm = {"name": "Do the thing", "status": "todo"}
+        body = "# Do the thing\n\nActually do it now."
+        result = vault_task_to_plane_update(fm, body=body)
+        assert result["description_html"] == "<p>Actually do it now.</p>"
+
+    def test_target_date_from_due_date(self):
+        fm = {"name": "Task", "status": "todo", "due_date": "2026-05-01"}
+        result = vault_task_to_plane_update(fm)
+        assert result["target_date"] == "2026-05-01"
+
+    def test_target_date_from_due(self):
+        fm = {"name": "Task", "status": "todo", "due": "2026-05-01"}
+        result = vault_task_to_plane_update(fm)
+        assert result["target_date"] == "2026-05-01"
+
+    def test_target_date_due_date_wins_over_due(self):
+        fm = {
+            "name": "Task", "status": "todo",
+            "due_date": "2026-05-01", "due": "2026-06-01",
+        }
+        result = vault_task_to_plane_update(fm)
+        assert result["target_date"] == "2026-05-01"
+
+    def test_target_date_garbage_omitted(self):
+        fm = {"name": "Task", "status": "todo", "due_date": "tomorrow"}
+        result = vault_task_to_plane_update(fm)
+        assert "target_date" not in result
+
+    def test_target_date_iso_datetime_normalised_to_date(self):
+        fm = {
+            "name": "Task", "status": "todo",
+            "due_date": "2026-05-01T09:00:00Z",
+        }
+        result = vault_task_to_plane_update(fm)
+        assert result["target_date"] == "2026-05-01"
+
+    def test_alfred_tags_passed_through(self):
+        fm = {
+            "name": "Task", "status": "todo",
+            "alfred_tags": ["budget", "urgent"],
+        }
+        result = vault_task_to_plane_update(fm)
+        assert "budget" in result["labels"]
+        assert "urgent" in result["labels"]
+        assert "alfred:managed" in result["labels"]
+
+    def test_topic_tags_passed_through(self):
+        fm = {
+            "name": "Task", "status": "todo",
+            "topic_tags": ["finance", "hr"],
+        }
+        result = vault_task_to_plane_update(fm)
+        assert "finance" in result["labels"]
+        assert "hr" in result["labels"]
+
+    def test_invalid_tags_dropped(self):
+        fm = {
+            "name": "Task", "status": "todo",
+            "alfred_tags": ["budget", "Has Space", "BAD", "ok"],
+        }
+        result = vault_task_to_plane_update(fm)
+        assert "budget" in result["labels"]
+        assert "ok" in result["labels"]
+        assert "Has Space" not in result["labels"]
+        assert "BAD" not in result["labels"]
+
+    def test_label_cap_enforced(self):
+        fm = {
+            "name": "Task", "status": "todo",
+            "alfred_tags": [f"tag{i}" for i in range(20)],
+        }
+        result = vault_task_to_plane_update(fm)
+        assert len(result["labels"]) <= MAX_LABELS_PER_ISSUE
+
+    def test_label_cap_preserves_alfred_managed(self):
+        """Even when the user spams 20 tags, alfred:managed must survive
+        the cap since it's always inserted first."""
+        fm = {
+            "name": "Task", "status": "todo", "requires_approval": True,
+            "alfred_tags": [f"tag{i}" for i in range(20)],
+        }
+        result = vault_task_to_plane_update(fm)
+        assert "alfred:managed" in result["labels"]
+        assert "alfred:needs-approval" in result["labels"]
+
+    def test_tags_deduped(self):
+        fm = {
+            "name": "Task", "status": "todo",
+            "alfred_tags": ["dup", "dup", "dup"],
+        }
+        result = vault_task_to_plane_update(fm)
+        assert result["labels"].count("dup") == 1
+
+    def test_assignees_always_list(self):
+        fm = {"name": "Task", "status": "todo"}
+        result = vault_task_to_plane_update(fm)
+        assert result["assignees"] == []
+        assert isinstance(result["assignees"], list)
+
+    def test_critical_priority_maps_to_urgent(self):
+        """Fleet-drift: David vault has ~4 'critical' records. Must not
+        collapse to 'none' — map to Plane's strongest tier."""
+        fm = {"name": "Task", "status": "todo", "priority": "critical"}
+        result = vault_task_to_plane_update(fm)
+        assert result["priority"] == "urgent"
+
+    def test_pending_status_maps_to_backlog(self):
+        """Fleet-drift: David has 1212 'pending' tasks. Route them to
+        backlog rather than letting them fall through to default."""
+        fm = {"name": "Task", "status": "pending"}
+        result = vault_task_to_plane_update(fm)
+        assert result["state_group"] == "backlog"
+
+    def test_title_field_used_when_name_missing(self):
+        fm = {"title": "Via title", "status": "todo"}
+        result = vault_task_to_plane_update(fm)
+        assert result["name"] == "Via title"
+
+    def test_name_wins_over_title(self):
+        fm = {"name": "Via name", "title": "Via title", "status": "todo"}
+        result = vault_task_to_plane_update(fm)
+        assert result["name"] == "Via name"
+
+
+# ── vault_matter_to_plane_update ─────────────────────────────────────────────
+
+
+class TestVaultMatterToPlaneUpdate:
+    def test_basic_active_matter(self):
+        fm = {"name": "Client X", "status": "active", "description": "summary"}
+        result = vault_matter_to_plane_update(fm)
+        assert result["name"] == "Client X"
+        assert result["description_text"] == "summary"
+        assert result["is_archived"] is False
+
+    def test_body_becomes_description_text(self):
+        fm = {"name": "Client X", "status": "active"}
+        body = "Long form notes about the engagement."
+        result = vault_matter_to_plane_update(fm, body=body)
+        assert body in result["description_text"]
+
+    def test_body_becomes_description_html(self):
+        fm = {"name": "Client X", "status": "active"}
+        body = "Paragraph one.\n\nParagraph two."
+        result = vault_matter_to_plane_update(fm, body=body)
+        assert result["description_html"] == "<p>Paragraph one.</p><p>Paragraph two.</p>"
+
+    def test_description_html_absent_with_no_content(self):
+        fm = {"name": "Stub", "status": "active"}
+        result = vault_matter_to_plane_update(fm)
+        assert "description_html" not in result
+
+    def test_non_active_status_marks_archived(self):
+        fm = {"name": "Done", "status": "completed"}
+        result = vault_matter_to_plane_update(fm)
+        assert result["is_archived"] is True
+
+    def test_empty_status_is_not_archived(self):
+        """No status set is ambiguous — don't assume archived."""
+        fm = {"name": "Fresh"}
+        result = vault_matter_to_plane_update(fm)
+        assert result["is_archived"] is False
+
+    def test_name_falls_back_to_untitled(self):
+        result = vault_matter_to_plane_update({})
+        assert result["name"] == "Untitled matter"
+
+    def test_name_truncated_to_255(self):
+        fm = {"name": "x" * 400}
+        result = vault_matter_to_plane_update(fm)
+        assert len(result["name"]) == 255
+
+    def test_emoji_accepted_when_single_non_alnum_char(self):
+        fm = {"name": "Loved", "status": "active", "emoji": "❤"}
+        result = vault_matter_to_plane_update(fm)
+        assert result["emoji"] == "❤"
+
+    def test_emoji_rejected_when_too_long(self):
+        fm = {"name": "X", "status": "active", "emoji": "not an emoji"}
+        result = vault_matter_to_plane_update(fm)
+        assert "emoji" not in result
+
+    def test_emoji_rejected_when_alphanumeric(self):
+        # If the user wrote a word, it's not an emoji.
+        fm = {"name": "X", "status": "active", "emoji": "abc"}
+        result = vault_matter_to_plane_update(fm)
+        assert "emoji" not in result
+
+    def test_icon_accepted_as_alias(self):
+        fm = {"name": "X", "status": "active", "icon": "🎯"}
+        result = vault_matter_to_plane_update(fm)
+        assert result["emoji"] == "🎯"
+
+    def test_body_html_escapes_content(self):
+        fm = {"name": "X", "status": "active"}
+        body = "Contains <script> tag"
+        result = vault_matter_to_plane_update(fm, body=body)
+        assert "<script>" not in result["description_html"]
+        assert "&lt;script&gt;" in result["description_html"]
+
+    def test_description_preview_used_as_fallback(self):
+        fm = {
+            "name": "X", "status": "active",
+            "description_preview": "from preview field",
+        }
+        result = vault_matter_to_plane_update(fm)
+        assert "from preview field" in result["description_text"]
+
+    def test_body_beats_scalar_description(self):
+        fm = {
+            "name": "X", "status": "active",
+            "description": "scalar version",
+        }
+        result = vault_matter_to_plane_update(fm, body="body version")
+        assert "body version" in result["description_text"]

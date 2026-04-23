@@ -333,8 +333,11 @@ def _make_stubs(
         task: dict[str, Any],
         project_map: dict[str, str],
         issue_map: dict[str, str],
+        label_cache: dict[str, dict[str, str]] | None = None,
     ) -> dict[str, str]:
-        _CALL_LOG.append(("sync_task", task["slug"]))
+        # Record the cache the workflow passed in so tests can assert
+        # the perf-fix wiring is live (see TestLabelCacheWiring).
+        _CALL_LOG.append(("sync_task", task["slug"], label_cache))
         if raise_on_task and task["slug"] == raise_on_task:
             raise RuntimeError("simulated plane outage for task")
         out = task_outcomes.get(task["slug"])
@@ -352,6 +355,24 @@ def _make_stubs(
             "project_id": project_map[matter_slug],
         }
 
+    @activity.defn(name="ensure_inbox_project")
+    async def stub_inbox(project_map: dict[str, str]) -> dict[str, str]:
+        _CALL_LOG.append(("inbox", None))
+        return {"plane_id": "prj-inbox", "action": "created"}
+
+    @activity.defn(name="preload_project_labels")
+    async def stub_preload_labels(
+        project_ids: list[str],
+    ) -> dict[str, dict[str, str]]:
+        _CALL_LOG.append(("preload_labels", list(project_ids)))
+        # Return a plausible preload result — one or two labels per
+        # project, so tests asserting cache contents have something
+        # to look at.
+        return {
+            pid: {"alfred-managed": f"lbl-{pid}-managed"}
+            for pid in project_ids
+        }
+
     return [
         stub_enabled,
         stub_load,
@@ -360,6 +381,8 @@ def _make_stubs(
         stub_fetch_tasks,
         stub_sync_matter,
         stub_sync_task,
+        stub_inbox,
+        stub_preload_labels,
     ]
 
 
@@ -429,11 +452,15 @@ class TestFirstRunBackfill:
         assert result.errors == 0
         assert result.last_vault_mtime == 250.0
 
-        # Verify cursor was saved and project_map populated
+        # Verify cursor was saved and project_map populated. The Inbox
+        # sentinel also lands in the map now that ensure_inbox_project
+        # runs unconditionally as a workflow step — assert on the
+        # real-matter subset so the test stays focused.
         save_calls = [c for c in _CALL_LOG if c[0] == "save"]
         assert len(save_calls) == 1
         saved = save_calls[0][1]
-        assert saved["project_map"] == {"alpha": "prj-alpha", "beta": "prj-beta"}
+        assert saved["project_map"]["alpha"] == "prj-alpha"
+        assert saved["project_map"]["beta"] == "prj-beta"
         assert saved["issue_map"] == {"t1": "iss-t1", "t2": "iss-t2"}
 
     def test_matter_without_tasks(self):
@@ -670,3 +697,255 @@ class TestCursorPersistenceAcrossRuns:
         assert r2.matters_synced == 1
         assert r2.tasks_synced == 1
         assert r2.last_vault_mtime == 400.0
+
+
+# ---------------------------------------------------------------------------
+# Rich-payload + label-cache wiring — the perf/correctness PR's asserts
+# ---------------------------------------------------------------------------
+
+
+class TestRichPayloadReachesTaskActivity:
+    """The workflow must hand the full enriched task dict (with body +
+    resolved matter_slug) to ``sync_task_to_plane``. A regression that
+    drops the body would silently hollow every Plane card."""
+
+    def test_body_and_frontmatter_propagate(self):
+        """Capture what sync_task_to_plane received and assert the
+        enriched shape is intact."""
+        received: list[dict] = []
+
+        @activity.defn(name="plane_sync_is_enabled")
+        async def ena() -> bool:
+            return True
+
+        @activity.defn(name="load_plane_sync_state")
+        async def load() -> dict:
+            return {
+                "last_vault_mtime": 0.0,
+                "project_map": {"m1": "prj-1"},
+                "issue_map": {},
+            }
+
+        @activity.defn(name="save_plane_sync_state")
+        async def save(state: dict) -> None:
+            return None
+
+        @activity.defn(name="fetch_changed_matters")
+        async def fm(since: float) -> list[dict]:
+            return []
+
+        @activity.defn(name="fetch_changed_tasks")
+        async def ft(since: float) -> list[dict]:
+            return [{
+                "slug": "alpha",
+                "path": "task/alpha.md",
+                "frontmatter": {
+                    "name": "Alpha task",
+                    "status": "todo",
+                    "priority": "high",
+                    "due_date": "2026-05-15",
+                    "alfred_tags": ["finance", "urgent"],
+                    "description": "short desc",
+                },
+                "matter_slug": "m1",
+                "body": "# Alpha task\n\nThe full body content.",
+                "mtime": 100.0,
+            }]
+
+        @activity.defn(name="sync_matter_to_plane")
+        async def sm(matter: dict, pm: dict) -> dict:
+            return {"slug": matter["slug"], "plane_id": "", "action": "skip"}
+
+        @activity.defn(name="sync_task_to_plane")
+        async def st(
+            task: dict,
+            project_map: dict,
+            issue_map: dict,
+            label_cache: dict | None = None,
+        ) -> dict:
+            received.append({
+                "task": task,
+                "project_map": project_map,
+                "label_cache": label_cache,
+            })
+            return {
+                "slug": task["slug"],
+                "plane_id": f"iss-{task['slug']}",
+                "action": "create",
+                "project_id": project_map.get(task.get("matter_slug")),
+            }
+
+        @activity.defn(name="ensure_inbox_project")
+        async def ei(pm: dict) -> dict:
+            return {"plane_id": "prj-inbox", "action": "created"}
+
+        @activity.defn(name="preload_project_labels")
+        async def pl(pids: list[str]) -> dict:
+            return {p: {"existing-label": f"lbl-{p}"} for p in pids}
+
+        stubs = [ena, load, save, fm, ft, sm, st, ei, pl]
+        result = asyncio.run(_run_workflow(stubs))
+        assert result.tasks_synced == 1
+        assert len(received) == 1
+        task = received[0]["task"]
+        # Body made it through untouched
+        assert task["body"] == "# Alpha task\n\nThe full body content."
+        # Frontmatter preserved with all the new fields
+        fm_got = task["frontmatter"]
+        assert fm_got["priority"] == "high"
+        assert fm_got["due_date"] == "2026-05-15"
+        assert fm_got["alfred_tags"] == ["finance", "urgent"]
+        # Matter slug resolved and project map carries real mapping
+        assert task["matter_slug"] == "m1"
+        assert received[0]["project_map"]["m1"] == "prj-1"
+
+
+class TestLabelCacheWiring:
+    """The preload_project_labels → sync_task_to_plane handoff is a
+    perf-critical path. These tests guarantee the cache is actually
+    computed and threaded through — a silent regression here would
+    add hundreds of label-lookup round-trips back in."""
+
+    def test_preload_called_once_per_run(self):
+        _reset_call_log()
+        matters = [{"slug": "m", "path": "matter/m.md",
+                    "frontmatter": {"name": "M"}, "mtime": 100.0}]
+        tasks = [
+            {"slug": "t1", "path": "task/t1.md",
+             "frontmatter": {"name": "T1"},
+             "matter_slug": "m", "mtime": 150.0},
+            {"slug": "t2", "path": "task/t2.md",
+             "frontmatter": {"name": "T2"},
+             "matter_slug": "m", "mtime": 160.0},
+            {"slug": "t3", "path": "task/t3.md",
+             "frontmatter": {"name": "T3"},
+             "matter_slug": "m", "mtime": 170.0},
+        ]
+        stubs = _make_stubs(cursor_state={}, matters=matters, tasks=tasks)
+        asyncio.run(_run_workflow(stubs))
+        preload_calls = [c for c in _CALL_LOG if c[0] == "preload_labels"]
+        # ONE preload call for the whole run, not three
+        assert len(preload_calls) == 1
+        # Unique projects = Inbox + matter project 'm'
+        called_with = set(preload_calls[0][1])
+        assert "prj-m" in called_with
+
+    def test_preload_not_called_when_no_tasks(self):
+        """Matter-only run skips the label preload — nothing to cache."""
+        _reset_call_log()
+        matters = [{"slug": "m", "path": "matter/m.md",
+                    "frontmatter": {"name": "M"}, "mtime": 100.0}]
+        stubs = _make_stubs(cursor_state={}, matters=matters, tasks=[])
+        asyncio.run(_run_workflow(stubs))
+        preload_calls = [c for c in _CALL_LOG if c[0] == "preload_labels"]
+        assert preload_calls == []
+
+    def test_cache_reaches_sync_task(self):
+        """The cache produced by preload is the same object handed to
+        each sync_task_to_plane call — assert it's not being re-built
+        per task."""
+        _reset_call_log()
+        matters = [{"slug": "m", "path": "matter/m.md",
+                    "frontmatter": {"name": "M"}, "mtime": 100.0}]
+        tasks = [
+            {"slug": "t1", "path": "task/t1.md",
+             "frontmatter": {"name": "T1"},
+             "matter_slug": "m", "mtime": 150.0},
+            {"slug": "t2", "path": "task/t2.md",
+             "frontmatter": {"name": "T2"},
+             "matter_slug": "m", "mtime": 160.0},
+        ]
+        stubs = _make_stubs(cursor_state={}, matters=matters, tasks=tasks)
+        asyncio.run(_run_workflow(stubs))
+        # The sync_task log entries now carry the cache as the third
+        # tuple element — both calls should have received a non-None dict
+        sync_calls = [c for c in _CALL_LOG if c[0] == "sync_task"]
+        assert len(sync_calls) == 2
+        for call in sync_calls:
+            label_cache = call[2]
+            assert label_cache is not None
+            assert isinstance(label_cache, dict)
+            # The preload stub returns alfred-managed entries per project
+            assert "prj-m" in label_cache
+            assert "alfred-managed" in label_cache["prj-m"]
+
+    def test_unique_project_set_deduped(self):
+        """Five tasks in one project = one entry in the preload set,
+        not five. Duplicates must be dropped before the activity call."""
+        _reset_call_log()
+        matters = [{"slug": "m", "path": "matter/m.md",
+                    "frontmatter": {"name": "M"}, "mtime": 100.0}]
+        tasks = [
+            {"slug": f"t{i}", "path": f"task/t{i}.md",
+             "frontmatter": {"name": f"T{i}"},
+             "matter_slug": "m", "mtime": 150.0 + i}
+            for i in range(5)
+        ]
+        stubs = _make_stubs(cursor_state={}, matters=matters, tasks=tasks)
+        asyncio.run(_run_workflow(stubs))
+        preload_call = [c for c in _CALL_LOG if c[0] == "preload_labels"][0]
+        # Project set should be deduped — all 5 tasks resolved to the
+        # same matter, so exactly 1 project in the preload set.
+        project_set = preload_call[1]
+        assert len(project_set) == len(set(project_set))
+        assert project_set == ["prj-m"]
+
+    def test_preload_failure_falls_back_gracefully(self):
+        """If preload raises, the task loop still runs — it just passes
+        an empty cache and sync_task_to_plane falls back to per-task
+        label fetch (stubbed here)."""
+        @activity.defn(name="plane_sync_is_enabled")
+        async def ena() -> bool:
+            return True
+
+        @activity.defn(name="load_plane_sync_state")
+        async def load() -> dict:
+            return {
+                "last_vault_mtime": 0.0,
+                "project_map": {"m": "prj-m"},
+                "issue_map": {},
+            }
+
+        @activity.defn(name="save_plane_sync_state")
+        async def save(state: dict) -> None:
+            return None
+
+        @activity.defn(name="fetch_changed_matters")
+        async def fm(since: float) -> list[dict]:
+            return []
+
+        @activity.defn(name="fetch_changed_tasks")
+        async def ft(since: float) -> list[dict]:
+            return [{
+                "slug": "t", "path": "task/t.md",
+                "frontmatter": {"name": "T"},
+                "matter_slug": "m", "mtime": 100.0,
+            }]
+
+        @activity.defn(name="sync_matter_to_plane")
+        async def sm(m: dict, pm: dict) -> dict:
+            return {"slug": m["slug"], "plane_id": "", "action": "skip"}
+
+        received_caches: list = []
+
+        @activity.defn(name="sync_task_to_plane")
+        async def st(t: dict, pm: dict, im: dict, lc: dict | None = None) -> dict:
+            received_caches.append(lc)
+            return {"slug": t["slug"], "plane_id": "i", "action": "create"}
+
+        @activity.defn(name="ensure_inbox_project")
+        async def ei(pm: dict) -> dict:
+            return {"plane_id": "prj-inbox", "action": "created"}
+
+        @activity.defn(name="preload_project_labels")
+        async def pl_raise(pids: list[str]) -> dict:
+            # Temporal wraps activity exceptions; the workflow catches
+            # them with a broad except and continues with empty cache.
+            raise RuntimeError("simulated preload outage")
+
+        stubs = [ena, load, save, fm, ft, sm, st, ei, pl_raise]
+        result = asyncio.run(_run_workflow(stubs))
+        # Task still synced despite preload failure
+        assert result.tasks_synced == 1
+        # Cache handed to sync_task was the empty-fallback dict
+        assert received_caches == [{}]

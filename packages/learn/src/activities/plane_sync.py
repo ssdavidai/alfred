@@ -34,6 +34,7 @@ from src.config import load_config
 from src.utils.plane_client import PlaneClient
 from src.utils.plane_mapping import (
     compute_loop_guard_hash,
+    vault_matter_to_plane_update,
     vault_task_to_plane_update,
 )
 from src.utils.vault_client import VaultClient
@@ -57,6 +58,12 @@ _OUTBOUND_SIGS_RELATIVE = "state/plane_outbound_signatures.json"
 # the race-condition guard, but more disk churn. 1000 ≈ half a day at
 # peak forward-sync rates.
 _OUTBOUND_SIGS_CAP = 1000
+
+# Cap on how many bytes of vault body we include on sync. The curator
+# itself caps body at ~30 KB per record, so matching that here means the
+# forward-sync faithfully reproduces what the vault holds without
+# risking a multi-megabyte payload on a pathological record.
+_BODY_BYTES_CAP = 30_000
 
 
 def _outbound_sigs_path() -> Path:
@@ -304,6 +311,30 @@ def _resolve_task_matter(fm: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _clamp_body(body: Any) -> str:
+    """Clamp a body to the sync size cap, preserving word boundaries.
+
+    Returns an empty string for non-strings. When the body exceeds the
+    cap we truncate at the last whitespace before the cap + append an
+    ellipsis so the Plane UI visibly signals truncation. This matches
+    the curator's own 30KB cap so forward-sync never smuggles more
+    content into Plane than the vault itself holds.
+    """
+    if not isinstance(body, str) or not body:
+        return ""
+    if len(body.encode("utf-8")) <= _BODY_BYTES_CAP:
+        return body
+    encoded = body.encode("utf-8")[: _BODY_BYTES_CAP]
+    truncated = encoded.decode("utf-8", errors="ignore")
+    # Walk back to the last whitespace so we don't cut mid-word.
+    idx = truncated.rfind("\n")
+    if idx < _BODY_BYTES_CAP * 0.8:
+        idx = truncated.rfind(" ")
+    if idx > 0:
+        truncated = truncated[:idx]
+    return truncated + "\n\n…"
+
+
 # Sentinel key used in ``project_map`` to refer to the Inbox project —
 # a catch-all destination for tasks that have no matter link yet.
 # Declared here + in plane_mapping so both forward and reverse sync can
@@ -385,15 +416,28 @@ async def fetch_changed_matters(since_mtime: float) -> list[dict[str, Any]]:
 
     Each returned record is shaped as::
 
-        {"slug": str, "path": str, "frontmatter": dict, "mtime": float}
+        {"slug": str, "path": str, "frontmatter": dict, "body": str, "mtime": float}
 
-    Body is NOT included — the workflow stays small and the Plane project
-    upsert only needs frontmatter (title, description).
+    ``body`` carries the full vault body truncated to ``_BODY_BYTES_CAP``
+    so Plane projects can render the long-form matter narrative — the
+    scalar ``description`` frontmatter is typically a one-line summary
+    and isn't enough for a useful project card. The list endpoint's
+    ``preview=2000`` param gives us 2 KB of body which covers > 95% of
+    matter records on the fleet without requiring a per-record GET.
     """
     cfg = load_config()
     client = VaultClient(cfg)
     try:
-        records = await client.list_records("matter", limit=10_000)
+        # Bumped preview window from the list endpoint's 500 default → 2000
+        # so the matter body reaches forward-sync with enough content to
+        # be worth rendering. Full body (no truncation) would require a
+        # per-record GET, which isn't worth the round-trip for matters
+        # that trend under a couple KB.
+        resp = await client._client.get(
+            "/api/v1/vault/list/matter", params={"preview": 2000}
+        )
+        resp.raise_for_status()
+        records = resp.json().get("results", [])
     except Exception as exc:
         logger.error("plane_sync: list_records(matter) failed: %s", exc)
         raise
@@ -410,14 +454,17 @@ async def fetch_changed_matters(since_mtime: float) -> list[dict[str, Any]]:
         if not slug:
             continue
         fm = rec.get("frontmatter") or {}
-        # Carry body_preview so the project description has *something*
-        # meaningful on first sync. Full body fetch is unnecessary noise.
+        # Carry body_preview as description_preview too, so callers that
+        # only have the frontmatter map (reverse-sync helper, tests) can
+        # still see some body content.
         fm = dict(fm)
-        fm.setdefault("description_preview", rec.get("body_preview", ""))
+        body_preview = rec.get("body_preview", "") or ""
+        fm.setdefault("description_preview", body_preview)
         changed.append({
             "slug": slug,
             "path": path,
             "frontmatter": fm,
+            "body": _clamp_body(body_preview),
             "mtime": mtime,
         })
     logger.info(
@@ -434,11 +481,29 @@ async def fetch_changed_matters(since_mtime: float) -> list[dict[str, Any]]:
 
 @activity.defn
 async def fetch_changed_tasks(since_mtime: float) -> list[dict[str, Any]]:
-    """Return task records whose derived mtime is strictly greater than ``since_mtime``."""
+    """Return task records whose derived mtime is strictly greater than ``since_mtime``.
+
+    Returned record shape::
+
+        {
+            "slug": str, "path": str, "frontmatter": dict,
+            "matter_slug": Optional[str], "body": str, "mtime": float,
+        }
+
+    ``body`` carries the full vault body (truncated to
+    ``_BODY_BYTES_CAP`` for safety) so the Plane issue's description
+    captures the actual task content — not just the frontmatter
+    summary. Tasks average <100 chars of body but can reach ~1.5 KB for
+    Alfred-generated chores + curated items.
+    """
     cfg = load_config()
     client = VaultClient(cfg)
     try:
-        records = await client.list_records("task", limit=10_000)
+        resp = await client._client.get(
+            "/api/v1/vault/list/task", params={"preview": 2000}
+        )
+        resp.raise_for_status()
+        records = resp.json().get("results", [])
     except Exception as exc:
         logger.error("plane_sync: list_records(task) failed: %s", exc)
         raise
@@ -460,11 +525,13 @@ async def fetch_changed_tasks(since_mtime: float) -> list[dict[str, Any]]:
         # pipeline's `related_matters[0]` (the common case on mature
         # tenants where surveyor has already linked tasks to matters).
         matter_ref = _resolve_task_matter(fm)
+        body_preview = rec.get("body_preview", "") or ""
         changed.append({
             "slug": slug,
             "path": path,
             "frontmatter": fm,
             "matter_slug": matter_ref,
+            "body": _clamp_body(body_preview),
             "mtime": mtime,
         })
     logger.info(
@@ -501,15 +568,24 @@ async def sync_matter_to_plane(
     """
     slug = matter["slug"]
     fm = matter.get("frontmatter") or {}
-    raw_name = str(fm.get("name") or fm.get("title") or slug).strip() or slug
+    body = matter.get("body") or ""
+
+    # Render the rich project payload via the central mapping helper so
+    # forward + reverse stay on the same field set. ``vault_matter_to_plane_update``
+    # emits name / description_text / description_html / is_archived /
+    # optional emoji; we then apply the Plane-specific name sanitizer
+    # (the helper leaves that to the activity layer since it's a
+    # Plane-version-specific quirk).
+    rich = vault_matter_to_plane_update(fm, body=body)
+    raw_name = rich.pop("name", "") or slug
     name = _sanitize_plane_name(raw_name)
-    description = str(fm.get("description") or fm.get("description_preview") or "").strip()
 
     client = _plane_client_from_env()
     try:
         existing_id = project_map.get(slug)
         if existing_id:
-            patch_body = {"name": name, "description_text": description}
+            patch_body: dict[str, Any] = {"name": name}
+            patch_body.update(rich)
             await client.update_project(existing_id, patch=patch_body)
             action = "update"
             plane_id = existing_id
@@ -521,24 +597,45 @@ async def sync_matter_to_plane(
             return {"slug": slug, "plane_id": plane_id, "action": action}
 
         # Create path — include origin stamp so webhook-back events
-        # can be detected as loop-back in B7.
-        create_body = {"name": name, "description_text": description}
+        # can be detected as loop-back in B7. Plane's create_project
+        # signature is narrow (name / identifier / description); for
+        # archived-flag and emoji we issue a follow-up PATCH so the
+        # project lands in the right shape on first sync.
+        description_text = str(rich.get("description_text") or "")
         created = await client.create_project(
             name=name,
             identifier=_project_identifier_for_slug(slug),
-            description=description,
+            description=description_text,
         )
         plane_id = str(created.get("id") or "")
         if not plane_id:
             raise RuntimeError(
                 f"plane_sync: create_project({slug}) returned no id: {created!r}"
             )
+        # Second-pass PATCH for the fields the create endpoint doesn't
+        # accept (description_html, is_archived, emoji). Skip the patch
+        # entirely when there's nothing extra to set — avoids a useless
+        # HTTP call on stub matters.
+        followup = {
+            k: v for k, v in rich.items()
+            if k in ("description_html", "is_archived", "emoji")
+            and v not in (None, "", False)
+        }
+        if followup:
+            try:
+                await client.update_project(plane_id, patch=followup)
+            except Exception as exc:  # noqa: BLE001 — followup is best-effort
+                logger.warning(
+                    "plane_sync.project_followup_failed slug=%s plane_id=%s error=%s",
+                    slug, plane_id, exc,
+                )
         action = "create"
         logger.info(
             "plane_sync.project_upsert slug=%s plane_id=%s action=%s",
             slug, plane_id, action,
         )
-        _record_outbound_signature(plane_id, create_body)
+        create_body_for_sig = {"name": name, **rich}
+        _record_outbound_signature(plane_id, create_body_for_sig)
         return {"slug": slug, "plane_id": plane_id, "action": action}
     finally:
         await client.close()
@@ -592,10 +689,106 @@ async def ensure_inbox_project(project_map: dict[str, str]) -> dict[str, str]:
 
 
 @activity.defn
+async def preload_project_labels(
+    project_ids: list[str],
+) -> dict[str, dict[str, str]]:
+    """Preload label-name → label-id maps for every project in one pass.
+
+    Returns ``{project_id: {label_name: label_id, ...}, ...}``.
+
+    Motivation: ``sync_task_to_plane`` used to call ``client.ensure_labels``
+    per task, which issues ``GET /projects/<id>/labels/`` on EVERY call —
+    even when the labels we need already exist. On a mature fleet tenant
+    that means N task-syncs × one label fetch = 200+ round-trips per
+    workflow run. This activity does ONE fetch per unique project_id up
+    front so the task loop can resolve labels from an in-memory cache.
+
+    Failures on any single project are swallowed — we return an empty
+    map for that project and ``sync_task_to_plane`` falls back to a
+    per-task ``ensure_labels`` call. That keeps the fast path fast
+    without making the preload a hard dependency.
+    """
+    unique = list({p for p in project_ids if p})
+    if not unique:
+        return {}
+    client = _plane_client_from_env()
+    result: dict[str, dict[str, str]] = {}
+    try:
+        for pid in unique:
+            try:
+                labels = await client.list_labels(pid)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "plane_sync.preload_labels_failed project=%s error=%s",
+                    pid, exc,
+                )
+                result[pid] = {}
+                continue
+            result[pid] = {
+                str(lb.get("name", "")): str(lb.get("id", ""))
+                for lb in labels
+                if lb.get("name") and lb.get("id")
+            }
+    finally:
+        await client.close()
+    logger.info(
+        "plane_sync.preload_labels projects=%d cached_total=%d",
+        len(unique),
+        sum(len(v) for v in result.values()),
+    )
+    return result
+
+
+async def _resolve_labels_with_cache(
+    client: PlaneClient,
+    project_id: str,
+    names: list[str],
+    cache: Optional[dict[str, dict[str, str]]],
+) -> list[str]:
+    """Resolve label names → IDs using the preload cache, creating
+    missing labels and patching the cache in place.
+
+    When ``cache`` is None we fall back to ``client.ensure_labels`` — same
+    semantics, one fetch + N creates. This keeps back-compat with callers
+    that haven't wired the cache through yet.
+    """
+    if cache is None:
+        return await client.ensure_labels(project_id, names)
+    proj_cache = cache.setdefault(project_id, {})
+    ids: list[str] = []
+    for name in names:
+        existing = proj_cache.get(name)
+        if existing:
+            ids.append(existing)
+            continue
+        # Label missing from cache — create it. A concurrent creator
+        # (e.g. someone manually adding the label in Plane) would make
+        # ``POST /labels/`` 400; we just log + skip on that path so a
+        # race never breaks the whole sync.
+        try:
+            result = await client._post(  # type: ignore[attr-defined]
+                f"{client._proj(project_id)}/labels/",  # type: ignore[attr-defined]
+                json={"name": name},
+            )
+            new_id = str(result.get("id", ""))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "plane_sync.label_create_failed project=%s name=%s error=%s",
+                project_id, name, exc,
+            )
+            continue
+        if new_id:
+            proj_cache[name] = new_id
+            ids.append(new_id)
+    return ids
+
+
+@activity.defn
 async def sync_task_to_plane(
     task: dict[str, Any],
     project_map: dict[str, str],
     issue_map: dict[str, str],
+    label_cache: Optional[dict[str, dict[str, str]]] = None,
 ) -> dict[str, str]:
     """Create or update the Plane issue mirroring this task record.
 
@@ -604,23 +797,24 @@ async def sync_task_to_plane(
     2. Otherwise → the Inbox project (``project_map[INBOX_SLUG_SENTINEL]``)
     3. If the Inbox isn't in the map yet (first-run race) → skip for
        this run; next run will have the Inbox after ``ensure_inbox_project``
+
+    ``label_cache``
+        Optional ``{project_id: {label_name: label_id}}`` produced by
+        ``preload_project_labels``. When provided, label resolution
+        skips the per-task ``GET /labels/`` round-trip and only issues
+        ``POST`` requests for labels that aren't in the cache yet
+        (mutations patch the cache in place). When ``None``, falls
+        back to the legacy ``client.ensure_labels`` path.
     """
     slug = task["slug"]
     matter_slug = task.get("matter_slug")
     fm = task.get("frontmatter") or {}
+    body = task.get("body") or ""
 
     project_id: Optional[str] = None
     if matter_slug:
         project_id = project_map.get(matter_slug)
         if not project_id:
-            # matter_slug is set but not in project_map — either a
-            # bogus/free-text value ("Manus AI billing" rather than a
-            # real slug) or a matter that legitimately hasn't synced
-            # yet. Either way, routing to Inbox is strictly better
-            # than skipping forever: we don't lose the task, and a
-            # later reverse-sync project-move can still relocate it.
-            # Without this fallback, a handful of garbage-valued
-            # matter refs permanently hold the cursor at zero.
             logger.warning(
                 "plane_sync.issue_upsert slug=%s matter=%s unresolved — routing to Inbox",
                 slug, matter_slug,
@@ -631,18 +825,19 @@ async def sync_task_to_plane(
         project_id = project_map.get(INBOX_SLUG_SENTINEL)
 
     if not project_id:
-        # Inbox hasn't synced yet — defer. ensure_inbox_project runs
-        # before the task loop so this should only happen on the first
-        # workflow run after Plane provisioning, or if ensure failed.
         logger.info(
             "plane_sync.issue_upsert slug=%s action=skip reason=no_inbox",
             slug,
         )
         return {"slug": slug, "plane_id": "", "action": "skip"}
 
-    update = vault_task_to_plane_update(fm)
+    update = vault_task_to_plane_update(fm, body=body)
     state_group = update.pop("state_group", None)
     labels = update.pop("labels", []) or []
+    description_html = update.pop("description_html", "") or ""
+    target_date = update.pop("target_date", None)
+    assignees = update.pop("assignees", []) or []
+
     client = _plane_client_from_env()
     try:
         # Resolve state_group → state UUID for this project
@@ -664,13 +859,14 @@ async def sync_task_to_plane(
                 seen.add(name)
                 label_names.append(name)
 
-        label_ids: list[str] = await client.ensure_labels(project_id, label_names)
+        # Cache-aware label resolution. Falls through to the legacy
+        # per-task fetch when the workflow didn't preload (e.g. very
+        # first run with no projects to preload yet).
+        label_ids: list[str] = await _resolve_labels_with_cache(
+            client, project_id, label_names, label_cache,
+        )
 
         existing_id = issue_map.get(slug)
-        # description_html: Plane 1.3.0 rejects empty string with
-        # "Invalid HTML passed" — omit the key entirely when the task
-        # has no description rather than sending "".
-        description_html = str(fm.get("description") or "")
         issue_body: dict[str, Any] = {
             "name": _sanitize_plane_name(str(update.get("name") or slug)),
             "priority": update.get("priority") or "none",
@@ -680,6 +876,10 @@ async def sync_task_to_plane(
             issue_body["description_html"] = description_html
         if state_id:
             issue_body["state"] = state_id
+        if target_date:
+            issue_body["target_date"] = target_date
+        if assignees:
+            issue_body["assignees"] = assignees
 
         if existing_id:
             await client.update_issue(project_id, existing_id, issue_body)
@@ -701,6 +901,22 @@ async def sync_task_to_plane(
                 raise RuntimeError(
                     f"plane_sync: create_issue({slug}) returned no id: {created!r}"
                 )
+            # PATCH-in the rich fields the create endpoint doesn't accept
+            # (target_date, assignees) so first-sync issues don't lose the
+            # due date / assignee round-trip we care about.
+            followup_body: dict[str, Any] = {}
+            if target_date:
+                followup_body["target_date"] = target_date
+            if assignees:
+                followup_body["assignees"] = assignees
+            if followup_body:
+                try:
+                    await client.update_issue(project_id, plane_id, followup_body)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "plane_sync.issue_followup_failed slug=%s plane_id=%s error=%s",
+                        slug, plane_id, exc,
+                    )
             action = "create"
 
         logger.info(
@@ -709,14 +925,15 @@ async def sync_task_to_plane(
         )
         # Record the outbound signature so reverse-sync can recognise the
         # webhook echo that Plane fires immediately after this write.
-        # Build a guard-compatible payload: merge what we sent with the
-        # hashed ``state`` group name (labels/state_id are per-project
-        # UUIDs that don't travel cross-direction).
+        # Build a guard-compatible payload — the hash only uses logical
+        # (not UUID-bound) fields so labels/state_id are omitted.
         outbound_for_hash: dict[str, Any] = {
             "name": issue_body["name"],
-            "description": issue_body["description_html"],
+            "description": description_html,
             "priority": issue_body["priority"],
-            "state": update.get("state_group") or "",
+            "state": state_group or "",
+            "due_date": target_date or "",
+            "assignees": assignees,
         }
         _record_outbound_signature(plane_id, outbound_for_hash)
         return {
