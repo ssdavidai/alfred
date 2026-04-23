@@ -246,8 +246,13 @@ class PlaneSyncWorkflow:
         #    the pre-run value so the next run retries the deferred records.
         #    This trades a few extra vault list_records reads for strict
         #    correctness under partial failure.
+        # Only hold the cursor on real errors. Previously we also held
+        # on any skip, but skips are now extremely rare (only the no-inbox
+        # race on workflow boot) and a single skipped record was enough
+        # to freeze backfill indefinitely. Errors get their usual
+        # retry-on-next-tick behavior.
         advance_mtime = processed_mtime
-        if result.errors > 0 or result.tasks_skipped > 0:
+        if result.errors > 0:
             advance_mtime = since
 
         state_out = {

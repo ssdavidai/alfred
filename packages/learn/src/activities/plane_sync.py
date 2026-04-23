@@ -609,25 +609,36 @@ async def sync_task_to_plane(
     matter_slug = task.get("matter_slug")
     fm = task.get("frontmatter") or {}
 
+    project_id: Optional[str] = None
     if matter_slug:
         project_id = project_map.get(matter_slug)
         if not project_id:
-            logger.info(
-                "plane_sync.issue_upsert slug=%s action=skip reason=unknown_matter matter=%s",
+            # matter_slug is set but not in project_map — either a
+            # bogus/free-text value ("Manus AI billing" rather than a
+            # real slug) or a matter that legitimately hasn't synced
+            # yet. Either way, routing to Inbox is strictly better
+            # than skipping forever: we don't lose the task, and a
+            # later reverse-sync project-move can still relocate it.
+            # Without this fallback, a handful of garbage-valued
+            # matter refs permanently hold the cursor at zero.
+            logger.warning(
+                "plane_sync.issue_upsert slug=%s matter=%s unresolved — routing to Inbox",
                 slug, matter_slug,
             )
-            return {"slug": slug, "plane_id": "", "action": "skip"}
-    else:
+            project_id = project_map.get(INBOX_SLUG_SENTINEL)
+
+    if not project_id:
         project_id = project_map.get(INBOX_SLUG_SENTINEL)
-        if not project_id:
-            # Inbox hasn't synced yet — defer. ensure_inbox_project
-            # runs before the task loop so this only happens on the
-            # very first workflow run after Plane provisioning.
-            logger.info(
-                "plane_sync.issue_upsert slug=%s action=skip reason=no_inbox",
-                slug,
-            )
-            return {"slug": slug, "plane_id": "", "action": "skip"}
+
+    if not project_id:
+        # Inbox hasn't synced yet — defer. ensure_inbox_project runs
+        # before the task loop so this should only happen on the first
+        # workflow run after Plane provisioning, or if ensure failed.
+        logger.info(
+            "plane_sync.issue_upsert slug=%s action=skip reason=no_inbox",
+            slug,
+        )
+        return {"slug": slug, "plane_id": "", "action": "skip"}
 
     update = vault_task_to_plane_update(fm)
     state_group = update.pop("state_group", None)
