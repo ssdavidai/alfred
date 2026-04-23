@@ -283,8 +283,21 @@ async def _list_project_issues(
         if isinstance(data, list):
             break
 
-        # Case B: dict — look for explicit cursor; fall back to "page
-        # was smaller than the per_page cap" heuristic.
+        # Case B: dict — Plane 1.3.0 returns a rich envelope:
+        #   {"results": [...], "next_cursor": "100:N:0",
+        #    "next_page_results": true/false, "total_pages": N, ...}
+        #
+        # Critical: Plane keeps returning `next_cursor` even AFTER the
+        # last page. The only reliable "stop" signal is
+        # `next_page_results: False`. Don't chase the cursor past it,
+        # or we'll hit MAX_PAGES with a trickle of empty pages.
+        if data.get("next_page_results") is False:
+            break
+
+        # Empty page with no explicit "done" hint → stop.
+        if not page_issues:
+            break
+
         new_cursor = (
             data.get("next_cursor")
             or data.get("next_page_cursor")
