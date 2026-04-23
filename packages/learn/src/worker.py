@@ -25,6 +25,7 @@ from src.workflows.omi_processor import OmiAudioProcessorWorkflow
 from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
 from src.workflows.chore_promotion import ChorePromotionReflectionWorkflow
 from src.workflows.hourly_enrichment import HourlyEnrichmentWorkflow
+from src.workflows.plane_sync import PlaneSyncWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -287,6 +288,17 @@ from src.activities.ephemeral_agent import (
     wait_for_agent_ready,
 )
 
+# Plane sync (#536 B4) — vault → Plane one-way sync activities
+from src.activities.plane_sync import (
+    fetch_changed_matters,
+    fetch_changed_tasks,
+    load_plane_sync_state,
+    plane_sync_is_enabled,
+    save_plane_sync_state,
+    sync_matter_to_plane,
+    sync_task_to_plane,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -309,6 +321,7 @@ _STATIC_WORKFLOWS = [
     NightlyMaintenanceWorkflow,
     ChorePromotionReflectionWorkflow,
     HourlyEnrichmentWorkflow,
+    PlaneSyncWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -503,6 +516,14 @@ ALL_ACTIVITIES = [
     create_ephemeral_agent,
     delete_ephemeral_agent,
     wait_for_agent_ready,
+    # Plane sync (#536 B4)
+    plane_sync_is_enabled,
+    load_plane_sync_state,
+    save_plane_sync_state,
+    fetch_changed_matters,
+    fetch_changed_tasks,
+    sync_matter_to_plane,
+    sync_task_to_plane,
 ]
 
 
