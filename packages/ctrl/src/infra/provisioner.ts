@@ -50,6 +50,9 @@ import hookHandler from "../hooks/alfred-inbox/handler.js";
 import observerHookReadme from "../hooks/alfred-learn-observer/HOOK.md";
 // @ts-expect-error esbuild plugin loads handler.js as text
 import observerHookHandler from "../hooks/alfred-learn-observer/handler.js";
+import mediaHookReadme from "../hooks/alfred-learn-media/HOOK.md";
+// @ts-expect-error esbuild plugin loads handler.js as text
+import mediaHookHandler from "../hooks/alfred-learn-media/handler.js";
 
 nunjucks.configure({ autoescape: false });
 
@@ -552,6 +555,24 @@ export async function provision(
       ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, observerHookHandler, `${observerHookBasePath}/handler.js`, 0o644, undefined, hostKeyOpts),
     ]);
     log("Observer hook uploaded");
+
+    // Upload alfred-learn-media hook (captures attachment file-share events
+    // from any channel → queues media ingestion so transcriptions/extracts
+    // land in the vault alongside the chat text).
+    log("Uploading alfred-learn-media hook...");
+    const mediaHookBasePath = "/mnt/encrypted/openclaw/hooks/alfred-learn-media";
+    await ssh.exec(
+      server.public_net.ipv4.ip,
+      keyPair.privateKeyPath,
+      `mkdir -p ${mediaHookBasePath}`,
+      undefined,
+      hostKeyOpts,
+    );
+    await Promise.all([
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, mediaHookReadme, `${mediaHookBasePath}/HOOK.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, mediaHookHandler, `${mediaHookBasePath}/handler.js`, 0o644, undefined, hostKeyOpts),
+    ]);
+    log("Media hook uploaded");
 
     // Pre-configure openclaw.json with baked-in config before openclaw starts.
     // Includes: heartbeat (4h), compaction (60k token flush), qmd memory
