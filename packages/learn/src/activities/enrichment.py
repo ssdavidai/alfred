@@ -227,6 +227,61 @@ async def _load_bodies_for_batch(
     return hydrated
 
 
+async def _fetch_matter_catalog(client: VaultClient) -> list[dict[str, str]]:
+    """Load the tenant's active matter records so the clerk prompt can
+    offer the full list as candidate `related_matters` values.
+
+    The previous prompt said "if this event relates to a known
+    project/matter, name it (empty list if unsure)". The clerk had no
+    way to know what slugs existed, so it defaulted to empty for 99%+
+    of events. Feeding the catalog flips the question to "pick zero or
+    more from this list", turning matter linking from a lottery into a
+    bounded multiple-choice.
+
+    Returns a list of {slug, name, description_preview} dicts, already
+    filtered to status=active matters. Sorted alphabetically by slug.
+    """
+    try:
+        records = await client.list_records("matter", limit=500)
+    except Exception as exc:
+        logger.warning("enrichment: matter catalog fetch failed: %s", exc)
+        return []
+
+    catalog: list[dict[str, str]] = []
+    for r in records:
+        fm = r.get("frontmatter") or r
+        if fm.get("status") and fm.get("status") not in ("active", None):
+            continue
+        path = r.get("path", "")
+        if not path.startswith("matter/") or not path.endswith(".md"):
+            continue
+        name = fm.get("name") or r.get("name") or path.removeprefix("matter/").removesuffix(".md")
+        # Short description to help the clerk disambiguate similarly-named
+        # matters. Keep tight so the prompt overhead stays small.
+        body = r.get("body", "") or ""
+        preview = body.strip().splitlines()[0][:160] if body.strip() else ""
+        catalog.append({
+            "path": path,
+            "name": str(name)[:80],
+            "description": preview,
+        })
+    catalog.sort(key=lambda m: m["path"])
+    return catalog
+
+
+def _build_matter_catalog_block(catalog: list[dict[str, str]]) -> str:
+    """Render the matter catalog as a compact markdown block for the prompt."""
+    if not catalog:
+        return ""
+    lines = ["\nKNOWN MATTERS — pick zero or more paths from this list for `related_matters`:"]
+    for m in catalog:
+        line = f"- {m['path']} — {m['name']}"
+        if m.get("description"):
+            line += f" — {m['description']}"
+        lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
 @activity.defn
 async def batch_enrich_events(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """ONE clerk LLM call to enrich a batch of records.
@@ -244,17 +299,19 @@ async def batch_enrich_events(records: list[dict[str, Any]]) -> list[dict[str, A
 
     from src.activities.clerk import _call_clerk
 
-    # Hydrate bodies if the records don't carry them already. The fetch
-    # activity now strips bodies; batches from it need re-hydration here.
-    if any("body" not in r for r in records):
-        config = load_config()
-        client = VaultClient(config)
-        try:
+    # Hydrate bodies + load matter catalog for the prompt. Both need the
+    # vault client so we share it.
+    config = load_config()
+    client = VaultClient(config)
+    matter_catalog: list[dict[str, str]] = []
+    try:
+        if any("body" not in r for r in records):
             records = await _load_bodies_for_batch(client, records)
-        finally:
-            await client.close()
-        if not records:
-            return []
+        matter_catalog = await _fetch_matter_catalog(client)
+    finally:
+        await client.close()
+    if not records:
+        return []
 
     # Build the structured events block. We feed the full body available on
     # the record (already capped by fetch_pending_enrichment_records), so a
@@ -275,18 +332,26 @@ async def batch_enrich_events(records: list[dict[str, Any]]) -> list[dict[str, A
         events_lines.append("")
 
     events_block = "\n".join(events_lines)
+    matter_catalog_block = _build_matter_catalog_block(matter_catalog)
 
     prompt = f"""You are enriching a batch of {len(records)} stream events for Sir's vault.
-
+{matter_catalog_block}
 For each event below, extract:
 1. entities: people and organizations mentioned (name + type: person or org)
 2. topic_tags: 2-5 topical keywords beyond the source tags
-3. related_matters: if this event relates to a known project/matter, name it (empty list if unsure)
+3. related_matters: paths of matters the event relates to, picked FROM THE
+   KNOWN MATTERS LIST ABOVE. Use the exact `matter/<slug>.md` path — no
+   inventing new slugs, no free-text descriptions. An event can match 0,
+   1, or multiple matters. Be generous: if the event body mentions
+   something that's clearly within a matter's scope (a person on the
+   team, an org we're working with, a place/project tied to the matter,
+   equipment relevant to the matter), include it. Empty list only if
+   nothing in the body maps to any listed matter.
 4. action_items: concrete next steps if any (empty list if none)
 5. priority: low, normal, or high (based on urgency signals)
 
 Return a JSON array where each element has:
-{{"event_index": 0, "entities": [{{"name": "...", "type": "person"}}], "topic_tags": ["..."], "related_matters": ["..."], "action_items": ["..."], "priority": "normal"}}
+{{"event_index": 0, "entities": [{{"name": "...", "type": "person"}}], "topic_tags": ["..."], "related_matters": ["matter/<slug>.md"], "action_items": ["..."], "priority": "normal"}}
 
 EVENTS:
 {events_block}
@@ -379,9 +444,28 @@ async def apply_enrichments(
             # Update frontmatter
             entities = enrichment.get("entities", [])
             topic_tags = enrichment.get("topic_tags", [])
-            related = enrichment.get("related_matters", [])
+            related_raw = enrichment.get("related_matters", [])
             action_items = enrichment.get("action_items", [])
             priority = enrichment.get("priority", "normal")
+
+            # Validate related_matters: must be strings that look like
+            # matter/<slug>.md. Drops any hallucinated / malformed paths
+            # the clerk might have emitted (bare names, made-up slugs,
+            # wrong prefixes). Preserves the clerk's matter-path form so
+            # downstream link-follow stays file-system cheap.
+            related: list[str] = []
+            for m in related_raw if isinstance(related_raw, list) else []:
+                if not isinstance(m, str):
+                    continue
+                s = m.strip()
+                # Accept "matter/foo.md", "matter/foo", or bare "foo" —
+                # normalise to "matter/foo.md".
+                if s.startswith("matter/"):
+                    norm = s if s.endswith(".md") else s + ".md"
+                else:
+                    norm = f"matter/{s}.md" if not s.endswith(".md") else f"matter/{s}"
+                if norm not in related:
+                    related.append(norm)
 
             # Build entity wikilinks
             entity_links = []
