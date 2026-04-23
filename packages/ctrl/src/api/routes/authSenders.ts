@@ -102,6 +102,14 @@ export function registerAuthSendersRoutes(): void {
     }
     const current = readSenders().senders;
     const next = current.filter((s) => s !== target);
+    // Guardrail #1 — refuse to leave the authorized-senders list empty.
+    // An empty list would lock the tenant owner out of the email channel entirely.
+    if (next.length === 0 && current.length > 0) {
+      sendJson(res, 400, {
+        error: "Cannot delete the last authorized sender — add another first",
+      });
+      return;
+    }
     sendJson(res, 200, writeSenders(next));
   });
 }

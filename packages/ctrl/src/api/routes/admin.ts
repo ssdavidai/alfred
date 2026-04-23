@@ -34,8 +34,22 @@ export function registerAdminRoutes(): void {
   });
 
   // Restart container
-  addRoute("POST", "/api/v1/admin/containers/:service/restart", async ({ res, params }) => {
+  addRoute("POST", "/api/v1/admin/containers/:service/restart", async ({ res, params, req }) => {
     validateServiceName(params.service);
+    // Guardrail #3 — self-lockout refusal.
+    // Restarting `openclaw` kills the running session; restarting `ctrl-api`
+    // kills the API connection mid-request. Both are allowed, but require an
+    // explicit opt-in header so an agent can't accidentally lock itself out.
+    const SELF_RESTART_SERVICES = ["openclaw", "ctrl-api"];
+    if (SELF_RESTART_SERVICES.includes(params.service)) {
+      const confirmHeader = req.headers["x-confirm-self-restart"];
+      if (confirmHeader !== "yes") {
+        sendJson(res, 409, {
+          error: `Refusing to restart ${params.service} without X-Confirm-Self-Restart:yes header — this kills the running session or API connection`,
+        });
+        return;
+      }
+    }
     await dockerComposeCmd(["restart", params.service]);
     sendJson(res, 200, { message: `Container "${params.service}" restarted` });
   });
@@ -489,9 +503,48 @@ export function registerAdminRoutes(): void {
       // file doesn't exist yet
     }
 
+    // Guardrail #2 — backup before write, then validate the merged result.
+    // Write a timestamped .bak copy so any bad patch can be reverted manually.
+    const isoStamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backupPath = OPENCLAW_JSON_PATH.replace(/\.json$/, `.bak-${isoStamp}.json`);
+    try {
+      if (fs.existsSync(OPENCLAW_JSON_PATH)) {
+        fs.copyFileSync(OPENCLAW_JSON_PATH, backupPath);
+      }
+    } catch (backupErr) {
+      // Non-fatal — log but do not block the patch.
+      console.warn(`[admin] openclaw.json backup failed: ${backupErr}`);
+    }
+
     const merged = deepMerge(existing, b);
+
+    // Structural validation: must still satisfy openclaw's minimum schema.
+    const agentsList = (merged as Record<string, unknown>)["agents"] as Record<string, unknown> | undefined;
+    const gatewaySection = (merged as Record<string, unknown>)["gateway"] as Record<string, unknown> | undefined;
+
+    if (!agentsList || !Array.isArray(agentsList["list"]) || (agentsList["list"] as unknown[]).length === 0) {
+      sendJson(res, 400, {
+        error: "patch would produce invalid openclaw config: agents.list must be a non-empty array",
+      });
+      return;
+    }
+    if (!gatewaySection || typeof gatewaySection["auth"] !== "object" || gatewaySection["auth"] === null) {
+      sendJson(res, 400, {
+        error: "patch would produce invalid openclaw config: gateway.auth must be present",
+      });
+      return;
+    }
+    if (!Array.isArray(gatewaySection["tools"]
+      ? (gatewaySection["tools"] as Record<string, unknown>)["allow"]
+      : undefined)) {
+      sendJson(res, 400, {
+        error: "patch would produce invalid openclaw config: gateway.tools.allow must be an array",
+      });
+      return;
+    }
+
     fs.writeFileSync(OPENCLAW_JSON_PATH, JSON.stringify(merged, null, 2) + "\n", "utf-8");
-    sendJson(res, 200, { message: "OpenClaw config updated" });
+    sendJson(res, 200, { message: "OpenClaw config updated", backup: backupPath });
   });
 
   // --- Tailscale ---

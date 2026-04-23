@@ -58,6 +58,12 @@ self({ endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
 | `GET /api/v1/streams` | List configured streams with status + event counts. |
 | `GET /api/v1/streams/events` | Recent events across all streams. `?status=unprocessed` to filter. |
 | `POST /api/v1/streams/ingest` | Manually push an event. Body: `{stream_id, stream_type, raw, summary?}` |
+| `POST /api/v1/streams` | Create a new stream. Body: `{id, name, type?, source?, enabled?, webhookToken?}`. Returns 201. |
+| `PATCH /api/v1/streams/:id` | Update stream config fields. Body: any subset of `{name, type, source, enabled, status, pull_endpoint, pull_mode, schedule_cron, schedule_interval_seconds, composio_action, composio_args, ...}`. |
+| `DELETE /api/v1/streams/:id` | Delete a stream and its event history. Cannot delete system streams. |
+| `POST /api/v1/streams/:id/pause` | Pause a stream (sets `enabled: false`, `status: "paused"`). Cannot pause system streams. |
+| `POST /api/v1/streams/:id/resume` | Resume a paused stream (sets `enabled: true`, `status: "idle"`). |
+| `POST /api/v1/streams/prune` | Remove processed events older than retention window. Body: `{retention_days?}` (default 7). |
 
 ### Learning & intelligence
 
@@ -77,9 +83,15 @@ self({ endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
 | `GET /api/v1/workflows` | List active and recent Temporal workflows. |
 | `GET /api/v1/workflows/{id}` | Inspect a single workflow (activities, results, failures). |
 | `POST /api/v1/workflows` | Start a workflow. Body: `{workflow_type, task_queue, input?}` |
+| `POST /api/v1/workflows/:id/terminate` | Terminate a running workflow. Body: `{reason?, run_id?}`. **Confirm with Sir before running.** |
+| `POST /api/v1/workflows/:id/signal` | Send a signal to a workflow. Body: `{signal_name, input?, run_id?}`. |
+| `POST /api/v1/workflows/:id/cancel` | Request graceful cancellation of a workflow. Body: `{run_id?}`. **Confirm with Sir before running.** |
 | `GET /api/v1/schedules` | List all schedules (`al-*`, `chore-*`). |
+| `POST /api/v1/schedules` | Create a new Temporal schedule. Body: `{schedule_id, workflow_type, task_queue, cron, input?, overlap_policy?}`. Returns 201. |
+| `DELETE /api/v1/schedules/:id` | Delete a schedule permanently. **Confirm with Sir before running.** |
 | `POST /api/v1/schedules/{id}/trigger` | Fire a schedule once, out of cycle. |
 | `POST /api/v1/schedules/{id}/pause` / `/unpause` | Pause / resume. |
+| `POST /api/v1/schedules/:id/rewrite-cron` | Atomically replace a schedule's cron expression (DELETE + CREATE, preserving workflow type, task queue, and input). Body: `{cron}`. |
 
 ### Chores
 
@@ -89,7 +101,9 @@ self({ endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
 | `GET /api/v1/chores/{slug}` | Single chore detail. |
 | `GET /api/v1/chores/{slug}/source` | Full generated Python source + dependency audit. |
 | `POST /api/v1/chores/{slug}/pause` / `/resume` / `/trigger` | State control. |
-| `DELETE /api/v1/chores/{slug}` | Remove a chore. |
+| `DELETE /api/v1/chores/{slug}` | Remove a chore. **Confirm with Sir before running.** |
+| `POST /api/v1/chores` | Create a new chore from Python source. Body: `{slug, workflow_class_name, python_source, schedule, name?, user_facing_description?, params?, task_queue?, overlap_policy?, restart_worker?}`. Returns 201 with `{slug, source_path, vault_path, schedule_id, cron, restart_triggered}`. |
+| `PATCH /api/v1/chores/:slug` | Edit an existing chore. Body: any subset of `{python_source, schedule, workflow_class_name, params, name, user_facing_description, tags, task_queue, overlap_policy, restart_worker}`. At least one field required. Atomically rewrites the `.py` file and Temporal schedule; restores prior state on failure. |
 
 ### Workers & admin
 
@@ -115,6 +129,25 @@ self({ endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
 | `POST /api/v1/integrations/execute` | Execute a Composio action (most code paths use the `ctrl_composio_execute` gateway tool instead). |
 
 For per-app action detail, consult the `alfred-composio-*` skills (gmail, googlecalendar, github, slack, notion, zoom, googledrive).
+
+### Connected Apps — management
+
+Use these endpoints to inspect and modify integration configuration. Sir manages app connections through the dashboard UI; these endpoints let you act on his behalf once connected.
+
+> **OAuth connect note**: `POST /api/v1/integrations/connect` returns a `connect_url` (OAuth redirect). You MUST surface that URL to Sir and tell him to click it. Do NOT claim the integration is connected until Sir confirms via the dashboard — the OAuth flow must complete in a browser.
+
+| Endpoint | What it does |
+|---|---|
+| `POST /api/v1/integrations/connect-api-key` | Connect an app using a raw API key (non-OAuth). Body: `{toolkit_slug, credential, auth_scheme?}` (`auth_scheme` defaults to `"API_KEY"`). |
+| `GET /api/v1/integrations/:toolkit/actions` | List available actions for a toolkit slug (e.g. `gmail`, `github`). Returns `{actions: [{slug, description}]}`. |
+| `POST /api/v1/integrations/check-readiness` | Check whether required tools are connected. Body: `{tools_required: string[]}` (array of toolkit slugs or action slugs). |
+| `POST /api/v1/integrations/:id/auto-config` | Auto-configure streams, tools, and skills after an OAuth connection completes. `:id` is the Composio `connection_id`. Connection must be `ACTIVE`. |
+| `POST /api/v1/integrations/:id/enable-stream` | Create a Composio-backed pull stream for a connection. Body: `{action_slug, stream_name?, poll_interval_seconds?}`. |
+| `POST /api/v1/integrations/:id/migrate-stream` | Migrate an existing stream to a new action slug (preserves config). Body: `{old_action_slug, new_action_slug?}`. |
+| `POST /api/v1/integrations/:id/disable-stream` | Remove the stream config and Temporal schedule for a Composio action. Body: `{action_slug}`. |
+| `POST /api/v1/integrations/enable-tool` | Add a Composio action slug to `gateway.tools.allow`. Body: `{action_slug}`. Triggers gateway restart. |
+| `POST /api/v1/integrations/disable-tool` | Remove a Composio action slug from `gateway.tools.allow`. Body: `{action_slug}`. Triggers gateway restart. |
+| `POST /api/v1/integrations/regenerate-skills` | Rebuild every connected app's SKILL.md from the current template (useful after a template change). No body required. |
 
 ### Email channel (AgentMail — Alfred's own inbox)
 
