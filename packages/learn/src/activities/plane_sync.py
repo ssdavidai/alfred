@@ -28,6 +28,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+import httpx
 from temporalio import activity
 
 from src.config import load_config
@@ -805,11 +806,74 @@ async def sync_task_to_plane(
         ``POST`` requests for labels that aren't in the cache yet
         (mutations patch the cache in place). When ``None``, falls
         back to the legacy ``client.ensure_labels`` path.
+
+    Archived-task cascade
+    ---------------------
+    When ``frontmatter.archived`` is truthy, the vault record has been
+    tombstoned and the mirrored Plane issue should follow. We call
+    ``client.delete_issue`` (Plane 1.3.0 does not expose a working issue
+    archive endpoint — ``PATCH is_archived`` returns 200 but doesn't
+    persist ``archived_at``; ``POST /archive/`` 404s) and return
+    ``action="archived"`` so the workflow can drop the slug from
+    ``issue_map``. Vault remains the source of truth; the delete is
+    reversible by clearing ``archived`` on the vault record (the next
+    sync tick will re-create the Plane issue fresh).
+
+    If the task is archived but has no existing Plane mapping, we skip
+    silently rather than creating the issue just to delete it.
     """
     slug = task["slug"]
     matter_slug = task.get("matter_slug")
     fm = task.get("frontmatter") or {}
     body = task.get("body") or ""
+
+    # Archive cascade: short-circuit before any Plane create/update work.
+    # See the docstring above for why we delete rather than archive.
+    if fm.get("archived"):
+        existing_id = issue_map.get(slug)
+        if not existing_id:
+            logger.info(
+                "plane_sync.issue_upsert slug=%s action=archived reason=never_synced",
+                slug,
+            )
+            return {"slug": slug, "plane_id": "", "action": "archived"}
+        # Find the project the existing issue lives in. Matter-slug first,
+        # fall back to Inbox (which is where orphan tasks were routed).
+        delete_project_id: Optional[str] = None
+        if matter_slug:
+            delete_project_id = project_map.get(matter_slug)
+        if not delete_project_id:
+            delete_project_id = project_map.get(INBOX_SLUG_SENTINEL)
+        if not delete_project_id:
+            # Very unusual: we have a plane_id but no project to address
+            # it through. Log and treat as archived so the cursor can
+            # move on — next run will re-evaluate once the Inbox lands.
+            logger.warning(
+                "plane_sync.issue_upsert slug=%s action=archived reason=no_project_for_delete plane_id=%s",
+                slug, existing_id,
+            )
+            return {"slug": slug, "plane_id": "", "action": "archived"}
+        client = _plane_client_from_env()
+        try:
+            try:
+                await client.delete_issue(delete_project_id, existing_id)
+            except httpx.HTTPStatusError as exc:
+                # 404 on delete means the issue is already gone in Plane
+                # — treat as success so we clear the stale mapping.
+                if exc.response.status_code != 404:
+                    raise
+                logger.info(
+                    "plane_sync.issue_upsert slug=%s plane_id=%s project=%s action=archived note=already_gone",
+                    slug, existing_id, delete_project_id,
+                )
+            else:
+                logger.info(
+                    "plane_sync.issue_upsert slug=%s plane_id=%s project=%s action=archived",
+                    slug, existing_id, delete_project_id,
+                )
+        finally:
+            await client.close()
+        return {"slug": slug, "plane_id": "", "action": "archived"}
 
     project_id: Optional[str] = None
     if matter_slug:

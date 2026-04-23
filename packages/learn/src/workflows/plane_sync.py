@@ -56,6 +56,7 @@ class PlaneSyncResult:
     matters_synced: int = 0
     tasks_synced: int = 0
     tasks_skipped: int = 0
+    tasks_archived: int = 0
     errors: int = 0
     last_vault_mtime: float = 0.0
     skipped_reason: str = ""
@@ -276,6 +277,19 @@ class PlaneSyncWorkflow:
                 result.tasks_skipped += 1
                 continue
 
+            if action == "archived":
+                # Vault record carries `archived: true` — the cascade in
+                # the activity already deleted the Plane issue. Drop the
+                # slug from issue_map so a later un-archive recreates
+                # cleanly, and DO advance the cursor past this record
+                # (the archive is a completed unit of work).
+                if slug in issue_map:
+                    del issue_map[slug]
+                result.tasks_archived += 1
+                if mt > processed_mtime:
+                    processed_mtime = mt
+                continue
+
             if slug and plane_id:
                 issue_map[slug] = plane_id
             result.tasks_synced += 1
@@ -310,11 +324,12 @@ class PlaneSyncWorkflow:
         result.last_vault_mtime = advance_mtime
 
         workflow.logger.info(
-            "plane_sync.done matters=%d tasks=%d skipped=%d errors=%d "
-            "cursor=%s",
+            "plane_sync.done matters=%d tasks=%d skipped=%d archived=%d "
+            "errors=%d cursor=%s",
             result.matters_synced,
             result.tasks_synced,
             result.tasks_skipped,
+            result.tasks_archived,
             result.errors,
             advance_mtime,
         )

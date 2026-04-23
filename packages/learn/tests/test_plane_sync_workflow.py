@@ -949,3 +949,286 @@ class TestLabelCacheWiring:
         assert result.tasks_synced == 1
         # Cache handed to sync_task was the empty-fallback dict
         assert received_caches == [{}]
+
+
+# ---------------------------------------------------------------------------
+# Archive cascade — vault task with `archived: true` deletes the Plane issue
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveCascadeWorkflow:
+    """Workflow-level assertions for the archive cascade. When the activity
+    returns ``action="archived"``, the workflow must drop the slug from
+    ``issue_map`` before the save, count it under ``tasks_archived``, and
+    advance the cursor past the record (archives are completed work, not
+    skips)."""
+
+    def test_archived_task_removes_from_issue_map(self):
+        _reset_call_log()
+        cursor_state = {
+            "last_vault_mtime": 50.0,
+            "project_map": {"alpha": "prj-alpha"},
+            "issue_map": {"t1": "iss-t1"},
+        }
+        tasks = [{
+            "slug": "t1",
+            "path": "task/t1.md",
+            "frontmatter": {"name": "T1", "archived": True},
+            "matter_slug": "alpha",
+            "mtime": 200.0,
+        }]
+        stubs = _make_stubs(
+            cursor_state=cursor_state,
+            matters=[],
+            tasks=tasks,
+            task_outcomes={
+                "t1": {"slug": "t1", "plane_id": "", "action": "archived"},
+            },
+        )
+        result = asyncio.run(_run_workflow(stubs))
+
+        assert result.tasks_archived == 1
+        assert result.tasks_synced == 0
+        assert result.tasks_skipped == 0
+        assert result.errors == 0
+        # Cursor DID advance past the archive
+        assert result.last_vault_mtime == 200.0
+
+        save = [c for c in _CALL_LOG if c[0] == "save"][-1][1]
+        # Slug pruned from issue_map
+        assert "t1" not in save["issue_map"]
+        # But project_map entries preserved (matters aren't affected)
+        assert save["project_map"]["alpha"] == "prj-alpha"
+
+    def test_archived_task_without_prior_mapping_is_counted(self):
+        """An archived task that was never synced before — the activity
+        returns archived with empty plane_id, the workflow still counts
+        it under tasks_archived and advances the cursor."""
+        _reset_call_log()
+        tasks = [{
+            "slug": "never-synced",
+            "path": "task/never-synced.md",
+            "frontmatter": {"name": "Fresh", "archived": True},
+            "matter_slug": None,
+            "mtime": 300.0,
+        }]
+        stubs = _make_stubs(
+            cursor_state={},
+            matters=[],
+            tasks=tasks,
+            task_outcomes={
+                "never-synced": {
+                    "slug": "never-synced",
+                    "plane_id": "",
+                    "action": "archived",
+                },
+            },
+        )
+        result = asyncio.run(_run_workflow(stubs))
+        assert result.tasks_archived == 1
+        assert result.tasks_skipped == 0
+        assert result.last_vault_mtime == 300.0
+        save = [c for c in _CALL_LOG if c[0] == "save"][-1][1]
+        assert "never-synced" not in save["issue_map"]
+
+    def test_archived_action_does_not_add_to_issue_map(self):
+        """Even if the activity returned a plane_id for some reason
+        alongside action=archived, the workflow must not write it into
+        issue_map — the issue is being deleted, not created."""
+        _reset_call_log()
+        cursor_state = {
+            "last_vault_mtime": 0.0,
+            "project_map": {"alpha": "prj-alpha"},
+            "issue_map": {},
+        }
+        tasks = [{
+            "slug": "t-ghost",
+            "path": "task/t-ghost.md",
+            "frontmatter": {"name": "Ghost", "archived": True},
+            "matter_slug": "alpha",
+            "mtime": 150.0,
+        }]
+        stubs = _make_stubs(
+            cursor_state=cursor_state,
+            matters=[],
+            tasks=tasks,
+            task_outcomes={
+                "t-ghost": {
+                    "slug": "t-ghost",
+                    # Deliberately set to a non-empty value to catch
+                    # regressions where the workflow would erroneously
+                    # index an archived outcome.
+                    "plane_id": "iss-ghost",
+                    "action": "archived",
+                },
+            },
+        )
+        result = asyncio.run(_run_workflow(stubs))
+        assert result.tasks_archived == 1
+        save = [c for c in _CALL_LOG if c[0] == "save"][-1][1]
+        assert "t-ghost" not in save["issue_map"]
+
+
+# ---------------------------------------------------------------------------
+# Archive cascade — activity-level assertions (sync_task_to_plane short-circuit)
+# ---------------------------------------------------------------------------
+
+
+class TestArchiveCascadeActivity:
+    """Activity-level assertions for the archive cascade — exercises
+    ``sync_task_to_plane`` directly with a fake PlaneClient to confirm
+    the DELETE path is invoked exactly once and no create/update is
+    attempted for an archived task.
+    """
+
+    def _run_activity(
+        self,
+        *,
+        task: dict,
+        project_map: dict,
+        issue_map: dict,
+        monkeypatch,
+        fake_client,
+    ):
+        from src.activities import plane_sync as ps
+        monkeypatch.setattr(ps, "_plane_client_from_env", lambda: fake_client)
+        from temporalio.testing import ActivityEnvironment
+        env = ActivityEnvironment()
+        return asyncio.run(
+            env.run(ps.sync_task_to_plane, task, project_map, issue_map, None)
+        )
+
+    def test_archived_task_with_mapping_calls_delete(self, monkeypatch):
+        calls: list[tuple[str, tuple]] = []
+
+        class FakeClient:
+            async def delete_issue(self, project_id, issue_id):
+                calls.append(("delete_issue", (project_id, issue_id)))
+
+            async def create_issue(self, *a, **kw):
+                calls.append(("create_issue", (a, kw)))
+                raise AssertionError("create_issue must not be called for archived task")
+
+            async def update_issue(self, *a, **kw):
+                calls.append(("update_issue", (a, kw)))
+                raise AssertionError("update_issue must not be called for archived task")
+
+            async def close(self):
+                pass
+
+        out = self._run_activity(
+            task={
+                "slug": "t1",
+                "frontmatter": {"archived": True},
+                "matter_slug": "alpha",
+                "body": "",
+            },
+            project_map={"alpha": "prj-alpha"},
+            issue_map={"t1": "iss-t1"},
+            monkeypatch=monkeypatch,
+            fake_client=FakeClient(),
+        )
+        assert out == {"slug": "t1", "plane_id": "", "action": "archived"}
+        assert calls == [("delete_issue", ("prj-alpha", "iss-t1"))]
+
+    def test_archived_task_no_mapping_is_silent(self, monkeypatch):
+        calls: list[tuple[str, tuple]] = []
+
+        class FakeClient:
+            async def delete_issue(self, *a, **kw):
+                calls.append(("delete_issue", (a, kw)))
+                raise AssertionError("delete should not fire without existing_id")
+
+            async def create_issue(self, *a, **kw):
+                calls.append(("create_issue", (a, kw)))
+                raise AssertionError("create should not fire for archived task")
+
+            async def close(self):
+                pass
+
+        out = self._run_activity(
+            task={
+                "slug": "never-synced",
+                "frontmatter": {"archived": True},
+                "matter_slug": None,
+                "body": "",
+            },
+            project_map={},
+            issue_map={},
+            monkeypatch=monkeypatch,
+            fake_client=FakeClient(),
+        )
+        assert out == {"slug": "never-synced", "plane_id": "", "action": "archived"}
+        assert calls == []
+
+    def test_archived_task_delete_404_treated_as_success(self, monkeypatch):
+        """If the Plane issue is already gone (404 on delete), the
+        activity must still return archived — it's the state we want."""
+        import httpx
+
+        deleted_calls: list = []
+
+        class FakeClient:
+            async def delete_issue(self, project_id, issue_id):
+                deleted_calls.append((project_id, issue_id))
+                # Simulate "already deleted in Plane"
+                req = httpx.Request("DELETE", "http://fake/")
+                resp = httpx.Response(404, request=req)
+                raise httpx.HTTPStatusError("gone", request=req, response=resp)
+
+            async def close(self):
+                pass
+
+        out = self._run_activity(
+            task={
+                "slug": "t-404",
+                "frontmatter": {"archived": True},
+                "matter_slug": "alpha",
+                "body": "",
+            },
+            project_map={"alpha": "prj-alpha"},
+            issue_map={"t-404": "iss-gone"},
+            monkeypatch=monkeypatch,
+            fake_client=FakeClient(),
+        )
+        assert out == {"slug": "t-404", "plane_id": "", "action": "archived"}
+        assert deleted_calls == [("prj-alpha", "iss-gone")]
+
+    def test_archived_task_delete_other_http_error_raises(self, monkeypatch):
+        """Non-404 errors on delete should propagate — we want the
+        workflow's retry policy to handle a genuine Plane outage."""
+        import httpx
+
+        class FakeClient:
+            async def delete_issue(self, project_id, issue_id):
+                req = httpx.Request("DELETE", "http://fake/")
+                resp = httpx.Response(500, request=req)
+                raise httpx.HTTPStatusError("oops", request=req, response=resp)
+
+            async def close(self):
+                pass
+
+        from src.activities import plane_sync as ps
+        monkeypatch.setattr(ps, "_plane_client_from_env", lambda: FakeClient())
+
+        from temporalio.testing import ActivityEnvironment
+        env = ActivityEnvironment()
+        try:
+            asyncio.run(
+                env.run(
+                    ps.sync_task_to_plane,
+                    {
+                        "slug": "t",
+                        "frontmatter": {"archived": True},
+                        "matter_slug": "alpha",
+                        "body": "",
+                    },
+                    {"alpha": "prj-alpha"},
+                    {"t": "iss-t"},
+                    None,
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            assert exc.response.status_code == 500
+        else:
+            raise AssertionError("expected 500 to propagate")
