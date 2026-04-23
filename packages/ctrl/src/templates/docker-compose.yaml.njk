@@ -333,6 +333,38 @@ services:
     mem_limit: 256m
     pids_limit: 128
 
+  # One-shot migrator. plane-api's entrypoint calls `wait_for_migrations` which
+  # blocks until `python manage.py migrate` has run — Plane's official compose
+  # factors this into a dedicated service so the api/worker/beat don't each try
+  # to apply migrations on boot (which caused deadlock during the first deploy
+  # attempt on david, issue #555).
+  plane-migrator:
+    image: makeplane/plane-backend:stable
+    restart: "no"
+    depends_on:
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=plane.settings.production
+      - DEBUG=0
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DATABASE_URL=postgresql://plane:${POSTGRES_PASSWORD}@plane-db:5432/plane
+      - POSTGRES_USER=plane
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=plane
+      - POSTGRES_HOST=plane-db
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+      - REDIS_HOST=plane-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    command: ["/bin/sh", "-c", "./bin/docker-entrypoint-migrator.sh"]
+    mem_limit: 512m
+    pids_limit: 128
+
   plane-api:
     image: makeplane/plane-backend:stable
     restart: unless-stopped
@@ -345,6 +377,8 @@ services:
         condition: service_healthy
       plane-minio:
         condition: service_healthy
+      plane-migrator:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
@@ -388,6 +422,8 @@ services:
     depends_on:
       plane-api:
         condition: service_healthy
+      plane-migrator:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
@@ -420,6 +456,8 @@ services:
     depends_on:
       plane-api:
         condition: service_healthy
+      plane-migrator:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
