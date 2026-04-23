@@ -30,14 +30,14 @@ from src.config import load_config
 PLANE_SYNC_SCHEDULE_ID = "al-plane-sync"
 PLANE_SYNC_WORKFLOW = "PlaneSyncWorkflow"
 PLANE_SYNC_NOTE = (
-    "Sync vault matters/tasks → Plane projects/issues every 60s. "
+    "Sync vault matters/tasks → Plane projects/issues every 15s. "
     "Feature-gated by PLANE_SYNC_ENABLED env."
 )
 
 PLANE_REVERSE_SYNC_SCHEDULE_ID = "al-plane-reverse-sync"
 PLANE_REVERSE_SYNC_WORKFLOW = "PlaneReverseSyncWorkflow"
 PLANE_REVERSE_SYNC_NOTE = (
-    "Sync Plane webhook events → vault matter/task updates every 30s. "
+    "Sync Plane webhook events → vault matter/task updates every 10s. "
     "Feature-gated by PLANE_SYNC_ENABLED env."
 )
 
@@ -162,7 +162,7 @@ async def register_plane_sync(client: Client, task_queue: str) -> None:
     """Create-or-delete the ``al-plane-sync`` schedule based on the feature flag.
 
     When ``PLANE_SYNC_ENABLED=true``:
-      * create the schedule (every 60s, overlap SKIP) if absent
+      * create the schedule (every 15s, overlap SKIP) if absent
       * leave it alone if it already exists — the workflow itself is the
         source of truth for logic changes, not the schedule definition
 
@@ -194,7 +194,7 @@ async def register_plane_sync(client: Client, task_queue: str) -> None:
         task_queue=task_queue,
     )
     spec = ScheduleSpec(
-        intervals=[ScheduleIntervalSpec(every=timedelta(seconds=60))],
+        intervals=[ScheduleIntervalSpec(every=timedelta(seconds=15))],
     )
     policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
 
@@ -204,7 +204,7 @@ async def register_plane_sync(client: Client, task_queue: str) -> None:
             Schedule(action=action, spec=spec, policy=policy),
         )
         logger.info(
-            "Created schedule: %s → %s (60s, SKIP overlap)",
+            "Created schedule: %s → %s (15s, SKIP overlap)",
             PLANE_SYNC_SCHEDULE_ID,
             PLANE_SYNC_WORKFLOW,
         )
@@ -238,7 +238,7 @@ async def register_plane_reverse_sync(client: Client, task_queue: str) -> None:
     ``PLANE_SYNC_ENABLED`` off deletes the schedule cleanly so a
     tenant opting out doesn't leave a zombie sync running.
 
-    30s interval + SKIP overlap: the workflow's own fetch activity
+    10s interval + SKIP overlap: the workflow's own fetch activity
     handles all the backfill so skipped ticks don't drop events.
     """
     handle = client.get_schedule_handle(PLANE_REVERSE_SYNC_SCHEDULE_ID)
@@ -264,7 +264,7 @@ async def register_plane_reverse_sync(client: Client, task_queue: str) -> None:
         task_queue=task_queue,
     )
     spec = ScheduleSpec(
-        intervals=[ScheduleIntervalSpec(every=timedelta(seconds=30))],
+        intervals=[ScheduleIntervalSpec(every=timedelta(seconds=10))],
     )
     policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
 
@@ -274,7 +274,7 @@ async def register_plane_reverse_sync(client: Client, task_queue: str) -> None:
             Schedule(action=action, spec=spec, policy=policy),
         )
         logger.info(
-            "Created schedule: %s → %s (30s, SKIP overlap)",
+            "Created schedule: %s → %s (10s, SKIP overlap)",
             PLANE_REVERSE_SYNC_SCHEDULE_ID,
             PLANE_REVERSE_SYNC_WORKFLOW,
         )

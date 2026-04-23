@@ -1,6 +1,6 @@
 """PlaneReverseSyncWorkflow — Plane → vault two-way sync ingress (#536 B7).
 
-Runs every 30 seconds. Consumes ``stream_type: "plane"`` events emitted
+Runs every 10 seconds. Consumes ``stream_type: "plane"`` events emitted
 by ctrl-api's ``POST /api/v1/plane/webhook`` (see
 ``packages/ctrl/src/api/routes/plane.ts``), translates them into vault
 matter/task/comment patches, and applies them with three loop guards
@@ -108,7 +108,7 @@ def _task_path_for_slug(slug: str) -> str:
 
 @workflow.defn(name="PlaneReverseSyncWorkflow")
 class PlaneReverseSyncWorkflow:
-    """Plane → vault ingress. Schedule: every 30 seconds."""
+    """Plane → vault ingress. Schedule: every 10 seconds."""
 
     @workflow.run
     async def run(self) -> PlaneReverseSyncResult:

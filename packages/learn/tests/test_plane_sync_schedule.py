@@ -111,12 +111,12 @@ class TestRegisterPlaneSyncEnabled:
         # Workflow reads its own env — no args.
         assert list(action.args) == []
 
-        # Spec: single 60s interval
+        # Spec: single 15s interval
         spec = schedule.spec
         assert len(spec.intervals) == 1
         interval = spec.intervals[0]
         assert isinstance(interval, ScheduleIntervalSpec)
-        assert interval.every == timedelta(seconds=60)
+        assert interval.every == timedelta(seconds=15)
         assert not spec.calendars
 
         # Policy: SKIP overlap
@@ -250,7 +250,7 @@ class TestRegisterPlaneReverseSyncEnabled:
     def enable_flag(self, monkeypatch):
         monkeypatch.setenv("PLANE_SYNC_ENABLED", "true")
 
-    def test_creates_schedule_with_30s_interval_and_skip_overlap(self):
+    def test_creates_schedule_with_10s_interval_and_skip_overlap(self):
         client, _handle = _mock_client()
 
         asyncio.run(register_plane_reverse_sync(client, "alfred-learn"))
@@ -268,7 +268,7 @@ class TestRegisterPlaneReverseSyncEnabled:
 
         spec = schedule.spec
         assert len(spec.intervals) == 1
-        assert spec.intervals[0].every == timedelta(seconds=30)
+        assert spec.intervals[0].every == timedelta(seconds=10)
         assert not spec.calendars
 
         policy = schedule.policy
