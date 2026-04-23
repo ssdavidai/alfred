@@ -410,7 +410,9 @@ services:
     command: ["/bin/sh", "-c", "./bin/docker-entrypoint-api.sh"]
     healthcheck:
       # plane-backend image ships wget but NOT curl.
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/api/instances/ >/dev/null 2>&1 || exit 1"]
+      # wget resolves "localhost" to ::1 first but gunicorn binds IPv4 only,
+      # so use 127.0.0.1 explicitly. The root endpoint returns {"status":"OK"}.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/ >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 30
