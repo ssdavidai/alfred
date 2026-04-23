@@ -408,6 +408,10 @@ services:
       - API_KEY_RATE_LIMIT=600/minute
       - GUNICORN_WORKERS=2
     command: ["/bin/sh", "-c", "./bin/docker-entrypoint-api.sh"]
+    networks:
+      default:
+        aliases:
+          - api
     healthcheck:
       # plane-backend image ships wget but NOT curl.
       # wget resolves "localhost" to ::1 first but gunicorn binds IPv4 only,
@@ -451,7 +455,8 @@ services:
       - AWS_S3_BUCKET_NAME=uploads
       - AWS_REGION=us-east-1
     command: ["/bin/sh", "-c", "./bin/docker-entrypoint-worker.sh"]
-    mem_limit: 1g
+    # 1g was OOM-killed on boot (celery + bgtask registry). 2g holds steady.
+    mem_limit: 2g
     pids_limit: 256
 
   plane-beat:
@@ -495,6 +500,10 @@ services:
     environment:
       - NEXT_PUBLIC_API_BASE_URL=
       - NEXT_PUBLIC_DEPLOY_URL=
+    networks:
+      default:
+        aliases:
+          - web
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || exit 1"]
       interval: 15s
@@ -515,6 +524,10 @@ services:
     environment:
       - NEXT_PUBLIC_API_BASE_URL=
       - NEXT_PUBLIC_DEPLOY_URL=
+    networks:
+      default:
+        aliases:
+          - space
     mem_limit: 256m
     pids_limit: 128
 
@@ -528,6 +541,10 @@ services:
     environment:
       - NEXT_PUBLIC_API_BASE_URL=
       - NEXT_PUBLIC_DEPLOY_URL=
+    networks:
+      default:
+        aliases:
+          - admin
     mem_limit: 256m
     pids_limit: 128
 
@@ -540,7 +557,12 @@ services:
     environment:
       - API_BASE_URL=http://plane-api:8000
       - LIVE_BASE_PATH=/live
+      - LIVE_SERVER_SECRET_KEY=${LIVE_SERVER_SECRET_KEY}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+    networks:
+      default:
+        aliases:
+          - live
     mem_limit: 256m
     pids_limit: 128
 

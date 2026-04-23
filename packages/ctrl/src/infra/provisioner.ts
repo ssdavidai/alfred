@@ -2456,6 +2456,7 @@ export async function deployPlane(
       "REDIS_PASSWORD",
       "POSTGRES_PASSWORD",
       "MINIO_ROOT_PASSWORD",
+      "LIVE_SERVER_SECRET_KEY",
     ] as const) {
       const existing = await readTenantEnv(sshOpts, k);
       if (!existing) {
