@@ -192,6 +192,12 @@ MAX_BODY_CHARS_PER_TASK = 800
 # is more than enough for disambiguation.
 MAX_MATTER_PREVIEW_CHARS = 200
 
+# Task statuses that the vault schema REJECTS on edit. If a task carries
+# one of these we coerce it to `todo` during the backfill patch so the
+# vault-edit validator doesn't bounce the whole request. On David's vault
+# ~1200 legacy tasks still carry `status: pending`.
+_VALID_TASK_STATUSES = frozenset({"active", "blocked", "cancelled", "done", "todo"})
+
 
 def _build_matter_block(matters: list[dict[str, Any]]) -> str:
     lines = ["Sir's active matters (pick the best-fit `slug` for each task, or null):"]
@@ -404,6 +410,7 @@ async def _load_candidate_tasks(
             "_created_dt": created_dt,
             "current_related_matters": fm.get("related_matters") or [],
             "current_enrichment_status": fm.get("enrichment_status") or "",
+            "current_status": fm.get("status") or "",
         })
     # Newest first
     candidates.sort(key=lambda t: t["_created_dt"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
@@ -564,9 +571,21 @@ async def _process_batch(
             continue
 
         # 4. Write: append to related_matters + mark enriched.
+        #
+        # If the task's current `status` is not in the vault schema's
+        # allowed set for tasks (active/blocked/cancelled/done/todo),
+        # ANY edit will fail with `_validate_status`. On David's vault
+        # ~1200 tasks carry `status: pending` (legacy curator output,
+        # pre-schema-tightening) and would all be un-patchable. Coerce
+        # such tasks to `todo` so our edit goes through.
         set_map: dict[str, Any] = {}
         if t["current_enrichment_status"] == "pending":
             set_map["enrichment_status"] = "enriched"
+        current_status = (t.get("current_status") or "").strip()
+        if current_status and current_status not in _VALID_TASK_STATUSES:
+            # Any non-empty value outside the schema would fail on edit.
+            # Coerce to `todo` so our edit can land.
+            set_map["status"] = "todo"
 
         try:
             await ctrl.patch_record(
