@@ -8,11 +8,31 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
 from datetime import timedelta
 
-from temporalio.client import Client, Schedule, ScheduleActionStartWorkflow, ScheduleIntervalSpec, ScheduleSpec, ScheduleCalendarSpec, ScheduleRange
+from temporalio.client import (
+    Client,
+    Schedule,
+    ScheduleActionStartWorkflow,
+    ScheduleIntervalSpec,
+    ScheduleOverlapPolicy,
+    SchedulePolicy,
+    ScheduleSpec,
+    ScheduleCalendarSpec,
+    ScheduleRange,
+)
+from temporalio.service import RPCError, RPCStatusCode
 
 from src.config import load_config
+
+PLANE_SYNC_SCHEDULE_ID = "al-plane-sync"
+PLANE_SYNC_WORKFLOW = "PlaneSyncWorkflow"
+PLANE_SYNC_NOTE = (
+    "Sync vault matters/tasks → Plane projects/issues every 60s. "
+    "Feature-gated by PLANE_SYNC_ENABLED env."
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("register-schedules")
@@ -119,9 +139,104 @@ def _build_schedule_entries(timezone: str) -> list[dict]:
     return entries
 
 
+def _plane_sync_enabled() -> bool:
+    """Feature flag for Plane two-way sync (#536).
+
+    Registration-time gate: tenants without the flag don't get the schedule
+    created at all, so the opt-out is free (no extra Temporal history, no
+    activity task poll). The workflow itself also checks this flag at runtime
+    — the two gates are redundant on purpose so flipping either direction is
+    safe.
+    """
+    return os.environ.get("PLANE_SYNC_ENABLED", "").strip().lower() == "true"
+
+
+async def register_plane_sync(client: Client, task_queue: str) -> None:
+    """Create-or-delete the ``al-plane-sync`` schedule based on the feature flag.
+
+    When ``PLANE_SYNC_ENABLED=true``:
+      * create the schedule (every 60s, overlap SKIP) if absent
+      * leave it alone if it already exists — the workflow itself is the
+        source of truth for logic changes, not the schedule definition
+
+    When the flag is unset/false:
+      * delete the schedule if present (so a tenant flipping the flag off
+        doesn't leave a zombie sync running)
+      * otherwise no-op
+    """
+    handle = client.get_schedule_handle(PLANE_SYNC_SCHEDULE_ID)
+
+    if not _plane_sync_enabled():
+        try:
+            await handle.describe()
+        except RPCError as e:
+            if e.status == RPCStatusCode.NOT_FOUND:
+                logger.info("plane_sync disabled — schedule skipped")
+                return
+            raise
+        await handle.delete()
+        logger.info(
+            "plane_sync disabled — existing schedule %s deleted",
+            PLANE_SYNC_SCHEDULE_ID,
+        )
+        return
+
+    action = ScheduleActionStartWorkflow(
+        PLANE_SYNC_WORKFLOW,
+        id=f"{PLANE_SYNC_SCHEDULE_ID}-run",
+        task_queue=task_queue,
+    )
+    spec = ScheduleSpec(
+        intervals=[ScheduleIntervalSpec(every=timedelta(seconds=60))],
+    )
+    policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
+
+    try:
+        await client.create_schedule(
+            PLANE_SYNC_SCHEDULE_ID,
+            Schedule(action=action, spec=spec, policy=policy),
+        )
+        logger.info(
+            "Created schedule: %s → %s (60s, SKIP overlap)",
+            PLANE_SYNC_SCHEDULE_ID,
+            PLANE_SYNC_WORKFLOW,
+        )
+    except RPCError as e:
+        if e.status == RPCStatusCode.ALREADY_EXISTS:
+            logger.info(
+                "Schedule already exists: %s (skipping)", PLANE_SYNC_SCHEDULE_ID
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s", PLANE_SYNC_SCHEDULE_ID, e
+        )
+        raise
+    except Exception as e:  # noqa: BLE001 — keep parity with register_all()
+        err = str(e).lower()
+        if "already" in err or "exists" in err:
+            logger.info(
+                "Schedule already exists: %s (skipping)", PLANE_SYNC_SCHEDULE_ID
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s", PLANE_SYNC_SCHEDULE_ID, e
+        )
+        raise
+
+
 async def register_all() -> None:
     config = load_config()
-    client = await Client.connect(config.temporal_host)
+    try:
+        client = await Client.connect(config.temporal_host)
+    except Exception as e:  # noqa: BLE001
+        # Don't silently swallow — downstream registration steps depend on
+        # the Temporal client, and init should fail loudly so the operator
+        # sees the problem in container logs.
+        logger.error(
+            "Failed to connect to Temporal at %s: %s",
+            config.temporal_host, e,
+        )
+        raise
     timezone = config.tenant_timezone
     logger.info("Using tenant timezone: %s", timezone)
 
@@ -152,9 +267,16 @@ async def register_all() -> None:
                 logger.error("Failed to create schedule %s: %s", schedule_id, e)
                 raise
 
+    # Plane two-way sync (#536) — registration-time feature-gated.
+    await register_plane_sync(client, config.task_queue)
+
 
 def main() -> None:
-    asyncio.run(register_all())
+    try:
+        asyncio.run(register_all())
+    except Exception as e:  # noqa: BLE001
+        logger.error("register_schedules failed: %s", e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
