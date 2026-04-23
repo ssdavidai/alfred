@@ -32,6 +32,7 @@ export interface Instance {
   cf_tunnel_id: string | null;
   cf_tunnel_name: string | null;
   cf_dns_record_id: string | null;
+  cf_plane_dns_record_id: string | null;
   cf_access_app_id: string | null;
   server_type: string;
   location: string;

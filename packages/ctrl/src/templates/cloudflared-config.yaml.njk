@@ -10,4 +10,8 @@ ingress:
     service: http://localhost:3100
   - hostname: {{ subdomain }}.{{ domain }}
     service: http://localhost:18789
+{%- if plane_enabled %}
+  - hostname: {{ subdomain }}-plane.{{ domain }}
+    service: http://localhost:8080
+{%- endif %}
   - service: http_status:404

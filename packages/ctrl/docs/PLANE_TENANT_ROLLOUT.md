@@ -71,6 +71,11 @@ node dist/index.mjs deploy-plane david
    plane-live plane-proxy` (up to ~3 min on first pull).
 6. `docker compose up -d` for the same 12 services.
 7. Calls `setupPlane` (step 2 below).
+8. Creates the `<subdomain>-plane.<domain>` Cloudflare DNS CNAME
+   pointing at the tenant's existing tunnel, then re-renders
+   `/etc/cloudflared/config.yml` with `plane_enabled: true` and
+   restarts cloudflared (step 3 below). Non-fatal if Cloudflare isn't
+   configured on the admin host.
 
 ### Option B — manual
 
@@ -197,8 +202,8 @@ done
 ## Step 3 — DNS + Cloudflared ingress for the Plane UI
 
 Plane's UI is served by `plane-proxy` on compose-network port 80,
-host-side `127.0.0.1:8080`. To expose it externally you add a new
-Cloudflare DNS record + ingress rule.
+host-side `127.0.0.1:8080`. To expose it externally we need a
+Cloudflare DNS record + an ingress rule in cloudflared's config.
 
 **Critical**: use a single-level subdomain like
 `<subdomain>-plane.<domain>` (e.g. `david-plane.alfred.black`). The
@@ -206,7 +211,48 @@ wildcard cert for `*.alfred.black` covers one level only —
 `plane.<subdomain>.alfred.black` would need a multi-level wildcard that
 we don't have.
 
-### 3a — Cloudflare DNS record
+### Automation (default — `deployPlane` handles both)
+
+As of the Plane rollout automation, `deployPlane` performs **both**
+sub-steps automatically after `setupPlane` succeeds:
+
+1. **DNS** — calls `cloudflare.createDnsRecord('<subdomain>-plane', cf_tunnel_id)`
+   using the existing legacy global key (`CLOUDFLARE_API_KEY` +
+   `CLOUDFLARE_EMAIL`) already configured on the admin host. The new
+   record id is persisted to the `instances.cf_plane_dns_record_id`
+   column so `destroy()` can clean it up on tenant teardown.
+2. **Cloudflared** — re-renders
+   `packages/ctrl/src/templates/cloudflared-config.yaml.njk` with
+   `plane_enabled: true`, SFTP-uploads the result to
+   `/etc/cloudflared/config.yml`, then
+   `sudo systemctl restart cloudflared` and verifies
+   `systemctl is-active cloudflared`.
+
+If Cloudflare isn't configured on the admin host (local-dev path),
+both sub-steps are skipped with a warning. The PLANE_* secrets are
+already written at that point and Plane is running locally, so you can
+run the fallback procedure (below) later.
+
+If the DNS record already exists (idempotent re-run of `deployPlane`),
+creation returns an error from Cloudflare and we log + skip — the
+first successful run persisted the record id, so the column is
+populated and we don't double-create.
+
+### Verification
+
+```bash
+# From your laptop.
+curl -I https://<subdomain>-plane.<domain>/
+# expect: HTTP/2 200 (or 301 to /spaces/)
+```
+
+### Fallback — manual DNS + ingress (if automation fails)
+
+If `deployPlane` logged warnings about DNS or cloudflared restart, or
+if the admin host can't reach Cloudflare, follow the original manual
+procedure.
+
+#### 3a — Cloudflare DNS record
 
 Either via the Cloudflare dashboard, or scripted from the local
 `alfred-ctrl`:
@@ -214,7 +260,7 @@ Either via the Cloudflare dashboard, or scripted from the local
 ```bash
 # On your laptop, assuming CLOUDFLARE_API_TOKEN + zone id available.
 TUNNEL_ID=$(sqlite3 packages/ctrl/data/alfred-ctrl.db \
-  "SELECT tunnel_id FROM instances WHERE subdomain='<subdomain>'")
+  "SELECT cf_tunnel_id FROM instances WHERE subdomain='<subdomain>'")
 ZONE_ID=<alfred.black-zone-id>
 
 curl -s -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records" \
@@ -235,16 +281,24 @@ Worked example (David):
 
 ```
 name:     david-plane
-content:  3a1c…-…-…-….cfargotunnel.com    (David's tunnel id)
+content:  ba815936-a6fd-46eb-8a79-25821a9cbb1b.cfargotunnel.com
 proxied:  true
 ```
 
-### 3b — cloudflared ingress
+If you created the record manually, backfill the column so the
+automation destroy path picks it up:
+
+```bash
+sqlite3 packages/ctrl/data/alfred-ctrl.db \
+  "UPDATE instances SET cf_plane_dns_record_id='<record-id>' WHERE subdomain='<subdomain>'"
+```
+
+#### 3b — cloudflared ingress
 
 Extend the existing cloudflared config on the tenant. The shipped
 template (`packages/ctrl/src/templates/cloudflared-config.yaml.njk`)
-only includes the base subdomain. Add the Plane rule by hand OR extend
-the template locally and re-upload:
+now carries a `{% if plane_enabled %}` block — re-render locally with
+`plane_enabled: true` and SCP the result, or edit in place:
 
 ```yaml
 # /etc/cloudflared/config.yml on the tenant
@@ -270,18 +324,10 @@ Reload cloudflared:
 
 ```bash
 # On the tenant.
-sudo systemctl reload cloudflared
-# or, if running under systemd: sudo systemctl restart cloudflared
+sudo systemctl restart cloudflared
 # verify:
+systemctl is-active cloudflared
 sudo journalctl -u cloudflared --since "1 min ago" | tail -20
-```
-
-### Verification
-
-```bash
-# From your laptop.
-curl -I https://<subdomain>-plane.<domain>/
-# expect: HTTP/2 200 (or 301 to /spaces/)
 ```
 
 ## Step 4 — WEB_URL in tenant .env
@@ -523,10 +569,27 @@ sudo chmod 600 /opt/alfred/compose/.env
 
 ### Step R5 — remove DNS + ingress
 
-1. Delete the Cloudflare DNS record for `<subdomain>-plane`.
-2. Remove the `hostname: <subdomain>-plane.<domain>` rule from
-   `/etc/cloudflared/config.yml` on the tenant.
-3. `sudo systemctl reload cloudflared`.
+Tenant-destroy automation (`destroy(instanceId)` in `provisioner.ts`)
+already deletes the `<subdomain>-plane` DNS record via
+`cloudflare.deleteDnsRecord(cf_plane_dns_record_id)` alongside the
+main DNS record. You only need this section if you're rolling Plane
+back without destroying the whole tenant.
+
+1. Delete the Cloudflare DNS record for `<subdomain>-plane`:
+   ```bash
+   # From a host with Cloudflare auth configured.
+   RECORD_ID=$(sqlite3 packages/ctrl/data/alfred-ctrl.db \
+     "SELECT cf_plane_dns_record_id FROM instances WHERE subdomain='<subdomain>'")
+   curl -s -X DELETE \
+     "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/dns_records/$RECORD_ID" \
+     -H "X-Auth-Key: $CLOUDFLARE_API_KEY" -H "X-Auth-Email: $CLOUDFLARE_EMAIL"
+   sqlite3 packages/ctrl/data/alfred-ctrl.db \
+     "UPDATE instances SET cf_plane_dns_record_id=NULL WHERE subdomain='<subdomain>'"
+   ```
+2. Re-render `/etc/cloudflared/config.yml` with `plane_enabled: false`
+   (or remove the `hostname: <subdomain>-plane.<domain>` rule by
+   hand) on the tenant.
+3. `sudo systemctl restart cloudflared`.
 
 The vault-side state files
 (`state/plane_sync_cursor.json`, `state/plane_reverse_sync_cursor.json`,

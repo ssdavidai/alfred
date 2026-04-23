@@ -917,6 +917,7 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
         tunnel_id: tunnel.id,
         subdomain,
         domain,
+        plane_enabled: config.planeEnabled === true,
       });
       await ssh.upload(
         server.public_net.ipv4.ip,
@@ -993,11 +994,32 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
       const dnsRecord = await cloudflare.createDnsRecord(subdomain, tunnel.id);
       log(`DNS record created: ${subdomain}.${domain} → tunnel`);
 
+      // If Plane is being provisioned alongside the main stack, create the
+      // sidecar DNS record too. `<subdomain>-plane.<domain>` stays a
+      // SINGLE-level subdomain so the `*.alfred.black` wildcard cert
+      // continues to cover it.
+      let planeDnsRecordId: string | null = null;
+      if (config.planeEnabled === true) {
+        try {
+          const planeRec = await cloudflare.createDnsRecord(
+            `${subdomain}-plane`,
+            tunnel.id,
+          );
+          planeDnsRecordId = planeRec.id;
+          log(`DNS record created: ${subdomain}-plane.${domain} → tunnel`);
+        } catch (e) {
+          log(
+            `Warning: could not create Plane DNS record (${subdomain}-plane.${domain}): ${e}`,
+          );
+        }
+      }
+
       // Update instance with tunnel metadata
       updateInstance(instance.id, {
         cf_tunnel_id: tunnel.id,
         cf_tunnel_name: tunnel.name,
         cf_dns_record_id: dnsRecord.id,
+        cf_plane_dns_record_id: planeDnsRecordId,
       });
 
       insertEvent(
@@ -1158,6 +1180,16 @@ export async function destroy(
       log("DNS record deleted");
     } catch (e) {
       log(`Warning: DNS record deletion failed: ${e}`);
+    }
+  }
+
+  if (instance.cf_plane_dns_record_id) {
+    log(`Deleting Plane DNS record ${instance.cf_plane_dns_record_id}...`);
+    try {
+      await cloudflare.deleteDnsRecord(instance.cf_plane_dns_record_id);
+      log("Plane DNS record deleted");
+    } catch (e) {
+      log(`Warning: Plane DNS record deletion failed: ${e}`);
     }
   }
 
@@ -2209,6 +2241,116 @@ export async function deployPlane(
     log,
   });
 
+  // --- Plane DNS + cloudflared ingress ---
+  //
+  // Wires `<subdomain>-plane.<domain>` → plane-proxy (localhost:8080) via
+  // the tenant's existing Cloudflare tunnel. Non-fatal: if Cloudflare
+  // isn't configured on this host, or the API call fails, we log and move
+  // on. The PLANE_* secrets are already written and Plane is running
+  // locally; DNS can be retrofitted manually via the fallback procedure
+  // in packages/ctrl/docs/PLANE_TENANT_ROLLOUT.md.
+  if (cloudflare.isConfigured()) {
+    const domain = process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain;
+    const subdomain = instance.subdomain;
+
+    try {
+      if (!instance.cf_tunnel_id) {
+        log(
+          "Warning: instance has no cf_tunnel_id — skipping Plane DNS + cloudflared re-render. Add DNS manually.",
+        );
+      } else {
+        // 5a — Create the <subdomain>-plane CNAME if we haven't already.
+        if (!instance.cf_plane_dns_record_id) {
+          try {
+            const planeRec = await cloudflare.createDnsRecord(
+              `${subdomain}-plane`,
+              instance.cf_tunnel_id,
+            );
+            updateInstance(instance.id, {
+              cf_plane_dns_record_id: planeRec.id,
+            });
+            log(
+              `DNS record created: ${subdomain}-plane.${domain} → tunnel`,
+            );
+          } catch (e) {
+            log(
+              `Warning: Plane DNS record creation failed (may already exist): ${e}`,
+            );
+          }
+        } else {
+          log(
+            `Plane DNS record already present (${instance.cf_plane_dns_record_id}) — skipping creation`,
+          );
+        }
+
+        // 5b — Re-render /etc/cloudflared/config.yml with plane_enabled=true
+        // and restart cloudflared. The directory is chown'd deploy:deploy
+        // during initial provisioning so no sudo needed for the upload
+        // itself; systemctl restart needs sudo (passwordless for deploy).
+        const cfConfig = nunjucks.renderString(cloudflaredConfigTemplate, {
+          tunnel_id: instance.cf_tunnel_id,
+          subdomain,
+          domain,
+          plane_enabled: true,
+        });
+        try {
+          await ssh.upload(
+            instance.ip_address,
+            sshKeyPath,
+            cfConfig,
+            `${DEFAULTS.cloudflaredDir}/config.yml`,
+            0o644,
+            undefined,
+            sshOpts.hostKeyOpts,
+          );
+          log("Cloudflared config re-rendered with Plane ingress");
+
+          const restartRes = await ssh.exec(
+            instance.ip_address,
+            sshKeyPath,
+            "sudo systemctl restart cloudflared",
+            undefined,
+            sshOpts.hostKeyOpts,
+          );
+          if (restartRes.code !== 0) {
+            log(
+              `Warning: cloudflared restart failed (exit ${restartRes.code}): ${restartRes.stderr.trim()}`,
+            );
+          } else {
+            // Give the service a moment to stabilise before probing.
+            await new Promise((r) => setTimeout(r, 3000));
+            const verifyRes = await ssh.exec(
+              instance.ip_address,
+              sshKeyPath,
+              "systemctl is-active cloudflared",
+              undefined,
+              sshOpts.hostKeyOpts,
+            );
+            if (verifyRes.stdout.trim() !== "active") {
+              log(
+                `Warning: cloudflared is not active after restart (got "${verifyRes.stdout.trim()}")`,
+              );
+            } else {
+              log("Cloudflared restarted and verified active");
+            }
+          }
+        } catch (e) {
+          log(`Warning: cloudflared re-render failed: ${e}`);
+        }
+      }
+    } catch (e) {
+      log(`Warning: Plane DNS/ingress wiring failed: ${e}`);
+    }
+  } else {
+    log(
+      "Skipping Plane DNS + cloudflared re-render (Cloudflare not configured on this host)",
+    );
+  }
+
   insertEvent(instanceId, "api_deployed", "Plane deployed + configured");
-  log("deploy-plane complete");
+  log(
+    `deploy-plane complete — Plane UI available at https://${instance.subdomain}-plane.${
+      process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain
+    }`,
+  );
 }
