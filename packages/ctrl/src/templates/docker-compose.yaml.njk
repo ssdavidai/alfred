@@ -483,6 +483,9 @@ services:
     pids_limit: 128
 
   plane-web:
+    # plane-frontend:stable is a pre-built nginx image serving static Next.js
+    # export on :80. The image already has the correct CMD/ENTRYPOINT — do
+    # not override with `command: [node ...]` (there is no node binary).
     image: makeplane/plane-frontend:stable
     restart: unless-stopped
     depends_on:
@@ -491,9 +494,8 @@ services:
     environment:
       - NEXT_PUBLIC_API_BASE_URL=
       - NEXT_PUBLIC_DEPLOY_URL=
-    command: ["node", "web/server.js"]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000 >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 20
@@ -502,6 +504,8 @@ services:
     pids_limit: 256
 
   plane-space:
+    # plane-space:stable runs `npx react-router-serve ./build/server/index.js`
+    # on :3000 via its own entrypoint — don't override CMD.
     image: makeplane/plane-space:stable
     restart: unless-stopped
     depends_on:
@@ -510,11 +514,11 @@ services:
     environment:
       - NEXT_PUBLIC_API_BASE_URL=
       - NEXT_PUBLIC_DEPLOY_URL=
-    command: ["node", "space/server.js"]
     mem_limit: 256m
     pids_limit: 128
 
   plane-admin:
+    # plane-admin:stable is nginx on :80, same pattern as plane-web.
     image: makeplane/plane-admin:stable
     restart: unless-stopped
     depends_on:
@@ -523,7 +527,6 @@ services:
     environment:
       - NEXT_PUBLIC_API_BASE_URL=
       - NEXT_PUBLIC_DEPLOY_URL=
-    command: ["node", "admin/server.js"]
     mem_limit: 256m
     pids_limit: 128
 
@@ -554,7 +557,7 @@ services:
       - FILE_SIZE_LIMIT=5242880
       - BUCKET_NAME=uploads
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:80/ >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 20
