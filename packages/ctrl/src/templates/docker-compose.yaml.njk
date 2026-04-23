@@ -484,8 +484,9 @@ services:
 
   plane-web:
     # plane-frontend:stable is a pre-built nginx image serving static Next.js
-    # export on :80. The image already has the correct CMD/ENTRYPOINT — do
-    # not override with `command: [node ...]` (there is no node binary).
+    # export. Image ships its own /etc/nginx/nginx.conf with `listen 3000;`
+    # (NOT :80 — the /etc/nginx/conf.d/default.conf stub is unused). CMD is
+    # `nginx -g daemon off;` — do not override.
     image: makeplane/plane-frontend:stable
     restart: unless-stopped
     depends_on:
@@ -495,7 +496,7 @@ services:
       - NEXT_PUBLIC_API_BASE_URL=
       - NEXT_PUBLIC_DEPLOY_URL=
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 20
