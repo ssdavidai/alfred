@@ -406,9 +406,11 @@ services:
       - ENABLE_EMAIL_PASSWORD=1
       - ENABLE_MAGIC_LINK_LOGIN=0
       - API_KEY_RATE_LIMIT=600/minute
+      - GUNICORN_WORKERS=2
     command: ["/bin/sh", "-c", "./bin/docker-entrypoint-api.sh"]
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/ || exit 1"]
+      # plane-backend image ships wget but NOT curl.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/api/instances/ >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 30
