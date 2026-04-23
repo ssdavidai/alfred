@@ -8,11 +8,14 @@ import pytest
 
 from src.utils.plane_mapping import (
     ALFRED_LABELS,
+    LOOP_GUARD_FIELDS,
     PLANE_PRIORITY_TO_VAULT,
     PLANE_STATE_GROUP_TO_VAULT_TASK,
     VAULT_PRIORITY_TO_PLANE,
     VAULT_TASK_TO_PLANE_STATE_GROUP,
+    compute_loop_guard_hash,
     plane_issue_to_vault_patch,
+    plane_project_to_matter_patch,
     vault_task_to_plane_update,
 )
 
@@ -248,3 +251,177 @@ class TestPlaneIssueToVaultPatch:
         }
         patch = plane_issue_to_vault_patch(fake_issue)
         assert patch["status"] == "blocked"
+
+
+# ── plane_project_to_matter_patch ────────────────────────────────────────────
+
+class TestPlaneProjectToMatterPatch:
+    def test_basic_active_project(self):
+        project = {
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "name": "Client X Engagement",
+            "description_text": "Long-running advisory retainer.",
+            "is_archived": False,
+        }
+        patch = plane_project_to_matter_patch(project)
+        assert patch["name"] == "Client X Engagement"
+        assert patch["description"] == "Long-running advisory retainer."
+        assert patch["status"] == "active"
+        assert patch["plane_project_id"] == "550e8400-e29b-41d4-a716-446655440000"
+
+    def test_archived_flag_sets_status_archived(self):
+        project = {"id": "x", "name": "Dead deal", "is_archived": True}
+        patch = plane_project_to_matter_patch(project)
+        assert patch["status"] == "archived"
+
+    def test_archived_at_timestamp_sets_status_archived(self):
+        """Plane sometimes reports archival via ``archived_at`` alone."""
+        project = {"id": "x", "name": "Old", "archived_at": "2026-04-01T00:00:00Z"}
+        patch = plane_project_to_matter_patch(project)
+        assert patch["status"] == "archived"
+
+    def test_missing_name_falls_back(self):
+        patch = plane_project_to_matter_patch({"id": "x", "name": ""})
+        assert patch["name"] == "Untitled matter"
+
+    def test_null_description_becomes_empty(self):
+        """Null description must not become the string 'None'."""
+        patch = plane_project_to_matter_patch({
+            "id": "x", "name": "Fine", "description_text": None,
+        })
+        assert patch["description"] == ""
+
+    def test_prefers_description_text_over_html(self):
+        patch = plane_project_to_matter_patch({
+            "id": "x", "name": "X",
+            "description_text": "plain",
+            "description_html": "<p>html</p>",
+        })
+        assert patch["description"] == "plain"
+
+    def test_falls_back_to_description_html(self):
+        patch = plane_project_to_matter_patch({
+            "id": "x", "name": "X",
+            "description_html": "<p>only html</p>",
+        })
+        assert patch["description"] == "<p>only html</p>"
+
+    def test_name_truncated_to_255(self):
+        project = {"id": "x", "name": "y" * 400}
+        patch = plane_project_to_matter_patch(project)
+        assert len(patch["name"]) == 255
+
+    def test_omits_plane_project_id_when_no_id(self):
+        """Don't smuggle in empty string fields on partial payloads."""
+        patch = plane_project_to_matter_patch({"name": "No id"})
+        assert "plane_project_id" not in patch
+
+    def test_unknown_fields_ignored(self):
+        """Fields Plane sends that we don't care about never leak into the patch."""
+        project = {
+            "id": "x",
+            "name": "Test",
+            "updated_by": "user-123",
+            "total_issues": 42,
+            "workspace_id": "ws-456",
+            "mystery_field": "boo",
+        }
+        patch = plane_project_to_matter_patch(project)
+        # Exactly the managed keys, nothing else
+        assert set(patch.keys()) == {
+            "name", "description", "status", "plane_project_id",
+        }
+
+    def test_does_not_touch_protected_fields(self):
+        """related_* / source_event / etc must never appear in the patch."""
+        project = {
+            "id": "x",
+            "name": "Test",
+            # Even if someone put these on the Plane side (they shouldn't),
+            # the helper does not echo them.
+            "related_matters": ["something"],
+            "related_persons": ["someone"],
+            "source_event": "bad",
+        }
+        patch = plane_project_to_matter_patch(project)
+        for field in (
+            "related_matters",
+            "related_persons",
+            "related_orgs",
+            "related_projects",
+            "source_event",
+        ):
+            assert field not in patch
+
+
+# ── compute_loop_guard_hash ──────────────────────────────────────────────────
+
+class TestLoopGuardHash:
+    def test_loop_guard_fields_constant(self):
+        """Explicit list — changing it breaks forward/reverse agreement."""
+        assert LOOP_GUARD_FIELDS == (
+            "name", "description", "state", "priority", "due_date", "assignees",
+        )
+
+    def test_deterministic(self):
+        payload = {"name": "A", "state": "started", "priority": "high"}
+        assert compute_loop_guard_hash(payload) == compute_loop_guard_hash(payload)
+
+    def test_order_insensitive(self):
+        """sort_keys must make dict-insertion-order irrelevant."""
+        a = {"name": "A", "state": "started", "priority": "high"}
+        b = {"priority": "high", "name": "A", "state": "started"}
+        assert compute_loop_guard_hash(a) == compute_loop_guard_hash(b)
+
+    def test_assignee_order_insensitive(self):
+        a = {"name": "X", "assignees": ["u1", "u2"]}
+        b = {"name": "X", "assignees": ["u2", "u1"]}
+        assert compute_loop_guard_hash(a) == compute_loop_guard_hash(b)
+
+    def test_unrelated_fields_do_not_affect_hash(self):
+        """Adding noise Plane fields must NOT change the digest."""
+        base = {"name": "X", "state": "started", "priority": "high"}
+        noisy = {
+            **base,
+            "updated_at": "2026-04-23T12:00:00Z",
+            "sequence_id": 42,
+            "archived_at": None,
+        }
+        assert compute_loop_guard_hash(base) == compute_loop_guard_hash(noisy)
+
+    def test_state_detail_group_matches_state_group(self):
+        """Webhook (state_detail.group) and flat (state_group) payloads
+        that mean the same thing hash identically."""
+        webhook = {
+            "name": "X", "priority": "high",
+            "state_detail": {"group": "started"},
+        }
+        flat = {"name": "X", "priority": "high", "state_group": "started"}
+        assert compute_loop_guard_hash(webhook) == compute_loop_guard_hash(flat)
+
+    def test_outbound_inbound_agree(self):
+        """Forward-sync's outbound body and the echo Plane sends back
+        must hash identically — otherwise guard #2 is a no-op."""
+        fm = {"name": "A task", "status": "todo", "priority": "medium"}
+        outbound = vault_task_to_plane_update(fm)
+        # Simulate Plane echoing the state back as an issue webhook
+        inbound = {
+            "name": outbound["name"],
+            "state_detail": {"group": outbound["state_group"]},
+            "priority": outbound["priority"],
+        }
+        assert compute_loop_guard_hash(outbound) == compute_loop_guard_hash(inbound)
+
+    def test_empty_payload_stable(self):
+        """Empty payload still hashes to something — and it's stable."""
+        h = compute_loop_guard_hash({})
+        assert len(h) == 64
+        assert compute_loop_guard_hash({}) == h
+
+    def test_priority_none_stable(self):
+        """Missing priority → 'none' — forward and reverse agree."""
+        a = {"name": "X"}
+        b = {"name": "X", "priority": "none"}
+        c = {"name": "X", "priority": None}
+        assert compute_loop_guard_hash(a) == compute_loop_guard_hash(b)
+        assert compute_loop_guard_hash(a) == compute_loop_guard_hash(c)

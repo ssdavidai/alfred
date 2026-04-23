@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -31,7 +32,10 @@ from temporalio import activity
 
 from src.config import load_config
 from src.utils.plane_client import PlaneClient
-from src.utils.plane_mapping import vault_task_to_plane_update
+from src.utils.plane_mapping import (
+    compute_loop_guard_hash,
+    vault_task_to_plane_update,
+)
 from src.utils.vault_client import VaultClient
 
 logger = logging.getLogger("alfred-learn")
@@ -42,6 +46,86 @@ logger = logging.getLogger("alfred-learn")
 # ---------------------------------------------------------------------------
 
 _CURSOR_RELATIVE = "state/plane_sync_cursor.json"
+
+# Outbound-signature store (shared with B7 reverse-sync guard #2). Path
+# is duplicated in ``src.activities.plane_reverse_sync`` so tests can
+# patch either module without cross-coupling; both resolve against
+# ``Config.alfred_data_dir`` so they stay in lockstep on disk.
+_OUTBOUND_SIGS_RELATIVE = "state/plane_outbound_signatures.json"
+
+# Cap on how many outbound signatures we keep. Larger → longer tail for
+# the race-condition guard, but more disk churn. 1000 ≈ half a day at
+# peak forward-sync rates.
+_OUTBOUND_SIGS_CAP = 1000
+
+
+def _outbound_sigs_path() -> Path:
+    cfg = load_config()
+    return Path(cfg.alfred_data_dir) / _OUTBOUND_SIGS_RELATIVE
+
+
+def _load_outbound_sigs_from_disk(path: Path) -> dict[str, dict[str, Any]]:
+    """Read the outbound-signature file. Empty dict on missing/corrupt."""
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        if not isinstance(raw, dict):
+            return {}
+        # Coerce values to the expected shape defensively — older files
+        # from a partial deploy shouldn't crash the activity.
+        out: dict[str, dict[str, Any]] = {}
+        for k, v in raw.items():
+            if not isinstance(v, dict):
+                continue
+            if "hash" not in v or "ts" not in v:
+                continue
+            out[str(k)] = {"hash": str(v["hash"]), "ts": int(v["ts"])}
+        return out
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "plane_sync: outbound signatures at %s unreadable (%s) — starting fresh",
+            path, exc,
+        )
+        return {}
+
+
+def _save_outbound_sigs_to_disk(path: Path, sigs: dict[str, dict[str, Any]]) -> None:
+    """FIFO-evict above cap, then atomically write."""
+    if len(sigs) > _OUTBOUND_SIGS_CAP:
+        # Sort by ts ascending, drop the oldest overflow. Python dicts
+        # preserve insertion order so we rebuild in chronological order.
+        ordered = sorted(sigs.items(), key=lambda kv: int(kv[1].get("ts", 0)))
+        ordered = ordered[-_OUTBOUND_SIGS_CAP:]
+        sigs = {k: v for k, v in ordered}
+    payload = json.dumps(sigs, sort_keys=True, separators=(",", ":"))
+    _atomic_write(path, payload)
+
+
+def _record_outbound_signature(plane_id: str, payload: dict[str, Any]) -> None:
+    """Record the hash of an outbound Plane write. Best-effort — logs and
+    continues on any I/O failure.
+
+    Called from ``sync_matter_to_plane`` / ``sync_task_to_plane`` AFTER
+    a successful PUT/POST so reverse-sync can recognise the echo that
+    Plane's webhook will fire milliseconds later.
+    """
+    if not plane_id:
+        return
+    try:
+        path = _outbound_sigs_path()
+        sigs = _load_outbound_sigs_from_disk(path)
+        sigs[str(plane_id)] = {
+            "hash": compute_loop_guard_hash(payload),
+            "ts": int(time.time() * 1000),
+        }
+        _save_outbound_sigs_to_disk(path, sigs)
+    except Exception as exc:  # noqa: BLE001 — signature write must never break sync
+        logger.warning(
+            "plane_sync: failed to record outbound signature plane_id=%s: %s",
+            plane_id, exc,
+        )
 
 
 def _cursor_path() -> Path:
@@ -373,20 +457,20 @@ async def sync_matter_to_plane(
     try:
         existing_id = project_map.get(slug)
         if existing_id:
-            await client.update_project(
-                existing_id,
-                patch={"name": name, "description_text": description},
-            )
+            patch_body = {"name": name, "description_text": description}
+            await client.update_project(existing_id, patch=patch_body)
             action = "update"
             plane_id = existing_id
             logger.info(
                 "plane_sync.project_upsert slug=%s plane_id=%s action=%s",
                 slug, plane_id, action,
             )
+            _record_outbound_signature(plane_id, patch_body)
             return {"slug": slug, "plane_id": plane_id, "action": action}
 
         # Create path — include origin stamp so webhook-back events
         # can be detected as loop-back in B7.
+        create_body = {"name": name, "description_text": description}
         created = await client.create_project(
             name=name,
             identifier=_project_identifier_for_slug(slug),
@@ -402,6 +486,7 @@ async def sync_matter_to_plane(
             "plane_sync.project_upsert slug=%s plane_id=%s action=%s",
             slug, plane_id, action,
         )
+        _record_outbound_signature(plane_id, create_body)
         return {"slug": slug, "plane_id": plane_id, "action": action}
     finally:
         await client.close()
@@ -505,6 +590,18 @@ async def sync_task_to_plane(
             "plane_sync.issue_upsert slug=%s plane_id=%s project=%s action=%s",
             slug, plane_id, project_id, action,
         )
+        # Record the outbound signature so reverse-sync can recognise the
+        # webhook echo that Plane fires immediately after this write.
+        # Build a guard-compatible payload: merge what we sent with the
+        # hashed ``state`` group name (labels/state_id are per-project
+        # UUIDs that don't travel cross-direction).
+        outbound_for_hash: dict[str, Any] = {
+            "name": issue_body["name"],
+            "description": issue_body["description_html"],
+            "priority": issue_body["priority"],
+            "state": update.get("state_group") or "",
+        }
+        _record_outbound_signature(plane_id, outbound_for_hash)
         return {
             "slug": slug,
             "plane_id": plane_id,

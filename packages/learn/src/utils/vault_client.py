@@ -61,6 +61,34 @@ class VaultClient:
         )
         resp.raise_for_status()
 
+    async def patch_frontmatter(
+        self, path: str, updates: dict[str, Any]
+    ) -> None:
+        """Update specific frontmatter keys on an existing vault record.
+
+        Uses ctrl-api's ``PATCH /api/v1/vault/records/*`` with the
+        ``set`` body — that endpoint routes to the ``alfred vault edit``
+        CLI which validates field names against the schema. All values
+        are stringified before send since the underlying CLI accepts
+        only string values per field.
+        """
+        # All vault-frontmatter-edit CLI arguments are strings; coerce
+        # booleans + numbers to lowercase string form so they round-trip
+        # correctly through YAML.
+        set_map: dict[str, str] = {}
+        for k, v in updates.items():
+            if isinstance(v, bool):
+                set_map[k] = "true" if v else "false"
+            elif v is None:
+                set_map[k] = ""
+            else:
+                set_map[k] = str(v)
+        resp = await self._client.patch(
+            f"/api/v1/vault/records/{path}",
+            json={"set": set_map},
+        )
+        resp.raise_for_status()
+
     async def delete_record(self, path: str) -> bool:
         """Delete a vault record by path. Returns True if a record was
         removed, False if it didn't exist (404). Raises on other errors.

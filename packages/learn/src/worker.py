@@ -26,6 +26,7 @@ from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
 from src.workflows.chore_promotion import ChorePromotionReflectionWorkflow
 from src.workflows.hourly_enrichment import HourlyEnrichmentWorkflow
 from src.workflows.plane_sync import PlaneSyncWorkflow
+from src.workflows.plane_reverse_sync import PlaneReverseSyncWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -299,6 +300,23 @@ from src.activities.plane_sync import (
     sync_task_to_plane,
 )
 
+# Plane reverse sync (#536 B7) — Plane → vault ingress activities
+from src.activities.plane_reverse_sync import (
+    append_plane_comment_to_vault,
+    apply_plane_patch_to_vault,
+    archive_vault_record,
+    check_loop_guards,
+    compute_plane_payload_hash,
+    create_vault_task_from_plane_issue,
+    fetch_plane_events,
+    load_outbound_signatures,
+    load_reverse_sync_state,
+    mark_plane_event_processed,
+    plane_reverse_sync_is_enabled,
+    save_outbound_signatures,
+    save_reverse_sync_cursor,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -322,6 +340,7 @@ _STATIC_WORKFLOWS = [
     ChorePromotionReflectionWorkflow,
     HourlyEnrichmentWorkflow,
     PlaneSyncWorkflow,
+    PlaneReverseSyncWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -524,6 +543,20 @@ ALL_ACTIVITIES = [
     fetch_changed_tasks,
     sync_matter_to_plane,
     sync_task_to_plane,
+    # Plane reverse sync (#536 B7)
+    plane_reverse_sync_is_enabled,
+    load_reverse_sync_state,
+    save_reverse_sync_cursor,
+    load_outbound_signatures,
+    save_outbound_signatures,
+    fetch_plane_events,
+    compute_plane_payload_hash,
+    check_loop_guards,
+    apply_plane_patch_to_vault,
+    create_vault_task_from_plane_issue,
+    append_plane_comment_to_vault,
+    archive_vault_record,
+    mark_plane_event_processed,
 ]
 
 

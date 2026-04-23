@@ -26,9 +26,12 @@ from temporalio.client import (
 from temporalio.service import RPCError, RPCStatusCode
 
 from scripts.register_schedules import (
+    PLANE_REVERSE_SYNC_SCHEDULE_ID,
+    PLANE_REVERSE_SYNC_WORKFLOW,
     PLANE_SYNC_SCHEDULE_ID,
     PLANE_SYNC_WORKFLOW,
     _plane_sync_enabled,
+    register_plane_reverse_sync,
     register_plane_sync,
 )
 
@@ -236,3 +239,76 @@ class TestRegisterAllConnectFailure:
         with pytest.raises(SystemExit) as excinfo:
             mod.main()
         assert excinfo.value.code == 1
+
+
+# ---------------------------------------------------------------------------
+# Reverse sync schedule (B7)
+# ---------------------------------------------------------------------------
+
+class TestRegisterPlaneReverseSyncEnabled:
+    @pytest.fixture(autouse=True)
+    def enable_flag(self, monkeypatch):
+        monkeypatch.setenv("PLANE_SYNC_ENABLED", "true")
+
+    def test_creates_schedule_with_30s_interval_and_skip_overlap(self):
+        client, _handle = _mock_client()
+
+        asyncio.run(register_plane_reverse_sync(client, "alfred-learn"))
+
+        client.create_schedule.assert_awaited_once()
+        schedule_id, schedule = client.create_schedule.await_args.args
+        assert schedule_id == PLANE_REVERSE_SYNC_SCHEDULE_ID
+
+        action = schedule.action
+        assert isinstance(action, ScheduleActionStartWorkflow)
+        assert action.workflow == PLANE_REVERSE_SYNC_WORKFLOW
+        assert action.task_queue == "alfred-learn"
+        assert action.id == f"{PLANE_REVERSE_SYNC_SCHEDULE_ID}-run"
+        assert list(action.args) == []
+
+        spec = schedule.spec
+        assert len(spec.intervals) == 1
+        assert spec.intervals[0].every == timedelta(seconds=30)
+        assert not spec.calendars
+
+        policy = schedule.policy
+        assert isinstance(policy, SchedulePolicy)
+        assert policy.overlap == ScheduleOverlapPolicy.SKIP
+
+    def test_already_exists_is_tolerated(self):
+        client, _handle = _mock_client()
+        client.create_schedule.side_effect = _rpc_error(
+            RPCStatusCode.ALREADY_EXISTS
+        )
+        asyncio.run(register_plane_reverse_sync(client, "alfred-learn"))
+        client.create_schedule.assert_awaited_once()
+
+    def test_real_temporal_error_propagates(self):
+        client, _handle = _mock_client()
+        client.create_schedule.side_effect = _rpc_error(
+            RPCStatusCode.UNAVAILABLE
+        )
+        with pytest.raises(RPCError):
+            asyncio.run(register_plane_reverse_sync(client, "alfred-learn"))
+
+
+class TestRegisterPlaneReverseSyncDisabled:
+    @pytest.fixture(autouse=True)
+    def disable_flag(self, monkeypatch):
+        monkeypatch.delenv("PLANE_SYNC_ENABLED", raising=False)
+
+    def test_absent_schedule_is_noop(self):
+        client, handle = _mock_client()
+        handle.describe.side_effect = _rpc_error(RPCStatusCode.NOT_FOUND)
+        asyncio.run(register_plane_reverse_sync(client, "alfred-learn"))
+        handle.describe.assert_awaited_once()
+        handle.delete.assert_not_called()
+        client.create_schedule.assert_not_called()
+
+    def test_existing_schedule_is_deleted(self):
+        client, handle = _mock_client()
+        handle.describe.return_value = MagicMock()
+        asyncio.run(register_plane_reverse_sync(client, "alfred-learn"))
+        handle.describe.assert_awaited_once()
+        handle.delete.assert_awaited_once()
+        client.create_schedule.assert_not_called()

@@ -30,11 +30,15 @@ from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from src.activities.plane_sync import (
+    _OUTBOUND_SIGS_CAP,
     _iso_to_epoch,
     _load_cursor_from_disk,
+    _load_outbound_sigs_from_disk,
     _normalize_matter_ref,
     _project_identifier_for_slug,
     _record_mtime,
+    _record_outbound_signature,
+    _save_outbound_sigs_to_disk,
     _slug_from_path,
 )
 from src.workflows.plane_sync import PlaneSyncResult, PlaneSyncWorkflow
@@ -495,6 +499,76 @@ class TestErrorHolding:
         # Cursor holds at pre-run value because at least one record failed
         save = [c for c in _CALL_LOG if c[0] == "save"][0][1]
         assert save["last_vault_mtime"] == 0.0
+
+
+class TestOutboundSignatureStore:
+    """Forward-sync writes outbound signatures so B7 reverse-sync's
+    suppression-window guard has something to match against. These tests
+    exercise the store directly."""
+
+    def test_round_trip(self, tmp_path):
+        path = tmp_path / "outbound.json"
+        sigs = {
+            "plane-1": {"hash": "abc", "ts": 1000},
+            "plane-2": {"hash": "def", "ts": 2000},
+        }
+        _save_outbound_sigs_to_disk(path, sigs)
+        loaded = _load_outbound_sigs_from_disk(path)
+        assert loaded == sigs
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        assert _load_outbound_sigs_from_disk(tmp_path / "nope.json") == {}
+
+    def test_corrupt_file_returns_empty(self, tmp_path):
+        path = tmp_path / "c.json"
+        path.write_text("{not json")
+        assert _load_outbound_sigs_from_disk(path) == {}
+
+    def test_malformed_entries_dropped(self, tmp_path):
+        path = tmp_path / "bad.json"
+        path.write_text(
+            '{"ok": {"hash": "a", "ts": 1}, '
+            '"shape1": "not a dict", '
+            '"shape2": {"hash": "only"}}'
+        )
+        loaded = _load_outbound_sigs_from_disk(path)
+        assert loaded == {"ok": {"hash": "a", "ts": 1}}
+
+    def test_fifo_eviction_above_cap(self, tmp_path):
+        """Overflowing the store drops the OLDEST ts, keeps the newest."""
+        path = tmp_path / "cap.json"
+        # Build cap + 10 entries; older timestamps should be evicted.
+        sigs = {
+            f"id-{i}": {"hash": f"h{i}", "ts": i}
+            for i in range(_OUTBOUND_SIGS_CAP + 10)
+        }
+        _save_outbound_sigs_to_disk(path, sigs)
+        loaded = _load_outbound_sigs_from_disk(path)
+        assert len(loaded) == _OUTBOUND_SIGS_CAP
+        # Newest 1000 kept = ts in [10, cap+10)
+        for key in loaded:
+            ts = loaded[key]["ts"]
+            assert ts >= 10
+
+    def test_record_outbound_signature_writes_entry(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ALFRED_DATA_DIR", str(tmp_path))
+        from src.activities.plane_sync import _outbound_sigs_path
+
+        payload = {"name": "X", "state_group": "started", "priority": "high"}
+        _record_outbound_signature("plane-id-1", payload)
+
+        loaded = _load_outbound_sigs_from_disk(_outbound_sigs_path())
+        assert "plane-id-1" in loaded
+        assert len(loaded["plane-id-1"]["hash"]) == 64  # sha256 hex
+
+    def test_record_outbound_signature_noop_on_empty_id(
+        self, tmp_path, monkeypatch
+    ):
+        """Empty plane_id must not create a spurious entry."""
+        monkeypatch.setenv("ALFRED_DATA_DIR", str(tmp_path))
+        from src.activities.plane_sync import _outbound_sigs_path
+        _record_outbound_signature("", {"anything": "here"})
+        assert not _outbound_sigs_path().exists()
 
 
 class TestCursorPersistenceAcrossRuns:
