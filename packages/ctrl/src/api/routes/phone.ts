@@ -612,6 +612,13 @@ export function registerPhoneRoutes(): void {
       const target = normaliseNumber(decodeURIComponent(params["number"]));
       const current = readAuthorizedNumbers();
       const next = current.filter((n) => normaliseNumber(n) !== target);
+      if (next.length === 0 && current.length > 0) {
+        sendJson(res, 400, {
+          error:
+            "Cannot delete the last authorized number — add another first",
+        });
+        return;
+      }
       writeAuthorizedNumbers(next);
       sendJson(res, 200, { numbers: readAuthorizedNumbers() });
     },
