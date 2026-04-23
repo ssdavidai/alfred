@@ -25,7 +25,7 @@ import {
   getInstanceByName,
   getEvents,
 } from "./db/queries.js";
-import { provision, destroy, updateImages, rollback, deployApi, repairTunnel } from "./infra/provisioner.js";
+import { provision, destroy, updateImages, rollback, deployApi, deployPlane, repairTunnel } from "./infra/provisioner.js";
 import { getHetznerClient } from "./infra/hetzner.js";
 import { runHealthChecks } from "./monitoring/health.js";
 import { exec as sshExec } from "./infra/ssh.js";
@@ -144,6 +144,7 @@ program
   .option("--location <loc>", "Location", process.env.DEFAULT_LOCATION ?? DEFAULTS.location)
   .option("--ts-key <key>", "Tailscale auth key")
   .option("--snapshot <id>", "Golden snapshot ID (auto-detects latest if set to 'auto')")
+  .option("--plane", "Deploy Plane self-hosted PM sidecar (issue #536 — adds ~6GB RAM)")
   .action(async (name, opts) => {
     getDb();
 
@@ -184,6 +185,7 @@ program
       tailscale_authkey: tsKey,
       openrouter_api_key: process.env.OPENROUTER_API_KEY,
       snapshot_id: snapshotId,
+      planeEnabled: opts.plane === true,
     };
 
     console.log(`Provisioning "${name}" (${opts.type} in ${opts.location})...`);
@@ -356,6 +358,36 @@ program
         process.exit(1);
       }
       await deployApi(instance.id, console.log);
+    }
+    closeDb();
+  });
+
+program
+  .command("deploy-plane <name>")
+  .description(
+    "Retrofit Plane (self-hosted PM sidecar) onto an existing tenant — see issue #536",
+  )
+  .action(async (name) => {
+    getDb();
+    const instance = getInstanceByName(name);
+    if (!instance) {
+      console.error(`Instance "${name}" not found`);
+      closeDb();
+      process.exit(1);
+    }
+    if (!instance.ip_address || !instance.ssh_key_path) {
+      console.error("Instance not fully provisioned");
+      closeDb();
+      process.exit(1);
+    }
+    try {
+      await deployPlane(instance.id, console.log);
+      console.log("\nPlane deployed successfully.");
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`\nPlane deploy FAILED: ${msg}`);
+      closeDb();
+      process.exit(1);
     }
     closeDb();
   });

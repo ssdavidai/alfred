@@ -53,6 +53,16 @@ export interface InstanceConfig {
   tailscale_tag?: string;
   subdomain?: string;
   snapshot_id?: number;
+  /**
+   * Opt-in flag to deploy Plane (self-hosted PM) alongside the Alfred stack.
+   * When true, the compose template renders 12 additional services
+   * (plane-db, plane-redis, plane-mq, plane-minio, plane-api, plane-worker,
+   * plane-beat, plane-web, plane-space, plane-admin, plane-live, plane-proxy)
+   * and the provisioner's `setup_plane` step creates a workspace, admin user,
+   * API token, and webhook. Adds ~6 GB RAM overhead — recommended on ccx33+.
+   * See issue #536.
+   */
+  planeEnabled?: boolean;
 }
 
 // --- Provisioning ---
@@ -74,6 +84,7 @@ export type ProvisioningStep =
   | "deploy_api"
   | "setup_tunnel"
   | "provision_phone"
+  | "setup_plane"
   | "health_check"
   | "done";
 
