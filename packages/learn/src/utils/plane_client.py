@@ -115,10 +115,14 @@ class PlaneClient:
         ``identifier`` must be ≤ 12 characters, uppercase alphanumeric.
         ``network=2`` means secret (visible only to members).
 
-        **409 self-heal**: if the identifier is already in use (common
-        when forward-sync retries a matter whose project_map entry got
-        lost), list projects and return the matching one instead of
-        failing. Match by identifier since that's unique per workspace.
+        **409 self-heal**: if the identifier is already in use, decide
+        whether this is a resync of the same project (identifier reuse
+        by the same matter — safe to return the existing project) or a
+        true collision (different matter trying to land on an
+        already-taken identifier). We detect the latter by comparing
+        names: if the existing project has a different name, retry with
+        ``<identifier>2``, ``<identifier>3``, … until we either succeed
+        or run out of retries.
         """
         payload: dict[str, Any] = {
             "name": name,
@@ -131,21 +135,50 @@ class PlaneClient:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 409:
                 raise
-            # Plane 1.3.0's 409 body for duplicate projects carries the
+            # First: inspect the 409 body — Plane 1.3.0 may carry the
             # existing id directly (same shape as the issues endpoint):
             #   {"error": "...", "id": "<uuid>"}
+            existing_project: Optional[dict[str, Any]] = None
             try:
                 err_body = exc.response.json()
                 if isinstance(err_body, dict) and err_body.get("id"):
-                    return await self.get_project(str(err_body["id"]))
+                    existing_project = await self.get_project(str(err_body["id"]))
             except httpx.HTTPStatusError:
                 raise
             except Exception:
                 pass
-            projects = await self.list_projects()
-            for p in projects:
-                if p.get("identifier") == payload["identifier"]:
-                    return p
+            if existing_project is None:
+                projects = await self.list_projects()
+                for p in projects:
+                    if p.get("identifier") == payload["identifier"]:
+                        existing_project = p
+                        break
+            if existing_project is None:
+                raise
+
+            # Same name → safe to treat this as a resync and return the
+            # existing project. Names are sanitized upstream so exact
+            # equality is the right check.
+            existing_name = str(existing_project.get("name") or "").strip()
+            if existing_name == name.strip():
+                return existing_project
+
+            # Different name → true identifier collision. Retry with a
+            # numeric suffix. Cap the retries so we don't spin forever.
+            base = payload["identifier"]
+            for n in range(2, 10):
+                suffixed = f"{base[:11]}{n}"[:12]
+                retry_payload = {**payload, "identifier": suffixed}
+                try:
+                    return await self._post(
+                        f"{self._ws()}/projects/", json=retry_payload
+                    )
+                except httpx.HTTPStatusError as exc2:
+                    if exc2.response.status_code == 409:
+                        continue
+                    raise
+            # Fell through — re-raise the original 409 so the caller
+            # sees a deterministic error rather than a silent mis-route.
             raise
 
     async def update_project(

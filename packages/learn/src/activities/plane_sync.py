@@ -227,19 +227,30 @@ def _iso_to_epoch(value: Any) -> float:
         return 0.0
 
 
-# Plane 1.3.0 rejects project/issue names containing `-`, `&`, `'`, `"` and
-# similar "special" characters with 400 "Project name cannot contain special
-# characters." Matter titles frequently include hyphens (slug-style) or
-# ampersands (e.g. "Family Life & Hanna's First Year"), so we sanitize before
-# sending. Keep it minimal: replace rejected chars with spaces, drop quotes,
-# collapse whitespace, fall back to a safe default.
-_PLANE_NAME_REJECT_RE = re.compile(r"[-&]+")
+# Plane 1.3.0 rejects project/issue names containing many ASCII punctuation
+# characters with 400 "Project name cannot contain special characters." The
+# exact reject list is not documented, but empirical probing against the
+# running instance identified these as rejected:
+#   -  &  ( )  ,  .  :  ;  @  %  #  *  +  |  !  ?  =  <  >  {  }
+# and accepted: letters, digits, whitespace, en-dash (–), em-dash (—),
+# underscore (_), forward slash (/), square brackets ([ ]), tilde (~), and
+# single/double quotes (though we strip quotes anyway to keep names quoting
+# cleanly in YAML frontmatter round-trips).
+#
+# Rather than an ever-growing blocklist, use an allowlist: permit letters,
+# digits, whitespace, the accepted punctuation above, and the Unicode
+# dashes we actually want to preserve. Replace everything else with a
+# space, collapse whitespace, fall back to a safe default.
+_PLANE_NAME_ALLOW_RE = re.compile(r"[^\w\s/\[\]~–—]", re.UNICODE)
 
 
 def _sanitize_plane_name(raw: str) -> str:
     if not raw:
         return "Untitled"
-    cleaned = _PLANE_NAME_REJECT_RE.sub(" ", raw).replace("'", "").replace('"', "")
+    # Strip quote characters outright (they're valid ASCII \w would miss
+    # quotes anyway, but keep the explicit strip for clarity).
+    cleaned = raw.replace("'", "").replace('"', "")
+    cleaned = _PLANE_NAME_ALLOW_RE.sub(" ", cleaned)
     cleaned = " ".join(cleaned.split()).strip()
     return cleaned or "Untitled"
 
@@ -548,11 +559,31 @@ async def fetch_changed_tasks(since_mtime: float) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def _project_identifier_for_slug(slug: str) -> str:
-    """Build a Plane project identifier (uppercase, ≤ 5 chars)."""
+    """Build a Plane project identifier (uppercase, ≤ 5 chars).
+
+    Must be stable per slug and unique across distinct slugs. Two different
+    slugs that happen to share a 5-char prefix (e.g.
+    ``alfred-black-ai-butler-product`` vs
+    ``alfred-black-ai-butler-product-build``) both produce ``ALFRE`` under
+    a naive ``cleaned[:5]`` scheme, which collides inside a workspace. We
+    keep the first 3 alpha chars for human-readability then append 2 chars
+    derived from a deterministic hash of the full cleaned slug; base-36
+    alphabet keeps the identifier uppercase-alphanumeric which is what
+    Plane requires.
+    """
+    import hashlib
+
     cleaned = re.sub(r"[^A-Za-z0-9]", "", slug).upper()
     if not cleaned:
         cleaned = "ALFRD"
-    return cleaned[:5]
+    prefix = cleaned[:3].ljust(3, "X")
+    # 2-char base-36 suffix from sha1(slug) → 1296 possible suffixes.
+    # Collision risk across a fleet of <100 matters per tenant is trivial.
+    digest = hashlib.sha1(cleaned.encode("ascii")).digest()
+    n = int.from_bytes(digest[:2], "big") % (36 * 36)
+    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    suffix = alphabet[n // 36] + alphabet[n % 36]
+    return prefix + suffix
 
 
 @activity.defn

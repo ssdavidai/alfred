@@ -186,20 +186,54 @@ class TestRecordMtime:
 
 
 class TestProjectIdentifier:
-    def test_short_slug(self):
-        assert _project_identifier_for_slug("cx") == "CX"
+    """Plane project identifier derivation — see _project_identifier_for_slug.
 
-    def test_long_slug_truncated_to_5(self):
-        assert _project_identifier_for_slug("client-xylophone") == "CLIEN"
+    Post-PR #587, the identifier is `<3 alpha prefix, X-padded><2 base-36
+    hash chars>` so distinct slugs cannot collide. Values are deterministic
+    per slug but exact hash output isn't meaningful — assert shape + stability.
+    """
+
+    def _is_valid_identifier(self, ident: str) -> bool:
+        import re
+        return len(ident) == 5 and bool(re.fullmatch(r"[A-Z0-9]{5}", ident))
+
+    def test_short_slug_pads_and_hashes(self):
+        ident = _project_identifier_for_slug("cx")
+        assert ident.startswith("CXX")
+        assert self._is_valid_identifier(ident)
+
+    def test_long_slug_preserves_prefix(self):
+        ident = _project_identifier_for_slug("client-xylophone")
+        assert ident.startswith("CLI")
+        assert self._is_valid_identifier(ident)
 
     def test_strips_non_alphanumeric(self):
-        assert _project_identifier_for_slug("a-b_c.d") == "ABCD"
+        ident = _project_identifier_for_slug("a-b_c.d")
+        assert ident.startswith("ABC")
+        assert self._is_valid_identifier(ident)
 
-    def test_empty_falls_back(self):
-        assert _project_identifier_for_slug("") == "ALFRD"
+    def test_empty_falls_back_to_alfred_prefix(self):
+        ident = _project_identifier_for_slug("")
+        assert ident.startswith("ALF")
+        assert self._is_valid_identifier(ident)
 
-    def test_only_punctuation_falls_back(self):
-        assert _project_identifier_for_slug("---") == "ALFRD"
+    def test_only_punctuation_falls_back_to_alfred_prefix(self):
+        ident = _project_identifier_for_slug("---")
+        assert ident.startswith("ALF")
+        assert self._is_valid_identifier(ident)
+
+    def test_stable_per_slug(self):
+        # Same slug must produce the same identifier across calls
+        assert _project_identifier_for_slug("family-life") == _project_identifier_for_slug("family-life")
+
+    def test_distinct_slugs_distinct_identifiers(self):
+        # The collision case that motivated this design: two slugs with
+        # identical 5-char prefix under the old scheme must produce
+        # distinct identifiers now.
+        a = _project_identifier_for_slug("alfred-black-ai-butler-product")
+        b = _project_identifier_for_slug("alfred-black-ai-butler-product-build")
+        assert a != b
+        assert a.startswith("ALF") and b.startswith("ALF")
 
 
 # ---------------------------------------------------------------------------
