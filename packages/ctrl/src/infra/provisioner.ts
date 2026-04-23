@@ -1694,16 +1694,18 @@ async function releaseAgentPhone(
 
 // ── Plane provisioning helpers (issue #536) ─────────────────────────────────
 //
-// setup_plane creates the Plane workspace + Alfred user + API token + webhook
-// on a freshly-booted Plane sidecar stack. All Plane API calls go through SSH
-// to the tenant (plane-proxy binds 127.0.0.1:8080 on the tenant host). We use
-// curl from the tenant rather than reach across the network because (a) the
-// tenant Cloudflare tunnel may not be live when this step runs, and (b) curl
-// is guaranteed to be on every Hetzner Ubuntu 24.04 image.
+// setupPlane creates the Plane workspace + Alfred user + API token + webhook
+// on a freshly-booted Plane sidecar stack. We use the Django ORM via
+// `manage.py shell` inside the plane-api container — the Plane 1.3.0 public
+// HTTP surface splits bootstrap across `/api/instances/admin/sign-up/` (CSRF-
+// gated), `/auth/sign-in/` (anonymous-cookie gotchas), `/api/workspaces/...`
+// (session-cookie auth) and `/api/v1/workspaces/<slug>/webhooks/` (PAT auth
+// but webhook model is only mounted on the app, not public-api path); a
+// single direct ORM shell script sidesteps all of that.
 //
-// Every step is idempotent — re-running setup_plane on an already-configured
-// tenant either fetches existing IDs or skips. Partial progress is persisted
-// to /opt/alfred/compose/.env on each successful sub-step so a retry resumes.
+// Every step is idempotent — re-running on an already-configured tenant
+// finds existing objects via get_or_create. Secrets are persisted to
+// /opt/alfred/compose/.env on success so reruns skip.
 
 interface SetupPlaneOpts {
   customerName: string;
@@ -1724,78 +1726,6 @@ function planeSlug(subdomain: string): string {
   // is a safety coerce in case the subdomain ever widens.
   const s = subdomain.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
   return s.length >= 2 ? s.slice(0, 48) : `alfred-${s}`.slice(0, 48);
-}
-
-/**
- * Run a curl command on the tenant via SSH. Captures the HTTP body + status
- * in the same invocation so callers can distinguish 2xx vs 4xx vs 5xx.
- *
- * Returns {status, body}. Non-zero SSH exit codes throw — those are
- * transport failures, not Plane failures.
- */
-async function tenantCurl(
-  opts: Pick<SetupPlaneOpts, "serverIp" | "keyPath" | "hostKeyOpts">,
-  args: {
-    method: "GET" | "POST" | "PATCH" | "DELETE";
-    path: string;
-    headers?: Record<string, string>;
-    body?: unknown;
-    cookieJar?: string;
-  },
-): Promise<{ status: number; body: string }> {
-  const url = `${PLANE_PROXY_INTERNAL_URL}${args.path}`;
-  const headerArgs = Object.entries(args.headers ?? {})
-    .map(([k, v]) => `-H ${JSON.stringify(`${k}: ${v}`)}`)
-    .join(" ");
-  const cookieArg = args.cookieJar ? `-b ${args.cookieJar} -c ${args.cookieJar}` : "";
-  const dataArg =
-    args.body !== undefined
-      ? `--data ${JSON.stringify(JSON.stringify(args.body))}`
-      : "";
-  // -s silences progress, -o writes body to a temp file, -w prints the status
-  // on stdout only. The bash sequence then emits status + a separator + body.
-  const cmd = `set -o pipefail; _tmp=$(mktemp); _code=$(curl -sS -o "$_tmp" -w '%{http_code}' ${cookieArg} -X ${args.method} ${headerArgs} ${dataArg} ${JSON.stringify(url)}); _body=$(cat "$_tmp"); rm -f "$_tmp"; printf '%s\\n__PLANE_SEP__\\n%s' "$_code" "$_body"`;
-  // SSH runs our command through the remote login shell, so any "$(...)" or
-  // "$var" inside a double-quoted wrapper is expanded BEFORE bash sees it.
-  // Passing a JSON.stringify()'d script (which uses double quotes) strips all
-  // our command substitutions. Base64-encoding is the one encoding that's
-  // guaranteed to survive shell quoting unchanged. Decode-and-pipe-into-bash
-  // is the canonical way to ship a shell script over ssh2.exec() without
-  // getting chewed up.
-  const b64 = Buffer.from(cmd, "utf-8").toString("base64");
-  const result = await ssh.exec(
-    opts.serverIp,
-    opts.keyPath,
-    `echo ${b64} | base64 -d | bash`,
-    undefined,
-    opts.hostKeyOpts,
-  );
-  if (result.code !== 0) {
-    throw new Error(
-      `SSH curl failed (exit ${result.code}): ${result.stderr || result.stdout}`,
-    );
-  }
-  const idx = result.stdout.indexOf("__PLANE_SEP__");
-  if (idx === -1) {
-    throw new Error(`Malformed curl response: ${result.stdout.slice(0, 200)}`);
-  }
-  const statusStr = result.stdout.slice(0, idx).trim();
-  const body = result.stdout.slice(idx + "__PLANE_SEP__".length).replace(/^\n/, "");
-  const status = parseInt(statusStr, 10);
-  if (!Number.isFinite(status)) {
-    throw new Error(`Invalid HTTP status from curl: ${JSON.stringify(statusStr)}`);
-  }
-  return { status, body };
-}
-
-function parseJson<T = unknown>(body: string, context: string): T {
-  try {
-    return JSON.parse(body) as T;
-  } catch (e) {
-    throw new Error(
-      `Invalid JSON from Plane (${context}): ${e instanceof Error ? e.message : String(e)} — body: ${body.slice(0, 400)}`,
-    );
-  }
 }
 
 /**
@@ -1883,69 +1813,172 @@ function randomPassword(): string {
 }
 
 async function waitForPlaneReady(
-  opts: Pick<SetupPlaneOpts, "serverIp" | "keyPath" | "hostKeyOpts" | "log"> & {
-    log: (m: string) => void;
-  },
+  opts: Pick<SetupPlaneOpts, "serverIp" | "keyPath" | "hostKeyOpts" | "log">,
 ): Promise<void> {
   const start = Date.now();
-  let last = 0;
+  let last = "";
   while (Date.now() - start < PLANE_READY_TIMEOUT_MS) {
-    try {
-      const { status } = await tenantCurl(opts, {
-        method: "GET",
-        path: "/api/instances/",
-      });
-      if (status === 200) {
-        opts.log(`Plane API ready (HTTP 200)`);
-        return;
-      }
-      last = status;
-    } catch (e) {
-      // Connection refused / not yet bound — keep polling
-      last = -1;
+    const r = await ssh.exec(
+      opts.serverIp,
+      opts.keyPath,
+      `curl -sS -o /dev/null -w '%{http_code}' ${PLANE_PROXY_INTERNAL_URL}/api/instances/ || true`,
+      undefined,
+      opts.hostKeyOpts,
+    );
+    last = r.stdout.trim();
+    if (last === "200") {
+      opts.log("Plane API ready (HTTP 200)");
+      return;
     }
     await new Promise((r) => setTimeout(r, PLANE_POLL_INTERVAL_MS));
   }
   throw new Error(
-    `Plane API did not become ready within ${PLANE_READY_TIMEOUT_MS / 1000}s (last HTTP status: ${last})`,
+    `Plane API did not become ready within ${PLANE_READY_TIMEOUT_MS / 1000}s (last HTTP status: ${last || "unreachable"})`,
   );
 }
 
-interface PlaneInstanceStatus {
-  instance?: { is_setup_done?: boolean };
-  is_activated?: boolean;
+/**
+ * One-shot Plane bootstrap executed inside `plane-api` via `manage.py shell`.
+ * Reads config from env vars (passed with `docker exec -e ...`), performs
+ * idempotent get_or_create on every object, and prints a single JSON blob
+ * prefixed by __PLANE_BOOT__ on stdout so the caller can parse it safely
+ * even if Django's shell prints banner lines.
+ */
+const PLANE_BOOTSTRAP_PY = `import json, os, uuid
+from django.db import transaction
+from django.utils import timezone
+from plane.db.models import User, Workspace, WorkspaceMember, APIToken, Webhook
+from plane.license.models import Instance, InstanceAdmin
+
+ADMIN_EMAIL    = os.environ["BOOT_ADMIN_EMAIL"]
+ADMIN_PASSWORD = os.environ["BOOT_ADMIN_PASSWORD"]
+ALFRED_EMAIL   = os.environ["BOOT_ALFRED_EMAIL"]
+SLUG           = os.environ["BOOT_WORKSPACE_SLUG"]
+WORKSPACE_NAME = os.environ.get("BOOT_WORKSPACE_NAME", "Alfred")
+WEBHOOK_URL    = os.environ["BOOT_WEBHOOK_URL"]
+WEBHOOK_SECRET = os.environ["BOOT_WEBHOOK_SECRET"]
+
+def _ensure_user(email, first, last, is_admin=False, password=None):
+    u = User.objects.filter(email=email).first()
+    if u is None:
+        u = User(
+            username=str(uuid.uuid4()),
+            email=email,
+            first_name=first,
+            last_name=last,
+            is_active=True,
+            is_email_verified=True,
+            is_password_autoset=False,
+            last_login_medium="email",
+            last_login_time=timezone.now(),
+        )
+        if is_admin:
+            u.is_superuser = True
+            u.is_staff = True
+        if password:
+            u.set_password(password)
+        else:
+            u.set_unusable_password()
+        u.save()
+    return u
+
+with transaction.atomic():
+    admin  = _ensure_user(ADMIN_EMAIL, "Alfred", "Admin", is_admin=True, password=ADMIN_PASSWORD)
+    alfred = _ensure_user(ALFRED_EMAIL, "Alfred", "Black", is_admin=False)
+
+    instance = Instance.objects.order_by("created_at").last()
+    if instance is None:
+        raise SystemExit("No Instance row — plane-api entrypoint did not run register_instance")
+    InstanceAdmin.objects.get_or_create(
+        instance=instance, user=admin,
+        defaults={"role": 20, "is_verified": True},
+    )
+    if not instance.is_setup_done:
+        instance.is_setup_done = True
+        instance.is_signup_screen_visited = True
+        instance.save(update_fields=["is_setup_done", "is_signup_screen_visited"])
+
+    ws, _ = Workspace.objects.get_or_create(
+        slug=SLUG, defaults={"name": WORKSPACE_NAME, "owner": admin},
+    )
+    WorkspaceMember.objects.get_or_create(
+        workspace=ws, member=admin,  defaults={"role": 20, "is_active": True},
+    )
+    WorkspaceMember.objects.get_or_create(
+        workspace=ws, member=alfred, defaults={"role": 20, "is_active": True},
+    )
+
+    tok = APIToken.objects.filter(workspace=ws, user=alfred, label="alfred-ctrl").first()
+    if tok is None:
+        tok = APIToken.objects.create(
+            user=alfred, workspace=ws, label="alfred-ctrl",
+            description="Auto-generated by alfred-ctrl setup_plane",
+            user_type=0, is_service=True,
+        )
+
+    wh = Webhook.objects.filter(workspace=ws, url=WEBHOOK_URL).first()
+    if wh is None:
+        wh = Webhook.objects.create(
+            workspace=ws, url=WEBHOOK_URL, secret_key=WEBHOOK_SECRET,
+            is_active=True, project=True, issue=True, issue_comment=True,
+            module=True, cycle=True,
+        )
+    elif wh.secret_key != WEBHOOK_SECRET:
+        wh.secret_key = WEBHOOK_SECRET
+        wh.save(update_fields=["secret_key"])
+
+print("__PLANE_BOOT__" + json.dumps({
+    "workspace_slug": ws.slug,
+    "alfred_user_id": str(alfred.id),
+    "api_token":      tok.token,
+    "webhook_secret": wh.secret_key,
+}))
+`;
+
+interface PlaneBootstrapResult {
+  workspace_slug: string;
+  alfred_user_id: string;
+  api_token: string;
+  webhook_secret: string;
 }
 
-interface PlaneWorkspaceMember {
-  id: string;
-  member?: { id: string; email?: string; display_name?: string };
-  role: number;
-}
-
-interface PlaneApiToken {
-  id: string;
-  token?: string; // only present on create response
-  label: string;
-}
-
-interface PlaneWebhook {
-  id: string;
-  url: string;
-  secret_key?: string;
-  is_active?: boolean;
-}
-
-interface PlaneWorkspace {
-  id: string;
-  slug: string;
-  name: string;
-}
-
-interface PlaneUser {
-  id: string;
-  email: string;
-  first_name?: string;
-  last_name?: string;
+/**
+ * Ship PLANE_BOOTSTRAP_PY into the plane-api container and run it via
+ * `python manage.py shell`. Base64-encoded to survive two layers of shell
+ * quoting (ssh → bash → docker exec).
+ */
+async function runPlaneBootstrap(
+  opts: Pick<SetupPlaneOpts, "serverIp" | "keyPath" | "hostKeyOpts">,
+  env: Record<string, string>,
+): Promise<PlaneBootstrapResult> {
+  const scriptB64 = Buffer.from(PLANE_BOOTSTRAP_PY, "utf-8").toString("base64");
+  const envArgs = Object.entries(env)
+    .map(([k, v]) => `-e ${k}=${JSON.stringify(v)}`)
+    .join(" ");
+  const cmd = `printf %s ${scriptB64} | base64 -d | docker exec -i ${envArgs} compose-plane-api-1 python manage.py shell`;
+  const result = await ssh.exec(opts.serverIp, opts.keyPath, cmd, undefined, opts.hostKeyOpts);
+  if (result.code !== 0) {
+    throw new Error(
+      `Plane bootstrap exited ${result.code}: stderr=${result.stderr.slice(0, 500)} stdout=${result.stdout.slice(0, 500)}`,
+    );
+  }
+  const marker = "__PLANE_BOOT__";
+  const idx = result.stdout.lastIndexOf(marker);
+  if (idx === -1) {
+    throw new Error(
+      `Plane bootstrap output missing ${marker} marker. stdout=${result.stdout.slice(-500)}`,
+    );
+  }
+  const jsonStart = idx + marker.length;
+  const jsonEnd = result.stdout.indexOf("\n", jsonStart);
+  const jsonStr = result.stdout.slice(jsonStart, jsonEnd === -1 ? undefined : jsonEnd);
+  try {
+    return JSON.parse(jsonStr) as PlaneBootstrapResult;
+  } catch (e) {
+    throw new Error(
+      `Plane bootstrap returned invalid JSON: ${e instanceof Error ? e.message : String(e)} — payload=${jsonStr.slice(0, 400)}`,
+    );
+  }
 }
 
 /** Main entry — idempotent. See module comment. */
@@ -1957,15 +1990,24 @@ export async function setupPlane(opts: SetupPlaneOpts): Promise<void> {
 
   opts.log(`Plane: workspace slug="${slug}", admin=${adminEmail}, alfred=${alfredEmail}`);
 
-  // Phase 0 — make sure docker-compose rendered the Plane stack. Checked via
-  // the proxy port. If plane-proxy isn't up, either the compose render didn't
-  // include the stack (planeEnabled=false) or the user hasn't run the retrofit.
+  // Fast-path idempotency: if the .env already has all four values we write,
+  // a prior successful setupPlane ran — nothing to do.
+  const existing = {
+    token: await readTenantEnv(opts, "PLANE_API_TOKEN"),
+    slug:  await readTenantEnv(opts, "PLANE_WORKSPACE_SLUG"),
+    uid:   await readTenantEnv(opts, "PLANE_ALFRED_USER_ID"),
+    hook:  await readTenantEnv(opts, "PLANE_WEBHOOK_SECRET"),
+  };
+  if (existing.token && existing.slug && existing.uid && existing.hook) {
+    opts.log("All Plane secrets already in .env — skipping bootstrap");
+    return;
+  }
+
   opts.log("Waiting for Plane API to become ready (up to 10 min)...");
   await waitForPlaneReady(opts);
 
-  // Phase 1 — super-admin sign-up. This endpoint is gated by is_setup_done on
-  // the backend; a second call after setup returns 400. We still write the
-  // chosen credentials to .env first so retries after a crash can resume.
+  // Generate or re-use durable secrets. Admin password is written FIRST so a
+  // crash mid-bootstrap still lets us re-run against the same password.
   let adminPassword = await readTenantEnv(opts, "PLANE_ADMIN_PASSWORD");
   if (!adminPassword) {
     adminPassword = randomPassword();
@@ -1973,403 +2015,46 @@ export async function setupPlane(opts: SetupPlaneOpts): Promise<void> {
       PLANE_ADMIN_EMAIL: adminEmail,
       PLANE_ADMIN_PASSWORD: adminPassword,
     });
-    opts.log("Generated admin credentials and persisted to .env");
-  } else {
-    opts.log("Re-using existing admin credentials from .env");
   }
+  const webhookSecret = existing.hook ?? randomSecret(32);
 
-  const instanceStatusRes = await tenantCurl(opts, {
-    method: "GET",
-    path: "/api/instances/",
+  opts.log("Running Plane bootstrap via manage.py shell...");
+  const result = await runPlaneBootstrap(opts, {
+    BOOT_ADMIN_EMAIL:    adminEmail,
+    BOOT_ADMIN_PASSWORD: adminPassword,
+    BOOT_ALFRED_EMAIL:   alfredEmail,
+    BOOT_WORKSPACE_SLUG: slug,
+    BOOT_WORKSPACE_NAME: opts.customerName || "Alfred",
+    BOOT_WEBHOOK_URL:    webhookUrl,
+    BOOT_WEBHOOK_SECRET: webhookSecret,
   });
-  const instanceStatus = parseJson<PlaneInstanceStatus>(
-    instanceStatusRes.body,
-    "GET /api/instances/",
+  opts.log(`Plane bootstrap done (workspace=${result.workspace_slug})`);
+
+  // Persist the four secrets the learn workflow reads, plus the env the
+  // alfred-learn service uses to reach plane-proxy on the shared network.
+  await writeTenantEnv(opts, {
+    PLANE_API_TOKEN:      result.api_token,
+    PLANE_WORKSPACE_SLUG: result.workspace_slug,
+    PLANE_ALFRED_USER_ID: result.alfred_user_id,
+    PLANE_WEBHOOK_SECRET: result.webhook_secret,
+    PLANE_API_BASE_URL:   "http://plane-proxy:8080",
+    PLANE_SYNC_ENABLED:   "true",
+  });
+  opts.log("Plane secrets persisted to .env; restarting alfred-learn...");
+
+  const restartRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `cd ${DEFAULTS.dockerComposeDir} && docker compose up -d --force-recreate alfred-learn`,
+    undefined,
+    opts.hostKeyOpts,
   );
-  const alreadySetUp =
-    instanceStatus?.instance?.is_setup_done === true ||
-    instanceStatus?.is_activated === true;
-  if (alreadySetUp) {
-    opts.log("Plane instance already set up — skipping admin sign-up");
-  } else {
-    opts.log("Plane instance is fresh — creating super-admin account");
-    const signupRes = await tenantCurl(opts, {
-      method: "POST",
-      path: "/api/instances/admin/sign-up/",
-      headers: { "Content-Type": "application/json" },
-      body: {
-        email: adminEmail,
-        password: adminPassword,
-        first_name: "Alfred",
-        last_name: "Admin",
-        company_name: opts.customerName,
-      },
-    });
-    if (signupRes.status >= 400) {
-      // 400 can also mean "already configured" if our is_setup_done probe
-      // lied (older Plane builds). Swallow it only if we can then sign in.
-      opts.log(
-        `Plane admin sign-up returned ${signupRes.status}: ${signupRes.body.slice(0, 200)} — attempting sign-in instead`,
-      );
-    } else {
-      opts.log("Super-admin account created");
-    }
+  if (restartRes.code !== 0) {
+    throw new Error(
+      `alfred-learn restart failed (exit ${restartRes.code}): ${restartRes.stderr}`,
+    );
   }
-
-  // Phase 2 — sign in via email+password to obtain a session cookie. We
-  // then use the cookie for all subsequent /api/workspaces/ calls until we
-  // have the PAT. Cookie lives in a jar on the tenant.
-  const cookieJar = `/tmp/plane-setup-${Date.now()}.cookies`;
-  try {
-    opts.log("Signing in to obtain session cookie...");
-    const signinRes = await tenantCurl(
-      opts,
-      {
-        method: "POST",
-        path: "/auth/sign-in/",
-        headers: { "Content-Type": "application/json" },
-        body: { email: adminEmail, password: adminPassword },
-        cookieJar,
-      },
-    );
-    if (signinRes.status >= 400) {
-      throw new Error(
-        `Plane sign-in failed (HTTP ${signinRes.status}): ${signinRes.body.slice(0, 400)}`,
-      );
-    }
-    opts.log("Session cookie acquired");
-
-    // Phase 3 — create (or fetch) the workspace. Plane's create returns
-    // 400 if a workspace with the slug exists; we then GET it.
-    const wsListRes = await tenantCurl(opts, {
-      method: "GET",
-      path: "/api/workspaces/",
-      headers: { "Content-Type": "application/json" },
-      cookieJar,
-    });
-    if (wsListRes.status >= 400) {
-      throw new Error(
-        `Plane workspace list failed (HTTP ${wsListRes.status}): ${wsListRes.body.slice(0, 400)}`,
-      );
-    }
-    const wsList = parseJson<PlaneWorkspace[] | { results?: PlaneWorkspace[] }>(
-      wsListRes.body,
-      "GET /api/workspaces/",
-    );
-    const wsArray: PlaneWorkspace[] = Array.isArray(wsList)
-      ? wsList
-      : Array.isArray((wsList as { results?: PlaneWorkspace[] }).results)
-        ? (wsList as { results: PlaneWorkspace[] }).results
-        : [];
-    let workspace = wsArray.find((w) => w.slug === slug);
-    if (workspace) {
-      opts.log(`Workspace "${slug}" already exists (id: ${workspace.id})`);
-    } else {
-      opts.log(`Creating workspace "${slug}"...`);
-      const wsCreateRes = await tenantCurl(opts, {
-        method: "POST",
-        path: "/api/workspaces/",
-        headers: { "Content-Type": "application/json" },
-        body: { name: "Alfred", slug },
-        cookieJar,
-      });
-      if (wsCreateRes.status >= 400) {
-        throw new Error(
-          `Plane workspace create failed (HTTP ${wsCreateRes.status}): ${wsCreateRes.body.slice(0, 400)}`,
-        );
-      }
-      workspace = parseJson<PlaneWorkspace>(
-        wsCreateRes.body,
-        "POST /api/workspaces/",
-      );
-      opts.log(`Workspace created (id: ${workspace.id})`);
-    }
-    await writeTenantEnv(opts, { PLANE_WORKSPACE_SLUG: slug });
-
-    // Phase 4 — ensure a workspace-admin API token for the super admin.
-    let apiToken = await readTenantEnv(opts, "PLANE_API_TOKEN");
-    if (!apiToken) {
-      opts.log("Creating workspace API token...");
-      const tokenCreateRes = await tenantCurl(opts, {
-        method: "POST",
-        path: `/api/workspaces/${slug}/api-tokens/`,
-        headers: { "Content-Type": "application/json" },
-        body: {
-          label: "alfred-ctrl",
-          description: "Auto-generated token used by alfred-learn sync workflow",
-        },
-        cookieJar,
-      });
-      if (tokenCreateRes.status >= 400) {
-        throw new Error(
-          `Plane API token create failed (HTTP ${tokenCreateRes.status}): ${tokenCreateRes.body.slice(0, 400)}`,
-        );
-      }
-      const tokenPayload = parseJson<PlaneApiToken & { token?: string }>(
-        tokenCreateRes.body,
-        "POST api-tokens",
-      );
-      if (!tokenPayload.token) {
-        throw new Error(
-          `Plane API token create response missing "token" field: ${tokenCreateRes.body.slice(0, 400)}`,
-        );
-      }
-      apiToken = tokenPayload.token;
-      await writeTenantEnv(opts, { PLANE_API_TOKEN: apiToken });
-      opts.log("API token created and persisted");
-    } else {
-      opts.log("Re-using existing PLANE_API_TOKEN from .env");
-    }
-
-    // From here on we authenticate with the PAT via x-api-key. The PAT is
-    // a full workspace-admin key — don't log it.
-    const pat = apiToken;
-    const patHeaders = {
-      "Content-Type": "application/json",
-      "x-api-key": pat,
-    };
-
-    // Phase 5 — create/invite the "Alfred Black" secondary user. Plane can
-    // only invite users by email; the actual user record is created when
-    // the invite is accepted, OR — on CE installs with ENABLE_EMAIL_PASSWORD
-    // — we can also sign up the account directly via /auth/sign-up/ before
-    // invitation so we get a confirmed account without going through email.
-    //
-    // We do BOTH: sign-up (best-effort, may already exist), then invite
-    // (also best-effort). The member listing then picks up the user.
-    let alfredPassword = await readTenantEnv(opts, "PLANE_ALFRED_PASSWORD");
-    if (!alfredPassword) {
-      alfredPassword = randomPassword();
-      await writeTenantEnv(opts, { PLANE_ALFRED_PASSWORD: alfredPassword });
-    }
-    const signupAlfred = await tenantCurl(opts, {
-      method: "POST",
-      path: "/auth/sign-up/",
-      headers: { "Content-Type": "application/json" },
-      body: {
-        email: alfredEmail,
-        password: alfredPassword,
-        first_name: "Alfred",
-        last_name: "Black",
-      },
-    });
-    if (signupAlfred.status >= 400) {
-      opts.log(
-        `Alfred user sign-up returned ${signupAlfred.status} (likely already exists) — proceeding`,
-      );
-    } else {
-      opts.log("Alfred user sign-up succeeded");
-    }
-
-    // Always re-issue the invite — Plane dedupes on (workspace, email) and
-    // role=20 is Admin. If already a member, Plane returns 400; we ignore.
-    const inviteRes = await tenantCurl(opts, {
-      method: "POST",
-      path: `/api/workspaces/${slug}/invitations/`,
-      headers: patHeaders,
-      body: { emails: [{ email: alfredEmail, role: 20 }] },
-    });
-    if (inviteRes.status >= 400) {
-      opts.log(
-        `Alfred invite returned ${inviteRes.status} (often means already a member) — proceeding`,
-      );
-    } else {
-      opts.log("Alfred invited to workspace as Admin");
-    }
-
-    // Phase 6 — resolve Alfred's user ID from the workspace member list. We
-    // retry a few times because the invite→member transition can be lazy.
-    let alfredUserId: string | undefined = await readTenantEnv(
-      opts,
-      "PLANE_ALFRED_USER_ID",
-    );
-    if (!alfredUserId) {
-      opts.log("Resolving Alfred user ID from workspace members...");
-      for (let attempt = 1; attempt <= 6 && !alfredUserId; attempt++) {
-        const membersRes = await tenantCurl(opts, {
-          method: "GET",
-          path: `/api/workspaces/${slug}/members/`,
-          headers: patHeaders,
-        });
-        if (membersRes.status >= 400) {
-          throw new Error(
-            `Plane members list failed (HTTP ${membersRes.status}): ${membersRes.body.slice(0, 400)}`,
-          );
-        }
-        const members = parseJson<
-          PlaneWorkspaceMember[] | { results?: PlaneWorkspaceMember[] }
-        >(membersRes.body, "GET members");
-        const arr: PlaneWorkspaceMember[] = Array.isArray(members)
-          ? members
-          : Array.isArray((members as { results?: PlaneWorkspaceMember[] }).results)
-            ? (members as { results: PlaneWorkspaceMember[] }).results
-            : [];
-        const match = arr.find(
-          (m) =>
-            (m.member?.email ?? "").toLowerCase() === alfredEmail.toLowerCase(),
-        );
-        if (match?.member?.id) {
-          alfredUserId = match.member.id;
-          break;
-        }
-        // Maybe the invite hasn't auto-accepted. Poke the auto-accept endpoint
-        // (some Plane versions require the invitee to click an email link;
-        // others accept on first login). For CE we rely on the Alfred user
-        // logging in later when the learn workflow first authenticates.
-        if (attempt < 6) {
-          await new Promise((r) => setTimeout(r, 2_500));
-        }
-      }
-      if (!alfredUserId) {
-        // Fall back to /auth/me/ after logging in as Alfred — on CE the
-        // sign-up flow above creates the user with a known id we can read.
-        opts.log("Member list did not surface Alfred yet — signing in as Alfred to resolve user id");
-        const alfredJar = `/tmp/plane-alfred-${Date.now()}.cookies`;
-        try {
-          const alfredSignin = await tenantCurl(
-            opts,
-            {
-              method: "POST",
-              path: "/auth/sign-in/",
-              headers: { "Content-Type": "application/json" },
-              body: { email: alfredEmail, password: alfredPassword },
-              cookieJar: alfredJar,
-            },
-          );
-          if (alfredSignin.status >= 400) {
-            throw new Error(
-              `Alfred sign-in failed (HTTP ${alfredSignin.status}): ${alfredSignin.body.slice(0, 400)}`,
-            );
-          }
-          const meRes = await tenantCurl(opts, {
-            method: "GET",
-            path: "/api/users/me/",
-            cookieJar: alfredJar,
-          });
-          if (meRes.status >= 400) {
-            throw new Error(
-              `GET /api/users/me/ as Alfred failed (HTTP ${meRes.status}): ${meRes.body.slice(0, 400)}`,
-            );
-          }
-          const me = parseJson<PlaneUser>(meRes.body, "GET users/me as Alfred");
-          if (!me.id) {
-            throw new Error(
-              `Plane users/me response missing "id": ${meRes.body.slice(0, 400)}`,
-            );
-          }
-          alfredUserId = me.id;
-        } finally {
-          await ssh
-            .exec(
-              opts.serverIp,
-              opts.keyPath,
-              `rm -f ${alfredJar}`,
-              undefined,
-              opts.hostKeyOpts,
-            )
-            .catch(() => {
-              /* best-effort cookie cleanup */
-            });
-        }
-      }
-      await writeTenantEnv(opts, { PLANE_ALFRED_USER_ID: alfredUserId });
-      opts.log(`Resolved Alfred user id (persisted to .env)`);
-    } else {
-      opts.log("Re-using existing PLANE_ALFRED_USER_ID from .env");
-    }
-
-    // Phase 7 — ensure a webhook pointing at the tenant's own Cloudflare
-    // tunnel. The webhook secret is generated here (HMAC-shared with the
-    // ctrl-api verifier on inbound).
-    let webhookSecret = await readTenantEnv(opts, "PLANE_WEBHOOK_SECRET");
-    if (!webhookSecret) {
-      webhookSecret = randomSecret(32);
-      await writeTenantEnv(opts, { PLANE_WEBHOOK_SECRET: webhookSecret });
-      opts.log("Generated webhook secret and persisted to .env");
-    }
-
-    const hooksListRes = await tenantCurl(opts, {
-      method: "GET",
-      path: `/api/workspaces/${slug}/webhooks/`,
-      headers: patHeaders,
-    });
-    if (hooksListRes.status >= 400) {
-      throw new Error(
-        `Plane webhooks list failed (HTTP ${hooksListRes.status}): ${hooksListRes.body.slice(0, 400)}`,
-      );
-    }
-    const hooksList = parseJson<
-      PlaneWebhook[] | { results?: PlaneWebhook[] }
-    >(hooksListRes.body, "GET webhooks");
-    const hooksArr: PlaneWebhook[] = Array.isArray(hooksList)
-      ? hooksList
-      : Array.isArray((hooksList as { results?: PlaneWebhook[] }).results)
-        ? (hooksList as { results: PlaneWebhook[] }).results
-        : [];
-    const existingHook = hooksArr.find((h) => h.url === webhookUrl);
-    if (existingHook) {
-      opts.log(`Webhook already registered (id: ${existingHook.id})`);
-    } else {
-      opts.log(`Registering webhook → ${webhookUrl}`);
-      const hookCreateRes = await tenantCurl(opts, {
-        method: "POST",
-        path: `/api/workspaces/${slug}/webhooks/`,
-        headers: patHeaders,
-        body: {
-          url: webhookUrl,
-          is_active: true,
-          project: true,
-          issue: true,
-          issue_comment: true,
-          module: true,
-          cycle: true,
-          page: true,
-        },
-      });
-      if (hookCreateRes.status >= 400) {
-        throw new Error(
-          `Plane webhook create failed (HTTP ${hookCreateRes.status}): ${hookCreateRes.body.slice(0, 400)}`,
-        );
-      }
-      opts.log("Webhook registered");
-    }
-
-    // Phase 8 — final env bundle. The learn workflow reads these.
-    await writeTenantEnv(opts, {
-      PLANE_API_BASE_URL: "http://plane-proxy:8080",
-      PLANE_SYNC_ENABLED: "true",
-    });
-    opts.log("PLANE_SYNC_ENABLED=true written; restarting alfred-learn...");
-
-    // Phase 9 — restart alfred-learn so the new env lands. We restart only
-    // that service; openclaw/ctrl-api don't need the Plane vars yet.
-    const restartRes = await ssh.exec(
-      opts.serverIp,
-      opts.keyPath,
-      `cd ${DEFAULTS.dockerComposeDir} && docker compose up -d --force-recreate alfred-learn`,
-      undefined,
-      opts.hostKeyOpts,
-    );
-    if (restartRes.code !== 0) {
-      throw new Error(
-        `alfred-learn restart failed (exit ${restartRes.code}): ${restartRes.stderr}`,
-      );
-    }
-    opts.log("alfred-learn restarted with Plane env");
-  } finally {
-    // Always clean up the admin cookie jar, even on error.
-    await ssh
-      .exec(
-        opts.serverIp,
-        opts.keyPath,
-        `rm -f ${cookieJar}`,
-        undefined,
-        opts.hostKeyOpts,
-      )
-      .catch(() => {
-        /* best-effort cookie cleanup */
-      });
-  }
+  opts.log("alfred-learn restarted with Plane env");
 }
 
 /**
