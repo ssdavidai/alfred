@@ -28,7 +28,18 @@ const OPENCLAW_CONFIG_PATH =
   process.env.OPENCLAW_CONFIG_PATH ?? "/mnt/encrypted/openclaw/openclaw.json";
 const OPENCLAW_GATEWAY_URL =
   process.env.OPENCLAW_GATEWAY_URL ?? "http://openclaw:18789";
-const GATEWAY_TOKEN_FILE = "/alfred-data/.gateway-token";
+// Gateway token lookup paths. ctrl-api mounts the same file as
+// openclaw + alfred-learn but at a different path (/mnt/encrypted/alfred/
+// rather than /alfred-data/). The env var set by docker-compose is the
+// authoritative source; the two fallbacks cover dev + legacy deployments.
+// Previously this was hardcoded to /alfred-data/.gateway-token which
+// never existed inside ctrl-api → every phone/sms call 502'd with
+// "Gateway token not available".
+const GATEWAY_TOKEN_CANDIDATES = [
+  process.env.OPENCLAW_GATEWAY_TOKEN_FILE,
+  "/mnt/encrypted/alfred/.gateway-token",
+  "/alfred-data/.gateway-token",
+].filter((p): p is string => typeof p === "string" && p.length > 0);
 const ALFRED_DATA_DIR = "/mnt/encrypted/alfred";
 const AUTHORIZED_NUMBERS_FILE = `${ALFRED_DATA_DIR}/.authorized-phone-numbers.json`;
 const SMS_THREAD_PREFIX = "sms-phone-";
@@ -217,11 +228,15 @@ function getVoiceContextCached(): VoiceContextBundle {
 }
 
 function getGatewayToken(): string {
-  try {
-    return fs.readFileSync(GATEWAY_TOKEN_FILE, "utf-8").trim();
-  } catch {
-    return "";
+  for (const candidate of GATEWAY_TOKEN_CANDIDATES) {
+    try {
+      const v = fs.readFileSync(candidate, "utf-8").trim();
+      if (v) return v;
+    } catch {
+      /* try next candidate */
+    }
   }
+  return "";
 }
 
 async function notifyMainSession(message: string): Promise<void> {
