@@ -577,6 +577,15 @@ services:
     ports:
       - "127.0.0.1:8080:80"
     environment:
+      # Caddyfile globals need SITE_ADDRESS populated or the empty-brace `{ ... }`
+      # block gets re-parsed as a second "server block without any key", which
+      # Caddy rejects ("global configuration, if used, must be first"). `:80` makes
+      # the Caddyfile a plain-HTTP listener with no ACME, which matches how we
+      # expose plane-proxy — bound to 127.0.0.1:8080 only, no public TLS.
+      # TRUSTED_PROXIES silences a separate global-config warning. See B9 on
+      # david 2026-04-23.
+      - SITE_ADDRESS=:80
+      - TRUSTED_PROXIES=0.0.0.0/0
       - FILE_SIZE_LIMIT=5242880
       - BUCKET_NAME=uploads
     healthcheck:
@@ -585,7 +594,7 @@ services:
       timeout: 5s
       retries: 20
       start_period: 60s
-    mem_limit: 64m
+    mem_limit: 128m
     pids_limit: 128
 {% endif %}
 
