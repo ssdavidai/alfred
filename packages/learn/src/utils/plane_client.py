@@ -131,6 +131,17 @@ class PlaneClient:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 409:
                 raise
+            # Plane 1.3.0's 409 body for duplicate projects carries the
+            # existing id directly (same shape as the issues endpoint):
+            #   {"error": "...", "id": "<uuid>"}
+            try:
+                err_body = exc.response.json()
+                if isinstance(err_body, dict) and err_body.get("id"):
+                    return await self.get_project(str(err_body["id"]))
+            except httpx.HTTPStatusError:
+                raise
+            except Exception:
+                pass
             projects = await self.list_projects()
             for p in projects:
                 if p.get("identifier") == payload["identifier"]:
@@ -243,17 +254,38 @@ class PlaneClient:
                 f"{self._proj(project_id)}/issues/", json=body
             )
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code != 409 or not external_id:
+            if exc.response.status_code != 409:
                 raise
-            # 409 with an external_id stamp almost always means "we
-            # already created this issue on a prior run". Recover the
-            # existing row instead of propagating the error.
-            existing = await self.list_issues(
-                project_id, external_id=external_id
-            )
-            if existing:
-                return existing[0]
-            # Truly a 409 for some other reason — surface it.
+            # Plane 1.3.0's 409 body for duplicate issues carries the
+            # existing `id` directly:
+            #   {"error": "Issue with the same external id and external
+            #     source already exists", "id": "<uuid>"}
+            # Trust that id first — `list_issues(external_id=...)`
+            # doesn't actually filter on issues in 1.3.0 (returns 0
+            # matches even when the issue exists), so we can't rely
+            # on it as the primary recovery path.
+            existing_id: Optional[str] = None
+            try:
+                err_body = exc.response.json()
+                if isinstance(err_body, dict) and err_body.get("id"):
+                    existing_id = str(err_body["id"])
+            except Exception:
+                pass
+            if existing_id:
+                try:
+                    return await self.get_issue(project_id, existing_id)
+                except Exception:
+                    # Fall through to list_issues fallback
+                    pass
+            # Secondary fallback: list_issues by external_id (broken in
+            # 1.3.0 but may work in later Plane versions).
+            if external_id:
+                existing = await self.list_issues(
+                    project_id, external_id=external_id
+                )
+                if existing:
+                    return existing[0]
+            # Truly unrecoverable 409 — surface it.
             raise
 
     async def update_issue(
