@@ -114,6 +114,11 @@ class PlaneClient:
 
         ``identifier`` must be ≤ 12 characters, uppercase alphanumeric.
         ``network=2`` means secret (visible only to members).
+
+        **409 self-heal**: if the identifier is already in use (common
+        when forward-sync retries a matter whose project_map entry got
+        lost), list projects and return the matching one instead of
+        failing. Match by identifier since that's unique per workspace.
         """
         payload: dict[str, Any] = {
             "name": name,
@@ -121,7 +126,16 @@ class PlaneClient:
             "description_text": description,
             "network": 2,
         }
-        return await self._post(f"{self._ws()}/projects/", json=payload)
+        try:
+            return await self._post(f"{self._ws()}/projects/", json=payload)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 409:
+                raise
+            projects = await self.list_projects()
+            for p in projects:
+                if p.get("identifier") == payload["identifier"]:
+                    return p
+            raise
 
     async def update_project(
         self, project_id: str, patch: dict[str, Any]
@@ -201,6 +215,12 @@ class PlaneClient:
         ``label_ids`` must be resolved UUIDs — use ``ensure_label()``
         before calling this method. ``external_id`` is the vault task
         path used to correlate back on webhook events.
+
+        **409 self-heal**: if Plane rejects the create because an issue
+        with the same ``external_id`` already exists (happens after a
+        workflow restart dropped the in-memory ``issue_map`` before it
+        persisted to cursor), we GET the existing issue by external_id
+        and return it as if we just created it. Idempotent re-creation.
         """
         body: dict[str, Any] = {
             "name": name,
@@ -218,7 +238,23 @@ class PlaneClient:
         if external_id:
             body["external_id"] = external_id
             body["external_source"] = "alfred"
-        return await self._post(f"{self._proj(project_id)}/issues/", json=body)
+        try:
+            return await self._post(
+                f"{self._proj(project_id)}/issues/", json=body
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 409 or not external_id:
+                raise
+            # 409 with an external_id stamp almost always means "we
+            # already created this issue on a prior run". Recover the
+            # existing row instead of propagating the error.
+            existing = await self.list_issues(
+                project_id, external_id=external_id
+            )
+            if existing:
+                return existing[0]
+            # Truly a 409 for some other reason — surface it.
+            raise
 
     async def update_issue(
         self,
