@@ -195,7 +195,11 @@ def _atomic_write(path: Path, payload: str) -> None:
 # than silently dropped.
 # ---------------------------------------------------------------------------
 
-_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}(:\d{2})?")
+# Accept full ISO datetime OR date-only (e.g. '2026-04-08'). Vault frontmatter
+# commonly has `created: 2026-04-08` with no time component — before this relax,
+# every such record had mtime 0.0 and the sync filter `mtime > cursor` excluded
+# them permanently (matters never synced).
+_ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([Tt ]\d{2}:\d{2}(:\d{2})?)?")
 
 
 def _iso_to_epoch(value: Any) -> float:
