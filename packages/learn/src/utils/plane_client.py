@@ -204,9 +204,13 @@ class PlaneClient:
         """
         body: dict[str, Any] = {
             "name": name,
-            "description_html": description,
             "priority": priority,
         }
+        # Plane 1.3.0 rejects `description_html: ""` with
+        # "Invalid HTML passed". Only include when non-empty; otherwise
+        # omit and let the field default server-side.
+        if description:
+            body["description_html"] = description
         if state_id:
             body["state"] = state_id
         if label_ids:

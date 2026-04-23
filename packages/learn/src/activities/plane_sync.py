@@ -656,12 +656,17 @@ async def sync_task_to_plane(
         label_ids: list[str] = await client.ensure_labels(project_id, label_names)
 
         existing_id = issue_map.get(slug)
+        # description_html: Plane 1.3.0 rejects empty string with
+        # "Invalid HTML passed" — omit the key entirely when the task
+        # has no description rather than sending "".
+        description_html = str(fm.get("description") or "")
         issue_body: dict[str, Any] = {
             "name": _sanitize_plane_name(str(update.get("name") or slug)),
-            "description_html": str(fm.get("description") or ""),
             "priority": update.get("priority") or "none",
             "labels": label_ids,
         }
+        if description_html:
+            issue_body["description_html"] = description_html
         if state_id:
             issue_body["state"] = state_id
 
@@ -674,7 +679,7 @@ async def sync_task_to_plane(
             created = await client.create_issue(
                 project_id,
                 name=issue_body["name"],
-                description=issue_body["description_html"],
+                description=issue_body.get("description_html", ""),
                 priority=issue_body["priority"],
                 state_id=state_id,
                 label_ids=label_ids,
