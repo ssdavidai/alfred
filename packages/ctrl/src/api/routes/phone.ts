@@ -616,7 +616,26 @@ export function registerPhoneRoutes(): void {
     const messageSid = b.messageSid ?? `${from}-${Date.now()}`;
 
     const authorized = readAuthorizedNumbers().map(normaliseNumber);
-    const isAuthorized = authorized.includes(normaliseNumber(from));
+    const normalisedFrom = normaliseNumber(from);
+    let isAuthorized = authorized.includes(normalisedFrom);
+
+    // Bootstrap-trust: if the authorized list is empty, treat the first
+    // inbound SMS as the tenant owner's number and auto-add it. The
+    // assumption holds because the tenant's Twilio number is freshly
+    // provisioned and known only to the owner (given via dashboard).
+    // Also prevents the ugly UX where a brand-new tenant has to hand-
+    // configure trust before their first SMS ever gets a reply.
+    //
+    // SaaS-side already filters spam numbers before proxying here, so the
+    // auto-trust window is bounded to real human senders.
+    if (!isAuthorized && authorized.length === 0) {
+      writeAuthorizedNumbers([normalisedFrom]);
+      console.log(
+        "[phone/sms] bootstrap-trusted first sender %s (empty authorized list)",
+        normalisedFrom,
+      );
+      isAuthorized = true;
+    }
 
     if (!isAuthorized) {
       // Stream pipeline. Bridge to the zero-LLM template path so hourly
