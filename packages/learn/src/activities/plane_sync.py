@@ -219,6 +219,23 @@ def _iso_to_epoch(value: Any) -> float:
         return 0.0
 
 
+# Plane 1.3.0 rejects project/issue names containing `-`, `&`, `'`, `"` and
+# similar "special" characters with 400 "Project name cannot contain special
+# characters." Matter titles frequently include hyphens (slug-style) or
+# ampersands (e.g. "Family Life & Hanna's First Year"), so we sanitize before
+# sending. Keep it minimal: replace rejected chars with spaces, drop quotes,
+# collapse whitespace, fall back to a safe default.
+_PLANE_NAME_REJECT_RE = re.compile(r"[-&]+")
+
+
+def _sanitize_plane_name(raw: str) -> str:
+    if not raw:
+        return "Untitled"
+    cleaned = _PLANE_NAME_REJECT_RE.sub(" ", raw).replace("'", "").replace('"', "")
+    cleaned = " ".join(cleaned.split()).strip()
+    return cleaned or "Untitled"
+
+
 def _record_mtime(record: dict[str, Any]) -> float:
     fm = record.get("frontmatter") or {}
     best = 0.0
@@ -454,7 +471,8 @@ async def sync_matter_to_plane(
     """
     slug = matter["slug"]
     fm = matter.get("frontmatter") or {}
-    name = str(fm.get("name") or fm.get("title") or slug).strip() or slug
+    raw_name = str(fm.get("name") or fm.get("title") or slug).strip() or slug
+    name = _sanitize_plane_name(raw_name)
     description = str(fm.get("description") or fm.get("description_preview") or "").strip()
 
     client = _plane_client_from_env()
@@ -560,7 +578,7 @@ async def sync_task_to_plane(
 
         existing_id = issue_map.get(slug)
         issue_body: dict[str, Any] = {
-            "name": update.get("name") or slug,
+            "name": _sanitize_plane_name(str(update.get("name") or slug)),
             "description_html": str(fm.get("description") or ""),
             "priority": update.get("priority") or "none",
             "labels": label_ids,

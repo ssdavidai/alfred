@@ -150,7 +150,12 @@ services:
     # v8 metadata, code, libuv buffers). Raised from 4g to 6g in lockstep
     # with NODE_OPTIONS bump above.
     mem_limit: 6g
-    pids_limit: 256
+    # 256 was saturation-prone: the gateway spawns a fresh node PID per
+    # healthcheck (every 10s) + per ephemeral session + per MCP subprocess,
+    # and exhaustion manifests as `uv_thread_create` assertion failures that
+    # crash the healthcheck while the main process keeps running → container
+    # stuck `Up (unhealthy)` blocking depends_on gates.
+    pids_limit: 2048
 
   alfred:
     image: ssdavidai00/alfred-worker:latest

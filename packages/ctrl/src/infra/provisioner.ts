@@ -2037,7 +2037,10 @@ export async function setupPlane(opts: SetupPlaneOpts): Promise<void> {
     PLANE_WORKSPACE_SLUG: result.workspace_slug,
     PLANE_ALFRED_USER_ID: result.alfred_user_id,
     PLANE_WEBHOOK_SECRET: result.webhook_secret,
-    PLANE_API_BASE_URL:   "http://plane-proxy:8080",
+    // plane-proxy listens on :80 inside the compose network; the `:8080`
+    // mapping is HOST-side only. alfred-learn reaches it via the internal
+    // service name on port 80.
+    PLANE_API_BASE_URL:   "http://plane-proxy/",
     PLANE_SYNC_ENABLED:   "true",
   });
   opts.log("Plane secrets persisted to .env; restarting alfred-learn...");
