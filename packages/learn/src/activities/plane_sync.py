@@ -946,10 +946,35 @@ async def sync_task_to_plane(
             issue_body["assignees"] = assignees
 
         if existing_id:
-            await client.update_issue(project_id, existing_id, issue_body)
-            action = "update"
-            plane_id = existing_id
+            try:
+                await client.update_issue(project_id, existing_id, issue_body)
+                action = "update"
+                plane_id = existing_id
+            except httpx.HTTPStatusError as exc:
+                # 404 on update = the Plane issue we had mapped was
+                # deleted (manually, or via an earlier archive cascade,
+                # or by Plane's retention policy). The issue_map entry
+                # is stale. Drop through to the create path — the 409
+                # self-heal in create_issue will recover if the slug's
+                # external_id was reclaimed by a newly-created issue.
+                if exc.response.status_code != 404:
+                    raise
+                logger.warning(
+                    "plane_sync.stale_issue_map slug=%s plane_id=%s — "
+                    "issue 404'd on update, falling through to create",
+                    slug, existing_id,
+                )
+                existing_id = None  # noqa: F841 — sentinel reset
+                # Don't fall into the `else` branch here — we need to
+                # actually exit this `if` and hit the `else` below. Use
+                # a flag to cascade.
+                _needs_create = True
+            else:
+                _needs_create = False
         else:
+            _needs_create = True
+
+        if _needs_create:
             # On create we also stamp external_id for loop-back detection.
             created = await client.create_issue(
                 project_id,
