@@ -418,7 +418,14 @@ async function openclawChatCompletion(
       "Content-Type": "application/json",
     },
     body: JSON.stringify(req),
-    signal: AbortSignal.timeout(25_000),
+    // Main agent session bootstrap (workspace skills + TOOLS.md + MEMORY
+    // + tool allowlist) can take ~15-30s cold, plus the actual LLM call.
+    // 25s was blowing up on the first SMS each session. 120s covers a
+    // cold boot + a thinking reply; Twilio's webhook timeout is 15s but
+    // the SaaS already returned 200 to Twilio before calling here, so
+    // the long wait only affects how long before the user sees a reply
+    // on their phone — not Twilio delivery.
+    signal: AbortSignal.timeout(120_000),
   });
   if (!res.ok) {
     throw new Error(
