@@ -24,8 +24,6 @@ const VAULT_PATH = process.env.VAULT_PATH ?? "/mnt/encrypted/vault";
 const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
 const WORKSPACE_DIR =
   process.env.OPENCLAW_WORKSPACE_DIR ?? "/mnt/encrypted/openclaw/workspace";
-const OPENCLAW_CONFIG_PATH =
-  process.env.OPENCLAW_CONFIG_PATH ?? "/mnt/encrypted/openclaw/openclaw.json";
 const OPENCLAW_GATEWAY_URL =
   process.env.OPENCLAW_GATEWAY_URL ?? "http://openclaw:18789";
 // Gateway token lookup paths. ctrl-api mounts the same file as
@@ -337,20 +335,15 @@ function appendSmsTurn(from: string, turn: SmsTurn): void {
 // ── openclaw chat completions wrapper (synchronous reply path) ───────────────
 
 function readMainAgentModel(): string {
-  try {
-    const raw = fs.readFileSync(OPENCLAW_CONFIG_PATH, "utf-8");
-    const cfg = JSON.parse(raw);
-    const main = (cfg?.agents?.list ?? []).find(
-      (a: any) => a?.id === "main",
-    );
-    return (
-      main?.model?.primary ??
-      cfg?.agents?.defaults?.model?.primary ??
-      "openrouter/x-ai/grok-4.1-fast"
-    );
-  } catch {
-    return "openrouter/x-ai/grok-4.1-fast";
-  }
+  // Openclaw's /v1/chat/completions endpoint routes via agent identity —
+  // it expects "openclaw" (picks agent defaults) or "openclaw/<agentId>"
+  // (specific agent), NOT the upstream model slug like "xai/grok-4" or
+  // "openrouter/...". If we pass the upstream slug directly, openclaw
+  // returns 400 "Invalid `model`. Use `openclaw` or `openclaw/<agentId>`".
+  //
+  // SMS replies should go through the main agent's persona + tools, so
+  // route via "openclaw/main".
+  return "openclaw/main";
 }
 
 function buildSmsSystemPrompt(): string {
