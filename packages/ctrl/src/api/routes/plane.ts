@@ -3,6 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ApiError, AuthError, ValidationError } from "../errors.js";
+import { dockerExec } from "../helpers.js";
 import { emitStreamEvent } from "./streams.js";
 
 // ---------------------------------------------------------------------------
@@ -126,6 +127,122 @@ function verifySignature(rawBody: Buffer, signature: Buffer, secret: string): bo
   } catch {
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Nudge workflow trigger (#574)
+//
+// Event-triggered forward-sync. Called fire-and-forget from vault write
+// handlers (see ``routes/vault.ts``) immediately after a successful
+// PATCH / POST / DELETE on ``matter/*`` or ``task/*``. Drops the vault
+// → Plane latency from ~15 s (cron) to ~1–3 s.
+//
+// All failures are swallowed and logged. The cron forward-sync
+// (``PlaneSyncWorkflow``, every 15 s) is the safety net — the nudge is
+// pure optimisation.
+// ---------------------------------------------------------------------------
+
+const NUDGE_TASK_QUEUE = "alfred-learn";
+const NUDGE_WORKFLOW_TYPE = "PlaneSyncNudgeWorkflow";
+
+export type PlaneNudgeRecordType = "matter" | "task";
+
+/** Allowed chars in a vault slug — same safety net the Python activity uses. */
+const NUDGE_SLUG_RE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/;
+
+/**
+ * Fire the nudge workflow for a single vault record. Fire-and-forget: the
+ * returned promise resolves once ``temporal workflow start`` has been
+ * dispatched; the workflow itself runs asynchronously in alfred-learn.
+ *
+ * Errors never throw — they are logged so the caller (a vault write
+ * handler) can ignore the result entirely. If Temporal is unreachable
+ * (e.g. tenant startup race) the cron forward-sync picks the record
+ * up on its next tick.
+ */
+export async function triggerPlaneSyncNudge(
+  recordType: PlaneNudgeRecordType,
+  slug: string,
+): Promise<{ scheduled: boolean; workflow_id?: string; reason?: string }> {
+  // Feature-gate identical to the Python-side check. Avoids spawning
+  // no-op workflows on tenants that don't run Plane.
+  if ((process.env.PLANE_SYNC_ENABLED ?? "").toLowerCase() !== "true") {
+    return { scheduled: false, reason: "PLANE_SYNC_ENABLED_off" };
+  }
+
+  if (recordType !== "matter" && recordType !== "task") {
+    console.warn(`[plane.nudge] skip: invalid record_type=${recordType}`);
+    return { scheduled: false, reason: "invalid_record_type" };
+  }
+
+  if (!slug || !NUDGE_SLUG_RE.test(slug)) {
+    console.warn(`[plane.nudge] skip: invalid slug=${slug}`);
+    return { scheduled: false, reason: "invalid_slug" };
+  }
+
+  // Workflow ID must be unique-enough to avoid collisions across rapid
+  // back-to-back writes to the same record. Include type + slug +
+  // millisecond timestamp + 8 hex chars of randomness. Temporal's
+  // default ID-reuse policy (ALLOW_DUPLICATE) lets closed workflows
+  // with the same ID be re-run, but back-to-back nudges within the
+  // same millisecond would collide — the random suffix guarantees
+  // uniqueness without requiring a stateful counter.
+  const nonce = crypto.randomBytes(4).toString("hex");
+  const workflowId = `plane-nudge-${recordType}-${slug}-${Date.now()}-${nonce}`;
+
+  const args = [
+    "temporal",
+    "workflow",
+    "start",
+    "--type",
+    NUDGE_WORKFLOW_TYPE,
+    "--task-queue",
+    NUDGE_TASK_QUEUE,
+    "--workflow-id",
+    workflowId,
+    "--input",
+    JSON.stringify({ record_type: recordType, slug }),
+  ];
+
+  try {
+    await dockerExec("temporal", args);
+    console.log(
+      `plane.nudge.scheduled record_type=${recordType} slug=${slug} workflow_id=${workflowId}`,
+    );
+    return { scheduled: true, workflow_id: workflowId };
+  } catch (err) {
+    // Degrade gracefully — the cron forward-sync will catch the record
+    // on its next 15s tick.
+    console.warn(
+      `[plane.nudge] failed to start workflow record_type=${recordType} slug=${slug}: ${(err as Error).message}`,
+    );
+    return { scheduled: false, reason: "exec_failed" };
+  }
+}
+
+/**
+ * Sanitize a slug out of a vault write path. Accepts:
+ *   - "matter/client-x"        → "client-x"
+ *   - "matter/client-x.md"     → "client-x"
+ *   - "task/deploy-v2.md"      → "deploy-v2"
+ * Returns null for any input that doesn't look like ``<type>/<slug>[.md]``.
+ *
+ * Shared between the explicit nudge endpoint handler and the automatic
+ * post-vault-write trigger in ``vault.ts``.
+ */
+export function slugFromVaultPath(
+  recordType: PlaneNudgeRecordType,
+  relPath: string,
+): string | null {
+  if (!relPath) return null;
+  const prefix = `${recordType}/`;
+  let s = relPath.startsWith(prefix) ? relPath.slice(prefix.length) : relPath;
+  if (s.endsWith(".md")) s = s.slice(0, -3);
+  // Reject paths with subdirectories or traversal — we only sync
+  // top-level records.
+  if (!s || s.includes("/") || s.includes("..")) return null;
+  if (!NUDGE_SLUG_RE.test(s)) return null;
+  return s;
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +371,35 @@ export function registerPlaneRoutes(): void {
       ok: true,
       delivery: deliveryId,
       forwarded: true,
+    });
+  });
+
+  // POST /api/v1/plane/nudge
+  //
+  // Explicit event-triggered forward-sync (#574). Callers (the vault
+  // write hook in `vault.ts`, ad-hoc scripts, operators poking the API)
+  // can use this to prod Plane with a single-record sync without
+  // waiting for the 15 s cron. Fire-and-forget — returns 202 Accepted
+  // with the workflow_id once the start has been dispatched; actual
+  // sync progress is visible via the standard workflow endpoints.
+  addRoute("POST", "/api/v1/plane/nudge", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b) throw new ValidationError("Request body required");
+    const recordType = b.record_type;
+    const slug = b.slug;
+    if (recordType !== "matter" && recordType !== "task") {
+      throw new ValidationError("record_type must be 'matter' or 'task'");
+    }
+    if (typeof slug !== "string" || !slug.trim()) {
+      throw new ValidationError("slug is required");
+    }
+    const outcome = await triggerPlaneSyncNudge(
+      recordType as PlaneNudgeRecordType,
+      slug.trim(),
+    );
+    sendJson(res, 202, {
+      ok: outcome.scheduled,
+      ...outcome,
     });
   });
 }

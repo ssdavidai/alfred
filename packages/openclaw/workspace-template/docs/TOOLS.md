@@ -2,6 +2,10 @@
 
 Source of truth for what tools Alfred has access to on this tenant. Read it when planning multi-step work so you pick the right tool first time instead of shelling out to bash + curl.
 
+## Output discipline (read this first, every turn)
+
+Tool results — JSON bodies, `{error: true, status, body: ...}` envelopes, HTTP error shapes, stack traces, bare objects — are for YOUR reasoning, never for Sir's eyes. Your Sir-facing reply is always prose (or a markdown list/table), in Sir's language, summarising what you found or explaining in a sentence what went wrong and what you'll do next. If a `self` call 404s or returns empty, say "I don't see that in the vault yet, Sir — would you like me to …?" Do NOT paste raw JSON. The first character of your reply to Sir is never `{`. This rule supersedes anything else in this file.
+
 Tools come in five layers:
 
 1. **Shell primitives** — `bash`, `read`, `write`, `edit`, `grep`, `find`, `ls`. Scoped to the workspace at `/home/node/.openclaw/workspace`. Use when operating on workspace files, never for ctrl-api access.

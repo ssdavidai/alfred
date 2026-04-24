@@ -571,6 +571,89 @@ async def fetch_changed_tasks(since_mtime: float) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Activity: fetch a single record by type + slug for event-triggered
+# nudge sync (#574). Unlike ``fetch_changed_matters`` / ``fetch_changed_tasks``
+# this returns exactly one record — shaped identically so the nudge
+# workflow can hand it to ``sync_matter_to_plane`` / ``sync_task_to_plane``
+# without reshuffling fields. Returns ``None`` when the record doesn't
+# exist (e.g. nudge fired on a record that's since been deleted).
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def fetch_single_plane_record(
+    record_type: str,
+    slug: str,
+) -> Optional[dict[str, Any]]:
+    """Fetch a single matter or task record, shaped for forward-sync.
+
+    Returns the same dict shape as one entry from
+    ``fetch_changed_matters`` / ``fetch_changed_tasks``. Returns ``None``
+    when the record is missing — the nudge workflow treats that as a
+    soft no-op (cron will catch up / confirm the delete on its own
+    archive cascade).
+    """
+    if record_type not in ("matter", "task"):
+        raise ValueError(
+            f"record_type must be 'matter' or 'task', got: {record_type!r}"
+        )
+    if not slug or "/" in slug or ".." in slug:
+        # Defensive: reject path-traversal-ish input. Slugs are the
+        # filename stem (e.g. 'client-x') not a full path.
+        raise ValueError(f"invalid slug: {slug!r}")
+
+    path = f"{record_type}/{slug}.md"
+    cfg = load_config()
+    client = VaultClient(cfg)
+    try:
+        resp = await client._client.get(f"/api/v1/vault/records/{path}")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        raw = resp.json()
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return None
+        logger.error(
+            "plane_nudge: read_record(%s) failed: %s", path, exc,
+        )
+        raise
+    except Exception as exc:
+        logger.error(
+            "plane_nudge: read_record(%s) failed: %s", path, exc,
+        )
+        raise
+    finally:
+        await client.close()
+
+    fm = dict(raw.get("frontmatter") or {})
+    body = str(raw.get("body") or "")
+    # Compute mtime the same way batch activities do, so downstream
+    # logic (cursor comparison if reused) stays consistent.
+    mtime = _record_mtime({"frontmatter": fm})
+    if record_type == "matter":
+        # Carry a preview just like the list endpoint would, so
+        # description-preview-based callers behave identically.
+        fm.setdefault("description_preview", body[:2000])
+        return {
+            "slug": slug,
+            "path": path,
+            "frontmatter": fm,
+            "body": _clamp_body(body),
+            "mtime": mtime,
+        }
+    # task
+    matter_ref = _resolve_task_matter(fm)
+    return {
+        "slug": slug,
+        "path": path,
+        "frontmatter": fm,
+        "matter_slug": matter_ref,
+        "body": _clamp_body(body),
+        "mtime": mtime,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Activity: upsert matter → Plane project
 # ---------------------------------------------------------------------------
 

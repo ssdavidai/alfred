@@ -26,6 +26,7 @@ from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
 from src.workflows.chore_promotion import ChorePromotionReflectionWorkflow
 from src.workflows.hourly_enrichment import HourlyEnrichmentWorkflow
 from src.workflows.plane_sync import PlaneSyncWorkflow
+from src.workflows.plane_sync_nudge import PlaneSyncNudgeWorkflow
 from src.workflows.plane_reverse_sync import PlaneReverseSyncWorkflow
 
 # Chore template workflows (static + dynamic)
@@ -294,6 +295,7 @@ from src.activities.plane_sync import (
     ensure_inbox_project,
     fetch_changed_matters,
     fetch_changed_tasks,
+    fetch_single_plane_record,
     load_plane_sync_state,
     plane_sync_is_enabled,
     preload_project_labels,
@@ -351,6 +353,7 @@ _STATIC_WORKFLOWS = [
     ChorePromotionReflectionWorkflow,
     HourlyEnrichmentWorkflow,
     PlaneSyncWorkflow,
+    PlaneSyncNudgeWorkflow,
     PlaneReverseSyncWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
@@ -552,6 +555,7 @@ ALL_ACTIVITIES = [
     save_plane_sync_state,
     fetch_changed_matters,
     fetch_changed_tasks,
+    fetch_single_plane_record,
     sync_matter_to_plane,
     sync_task_to_plane,
     ensure_inbox_project,
