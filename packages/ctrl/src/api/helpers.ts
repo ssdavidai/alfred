@@ -21,6 +21,50 @@ export function execAsync(cmd: string, args: string[], timeoutMs = 30_000): Prom
   });
 }
 
+// ---------------------------------------------------------------------------
+// Concurrency cap for docker-exec calls (#593).
+//
+// Each `docker compose exec ...` invocation forks several processes in
+// the ctrl-api container (docker CLI + compose plugin + containerd
+// helper). Under fleet load — plane_sync, plane_reverse_sync,
+// hourly_enrichment, composio sync, stream_puller — bursts of
+// simultaneous docker-exec calls can saturate the container's
+// pids_limit. The kernel returns EAGAIN on fork; docker's CLI-plugin
+// loader surfaces it either as
+//   ``fork/exec … resource temporarily unavailable`` (clean EAGAIN)
+// or — more confusingly — as
+//   ``unknown shorthand flag: 'f' in -f``
+// when the compose plugin fails to load mid-parse and docker falls
+// back to treating `compose` as an unknown subcommand (so `-f` is
+// re-parsed against the base docker CLI which rejects it).
+//
+// Capping in-flight docker-exec to 8 throttles bursts below the fork
+// budget while still letting normal workloads (2–3 parallel execs)
+// proceed without queueing. Requests above the cap wait in FIFO order
+// instead of failing.
+// ---------------------------------------------------------------------------
+
+const DOCKER_EXEC_CONCURRENCY = 8;
+let _dockerExecInFlight = 0;
+const _dockerExecWaiters: Array<() => void> = [];
+
+async function _acquireDockerExecSlot(): Promise<void> {
+  if (_dockerExecInFlight < DOCKER_EXEC_CONCURRENCY) {
+    _dockerExecInFlight++;
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    _dockerExecWaiters.push(resolve);
+  });
+  _dockerExecInFlight++;
+}
+
+function _releaseDockerExecSlot(): void {
+  _dockerExecInFlight--;
+  const next = _dockerExecWaiters.shift();
+  if (next) next();
+}
+
 export async function dockerExec(service: string, command: string[], envVars?: Record<string, string>): Promise<string> {
   const envFlags: string[] = [];
   if (envVars) {
@@ -29,8 +73,13 @@ export async function dockerExec(service: string, command: string[], envVars?: R
     }
   }
   const args = ["compose", "-f", `${COMPOSE_DIR}/docker-compose.yaml`, "exec", ...envFlags, "-T", service, ...command];
-  const { stdout } = await execAsync("docker", args);
-  return stdout;
+  await _acquireDockerExecSlot();
+  try {
+    const { stdout } = await execAsync("docker", args);
+    return stdout;
+  } finally {
+    _releaseDockerExecSlot();
+  }
 }
 
 export async function dockerComposeCmd(command: string[]): Promise<string> {

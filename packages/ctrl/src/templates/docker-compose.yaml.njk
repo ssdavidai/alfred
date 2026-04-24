@@ -230,7 +230,17 @@ services:
       start_period: 30s
     restart: unless-stopped
     mem_limit: 1g
-    pids_limit: 256
+    # Higher pids_limit than peer services because ctrl-api fronts all
+    # docker-exec traffic into the alfred container (vault writes, worker
+    # operations, chore runs). Under fleet load — plane forward+reverse
+    # sync, hourly_enrichment, composio sync, stream pullers — 256 was
+    # saturating the fork budget and surfacing as 500s with
+    # ``fork/exec … resource temporarily unavailable`` or the more
+    # confusing ``unknown shorthand flag: 'f' in -f`` when the compose
+    # plugin failed to load mid-parse (see #593). 1024 leaves headroom
+    # above the 8-way in-process semaphore in helpers.ts while staying
+    # safely below the host's default 32k cap.
+    pids_limit: 1024
 
   alfred-learn:
     image: ssdavidai00/alfred-learn:latest

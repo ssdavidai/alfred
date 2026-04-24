@@ -14,6 +14,38 @@ export const VAULT_PATH = "/mnt/encrypted/vault";
 const INBOX_PATH = `${VAULT_PATH}/inbox`;
 export const VAULT_ENV = { ALFRED_VAULT_PATH: "/vault" };
 
+// ---------------------------------------------------------------------------
+// Per-path write mutex (#593).
+//
+// ``alfred vault edit`` takes a per-file lock inside the alfred container,
+// so concurrent writes to the same vault record are already serialised
+// at the filesystem level — but the serialisation happens AFTER the
+// `docker compose exec` fork-chain lands. Forcing same-file writes to
+// queue at the ctrl-api boundary cuts the fork-storm that tripped
+// pids_limit saturation under fleet load (plane_sync /
+// plane_reverse_sync / hourly_enrichment all driving concurrent
+// docker-exec). It also produces cleaner audit logs (no redundant
+// no-op writes stacked while the file was already kernel-locked).
+// ---------------------------------------------------------------------------
+
+const _vaultPathLocks = new Map<string, Promise<unknown>>();
+
+async function _withVaultPathLock<T>(relPath: string, fn: () => Promise<T>): Promise<T> {
+  const previous = _vaultPathLocks.get(relPath) ?? Promise.resolve();
+  // Swallow previous failures so one 500 doesn't poison the whole queue.
+  const current = previous.then(() => fn(), () => fn());
+  _vaultPathLocks.set(relPath, current);
+  try {
+    return await current;
+  } finally {
+    // Clean up only if we're still the tail; otherwise someone chained
+    // behind us and the map entry is theirs to clean up.
+    if (_vaultPathLocks.get(relPath) === current) {
+      _vaultPathLocks.delete(relPath);
+    }
+  }
+}
+
 export const IGNORE_DIRS = new Set(["_templates", "_bases", "_docs", ".obsidian", "view", "dashboard"]);
 
 const KNOWN_TYPES = [
@@ -589,7 +621,12 @@ export function registerVaultRoutes(): void {
     // body-stdin is a flag, not an argument — would need stdin piping
     // For now, body-append handles most use cases
 
-    const stdout = await dockerExec("alfred", args, VAULT_ENV);
+    // Serialise concurrent writes to the same file at the ctrl-api
+    // boundary so we don't fan-out a fork-storm of `docker compose
+    // exec` waiting on the in-container alfred-CLI file lock (#593).
+    const stdout = await _withVaultPathLock(
+      recordPath, () => dockerExec("alfred", args, VAULT_ENV),
+    );
     try {
       sendJson(res, 200, JSON.parse(stdout));
     } catch {
@@ -622,7 +659,10 @@ export function registerVaultRoutes(): void {
     const recordPath = params.path;
     const args = [...ALFRED_CMD, "vault", "delete", recordPath];
 
-    const stdout = await dockerExec("alfred", args, VAULT_ENV);
+    // Serialise with any in-flight writes to this same path (#593).
+    const stdout = await _withVaultPathLock(
+      recordPath, () => dockerExec("alfred", args, VAULT_ENV),
+    );
     try {
       sendJson(res, 200, JSON.parse(stdout));
     } catch {
