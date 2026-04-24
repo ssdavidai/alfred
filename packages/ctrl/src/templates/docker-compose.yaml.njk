@@ -33,7 +33,15 @@ services:
     security_opt:
       - no-new-privileges:true
     mem_limit: 2g
-    pids_limit: 256
+    # Bumped from 256 → 1024 (2026-04-24). Temporal's Go runtime multiplexes
+    # goroutines onto OS threads (M:N scheduler), and under fleet load —
+    # many concurrent workflow executions + SQLite background writers +
+    # HTTP/2 streams to the UI — 256 was exhausting the pid budget with
+    # ``runtime: failed to create new OS thread (have 2 already; errno=11)``
+    # on miguel + rapali. Live-patched via `docker update --pids-limit`
+    # on david/miguel/rapali; this bakes the fix into the template so the
+    # starvation doesn't return on container recreate.
+    pids_limit: 1024
 
   ollama:
     # Local embedding server for surveyor (and future local-LLM uses).
@@ -63,7 +71,10 @@ services:
     security_opt:
       - no-new-privileges:true
     mem_limit: 2g
-    pids_limit: 256
+    # Bumped from 256 → 512 (2026-04-24). Ollama's runtime spawns a pytorch
+    # threadpool sized to CPU count for embedding inference; with surveyor
+    # batching requests every few minutes 256 was too tight.
+    pids_limit: 512
 
   openclaw:
     image: ssdavidai00/alfred-openclaw:latest
@@ -102,7 +113,12 @@ services:
     cap_add:
       - DAC_OVERRIDE
     mem_limit: 4g
-    pids_limit: 256
+    # Bumped from 256 → 2048 (2026-04-24) to match openclaw-workers (see
+    # #593 reasoning below). Main gateway has the same PID spawn profile
+    # — healthcheck fork every 10s + MCP subprocesses + ephemeral session
+    # nodes — and fronts all user-facing traffic (Slack DMs, webchat,
+    # email, voice), so it needs the same headroom.
+    pids_limit: 2048
 
   openclaw-workers:
     image: ssdavidai00/alfred-openclaw:latest
@@ -189,7 +205,11 @@ services:
       - FOWNER
       - CHOWN
     mem_limit: 2g
-    pids_limit: 256
+    # Bumped from 256 → 512 (2026-04-24). The alfred worker runs multiple
+    # long-lived daemon processes (curator, janitor, distiller, surveyor)
+    # plus periodic child processes for vault CLI calls, embedding
+    # generation via ollama, and openclaw gateway sessions.
+    pids_limit: 512
 
   ctrl-api:
     image: node:22-slim
@@ -287,7 +307,14 @@ services:
     cap_drop:
       - ALL
     mem_limit: 4g
-    pids_limit: 128
+    # Bumped from 128 → 512 (2026-04-24). alfred-learn runs the Temporal
+    # Python worker which spawns threads per activity execution, plus
+    # httpx connection pools per workflow (EventProcessor, Hourly
+    # Enrichment, Daily Digest, Judgment, Reflection all active
+    # concurrently). 128 was the tightest budget in the stack and was
+    # saturating under the zero-LLM ingest + hourly enrichment pattern
+    # that landed in #394/#395.
+    pids_limit: 512
 
 {% if plane_enabled %}
   # ── Plane self-hosted PM (stable) ───────────────────────────────────
@@ -319,7 +346,7 @@ services:
       retries: 20
       start_period: 30s
     mem_limit: 1g
-    pids_limit: 256
+    pids_limit: 512
 
   plane-redis:
     image: valkey/valkey:7.2.11-alpine
@@ -334,7 +361,7 @@ services:
       retries: 20
       start_period: 15s
     mem_limit: 256m
-    pids_limit: 128
+    pids_limit: 512
 
   plane-mq:
     image: rabbitmq:3.13-management-alpine
@@ -352,7 +379,7 @@ services:
       retries: 20
       start_period: 30s
     mem_limit: 512m
-    pids_limit: 256
+    pids_limit: 512
 
   plane-minio:
     image: minio/minio:latest
@@ -370,7 +397,7 @@ services:
       retries: 20
       start_period: 30s
     mem_limit: 256m
-    pids_limit: 128
+    pids_limit: 512
 
   # One-shot migrator. plane-api's entrypoint calls `wait_for_migrations` which
   # blocks until `python manage.py migrate` has run — Plane's official compose
@@ -402,7 +429,7 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
     command: ["/bin/sh", "-c", "./bin/docker-entrypoint-migrator.sh"]
     mem_limit: 512m
-    pids_limit: 128
+    pids_limit: 512
 
   plane-api:
     image: makeplane/plane-backend:stable
@@ -461,7 +488,7 @@ services:
       retries: 30
       start_period: 120s
     mem_limit: 1g
-    pids_limit: 256
+    pids_limit: 512
 
   plane-worker:
     image: makeplane/plane-backend:stable
@@ -496,7 +523,7 @@ services:
     command: ["/bin/sh", "-c", "./bin/docker-entrypoint-worker.sh"]
     # 1g was OOM-killed on boot (celery + bgtask registry). 2g holds steady.
     mem_limit: 2g
-    pids_limit: 256
+    pids_limit: 512
 
   plane-beat:
     image: makeplane/plane-backend:stable
@@ -524,7 +551,7 @@ services:
       - AMQP_URL=amqp://plane:${REDIS_PASSWORD}@plane-mq:5672/plane
     command: ["/bin/sh", "-c", "./bin/docker-entrypoint-beat.sh"]
     mem_limit: 256m
-    pids_limit: 128
+    pids_limit: 512
 
   plane-web:
     # plane-frontend:stable is a pre-built nginx image serving static Next.js
@@ -550,7 +577,7 @@ services:
       retries: 20
       start_period: 60s
     mem_limit: 512m
-    pids_limit: 256
+    pids_limit: 512
 
   plane-space:
     # plane-space:stable runs `npx react-router-serve ./build/server/index.js`
@@ -568,7 +595,7 @@ services:
         aliases:
           - space
     mem_limit: 256m
-    pids_limit: 128
+    pids_limit: 512
 
   plane-admin:
     # plane-admin:stable is nginx on :80, same pattern as plane-web.
@@ -585,7 +612,7 @@ services:
         aliases:
           - admin
     mem_limit: 256m
-    pids_limit: 128
+    pids_limit: 512
 
   plane-live:
     image: makeplane/plane-live:stable
@@ -603,7 +630,7 @@ services:
         aliases:
           - live
     mem_limit: 256m
-    pids_limit: 128
+    pids_limit: 512
 
   plane-proxy:
     image: makeplane/plane-proxy:stable
@@ -634,7 +661,7 @@ services:
       retries: 20
       start_period: 60s
     mem_limit: 128m
-    pids_limit: 128
+    pids_limit: 512
 {% endif %}
 
 volumes: {}

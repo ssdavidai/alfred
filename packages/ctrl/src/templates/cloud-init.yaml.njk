@@ -42,6 +42,21 @@ runcmd:
   - apt-get update
   - apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
+  # --- Raise per-user process limit (nproc / ulimit -u) ---
+  # Ubuntu 24.04's default for interactive sessions is 2048, which is the
+  # actual ceiling that docker's container-level pids_limit can draw from
+  # when the parent process (dockerd's child of the deploy shell for
+  # docker-cli exec calls) shares the deploy user's limit. Bump to 32k to
+  # give the whole fleet's per-container pids_limits plenty of headroom.
+  # Applies to both soft and hard limits for root and deploy.
+  - |
+    cat > /etc/security/limits.d/99-alfred.conf << 'LIMITS'
+    root    soft    nproc   32768
+    root    hard    nproc   32768
+    deploy  soft    nproc   32768
+    deploy  hard    nproc   32768
+    LIMITS
+
   # --- Harden SSH ---
   - |
     cat > /etc/ssh/sshd_config.d/99-alfred-hardening.conf << 'SSHD'
