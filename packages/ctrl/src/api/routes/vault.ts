@@ -223,6 +223,14 @@ function parseFrontmatter(content: string): ParsedRecord {
   let listValues: string[] | null = null;
   let multiLineQuote = ""; // accumulates multi-line quoted strings
   let multiLineChar = ""; // the quote character (' or ")
+  // Plain-scalar folded continuation (#611): python-frontmatter wraps
+  // long string values across multiple lines without quotes, e.g.:
+  //     description: first chunk of a long description that
+  //       continues on the next indented line and folds with a
+  //       single space between every line.
+  // Track whether the current key has an unquoted scalar that may still
+  // be accumulating follow-on lines.
+  let plainScalarActive = false;
 
   const lines = yamlBlock.split("\n");
   for (let li = 0; li < lines.length; li++) {
@@ -236,8 +244,33 @@ function parseFrontmatter(content: string): ParsedRecord {
         fm[currentKey] = multiLineQuote;
         multiLineQuote = "";
         multiLineChar = "";
+        plainScalarActive = false;
       } else {
         multiLineQuote += " " + trimmed.trim();
+      }
+      continue;
+    }
+
+    // Plain-scalar folded continuation (#611). A continuation line is
+    // an indented line (starts with whitespace) that is NOT the start
+    // of a list item and NOT a new `key:` pair. Each such line is
+    // appended to the current scalar with a single space separator.
+    // This mirrors YAML's plain-scalar folding semantics as produced
+    // by python-frontmatter / PyYAML when a string value exceeds the
+    // default line width (80) and is written unquoted.
+    if (
+      plainScalarActive &&
+      currentKey &&
+      /^\s/.test(line) &&
+      !/^\s*-\s/.test(line) &&
+      !/^([a-zA-Z_][a-zA-Z0-9_-]*)\s*:\s*/.test(line.trimStart())
+    ) {
+      const existing = fm[currentKey];
+      if (typeof existing === "string") {
+        const continuation = line.trim();
+        if (continuation) {
+          fm[currentKey] = existing + " " + continuation;
+        }
       }
       continue;
     }
@@ -253,6 +286,9 @@ function parseFrontmatter(content: string): ParsedRecord {
       fm[currentKey] = listValues;
       listValues = null;
     }
+    // A new top-level `key:` line closes out any in-progress plain
+    // scalar.
+    plainScalarActive = false;
     // "key: value" or "key:"
     const m = line.match(/^([a-zA-Z_][a-zA-Z0-9_-]*)\s*:\s*(.*)/);
     if (!m) continue;
@@ -291,6 +327,10 @@ function parseFrontmatter(content: string): ParsedRecord {
         multiLineQuote = val.slice(1);
         continue;
       }
+    } else {
+      // Unquoted scalar value — mark active so subsequent indented
+      // lines are treated as plain-scalar continuation (#611).
+      plainScalarActive = true;
     }
     fm[currentKey] = val;
   }

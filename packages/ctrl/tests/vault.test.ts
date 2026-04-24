@@ -373,6 +373,189 @@ describe("POST /api/v1/vault/inbox (binary upload + media routing)", () => {
   });
 });
 
+describe("GET /api/v1/vault/records/* — YAML plain-scalar continuation (#611)", () => {
+  // python-frontmatter (used by `alfred vault edit`) wraps long unquoted
+  // string values across multiple indented lines (YAML plain-scalar
+  // folding). The pre-fix ctrl-api parser only kept the first line,
+  // silently truncating descriptions at ~68-80 chars. Regression tests
+  // pin the parser to fold indented continuations back together with
+  // a single space.
+
+  it("reassembles a description that wraps across multiple indented lines", async () => {
+    const content = [
+      "---",
+      "created: 2026-04-24 06:06:16.439419+00:00",
+      "description: Erste Agentic Coding Makerspace program—your February-prepared proposal",
+      "  accepted 2026-04-18—requires IT security kickoff to initiate 12-week training for",
+      "  20–30 Erste Bank developers in compliant agentic coding harnesses using GitHub Copilot.",
+      "  Involves Peti and Alexa; leverages GitHub and Microsoft. Originates from Omi's 2026-04-17",
+      "  conversation affirming Copilot as safe compliance choice.",
+      "name: organize IT security kickoff",
+      "status: todo",
+      "type: task",
+      "---",
+      "",
+    ].join("\n");
+    readFileSyncFn.mock.mockImplementationOnce(() => content);
+
+    const { status, data } = await req(
+      "GET",
+      "/api/v1/vault/records/task/1828ac84-organize-it-security-kickoff.md",
+    );
+    assert.strictEqual(status, 200);
+    assert.strictEqual(
+      data.frontmatter.description,
+      "Erste Agentic Coding Makerspace program—your February-prepared proposal accepted 2026-04-18—requires IT security kickoff to initiate 12-week training for 20–30 Erste Bank developers in compliant agentic coding harnesses using GitHub Copilot. Involves Peti and Alexa; leverages GitHub and Microsoft. Originates from Omi's 2026-04-17 conversation affirming Copilot as safe compliance choice.",
+    );
+    // Sibling fields after the multi-line scalar must parse normally.
+    assert.strictEqual(data.frontmatter.name, "organize IT security kickoff");
+    assert.strictEqual(data.frontmatter.status, "todo");
+    assert.strictEqual(data.frontmatter.type, "task");
+  });
+
+  it("preserves short single-line descriptions verbatim", async () => {
+    const content = [
+      "---",
+      "description: Short single-line description.",
+      "name: Simple task",
+      "type: task",
+      "---",
+      "",
+    ].join("\n");
+    readFileSyncFn.mock.mockImplementationOnce(() => content);
+
+    const { status, data } = await req(
+      "GET",
+      "/api/v1/vault/records/task/simple.md",
+    );
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.frontmatter.description, "Short single-line description.");
+    assert.strictEqual(data.frontmatter.name, "Simple task");
+  });
+
+  it("does not fold list items into the preceding scalar", async () => {
+    // A long description followed immediately by a list field must
+    // not eat the list items into the description.
+    const content = [
+      "---",
+      "description: This description wraps across two lines and",
+      "  ends at the indented continuation before the list.",
+      "related_matters:",
+      "- matter/example.md",
+      "- matter/other.md",
+      "name: wrap-then-list",
+      "type: task",
+      "---",
+      "",
+    ].join("\n");
+    readFileSyncFn.mock.mockImplementationOnce(() => content);
+
+    const { status, data } = await req(
+      "GET",
+      "/api/v1/vault/records/task/wrap-then-list.md",
+    );
+    assert.strictEqual(status, 200);
+    assert.strictEqual(
+      data.frontmatter.description,
+      "This description wraps across two lines and ends at the indented continuation before the list.",
+    );
+    assert.deepStrictEqual(data.frontmatter.related_matters, [
+      "matter/example.md",
+      "matter/other.md",
+    ]);
+    assert.strictEqual(data.frontmatter.name, "wrap-then-list");
+  });
+
+  it("handles descriptions containing opening braces and curly brackets", async () => {
+    // Regression for the #611 working theory that `{` / `}` inside the
+    // description could confuse a brace-based salvage path. Parser now
+    // runs on plain scalar continuation, so literal braces in the text
+    // pass through intact.
+    const content = [
+      "---",
+      "description: The clerk emits JSON like {\"description\": \"...\"} — this",
+      "  wrapped line contains a literal } character mid-sentence and must",
+      "  survive the fold without corruption.",
+      "name: brace-test",
+      "type: task",
+      "---",
+      "",
+    ].join("\n");
+    readFileSyncFn.mock.mockImplementationOnce(() => content);
+
+    const { status, data } = await req(
+      "GET",
+      "/api/v1/vault/records/task/brace-test.md",
+    );
+    assert.strictEqual(status, 200);
+    assert.ok(
+      data.frontmatter.description.includes('JSON like {"description": "..."}'),
+      "inline { and } must be preserved",
+    );
+    assert.ok(
+      data.frontmatter.description.includes("literal } character mid-sentence"),
+      "continuation with a literal } must fold intact",
+    );
+  });
+
+  it("closes plain-scalar folding when a new top-level key appears", async () => {
+    // Non-indented lines (0-column) that match `key: ...` must end the
+    // fold, not be treated as continuation.
+    const content = [
+      "---",
+      "description: Line one of the scalar that",
+      "  wraps once into a second line.",
+      "status: todo",
+      "name: boundary-test",
+      "type: task",
+      "---",
+      "",
+    ].join("\n");
+    readFileSyncFn.mock.mockImplementationOnce(() => content);
+
+    const { status, data } = await req(
+      "GET",
+      "/api/v1/vault/records/task/boundary-test.md",
+    );
+    assert.strictEqual(status, 200);
+    assert.strictEqual(
+      data.frontmatter.description,
+      "Line one of the scalar that wraps once into a second line.",
+    );
+    assert.strictEqual(data.frontmatter.status, "todo");
+    assert.strictEqual(data.frontmatter.name, "boundary-test");
+  });
+
+  it("still folds a quoted multi-line string (single-quoted)", async () => {
+    // Existing behaviour for single-quoted multi-line strings must keep
+    // working. PyYAML uses single-quoted blocks when the value contains
+    // special characters (timestamps etc.); truncation of those would
+    // be a separate regression.
+    const content = [
+      "---",
+      "updated: '2026-04-24T07:46:24Z'",
+      "description: 'A single-quoted string that",
+      "  wraps across a line break.'",
+      "name: quoted-wrap",
+      "type: task",
+      "---",
+      "",
+    ].join("\n");
+    readFileSyncFn.mock.mockImplementationOnce(() => content);
+
+    const { status, data } = await req(
+      "GET",
+      "/api/v1/vault/records/task/quoted-wrap.md",
+    );
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.frontmatter.updated, "2026-04-24T07:46:24Z");
+    assert.strictEqual(
+      data.frontmatter.description,
+      "A single-quoted string that wraps across a line break.",
+    );
+  });
+});
+
 describe("emitStreamEvent reserved-key filtering", () => {
   it("ignores reserved keys passed via extra and preserves generated values", async () => {
     appendFileSyncFn.mock.resetCalls();
