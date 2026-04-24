@@ -551,29 +551,47 @@ class Embedder:
             }],
         )
 
+    # Page size for pulling all embeddings out of Milvus.
+    #
+    # Milvus Lite's `segcore` has an internal result-size cap on how many
+    # rows a single `query()` can return. The hard ceiling is ~16,384, but
+    # in practice the cap trips well before that once rows carry a fat
+    # payload like a 768-dim embedding vector — we've seen
+    # `query results exceed the limit size at ... SegmentInterface.cpp:116`
+    # crash the surveyor daemon on David's vault at ~12k entity rows with
+    # `limit=16_000`. 2,000 rows per page is comfortably under the cap
+    # across observed payload shapes and still keeps total round-trips
+    # reasonable (a 20k-row vault = 10 pages).
+    _GET_ALL_PAGE_SIZE = 2_000
+
     def get_all_embeddings(self) -> tuple[list[str], np.ndarray] | None:
         """Retrieve all embeddings from Milvus as (paths, matrix).
 
+        Paginates via `query_iterator` so arbitrarily large collections
+        don't trip Milvus Lite's `segcore` per-query result-size cap.
         Returns None if collection is empty.
         """
-        PAGE_SIZE = 16_000  # Milvus caps query limit at 16,384
         all_results: list[dict] = []
-        offset = 0
-
-        while True:
-            page = self.milvus.query(
-                collection_name=self.collection_name,
-                filter="",
-                output_fields=["id", "embedding"],
-                limit=PAGE_SIZE,
-                offset=offset,
-            )
-            if not page:
-                break
-            all_results.extend(page)
-            if len(page) < PAGE_SIZE:
-                break
-            offset += PAGE_SIZE
+        iterator = self.milvus.query_iterator(
+            collection_name=self.collection_name,
+            batch_size=self._GET_ALL_PAGE_SIZE,
+            filter="",
+            output_fields=["id", "embedding"],
+        )
+        try:
+            while True:
+                page = iterator.next()
+                if not page:
+                    break
+                all_results.extend(page)
+        finally:
+            # query_iterator holds a server-side cursor; closing is
+            # mandatory to release it (esp. on milvus-lite where the
+            # cursor is a process-local resource).
+            try:
+                iterator.close()
+            except Exception:
+                pass
 
         if not all_results:
             return None
