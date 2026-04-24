@@ -238,10 +238,20 @@ _VALID_TASK_STATUSES = frozenset({"active", "blocked", "cancelled", "done", "tod
 # matches one of these patterns AND is short. Anything longer than
 # _MAX_CLEARABLE_BODY is preserved verbatim — legitimate bodies tend to
 # run into the hundreds of characters with structured content.
+#
+# The wikilink target can be any vault record type — the curator and
+# event-processor both emit stubs pointing at ``event/``, but tasks
+# promoted from Omi conversations carry ``conversation/`` refs, and
+# tasks derived from sessions / observations / notes carry their own
+# type prefixes. Accept ``[[<any-word-chars>/`` so one pattern covers
+# every current + future record type without needing a fresh PR each
+# time the curator gains a new source type. (On David 2026-04-24: 2413
+# ``event/`` stubs + 80 ``conversation/`` stubs; the 80 conversation-
+# refs silently leaked their stub body to Plane pre-fix.)
 _STUB_BODY_PATTERNS = [
-    re.compile(r"Extracted\s+from\s+\[\[event/", re.IGNORECASE),
+    re.compile(r"Extracted\s+from\s+\[\[\w+/", re.IGNORECASE),
     re.compile(r"Created\s+from\s+\[\[", re.IGNORECASE),
-    re.compile(r"Source:\s+\[\[event/", re.IGNORECASE),
+    re.compile(r"Source:\s+\[\[\w+/", re.IGNORECASE),
 ]
 _MAX_CLEARABLE_BODY = 200
 
