@@ -38,6 +38,7 @@ class PullerResult:
     stream_id: str = ""
     events_pulled: int = 0
     events_ingested: int = 0
+    events_rejected: int = 0
     detail_fetches: int = 0
     cursor_updated: bool = False
     error: str | None = None
@@ -151,25 +152,27 @@ class StreamPullerWorkflow:
 
                     # Ingest in small batches to keep payloads under 4MB
                     if len(batch) >= BATCH_SIZE:
-                        count: int = await workflow.execute_activity(
+                        counts: dict[str, int] = await workflow.execute_activity(
                             ingest_events,
                             args=[stream_id, stream_type, parser_name, batch],
                             start_to_close_timeout=timedelta(seconds=60),
                             retry_policy=RetryPolicy(maximum_attempts=2),
                         )
-                        result.events_ingested += count
+                        result.events_ingested += counts.get("ingested", 0)
+                        result.events_rejected += counts.get("rejected", 0)
                         result.events_pulled += len(batch)
                         batch = []
 
                 # Flush remaining
                 if batch:
-                    count = await workflow.execute_activity(
+                    counts = await workflow.execute_activity(
                         ingest_events,
                         args=[stream_id, stream_type, parser_name, batch],
                         start_to_close_timeout=timedelta(seconds=60),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
-                    result.events_ingested += count
+                    result.events_ingested += counts.get("ingested", 0)
+                    result.events_rejected += counts.get("rejected", 0)
                     result.events_pulled += len(batch)
 
                 # Skip the generic ingest below — already handled
@@ -184,13 +187,14 @@ class StreamPullerWorkflow:
             raw_to_ingest = detail_items if detail_items else [raw_response]
 
             # 7. Ingest parsed events via POST /api/v1/streams/ingest
-            ingested_count: int = await workflow.execute_activity(
+            ingest_counts: dict[str, int] = await workflow.execute_activity(
                 ingest_events,
                 args=[stream_id, config.get("type", "custom"), parser_name, raw_to_ingest],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-            result.events_ingested += ingested_count
+            result.events_ingested += ingest_counts.get("ingested", 0)
+            result.events_rejected += ingest_counts.get("rejected", 0)
             result.events_pulled += len(raw_to_ingest)
 
         # 8. Update cursor if configured
@@ -269,17 +273,17 @@ class StreamPullerWorkflow:
         # 5. Ingest through the composio parser only if the response carries
         #    real data. An error envelope with no `data` would just produce
         #    an empty ingest anyway.
-        ingested_count = 0
         if pull_status == "ok":
             parser_name = config.get("parser", "composio")
             stream_type = config.get("type", "composio")
-            ingested_count = await workflow.execute_activity(
+            counts: dict[str, int] = await workflow.execute_activity(
                 ingest_events,
                 args=[stream_id, stream_type, parser_name, [raw_response]],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-        result.events_ingested = ingested_count
+            result.events_ingested = counts.get("ingested", 0)
+            result.events_rejected = counts.get("rejected", 0)
         result.events_pulled = 1
 
         # 6. Extract cursor from response (for sync mode).

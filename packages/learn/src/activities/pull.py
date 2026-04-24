@@ -221,11 +221,36 @@ async def ingest_events(
     stream_type: str,
     parser_name: str,
     raw_items: list[dict[str, Any]],
-) -> int:
-    """Parse raw items and ingest as stream events via POST /api/v1/streams/ingest."""
+) -> dict[str, int]:
+    """Parse raw items and ingest as stream events via POST /api/v1/streams/ingest.
+
+    Returns ``{"ingested": int, "rejected": int}``.
+
+    Cross-tenant ingest guard (defense-in-depth for #408-class leaks): every
+    parsed event that carries a Google-shaped identity claim (``self: true``
+    attendee on calendar events, owner-email field on Gmail full messages)
+    is checked against the tenant's ``OWNER_EMAIL``. A mismatch means the
+    upstream OAuth token is scoped to a different Google account — the
+    event belongs on someone else's vault and must not be written here.
+    Events with no identity claim (e.g. external meeting invites that the
+    owner is merely attending, unauthenticated webhook payloads) are always
+    allowed through; this guard never false-rejects.
+
+    If ``OWNER_EMAIL`` is unset the guard is skipped entirely so an
+    onboarding-in-progress tenant still ingests.
+    """
     parser = get_parser(parser_name)
     config = load_config()
     ingested = 0
+    rejected = 0
+    owner_email = _resolve_owner_email()
+    if not owner_email:
+        logger.warning(
+            "ingest_events: OWNER_EMAIL unset for stream %s — cross-tenant "
+            "guard disabled (accepting all events). Set OWNER_EMAIL in the "
+            "tenant .env or /alfred-data/onboard.json to enable rejection.",
+            stream_id,
+        )
 
     async with _ctrl_client(config) as client:
         for raw_item in raw_items:
@@ -236,6 +261,22 @@ async def ingest_events(
                 continue
 
             for event in parsed_events:
+                # Cross-tenant sanity check: drop events whose Google
+                # identity claim doesn't match this tenant's owner.
+                if owner_email and not _event_belongs_to_owner(event.raw, owner_email):
+                    rejected += 1
+                    logger.warning(
+                        "ingest_events: REJECTED cross-tenant event "
+                        "stream=%s parser=%s source_ref=%s owner=%s "
+                        "claimed=%s",
+                        stream_id,
+                        parser_name,
+                        event.source_ref,
+                        owner_email,
+                        _extract_claimed_email(event.raw) or "<unknown>",
+                    )
+                    continue
+
                 try:
                     resp = await client.post(
                         "/api/v1/streams/ingest",
@@ -261,7 +302,89 @@ async def ingest_events(
                     logger.warning("Ingest failed for %s: %s", event.source_ref, exc)
                     continue
 
-    return ingested
+    return {"ingested": ingested, "rejected": rejected}
+
+
+# ---------------------------------------------------------------------------
+# Cross-tenant ingest guard helpers
+# ---------------------------------------------------------------------------
+
+def _resolve_owner_email() -> str:
+    """Resolve the tenant owner's canonical email.
+
+    Priority: OWNER_EMAIL env var → /alfred-data/onboard.json
+    ("user_email" or "owner_email" keys — neither is canonical today but
+    some onboarding variants have set them).
+
+    Returns an empty string when nothing is found. Callers MUST treat an
+    empty string as "guard disabled" and accept all events (so a
+    provisioning-time bug doesn't also block ingest).
+    """
+    env_val = (os.environ.get("OWNER_EMAIL") or "").strip()
+    if env_val:
+        return env_val.lower()
+
+    # Fallback: try onboard.json
+    onboard_path = os.environ.get("ONBOARD_PATH", "/alfred-data/onboard.json")
+    try:
+        import json
+
+        with open(onboard_path, encoding="utf-8") as f:
+            data = json.load(f)
+        for key in ("owner_email", "user_email"):
+            val = (data.get(key) or "").strip() if isinstance(data, dict) else ""
+            if val:
+                return val.lower()
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
+def _event_belongs_to_owner(raw: Any, owner_email: str) -> bool:
+    """Return False iff ``raw`` makes an identity claim that mismatches ``owner_email``.
+
+    Conservative by design: events with no identity claim always pass. We
+    only reject when we find a clear "this event was retrieved as user X"
+    marker and X is not the owner.
+
+    Current identity claim shapes:
+      - Google Calendar: ``attendees: [{..., self: true, email: X}]``
+        (the ``self`` attendee IS the calendar owner from Google's view)
+      - Gmail: no per-message identity claim — messages in a mailbox can
+        be from/to anyone. Guard is a no-op for Gmail. The wrong-tenant
+        failure mode is caught at the OAuth layer (oauthTenantEmailGuard)
+        which verifies the connected Google account matches the tenant.
+      - Other sources (Slack, GitHub, Notion, webhooks): no identity
+        claim → always accept.
+    """
+    if not isinstance(raw, dict):
+        return True
+    claimed = _extract_claimed_email(raw)
+    if not claimed:
+        return True
+    return claimed.strip().lower() == owner_email.strip().lower()
+
+
+def _extract_claimed_email(raw: Any) -> str:
+    """Extract the ``self: true`` attendee email from a calendar event.
+
+    Returns an empty string if no such claim is present. Handles both
+    the Composio-wrapped shape (attendees under the item) and the raw
+    Google Calendar shape.
+    """
+    if not isinstance(raw, dict):
+        return ""
+    attendees = raw.get("attendees")
+    if not isinstance(attendees, list):
+        return ""
+    for att in attendees:
+        if not isinstance(att, dict):
+            continue
+        if att.get("self") is True:
+            email = att.get("email")
+            if isinstance(email, str) and email.strip():
+                return email.strip()
+    return ""
 
 
 @activity.defn
