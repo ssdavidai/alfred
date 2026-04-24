@@ -102,6 +102,109 @@ function appendDeliveryToDisk(deliveryId: string): void {
 }
 
 // ---------------------------------------------------------------------------
+// Self-comments ledger (#536 B8 echo defence)
+//
+// When Alfred posts a comment via ``POST /api/v1/plane/comment`` we record
+// the returned comment id in a FIFO-bounded ledger so the Plane trigger
+// detector (``plane_alfred_triggers.py``) can suppress the webhook that
+// will fire for Alfred's own comment.
+//
+// File shape matches the Python side exactly: a JSON array of string
+// comment ids, capped at 500 entries (oldest evicted first). Writes are
+// atomic (tmp + rename) so concurrent writes from multiple inflight
+// comment posts don't corrupt the file.
+// ---------------------------------------------------------------------------
+
+const SELF_COMMENTS_FILE = "/alfred-data/state/plane_self_comments.json";
+const SELF_COMMENTS_CAP = 500;
+
+function appendSelfCommentId(commentId: string): void {
+  if (!commentId) return;
+  try {
+    fs.mkdirSync(path.dirname(SELF_COMMENTS_FILE), { recursive: true });
+
+    let ledger: string[] = [];
+    if (fs.existsSync(SELF_COMMENTS_FILE)) {
+      try {
+        const raw = fs.readFileSync(SELF_COMMENTS_FILE, "utf-8");
+        const parsed = raw ? JSON.parse(raw) : [];
+        if (Array.isArray(parsed)) {
+          ledger = parsed.filter(
+            (x): x is string => typeof x === "string" || typeof x === "number",
+          ).map((x) => String(x));
+        } else if (
+          parsed &&
+          typeof parsed === "object" &&
+          Array.isArray((parsed as any).comments)
+        ) {
+          // Backwards-compat with the {"comments": [...]} shape the
+          // Python loader also accepts.
+          ledger = (parsed as any).comments
+            .filter(
+              (x: unknown): x is string =>
+                typeof x === "string" || typeof x === "number",
+            )
+            .map((x: string | number) => String(x));
+        }
+      } catch {
+        // Corrupt ledger — start fresh rather than fail the write.
+        ledger = [];
+      }
+    }
+
+    ledger.push(commentId);
+    if (ledger.length > SELF_COMMENTS_CAP) {
+      ledger = ledger.slice(-SELF_COMMENTS_CAP);
+    }
+
+    const tmp = SELF_COMMENTS_FILE + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(ledger));
+    fs.renameSync(tmp, SELF_COMMENTS_FILE);
+  } catch (err) {
+    // Ledger write is best-effort — a failure here is logged but
+    // doesn't fail the comment post. Worst case: Alfred's own comment
+    // fires a webhook and the ``author_id == alfred_user_id`` check in
+    // ``plane_alfred_triggers`` is the second line of defence.
+    console.warn(
+      `[plane.comment] failed to append self-comment id ${commentId}: ${(err as Error).message}`,
+    );
+  }
+}
+
+// Minimal HTML escape — enough for wrapping untrusted plain text in a
+// <p>. Not a substitute for a real sanitiser (Plane stores raw html);
+// callers passing structured text_html are responsible for that input.
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// Minimal HTML → text for deriving ``comment_stripped`` when the
+// caller only supplied ``text_html``. Strips tags and decodes the
+// handful of entities we care about. Not a full HTML parser; Plane
+// itself normalises the stripped form on save.
+function stripHtml(html: string): string {
+  if (!html) return "";
+  return html
+    .replace(/<\s*br\s*\/?\s*>/gi, "\n")
+    .replace(/<\/(p|div|li|h[1-6])\s*>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// ---------------------------------------------------------------------------
 // Signature verification
 // ---------------------------------------------------------------------------
 
@@ -372,6 +475,114 @@ export function registerPlaneRoutes(): void {
       delivery: deliveryId,
       forwarded: true,
     });
+  });
+
+  // POST /api/v1/plane/comment
+  //
+  // Outbound comment poster for Alfred-as-a-Plane-user (#536 B8). The
+  // main agent calls this via the MCP `self` tool when it wants to
+  // reply to an @mention or post a progress/clarification comment on a
+  // Plane issue. ctrl-api holds the ``PLANE_API_TOKEN`` + workspace
+  // slug — the agent never sees the Plane PAT directly.
+  //
+  // On success, the returned comment id is appended to the
+  // self-comments ledger at
+  // ``/alfred-data/state/plane_self_comments.json`` so the trigger
+  // detector (``plane_alfred_triggers``) suppresses the echo webhook.
+  addRoute("POST", "/api/v1/plane/comment", async ({ body, res }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const projectId = typeof b.project_id === "string" ? b.project_id.trim() : "";
+    const issueId = typeof b.issue_id === "string" ? b.issue_id.trim() : "";
+    const text = typeof b.text === "string" ? b.text : "";
+    const textHtml = typeof b.text_html === "string" ? b.text_html : "";
+
+    if (!projectId || !issueId || (!text && !textHtml)) {
+      throw new ValidationError(
+        "project_id, issue_id, and text (or text_html) are required",
+      );
+    }
+
+    const planeToken = process.env.PLANE_API_TOKEN;
+    const workspaceSlug = process.env.PLANE_WORKSPACE_SLUG;
+    const planeBaseRaw =
+      process.env.PLANE_API_BASE_URL ||
+      process.env.PLANE_API_URL ||
+      "http://plane-api:8000";
+
+    if (!planeToken || !workspaceSlug) {
+      throw new ApiError(
+        500,
+        "NOT_CONFIGURED",
+        "Plane not configured on this tenant (missing PLANE_API_TOKEN or PLANE_WORKSPACE_SLUG)",
+      );
+    }
+
+    const planeBase = planeBaseRaw.replace(/\/+$/, "");
+
+    // Plane accepts comment_html (+ optional comment_stripped). If the
+    // caller supplied plain ``text``, wrap in a <p> and derive the
+    // stripped form; if ``text_html`` was supplied, use it as-is and
+    // derive a cheap stripped form by removing tags.
+    const html = textHtml || `<p>${escapeHtml(text)}</p>`;
+    const stripped = text || stripHtml(textHtml);
+
+    const url = `${planeBase}/api/v1/workspaces/${encodeURIComponent(
+      workspaceSlug,
+    )}/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(
+      issueId,
+    )}/comments/`;
+
+    let planeResp: Response;
+    try {
+      planeResp = await fetch(url, {
+        method: "POST",
+        headers: {
+          "x-api-key": planeToken,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          comment_html: html,
+          comment_stripped: stripped,
+        }),
+      });
+    } catch (err) {
+      throw new ApiError(
+        502,
+        "PLANE_UNREACHABLE",
+        `Failed to reach Plane at ${planeBase}: ${(err as Error).message}`,
+      );
+    }
+
+    if (!planeResp.ok) {
+      const errText = (await planeResp.text().catch(() => "")).slice(0, 500);
+      return sendJson(res, planeResp.status, {
+        error: {
+          code: "PLANE_API_ERROR",
+          message: errText || `Plane responded with ${planeResp.status}`,
+        },
+      });
+    }
+
+    let planeData: Record<string, unknown> = {};
+    try {
+      planeData = (await planeResp.json()) as Record<string, unknown>;
+    } catch {
+      // Plane occasionally returns no body on 201 with some proxies in
+      // between. Treat that as success with no id — we skip the ledger
+      // append but still 201 the caller.
+    }
+
+    const commentId =
+      (typeof planeData.id === "string" && planeData.id) ||
+      (typeof planeData.id === "number" && String(planeData.id)) ||
+      "";
+
+    if (commentId) {
+      appendSelfCommentId(commentId);
+    }
+
+    sendJson(res, 201, { ok: true, comment_id: commentId || null });
   });
 
   // POST /api/v1/plane/nudge
