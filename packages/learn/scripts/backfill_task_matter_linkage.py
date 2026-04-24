@@ -24,6 +24,18 @@ Flags::
     --dry-run                 Simulate everything (clerk included); write nothing.
     --only-missing-matter     Only target tasks with no related_matters (default True).
     --include-all             Override --only-missing-matter (re-assign everything).
+    --include-agent-authored  Include tasks whose frontmatter carries an
+                              ``agent_id`` (e.g. ``learn-clerk`` session
+                              summaries). Default False for back-compat —
+                              round 1 of this backfill skipped them on the
+                              assumption they were ephemeral TaskRunner
+                              rows, but learn-clerk-authored tasks are in
+                              fact real user-facing errands with rich
+                              bodies and the clerk matcher handles them
+                              well. Pass this on a round-2 sweep to pick
+                              them up. Tasks that additionally carry
+                              ``skill_entry`` (true TaskRunner ephemerals)
+                              are still skipped regardless of this flag.
     --since YYYY-MM-DD        Skip tasks created before this date.
     --min-confidence 0.6      Confidence threshold for assignment (default 0.6).
     --sleep-between 1.0       Seconds to sleep between batches (default 1.0).
@@ -98,6 +110,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Simulate the full pipeline (clerk included) but write nothing.")
     p.add_argument("--include-all", action="store_true",
                    help="Include tasks that already have related_matters.")
+    p.add_argument("--include-agent-authored", action="store_true",
+                   help=(
+                       "Include orphan tasks with an `agent_id` "
+                       "frontmatter (e.g. learn-clerk session-summary "
+                       "tasks). Default False — the first backfill round "
+                       "skipped them. Pass this for a round-2 sweep. "
+                       "Tasks with `skill_entry` set (true TaskRunner "
+                       "ephemerals) are always skipped."
+                   ))
     p.add_argument("--since", default="",
                    help="YYYY-MM-DD cutoff; skip tasks older than this.")
     p.add_argument("--min-confidence", type=float, default=0.6,
@@ -375,10 +396,40 @@ def _has_related_matters(fm: dict[str, Any]) -> bool:
     return False
 
 
+def _fm_truthy_str(value: Any) -> bool:
+    """Frontmatter values can arrive as ``str`` / ``None`` / ``bool``.
+    Treat empty string the same as missing.
+    """
+    if isinstance(value, str):
+        return bool(value.strip())
+    return bool(value)
+
+
+def _has_agent_id(fm: dict[str, Any]) -> bool:
+    """Task is authored by an agent (has non-empty ``agent_id``).
+
+    ``learn-clerk`` is the common one — emitted by reflection / digest
+    passes. Round 1 of the matter-linkage backfill treated these as
+    ephemeral and skipped them, but they are real user-facing errands
+    with rich bodies. Gate them behind ``--include-agent-authored``.
+    """
+    return _fm_truthy_str(fm.get("agent_id"))
+
+
+def _has_skill_entry(fm: dict[str, Any]) -> bool:
+    """Task is a TaskRunner-spawned ephemeral execution row.
+
+    Always skipped regardless of ``--include-agent-authored`` — these
+    auto-cleanup and must never be retroactively matter-linked.
+    """
+    return _fm_truthy_str(fm.get("skill_entry"))
+
+
 async def _load_candidate_tasks(
     ctrl: CtrlClient,
     *,
     include_all: bool,
+    include_agent_authored: bool,
     since: str,
 ) -> list[dict[str, Any]]:
     """Fetch task list, filter orphans + --since, sort newest-first."""
@@ -390,6 +441,8 @@ async def _load_candidate_tasks(
         except ValueError:
             logger.warning("backfill: --since %r is not YYYY-MM-DD, ignoring", since)
 
+    skipped_agent_authored = 0
+    skipped_skill_entry = 0
     candidates: list[dict[str, Any]] = []
     for r in records:
         path = r.get("path", "")
@@ -397,6 +450,14 @@ async def _load_candidate_tasks(
             continue
         fm = r.get("frontmatter") or {}
         if not include_all and _has_related_matters(fm):
+            continue
+        # Always skip TaskRunner ephemerals — they auto-cleanup.
+        if _has_skill_entry(fm):
+            skipped_skill_entry += 1
+            continue
+        # Gate agent-authored tasks (e.g. learn-clerk) behind the flag.
+        if not include_agent_authored and _has_agent_id(fm):
+            skipped_agent_authored += 1
             continue
         created_str = fm.get("created") or r.get("created") or ""
         created_dt = _parse_iso_ts(created_str)
@@ -412,6 +473,17 @@ async def _load_candidate_tasks(
             "current_enrichment_status": fm.get("enrichment_status") or "",
             "current_status": fm.get("status") or "",
         })
+    if skipped_skill_entry:
+        logger.info(
+            "backfill: skipped %d tasks with skill_entry (TaskRunner ephemerals)",
+            skipped_skill_entry,
+        )
+    if skipped_agent_authored:
+        logger.info(
+            "backfill: skipped %d agent-authored tasks "
+            "(pass --include-agent-authored to include them)",
+            skipped_agent_authored,
+        )
     # Newest first
     candidates.sort(key=lambda t: t["_created_dt"] or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
     for t in candidates:
@@ -635,6 +707,7 @@ async def _run(args: argparse.Namespace) -> BackfillStats:
         tasks = await _load_candidate_tasks(
             ctrl,
             include_all=args.include_all,
+            include_agent_authored=args.include_agent_authored,
             since=args.since,
         )
         stats.tasks_examined = len(tasks)
@@ -689,6 +762,7 @@ def _print_summary(
     print(f"tenant:               {args.tenant_id or '(unspecified)'}")
     print(f"mode:                 {'DRY-RUN' if args.dry_run else 'LIVE'}")
     print(f"clerk model:          {clerk_model}")
+    print(f"include agent-auth:   {args.include_agent_authored}")
     print(f"min confidence:       {args.min_confidence}")
     print(f"batch size:           {args.batch_size}")
     print(f"max batches:          {args.max_batches}")
