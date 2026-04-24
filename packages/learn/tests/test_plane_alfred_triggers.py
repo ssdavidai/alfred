@@ -556,6 +556,213 @@ class TestPendingApprovalsIO:
 
 
 # ---------------------------------------------------------------------------
+# Bootstrap-prompt enrichment (matter body + comment thread)
+# ---------------------------------------------------------------------------
+
+from src.activities.plane_alfred_triggers import (
+    _build_prompt,
+    _matter_slug_for_project,
+    _format_comment_excerpt,
+)
+
+
+class TestBuildPromptEnrichment:
+    """_build_prompt must inline the matter body + the issue's comment
+    thread so the spawned agent has full context instead of waking up
+    with only the triggering comment.
+    """
+
+    def _trigger(self, **overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "trigger_type": "mention",
+            "issue_id": "iss-123",
+            "project_id": "proj-1",
+            "comment_body": "@alfred please ship this",
+            "author_email": "sir@alfred.black",
+            "author_id": "human-user-1",
+            "requires_approval": False,
+        }
+        base.update(overrides)
+        return base
+
+    def test_matter_body_is_inlined(self):
+        matter = {
+            "path": "matter/alfred-platform.md",
+            "frontmatter": {"name": "Alfred Platform Build"},
+            "body": "This matter tracks the end-to-end build of the Alfred SaaS platform including SaaS control plane, tenant plane, and data plane.",
+        }
+        out = _build_prompt(
+            self._trigger(),
+            project_name="Alfred Platform",
+            issue={"name": "ship it", "description_stripped": "do the thing"},
+            matter=matter,
+            alfred_user_id=ALFRED_UID,
+        )
+        assert "Related matter: Alfred Platform Build" in out
+        assert "matter/alfred-platform.md" in out
+        assert "end-to-end build of the Alfred SaaS platform" in out
+
+    def test_matter_body_truncated_when_huge(self):
+        matter = {
+            "path": "matter/big.md",
+            "frontmatter": {"name": "Big"},
+            "body": "x" * 5000,
+        }
+        out = _build_prompt(
+            self._trigger(),
+            project_name="Big",
+            issue={"name": "iss"},
+            matter=matter,
+            alfred_user_id=ALFRED_UID,
+        )
+        assert "[truncated]" in out
+        # The original 5000-char body must not be inlined verbatim —
+        # we cap at 1500 + the truncation marker.
+        assert out.count("x") < 5000
+
+    def test_no_matter_section_when_unmapped(self):
+        out = _build_prompt(
+            self._trigger(),
+            project_name="Inbox",
+            issue={"name": "ad-hoc", "description": ""},
+            matter=None,
+            alfred_user_id=ALFRED_UID,
+        )
+        assert "Related matter" not in out
+
+    def test_comment_thread_rendered_oldest_to_newest(self):
+        comments = [
+            {
+                "id": "c1",
+                "created_at": "2026-04-24T09:00:00Z",
+                "comment_stripped": "initial thought from Sir",
+                "actor": {"id": "human-user-1", "email": "sir@alfred.black"},
+            },
+            {
+                "id": "c2",
+                "created_at": "2026-04-24T09:05:00Z",
+                "comment_stripped": "some context reply",
+                "actor": {"id": ALFRED_UID, "email": "alfred@alfred.black"},
+            },
+            {
+                "id": "c3",
+                "created_at": "2026-04-24T09:10:00Z",
+                "comment_stripped": "@alfred please ship this",
+                "actor": {"id": "human-user-1", "email": "sir@alfred.black"},
+            },
+        ]
+        out = _build_prompt(
+            self._trigger(),
+            project_name="P",
+            issue={"name": "i"},
+            comments=comments,
+            alfred_user_id=ALFRED_UID,
+        )
+        assert "Comment thread on this issue" in out
+        # Newest-at-bottom ordering preserved within the thread section.
+        # "please ship this" also appears in the triggering-comment line
+        # earlier in the prompt, so compare within the thread section
+        # (everything after "Comment thread on this issue:").
+        thread_section = out[out.index("Comment thread on this issue"):]
+        initial_pos = thread_section.index("initial thought from Sir")
+        ship_pos = thread_section.index("please ship this")
+        assert initial_pos < ship_pos
+        # Alfred's own prior comment labelled as Alfred, not by email
+        alfred_line = [ln for ln in out.splitlines() if "some context reply" in ln][0]
+        assert "Alfred" in alfred_line
+        # Sir's line labelled with his email
+        sir_line = [ln for ln in out.splitlines() if "initial thought" in ln][0]
+        assert "sir@alfred.black" in sir_line
+
+    def test_long_thread_truncated_at_cap(self):
+        # 25 comments — only the last _PROMPT_COMMENT_MAX (20) should be rendered
+        comments = [
+            {
+                "id": f"c{i}",
+                "created_at": f"2026-04-24T09:{i:02d}:00Z",
+                "comment_stripped": f"body-{i}",
+                "actor": {"id": "human-user-1"},
+            }
+            for i in range(25)
+        ]
+        out = _build_prompt(
+            self._trigger(),
+            project_name="P",
+            issue={"name": "i"},
+            comments=comments,
+            alfred_user_id=ALFRED_UID,
+        )
+        assert "showing last 20 of 25" in out
+        # First 5 comments (body-0..body-4) should have been dropped
+        assert "body-0:" not in out and "body-4:" not in out
+        # Last 5 should be present
+        assert "body-24" in out and "body-20" in out
+
+    def test_no_comments_section_when_empty(self):
+        out = _build_prompt(
+            self._trigger(),
+            project_name="P",
+            issue={"name": "i"},
+            comments=[],
+            alfred_user_id=ALFRED_UID,
+        )
+        assert "Comment thread" not in out
+
+
+class TestFormatCommentExcerpt:
+    def test_alfred_author_labelled_alfred(self):
+        out = _format_comment_excerpt(
+            {
+                "comment_stripped": "acknowledged",
+                "actor": {"id": ALFRED_UID, "email": "alfred@x.com"},
+                "created_at": "2026-04-24T09:05:00Z",
+            },
+            alfred_user_id=ALFRED_UID,
+        )
+        assert "Alfred" in out
+        assert "alfred@x.com" not in out  # prefer the name label
+
+    def test_html_is_stripped(self):
+        out = _format_comment_excerpt(
+            {
+                "comment_html": "<p>hello <strong>world</strong></p>",
+                "actor": {"id": "u1"},
+            },
+            alfred_user_id=ALFRED_UID,
+        )
+        assert "<p>" not in out and "<strong>" not in out
+        assert "hello world" in out
+
+    def test_empty_body_returns_empty_string(self):
+        out = _format_comment_excerpt(
+            {"actor": {"id": "u1"}},
+            alfred_user_id=ALFRED_UID,
+        )
+        assert out == ""
+
+
+class TestMatterSlugForProject:
+    def test_unmapped_returns_empty(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("ALFRED_DATA_DIR", str(tmp_path))
+        assert _matter_slug_for_project("nope") == ""
+
+    def test_roundtrip(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("ALFRED_DATA_DIR", str(tmp_path))
+        (tmp_path / "plane_sync_cursor.json").write_text(json.dumps({
+            "last_vault_mtime": 0,
+            "project_map": {
+                "alfred-platform": "proj-alfred-uuid",
+                "__inbox__": "proj-inbox-uuid",
+            },
+            "issue_map": {},
+        }))
+        assert _matter_slug_for_project("proj-alfred-uuid") == "alfred-platform"
+        # Inbox sentinel not returned as a matter
+        assert _matter_slug_for_project("proj-inbox-uuid") == ""
+        assert _matter_slug_for_project("") == ""
+
+
+# ---------------------------------------------------------------------------
 # Workflow end-to-end test with stubbed activities
 # ---------------------------------------------------------------------------
 

@@ -48,6 +48,7 @@ from temporalio import activity
 
 from src.config import load_config
 from src.utils.plane_client import PlaneClient
+from src.utils.vault_client import VaultClient
 
 logger = logging.getLogger("alfred-learn")
 
@@ -58,6 +59,15 @@ logger = logging.getLogger("alfred-learn")
 
 _SELF_COMMENTS_RELATIVE = "state/plane_self_comments.json"
 _PENDING_APPROVALS_RELATIVE = "state/plane_pending_approvals.json"
+_PLANE_SYNC_CURSOR_RELATIVE = "plane_sync_cursor.json"
+
+# Bootstrap-context caps. These bound prompt growth so a pathological
+# issue (100+ comments, 50kb matter body) can't blow past the openclaw
+# gateway's request size limit. Numbers chosen to comfortably fit the
+# spawn prompt under ~8k tokens.
+_PROMPT_MATTER_BODY_CHARS = 1500
+_PROMPT_COMMENT_MAX = 20
+_PROMPT_COMMENT_CHARS = 600
 
 # Cap on the self-comment ledger. 500 is enough to cover many hours of
 # activity without growing the file unbounded; entries are FIFO-evicted
@@ -100,6 +110,42 @@ def _self_comments_path() -> Path:
 
 def _pending_approvals_path() -> Path:
     return _alfred_data_dir() / _PENDING_APPROVALS_RELATIVE
+
+
+def _plane_sync_cursor_path() -> Path:
+    return _alfred_data_dir() / _PLANE_SYNC_CURSOR_RELATIVE
+
+
+def _matter_slug_for_project(project_id: str) -> str:
+    """Invert ``plane_sync_cursor.json::project_map`` to find the matter
+    slug corresponding to ``project_id``. Returns "" when unmapped (e.g.
+    Inbox project, a pre-sync project, or a sentinel). The cursor is
+    maintained by ``plane_sync`` on every forward-sync tick; a missing
+    cursor just means no sync has run yet on this tenant.
+    """
+    if not project_id:
+        return ""
+    path = _plane_sync_cursor_path()
+    if not path.exists():
+        return ""
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    project_map = raw.get("project_map") or {}
+    if not isinstance(project_map, dict):
+        return ""
+    for slug, pid in project_map.items():
+        if str(pid) == str(project_id):
+            # The sentinel slug used for the Inbox project is not a real
+            # matter — skip it so we don't try to read matter/__inbox__.md.
+            if slug.startswith("__") or slug.endswith("__"):
+                return ""
+            return str(slug)
+    return ""
 
 
 def _atomic_write(path: Path, payload: str) -> None:
@@ -603,11 +649,53 @@ async def detect_alfred_plane_trigger(
 # Activity: spawn openclaw session for a Plane trigger
 # ---------------------------------------------------------------------------
 
+def _format_comment_excerpt(
+    comment: dict[str, Any],
+    *,
+    alfred_user_id: str,
+) -> str:
+    """Render a single Plane comment as one inline paragraph for the
+    bootstrap prompt. Strips HTML-ish tags roughly (Plane returns
+    ``comment_html``; ``comment_stripped`` is plain text where
+    available).
+    """
+    body = str(
+        comment.get("comment_stripped")
+        or comment.get("comment_html")
+        or ""
+    ).strip()
+    if not body:
+        return ""
+    # Crude HTML tag stripper — Plane's ``comment_stripped`` is usually
+    # plain text so this is a belt-and-braces defence for payloads that
+    # skip it.
+    body = re.sub(r"<[^>]+>", " ", body)
+    body = re.sub(r"\s+", " ", body).strip()
+    actor_id = _resolve_author_id(comment)
+    actor_label = "Alfred" if alfred_user_id and actor_id == alfred_user_id \
+        else str(
+            _resolve_author_email(comment)
+            or actor_id
+            or "unknown"
+        )
+    ts = str(
+        comment.get("created_at")
+        or comment.get("updated_at")
+        or ""
+    )
+    ts_short = ts[:19] if ts else ""
+    prefix = f"[{ts_short}] {actor_label}" if ts_short else actor_label
+    return f"- {prefix}: {body[:_PROMPT_COMMENT_CHARS]}"
+
+
 def _build_prompt(
     trigger: dict[str, Any],
     *,
     project_name: str,
     issue: dict[str, Any],
+    comments: Optional[list[dict[str, Any]]] = None,
+    matter: Optional[dict[str, Any]] = None,
+    alfred_user_id: str = "",
 ) -> str:
     """Compose the system/user prompt handed to the main openclaw agent.
 
@@ -615,6 +703,16 @@ def _build_prompt(
     session transcript is reviewable in openclaw's history UI. The main
     agent's existing skill set (``alfred-vault-operations`` etc.) tells
     it how to call the vault/Plane MCP `self` tool.
+
+    ``comments`` — the full Plane comment thread on this issue
+    (oldest → newest). The triggering comment is typically the last
+    entry; including prior comments lets Alfred reason with context
+    from the conversation rather than reacting to a bare mention.
+
+    ``matter`` — the vault matter record ``{path, frontmatter, body}``
+    that the issue's project maps to. Giving Alfred the matter body
+    means he enters the session already grounded in the broader
+    initiative instead of having to fetch it mid-turn.
     """
     ttype = str(trigger.get("trigger_type") or "")
     issue_name = str(issue.get("name") or "").strip() or "(untitled)"
@@ -642,10 +740,46 @@ def _build_prompt(
     if ttype == "mention":
         author = str(trigger.get("author_email") or trigger.get("author_id") or "unknown")
         body = str(trigger.get("comment_body") or "").strip()
-        lines.append(f'Comment by {author}: "{body[:1500]}"')
+        lines.append(f'Triggering comment by {author}: "{body[:1500]}"')
     elif ttype == "assignment":
         author = str(trigger.get("author_email") or trigger.get("author_id") or "someone")
         lines.append(f"{author} has assigned this issue to you.")
+
+    # ── Matter context ──────────────────────────────────────────────
+    # The vault matter this issue's project maps to. Gives Alfred the
+    # broader initiative context without a round-trip — e.g. the matter's
+    # objective, stakeholders, constraints. Skipped for Inbox issues
+    # (project isn't mapped to a matter) or when the matter read fails.
+    if matter:
+        m_fm = matter.get("frontmatter") or {}
+        m_name = str(m_fm.get("name") or m_fm.get("title") or "").strip()
+        m_body = str(matter.get("body") or "").strip()
+        if m_body:
+            excerpt = m_body[:_PROMPT_MATTER_BODY_CHARS]
+            if len(m_body) > _PROMPT_MATTER_BODY_CHARS:
+                excerpt = excerpt.rstrip() + " …[truncated]"
+            lines.append("")
+            header = f"Related matter: {m_name}" if m_name else "Related matter"
+            lines.append(f"{header} (path: {matter.get('path') or ''})")
+            lines.append(excerpt)
+
+    # ── Comment thread ──────────────────────────────────────────────
+    # Everything posted on this issue, oldest → newest, capped so the
+    # prompt stays bounded. Alfred's own previous comments are labelled
+    # so he can stay consistent with what he already committed to.
+    if comments:
+        ordered = list(comments)[-_PROMPT_COMMENT_MAX:]
+        rendered = [
+            _format_comment_excerpt(c, alfred_user_id=alfred_user_id)
+            for c in ordered
+        ]
+        rendered = [r for r in rendered if r]
+        if rendered:
+            lines.append("")
+            suffix = "" if len(comments) <= _PROMPT_COMMENT_MAX \
+                else f" (showing last {_PROMPT_COMMENT_MAX} of {len(comments)})"
+            lines.append(f"Comment thread on this issue{suffix}:")
+            lines.extend(rendered)
 
     lines.append("")
     lines.append(
@@ -720,6 +854,7 @@ async def spawn_alfred_for_plane_trigger(
     issue_full: dict[str, Any] = dict(trigger.get("issue_data") or {})
     if issue_full and not issue_full.get("name") and not issue_full.get("description"):
         issue_full = {}
+    comments: list[dict[str, Any]] = []
     if issue_id and project_id:
         plane = _plane_client_from_env()
         try:
@@ -740,10 +875,56 @@ async def spawn_alfred_for_plane_trigger(
                     "spawn_alfred_for_plane_trigger: get_project failed %s: %s",
                     project_id, exc,
                 )
+            try:
+                comments = await plane.list_issue_comments(project_id, issue_id) or []
+            except httpx.HTTPError as exc:
+                activity.logger.warning(
+                    "spawn_alfred_for_plane_trigger: list_issue_comments "
+                    "failed %s: %s",
+                    issue_id, exc,
+                )
+                comments = []
         finally:
             await plane.close()
 
-    prompt = _build_prompt(trigger, project_name=project_name, issue=issue_full)
+    # Matter context — look up this project's matter slug via the
+    # forward-sync cursor's project_map, then read the matter record.
+    # Anything that fails here just means the prompt ships without the
+    # matter body section (not fatal).
+    matter_record: Optional[dict[str, Any]] = None
+    matter_slug = _matter_slug_for_project(project_id)
+    if matter_slug:
+        cfg = load_config()
+        vault = VaultClient(cfg)
+        try:
+            matter_record = await vault.read_record(f"matter/{matter_slug}.md")
+        except httpx.HTTPStatusError as exc:
+            # 404 is expected for stale project_map entries; anything else
+            # is worth surfacing but must not block the spawn.
+            if exc.response.status_code != 404:
+                activity.logger.warning(
+                    "spawn_alfred_for_plane_trigger: matter read %s: %s",
+                    matter_slug, exc,
+                )
+            matter_record = None
+        except httpx.HTTPError as exc:
+            activity.logger.warning(
+                "spawn_alfred_for_plane_trigger: matter read network %s: %s",
+                matter_slug, exc,
+            )
+            matter_record = None
+        finally:
+            await vault.close()
+
+    alfred_user_id = os.environ.get("PLANE_ALFRED_USER_ID", "")
+    prompt = _build_prompt(
+        trigger,
+        project_name=project_name,
+        issue=issue_full,
+        comments=comments,
+        matter=matter_record,
+        alfred_user_id=alfred_user_id,
+    )
 
     headers = {
         "Authorization": f"Bearer {token}",
