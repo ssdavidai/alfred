@@ -29,6 +29,7 @@ from src.workflows.plane_sync import PlaneSyncWorkflow
 from src.workflows.plane_sync_nudge import PlaneSyncNudgeWorkflow
 from src.workflows.plane_reverse_sync import PlaneReverseSyncWorkflow
 from src.workflows.plane_reconciliation import PlaneReconciliationWorkflow
+from src.workflows.fleet_audit import FleetAuditWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -312,6 +313,13 @@ from src.activities.plane_reconciliation import (
     reconcile_plane_deletes,
 )
 
+# Fleet audit — daily wrong-tenant stream contamination check.
+from src.activities.fleet_audit import (
+    audit_streams_for_owner_mismatch,
+    fleet_audit_is_enabled,
+    write_fleet_audit_observation,
+)
+
 # Plane reverse sync (#536 B7) — Plane → vault ingress activities
 from src.activities.plane_reverse_sync import (
     append_plane_comment_to_vault,
@@ -365,6 +373,7 @@ _STATIC_WORKFLOWS = [
     PlaneSyncNudgeWorkflow,
     PlaneReverseSyncWorkflow,
     PlaneReconciliationWorkflow,
+    FleetAuditWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -573,6 +582,10 @@ ALL_ACTIVITIES = [
     # Plane reconciliation — hourly REST-delete mirror
     plane_reconciliation_is_enabled,
     reconcile_plane_deletes,
+    # Fleet audit — daily wrong-tenant stream contamination check
+    fleet_audit_is_enabled,
+    audit_streams_for_owner_mismatch,
+    write_fleet_audit_observation,
     # Plane reverse sync (#536 B7)
     plane_reverse_sync_is_enabled,
     load_reverse_sync_state,

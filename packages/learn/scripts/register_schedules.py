@@ -48,6 +48,15 @@ PLANE_RECONCILIATION_NOTE = (
     "into vault archives. Feature-gated by PLANE_SYNC_ENABLED env."
 )
 
+FLEET_AUDIT_SCHEDULE_ID = "al-fleet-audit"
+FLEET_AUDIT_WORKFLOW = "FleetAuditWorkflow"
+FLEET_AUDIT_NOTE = (
+    "Daily wrong-tenant stream contamination check. Scans "
+    "composio-*.jsonl for self:true attendees whose email doesn't match "
+    "the tenant owner. Feature-gated by FLEET_AUDIT_ENABLED env (default "
+    "true)."
+)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("register-schedules")
 
@@ -385,6 +394,94 @@ async def register_plane_reconciliation(client: Client, task_queue: str) -> None
         raise
 
 
+def _fleet_audit_enabled() -> bool:
+    """Feature flag for the daily fleet audit. Defaults to ``true``.
+
+    Unlike the Plane flags, this one's opt-OUT — we want wrong-tenant
+    detection on every tenant by default.
+    """
+    return os.environ.get(
+        "FLEET_AUDIT_ENABLED", "true",
+    ).strip().lower() == "true"
+
+
+async def register_fleet_audit(client: Client, task_queue: str) -> None:
+    """Create-or-delete the ``al-fleet-audit`` schedule based on the flag.
+
+    Calendar-based: daily at 02:00 UTC (chosen after nightly_maintenance
+    at 03:00 local — sufficiently off-peak). SKIP overlap policy (audit
+    runs are idempotent but back-to-back would be wasteful).
+    """
+    handle = client.get_schedule_handle(FLEET_AUDIT_SCHEDULE_ID)
+
+    if not _fleet_audit_enabled():
+        try:
+            await handle.describe()
+        except RPCError as e:
+            if e.status == RPCStatusCode.NOT_FOUND:
+                logger.info("fleet_audit disabled — schedule skipped")
+                return
+            raise
+        await handle.delete()
+        logger.info(
+            "fleet_audit disabled — existing schedule %s deleted",
+            FLEET_AUDIT_SCHEDULE_ID,
+        )
+        return
+
+    action = ScheduleActionStartWorkflow(
+        FLEET_AUDIT_WORKFLOW,
+        id=f"{FLEET_AUDIT_SCHEDULE_ID}-run",
+        task_queue=task_queue,
+    )
+    spec = ScheduleSpec(
+        calendars=[
+            ScheduleCalendarSpec(
+                hour=[ScheduleRange(start=2)],
+                minute=[ScheduleRange(start=0)],
+            )
+        ],
+        # Pinned to UTC on purpose — we want a fleet-wide consistent audit
+        # window, not one that drifts with tenant local time.
+        time_zone_name="UTC",
+    )
+    policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
+
+    try:
+        await client.create_schedule(
+            FLEET_AUDIT_SCHEDULE_ID,
+            Schedule(action=action, spec=spec, policy=policy),
+        )
+        logger.info(
+            "Created schedule: %s → %s (daily 02:00 UTC, SKIP overlap)",
+            FLEET_AUDIT_SCHEDULE_ID,
+            FLEET_AUDIT_WORKFLOW,
+        )
+    except RPCError as e:
+        if e.status == RPCStatusCode.ALREADY_EXISTS:
+            logger.info(
+                "Schedule already exists: %s (skipping)",
+                FLEET_AUDIT_SCHEDULE_ID,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s", FLEET_AUDIT_SCHEDULE_ID, e,
+        )
+        raise
+    except Exception as e:  # noqa: BLE001 — parity with sibling helpers
+        err = str(e).lower()
+        if "already" in err or "exists" in err:
+            logger.info(
+                "Schedule already exists: %s (skipping)",
+                FLEET_AUDIT_SCHEDULE_ID,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s", FLEET_AUDIT_SCHEDULE_ID, e,
+        )
+        raise
+
+
 async def register_all() -> None:
     config = load_config()
     try:
@@ -433,6 +530,8 @@ async def register_all() -> None:
     await register_plane_reverse_sync(client, config.task_queue)
     # Plane reconciliation — hourly REST-delete sweep.
     await register_plane_reconciliation(client, config.task_queue)
+    # Fleet audit — daily wrong-tenant stream contamination check.
+    await register_fleet_audit(client, config.task_queue)
 
 
 def main() -> None:
