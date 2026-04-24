@@ -365,17 +365,103 @@ INBOX_SLUG_SENTINEL = "__inbox__"
 # vault task keeps its ``plane_issue_id`` pointing at a now-gone issue.
 # The first signal we have is a 404 on the next forward-sync PATCH.
 #
-# Pre-PR #584 behaviour: errors++, cursor pinned (bad — blocks backfill).
-# PR #584 behaviour:     clear ``existing_id``, fall through to create path
-#                         (heals the map, but re-creates the Plane issue for
-#                         a task Sir deliberately deleted — wrong intent).
-# Current behaviour:     archive the vault task to mirror Sir's delete intent,
-#                         clear the issue_map entry, return action="archived_by_plane".
+# History of the 404 handling:
+#   Pre-PR #584:  errors++, cursor pinned (bad — blocks backfill).
+#   PR #584:      clear ``existing_id``, fall through to create path
+#                 (heals the map, but re-creates the Plane issue for
+#                 a task Sir deliberately deleted — wrong intent).
+#   Pre-Rapali-cascade: archive the vault task to mirror Sir's delete intent,
+#                 return action="archived_by_plane". WRONG when the real
+#                 cause is a cross-project move (related_matters changed),
+#                 because the issue is alive in another project — we just
+#                 pointed PATCH at the wrong one. Vault is the source of
+#                 truth; Plane is a projection. A 404 from Plane must
+#                 never cause an autonomous vault archive.
+#   Current (Rapali hotfix made permanent):
+#                 1. Cross-project search: probe every OTHER project in
+#                    project_map for the issue_id. If found, DELETE it
+#                    from the stale project + return action="stale_dropped"
+#                    so the workflow drops the slug from issue_map and
+#                    the next tick re-creates fresh in the correct project.
+#                 2. If not found anywhere, or the cross-project search
+#                    itself fails, still return "stale_dropped" — never
+#                    auto-archive from a 404. The hourly reconciliation
+#                    workflow retains the archive pathway for the case
+#                    where the issue is genuinely gone AND Sir intended
+#                    the delete (it confirms via the vault record rather
+#                    than blind-trusting a 404).
 #
-# This keeps the vault consistent with Plane without re-creating deleted
-# issues. The alternative signal — the hourly reconciliation workflow —
-# catches any 404s that never triggered an update because the task's mtime
-# is stale relative to the cursor.
+# The helper below is kept because plane_reconciliation.py still uses it,
+# but it is NO LONGER called from sync_task_to_plane's 404 branch.
+
+async def _find_issue_in_other_projects(
+    client: PlaneClient,
+    issue_id: str,
+    current_project_id: str,
+    project_map: dict[str, str],
+) -> Optional[str]:
+    """Probe every project in ``project_map.values()`` other than
+    ``current_project_id`` for ``issue_id``. Returns the project_id
+    where the issue lives, or ``None`` if not found in any project.
+
+    Used by ``sync_task_to_plane``'s 404-on-update branch to detect the
+    cross-project-move case: a task whose ``related_matters`` changed so
+    forward-sync now thinks the issue belongs to project B, but Plane
+    still holds it under project A. Without this probe we'd treat that
+    as a deletion and (pre-hotfix) auto-archive the vault task.
+
+    Every single 4xx/5xx from ``get_issue`` is swallowed — this helper
+    must NEVER propagate a failure back into the sync path, because the
+    caller falls back to the safe "stale_dropped" action on None. A
+    network outage during the probe should not cause the 404-on-update
+    to become an archive. Non-HTTP exceptions (e.g. asyncio cancel)
+    still propagate.
+    """
+    candidates = [
+        pid for pid in project_map.values()
+        if pid and pid != current_project_id
+    ]
+    # Deduplicate while preserving order — project_map CAN contain
+    # duplicate plane_ids in pathological cases (two slugs aliased
+    # onto the same project, e.g. cleanup mid-flight).
+    seen: set[str] = set()
+    unique: list[str] = []
+    for pid in candidates:
+        if pid in seen:
+            continue
+        seen.add(pid)
+        unique.append(pid)
+
+    for other_pid in unique:
+        try:
+            issue = await client.get_issue(other_pid, issue_id)
+        except httpx.HTTPStatusError as exc:
+            # 404 here just means "not in this project" — keep looking.
+            # Other 4xx/5xx shouldn't abort the search either; the caller
+            # falls back to stale_dropped on None which is still safe.
+            if exc.response.status_code != 404:
+                logger.warning(
+                    "plane_sync.cross_project_probe_http_error "
+                    "project=%s issue=%s status=%s",
+                    other_pid, issue_id, exc.response.status_code,
+                )
+            continue
+        except (httpx.HTTPError, httpx.TimeoutException) as exc:
+            logger.warning(
+                "plane_sync.cross_project_probe_transport_error "
+                "project=%s issue=%s error=%s",
+                other_pid, issue_id, exc,
+            )
+            continue
+        if issue and issue.get("id"):
+            logger.info(
+                "plane_sync.cross_project_found issue=%s in_project=%s "
+                "(was expected in %s)",
+                issue_id, other_pid, current_project_id,
+            )
+            return other_pid
+    return None
+
 
 async def _archive_vault_task_from_plane_delete(slug: str, path: str) -> None:
     """PATCH the vault task to mirror a Plane-side delete.
@@ -1130,14 +1216,23 @@ async def sync_task_to_plane(
                 action = "update"
                 plane_id = existing_id
             except httpx.HTTPStatusError as exc:
-                # 404 on update = the Plane issue we had mapped is gone.
-                # Plane 1.3.0 doesn't emit webhooks for REST DELETE, so this
-                # is typically our first signal that Sir deleted the issue
-                # in Plane via the REST API (or that it was otherwise
-                # removed out-of-band). Treat as intentional deletion:
-                # archive the vault task to mirror Sir's intent, clear
-                # the issue_map entry, and return a dedicated action so
-                # the workflow can drop the slug from the cursor.
+                # 404 on update: the issue isn't in the project we're
+                # PATCHing. That could be a genuine deletion OR — the
+                # common case that motivated the Rapali hotfix — a
+                # cross-project move where forward-sync re-resolved the
+                # destination project (e.g. ``related_matters`` changed)
+                # but Plane still holds the issue under the OLD project.
+                #
+                # Never auto-archive from a 404. Vault is the source of
+                # truth; Plane is a projection. We:
+                #   1. Search every OTHER known project for the issue.
+                #   2. If found: delete the stale issue so the next tick
+                #      creates a fresh one in the correct project.
+                #      Return action="stale_dropped".
+                #   3. If not found (or the search itself fails): also
+                #      return "stale_dropped". Genuine deletion is
+                #      handled by the hourly reconciliation workflow,
+                #      which confirms against the vault record.
                 #
                 # Only 404 triggers this path — other HTTP errors (500,
                 # 503, 403) still propagate so the workflow's retry
@@ -1145,26 +1240,62 @@ async def sync_task_to_plane(
                 if exc.response.status_code != 404:
                     raise
                 logger.info(
-                    "plane_sync.plane_deleted_detected slug=%s plane_id=%s "
-                    "— archiving vault task",
-                    slug, existing_id,
+                    "plane_sync.update_404 slug=%s plane_id=%s "
+                    "project=%s — searching other projects",
+                    slug, existing_id, project_id,
                 )
-                task_path = str(task.get("path") or f"task/{slug}.md")
+                other_project_id: Optional[str] = None
                 try:
-                    await _archive_vault_task_from_plane_delete(slug, task_path)
-                except Exception as arch_exc:  # noqa: BLE001
-                    # Archive write failed — re-raise the ORIGINAL 404 so
-                    # the workflow's retry policy kicks in (vs swallowing
-                    # into a spurious create). Don't stack errors.
-                    logger.warning(
-                        "plane_sync.plane_deleted_archive_failed slug=%s error=%s",
-                        slug, arch_exc,
+                    other_project_id = await _find_issue_in_other_projects(
+                        client, existing_id, project_id, project_map,
                     )
-                    raise exc
+                except Exception as search_exc:  # noqa: BLE001
+                    # Defensive: cross-project search must never escalate
+                    # into an archive or a raise. Log and fall through to
+                    # the stale_dropped path.
+                    logger.warning(
+                        "plane_sync.cross_project_search_failed slug=%s "
+                        "plane_id=%s error=%s — treating as stale_dropped",
+                        slug, existing_id, search_exc,
+                    )
+                    other_project_id = None
+
+                if other_project_id:
+                    # Cross-project move confirmed: delete the stale
+                    # issue from the project Plane still holds it in.
+                    # Next forward-sync tick creates a fresh issue in
+                    # the correct project. Swallow any error from the
+                    # delete — worst case we leave an orphan which the
+                    # hourly reconciliation will pick up; we still
+                    # want to clear the slug from issue_map.
+                    try:
+                        await client.delete_issue(
+                            other_project_id, existing_id,
+                        )
+                        logger.info(
+                            "plane_sync.stale_issue_deleted slug=%s "
+                            "plane_id=%s from_project=%s",
+                            slug, existing_id, other_project_id,
+                        )
+                    except Exception as del_exc:  # noqa: BLE001
+                        logger.warning(
+                            "plane_sync.stale_issue_delete_failed "
+                            "slug=%s plane_id=%s from_project=%s "
+                            "error=%s — dropping slug anyway",
+                            slug, existing_id, other_project_id, del_exc,
+                        )
+                else:
+                    logger.warning(
+                        "plane_sync.stale_issue_map slug=%s plane_id=%s "
+                        "— not found in any known project; dropping "
+                        "slug, next tick will re-create",
+                        slug, existing_id,
+                    )
+
                 return {
                     "slug": slug,
                     "plane_id": "",
-                    "action": "archived_by_plane",
+                    "action": "stale_dropped",
                 }
             else:
                 _needs_create = False

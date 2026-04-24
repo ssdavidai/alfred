@@ -57,11 +57,17 @@ class PlaneSyncResult:
     tasks_synced: int = 0
     tasks_skipped: int = 0
     tasks_archived: int = 0
-    # Counter for tasks that were archived because the mirrored Plane issue
-    # 404'd on update — i.e. Sir deleted it via the REST API (no webhook)
-    # and we mirrored that intent into the vault. See
-    # ``_archive_vault_task_from_plane_delete`` in activities.plane_sync.
+    # Counter kept for wire compatibility with historical workflow results —
+    # the activity no longer returns ``action="archived_by_plane"`` (a 404
+    # on update now resolves to stale_dropped, never an auto-archive, see
+    # the Rapali cascade hotfix). New runs always report zero here.
     tasks_archived_by_plane: int = 0
+    # Tasks whose mapped Plane issue 404'd on update. The activity
+    # checked every other known project for the issue; either it was
+    # deleted from a stale project (cross-project move) and fresh-created
+    # next tick, or it's gone entirely (reconciliation will confirm).
+    # Either way the slug is dropped from issue_map.
+    tasks_stale_dropped: int = 0
     errors: int = 0
     last_vault_mtime: float = 0.0
     skipped_reason: str = ""
@@ -296,14 +302,29 @@ class PlaneSyncWorkflow:
                 continue
 
             if action == "archived_by_plane":
-                # The 404-on-update path: the Plane issue is gone (Sir
-                # deleted it via REST, no webhook fired), so we archived
-                # the vault task in the activity. Drop the stale slug
-                # from issue_map and advance the cursor — the archive
-                # is a completed unit of work, same as ``archived``.
+                # LEGACY path, kept for wire compatibility with any in-
+                # flight workflows that still return this action value.
+                # The activity no longer emits it — see tasks_stale_dropped
+                # below for the replacement path. On the next deploy every
+                # run reports zero here.
                 if slug in issue_map:
                     del issue_map[slug]
                 result.tasks_archived_by_plane += 1
+                if mt > processed_mtime:
+                    processed_mtime = mt
+                continue
+
+            if action == "stale_dropped":
+                # 404-on-update resolved either as a cross-project move
+                # (the activity DELETE'd the stale issue; next tick will
+                # create fresh in the correct project) or a not-found-
+                # anywhere miss (the activity logged stale_issue_map).
+                # Either way we drop the slug from issue_map and advance
+                # the cursor. Vault is NOT archived — that's the whole
+                # point of this fix vs the prior auto-archive behaviour.
+                if slug in issue_map:
+                    del issue_map[slug]
+                result.tasks_stale_dropped += 1
                 if mt > processed_mtime:
                     processed_mtime = mt
                 continue
@@ -343,12 +364,13 @@ class PlaneSyncWorkflow:
 
         workflow.logger.info(
             "plane_sync.done matters=%d tasks=%d skipped=%d archived=%d "
-            "archived_by_plane=%d errors=%d cursor=%s",
+            "archived_by_plane=%d stale_dropped=%d errors=%d cursor=%s",
             result.matters_synced,
             result.tasks_synced,
             result.tasks_skipped,
             result.tasks_archived,
             result.tasks_archived_by_plane,
+            result.tasks_stale_dropped,
             result.errors,
             advance_mtime,
         )
