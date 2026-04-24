@@ -556,6 +556,110 @@ describe("GET /api/v1/vault/records/* — YAML plain-scalar continuation (#611)"
   });
 });
 
+describe("GET /api/v1/vault/records/* — plain-scalar type coercion (bool / null)", () => {
+  // Regression for 2026-04-24 cascade: ctrl-api was returning YAML bool
+  // values as strings ("false" / "true"), so Python consumers reading
+  // `fm.get("archived")` saw the truthy string "false" and took the
+  // archive-cascade branch, silently archiving hundreds of active
+  // Rapali tasks. Fixed by coercing unquoted plain scalars to their
+  // typed form.
+
+  it("returns archived: false as a JS boolean, not the string 'false'", async () => {
+    const content = [
+      "---",
+      "archived: false",
+      "archived_at: ''",
+      "archived_reason: ''",
+      "name: a real active task",
+      "type: task",
+      "---",
+      "",
+    ].join("\n");
+    readFileSyncFn.mock.mockImplementationOnce(() => content);
+
+    const { status, data } = await req(
+      "GET",
+      "/api/v1/vault/records/task/active-task.md",
+    );
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.frontmatter.archived, false);
+    assert.strictEqual(typeof data.frontmatter.archived, "boolean");
+    // Truthy-falsy assertion that specifically guards plane_sync's path
+    assert.ok(!data.frontmatter.archived, "archived:false must be falsy");
+  });
+
+  it("returns archived: true as a JS boolean, not the string 'true'", async () => {
+    const content = [
+      "---",
+      "archived: true",
+      "name: archived task",
+      "type: task",
+      "---",
+      "",
+    ].join("\n");
+    readFileSyncFn.mock.mockImplementationOnce(() => content);
+
+    const { status, data } = await req(
+      "GET",
+      "/api/v1/vault/records/task/archived-task.md",
+    );
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.frontmatter.archived, true);
+    assert.strictEqual(typeof data.frontmatter.archived, "boolean");
+  });
+
+  // NOTE: `null`/`~` tokens are intentionally mapped to the empty string
+  // by a separate pre-existing branch (see parseFrontmatter), for
+  // legacy compatibility with downstream consumers that expect "" for
+  // missing optional fields. Not touching that here — the cascade bug
+  // is specifically about booleans.
+
+  it("preserves QUOTED true/false as strings", async () => {
+    // An author who wrote archived: "false" meant the literal string,
+    // not a boolean — don't second-guess them.
+    const content = [
+      "---",
+      "archived: 'false'",
+      "name: quoted-false",
+      "type: task",
+      "---",
+      "",
+    ].join("\n");
+    readFileSyncFn.mock.mockImplementationOnce(() => content);
+
+    const { status, data } = await req(
+      "GET",
+      "/api/v1/vault/records/task/quoted-false.md",
+    );
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.frontmatter.archived, "false");
+    assert.strictEqual(typeof data.frontmatter.archived, "string");
+  });
+
+  it("does not coerce string values that merely contain 'true'/'false'", async () => {
+    const content = [
+      "---",
+      "name: truefalse-in-name",
+      "description: This task says true things and false things",
+      "type: task",
+      "---",
+      "",
+    ].join("\n");
+    readFileSyncFn.mock.mockImplementationOnce(() => content);
+
+    const { status, data } = await req(
+      "GET",
+      "/api/v1/vault/records/task/truefalse.md",
+    );
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.frontmatter.name, "truefalse-in-name");
+    assert.strictEqual(
+      data.frontmatter.description,
+      "This task says true things and false things",
+    );
+  });
+});
+
 describe("emitStreamEvent reserved-key filtering", () => {
   it("ignores reserved keys passed via extra and preserves generated values", async () => {
     appendFileSyncFn.mock.resetCalls();

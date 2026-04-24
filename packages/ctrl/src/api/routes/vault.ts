@@ -208,6 +208,30 @@ interface ParsedRecord {
   body: string;
 }
 
+// Coerce an unquoted YAML plain scalar to its typed value. Quoted
+// strings are never passed here — this only runs on values that the
+// author wrote without quotes, mirroring YAML 1.2's type-inference
+// semantics.
+//
+// Added because plane_sync (and every other Python consumer reading
+// frontmatter via ctrl-api) was receiving ``archived: false`` as the
+// truthy string ``"false"``. ``fm.get("archived")`` then evaluated
+// truthy and took the archive-cascade branch, silently archiving
+// thousands of active vault tasks — most recently, 254 real Rapali
+// tasks on 2026-04-24 including meeting prep for the following day.
+//
+// Scope is intentionally narrow: booleans + null only today. Numbers
+// / timestamps can be added when a consumer needs them.
+function coercePlainScalar(raw: string): unknown {
+  // YAML 1.2 canonical + PyYAML-emitted casings. Intentionally NOT
+  // handling "yes"/"no"/"on"/"off" — those were dropped from YAML 1.2
+  // and PyYAML's default dumper doesn't emit them.
+  if (raw === "true" || raw === "True" || raw === "TRUE") return true;
+  if (raw === "false" || raw === "False" || raw === "FALSE") return false;
+  if (raw === "null" || raw === "Null" || raw === "NULL" || raw === "~") return null;
+  return raw;
+}
+
 function parseFrontmatter(content: string): ParsedRecord {
   if (!content.startsWith("---")) {
     return { frontmatter: {}, body: content };
@@ -317,10 +341,12 @@ function parseFrontmatter(content: string): ParsedRecord {
       continue;
     }
     // Strip quotes — handle multi-line quoted strings
+    let wasQuoted = false;
     if ((val.startsWith("'") || val.startsWith('"'))) {
       const qc = val[0];
       if (val.endsWith(qc) && val.length > 1) {
         val = val.slice(1, -1);
+        wasQuoted = true;
       } else {
         // Multi-line quoted string — accumulate until closing quote
         multiLineChar = qc;
@@ -332,7 +358,10 @@ function parseFrontmatter(content: string): ParsedRecord {
       // lines are treated as plain-scalar continuation (#611).
       plainScalarActive = true;
     }
-    fm[currentKey] = val;
+    // Coerce unquoted scalars to their typed form (bool/null). Quoted
+    // strings retain their string identity — an author who wrote
+    // ``archived: "false"`` meant the literal string "false".
+    fm[currentKey] = wasQuoted ? val : coercePlainScalar(val);
   }
   if (multiLineChar) fm[currentKey] = multiLineQuote;
   if (listValues !== null) fm[currentKey] = listValues;
