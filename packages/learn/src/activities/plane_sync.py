@@ -546,9 +546,25 @@ async def fetch_changed_tasks(since_mtime: float) -> list[dict[str, Any]]:
             "body": _clamp_body(body_preview),
             "mtime": mtime,
         })
+
+    # Temporal activities have a ~2MB payload ceiling. On mature tenants
+    # (david: 2500+ tasks, each ~2KB frontmatter+body) the uncapped return
+    # value blows that ceiling and every plane_sync run fails with
+    # "Complete result exceeds size limit". Sort by mtime ascending and
+    # cap the return to a window slightly larger than
+    # MAX_RECORDS_PER_RUN so the workflow has headroom but the payload
+    # stays bounded. Records past the cap are picked up on a later tick
+    # once the cursor advances past the current batch.
+    changed.sort(key=lambda r: float(r.get("mtime") or 0.0))
+    _FETCH_RETURN_CAP = 300
+    total_found = len(changed)
+    if total_found > _FETCH_RETURN_CAP:
+        changed = changed[:_FETCH_RETURN_CAP]
+
     logger.info(
-        "plane_sync: fetch_changed_tasks since=%s found=%d",
+        "plane_sync: fetch_changed_tasks since=%s found=%d returned=%d",
         since_mtime,
+        total_found,
         len(changed),
     )
     return changed

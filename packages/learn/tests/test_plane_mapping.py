@@ -171,10 +171,11 @@ class TestPlaneIssueToVaultPatch:
         patch = plane_issue_to_vault_patch(issue)
         assert patch["status"] == "active"
 
-    def test_backlog_maps_to_queued(self):
+    def test_backlog_maps_to_todo(self):
+        # PR #590: vault schema doesn't have "queued" — collapsed to "todo"
         issue = self._make_issue("backlog")
         patch = plane_issue_to_vault_patch(issue)
-        assert patch["status"] == "queued"
+        assert patch["status"] == "todo"
 
     def test_unstarted_maps_to_todo(self):
         issue = self._make_issue("unstarted")
