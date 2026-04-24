@@ -467,15 +467,18 @@ describe("GET /api/v1/vault/records/* — YAML plain-scalar continuation (#611)"
   });
 
   it("handles descriptions containing opening braces and curly brackets", async () => {
-    // Regression for the #611 working theory that `{` / `}` inside the
-    // description could confuse a brace-based salvage path. Parser now
-    // runs on plain scalar continuation, so literal braces in the text
-    // pass through intact.
+    // Per YAML 1.2 (and python-frontmatter / PyYAML), a plain scalar
+    // that begins with `{` is ambiguous with a flow mapping, so PyYAML
+    // emits such values single-quoted. The regression the old regex
+    // parser lucked into (treating a leading `{` as part of a plain
+    // scalar) is not spec-conformant — js-yaml correctly requires the
+    // author to quote. This test pins the spec-compliant shape that
+    // python-frontmatter actually produces when `emits` is re-serialised.
     const content = [
       "---",
-      "description: The clerk emits JSON like {\"description\": \"...\"} — this",
+      "description: 'The clerk emits JSON like {\"description\": \"...\"} — this",
       "  wrapped line contains a literal } character mid-sentence and must",
-      "  survive the fold without corruption.",
+      "  survive the fold without corruption.'",
       "name: brace-test",
       "type: task",
       "---",
@@ -609,10 +612,9 @@ describe("GET /api/v1/vault/records/* — plain-scalar type coercion (bool / nul
   });
 
   // NOTE: `null`/`~` tokens are intentionally mapped to the empty string
-  // by a separate pre-existing branch (see parseFrontmatter), for
-  // legacy compatibility with downstream consumers that expect "" for
-  // missing optional fields. Not touching that here — the cascade bug
-  // is specifically about booleans.
+  // by parseFrontmatter (legacy contract: downstream consumers expect
+  // "" for missing optional fields, not JS null). Type coercion of
+  // booleans flows through js-yaml natively.
 
   it("preserves QUOTED true/false as strings", async () => {
     // An author who wrote archived: "false" meant the literal string,

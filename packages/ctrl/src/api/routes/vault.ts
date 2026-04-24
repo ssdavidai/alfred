@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { dockerExec, ALFRED_CMD } from "../helpers.js";
@@ -200,36 +201,37 @@ function resolveVaultPath(relPath: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Lightweight YAML frontmatter parser (no npm dependency)
+// YAML frontmatter parser
 // ---------------------------------------------------------------------------
+//
+// Hand-rolled regex predecessor had three cascading bugs in the last
+// 48 hours:
+//   - #611: plain-scalar folded continuations (multi-line unquoted
+//     strings) were truncated at the first line; fix #612 patched it
+//     with yet more regex.
+//   - 2026-04-24 midday: `archived: ''` from the CLI layer was returned
+//     as the empty string, which Python evaluated as falsy — tasks
+//     lingered as "zombies" instead of archiving.
+//   - 2026-04-24 evening: unquoted `archived: false` was returned as
+//     the string "false" (truthy in Python) — plane_sync saw truthy,
+//     silently archived 254 active Rapali tasks. Band-aided in #621
+//     with `coercePlainScalar`.
+//
+// Every one of those failures was a consequence of reimplementing YAML
+// piecemeal. The structural fix: hand parsing to a spec-conformant
+// YAML 1.2 parser (js-yaml) and delete the regex machinery.
+//
+// Contract preserved:
+//   - same signature: `parseFrontmatter(content) => { frontmatter, body }`
+//   - malformed YAML returns `{ frontmatter: {}, body: content }` (total)
+//   - legacy null-to-empty-string mapping preserved for back-compat
+//     with downstream consumers that expect "" for missing optional
+//     fields (pre-existing branch in the old parser; keeping it on
+//     top-level scalars to avoid a silent contract break)
 
 interface ParsedRecord {
   frontmatter: Record<string, unknown>;
   body: string;
-}
-
-// Coerce an unquoted YAML plain scalar to its typed value. Quoted
-// strings are never passed here — this only runs on values that the
-// author wrote without quotes, mirroring YAML 1.2's type-inference
-// semantics.
-//
-// Added because plane_sync (and every other Python consumer reading
-// frontmatter via ctrl-api) was receiving ``archived: false`` as the
-// truthy string ``"false"``. ``fm.get("archived")`` then evaluated
-// truthy and took the archive-cascade branch, silently archiving
-// thousands of active vault tasks — most recently, 254 real Rapali
-// tasks on 2026-04-24 including meeting prep for the following day.
-//
-// Scope is intentionally narrow: booleans + null only today. Numbers
-// / timestamps can be added when a consumer needs them.
-function coercePlainScalar(raw: string): unknown {
-  // YAML 1.2 canonical + PyYAML-emitted casings. Intentionally NOT
-  // handling "yes"/"no"/"on"/"off" — those were dropped from YAML 1.2
-  // and PyYAML's default dumper doesn't emit them.
-  if (raw === "true" || raw === "True" || raw === "TRUE") return true;
-  if (raw === "false" || raw === "False" || raw === "FALSE") return false;
-  if (raw === "null" || raw === "Null" || raw === "NULL" || raw === "~") return null;
-  return raw;
 }
 
 function parseFrontmatter(content: string): ParsedRecord {
@@ -242,129 +244,22 @@ function parseFrontmatter(content: string): ParsedRecord {
   }
   const yamlBlock = content.slice(4, end);
   const body = content.slice(end + 4).replace(/^\r?\n/, "");
-  const fm: Record<string, unknown> = {};
-  let currentKey = "";
-  let listValues: string[] | null = null;
-  let multiLineQuote = ""; // accumulates multi-line quoted strings
-  let multiLineChar = ""; // the quote character (' or ")
-  // Plain-scalar folded continuation (#611): python-frontmatter wraps
-  // long string values across multiple lines without quotes, e.g.:
-  //     description: first chunk of a long description that
-  //       continues on the next indented line and folds with a
-  //       single space between every line.
-  // Track whether the current key has an unquoted scalar that may still
-  // be accumulating follow-on lines.
-  let plainScalarActive = false;
-
-  const lines = yamlBlock.split("\n");
-  for (let li = 0; li < lines.length; li++) {
-    const line = lines[li];
-
-    // Multi-line quoted string continuation
-    if (multiLineChar) {
-      const trimmed = line.trimEnd();
-      if (trimmed.endsWith(multiLineChar)) {
-        multiLineQuote += " " + trimmed.slice(0, -1).trim();
-        fm[currentKey] = multiLineQuote;
-        multiLineQuote = "";
-        multiLineChar = "";
-        plainScalarActive = false;
-      } else {
-        multiLineQuote += " " + trimmed.trim();
+  let fm: Record<string, unknown> = {};
+  try {
+    const parsed = yaml.load(yamlBlock, { schema: yaml.DEFAULT_SCHEMA });
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      fm = parsed as Record<string, unknown>;
+      // Legacy contract: top-level `key: null` / `key: ~` / bare `key:`
+      // becomes the empty string for downstream consumers that
+      // historically read missing-optional fields as "".
+      for (const k of Object.keys(fm)) {
+        if (fm[k] === null) fm[k] = "";
       }
-      continue;
     }
-
-    // Plain-scalar folded continuation (#611). A continuation line is
-    // an indented line (starts with whitespace) that is NOT the start
-    // of a list item and NOT a new `key:` pair. Each such line is
-    // appended to the current scalar with a single space separator.
-    // This mirrors YAML's plain-scalar folding semantics as produced
-    // by python-frontmatter / PyYAML when a string value exceeds the
-    // default line width (80) and is written unquoted.
-    if (
-      plainScalarActive &&
-      currentKey &&
-      /^\s/.test(line) &&
-      !/^\s*-\s/.test(line) &&
-      !/^([a-zA-Z_][a-zA-Z0-9_-]*)\s*:\s*/.test(line.trimStart())
-    ) {
-      const existing = fm[currentKey];
-      if (typeof existing === "string") {
-        const continuation = line.trim();
-        if (continuation) {
-          fm[currentKey] = existing + " " + continuation;
-        }
-      }
-      continue;
-    }
-
-    // List continuation: "- value" (block sequence, YAML permits either
-    // 0-indent at the parent key's column or a nested indent).
-    if (listValues !== null && /^\s*-\s/.test(line)) {
-      listValues.push(line.replace(/^\s*-\s*/, "").replace(/^['"]|['"]$/g, "").trim());
-      continue;
-    }
-    // Flush any pending list
-    if (listValues !== null) {
-      fm[currentKey] = listValues;
-      listValues = null;
-    }
-    // A new top-level `key:` line closes out any in-progress plain
-    // scalar.
-    plainScalarActive = false;
-    // "key: value" or "key:"
-    const m = line.match(/^([a-zA-Z_][a-zA-Z0-9_-]*)\s*:\s*(.*)/);
-    if (!m) continue;
-    currentKey = m[1];
-    let val = m[2].trim();
-    if (val === "[]") {
-      fm[currentKey] = [];
-      continue;
-    }
-    if (val === "" || val === "null") {
-      if (val === "null") {
-        fm[currentKey] = "";
-        continue;
-      }
-      // Could be empty scalar or start of block list — peek ahead
-      listValues = [];
-      continue;
-    }
-    // Inline list: [a, b, c]
-    if (val.startsWith("[") && val.endsWith("]")) {
-      fm[currentKey] = val
-        .slice(1, -1)
-        .split(",")
-        .map((s) => s.trim().replace(/^['"]|['"]$/g, ""))
-        .filter(Boolean);
-      continue;
-    }
-    // Strip quotes — handle multi-line quoted strings
-    let wasQuoted = false;
-    if ((val.startsWith("'") || val.startsWith('"'))) {
-      const qc = val[0];
-      if (val.endsWith(qc) && val.length > 1) {
-        val = val.slice(1, -1);
-        wasQuoted = true;
-      } else {
-        // Multi-line quoted string — accumulate until closing quote
-        multiLineChar = qc;
-        multiLineQuote = val.slice(1);
-        continue;
-      }
-    } else {
-      // Unquoted scalar value — mark active so subsequent indented
-      // lines are treated as plain-scalar continuation (#611).
-      plainScalarActive = true;
-    }
-    // Coerce unquoted scalars to their typed form (bool/null). Quoted
-    // strings retain their string identity — an author who wrote
-    // ``archived: "false"`` meant the literal string "false".
-    fm[currentKey] = wasQuoted ? val : coercePlainScalar(val);
+  } catch {
+    // Malformed YAML — return empty frontmatter rather than crash.
+    // Historical behaviour: broken records never blocked reads.
   }
-  if (multiLineChar) fm[currentKey] = multiLineQuote;
-  if (listValues !== null) fm[currentKey] = listValues;
   return { frontmatter: fm, body };
 }
 
