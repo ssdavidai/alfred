@@ -125,6 +125,7 @@ def _make_stubs(
     outbound_sigs: Optional[dict[str, dict[str, Any]]] = None,
     cursor: Optional[dict[str, Any]] = None,
     existing_frontmatter: Optional[dict[str, dict[str, Any]]] = None,
+    plane_id_to_vault_path: Optional[dict[str, str]] = None,
     enabled: bool = True,
     raise_on_apply_path: Optional[str] = None,
     fixed_now_ms: Optional[int] = None,
@@ -135,12 +136,21 @@ def _make_stubs(
     guard #3 path-hash comparison has something to work with. Defaults
     to empty (records look missing to the workflow), which is the
     realistic state when a human just created an issue in Plane.
+
+    ``plane_id_to_vault_path`` seeds the ``find_vault_task_path_by_plane_id``
+    stub activity. This simulates the vault scan fallback that the
+    workflow uses when the in-memory forward-sync map misses a
+    ``plane_issue_id`` (the reverse-sync-created task rename case
+    that #594 fixes). Any plane_id not in the map returns ``None``
+    from the stub, matching the production "no task with this
+    plane_issue_id" outcome.
     """
     project_map = project_map or {}
     issue_map = issue_map or {}
     outbound_sigs = outbound_sigs or {}
     cursor = cursor or {"last_event_id": "", "last_event_ts": 0.0}
     existing_frontmatter = existing_frontmatter or {}
+    plane_id_to_vault_path = plane_id_to_vault_path or {}
 
     # Internal state so tests can assert on it after the run
     state: dict[str, Any] = {
@@ -253,6 +263,11 @@ def _make_stubs(
         return {"applied": True, "action": "patched", "reason": "",
                 "changed_fields": sorted(patch.keys())}
 
+    @activity.defn(name="find_vault_task_path_by_plane_id")
+    async def stub_find_by_plane_id(plane_issue_id: str) -> Optional[str]:
+        _CALL_LOG.append(("find_by_plane_id", plane_issue_id))
+        return plane_id_to_vault_path.get(str(plane_issue_id)) or None
+
     @activity.defn(name="create_vault_task_from_plane_issue")
     async def stub_create(
         issue: dict[str, Any],
@@ -306,6 +321,7 @@ def _make_stubs(
         stub_guards,
         stub_apply,
         stub_create,
+        stub_find_by_plane_id,
         stub_append_comment,
         stub_archive,
         stub_mark,
@@ -674,6 +690,158 @@ class TestHumanUpdatedIssue:
         applied = state["patches_applied"][0]
         assert applied["path"] == "task/done-task.md"
         assert applied["patch"]["status"] == "done"
+
+
+class TestIssueRenameNoDuplicate:
+    """Regression tests for #594: ``issue.updated`` that changes ``name``
+    must land on the existing vault task (found by ``plane_issue_id``),
+    not spawn a new file at ``task/<sanitised-new-name>.md``.
+
+    The bug scenario:
+      1. Human creates a Plane issue "Foo" → reverse-sync mints
+         ``task/foo.md`` with ``external_id: plane:<id>`` (NOT
+         ``alfred:<slug>``) and a ``plane_issue_id`` frontmatter field.
+      2. Forward-sync hasn't yet synced this task back, so
+         ``issue_map`` does not contain ``foo → <id>`` yet.
+      3. Human renames the Plane issue to "Bar" → webhook fires
+         ``issue.updated``. Old code: no ``alfred:`` external_id, no
+         entry in ``plane_issue_to_slug`` → fall through to
+         ``create_vault_task_from_plane_issue`` which derives a NEW
+         slug from "bar" → ``task/bar-*.md`` created, leaving
+         ``task/foo.md`` stale. Permanent duplication.
+      4. New code: workflow calls ``find_vault_task_path_by_plane_id``
+         as a third resolution step, finds ``task/foo.md``, applies
+         the name patch in place. Filename is left alone — the slug
+         filename is just a stable id, the ``name`` frontmatter is
+         the source of truth for display.
+    """
+
+    def test_rename_updates_existing_task_no_new_file(self):
+        _reset_call_log()
+        issue_id = "plane-reverse-created-1"
+        # Vault task was minted by reverse-sync, so external_id is
+        # plane:<id> (NOT alfred:<slug>) and forward-sync hasn't seen
+        # it yet.
+        renamed = _issue_payload(
+            issue_id,
+            name="Bar — renamed issue",
+            state_group="unstarted",
+            priority="medium",
+            external_id=f"plane:{issue_id}",  # non-alfred stamp from reverse-sync
+        )
+        ev = _stream_event("issue", "updated", renamed)
+
+        stubs, state = _make_stubs(
+            events=[ev],
+            # issue_map is EMPTY — this is the bug-triggering precondition.
+            issue_map={},
+            # But the vault scan will find the task by plane_issue_id.
+            plane_id_to_vault_path={issue_id: "task/foo-original-slug.md"},
+            existing_frontmatter={
+                "task/foo-original-slug.md": {
+                    "name": "Foo — original name",
+                    "status": "todo",
+                    "priority": "medium",
+                    "plane_issue_id": issue_id,
+                    "external_id": f"plane:{issue_id}",
+                },
+            },
+        )
+        result = asyncio.run(_run_workflow(stubs))
+
+        # No new task file — we updated in place.
+        assert result.tasks_created == 0, (
+            "rename spawned a new vault task — #594 regression"
+        )
+        assert state["tasks_created"] == []
+        # The existing task's name was patched.
+        assert result.tasks_updated == 1
+        assert len(state["patches_applied"]) == 1
+        applied = state["patches_applied"][0]
+        # Filename stays at the original (stale) slug — that's by
+        # design; the name frontmatter is the display source of truth.
+        assert applied["path"] == "task/foo-original-slug.md"
+        assert applied["patch"]["name"] == "Bar — renamed issue"
+        # And the vault lookup activity was indeed consulted.
+        assert any(
+            call[0] == "find_by_plane_id" and call[1] == issue_id
+            for call in _CALL_LOG
+        ), "vault scan activity was never invoked"
+
+    def test_rename_on_truly_new_issue_still_creates(self):
+        """Baseline: ``issue.updated`` for a plane_id that has neither a
+        forward-sync map entry NOR a vault task with matching
+        ``plane_issue_id`` must still mint a new vault task (Plane
+        sometimes reorders event delivery so an updated event can land
+        before the paired created event).
+        """
+        _reset_call_log()
+        issue_id = "plane-genuinely-new-1"
+        updated = _issue_payload(
+            issue_id,
+            name="Filed directly in Plane",
+            state_group="unstarted",
+            priority="low",
+            external_id=None,
+            project_id="proj-new",
+        )
+        ev = _stream_event("issue", "updated", updated)
+
+        stubs, state = _make_stubs(
+            events=[ev],
+            issue_map={},                # not in forward-sync map
+            plane_id_to_vault_path={},   # vault scan also misses
+            project_map={"client-new": "proj-new"},
+        )
+        result = asyncio.run(_run_workflow(stubs))
+
+        # Genuinely new → mint it.
+        assert result.tasks_created == 1
+        assert result.tasks_updated == 0
+        assert len(state["tasks_created"]) == 1
+        assert state["tasks_created"][0]["plane_issue_id"] == issue_id
+        # Vault scan was consulted before giving up and creating.
+        assert any(
+            call[0] == "find_by_plane_id" and call[1] == issue_id
+            for call in _CALL_LOG
+        ), "vault scan activity was skipped — we'd create duplicates on any race"
+
+    def test_rename_with_alfred_external_id_bypasses_scan(self):
+        """Issues that ARE Alfred-originated (``external_id=alfred:<slug>``)
+        resolve via the existing fast path and must NOT trigger the
+        vault scan — keeps the hot path cheap.
+        """
+        _reset_call_log()
+        issue_id = "plane-alfred-originated"
+        renamed = _issue_payload(
+            issue_id,
+            name="Renamed but Alfred-originated",
+            state_group="started",
+            priority="medium",
+            external_id="alfred:alfred-task",  # fast-path slug
+        )
+        ev = _stream_event("issue", "updated", renamed)
+
+        stubs, state = _make_stubs(
+            events=[ev],
+            issue_map={"alfred-task": issue_id},
+            plane_id_to_vault_path={},  # scan would miss if called
+            existing_frontmatter={
+                "task/alfred-task.md": {
+                    "name": "Original name",
+                    "status": "active",
+                    "priority": "medium",
+                },
+            },
+        )
+        result = asyncio.run(_run_workflow(stubs))
+
+        assert result.tasks_updated == 1
+        assert result.tasks_created == 0
+        # Crucially, the vault scan was NOT invoked — fast path held.
+        assert not any(
+            call[0] == "find_by_plane_id" for call in _CALL_LOG
+        ), "vault scan fired on the fast path — wasted activity round-trip"
 
 
 class TestIssueDeleted:

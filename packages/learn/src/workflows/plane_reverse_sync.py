@@ -36,6 +36,7 @@ with workflow.unsafe.imports_passed_through():
         check_loop_guards,
         create_vault_task_from_plane_issue,
         fetch_plane_events,
+        find_vault_task_path_by_plane_id,
         load_reverse_sync_state,
         mark_plane_event_processed,
         plane_reverse_sync_is_enabled,
@@ -377,9 +378,46 @@ class PlaneReverseSyncWorkflow:
                 return
 
             if action == "updated":
-                if not slug:
-                    # Issue we haven't seen before — treat as newly
-                    # created (Plane sometimes reorders deliveries).
+                # Path resolution for an update event must **never** depend
+                # on the current ``name`` — a rename changes the name but
+                # not the ``plane_issue_id``. Order of precedence (#594):
+                #   1. ``external_id=alfred:<slug>`` on the payload (the
+                #      stable origin stamp for Alfred-created issues) —
+                #      already folded into ``slug`` above.
+                #   2. ``plane_issue_to_slug[plane_id]`` from the
+                #      forward-sync map (catches Alfred-originated issues
+                #      that forward-sync has seen) — also folded into
+                #      ``slug`` above.
+                #   3. Vault scan by ``plane_issue_id`` — covers vault
+                #      tasks created by reverse-sync that forward-sync
+                #      hasn't yet picked up (``external_id=plane:<id>``,
+                #      not in forward-sync's ``issue_map``). Without this
+                #      fallback a rename on a reverse-sync-minted task
+                #      creates a duplicate vault file at a slug derived
+                #      from the new ``name``.
+                #   4. Only if all three miss, create a new vault task
+                #      (Plane can reorder ``created``/``updated`` delivery).
+                path: Optional[str] = None
+                if slug:
+                    path = _task_path_for_slug(slug)
+                elif plane_id:
+                    existing_path = await workflow.execute_activity(
+                        find_vault_task_path_by_plane_id,
+                        args=[plane_id],
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=retry,
+                    )
+                    if existing_path:
+                        path = existing_path
+                        workflow.logger.info(
+                            "plane_reverse_sync: resolved issue.updated via "
+                            "vault scan plane_id=%s path=%s "
+                            "(stale slug filename ok)",
+                            plane_id, path,
+                        )
+
+                if not path:
+                    # Genuinely new Plane issue — mint a vault task.
                     project_id = str(data.get("project") or data.get("project_id") or "")
                     matter_slug = plane_project_to_slug.get(project_id)
                     await workflow.execute_activity(
@@ -390,7 +428,6 @@ class PlaneReverseSyncWorkflow:
                     )
                     result.tasks_created += 1
                     return
-                path = _task_path_for_slug(slug)
                 patch = plane_issue_to_vault_patch(data)
 
                 # Detect matter reassignment: if the issue has moved to a

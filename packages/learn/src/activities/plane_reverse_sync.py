@@ -669,6 +669,44 @@ async def archive_vault_record(
 
 
 # ---------------------------------------------------------------------------
+# Activity: vault task lookup by plane_issue_id — covers the reverse-sync
+# rename case (#594). When a human renames a Plane issue whose mirror
+# vault task was created by reverse-sync (``external_id=plane:<id>``,
+# not ``alfred:<slug>``), the forward-sync ``issue_map`` won't yet
+# contain the pair, so the workflow-side ``plane_issue_to_slug`` lookup
+# misses. Without this activity as a fallback we'd fall through to
+# ``create_vault_task_from_plane_issue`` and end up with a second vault
+# task at a new slug derived from the renamed ``name`` — permanent
+# duplication. Scanning vault tasks by ``plane_issue_id`` frontmatter is
+# O(n) but cached by ctrl-api; fine for the fleet's ≤2000-task vaults.
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def find_vault_task_path_by_plane_id(plane_issue_id: str) -> Optional[str]:
+    """Return vault path of the task whose frontmatter matches ``plane_issue_id``.
+
+    Returns ``None`` when no such task exists (i.e. this really is a new
+    Plane issue we haven't seen before and the workflow should fall
+    through to the create path).
+
+    The one-activity-per-event overhead is acceptable because:
+      * ``issue.updated`` events only reach this activity when the
+        workflow's in-memory ``plane_issue_to_slug`` lookup already
+        missed — so this is the failover path, not the hot path.
+      * ctrl-api ``list_records("task")`` is a single in-memory scan of
+        an already-loaded index; no filesystem walk per-call.
+    """
+    if not plane_issue_id:
+        return None
+    cfg = load_config()
+    client = VaultClient(cfg)
+    try:
+        return await _find_task_by_plane_id(client, plane_issue_id)
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
 # Activity: loop-guard #1 + #2 combined check
 # ---------------------------------------------------------------------------
 
