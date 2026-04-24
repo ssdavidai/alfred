@@ -12,8 +12,24 @@ class Config:
     temporal_host: str = field(default_factory=lambda: os.environ.get("TEMPORAL_HOST", "temporal:7233"))
     task_queue: str = field(default_factory=lambda: os.environ.get("TASK_QUEUE", "alfred-learn"))
 
-    # OpenClaw gateway
+    # OpenClaw gateways. Two gateways exist on every tenant:
+    #
+    # * ``openclaw_gateway_url`` → the MAIN agent gateway on :18789. Hosts
+    #   ``agentId: "main"`` — Sir-facing chat, Slack DMs, Plane @alfred
+    #   mentions. Only this gateway accepts ``agentId=main`` on
+    #   ``sessions_spawn``; the workers gateway rejects it with
+    #   ``agentId is not allowed for sessions_spawn``.
+    # * ``openclaw_workers_gateway_url`` → the WORKERS gateway on :18790.
+    #   Hosts ``learn-clerk`` + ephemeral execution subagents spawned by
+    #   TaskRunner. Rejects ``agentId=main``.
+    #
+    # Keep these straight: any activity spawning a user-facing Alfred
+    # session (notify EOD, Plane triggers, email channel, voice) must use
+    # ``openclaw_gateway_url``. Any activity spawning a background
+    # clerk/subagent (classification, reflection, task execution) must use
+    # ``openclaw_workers_gateway_url``.
     openclaw_gateway_url: str = field(default_factory=lambda: os.environ.get("OPENCLAW_GATEWAY_URL", "http://openclaw:18789"))
+    openclaw_workers_gateway_url: str = field(default_factory=lambda: os.environ.get("OPENCLAW_WORKERS_GATEWAY_URL", "http://openclaw-workers:18790"))
     openclaw_gateway_token_file: str = field(default_factory=lambda: os.environ.get("OPENCLAW_GATEWAY_TOKEN_FILE", "/alfred-data/.gateway-token"))
 
     # Vault (via alfred-ctrl API)

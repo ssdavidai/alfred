@@ -687,9 +687,11 @@ async def spawn_alfred_for_plane_trigger(
     """Spawn an openclaw main-gateway session for a Plane trigger.
 
     Uses the same ``sessions_spawn`` tool invocation pattern as
-    ``tasks.execute_task`` and ``clerk._call_clerk`` — POST to
-    ``/tools/invoke`` at ``OPENCLAW_GATEWAY_URL`` with bearer auth from
-    the gateway token file.
+    ``clerk._call_clerk`` / ``tasks.execute_task`` — POST to
+    ``/tools/invoke`` — BUT targets the MAIN gateway at
+    ``config.openclaw_gateway_url`` (:18789) because the spawned session
+    uses ``agentId: "main"``. The workers gateway rejects non-clerk
+    agentIds.
 
     Fire-and-forget from the workflow's perspective: we wait for the
     spawn call to return (so we can capture the child session key) but
@@ -702,6 +704,7 @@ async def spawn_alfred_for_plane_trigger(
     """
     config = load_config()
     token = config.gateway_token()
+    # MAIN gateway — this spawns agentId=main for user-facing Alfred.
     base = config.openclaw_gateway_url.rstrip("/")
 
     trigger = dict(trigger or {})
@@ -882,6 +885,8 @@ async def resolve_plane_approval(
         try:
             config = load_config()
             token = config.gateway_token()
+            # The pending session lives on the MAIN gateway — it was
+            # spawned there with agentId=main.
             base = config.openclaw_gateway_url.rstrip("/")
             async with httpx.AsyncClient(timeout=20.0) as client:
                 await client.post(

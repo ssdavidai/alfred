@@ -689,6 +689,7 @@ export function registerLearningRoutes(): void {
     environment:
       - TEMPORAL_HOST=temporal:7233
       - OPENCLAW_GATEWAY_URL=http://openclaw:18789
+      - OPENCLAW_WORKERS_GATEWAY_URL=http://openclaw-workers:18790
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
       - VAULT_PATH=/vault
       - TASK_QUEUE=alfred-learn

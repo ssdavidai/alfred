@@ -233,7 +233,10 @@ async def execute_task(task: dict[str, Any], context: str) -> dict[str, Any]:
     """
     config = load_config()
     token = config.gateway_token()
-    base = config.openclaw_gateway_url
+    # execute_task spawns ephemeral / clerk-like subagents — routed to the
+    # WORKERS gateway (:18790). The main gateway is reserved for
+    # agentId=main (user-facing Alfred chat).
+    base = config.openclaw_workers_gateway_url
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     agent_id = task.get("agent_id", config.clerk_agent_id)
@@ -616,7 +619,8 @@ async def _llm_evaluate_consequentials(
     Returns a list of follow-up task dicts or empty list.
     """
     token = config.gateway_token()
-    base = config.openclaw_gateway_url
+    # Evaluates follow-ups via a clerk subagent on the WORKERS gateway.
+    base = config.openclaw_workers_gateway_url
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     title = task.get("title", task.get("name", "Untitled"))

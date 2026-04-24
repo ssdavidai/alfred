@@ -33,6 +33,8 @@ async def notify_eod_prompt(prompt: str, digest_path: str) -> None:
     token = config.gateway_token()
 
     async with httpx.AsyncClient(timeout=30.0) as client:
+        # EOD prompt goes to the MAIN gateway — the alfred-main session is
+        # the user-facing agent, not a worker subagent.
         resp = await client.post(
             f"{config.openclaw_gateway_url}/v1/sessions/message",
             headers={"Authorization": f"Bearer {token}"},

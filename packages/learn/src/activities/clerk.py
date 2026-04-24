@@ -544,7 +544,10 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
 
     config = load_config()
     token = config.gateway_token()
-    base = config.openclaw_gateway_url
+    # Clerk is a WORKERS-gateway subagent (agentId=learn-clerk). The main
+    # gateway rejects non-main spawns when strictly configured and the
+    # workers gateway is the one with the clerk's tool/skill scoping.
+    base = config.openclaw_workers_gateway_url
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -664,7 +667,8 @@ async def _cleanup_session(session_key: str) -> None:
     try:
         config = load_config()
         token = config.gateway_token()
-        base = config.openclaw_gateway_url
+        # Cleanup targets the same gateway the clerk was spawned on.
+        base = config.openclaw_workers_gateway_url
         async with httpx.AsyncClient(timeout=10.0) as client:
             await client.post(
                 f"{base}/tools/invoke",

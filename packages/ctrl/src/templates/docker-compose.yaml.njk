@@ -257,7 +257,20 @@ services:
       - /mnt/encrypted/openclaw-workers:/openclaw-workers-state
     environment:
       - TEMPORAL_HOST=temporal:7233
-      - OPENCLAW_GATEWAY_URL=http://openclaw-workers:18790
+      # alfred-learn talks to BOTH gateways:
+      #
+      # * OPENCLAW_GATEWAY_URL → MAIN (:18789). Used by notify_eod_prompt,
+      #   the Plane @alfred trigger spawn (agentId=main), and any other
+      #   user-facing Alfred session. The workers gateway rejects
+      #   agentId=main, so this MUST NOT point at :18790.
+      # * OPENCLAW_WORKERS_GATEWAY_URL → WORKERS (:18790). Used by clerk
+      #   (agentId=learn-clerk) and task execution subagents.
+      #
+      # EXECUTION_GATEWAY_URL is the older name for the same workers
+      # endpoint, consumed by the ephemeral-subagent activity stack
+      # (chore_actions.py, ephemeral_agent.py).
+      - OPENCLAW_GATEWAY_URL=http://openclaw:18789
+      - OPENCLAW_WORKERS_GATEWAY_URL=http://openclaw-workers:18790
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
       - VAULT_PATH=/vault
       - TASK_QUEUE=alfred-learn
