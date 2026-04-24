@@ -1,4 +1,4 @@
-.PHONY: build-ctrl dev-ctrl build-saas test-learn build-learn build-openclaw
+.PHONY: build-ctrl dev-ctrl build-saas test-saas-unit test-learn build-learn build-openclaw
 
 build-ctrl:
 	cd packages/ctrl && npm ci && npm run build
@@ -8,6 +8,12 @@ dev-ctrl:
 
 build-saas:
 	cd packages/saas/app && wasp build
+
+# Lightweight unit tests for SaaS server modules that have no Wasp/Prisma
+# dependency (pure functions, guards, validators). Uses Node's built-in
+# test runner + tsx for TS support so we don't have to add jest/vitest.
+test-saas-unit:
+	cd packages/saas/app && npx -y tsx --test "src/server/**/*.test.ts"
 
 test-learn:
 	cd packages/learn && pip install -r requirements.txt && pytest tests/ -v

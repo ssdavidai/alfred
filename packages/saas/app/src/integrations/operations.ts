@@ -34,6 +34,13 @@ import type {
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 import {
+  GoogleAccountMismatchError,
+  isGoogleFamilyToolkit,
+  isGuardEnabled,
+  verifyGoogleEmailMatch,
+} from "../server/oauthTenantEmailGuard";
+import { prisma } from "wasp/server";
+import {
   upsertConnection,
   applyAutoConfigResult,
   markAutoConfigRunning,
@@ -474,6 +481,52 @@ export const autoConfigIntegration: AutoConfigIntegration<
     console.error("[autoConfigIntegration] markRunning failed:", err);
   }
 
+  // -----------------------------------------------------------------------
+  // Tenant-email guard for Google-family Composio connections. Must run
+  // BEFORE auto-config writes streams/skills/tools — that way a mismatched
+  // connection never leaves side effects on the tenant filesystem. See
+  // oauthTenantEmailGuard.ts for background on the 2026-04-16 incident.
+  // -----------------------------------------------------------------------
+  const existingRow = await delegate.findUnique({
+    where: { connectionId: args.connectionId },
+    select: { toolkit: true, userId: true },
+  });
+  const toolkit = (existingRow?.toolkit ?? "").toLowerCase();
+  if (toolkit && isGuardEnabled() && isGoogleFamilyToolkit(toolkit)) {
+    try {
+      await enforceComposioGoogleFamilyGuard(
+        instance,
+        user.id,
+        args.connectionId,
+        toolkit,
+      );
+    } catch (err) {
+      if (err instanceof GoogleAccountMismatchError) {
+        console.error(
+          `[autoConfigIntegration] guard REJECTED — user ${user.id} tried to connect ${toolkit} as ${err.connectedEmail}, expected ${err.expectedEmail}`,
+        );
+        await rollbackMismatchedComposioConnection(
+          instance,
+          user.id,
+          args.connectionId,
+          delegate,
+        );
+        const rejection: any = new Error(
+          `This tenant is owned by ${err.expectedEmail}. ` +
+            `You connected ${err.connectedEmail} instead. ` +
+            `Sign out of ${err.connectedEmail} in your browser, sign in as ${err.expectedEmail}, and try again.`,
+        );
+        rejection.code = "google_account_mismatch";
+        rejection.statusCode = 400;
+        rejection.connectedEmail = err.connectedEmail;
+        rejection.expectedEmail = err.expectedEmail;
+        throw rejection;
+      }
+      // Non-mismatch error from the guard itself — already logged; continue
+      // to auto-config (the guard logs "SKIPPED" reasons explicitly).
+    }
+  }
+
   let result: any;
   try {
     result = await proxyToTenant(instance, {
@@ -519,6 +572,42 @@ export const finalizeComposioConnections: FinalizeComposioConnections<void, any>
       await markAutoConfigRunning(delegate, user.id, conn.id);
     } catch { /* logged via DB driver if it matters */ }
 
+    // Tenant-email guard for Google-family toolkits, same as autoConfigIntegration.
+    const toolkit = String(conn.toolkit ?? "").toLowerCase();
+    if (toolkit && isGuardEnabled() && isGoogleFamilyToolkit(toolkit)) {
+      try {
+        await enforceComposioGoogleFamilyGuard(instance, user.id, conn.id, toolkit);
+      } catch (err) {
+        if (err instanceof GoogleAccountMismatchError) {
+          console.error(
+            `[finalizeComposioConnections] guard REJECTED — ${toolkit} connection ${conn.id} connected=${err.connectedEmail} expected=${err.expectedEmail}`,
+          );
+          await rollbackMismatchedComposioConnection(
+            instance,
+            user.id,
+            conn.id,
+            delegate,
+          );
+          try {
+            await markAutoConfigError(
+              delegate,
+              user.id,
+              conn.id,
+              `google_account_mismatch: connected=${err.connectedEmail} expected=${err.expectedEmail}`,
+            );
+          } catch { /* best-effort */ }
+          results.push({
+            toolkit,
+            error: "google_account_mismatch",
+            connected_email: err.connectedEmail,
+            expected_email: err.expectedEmail,
+          });
+          continue;
+        }
+        // Non-mismatch: fall through to auto-config as before.
+      }
+    }
+
     try {
       const result = await proxyToTenant(instance, {
         method: "POST",
@@ -555,4 +644,100 @@ function requireUser(context: any): { id: string } {
   const user = context?.user;
   if (!user?.id) throw new Error("Not authenticated");
   return user;
+}
+
+/**
+ * Tenant-email guard for Composio connections (Google family only).
+ *
+ * Mirrors the oauth2.ts guard but for Composio-managed OAuth: after a
+ * Google-family toolkit connects, we ask the tenant ctrl-api to report
+ * the provider-returned email (extracted from Composio metadata or a live
+ * GMAIL_GET_PROFILE call), then compare against the tenant owner's email.
+ * Mismatch → throw GoogleAccountMismatchError, caller rolls back.
+ *
+ * Throws on mismatch. Returns silently on match or on "can't verify / not
+ * applicable" outcomes (logged via console).
+ */
+async function enforceComposioGoogleFamilyGuard(
+  instance: any,
+  userId: string,
+  connectionId: string,
+  toolkit: string,
+): Promise<void> {
+  if (!isGuardEnabled()) return;
+  if (!isGoogleFamilyToolkit(toolkit)) return;
+
+  const owner = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { email: true },
+  });
+  const ownerEmail = owner?.email ?? null;
+  if (!ownerEmail) {
+    console.warn(
+      `[composio guard] SKIPPED — user ${userId} has no email on record; allowing ${toolkit} connection`,
+    );
+    return;
+  }
+
+  let identity: any;
+  try {
+    identity = await proxyToTenant(instance, {
+      path: `/api/v1/integrations/${encodeURIComponent(connectionId)}/google-identity`,
+      timeoutMs: 15000,
+    });
+  } catch (err: any) {
+    console.warn(
+      `[composio guard] SKIPPED — identity probe errored for ${toolkit}/${connectionId}: ${String(
+        err?.message ?? err,
+      ).slice(0, 200)}`,
+    );
+    return;
+  }
+
+  const email = identity?.email;
+  if (typeof email !== "string" || !email.includes("@")) {
+    console.warn(
+      `[composio guard] SKIPPED — no email in identity response for ${toolkit}/${connectionId}`,
+    );
+    return;
+  }
+
+  verifyGoogleEmailMatch(email, ownerEmail);
+  console.log(
+    `[composio guard] OK — ${toolkit}/${connectionId} identity=${email} matches owner=${ownerEmail}`,
+  );
+}
+
+/**
+ * Roll back a Composio connection that failed the tenant-email guard. We
+ * tell the tenant ctrl-api to disconnect it so no tokens/streams persist,
+ * and drop the SaaS tracking row. Best-effort — if cleanup fails we log and
+ * keep going; the mismatch error is what matters.
+ */
+async function rollbackMismatchedComposioConnection(
+  instance: any,
+  userId: string,
+  connectionId: string,
+  delegate: any,
+): Promise<void> {
+  try {
+    await proxyToTenant(instance, {
+      method: "DELETE",
+      path: `/api/v1/integrations/${encodeURIComponent(connectionId)}`,
+      timeoutMs: 15000,
+    });
+  } catch (err) {
+    console.error(
+      `[composio guard] rollback: tenant DELETE failed for ${connectionId}:`,
+      err,
+    );
+  }
+  try {
+    await deleteConnection(delegate, userId, connectionId);
+  } catch (err) {
+    console.error(
+      `[composio guard] rollback: SaaS delete failed for ${connectionId}:`,
+      err,
+    );
+  }
 }

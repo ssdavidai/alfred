@@ -1821,6 +1821,110 @@ print(json.dumps(result, default=str))
   });
 
   // =========================================================================
+  // GET /api/v1/integrations/:id/google-identity — fetch the Google-account
+  // email associated with a Google-family Composio connection. Used by the
+  // SaaS-side tenant-email guard (see packages/saas/.../oauthTenantEmailGuard.ts)
+  // to verify that the operator authorized the RIGHT Google account before
+  // auto-config runs. On 2026-04-16 a tenant got contaminated with another
+  // tenant's Gmail data because the operator's browser was signed into the
+  // wrong Google account — this endpoint gives SaaS the identity it needs
+  // to catch that mismatch and reject.
+  //
+  // Response: { email: string, verified: bool } on success,
+  //           404 if the connection doesn't belong to this tenant,
+  //           422 if identity couldn't be determined from Composio.
+  // =========================================================================
+  addRoute("GET", "/api/v1/integrations/:id/google-identity", async ({ res, params }) => {
+    const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
+    const connId = params.id;
+
+    const conn = await assertConnectionOwnedByTenant(res, connId, userId, apiKey);
+    if (!conn) return;
+
+    // Try the cheap path first — Composio connected_account payload often
+    // carries the provider-returned email in state.val.profile, meta, or
+    // account_identifier. Fall back to a live GMAIL_GET_PROFILE execution
+    // for toolkits where the cheap path is empty.
+    const candidates: string[] = [];
+    const collectEmail = (obj: unknown, depth = 0): void => {
+      if (!obj || typeof obj !== "object" || depth > 4) return;
+      for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+        if (typeof v === "string" && /@/.test(v) && /\./.test(v)) {
+          const kl = k.toLowerCase();
+          if (
+            kl === "email" ||
+            kl === "account_email" ||
+            kl === "account_identifier" ||
+            kl === "emailaddress" ||
+            kl === "primary_email"
+          ) {
+            candidates.push(v);
+          }
+        } else if (v && typeof v === "object") {
+          collectEmail(v, depth + 1);
+        }
+      }
+    };
+    collectEmail(conn);
+
+    if (candidates.length > 0) {
+      sendJson(res, 200, { email: candidates[0], verified: false, source: "composio_metadata" });
+      return;
+    }
+
+    // Live probe — run GMAIL_GET_PROFILE if the toolkit is Gmail, otherwise
+    // fail with 422 so SaaS knows it can't verify (and can make its own policy
+    // call — skip guard vs. fail closed — per Google-family toolkit).
+    const toolkit = (conn as any).toolkit?.slug ?? "";
+    const toolkitL = String(toolkit).toLowerCase().replace(/[-_\s]/g, "");
+    if (toolkitL !== "gmail" && toolkitL !== "googlemail") {
+      sendJson(res, 422, {
+        error: "identity_unavailable",
+        reason:
+          "Composio connected_account metadata has no email field and we " +
+          "don't have a live-probe action for this toolkit.",
+        toolkit,
+      });
+      return;
+    }
+
+    try {
+      const script = `
+import json, os
+os.environ.setdefault("COMPOSIO_API_KEY", ${JSON.stringify(apiKey)})
+os.environ["COMPOSIO_USER_ID"] = ${JSON.stringify(userId)}
+from src.integrations.composio_client import execute_action
+result = execute_action(
+    "GMAIL_GET_PROFILE",
+    {"userId": "me"},
+    user_id=${JSON.stringify(userId)},
+    connected_account_id=${JSON.stringify(connId)},
+)
+print(json.dumps(result, default=str))
+`.trim();
+      const output = await dockerExec("alfred-learn", ["python3", "-c", script]);
+      const parsed = JSON.parse(output.trim());
+      // GMAIL_GET_PROFILE returns { data: { emailAddress: "...", ... } }
+      const data = (parsed && typeof parsed === "object" ? (parsed as any).data ?? parsed : {}) as any;
+      const email = data?.emailAddress || data?.email || null;
+      if (typeof email === "string" && email.includes("@")) {
+        sendJson(res, 200, { email, verified: true, source: "gmail_get_profile" });
+        return;
+      }
+      sendJson(res, 422, {
+        error: "identity_unavailable",
+        reason: "GMAIL_GET_PROFILE returned no email",
+      });
+    } catch (err: any) {
+      sendJson(res, 422, {
+        error: "identity_unavailable",
+        reason: `GMAIL_GET_PROFILE failed: ${String(err?.message ?? err).slice(0, 200)}`,
+      });
+    }
+  });
+
+  // =========================================================================
   // POST /api/v1/integrations/:id/auto-config — auto-configure after connect
   // =========================================================================
   addRoute("POST", "/api/v1/integrations/:id/auto-config", async ({ res, params }) => {

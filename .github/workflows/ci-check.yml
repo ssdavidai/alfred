@@ -69,6 +69,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run SaaS unit tests (pure server modules)
+        run: make test-saas-unit
       - name: Wasp build check skipped
         run: echo "Wasp build check skipped (needs full env)"
 

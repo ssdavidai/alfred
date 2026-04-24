@@ -11,6 +11,13 @@ import express from "express";
 import type { Application, Request, Response } from "express";
 import { encryptApiKey, decryptApiKey } from "./tenantProxy";
 import { prisma } from "wasp/server";
+import {
+  GoogleAccountMismatchError,
+  fetchGoogleUserEmail,
+  isGoogleFamilyProvider,
+  isGuardEnabled,
+  verifyGoogleEmailMatch,
+} from "./oauthTenantEmailGuard";
 
 // ---------------------------------------------------------------------------
 // Provider config registry
@@ -276,6 +283,68 @@ async function handleCallback(req: Request, res: Response) {
         );
         accountLabel = payload.email || payload.preferred_username || null;
       } catch {}
+    }
+
+    // -----------------------------------------------------------------------
+    // Tenant-email guard (see oauthTenantEmailGuard.ts). For Google-family
+    // providers we verify that the Google account the operator just
+    // authorized matches the tenant owner's canonical email BEFORE
+    // persisting any tokens. Prevents the 2026-04-16 contamination bug.
+    // -----------------------------------------------------------------------
+    if (isGuardEnabled() && isGoogleFamilyProvider(pending.provider)) {
+      try {
+        const { email: connectedEmail } = await fetchGoogleUserEmail(
+          tokens.access_token as string,
+        );
+        accountLabel = connectedEmail; // always prefer the verified address
+
+        const owner = await prisma.user.findUnique({
+          where: { id: pending.userId },
+          select: { email: true },
+        });
+        const ownerEmail = owner?.email ?? null;
+
+        if (!ownerEmail) {
+          // Edge case: tenant without a populated email on User. Skip the
+          // guard rather than block OAuth, but leave a breadcrumb so we
+          // notice if it becomes common.
+          console.warn(
+            `[oauth2] Tenant-email guard SKIPPED — user ${pending.userId} has no email on record; allowing OAuth for ${pending.provider} (connected=${connectedEmail})`,
+          );
+        } else {
+          verifyGoogleEmailMatch(connectedEmail, ownerEmail);
+          console.log(
+            `[oauth2] Tenant-email guard OK — ${pending.provider} callback for user ${pending.userId} (email=${connectedEmail})`,
+          );
+        }
+      } catch (err) {
+        if (err instanceof GoogleAccountMismatchError) {
+          console.error(
+            `[oauth2] Tenant-email guard REJECTED — user ${pending.userId} tried to connect ${pending.provider} as ${err.connectedEmail}, expected ${err.expectedEmail}`,
+          );
+          return res.status(400).json({
+            error: "google_account_mismatch",
+            connected_email: err.connectedEmail,
+            expected_email: err.expectedEmail,
+            message:
+              `This tenant is owned by ${err.expectedEmail}. ` +
+              `You authorized ${err.connectedEmail} instead. ` +
+              `Sign out of ${err.connectedEmail} in your browser, sign in as ${err.expectedEmail}, and try again.`,
+          });
+        }
+        // Non-mismatch errors — couldn't even verify identity. Fail closed:
+        // do not persist tokens. Better to make the user retry than leave
+        // the guard open.
+        console.error(
+          `[oauth2] Tenant-email guard FAILED to verify identity for ${pending.provider}:`,
+          err,
+        );
+        return res.status(500).json({
+          error: "identity_verification_failed",
+          message:
+            "Could not verify the connected Google account. Please try again.",
+        });
+      }
     }
 
     const expiresAt = tokens.expires_in
