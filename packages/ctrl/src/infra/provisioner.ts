@@ -11,6 +11,11 @@ import type { SSHHostKeyOptions } from "./ssh.js";
 import * as tailscale from "./tailscale.js";
 import * as cloudflare from "./cloudflare.js";
 import {
+  generateSubdomain as _generateSubdomain,
+  planeSlug as _planeSlug,
+  planeHostnameFromCustomerName,
+} from "./plane-hostname.js";
+import {
   createInstance,
   updateInstance,
   insertEvent,
@@ -58,9 +63,9 @@ nunjucks.configure({ autoescape: false });
 
 const VALID_NAME = /^[a-zA-Z0-9_-]+$/;
 
-function generateSubdomain(customerName: string): string {
-  return customerName.toLowerCase().replace(/_/g, "-");
-}
+// Re-export so historical import paths keep working.
+export const generateSubdomain = _generateSubdomain;
+export { planeHostnameFromCustomerName };
 
 type StepCallback = (state: ProvisioningState) => void;
 
@@ -1752,13 +1757,9 @@ const PLANE_PROXY_INTERNAL_URL = "http://127.0.0.1:8080";
 const PLANE_READY_TIMEOUT_MS = 10 * 60 * 1000; // 10 min — first boot pulls images + runs migrations
 const PLANE_POLL_INTERVAL_MS = 5_000;
 
-function planeSlug(subdomain: string): string {
-  // Plane workspace slugs are lowercased letters/numbers/hyphens only, 2–48 chars.
-  // Our subdomain already matches /[a-z0-9-]+/ post-generateSubdomain(), so this
-  // is a safety coerce in case the subdomain ever widens.
-  const s = subdomain.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
-  return s.length >= 2 ? s.slice(0, 48) : `alfred-${s}`.slice(0, 48);
-}
+// `planeSlug` moved to ./plane-hostname.ts. Re-aliased below for any
+// in-module usage not covered by planeHostnameFromCustomerName().
+const planeSlug = _planeSlug;
 
 /**
  * Append (or replace) one or more KEY=VALUE lines in /opt/alfred/compose/.env.
@@ -2015,11 +2016,29 @@ async function runPlaneBootstrap(
 
 /** Main entry — idempotent. See module comment. */
 export async function setupPlane(opts: SetupPlaneOpts): Promise<void> {
-  const slug = planeSlug(opts.subdomain);
-  const adminEmail = `admin@${opts.subdomain}.alfred.black`;
-  const alfredEmail = `alfred@${opts.subdomain}.alfred.black`;
-  const webhookUrl = `https://${opts.subdomain}.alfred.black/api/v1/plane/webhook`;
+  // The Plane webhook URL has to resolve to the public Cloudflare tunnel
+  // hostname — otherwise Plane's 5-strike retry policy disables the webhook
+  // and the tenant's reverse-sync silently stops. The public hostname is
+  // always `generateSubdomain(customer_name).alfred.black` (SaaS always
+  // generates `customerName` as the full Hetzner-slug form
+  // `alfred-<slug>-<base36ts>`, and `generateSubdomain` is a lowercase-only
+  // identity on that shape).
+  //
+  // `opts.subdomain` used to be trusted here, but it's vulnerable to DB drift
+  // — David's ctrl-db had `subdomain=alfred-david` (short form) while the
+  // actual DNS / cloudflared ingress was `alfred-david-mnbqn4jg.alfred.black`.
+  // That silently registered a webhook pointing at an NXDOMAIN host and the
+  // webhook auto-disabled after 5 retries. Deriving from `customer_name`
+  // matches what cloudflare.createDnsRecord + the cloudflared template see
+  // at provision time.
+  const { hostname, slug, adminEmail, alfredEmail, webhookUrl } =
+    planeHostnameFromCustomerName(opts.customerName);
 
+  if (hostname !== opts.subdomain) {
+    opts.log(
+      `Plane: customer_name-derived hostname "${hostname}" differs from instance.subdomain "${opts.subdomain}" — using customer_name (matches Cloudflare DNS)`,
+    );
+  }
   opts.log(`Plane: workspace slug="${slug}", admin=${adminEmail}, alfred=${alfredEmail}`);
 
   // Fast-path idempotency: if the .env already has all four values we write,

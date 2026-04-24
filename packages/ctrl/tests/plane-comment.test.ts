@@ -259,7 +259,7 @@ describe("POST /api/v1/plane/comment", () => {
     assert.strictEqual(planeBody.comment_stripped, "pong");
 
     // Ledger was written with the id
-    const ledgerRaw = fsStore.get("/alfred-data/state/plane_self_comments.json");
+    const ledgerRaw = fsStore.get("/mnt/encrypted/alfred/state/plane_self_comments.json");
     assert.ok(ledgerRaw, "ledger file must exist");
     assert.deepStrictEqual(JSON.parse(ledgerRaw!), ["plane-comment-uuid-1"]);
   });
@@ -281,7 +281,7 @@ describe("POST /api/v1/plane/comment", () => {
     // Pre-seed a 499-entry ledger
     const seed = Array.from({ length: 499 }, (_, i) => `old-${i}`);
     fsStore.set(
-      "/alfred-data/state/plane_self_comments.json",
+      "/mnt/encrypted/alfred/state/plane_self_comments.json",
       JSON.stringify(seed),
     );
 
@@ -289,7 +289,7 @@ describe("POST /api/v1/plane/comment", () => {
       project_id: "p", issue_id: "i", text: "x",
     });
     let ledger = JSON.parse(
-      fsStore.get("/alfred-data/state/plane_self_comments.json")!,
+      fsStore.get("/mnt/encrypted/alfred/state/plane_self_comments.json")!,
     );
     assert.strictEqual(ledger.length, 500);
     assert.strictEqual(ledger[499], "plane-comment-uuid-1");
@@ -304,7 +304,7 @@ describe("POST /api/v1/plane/comment", () => {
       project_id: "p", issue_id: "i", text: "y",
     });
     ledger = JSON.parse(
-      fsStore.get("/alfred-data/state/plane_self_comments.json")!,
+      fsStore.get("/mnt/encrypted/alfred/state/plane_self_comments.json")!,
     );
     assert.strictEqual(ledger.length, 500);
     assert.strictEqual(ledger[0], "old-1"); // "old-0" was evicted
@@ -369,7 +369,7 @@ describe("POST /api/v1/plane/comment", () => {
     assert.strictEqual(data.error?.code, "PLANE_API_ERROR");
     // Ledger must NOT have been touched on failure.
     assert.strictEqual(
-      fsStore.has("/alfred-data/state/plane_self_comments.json"),
+      fsStore.has("/mnt/encrypted/alfred/state/plane_self_comments.json"),
       false,
     );
   });
