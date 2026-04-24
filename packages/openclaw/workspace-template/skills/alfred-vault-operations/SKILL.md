@@ -70,6 +70,7 @@ If the task needs human approval before execution (either because the instinct h
 4. **Task owner is required.** Every `task` record gets `owner: alfred` or `owner: human`. No default, no "figure it out later".
 5. **Don't duplicate.** Before creating, search for near-matches. The vault already has curator-extracted records from the inbox pipeline.
 6. **Body content is where the insight lives.** Frontmatter is structure; the Markdown body is where you write the actual content, references, and history.
+7. **Tool output stays out of Sir's reply.** Empty search results, 404s on missing records, `{error: true, ...}` envelopes from `self` — all of these are signals for YOUR reasoning, never text for Sir. If a search returns `{"results": [], "count": 0}`, reply with something like "I don't see any NeoTerra matters in the vault yet, Sir — shall I create one?" Do NOT paste the raw JSON. If a record read fails, paraphrase in one prose sentence and suggest a next step (broaden the search, check a different type, ask Sir for the exact name). The first character of your Sir-facing message is never `{`.
 
 ## Examples
 
