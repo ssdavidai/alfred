@@ -49,9 +49,11 @@ SAFETY RULES (enforced programmatically)
    the time between the initial listing and the PATCH a concurrent process
    (e.g. the matter-linkage backfill) added a ``related_matters`` entry, we
    abort the PATCH — that task is no longer an orphan.
-2. Agent-managed tasks (``agent_id`` or ``skill_entry`` frontmatter) are
-   skipped regardless of matter linkage. Those are task-runner execution
-   rows, not user errands.
+2. Agent-managed tasks (``skill_entry`` frontmatter only) are skipped
+   regardless of matter linkage. Those are task-runner execution rows,
+   not user errands. ``agent_id`` alone is NOT a filter — learn-clerk
+   authors real user-facing errands and those must go through the normal
+   archive/sync paths.
 3. Status is coerced to ``cancelled`` (schema-valid) in the SAME PATCH as
    the archive flag so the vault edit validator doesn't bounce a task with
    a legacy ``pending`` status.
@@ -338,10 +340,20 @@ def _stringify(v: Any) -> str:
 
 
 def _is_agent_managed(fm: dict[str, Any]) -> bool:
-    """Skip task-runner execution rows. These have `agent_id` (ephemeral
-    agent owner) or `skill_entry` (chore deployment marker).
+    """Filter for truly-ephemeral task-runner execution tasks, NOT all
+    agent-authored tasks.
+
+    ``skill_entry`` is the distinguishing marker — it's present only on
+    TaskRunner-spawned tasks that execute a specific skill and auto-
+    cleanup. learn-clerk-authored tasks have ``agent_id`` set but no
+    ``skill_entry``; those are real user-facing errands that should sync
+    to Plane + appear in archive/backfill passes normally.
+
+    The previous version also treated bare ``agent_id`` as "agent-
+    managed", which hid 368 real learn-clerk-authored errands on David's
+    vault from Plane. ``skill_entry`` alone is the correct marker.
     """
-    return bool(fm.get("agent_id") or fm.get("skill_entry"))
+    return bool(fm.get("skill_entry"))
 
 
 def _is_archived(fm: dict[str, Any]) -> bool:

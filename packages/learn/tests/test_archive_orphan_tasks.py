@@ -47,22 +47,43 @@ class TestIsArchived:
 
 
 class TestIsAgentManaged:
-    def test_agent_id(self):
-        assert _is_agent_managed({"agent_id": "exec-123"}) is True
+    """``_is_agent_managed`` excludes ONLY tasks with ``skill_entry`` set
+    — those are TaskRunner-spawned ephemeral execution rows that
+    auto-cleanup. Tasks with bare ``agent_id`` (e.g. learn-clerk authored
+    errands) are real user-facing records and must NOT be filtered.
+    """
 
-    def test_skill_entry(self):
-        assert _is_agent_managed({"skill_entry": "chore:weekly-digest"}) is True
+    def test_learn_clerk_authored_not_agent_managed(self):
+        # Real user-facing errand authored by the clerk LLM during a
+        # reflection / digest pass. Has agent_id but no skill_entry.
+        # These must go through normal archive/sync paths.
+        assert _is_agent_managed({"agent_id": "learn-clerk"}) is False
 
-    def test_both(self):
+    def test_task_runner_ephemeral_is_agent_managed(self):
+        # TaskRunner-spawned execution row with both markers set —
+        # ephemeral, auto-cleanup, must be skipped.
         assert _is_agent_managed(
-            {"agent_id": "x", "skill_entry": "y"}
+            {"agent_id": "task-runner", "skill_entry": "some-skill"}
         ) is True
 
-    def test_neither(self):
-        assert _is_agent_managed({"name": "Some task"}) is False
+    def test_skill_entry_alone_is_agent_managed(self):
+        # `skill_entry` is the distinguishing marker; bare skill_entry
+        # without an agent_id still means ephemeral execution row.
+        assert _is_agent_managed({"skill_entry": "whatever"}) is True
 
-    def test_empty_values(self):
-        assert _is_agent_managed({"agent_id": "", "skill_entry": None}) is False
+    def test_empty_dict_not_agent_managed(self):
+        # No fields at all — ordinary user-facing task.
+        assert _is_agent_managed({}) is False
+
+    def test_empty_skill_entry_not_agent_managed(self):
+        # Empty string / None for skill_entry is falsy — not filtered.
+        assert _is_agent_managed({"skill_entry": ""}) is False
+        assert _is_agent_managed({"skill_entry": None}) is False
+
+    def test_arbitrary_fields_no_filter(self):
+        # Non-marker fields don't trigger the filter.
+        assert _is_agent_managed({"name": "Some task"}) is False
+        assert _is_agent_managed({"agent_id": "exec-123"}) is False
 
 
 class TestIsOrphan:

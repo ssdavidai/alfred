@@ -41,8 +41,10 @@ Hard rules
 - Idempotent — re-runnable. A slug we delete this run will 404 next run,
   which we treat as "already gone" and skip.
 - Never deletes a Plane issue backed by an active (unarchived) vault task.
-- Skips tasks with ``agent_id`` or ``skill_entry`` frontmatter (agent-
-  managed chores, out of orphan/archive scope).
+- Skips tasks with ``skill_entry`` frontmatter (task-runner execution
+  rows, out of orphan/archive scope). ``agent_id`` alone is NOT a
+  filter — learn-clerk authors real user-facing errands and those must
+  not be treated as ephemeral.
 - Does NOT write the cursor back. Forward-sync re-heals the map naturally
   once the deletions land.
 
@@ -350,7 +352,16 @@ def _is_archived(fm: dict[str, Any]) -> bool:
 
 
 def _is_agent_managed(fm: dict[str, Any]) -> bool:
-    return bool(fm.get("agent_id") or fm.get("skill_entry"))
+    """Filter for truly-ephemeral task-runner execution tasks, NOT all
+    agent-authored tasks.
+
+    ``skill_entry`` is the distinguishing marker — it's present only on
+    TaskRunner-spawned tasks that execute a specific skill and auto-
+    cleanup. learn-clerk-authored tasks have ``agent_id`` set but no
+    ``skill_entry``; those are real user-facing errands whose backing
+    Plane issues must NOT be deleted by this cleanup.
+    """
+    return bool(fm.get("skill_entry"))
 
 
 # ---------------------------------------------------------------------------
