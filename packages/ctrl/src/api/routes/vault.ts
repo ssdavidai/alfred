@@ -627,6 +627,50 @@ export function registerVaultRoutes(): void {
     const stdout = await _withVaultPathLock(
       recordPath, () => dockerExec("alfred", args, VAULT_ENV),
     );
+
+    // body_set: replace the body wholesale AFTER the CLI PATCH has
+    // written any frontmatter changes. The alfred CLI has no
+    // `--body-set` flag (only `--body-append`), so we do the
+    // replacement at the filesystem level under the same path lock.
+    // This is intentionally narrow — only the bytes after the closing
+    // frontmatter `---` line are touched, frontmatter parsing is left
+    // entirely to the CLI. Used by the description-backfill script to
+    // clear worthless curator stub bodies like
+    // `# <name>\n\nExtracted from [[event/...]].` so a freshly-written
+    // `description` scalar isn't overshadowed by the stub in
+    // plane_sync's description-html rendering (see
+    // _body_to_description_html in plane_mapping.py).
+    if (typeof b.body_set === "string") {
+      await _withVaultPathLock(recordPath, async () => {
+        const fullPath = path.resolve(VAULT_PATH, recordPath);
+        const raw = await fs.promises.readFile(fullPath, "utf-8");
+        // Find the end of the frontmatter block. `parseFrontmatter`
+        // expects the first block closed by `\n---`; we mirror the same
+        // heuristic so an un-frontmattered file (rare, but possible)
+        // gets the body replaced wholesale.
+        let rewritten: string;
+        if (raw.startsWith("---")) {
+          const end = raw.indexOf("\n---", 3);
+          if (end === -1) {
+            // Malformed frontmatter — refuse to touch the file; leave
+            // a marker in the response so the caller can log.
+            return;
+          }
+          const headerEnd = end + "\n---".length;
+          // Preserve exactly one newline between `---` and body to
+          // match the style the alfred CLI emits.
+          rewritten = raw.slice(0, headerEnd) + "\n" + (b.body_set as string);
+          if (!(b.body_set as string).endsWith("\n")) {
+            rewritten += "\n";
+          }
+        } else {
+          rewritten = b.body_set as string;
+          if (!rewritten.endsWith("\n")) rewritten += "\n";
+        }
+        await fs.promises.writeFile(fullPath, rewritten, "utf-8");
+      });
+    }
+
     try {
       sendJson(res, 200, JSON.parse(stdout));
     } catch {

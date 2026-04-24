@@ -174,14 +174,19 @@ class CtrlClient:
         path: str,
         *,
         set_fields: dict[str, Any] | None = None,
+        body_set: str | None = None,
     ) -> None:
         """Dispatches to ctrl-api's ``PATCH /api/v1/vault/records/*`` endpoint.
 
         ``set_fields`` → forwarded as ``{"set": {...}}`` (serialized as strings).
+        ``body_set`` → forwarded as ``{"body_set": ...}`` to replace the
+        body wholesale after the frontmatter PATCH lands.
         """
         body: dict[str, Any] = {}
         if set_fields:
             body["set"] = {k: _stringify(v) for k, v in set_fields.items()}
+        if body_set is not None:
+            body["body_set"] = body_set
         if not body:
             return
         resp = await self._client.patch(f"/api/v1/vault/records/{path}", json=body)
@@ -224,6 +229,31 @@ DESC_MAX_CHARS = 500
 # tasks to `todo` inside the same PATCH so our description can land.
 # Same pattern as backfill_task_matter_linkage.py.
 _VALID_TASK_STATUSES = frozenset({"active", "blocked", "cancelled", "done", "todo"})
+
+# Worthless curator stub-body patterns. plane_sync's
+# _body_to_description_html prefers BODY over the `description` scalar,
+# so a task with one of these stubs would render its stub in Plane
+# instead of our new butler-grade description. We clear the body as
+# part of the same PATCH (via ctrl-api `body_set`) when the body
+# matches one of these patterns AND is short. Anything longer than
+# _MAX_CLEARABLE_BODY is preserved verbatim — legitimate bodies tend to
+# run into the hundreds of characters with structured content.
+_STUB_BODY_PATTERNS = [
+    re.compile(r"Extracted\s+from\s+\[\[event/", re.IGNORECASE),
+    re.compile(r"Created\s+from\s+\[\[", re.IGNORECASE),
+    re.compile(r"Source:\s+\[\[event/", re.IGNORECASE),
+]
+_MAX_CLEARABLE_BODY = 200
+
+
+def _is_stub_body(body: str) -> bool:
+    """Return True if the body looks like a throwaway curator stub."""
+    if not body or len(body) > _MAX_CLEARABLE_BODY:
+        return False
+    for pat in _STUB_BODY_PATTERNS:
+        if pat.search(body):
+            return True
+    return False
 
 
 def _safe_body_preview(record: dict[str, Any] | None, cap: int) -> str:
@@ -518,6 +548,7 @@ async def _hydrate_task(
         "priority": priority,
         "due_date": due_date,
         "task_body": body_clean,
+        "raw_task_body": body,
     }
 
 
@@ -533,6 +564,7 @@ class BackfillStats:
     clerk_calls: int = 0
     clerk_failures: int = 0
     enriched: int = 0
+    stub_bodies_cleared: int = 0
     skipped_existing: int = 0  # pre-filter: already rich
     skipped_archived: int = 0
     skipped_agent_managed: int = 0
@@ -659,7 +691,7 @@ async def _process_one(
         )
         return
 
-    # Atomic PATCH: {description, updated, [status]}
+    # Atomic PATCH: {description, updated, [status], [body_set]}
     # The `updated` bump is deliberate — plane_sync's forward cursor uses
     # max(updated, modified, created) as the task's mtime, so bumping it
     # guarantees the next forward-sync tick picks this task up and pushes
@@ -670,6 +702,15 @@ async def _process_one(
     # legacy case is `status: pending` — ANY edit would be rejected by
     # `_validate_status` on the vault side, so we coerce to `todo` in
     # the same PATCH. Matches the pattern in backfill_task_matter_linkage.py.
+    #
+    # If the task's current body is a worthless curator stub (e.g.
+    # `# <name>\n\nExtracted from [[event/...]].`), we clear it via
+    # `body_set=""` in the same PATCH — otherwise plane_sync's
+    # `_body_to_description_html` prefers body over `description` and
+    # our new rich description would be hidden behind the stub. The
+    # `body_set` ctrl-api extension is part of the same PR as this
+    # script. Only bodies matching _STUB_BODY_PATTERNS AND under
+    # _MAX_CLEARABLE_BODY chars are touched — real bodies are kept.
     set_map: dict[str, Any] = {
         "description": desc,
         "updated": _now_iso(),
@@ -677,8 +718,20 @@ async def _process_one(
     current_status = (task.get("current_status") or "").strip()
     if current_status and current_status not in _VALID_TASK_STATUSES:
         set_map["status"] = "todo"
+
+    body_set: str | None = None
+    raw_body = ctx.get("raw_task_body") or ""
+    if _is_stub_body(raw_body):
+        body_set = ""
+
     try:
-        await ctrl.patch_record(task["path"], set_fields=set_map)
+        await ctrl.patch_record(
+            task["path"],
+            set_fields=set_map,
+            body_set=body_set,
+        )
+        if body_set is not None:
+            stats.stub_bodies_cleared += 1
     except Exception as exc:
         stats.write_errors += 1
         logger.warning("backfill: PATCH %s failed: %s", task["path"], exc)
@@ -810,6 +863,7 @@ def _print_summary(args: argparse.Namespace, stats: BackfillStats) -> None:
     print(f"clerk calls:              {stats.clerk_calls}")
     print(f"clerk failures:           {stats.clerk_failures}")
     print(f"descriptions enriched:    {stats.enriched}")
+    print(f"  stub bodies cleared:    {stats.stub_bodies_cleared}")
     print(f"  parse failures:         {stats.skipped_parse_failure}")
     print(f"  empty-desc skip:        {stats.skipped_empty_desc}")
     print(f"  write errors:           {stats.write_errors}")
