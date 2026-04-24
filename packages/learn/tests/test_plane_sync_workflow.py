@@ -1266,3 +1266,311 @@ class TestArchiveCascadeActivity:
             assert exc.response.status_code == 500
         else:
             raise AssertionError("expected 500 to propagate")
+
+
+# ---------------------------------------------------------------------------
+# 404-on-update = Plane REST-delete workaround — archive vault task
+# ---------------------------------------------------------------------------
+
+
+class TestPlaneRestDeleteArchive:
+    """The Plane 1.3.0 workaround: a 404 on update_issue is our first
+    signal that Sir deleted the issue via the REST API (since REST
+    DELETEs don't fire webhooks). We archive the vault task to mirror
+    the intent + clear the issue_map so future runs don't try to
+    re-create it.
+
+    Previously (PR #584) the 404 path just cleared ``existing_id`` and
+    fell through to the create path — which un-deleted Sir's deliberate
+    delete. That behaviour is specifically wrong and these tests pin
+    the new archive behaviour.
+    """
+
+    def test_404_on_update_archives_vault_task(self, monkeypatch, tmp_path):
+        """404 on update_issue → archive helper is called → activity
+        returns action=archived_by_plane. No create path invoked."""
+        import httpx
+
+        from src.activities import plane_sync as ps
+
+        archive_calls: list[tuple[str, str]] = []
+
+        async def fake_archive(slug, path):
+            archive_calls.append((slug, path))
+
+        monkeypatch.setattr(
+            ps, "_archive_vault_task_from_plane_delete", fake_archive,
+        )
+
+        class FakeClient:
+            async def update_issue(self, project_id, issue_id, body):
+                req = httpx.Request("PATCH", "http://fake/")
+                resp = httpx.Response(404, request=req)
+                raise httpx.HTTPStatusError(
+                    "gone", request=req, response=resp,
+                )
+
+            async def create_issue(self, *a, **kw):
+                raise AssertionError(
+                    "create_issue must not fire for a 404-on-update path"
+                )
+
+            async def resolve_state_id(self, pid, group):
+                return None
+
+            async def ensure_labels(self, pid, names):
+                return []
+
+            async def close(self):
+                pass
+
+            # Cache-aware label resolution falls through to post when cache
+            # has entries missing. We provide an empty cache + stub _post
+            # so the helper returns an empty list of label ids.
+            async def _post(self, *a, **kw):
+                return {"id": "lbl-x"}
+
+            _proj = lambda self, pid: f"/proj/{pid}"  # noqa: E731
+
+        monkeypatch.setattr(ps, "_plane_client_from_env", lambda: FakeClient())
+
+        from temporalio.testing import ActivityEnvironment
+        env = ActivityEnvironment()
+        out = asyncio.run(
+            env.run(
+                ps.sync_task_to_plane,
+                {
+                    "slug": "deleted-by-sir",
+                    "path": "task/deleted-by-sir.md",
+                    "frontmatter": {"name": "Gone"},
+                    "matter_slug": "alpha",
+                    "body": "",
+                },
+                {"alpha": "prj-alpha"},
+                {"deleted-by-sir": "iss-gone"},
+                {"prj-alpha": {}},  # empty cache so no extra round-trips
+            )
+        )
+        assert out == {
+            "slug": "deleted-by-sir",
+            "plane_id": "",
+            "action": "archived_by_plane",
+        }
+        assert archive_calls == [("deleted-by-sir", "task/deleted-by-sir.md")]
+
+    def test_non_404_error_still_raises(self, monkeypatch):
+        """500/403 on update should still propagate — those aren't
+        deletions and we want the retry policy to handle them."""
+        import httpx
+
+        from src.activities import plane_sync as ps
+
+        async def fake_archive(slug, path):
+            raise AssertionError(
+                "archive helper must not be called for non-404 errors"
+            )
+
+        monkeypatch.setattr(
+            ps, "_archive_vault_task_from_plane_delete", fake_archive,
+        )
+
+        class FakeClient:
+            async def update_issue(self, project_id, issue_id, body):
+                req = httpx.Request("PATCH", "http://fake/")
+                resp = httpx.Response(500, request=req)
+                raise httpx.HTTPStatusError(
+                    "oops", request=req, response=resp,
+                )
+
+            async def resolve_state_id(self, pid, group):
+                return None
+
+            async def ensure_labels(self, pid, names):
+                return []
+
+            async def close(self):
+                pass
+
+            async def _post(self, *a, **kw):
+                return {"id": "lbl-x"}
+
+            _proj = lambda self, pid: f"/proj/{pid}"  # noqa: E731
+
+        monkeypatch.setattr(ps, "_plane_client_from_env", lambda: FakeClient())
+
+        from temporalio.testing import ActivityEnvironment
+        env = ActivityEnvironment()
+        try:
+            asyncio.run(
+                env.run(
+                    ps.sync_task_to_plane,
+                    {
+                        "slug": "t",
+                        "path": "task/t.md",
+                        "frontmatter": {"name": "T"},
+                        "matter_slug": "alpha",
+                        "body": "",
+                    },
+                    {"alpha": "prj-alpha"},
+                    {"t": "iss-t"},
+                    {"prj-alpha": {}},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            assert exc.response.status_code == 500
+        else:
+            raise AssertionError("expected 500 to propagate")
+
+    def test_archive_helper_failure_propagates_original_404(self, monkeypatch):
+        """If the archive write itself fails, re-raise the ORIGINAL 404
+        so the workflow's retry policy kicks in (rather than swallowing
+        into a bogus 'create' path)."""
+        import httpx
+
+        from src.activities import plane_sync as ps
+
+        async def broken_archive(slug, path):
+            raise RuntimeError("vault write failed")
+
+        monkeypatch.setattr(
+            ps, "_archive_vault_task_from_plane_delete", broken_archive,
+        )
+
+        class FakeClient:
+            async def update_issue(self, project_id, issue_id, body):
+                req = httpx.Request("PATCH", "http://fake/")
+                resp = httpx.Response(404, request=req)
+                raise httpx.HTTPStatusError(
+                    "gone", request=req, response=resp,
+                )
+
+            async def create_issue(self, *a, **kw):
+                raise AssertionError(
+                    "create_issue must not fire when the archive fails"
+                )
+
+            async def resolve_state_id(self, pid, group):
+                return None
+
+            async def ensure_labels(self, pid, names):
+                return []
+
+            async def close(self):
+                pass
+
+            async def _post(self, *a, **kw):
+                return {"id": "lbl-x"}
+
+            _proj = lambda self, pid: f"/proj/{pid}"  # noqa: E731
+
+        monkeypatch.setattr(ps, "_plane_client_from_env", lambda: FakeClient())
+
+        from temporalio.testing import ActivityEnvironment
+        env = ActivityEnvironment()
+        try:
+            asyncio.run(
+                env.run(
+                    ps.sync_task_to_plane,
+                    {
+                        "slug": "t",
+                        "path": "task/t.md",
+                        "frontmatter": {"name": "T"},
+                        "matter_slug": "alpha",
+                        "body": "",
+                    },
+                    {"alpha": "prj-alpha"},
+                    {"t": "iss-gone"},
+                    {"prj-alpha": {}},
+                )
+            )
+        except httpx.HTTPStatusError as exc:
+            # The 404 propagated, not the vault-write error — the workflow
+            # will see the 404 and log it + hold the cursor.
+            assert exc.response.status_code == 404
+        else:
+            raise AssertionError(
+                "expected original 404 to propagate when archive fails"
+            )
+
+    def test_archive_helper_writes_expected_frontmatter(self, monkeypatch):
+        """The helper must set archived=true, status=cancelled,
+        archived_at (ISO timestamp), archived_reason — and nothing more."""
+        from src.activities import plane_sync as ps
+
+        captured: list[tuple[str, dict]] = []
+
+        class FakeVaultClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def patch_frontmatter(self, path, updates):
+                captured.append((path, dict(updates)))
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(ps, "VaultClient", FakeVaultClient)
+
+        asyncio.run(
+            ps._archive_vault_task_from_plane_delete(
+                "some-task", "task/some-task.md",
+            )
+        )
+        assert len(captured) == 1
+        path, updates = captured[0]
+        assert path == "task/some-task.md"
+        assert updates["archived"] is True
+        assert updates["status"] == "cancelled"
+        assert updates["archived_reason"] == "plane_delete_detected_via_404"
+        # archived_at should be an ISO-8601 timestamp (UTC)
+        archived_at = updates["archived_at"]
+        assert isinstance(archived_at, str)
+        assert "T" in archived_at
+        # parseable back via fromisoformat
+        from datetime import datetime
+        parsed = datetime.fromisoformat(archived_at)
+        assert parsed.tzinfo is not None
+
+
+class TestArchivedByPlaneWorkflow:
+    """Workflow-level assertion: when the activity returns
+    action="archived_by_plane", the workflow must drop the slug from
+    issue_map, count it under tasks_archived_by_plane, and advance the
+    cursor (same treatment as archived, different counter)."""
+
+    def test_archived_by_plane_drops_from_map_and_counts(self):
+        _reset_call_log()
+        cursor_state = {
+            "last_vault_mtime": 50.0,
+            "project_map": {"alpha": "prj-alpha"},
+            "issue_map": {"t-rest-gone": "iss-gone"},
+        }
+        tasks = [{
+            "slug": "t-rest-gone",
+            "path": "task/t-rest-gone.md",
+            "frontmatter": {"name": "Gone"},
+            "matter_slug": "alpha",
+            "mtime": 200.0,
+        }]
+        stubs = _make_stubs(
+            cursor_state=cursor_state,
+            matters=[],
+            tasks=tasks,
+            task_outcomes={
+                "t-rest-gone": {
+                    "slug": "t-rest-gone",
+                    "plane_id": "",
+                    "action": "archived_by_plane",
+                },
+            },
+        )
+        result = asyncio.run(_run_workflow(stubs))
+
+        assert result.tasks_archived_by_plane == 1
+        assert result.tasks_archived == 0
+        assert result.tasks_synced == 0
+        assert result.errors == 0
+        # Cursor DID advance
+        assert result.last_vault_mtime == 200.0
+        save = [c for c in _CALL_LOG if c[0] == "save"][-1][1]
+        assert "t-rest-gone" not in save["issue_map"]

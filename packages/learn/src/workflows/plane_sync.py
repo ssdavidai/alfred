@@ -57,6 +57,11 @@ class PlaneSyncResult:
     tasks_synced: int = 0
     tasks_skipped: int = 0
     tasks_archived: int = 0
+    # Counter for tasks that were archived because the mirrored Plane issue
+    # 404'd on update — i.e. Sir deleted it via the REST API (no webhook)
+    # and we mirrored that intent into the vault. See
+    # ``_archive_vault_task_from_plane_delete`` in activities.plane_sync.
+    tasks_archived_by_plane: int = 0
     errors: int = 0
     last_vault_mtime: float = 0.0
     skipped_reason: str = ""
@@ -290,6 +295,19 @@ class PlaneSyncWorkflow:
                     processed_mtime = mt
                 continue
 
+            if action == "archived_by_plane":
+                # The 404-on-update path: the Plane issue is gone (Sir
+                # deleted it via REST, no webhook fired), so we archived
+                # the vault task in the activity. Drop the stale slug
+                # from issue_map and advance the cursor — the archive
+                # is a completed unit of work, same as ``archived``.
+                if slug in issue_map:
+                    del issue_map[slug]
+                result.tasks_archived_by_plane += 1
+                if mt > processed_mtime:
+                    processed_mtime = mt
+                continue
+
             if slug and plane_id:
                 issue_map[slug] = plane_id
             result.tasks_synced += 1
@@ -325,11 +343,12 @@ class PlaneSyncWorkflow:
 
         workflow.logger.info(
             "plane_sync.done matters=%d tasks=%d skipped=%d archived=%d "
-            "errors=%d cursor=%s",
+            "archived_by_plane=%d errors=%d cursor=%s",
             result.matters_synced,
             result.tasks_synced,
             result.tasks_skipped,
             result.tasks_archived,
+            result.tasks_archived_by_plane,
             result.errors,
             advance_mtime,
         )

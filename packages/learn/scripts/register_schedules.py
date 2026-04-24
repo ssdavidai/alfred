@@ -41,6 +41,13 @@ PLANE_REVERSE_SYNC_NOTE = (
     "Feature-gated by PLANE_SYNC_ENABLED env."
 )
 
+PLANE_RECONCILIATION_SCHEDULE_ID = "al-plane-reconciliation"
+PLANE_RECONCILIATION_WORKFLOW = "PlaneReconciliationWorkflow"
+PLANE_RECONCILIATION_NOTE = (
+    "Hourly sweep that mirrors Plane REST-deletes (not webhooked in 1.3.0) "
+    "into vault archives. Feature-gated by PLANE_SYNC_ENABLED env."
+)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("register-schedules")
 
@@ -305,6 +312,79 @@ async def register_plane_reverse_sync(client: Client, task_queue: str) -> None:
         raise
 
 
+async def register_plane_reconciliation(client: Client, task_queue: str) -> None:
+    """Create-or-delete ``al-plane-reconciliation`` based on the feature flag.
+
+    Same on/off pattern as ``register_plane_sync``. Every hour, SKIP
+    overlap — the workflow is idempotent but back-to-back runs would
+    just chew Plane API quota for no benefit.
+    """
+    handle = client.get_schedule_handle(PLANE_RECONCILIATION_SCHEDULE_ID)
+
+    if not _plane_sync_enabled():
+        try:
+            await handle.describe()
+        except RPCError as e:
+            if e.status == RPCStatusCode.NOT_FOUND:
+                logger.info(
+                    "plane_reconciliation disabled — schedule skipped"
+                )
+                return
+            raise
+        await handle.delete()
+        logger.info(
+            "plane_reconciliation disabled — existing schedule %s deleted",
+            PLANE_RECONCILIATION_SCHEDULE_ID,
+        )
+        return
+
+    action = ScheduleActionStartWorkflow(
+        PLANE_RECONCILIATION_WORKFLOW,
+        id=f"{PLANE_RECONCILIATION_SCHEDULE_ID}-run",
+        task_queue=task_queue,
+    )
+    spec = ScheduleSpec(
+        intervals=[ScheduleIntervalSpec(every=timedelta(hours=1))],
+    )
+    policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
+
+    try:
+        await client.create_schedule(
+            PLANE_RECONCILIATION_SCHEDULE_ID,
+            Schedule(action=action, spec=spec, policy=policy),
+        )
+        logger.info(
+            "Created schedule: %s → %s (1h, SKIP overlap)",
+            PLANE_RECONCILIATION_SCHEDULE_ID,
+            PLANE_RECONCILIATION_WORKFLOW,
+        )
+    except RPCError as e:
+        if e.status == RPCStatusCode.ALREADY_EXISTS:
+            logger.info(
+                "Schedule already exists: %s (skipping)",
+                PLANE_RECONCILIATION_SCHEDULE_ID,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s",
+            PLANE_RECONCILIATION_SCHEDULE_ID, e,
+        )
+        raise
+    except Exception as e:  # noqa: BLE001 — parity with sibling helpers
+        err = str(e).lower()
+        if "already" in err or "exists" in err:
+            logger.info(
+                "Schedule already exists: %s (skipping)",
+                PLANE_RECONCILIATION_SCHEDULE_ID,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s",
+            PLANE_RECONCILIATION_SCHEDULE_ID, e,
+        )
+        raise
+
+
 async def register_all() -> None:
     config = load_config()
     try:
@@ -351,6 +431,8 @@ async def register_all() -> None:
     # Plane two-way sync (#536) — registration-time feature-gated.
     await register_plane_sync(client, config.task_queue)
     await register_plane_reverse_sync(client, config.task_queue)
+    # Plane reconciliation — hourly REST-delete sweep.
+    await register_plane_reconciliation(client, config.task_queue)
 
 
 def main() -> None:

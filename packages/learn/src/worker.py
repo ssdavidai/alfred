@@ -28,6 +28,7 @@ from src.workflows.hourly_enrichment import HourlyEnrichmentWorkflow
 from src.workflows.plane_sync import PlaneSyncWorkflow
 from src.workflows.plane_sync_nudge import PlaneSyncNudgeWorkflow
 from src.workflows.plane_reverse_sync import PlaneReverseSyncWorkflow
+from src.workflows.plane_reconciliation import PlaneReconciliationWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -304,6 +305,13 @@ from src.activities.plane_sync import (
     sync_task_to_plane,
 )
 
+# Plane reconciliation — hourly sweep that mirrors REST-deleted issues
+# (Plane 1.3.0 doesn't fire ``issue.deleted`` webhooks for REST DELETEs).
+from src.activities.plane_reconciliation import (
+    plane_reconciliation_is_enabled,
+    reconcile_plane_deletes,
+)
+
 # Plane reverse sync (#536 B7) — Plane → vault ingress activities
 from src.activities.plane_reverse_sync import (
     append_plane_comment_to_vault,
@@ -356,6 +364,7 @@ _STATIC_WORKFLOWS = [
     PlaneSyncWorkflow,
     PlaneSyncNudgeWorkflow,
     PlaneReverseSyncWorkflow,
+    PlaneReconciliationWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -561,6 +570,9 @@ ALL_ACTIVITIES = [
     sync_task_to_plane,
     ensure_inbox_project,
     preload_project_labels,
+    # Plane reconciliation — hourly REST-delete mirror
+    plane_reconciliation_is_enabled,
+    reconcile_plane_deletes,
     # Plane reverse sync (#536 B7)
     plane_reverse_sync_is_enabled,
     load_reverse_sync_state,

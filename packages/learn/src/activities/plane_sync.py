@@ -25,6 +25,7 @@ import os
 import re
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -352,6 +353,54 @@ def _clamp_body(body: Any) -> str:
 # Declared here + in plane_mapping so both forward and reverse sync can
 # recognise it without importing across sibling activity modules.
 INBOX_SLUG_SENTINEL = "__inbox__"
+
+
+# ---------------------------------------------------------------------------
+# Plane REST-delete workaround helper — archive vault task on 404 update
+# ---------------------------------------------------------------------------
+#
+# Plane 1.3.0 does NOT emit ``issue.deleted`` webhooks for deletions made via
+# the REST API; only UI-driven deletes trigger the webhook. That means the
+# reverse-sync workflow never learns about programmatic DELETEs, and the
+# vault task keeps its ``plane_issue_id`` pointing at a now-gone issue.
+# The first signal we have is a 404 on the next forward-sync PATCH.
+#
+# Pre-PR #584 behaviour: errors++, cursor pinned (bad — blocks backfill).
+# PR #584 behaviour:     clear ``existing_id``, fall through to create path
+#                         (heals the map, but re-creates the Plane issue for
+#                         a task Sir deliberately deleted — wrong intent).
+# Current behaviour:     archive the vault task to mirror Sir's delete intent,
+#                         clear the issue_map entry, return action="archived_by_plane".
+#
+# This keeps the vault consistent with Plane without re-creating deleted
+# issues. The alternative signal — the hourly reconciliation workflow —
+# catches any 404s that never triggered an update because the task's mtime
+# is stale relative to the cursor.
+
+async def _archive_vault_task_from_plane_delete(slug: str, path: str) -> None:
+    """PATCH the vault task to mirror a Plane-side delete.
+
+    Called from the 404-on-update branch of ``sync_task_to_plane`` and from
+    the hourly reconciliation workflow when a mapped ``plane_issue_id``
+    is no longer in the Plane project's issue list. Uses the existing
+    ``VaultClient.patch_frontmatter`` helper — does NOT add a new vault
+    write path, as required by the hard rules.
+    """
+    cfg = load_config()
+    client = VaultClient(cfg)
+    try:
+        updates: dict[str, Any] = {
+            "archived": True,
+            "status": "cancelled",
+            "archived_at": datetime.now(timezone.utc).isoformat(),
+            "archived_reason": "plane_delete_detected_via_404",
+        }
+        await client.patch_frontmatter(path, updates)
+        logger.info(
+            "plane_sync.plane_deleted_archived slug=%s path=%s", slug, path,
+        )
+    finally:
+        await client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1081,24 +1130,42 @@ async def sync_task_to_plane(
                 action = "update"
                 plane_id = existing_id
             except httpx.HTTPStatusError as exc:
-                # 404 on update = the Plane issue we had mapped was
-                # deleted (manually, or via an earlier archive cascade,
-                # or by Plane's retention policy). The issue_map entry
-                # is stale. Drop through to the create path — the 409
-                # self-heal in create_issue will recover if the slug's
-                # external_id was reclaimed by a newly-created issue.
+                # 404 on update = the Plane issue we had mapped is gone.
+                # Plane 1.3.0 doesn't emit webhooks for REST DELETE, so this
+                # is typically our first signal that Sir deleted the issue
+                # in Plane via the REST API (or that it was otherwise
+                # removed out-of-band). Treat as intentional deletion:
+                # archive the vault task to mirror Sir's intent, clear
+                # the issue_map entry, and return a dedicated action so
+                # the workflow can drop the slug from the cursor.
+                #
+                # Only 404 triggers this path — other HTTP errors (500,
+                # 503, 403) still propagate so the workflow's retry
+                # policy handles genuine outages.
                 if exc.response.status_code != 404:
                     raise
-                logger.warning(
-                    "plane_sync.stale_issue_map slug=%s plane_id=%s — "
-                    "issue 404'd on update, falling through to create",
+                logger.info(
+                    "plane_sync.plane_deleted_detected slug=%s plane_id=%s "
+                    "— archiving vault task",
                     slug, existing_id,
                 )
-                existing_id = None  # noqa: F841 — sentinel reset
-                # Don't fall into the `else` branch here — we need to
-                # actually exit this `if` and hit the `else` below. Use
-                # a flag to cascade.
-                _needs_create = True
+                task_path = str(task.get("path") or f"task/{slug}.md")
+                try:
+                    await _archive_vault_task_from_plane_delete(slug, task_path)
+                except Exception as arch_exc:  # noqa: BLE001
+                    # Archive write failed — re-raise the ORIGINAL 404 so
+                    # the workflow's retry policy kicks in (vs swallowing
+                    # into a spurious create). Don't stack errors.
+                    logger.warning(
+                        "plane_sync.plane_deleted_archive_failed slug=%s error=%s",
+                        slug, arch_exc,
+                    )
+                    raise exc
+                return {
+                    "slug": slug,
+                    "plane_id": "",
+                    "action": "archived_by_plane",
+                }
             else:
                 _needs_create = False
         else:
