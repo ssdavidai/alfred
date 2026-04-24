@@ -1,20 +1,28 @@
 """Tests for the ``archive_orphan_tasks`` bulk cleanup script.
 
 These cover the pure-function orphan / agent-managed / recency / archived
-guards. Network I/O paths go through ``CtrlClient`` which is exercised
-in integration tests; unit coverage here just makes sure the in-memory
-filter predicates match the forward-sync's own view of "orphan".
+guards plus the Plane-cascade helper. Network I/O paths go through
+``CtrlClient`` / ``PlaneClient`` which are exercised in integration
+tests; unit coverage here just makes sure the predicates match the
+forward-sync's own view of "orphan" and the cascade tolerates 404 as
+success.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
+from unittest.mock import AsyncMock, MagicMock
+
+import httpx
+import pytest
 
 from scripts.archive_orphan_tasks import (
+    _delete_plane_issue,
     _is_agent_managed,
     _is_archived,
     _is_orphan,
     _most_recent_timestamp,
     _parse_iso_ts,
+    _slug_from_path,
 )
 
 
@@ -179,3 +187,151 @@ class TestRecentCutoffBehaviour:
         ts = _most_recent_timestamp(old_fm, {})
         assert ts is not None
         assert ts < cutoff
+
+
+class TestSlugFromPath:
+    def test_typical(self):
+        assert _slug_from_path("task/foo-bar.md") == "foo-bar"
+
+    def test_wrong_prefix(self):
+        assert _slug_from_path("matter/foo.md") == ""
+
+    def test_wrong_suffix(self):
+        assert _slug_from_path("task/foo.txt") == ""
+
+    def test_empty(self):
+        assert _slug_from_path("") == ""
+
+
+def _mk_http_error(status_code: int) -> httpx.HTTPStatusError:
+    req = httpx.Request("DELETE", "http://x/")
+    resp = httpx.Response(status_code, request=req)
+    return httpx.HTTPStatusError(f"{status_code}", request=req, response=resp)
+
+
+class TestDeletePlaneIssueCascade:
+    """The cascade helper must:
+
+    - Succeed when any project accepts the DELETE (204).
+    - Treat 404 across all tried projects as ``already_gone`` success.
+    - Try the preferred matter project first, then Inbox, then others.
+    - Return a clean failure for non-404 errors (e.g. 500) without iterating.
+    - Return ``no_projects_in_map`` when the project_map is empty.
+    """
+
+    @pytest.mark.asyncio
+    async def test_success_on_first_project(self):
+        client = MagicMock()
+        client.delete_issue = AsyncMock(return_value=None)
+        ok, note = await _delete_plane_issue(
+            client,
+            "ISSUE-1",
+            {"__inbox__": "INBOX-PROJ", "my-matter": "MATTER-PROJ"},
+            preferred_matter_slug="my-matter",
+        )
+        assert ok is True
+        assert note == "deleted"
+        # First call should target the preferred matter project.
+        args, _kwargs = client.delete_issue.call_args
+        assert args[0] == "MATTER-PROJ"
+        assert args[1] == "ISSUE-1"
+
+    @pytest.mark.asyncio
+    async def test_tries_inbox_after_matter_404(self):
+        client = MagicMock()
+        # Matter project returns 404, Inbox succeeds.
+        client.delete_issue = AsyncMock(
+            side_effect=[_mk_http_error(404), None]
+        )
+        ok, note = await _delete_plane_issue(
+            client,
+            "ISSUE-2",
+            {"__inbox__": "INBOX-PROJ", "my-matter": "MATTER-PROJ"},
+            preferred_matter_slug="my-matter",
+        )
+        assert ok is True
+        assert note == "deleted"
+        assert client.delete_issue.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_all_404s_returns_already_gone(self):
+        client = MagicMock()
+        client.delete_issue = AsyncMock(
+            side_effect=[
+                _mk_http_error(404),
+                _mk_http_error(404),
+                _mk_http_error(404),
+            ]
+        )
+        ok, note = await _delete_plane_issue(
+            client,
+            "ISSUE-3",
+            {
+                "__inbox__": "INBOX-PROJ",
+                "matter-a": "PROJ-A",
+                "matter-b": "PROJ-B",
+            },
+            preferred_matter_slug="matter-a",
+        )
+        assert ok is True
+        assert note == "already_gone"
+
+    @pytest.mark.asyncio
+    async def test_500_error_short_circuits(self):
+        client = MagicMock()
+        client.delete_issue = AsyncMock(side_effect=_mk_http_error(500))
+        ok, note = await _delete_plane_issue(
+            client,
+            "ISSUE-4",
+            {"__inbox__": "INBOX-PROJ"},
+            preferred_matter_slug=None,
+        )
+        assert ok is False
+        assert note.startswith("http_500")
+        # Must not keep trying after a real error.
+        assert client.delete_issue.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_project_map(self):
+        client = MagicMock()
+        client.delete_issue = AsyncMock()
+        ok, note = await _delete_plane_issue(
+            client,
+            "ISSUE-5",
+            {},
+            preferred_matter_slug=None,
+        )
+        assert ok is False
+        assert note == "no_projects_in_map"
+        client.delete_issue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_preferred_falls_back_to_inbox_first(self):
+        client = MagicMock()
+        client.delete_issue = AsyncMock(return_value=None)
+        ok, note = await _delete_plane_issue(
+            client,
+            "ISSUE-6",
+            {"__inbox__": "INBOX-PROJ", "other": "OTHER-PROJ"},
+            preferred_matter_slug=None,
+        )
+        assert ok is True
+        assert note == "deleted"
+        args, _kwargs = client.delete_issue.call_args
+        assert args[0] == "INBOX-PROJ"
+
+    @pytest.mark.asyncio
+    async def test_deduplicates_project_ids(self):
+        """If the matter-resolved project == Inbox project, we must not
+        issue the DELETE twice."""
+        client = MagicMock()
+        client.delete_issue = AsyncMock(return_value=None)
+        ok, note = await _delete_plane_issue(
+            client,
+            "ISSUE-7",
+            {"__inbox__": "P", "my-matter": "P"},
+            preferred_matter_slug="my-matter",
+        )
+        assert ok is True
+        assert note == "deleted"
+        assert client.delete_issue.call_count == 1

@@ -9,15 +9,22 @@ linked. On David's vault this pool numbers in the thousands.
 Running this script is **destructive-ish**: it PATCHes `archived: true`,
 `status: cancelled`, `archived_at`, and `archived_reason` onto every orphan's
 frontmatter. No files are deleted from disk — the vault retains the record so
-an ``unarchive`` script can flip ``archived`` back to false later. The
-companion forward-sync change (PR #580) cascades the archive to a Plane issue
-DELETE within one ~15s tick.
+an ``unarchive`` script can flip ``archived`` back to false later.
+
+**Synchronous Plane cascade (default)**: after the vault PATCH succeeds the
+script immediately DELETEs the mirrored Plane issue using the current
+``issue_map`` from ``state/plane_sync_cursor.json``. The forward-sync worker's
+own cascade can't fire for this pool because the ctrl-api ``vault/list``
+endpoint filters out archived records by default — so once a record flips to
+``archived: true`` the next forward-sync tick simply never fetches it again
+and the Plane issue lingers indefinitely. Doing the DELETE at archive-write
+time closes that gap. Use ``--no-plane-cascade`` to opt out.
 
 USAGE
 -----
 
-Runs inside the ``alfred-learn`` container (reads ``AAS_API_KEY`` from the
-tenant env; the script refuses to run without it)::
+Runs inside the ``alfred-learn`` container (reads ``AAS_API_KEY`` +
+``PLANE_API_*`` from the tenant env)::
 
     docker exec compose-alfred-learn-1 \\
         python -m scripts.archive_orphan_tasks [flags]
@@ -30,6 +37,8 @@ Flags::
                                (default "plane_sync_orphan_cleanup").
     --skip-recent-days N       Leave tasks updated/created in the last N days
                                alone (default 0 = archive all orphans).
+    --no-plane-cascade         Disable the synchronous Plane DELETE — vault-only
+                               archive (legacy behaviour). Default cascade is on.
     --verbose                  DEBUG-level logging.
     --tenant-id <id>           Optional — for summary output only.
 
@@ -47,26 +56,42 @@ SAFETY RULES (enforced programmatically)
    the archive flag so the vault edit validator doesn't bounce a task with
    a legacy ``pending`` status.
 4. The script is idempotent: if the task is already archived when we re-read
-   it, we skip without a write.
+   it, we skip without a write. Plane DELETE treats 404 as success (issue
+   already gone).
+5. The cursor file is NOT written back. We prune ``issue_map`` locally so
+   subsequent iterations in the same run don't retry the same slug, but
+   forward-sync will re-heal the on-disk map on its next tick.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 
 import httpx
 
 from src.config import load_config
+from src.utils.plane_client import PlaneClient
 
 logger = logging.getLogger("archive-orphan-tasks")
+
+
+# -----------------------------------------------------------------------------
+# Plane cursor constants — mirrored from plane_sync activity so we don't pull
+# an activity module into a CLI script.
+# -----------------------------------------------------------------------------
+
+_CURSOR_RELATIVE = "state/plane_sync_cursor.json"
+_INBOX_SLUG_SENTINEL = "__inbox__"
 
 
 # -----------------------------------------------------------------------------
@@ -112,8 +137,134 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Default 0 = archive every orphan regardless of recency."
         ),
     )
+    p.add_argument(
+        "--no-plane-cascade",
+        action="store_true",
+        help=(
+            "Disable the synchronous Plane DELETE. Vault-only archive — "
+            "legacy behaviour. Default cascade is on."
+        ),
+    )
     p.add_argument("--verbose", action="store_true", help="DEBUG-level logging.")
     return p.parse_args(argv)
+
+
+# -----------------------------------------------------------------------------
+# Plane cursor helpers — read-only. We prune the in-memory issue_map so the
+# loop doesn't retry slugs already handled this run, but never write the
+# cursor back. Forward-sync will re-heal on its next tick.
+# -----------------------------------------------------------------------------
+
+
+def _cursor_path() -> Path:
+    cfg = load_config()
+    return Path(cfg.alfred_data_dir) / _CURSOR_RELATIVE
+
+
+def _load_cursor() -> dict[str, Any]:
+    path = _cursor_path()
+    if not path.exists():
+        return {"project_map": {}, "issue_map": {}}
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        if not isinstance(raw, dict):
+            return {"project_map": {}, "issue_map": {}}
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "archive_orphan_tasks: cursor at %s unreadable (%s) — "
+            "Plane cascade disabled",
+            path, exc,
+        )
+        return {"project_map": {}, "issue_map": {}}
+    return {
+        "project_map": dict(raw.get("project_map") or {}),
+        "issue_map": dict(raw.get("issue_map") or {}),
+    }
+
+
+def _plane_client_from_env() -> PlaneClient:
+    return PlaneClient(
+        base_url=(
+            os.environ.get("PLANE_API_BASE_URL")
+            or os.environ.get("PLANE_API_URL")
+        ),
+        token=os.environ.get("PLANE_API_TOKEN"),
+        workspace_slug=os.environ.get("PLANE_WORKSPACE_SLUG"),
+    )
+
+
+def _slug_from_path(path: str) -> str:
+    """Extract the vault task slug from a record path like ``task/<slug>.md``."""
+    if not path.startswith("task/") or not path.endswith(".md"):
+        return ""
+    return path[len("task/"):-len(".md")]
+
+
+async def _delete_plane_issue(
+    client: PlaneClient,
+    issue_id: str,
+    project_map: dict[str, str],
+    *,
+    preferred_matter_slug: Optional[str],
+) -> tuple[bool, str]:
+    """Attempt to DELETE a Plane issue given only the issue id.
+
+    Plane's DELETE endpoint requires ``(project_id, issue_id)``. We don't
+    always know the project up-front (orphans route to Inbox in most eras,
+    to a matter project in some). Strategy:
+
+    1. If ``preferred_matter_slug`` resolves in ``project_map`` → try that first.
+    2. Else try the Inbox sentinel.
+    3. Else try every project in ``project_map`` in turn.
+
+    404 means "issue not in this project" — try the next one. 204 means
+    success. If every project 404s the issue is already gone and we treat
+    that as ``already_gone`` (still success for cleanup purposes).
+
+    Returns ``(deleted_or_already_gone, note)`` where ``note`` is one of
+    ``"deleted"``, ``"already_gone"``, ``"no_projects_in_map"``, or an
+    error summary.
+    """
+    # Build ordered candidate list without duplicates.
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def _push(candidate: Optional[str]) -> None:
+        if not candidate:
+            return
+        pid = str(candidate)
+        if pid in seen:
+            return
+        seen.add(pid)
+        ordered.append(pid)
+
+    if preferred_matter_slug:
+        _push(project_map.get(preferred_matter_slug))
+    _push(project_map.get(_INBOX_SLUG_SENTINEL))
+    for pid in project_map.values():
+        _push(pid)
+
+    if not ordered:
+        return False, "no_projects_in_map"
+
+    any_404 = False
+    for project_id in ordered:
+        try:
+            await client.delete_issue(project_id, issue_id)
+            return True, "deleted"
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                any_404 = True
+                continue
+            return False, f"http_{exc.response.status_code}"
+        except httpx.HTTPError as exc:
+            return False, f"network:{exc!r}"[:200]
+
+    if any_404:
+        # Every project returned 404 → issue is already gone in Plane.
+        return True, "already_gone"
+    return False, "no_project_matched"
 
 
 # -----------------------------------------------------------------------------
@@ -273,6 +424,13 @@ class ArchiveStats:
     not_orphan_on_reread_skipped: int = 0
     archived: int = 0
     write_errors: int = 0
+    # Plane cascade counters
+    plane_cascade_enabled: bool = True
+    plane_deleted: int = 0
+    plane_already_gone: int = 0
+    plane_vault_only_no_map_entry: int = 0
+    plane_errors: int = 0
+    plane_error_messages: list[str] = field(default_factory=list)
     error_messages: list[str] = field(default_factory=list)
     started_at: float = 0.0
     finished_at: float = 0.0
@@ -310,18 +468,42 @@ async def _archive_one(
 async def _run(args: argparse.Namespace) -> ArchiveStats:
     stats = ArchiveStats()
     stats.started_at = time.time()
+    stats.plane_cascade_enabled = not args.no_plane_cascade
 
     ctrl = CtrlClient()
+    plane_client: Optional[PlaneClient] = None
+    # Mutable in-memory copy of the issue_map. We prune on successful
+    # DELETE so subsequent iterations in the same process skip already-
+    # handled slugs. Never written back to disk.
+    issue_map: dict[str, str] = {}
+    project_map: dict[str, str] = {}
     try:
         logger.info(
             "archive_orphan_tasks: tenant=%s, dry_run=%s, reason=%s, "
-            "batch_size=%d, skip_recent_days=%d",
+            "batch_size=%d, skip_recent_days=%d, plane_cascade=%s",
             args.tenant_id or "(unspecified)",
             args.dry_run,
             args.reason,
             args.batch_size,
             args.skip_recent_days,
+            stats.plane_cascade_enabled,
         )
+
+        if stats.plane_cascade_enabled:
+            cursor = _load_cursor()
+            project_map = dict(cursor.get("project_map") or {})
+            issue_map = dict(cursor.get("issue_map") or {})
+            logger.info(
+                "archive_orphan_tasks: loaded cursor projects=%d issues=%d",
+                len(project_map), len(issue_map),
+            )
+            if not project_map:
+                logger.warning(
+                    "archive_orphan_tasks: project_map empty — cascade "
+                    "will fall through to vault-only for every task."
+                )
+            if not args.dry_run:
+                plane_client = _plane_client_from_env()
 
         records = await ctrl.list_tasks()
         stats.tasks_examined = len(records)
@@ -416,6 +598,56 @@ async def _run(args: argparse.Namespace) -> ArchiveStats:
                 logger.warning("archive_orphan_tasks: %s", msg)
                 continue
 
+            # Plane cascade — runs AFTER the vault PATCH succeeded. We
+            # skip the entire block on --no-plane-cascade or --dry-run.
+            slug = _slug_from_path(path)
+            if stats.plane_cascade_enabled and slug:
+                plane_id = issue_map.get(slug)
+                if not plane_id:
+                    stats.plane_vault_only_no_map_entry += 1
+                    logger.info(
+                        "archived: vault-only %s (not in issue_map)", slug
+                    )
+                elif args.dry_run:
+                    logger.info(
+                        "DRY-RUN: would delete Plane issue %s for %s",
+                        plane_id, slug,
+                    )
+                else:
+                    # Best-effort DELETE. We treat 404 (issue already gone)
+                    # as success for cleanup purposes. Hard failures are
+                    # logged but don't roll back the vault PATCH — archive
+                    # remains the authoritative state.
+                    assert plane_client is not None  # noqa: S101
+                    preferred_matter = _resolve_task_matter(fm_current)
+                    try:
+                        ok, note = await _delete_plane_issue(
+                            plane_client,
+                            plane_id,
+                            project_map,
+                            preferred_matter_slug=preferred_matter,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        ok = False
+                        note = f"exception:{exc!r}"[:200]
+
+                    if ok:
+                        # Prune in-memory so subsequent iterations in the
+                        # same run don't reattempt. Not written to disk.
+                        issue_map.pop(slug, None)
+                        if note == "already_gone":
+                            stats.plane_already_gone += 1
+                        else:
+                            stats.plane_deleted += 1
+                        logger.info(
+                            "archived: vault + plane %s (%s)", slug, note
+                        )
+                    else:
+                        stats.plane_errors += 1
+                        msg = f"plane delete {slug}={plane_id}: {note}"[:500]
+                        stats.plane_error_messages.append(msg)
+                        logger.warning("archive_orphan_tasks: %s", msg)
+
             if stats.archived % args.batch_size == 0:
                 logger.info(
                     "archive_orphan_tasks: archived %d/%d (latest: %s)",
@@ -425,6 +657,8 @@ async def _run(args: argparse.Namespace) -> ArchiveStats:
                 )
     finally:
         await ctrl.close()
+        if plane_client is not None:
+            await plane_client.close()
 
     stats.finished_at = time.time()
     _print_summary(args, stats)
@@ -440,6 +674,7 @@ def _print_summary(args: argparse.Namespace, stats: ArchiveStats) -> None:
     print(f"mode:                           {'DRY-RUN' if args.dry_run else 'LIVE'}")
     print(f"archive_reason:                 {args.reason}")
     print(f"skip_recent_days:               {args.skip_recent_days}")
+    print(f"plane cascade:                  {'ON' if stats.plane_cascade_enabled else 'OFF'}")
     print(f"tasks examined:                 {stats.tasks_examined}")
     print(f"orphans detected:               {stats.orphans_detected}")
     print(f"agent-managed skipped:          {stats.agent_managed_skipped}")
@@ -448,10 +683,19 @@ def _print_summary(args: argparse.Namespace, stats: ArchiveStats) -> None:
     print(f"no-longer-orphan on re-read:    {stats.not_orphan_on_reread_skipped}")
     print(f"archived:                       {stats.archived}")
     print(f"write errors:                   {stats.write_errors}")
+    if stats.plane_cascade_enabled:
+        print(f"plane issues deleted:           {stats.plane_deleted}")
+        print(f"plane issues already gone:      {stats.plane_already_gone}")
+        print(f"plane vault-only (no map):      {stats.plane_vault_only_no_map_entry}")
+        print(f"plane cascade errors:           {stats.plane_errors}")
     print(f"runtime:                        {runtime:0.1f}s")
     if stats.error_messages:
-        print("\nfirst 5 error messages:")
+        print("\nfirst 5 vault error messages:")
         for msg in stats.error_messages[:5]:
+            print(f"  - {msg}")
+    if stats.plane_error_messages:
+        print("\nfirst 5 plane cascade errors:")
+        for msg in stats.plane_error_messages[:5]:
             print(f"  - {msg}")
     print("=" * 72)
 
