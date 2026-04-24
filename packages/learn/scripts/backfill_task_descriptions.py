@@ -218,6 +218,13 @@ MAX_TASK_BODY = 500
 DESC_MIN_CHARS = 40
 DESC_MAX_CHARS = 500
 
+# Task statuses the vault schema REJECTS on edit. Legacy tasks (curator
+# output from pre-schema-tightening) commonly carry `status: pending`,
+# which ANY edit would bounce with `_validate_status`. We coerce such
+# tasks to `todo` inside the same PATCH so our description can land.
+# Same pattern as backfill_task_matter_linkage.py.
+_VALID_TASK_STATUSES = frozenset({"active", "blocked", "cancelled", "done", "todo"})
+
 
 def _safe_body_preview(record: dict[str, Any] | None, cap: int) -> str:
     """Return a trimmed body preview for a record, or empty string."""
@@ -408,6 +415,7 @@ def _filter_candidates(
             "_created_dt": created_dt,
             "frontmatter": fm,
             "existing_description": existing_desc,
+            "current_status": _fm_as_str(fm.get("status")).strip(),
             "body_preview": r.get("body_preview") or "",
         })
 
@@ -651,19 +659,26 @@ async def _process_one(
         )
         return
 
-    # Atomic PATCH: {description, updated}
+    # Atomic PATCH: {description, updated, [status]}
     # The `updated` bump is deliberate — plane_sync's forward cursor uses
     # max(updated, modified, created) as the task's mtime, so bumping it
     # guarantees the next forward-sync tick picks this task up and pushes
     # the new description_html to Plane.
+    #
+    # If the task carries a `status` value outside the vault schema's
+    # allowed set (active/blocked/cancelled/done/todo) — the common
+    # legacy case is `status: pending` — ANY edit would be rejected by
+    # `_validate_status` on the vault side, so we coerce to `todo` in
+    # the same PATCH. Matches the pattern in backfill_task_matter_linkage.py.
+    set_map: dict[str, Any] = {
+        "description": desc,
+        "updated": _now_iso(),
+    }
+    current_status = (task.get("current_status") or "").strip()
+    if current_status and current_status not in _VALID_TASK_STATUSES:
+        set_map["status"] = "todo"
     try:
-        await ctrl.patch_record(
-            task["path"],
-            set_fields={
-                "description": desc,
-                "updated": _now_iso(),
-            },
-        )
+        await ctrl.patch_record(task["path"], set_fields=set_map)
     except Exception as exc:
         stats.write_errors += 1
         logger.warning("backfill: PATCH %s failed: %s", task["path"], exc)
