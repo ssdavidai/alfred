@@ -468,6 +468,147 @@ const DEFAULT_ARGS: Record<string, Record<string, unknown>> = {
   GMAIL_LIST_LABELS: { userId: "me" },
 };
 
+// ---------------------------------------------------------------------------
+// Gmail metadata-mode response stripping
+//
+// Composio's GMAIL_FETCH_EMAILS adapter silently ignores the `format` argument
+// and always returns full RFC 5322 (headers + body + base64-encoded attachment
+// parts). One message averages ~104 KB on the wire. Even after raising the
+// openclaw tool-result cap to 160 KB, that's only ~2 messages per call —
+// nowhere near enough for "list every email in the last 24 hours" (40+ msgs).
+//
+// When the agent passed `format: "metadata"` (the documented opt-in for the
+// lightweight shape), we know it just wants navigation data — message ids,
+// subject, sender, timestamp, label ids, snippet, attachment names. So we
+// strip the body / payload tree / attachment binaries server-side. Net per
+// message: ~104 KB → ~1 KB (~50–100x reduction observed against David's inbox).
+//
+// Strict pass-through rules:
+//   • Only when action === "GMAIL_FETCH_EMAILS" AND arguments.format ===
+//     "metadata" AND result.successful === true AND result.data.messages is
+//     an array. Anything else flows through untouched.
+//   • format: "full" (or unset, Composio's own default) is a deliberate
+//     "give me one specific body" call — never strip.
+//   • Top-level data fields like nextPageToken / resultSizeEstimate are
+//     preserved so pagination keeps working.
+//   • If the response shape doesn't match what we expect (Composio changed
+//     it under us), we log at warn level and pass through untouched rather
+//     than silently swallow data.
+// ---------------------------------------------------------------------------
+
+const PREVIEW_MAX_CHARS = 240;
+
+const GMAIL_METADATA_KEEP_FIELDS = [
+  "messageId",
+  "threadId",
+  "subject",
+  "sender",
+  "to",
+  "messageTimestamp",
+  "labelIds",
+] as const;
+
+function truncatePreview(value: unknown): unknown {
+  // Composio's `preview` field is observed in two shapes:
+  //   • a string snippet (older shape)
+  //   • an object like { body: string, subject?: string } (current shape)
+  // Truncate the body in either case; pass through anything else unchanged
+  // so we don't corrupt unfamiliar variants.
+  if (typeof value === "string") {
+    return value.length > PREVIEW_MAX_CHARS
+      ? value.slice(0, PREVIEW_MAX_CHARS) + "…"
+      : value;
+  }
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const obj = value as Record<string, unknown>;
+    const body = obj.body;
+    if (typeof body === "string" && body.length > PREVIEW_MAX_CHARS) {
+      return { ...obj, body: body.slice(0, PREVIEW_MAX_CHARS) + "…" };
+    }
+    return value;
+  }
+  return value;
+}
+
+function stripAttachmentEntry(entry: unknown): Record<string, unknown> | null {
+  if (!entry || typeof entry !== "object") return null;
+  const a = entry as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  if (typeof a.filename === "string") out.filename = a.filename;
+  if (typeof a.mimeType === "string") out.mimeType = a.mimeType;
+  if (typeof a.size === "number") out.size = a.size;
+  if (typeof a.attachmentId === "string") out.attachmentId = a.attachmentId;
+  return out;
+}
+
+function stripGmailMetadataMessage(msg: unknown): Record<string, unknown> | unknown {
+  if (!msg || typeof msg !== "object" || Array.isArray(msg)) return msg;
+  const m = msg as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+
+  for (const k of GMAIL_METADATA_KEEP_FIELDS) {
+    if (k in m) out[k] = m[k];
+  }
+  if ("preview" in m) {
+    out.preview = truncatePreview(m.preview);
+  }
+  if (Array.isArray(m.attachmentList) && m.attachmentList.length > 0) {
+    const stripped = m.attachmentList
+      .map(stripAttachmentEntry)
+      .filter((x): x is Record<string, unknown> => x !== null);
+    // Only emit the field if the source had at least one entry — don't
+    // synthesise an empty array where there wasn't one.
+    if (stripped.length > 0) out.attachmentList = stripped;
+  }
+  return out;
+}
+
+/**
+ * Pure transform: given a raw `/api/v1/integrations/execute` response wrapping
+ * a GMAIL_FETCH_EMAILS+format=metadata call, return a copy with each message
+ * reduced to the navigation fields Alfred actually needs. See block comment
+ * above for the policy. Exported for unit tests.
+ *
+ * The caller is responsible for checking that this transform is appropriate
+ * (action + format match) before invoking — this helper assumes it is and
+ * focuses on shape-checking the payload itself.
+ */
+export function stripGmailMetadataResponse(rawResponse: unknown): unknown {
+  if (!rawResponse || typeof rawResponse !== "object") return rawResponse;
+  const top = rawResponse as Record<string, unknown>;
+  const result = top.result;
+  if (!result || typeof result !== "object") return rawResponse;
+  const r = result as Record<string, unknown>;
+  if (r.successful !== true) return rawResponse;
+  const data = r.data;
+  if (!data || typeof data !== "object") {
+    console.warn(
+      "[integrations/execute] GMAIL_FETCH_EMAILS metadata-strip: result.data missing/invalid, passing through",
+    );
+    return rawResponse;
+  }
+  const d = data as Record<string, unknown>;
+  if (!Array.isArray(d.messages)) {
+    console.warn(
+      "[integrations/execute] GMAIL_FETCH_EMAILS metadata-strip: result.data.messages not an array, passing through",
+    );
+    return rawResponse;
+  }
+
+  const strippedMessages = d.messages.map(stripGmailMetadataMessage);
+
+  return {
+    ...top,
+    result: {
+      ...r,
+      data: {
+        ...d,
+        messages: strippedMessages,
+      },
+    },
+  };
+}
+
 const TOOLKIT_EMOJI: Record<string, string> = {
   gmail: "📧", googlecalendar: "📅", slack: "💬", notion: "📝",
   github: "🐙", linear: "📋", stripe: "💳", discord: "🎮",
@@ -2400,7 +2541,18 @@ print(json.dumps(result, default=str))
 
       const output = await dockerExec("alfred-learn", ["python3", "-c", script]);
       const result = JSON.parse(output.trim());
-      sendJson(res, 200, { action: actionSlug, toolkit, result });
+      let response: unknown = { action: actionSlug, toolkit, result };
+      // Strip Gmail metadata-mode bulk fields (see stripGmailMetadataResponse
+      // for the policy). Composio's adapter ignores `format: "metadata"` and
+      // returns the full RFC822 + body; we trim it server-side so the agent
+      // can fit ~150 messages per call instead of ~2.
+      if (
+        actionSlug === "GMAIL_FETCH_EMAILS" &&
+        (mergedArgs as Record<string, unknown>).format === "metadata"
+      ) {
+        response = stripGmailMetadataResponse(response);
+      }
+      sendJson(res, 200, response);
     } catch (err: any) {
       sendJson(res, 500, {
         error: `Composio execute failed: ${err.message?.slice(0, 300)}`,
