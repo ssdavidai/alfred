@@ -13,7 +13,18 @@ export function execAsync(cmd: string, args: string[], timeoutMs = 30_000): Prom
     execFileCb(cmd, args, { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         const exitCode = (err as any).status ?? (err as any).code;
-        reject(new ExecError(`${cmd} failed (${exitCode}): ${stderr || err.message}`, stderr));
+        // Capture both stderr and stdout — some CLIs (notably the alfred
+        // CLI's `vault delete`) emit structured error payloads to stdout
+        // on non-zero exit, and downstream handlers need to inspect both
+        // streams to classify the failure (e.g. map "File not found" to
+        // HTTP 404 rather than a generic 500).
+        const stdoutStr = typeof stdout === "string" ? stdout : stdout?.toString() ?? "";
+        const stderrStr = typeof stderr === "string" ? stderr : stderr?.toString() ?? "";
+        reject(new ExecError(
+          `${cmd} failed (${exitCode}): ${stderrStr || err.message}`,
+          stderrStr,
+          stdoutStr,
+        ));
         return;
       }
       resolve({ stdout, stderr });

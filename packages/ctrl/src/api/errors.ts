@@ -36,8 +36,18 @@ export class ConflictError extends ApiError {
 }
 
 export class ExecError extends ApiError {
-  constructor(message: string, stderr?: string) {
-    super(500, "EXEC_ERROR", message, stderr ? { stderr } : undefined);
+  /** Captured stdout from the failed subprocess (best-effort). */
+  public stdout?: string;
+  /** Captured stderr from the failed subprocess (best-effort). */
+  public stderr?: string;
+
+  constructor(message: string, stderr?: string, stdout?: string) {
+    const details: Record<string, unknown> = {};
+    if (stderr) details.stderr = stderr;
+    if (stdout) details.stdout = stdout;
+    super(500, "EXEC_ERROR", message, Object.keys(details).length ? details : undefined);
+    this.stderr = stderr;
+    this.stdout = stdout;
   }
 }
 

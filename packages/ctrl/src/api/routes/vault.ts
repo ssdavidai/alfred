@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import yaml from "js-yaml";
 import { addRoute } from "../server.js";
-import { sendJson, ValidationError, NotFoundError } from "../errors.js";
+import { sendJson, ValidationError, NotFoundError, ExecError } from "../errors.js";
 import { dockerExec, ALFRED_CMD } from "../helpers.js";
 import { emitStreamEvent } from "./streams.js";
 import {
@@ -667,10 +667,38 @@ export function registerVaultRoutes(): void {
     const recordPath = params.path;
     const args = [...ALFRED_CMD, "vault", "delete", recordPath];
 
-    // Serialise with any in-flight writes to this same path (#593).
-    const stdout = await _withVaultPathLock(
-      recordPath, () => dockerExec("alfred", args, VAULT_ENV),
-    );
+    let stdout: string;
+    try {
+      // Serialise with any in-flight writes to this same path (#593).
+      stdout = await _withVaultPathLock(
+        recordPath, () => dockerExec("alfred", args, VAULT_ENV),
+      );
+    } catch (err) {
+      // The alfred CLI exits 1 with a `{"error": "File not found: ..."}`
+      // payload (to stdout and/or stderr) when the target record has
+      // already been removed. Idempotent re-runs of the rematerializer
+      // and other consumers of `delete_record` treat 404 as success;
+      // bubbling these as a generic 500 EXEC_ERROR turns clean
+      // already-deleted no-ops into noisy false-failure warnings (today's
+      // Omi rematerializer logged 277 such warnings on David). Inspect
+      // the captured streams and downgrade the explicit not-found case
+      // to a real 404 — preserving 500 for genuine exec failures
+      // (permissions, malformed paths, docker-side issues, etc.).
+      if (err instanceof ExecError) {
+        const combined = `${err.stdout ?? ""}\n${err.stderr ?? ""}`.toLowerCase();
+        if (combined.includes("file not found")) {
+          // Debug-level: this is an idempotent no-op, not a failure.
+          console.debug(
+            `[vault.delete] record already absent path=${recordPath} (CLI exit non-zero with "File not found")`,
+          );
+          sendJson(res, 404, {
+            error: { code: "NOT_FOUND", message: `Record not found: ${recordPath}` },
+          });
+          return;
+        }
+      }
+      throw err;
+    }
     try {
       sendJson(res, 200, JSON.parse(stdout));
     } catch {
