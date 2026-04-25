@@ -15,6 +15,12 @@ from typing import Any
 from temporalio import activity
 
 from src.config import load_config
+from src.utils.entity_promotion import (
+    initial_status_for_auto_discovery,
+    is_provisional_entity_type,
+    merge_mentioned_streams,
+    next_status,
+)
 from src.utils.vault_client import VaultClient
 
 logger = logging.getLogger("alfred-learn")
@@ -493,6 +499,26 @@ def _build_vault_content(
         if part and total_parts and int(total_parts) > 1:
             extra_fm_lines.append(f"part: {part}")
             extra_fm_lines.append(f"total_parts: {total_parts}")
+        # Ambient-capture forward-defense (#650): Omi pendant captures
+        # whatever it hears — conferences, restaurants, family dinners,
+        # other people's phone calls. Without speaker diarization (today
+        # Whisper doesn't do it by default), we cannot tell which segments
+        # are Sir's voice vs ambient. Default to the conservative posture:
+        # treat every Omi conversation as "things Sir was AROUND" rather
+        # than "things Sir SAID/OWNS". Downstream enrichment + Alfred's
+        # answering layer should require explicit possession evidence
+        # before asserting Sir owns/uses/drives any entity mentioned here.
+        #
+        # When diarization is wired (segments[].speaker_id == owner), this
+        # block can be relaxed — but only for that specific case. Lack of
+        # diarization stays ambient.
+        segments_list = _get("segments_list") or raw.get("segments")
+        owner_id = _get("owner_id") or metadata.get("owner_speaker_id")
+        attribution = _compute_omi_speaker_attribution(segments_list, owner_id)
+        extra_fm_lines.append(f"speaker_attribution: {attribution}")
+        extra_fm_lines.append(
+            f"possession_evidence: {'true' if attribution == 'owner' else 'false'}"
+        )
 
     extra_fm = ("\n" + "\n".join(extra_fm_lines)) if extra_fm_lines else ""
 
@@ -526,6 +552,97 @@ def _event_slug(event: dict[str, Any]) -> str:
     ref_hash = hashlib.sha256(source_ref.encode()).hexdigest()[:12]
 
     return f"{date_str}-{ref_hash}"
+
+
+def _compute_omi_speaker_attribution(
+    segments: Any, owner_id: Any,
+) -> str:
+    """Return ``owner`` only if diarization proves Sir was the speaker (#650).
+
+    Conservative default — anything we can't prove is Sir's voice gets
+    tagged ``ambient``:
+
+    - No segments OR no diarization data → ``ambient``
+    - No known owner speaker id → ``ambient`` (we can't compare)
+    - Any segment has ``speaker_id != owner_id`` → ``ambient`` (mixed audio)
+    - All segments speaker_id match owner_id → ``owner`` (proven Sir)
+
+    Today's Omi pipeline doesn't emit ``speaker_id`` per segment (Whisper
+    doesn't diarize by default), so this returns ``ambient`` for every
+    real conversation. The branch exists so that the moment diarization
+    lands, the same template starts gating correctly without rewrite.
+    """
+    if not isinstance(segments, list) or not segments:
+        return "ambient"
+    if not owner_id:
+        return "ambient"
+    has_any_speaker_field = False
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        if "speaker_id" not in seg:
+            continue
+        has_any_speaker_field = True
+        if seg.get("speaker_id") != owner_id:
+            return "ambient"
+    if not has_any_speaker_field:
+        return "ambient"
+    return "owner"
+
+
+def apply_two_strike_promotion(
+    record_type: str,
+    existing_frontmatter: dict[str, Any] | None,
+    new_stream_id: str,
+) -> dict[str, Any]:
+    """Compute the frontmatter delta for a stream-driven entity touch (#651).
+
+    This is the public surface the downstream entity-creation paths
+    (``activities/vault.py:ensure_entities_exist`` and
+    ``activities/enrichment.py:_create_discovered_entities``) should call
+    to start auto-discoveries as ``provisional`` and promote them only
+    once a *second distinct* stream corroborates them.
+
+    No code path in this PR invokes it yet — wiring those callers is a
+    follow-up because they live under ``activities/`` which #650/#651
+    explicitly told us to leave alone. But the helper is here, tested,
+    and ready so the downstream PR is a small surgical change.
+
+    Args:
+        record_type: ``org``, ``person``, ``location``, etc.
+        existing_frontmatter: The current YAML frontmatter (or None for
+            a brand-new record).
+        new_stream_id: The stream id introducing the mention right now.
+
+    Returns:
+        A frontmatter delta dict with the keys that should be set/updated
+        on the entity record. Empty dict if the type is non-provisional
+        or if nothing changed (existing already-active record, no new
+        stream id).
+    """
+    if not is_provisional_entity_type(record_type):
+        return {}
+
+    existing = existing_frontmatter or {}
+    current_status = existing.get("status")
+    existing_streams = existing.get("mentioned_by_streams") or []
+
+    if current_status is None:
+        # Brand-new auto-discovery from a single stream.
+        merged, _ = merge_mentioned_streams(existing_streams, new_stream_id)
+        return {
+            "status": initial_status_for_auto_discovery(record_type),
+            "mentioned_by_streams": merged,
+        }
+
+    merged, added = merge_mentioned_streams(existing_streams, new_stream_id)
+    delta: dict[str, Any] = {}
+    if added:
+        delta["mentioned_by_streams"] = merged
+    promoted_status = next_status(current_status, merged)
+    if promoted_status != current_status:
+        delta["status"] = promoted_status
+    return delta
 
 
 def _format_dt(dt_str: str) -> str:
