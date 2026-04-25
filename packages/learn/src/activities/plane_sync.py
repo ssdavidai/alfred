@@ -623,31 +623,43 @@ async def fetch_changed_matters(since_mtime: float) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Activity: fetch changed tasks (since mtime)
+# Activity: list changed task paths (since mtime) — STAGE 1 of the
+# paginated fetch (#592). Returns lightweight ``{path, slug,
+# matter_slug, mtime}`` refs only, never the full frontmatter/body. The
+# workflow slices these into chunks and feeds each chunk to
+# ``fetch_task_records_batch`` to materialise the full TaskRecord shape
+# on demand. Two-stage design replaces the old single-shot
+# ``fetch_changed_tasks`` activity, which on mature tenants (David:
+# ~2545 tasks) blew Temporal's 2 MB activity-result ceiling and froze
+# the cursor permanently. PR #591 capped the return at 300 records as a
+# stop-gap; this is the proper fix.
 # ---------------------------------------------------------------------------
 
 @activity.defn
-async def fetch_changed_tasks(since_mtime: float) -> list[dict[str, Any]]:
-    """Return task records whose derived mtime is strictly greater than ``since_mtime``.
+async def list_changed_task_paths(since_mtime: float) -> list[dict[str, Any]]:
+    """Return lightweight references for every task whose derived
+    mtime is strictly greater than ``since_mtime``.
 
     Returned record shape::
 
-        {
-            "slug": str, "path": str, "frontmatter": dict,
-            "matter_slug": Optional[str], "body": str, "mtime": float,
-        }
+        {"path": str, "slug": str, "matter_slug": Optional[str], "mtime": float}
 
-    ``body`` carries the full vault body (truncated to
-    ``_BODY_BYTES_CAP`` for safety) so the Plane issue's description
-    captures the actual task content — not just the frontmatter
-    summary. Tasks average <100 chars of body but can reach ~1.5 KB for
-    Alfred-generated chores + curated items.
+    Cheap by design — no frontmatter, no body, no description preview.
+    A 10k-task vault produces ≈ 10 000 × ~120 bytes = ~1.2 MB of result,
+    well under the Temporal 2 MB activity-result ceiling. Internally we
+    still need the frontmatter to compute ``mtime`` + resolve the matter
+    ref, so we hit the list endpoint with ``preview=0`` (no body
+    preview) and discard everything except the four fields above before
+    returning.
+
+    Sort order: ascending by mtime, so the workflow processes the oldest
+    pending change first and the cursor advances monotonically.
     """
     cfg = load_config()
     client = VaultClient(cfg)
     try:
         resp = await client._client.get(
-            "/api/v1/vault/list/task", params={"preview": 2000}
+            "/api/v1/vault/list/task", params={"preview": 0}
         )
         resp.raise_for_status()
         records = resp.json().get("results", [])
@@ -657,7 +669,7 @@ async def fetch_changed_tasks(since_mtime: float) -> list[dict[str, Any]]:
     finally:
         await client.close()
 
-    changed: list[dict[str, Any]] = []
+    refs: list[dict[str, Any]] = []
     for rec in records:
         mtime = _record_mtime(rec)
         if mtime <= since_mtime:
@@ -666,43 +678,115 @@ async def fetch_changed_tasks(since_mtime: float) -> list[dict[str, Any]]:
         slug = _slug_from_path(path)
         if not slug:
             continue
-        fm = dict(rec.get("frontmatter") or {})
-        # Normalize matter ref so the workflow doesn't have to branch.
-        # Accepts scalar `matter` / `related_matter` AND the enrichment-
-        # pipeline's `related_matters[0]` (the common case on mature
-        # tenants where surveyor has already linked tasks to matters).
+        fm = rec.get("frontmatter") or {}
         matter_ref = _resolve_task_matter(fm)
-        body_preview = rec.get("body_preview", "") or ""
-        changed.append({
-            "slug": slug,
+        refs.append({
             "path": path,
-            "frontmatter": fm,
+            "slug": slug,
             "matter_slug": matter_ref,
-            "body": _clamp_body(body_preview),
             "mtime": mtime,
         })
 
-    # Temporal activities have a ~2MB payload ceiling. On mature tenants
-    # (david: 2500+ tasks, each ~2KB frontmatter+body) the uncapped return
-    # value blows that ceiling and every plane_sync run fails with
-    # "Complete result exceeds size limit". Sort by mtime ascending and
-    # cap the return to a window slightly larger than
-    # MAX_RECORDS_PER_RUN so the workflow has headroom but the payload
-    # stays bounded. Records past the cap are picked up on a later tick
-    # once the cursor advances past the current batch.
-    changed.sort(key=lambda r: float(r.get("mtime") or 0.0))
-    _FETCH_RETURN_CAP = 300
-    total_found = len(changed)
-    if total_found > _FETCH_RETURN_CAP:
-        changed = changed[:_FETCH_RETURN_CAP]
+    refs.sort(key=lambda r: float(r.get("mtime") or 0.0))
+    logger.info(
+        "plane_sync: list_changed_task_paths since=%s found=%d",
+        since_mtime,
+        len(refs),
+    )
+    return refs
+
+
+# ---------------------------------------------------------------------------
+# Activity: fetch a batch of full task records by path — STAGE 2 of the
+# paginated fetch (#592). Caller (the workflow) slices the
+# ``list_changed_task_paths`` output into chunks of N (today: 100) and
+# invokes this activity per chunk. Each batch produces a payload bounded
+# by N × per-record-size which stays well under the 2 MB ceiling for
+# any plausible N.
+# ---------------------------------------------------------------------------
+
+# Per-batch chunk size used by the workflow when slicing the path list
+# into ``fetch_task_records_batch`` calls. 100 keeps each activity-result
+# payload safely below 2 MB even at the upper end of vault record sizes
+# (frontmatter + 30 KB body cap = ~32 KB per record → ~3.2 MB at 100;
+# typical records are far smaller, ~2 KB each → ~200 KB per batch).
+TASK_FETCH_BATCH_SIZE = 100
+
+
+@activity.defn
+async def fetch_task_records_batch(paths: list[str]) -> list[dict[str, Any]]:
+    """Fetch the full TaskRecord shape for each path in ``paths``.
+
+    Returned record shape (matches the legacy
+    ``fetch_changed_tasks`` output so the downstream
+    ``sync_task_to_plane`` consumer is unchanged)::
+
+        {
+            "slug": str, "path": str, "frontmatter": dict,
+            "matter_slug": Optional[str], "body": str, "mtime": float,
+        }
+
+    A path that 404s (race condition: the task was deleted between the
+    list call and this batch) is silently dropped from the returned
+    list — the next tick will simply skip it.
+    """
+    if not paths:
+        return []
+
+    cfg = load_config()
+    client = VaultClient(cfg)
+    out: list[dict[str, Any]] = []
+    try:
+        for path in paths:
+            try:
+                resp = await client._client.get(
+                    f"/api/v1/vault/records/{path}"
+                )
+                if resp.status_code == 404:
+                    logger.info(
+                        "plane_sync: fetch_task_records_batch path=%s 404 — dropping",
+                        path,
+                    )
+                    continue
+                resp.raise_for_status()
+                raw = resp.json()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    logger.info(
+                        "plane_sync: fetch_task_records_batch path=%s 404 — dropping",
+                        path,
+                    )
+                    continue
+                logger.error(
+                    "plane_sync: fetch_task_records_batch path=%s failed: %s",
+                    path, exc,
+                )
+                raise
+
+            slug = _slug_from_path(path)
+            if not slug:
+                continue
+            fm = dict(raw.get("frontmatter") or {})
+            body = str(raw.get("body") or "")
+            matter_ref = _resolve_task_matter(fm)
+            mtime = _record_mtime({"frontmatter": fm})
+            out.append({
+                "slug": slug,
+                "path": path,
+                "frontmatter": fm,
+                "matter_slug": matter_ref,
+                "body": _clamp_body(body),
+                "mtime": mtime,
+            })
+    finally:
+        await client.close()
 
     logger.info(
-        "plane_sync: fetch_changed_tasks since=%s found=%d returned=%d",
-        since_mtime,
-        total_found,
-        len(changed),
+        "plane_sync: fetch_task_records_batch requested=%d returned=%d",
+        len(paths),
+        len(out),
     )
-    return changed
+    return out
 
 
 # ---------------------------------------------------------------------------

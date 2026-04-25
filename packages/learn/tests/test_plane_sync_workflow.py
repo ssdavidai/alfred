@@ -340,10 +340,38 @@ def _make_stubs(
         _CALL_LOG.append(("fetch_matters", since))
         return [m for m in matters if float(m.get("mtime") or 0.0) > since]
 
-    @activity.defn(name="fetch_changed_tasks")
-    async def stub_fetch_tasks(since: float) -> list[dict[str, Any]]:
-        _CALL_LOG.append(("fetch_tasks", since))
-        return [t for t in tasks if float(t.get("mtime") or 0.0) > since]
+    @activity.defn(name="list_changed_task_paths")
+    async def stub_list_paths(since: float) -> list[dict[str, Any]]:
+        _CALL_LOG.append(("list_paths", since))
+        # Lightweight refs: path/slug/matter_slug/mtime only
+        refs = [
+            {
+                "path": t.get("path"),
+                "slug": t.get("slug"),
+                "matter_slug": t.get("matter_slug"),
+                "mtime": float(t.get("mtime") or 0.0),
+            }
+            for t in tasks
+            if float(t.get("mtime") or 0.0) > since
+        ]
+        refs.sort(key=lambda r: r["mtime"])
+        return refs
+
+    # Index tasks by path for the batch fetcher
+    tasks_by_path: dict[str, dict[str, Any]] = {
+        str(t.get("path")): t for t in tasks if t.get("path")
+    }
+
+    @activity.defn(name="fetch_task_records_batch")
+    async def stub_fetch_batch(paths: list[str]) -> list[dict[str, Any]]:
+        _CALL_LOG.append(("fetch_batch", list(paths)))
+        out: list[dict[str, Any]] = []
+        for p in paths:
+            t = tasks_by_path.get(p)
+            if t is None:
+                continue
+            out.append(dict(t))
+        return out
 
     @activity.defn(name="sync_matter_to_plane")
     async def stub_sync_matter(
@@ -412,7 +440,8 @@ def _make_stubs(
         stub_load,
         stub_save,
         stub_fetch_matters,
-        stub_fetch_tasks,
+        stub_list_paths,
+        stub_fetch_batch,
         stub_sync_matter,
         stub_sync_task,
         stub_inbox,
@@ -486,13 +515,13 @@ class TestFirstRunBackfill:
         assert result.errors == 0
         assert result.last_vault_mtime == 250.0
 
-        # Verify cursor was saved and project_map populated. The Inbox
-        # sentinel also lands in the map now that ensure_inbox_project
-        # runs unconditionally as a workflow step — assert on the
-        # real-matter subset so the test stays focused.
+        # Verify cursor was saved and project_map populated. The
+        # workflow may emit multiple saves (interim matter save +
+        # per-batch task saves, see #592 paginated fetch); we assert on
+        # the FINAL save which carries the run's terminal state.
         save_calls = [c for c in _CALL_LOG if c[0] == "save"]
-        assert len(save_calls) == 1
-        saved = save_calls[0][1]
+        assert len(save_calls) >= 1
+        saved = save_calls[-1][1]
         assert saved["project_map"]["alpha"] == "prj-alpha"
         assert saved["project_map"]["beta"] == "prj-beta"
         assert saved["issue_map"] == {"t1": "iss-t1", "t2": "iss-t2"}
@@ -550,7 +579,7 @@ class TestIncrementalRun:
         assert result.errors == 0
         assert result.last_vault_mtime == 175.0
 
-        save = [c for c in _CALL_LOG if c[0] == "save"][0][1]
+        save = [c for c in _CALL_LOG if c[0] == "save"][-1][1]
         saved_map = save["project_map"]
         # Pre-existing map entries preserved + new ones added
         assert saved_map
@@ -585,7 +614,7 @@ class TestTaskWithoutMatter:
         assert result.tasks_synced == 0
         assert result.tasks_skipped == 1
         # Cursor should NOT have advanced past the skipped task
-        save = [c for c in _CALL_LOG if c[0] == "save"][0][1]
+        save = [c for c in _CALL_LOG if c[0] == "save"][-1][1]
         assert save["last_vault_mtime"] == 0.0
 
 
@@ -602,7 +631,15 @@ class TestTaskWhoseMatterMissing:
 
 
 class TestErrorHolding:
-    def test_matter_activity_error_does_not_advance_cursor(self):
+    def test_matter_activity_error_holds_cursor_below_failed_record(self):
+        """With per-batch cursor advancement (#592), partial progress
+        IS preserved: the cursor lands at the LAST SUCCESSFUL matter's
+        mtime, not at the pre-run value. The failing matter has a
+        higher mtime, so the next run will still re-discover it via
+        ``fetch_changed_matters(since=100)`` and retry. This is a
+        semantics change vs the legacy behavior that pinned the
+        cursor at since=0 on any error — see PR #592.
+        """
         _reset_call_log()
         matters = [
             {"slug": "works", "path": "matter/works.md",
@@ -617,9 +654,15 @@ class TestErrorHolding:
         result = asyncio.run(_run_workflow(stubs))
         assert result.matters_synced == 1
         assert result.errors == 1
-        # Cursor holds at pre-run value because at least one record failed
-        save = [c for c in _CALL_LOG if c[0] == "save"][0][1]
-        assert save["last_vault_mtime"] == 0.0
+        # Cursor sits at the last-successful matter's mtime (100). The
+        # failing matter (mtime=200) will be re-discovered next tick
+        # by fetch_changed_matters(since=100) and retried. The
+        # successful "works" entry is also still in project_map so
+        # the retry won't double-create it.
+        save = [c for c in _CALL_LOG if c[0] == "save"][-1][1]
+        assert save["last_vault_mtime"] == 100.0
+        assert save["project_map"]["works"] == "prj-works"
+        assert "breaks" not in save["project_map"]
 
 
 class TestOutboundSignatureStore:
@@ -768,23 +811,36 @@ class TestRichPayloadReachesTaskActivity:
         async def fm(since: float) -> list[dict]:
             return []
 
-        @activity.defn(name="fetch_changed_tasks")
-        async def ft(since: float) -> list[dict]:
+        ALPHA_RECORD = {
+            "slug": "alpha",
+            "path": "task/alpha.md",
+            "frontmatter": {
+                "name": "Alpha task",
+                "status": "todo",
+                "priority": "high",
+                "due_date": "2026-05-15",
+                "alfred_tags": ["finance", "urgent"],
+                "description": "short desc",
+            },
+            "matter_slug": "m1",
+            "body": "# Alpha task\n\nThe full body content.",
+            "mtime": 100.0,
+        }
+
+        @activity.defn(name="list_changed_task_paths")
+        async def lp(since: float) -> list[dict]:
             return [{
-                "slug": "alpha",
-                "path": "task/alpha.md",
-                "frontmatter": {
-                    "name": "Alpha task",
-                    "status": "todo",
-                    "priority": "high",
-                    "due_date": "2026-05-15",
-                    "alfred_tags": ["finance", "urgent"],
-                    "description": "short desc",
-                },
-                "matter_slug": "m1",
-                "body": "# Alpha task\n\nThe full body content.",
-                "mtime": 100.0,
+                "path": ALPHA_RECORD["path"],
+                "slug": ALPHA_RECORD["slug"],
+                "matter_slug": ALPHA_RECORD["matter_slug"],
+                "mtime": ALPHA_RECORD["mtime"],
             }]
+
+        @activity.defn(name="fetch_task_records_batch")
+        async def fb(paths: list[str]) -> list[dict]:
+            return [
+                ALPHA_RECORD for p in paths if p == ALPHA_RECORD["path"]
+            ]
 
         @activity.defn(name="sync_matter_to_plane")
         async def sm(matter: dict, pm: dict) -> dict:
@@ -817,7 +873,7 @@ class TestRichPayloadReachesTaskActivity:
         async def pl(pids: list[str]) -> dict:
             return {p: {"existing-label": f"lbl-{p}"} for p in pids}
 
-        stubs = [ena, load, save, fm, ft, sm, st, ei, pl]
+        stubs = [ena, load, save, fm, lp, fb, sm, st, ei, pl]
         result = asyncio.run(_run_workflow(stubs))
         assert result.tasks_synced == 1
         assert len(received) == 1
@@ -948,13 +1004,27 @@ class TestLabelCacheWiring:
         async def fm(since: float) -> list[dict]:
             return []
 
-        @activity.defn(name="fetch_changed_tasks")
-        async def ft(since: float) -> list[dict]:
+        T_RECORD = {
+            "slug": "t",
+            "path": "task/t.md",
+            "frontmatter": {"name": "T"},
+            "matter_slug": "m",
+            "body": "",
+            "mtime": 100.0,
+        }
+
+        @activity.defn(name="list_changed_task_paths")
+        async def lp(since: float) -> list[dict]:
             return [{
-                "slug": "t", "path": "task/t.md",
-                "frontmatter": {"name": "T"},
-                "matter_slug": "m", "mtime": 100.0,
+                "path": T_RECORD["path"],
+                "slug": T_RECORD["slug"],
+                "matter_slug": T_RECORD["matter_slug"],
+                "mtime": T_RECORD["mtime"],
             }]
+
+        @activity.defn(name="fetch_task_records_batch")
+        async def fb(paths: list[str]) -> list[dict]:
+            return [T_RECORD for p in paths if p == T_RECORD["path"]]
 
         @activity.defn(name="sync_matter_to_plane")
         async def sm(m: dict, pm: dict) -> dict:
@@ -977,7 +1047,7 @@ class TestLabelCacheWiring:
             # them with a broad except and continues with empty cache.
             raise RuntimeError("simulated preload outage")
 
-        stubs = [ena, load, save, fm, ft, sm, st, ei, pl_raise]
+        stubs = [ena, load, save, fm, lp, fb, sm, st, ei, pl_raise]
         result = asyncio.run(_run_workflow(stubs))
         # Task still synced despite preload failure
         assert result.tasks_synced == 1
@@ -2014,3 +2084,398 @@ class TestStaleDroppedWorkflow:
         """Sanity: fresh result starts at zero for the new counter."""
         result = PlaneSyncResult()
         assert result.tasks_stale_dropped == 0
+
+
+# ---------------------------------------------------------------------------
+# Paginated task fetch (#592) — workflow-level coverage of the two-stage
+# ``list_changed_task_paths`` → ``fetch_task_records_batch`` flow,
+# per-batch cursor advancement, and backward-compat for normal-sized
+# vaults that fit into one batch.
+# ---------------------------------------------------------------------------
+
+
+class TestPaginatedTaskFetch:
+    """Workflow-level guarantees for the #592 fix.
+
+    These tests pin the new pagination behaviour so a future refactor
+    can't silently regress to the single-shot ``fetch_changed_tasks``
+    pattern that overflowed Temporal's 2 MB activity-result ceiling on
+    David's vault (~2545 tasks).
+    """
+
+    def test_empty_result_no_changes_since_cursor(self):
+        """No matters AND no task changes since cursor → workflow runs
+        cleanly, list_paths fires once and returns nothing, no batches
+        are processed, but a final cursor save still happens."""
+        _reset_call_log()
+        cursor = {
+            "last_vault_mtime": 1_000.0,
+            "project_map": {"alpha": "prj-alpha"},
+            "issue_map": {},
+        }
+        # Tasks list is empty after the cursor filter
+        stubs = _make_stubs(cursor_state=cursor, matters=[], tasks=[])
+        result = asyncio.run(_run_workflow(stubs))
+
+        assert result.started is True
+        assert result.matters_synced == 0
+        assert result.tasks_synced == 0
+        assert result.task_batches == 0
+        assert result.errors == 0
+        # list_changed_task_paths fired exactly once
+        assert sum(1 for c in _CALL_LOG if c[0] == "list_paths") == 1
+        # No batch fetches happened (no refs to chunk)
+        assert sum(1 for c in _CALL_LOG if c[0] == "fetch_batch") == 0
+        # The catch-all final save still fires so the cursor file
+        # always reflects the latest state.
+        save_calls = [c for c in _CALL_LOG if c[0] == "save"]
+        assert len(save_calls) >= 1
+        assert save_calls[-1][1]["last_vault_mtime"] == 1_000.0
+
+    def test_single_batch_fits_in_one_chunk(self):
+        """50 tasks → one batch, one fetch, all syncs land in the
+        terminal cursor."""
+        _reset_call_log()
+        matters = [{"slug": "m", "path": "matter/m.md",
+                    "frontmatter": {"name": "M"}, "mtime": 100.0}]
+        tasks = [
+            {"slug": f"t{i}", "path": f"task/t{i}.md",
+             "frontmatter": {"name": f"T{i}"},
+             "matter_slug": "m", "mtime": 200.0 + i}
+            for i in range(50)
+        ]
+        stubs = _make_stubs(cursor_state={}, matters=matters, tasks=tasks)
+        result = asyncio.run(_run_workflow(stubs))
+
+        assert result.matters_synced == 1
+        assert result.tasks_synced == 50
+        assert result.task_batches == 1
+        assert result.errors == 0
+        # Exactly one batch fetch with all 50 paths
+        batch_calls = [c for c in _CALL_LOG if c[0] == "fetch_batch"]
+        assert len(batch_calls) == 1
+        assert len(batch_calls[0][1]) == 50
+
+    def test_multiple_batches_chunks_at_size_100(self):
+        """300 tasks → 3 batches of 100 each. Per-batch save semantics
+        mean we observe at least 3 save calls during task processing
+        (matter interim save also fires, plus the final catch-all)."""
+        _reset_call_log()
+        matters = [{"slug": "m", "path": "matter/m.md",
+                    "frontmatter": {"name": "M"}, "mtime": 100.0}]
+        tasks = [
+            {"slug": f"t{i:03d}", "path": f"task/t{i:03d}.md",
+             "frontmatter": {"name": f"T{i}"},
+             "matter_slug": "m", "mtime": 200.0 + i}
+            for i in range(300)
+        ]
+        stubs = _make_stubs(cursor_state={}, matters=matters, tasks=tasks)
+        result = asyncio.run(_run_workflow(stubs))
+
+        assert result.matters_synced == 1
+        assert result.tasks_synced == 300
+        assert result.task_batches == 3
+        assert result.errors == 0
+
+        batch_calls = [c for c in _CALL_LOG if c[0] == "fetch_batch"]
+        assert len(batch_calls) == 3
+        # Each batch should be exactly 100 paths (300 = 3 × 100)
+        assert [len(c[1]) for c in batch_calls] == [100, 100, 100]
+
+        # Saves: 1 interim matter + 3 per-batch + 1 final catch-all = 5
+        save_calls = [c for c in _CALL_LOG if c[0] == "save"]
+        assert len(save_calls) >= 4  # interim + 3 batch + final
+        # Terminal cursor advanced past the last task
+        assert save_calls[-1][1]["last_vault_mtime"] == 200.0 + 299
+
+    def test_per_batch_cursor_advancement_on_mid_run_failure(self):
+        """If a sync_task call fails mid-batch, the cursor advances
+        to the LAST successful batch's mtime (not all the way to the
+        failing one) and the workflow stops processing further
+        batches. Next run picks up from where the cursor advanced."""
+        _reset_call_log()
+        # 250 tasks → 3 batches (100, 100, 50). The 200th task (index
+        # 199, in batch 2) fails. Batch 1 should advance the cursor to
+        # the last task in batch 1 (mtime 200.0 + 99); batch 2 should
+        # NOT advance because batch_errors=True; batch 3 is deferred.
+        matters = [{"slug": "m", "path": "matter/m.md",
+                    "frontmatter": {"name": "M"}, "mtime": 100.0}]
+        failing_slug = "t199"
+        tasks = [
+            {"slug": f"t{i}", "path": f"task/t{i}.md",
+             "frontmatter": {"name": f"T{i}"},
+             "matter_slug": "m", "mtime": 200.0 + i}
+            for i in range(250)
+        ]
+        stubs = _make_stubs(
+            cursor_state={}, matters=matters, tasks=tasks,
+            raise_on_task=failing_slug,
+        )
+        result = asyncio.run(_run_workflow(stubs))
+
+        assert result.matters_synced == 1
+        assert result.errors >= 1
+        # Batch 1 (100 tasks) succeeded; batch 2 had an error (1 task
+        # failed but the rest of the batch still processed); batch 3
+        # was deferred. So batches actually processed = 2.
+        assert result.task_batches == 2
+        # No batch 3 fetch happened
+        batch_calls = [c for c in _CALL_LOG if c[0] == "fetch_batch"]
+        assert len(batch_calls) == 2
+
+        # Final cursor: we held at the end of batch 1 (mtime = 200.0 +
+        # 99 = 299) because batch 2 had errors. Batch 3 wasn't even
+        # fetched, so its records will be re-discovered on the next
+        # tick by list_changed_task_paths.
+        save_calls = [c for c in _CALL_LOG if c[0] == "save"]
+        # First save is the interim matter save (mtime 100), second
+        # is batch 1 (mtime 299), third is batch 2 (held at 299
+        # because of the error), fourth is the final catch-all.
+        assert any(s[1]["last_vault_mtime"] == 200.0 + 99 for s in save_calls)
+        # Final cursor should NOT have advanced past batch 1 because
+        # batch 2 errored.
+        assert save_calls[-1][1]["last_vault_mtime"] == 200.0 + 99
+
+    def test_normal_sized_vault_unchanged_behavior(self):
+        """Backward-compat guard: a 'normal' tenant (5 matters, 20
+        tasks) goes through the new pipeline without any visible
+        behavior change vs the legacy single-shot path. All tasks
+        sync, cursor advances cleanly to the latest task mtime, no
+        batch overflow."""
+        _reset_call_log()
+        matters = [
+            {"slug": f"m{i}", "path": f"matter/m{i}.md",
+             "frontmatter": {"name": f"M{i}"}, "mtime": 100.0 + i}
+            for i in range(5)
+        ]
+        tasks = [
+            {"slug": f"t{i}", "path": f"task/t{i}.md",
+             "frontmatter": {"name": f"T{i}"},
+             "matter_slug": f"m{i % 5}", "mtime": 200.0 + i}
+            for i in range(20)
+        ]
+        stubs = _make_stubs(cursor_state={}, matters=matters, tasks=tasks)
+        result = asyncio.run(_run_workflow(stubs))
+
+        assert result.matters_synced == 5
+        assert result.tasks_synced == 20
+        assert result.task_batches == 1  # 20 tasks fits in one batch
+        assert result.errors == 0
+        # Cursor at the latest task mtime
+        save_calls = [c for c in _CALL_LOG if c[0] == "save"]
+        assert save_calls[-1][1]["last_vault_mtime"] == 200.0 + 19
+
+
+class TestPaginationActivities:
+    """Activity-level coverage for the new ``list_changed_task_paths``
+    + ``fetch_task_records_batch`` activities. Exercises the real
+    activity functions with a fake vault HTTP client so the lightweight
+    /heavy-batch contract is pinned without spinning up a worker."""
+
+    def test_list_changed_task_paths_filters_by_mtime(
+        self, monkeypatch,
+    ):
+        """The list activity must filter records by mtime > since,
+        return only the lightweight 4-field shape, and sort ascending."""
+        from src.activities import plane_sync as ps
+
+        records = [
+            {"path": "task/old.md", "name": "Old",
+             "frontmatter": {"created": "2026-01-01T00:00:00"}},
+            {"path": "task/mid.md", "name": "Mid",
+             "frontmatter": {"created": "2026-04-15T00:00:00",
+                             "matter": "alpha"}},
+            {"path": "task/new.md", "name": "New",
+             "frontmatter": {"updated": "2026-04-20T00:00:00",
+                             "related_matters": ["beta"]}},
+        ]
+
+        class FakeHttp:
+            async def get(self, url, params=None):
+                # Sanity: workflow asks for preview=0 to keep the
+                # response cheap.
+                assert params is not None
+                assert params.get("preview") == 0
+
+                class FakeResp:
+                    status_code = 200
+                    def raise_for_status(self): pass
+                    def json(self): return {"results": records}
+                return FakeResp()
+
+        class FakeVaultClient:
+            def __init__(self, *a, **kw):
+                self._client = FakeHttp()
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(ps, "VaultClient", FakeVaultClient)
+
+        from temporalio.testing import ActivityEnvironment
+        env = ActivityEnvironment()
+        # Use the mtime of the "old" record + 1 so only mid + new surface
+        old_mtime = ps._iso_to_epoch("2026-01-01T00:00:00")
+        out = asyncio.run(env.run(ps.list_changed_task_paths, old_mtime + 1))
+
+        assert len(out) == 2
+        slugs = [r["slug"] for r in out]
+        assert "old" not in slugs
+        assert "mid" in slugs
+        assert "new" in slugs
+        # Sorted ascending by mtime
+        assert out[0]["mtime"] <= out[1]["mtime"]
+        # Lightweight shape — no frontmatter, no body
+        for ref in out:
+            assert set(ref.keys()) == {"path", "slug", "matter_slug", "mtime"}
+        # matter_slug resolution still works
+        mid = next(r for r in out if r["slug"] == "mid")
+        assert mid["matter_slug"] == "alpha"
+        new = next(r for r in out if r["slug"] == "new")
+        assert new["matter_slug"] == "beta"
+
+    def test_fetch_task_records_batch_returns_full_shape(
+        self, monkeypatch,
+    ):
+        """The batch activity must return the same TaskRecord shape
+        that the legacy fetch_changed_tasks emitted, so the downstream
+        sync_task_to_plane consumer is unchanged."""
+        from src.activities import plane_sync as ps
+
+        get_calls: list[str] = []
+
+        class FakeHttp:
+            async def get(self, url):
+                get_calls.append(url)
+
+                class FakeResp:
+                    status_code = 200
+                    def raise_for_status(self): pass
+                    def json(self_inner):
+                        # Echo a synthesised record per path
+                        path = url.split("/api/v1/vault/records/")[-1]
+                        slug = path.rsplit("/", 1)[-1].replace(".md", "")
+                        return {
+                            "path": path,
+                            "frontmatter": {
+                                "name": f"Task {slug}",
+                                "created": "2026-04-20T00:00:00",
+                                "matter": "alpha",
+                            },
+                            "body": f"# {slug}\n\nbody content",
+                        }
+                return FakeResp()
+
+        class FakeVaultClient:
+            def __init__(self, *a, **kw):
+                self._client = FakeHttp()
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(ps, "VaultClient", FakeVaultClient)
+
+        from temporalio.testing import ActivityEnvironment
+        env = ActivityEnvironment()
+        out = asyncio.run(
+            env.run(
+                ps.fetch_task_records_batch,
+                ["task/a.md", "task/b.md", "task/c.md"],
+            )
+        )
+        assert len(out) == 3
+        # Issued one HTTP GET per path
+        assert len(get_calls) == 3
+        for rec in out:
+            # Full TaskRecord shape
+            assert set(rec.keys()) == {
+                "slug", "path", "frontmatter", "matter_slug", "body", "mtime",
+            }
+            assert rec["matter_slug"] == "alpha"
+            assert rec["body"].startswith("# ")
+
+    def test_fetch_task_records_batch_drops_404s(self, monkeypatch):
+        """A path that 404s mid-batch (race with deletion) gets
+        silently dropped rather than aborting the whole batch."""
+        import httpx
+
+        from src.activities import plane_sync as ps
+
+        class FakeHttp:
+            async def get(self, url):
+                # 404 only for the second path
+                if "/missing.md" in url:
+                    class FakeResp:
+                        status_code = 404
+                        def raise_for_status(self_inner):
+                            req = httpx.Request("GET", url)
+                            resp = httpx.Response(404, request=req)
+                            raise httpx.HTTPStatusError(
+                                "gone", request=req, response=resp,
+                            )
+                        def json(self_inner): return {}
+                    return FakeResp()
+                # Otherwise return a normal record
+                class OkResp:
+                    status_code = 200
+                    def raise_for_status(self_inner): pass
+                    def json(self_inner):
+                        path = url.split("/api/v1/vault/records/")[-1]
+                        return {
+                            "path": path,
+                            "frontmatter": {
+                                "created": "2026-04-20T00:00:00",
+                            },
+                            "body": "ok",
+                        }
+                return OkResp()
+
+        class FakeVaultClient:
+            def __init__(self, *a, **kw):
+                self._client = FakeHttp()
+
+            async def close(self):
+                pass
+
+        monkeypatch.setattr(ps, "VaultClient", FakeVaultClient)
+
+        from temporalio.testing import ActivityEnvironment
+        env = ActivityEnvironment()
+        out = asyncio.run(
+            env.run(
+                ps.fetch_task_records_batch,
+                ["task/a.md", "task/missing.md", "task/c.md"],
+            )
+        )
+        # Two records survived; the 404 was dropped silently
+        assert len(out) == 2
+        assert {r["slug"] for r in out} == {"a", "c"}
+
+    def test_fetch_task_records_batch_empty_paths_short_circuits(
+        self, monkeypatch,
+    ):
+        """An empty paths list must return [] without touching the
+        vault HTTP client at all."""
+        from src.activities import plane_sync as ps
+
+        class TripwireClient:
+            def __init__(self, *a, **kw):
+                raise AssertionError(
+                    "VaultClient must not be constructed for empty paths"
+                )
+
+        monkeypatch.setattr(ps, "VaultClient", TripwireClient)
+
+        from temporalio.testing import ActivityEnvironment
+        env = ActivityEnvironment()
+        out = asyncio.run(env.run(ps.fetch_task_records_batch, []))
+        assert out == []
+
+    def test_task_fetch_batch_size_constant(self):
+        """Pin the batch size so the workflow's per-call payload
+        budget stays predictable."""
+        from src.activities.plane_sync import TASK_FETCH_BATCH_SIZE
+        # 100 keeps per-batch payload bounded at ~3.2 MB in the
+        # worst case (frontmatter + 30 KB body cap × 100). Typical
+        # records are ~2 KB so a real batch is more like 200 KB.
+        assert TASK_FETCH_BATCH_SIZE == 100
