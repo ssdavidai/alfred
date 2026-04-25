@@ -10,6 +10,7 @@ from src.activities.chore_generation import (
     _slice_profile_for_opportunity,
     _try_parse_envelope,
     _validate_cron_expression,
+    _validate_cron_matches_description,
     _validate_envelope,
 )
 
@@ -340,3 +341,281 @@ class TestSliceProfileForOpportunity:
     def test_non_dict_profile_returns_empty(self):
         sliced = _slice_profile_for_opportunity("not a dict", {})  # type: ignore[arg-type]
         assert sliced == {}
+
+
+# ---------------------------------------------------------------------------
+# _validate_cron_matches_description (#478)
+# ---------------------------------------------------------------------------
+
+class TestValidateCronMatchesDescription:
+    # ----- Real-world Rapali bugs that motivated the validator -----
+
+    def test_rapali_daily_morning_briefing_misalignment_caught(self):
+        """The exact bug from issue #478: 'every day at 05:30 CET' but cron
+        is `0 18 * * 0` (Sundays at 18:00 UTC = Mondays 00:00 Budapest).
+        """
+        ok, err = _validate_cron_matches_description(
+            "0 18 * * 0",
+            "Every day at 05:30 CET, this chore assembles a single morning "
+            "briefing summarising your day-ahead calendar, overnight emails, "
+            "and any open errands.",
+            "Europe/Budapest",
+        )
+        assert not ok
+        assert "daily" in err.lower() or "day-of-week" in err.lower()
+
+    def test_rapali_weekly_wellness_misalignment_caught(self):
+        """'Every Friday at 18:00 CET' but cron is `0 18 * * 0` (Sundays)."""
+        ok, err = _validate_cron_matches_description(
+            "0 18 * * 0",
+            "Every Friday at 18:00 CET, this chore reviews your week and "
+            "queues a wellness checkpoint conversation.",
+            "Europe/Budapest",
+        )
+        assert not ok
+        assert "5" in err
+
+    # ----- Daily-implies-wildcard cases -----
+
+    def test_daily_cron_30_4_passes_for_0530_cet_summer(self):
+        """CEST 05:30 = UTC 03:30. Tolerance ±1h means UTC 04:30 also passes.
+        `30 4 * * *` is the correct cron for 'every day at 05:30 CET' in
+        summer (CEST). Should pass.
+        """
+        ok, err = _validate_cron_matches_description(
+            "30 4 * * *",
+            "Every day at 05:30 CET, this chore assembles your morning briefing.",
+            "Europe/Budapest",
+        )
+        assert ok, err
+
+    def test_daily_morning_with_wildcard_dow_passes(self):
+        ok, err = _validate_cron_matches_description(
+            "0 7 * * *",
+            "Each morning at 07:00 UTC, this chore drafts your day plan.",
+            "UTC",
+        )
+        assert ok, err
+
+    def test_daily_with_specific_dow_fails(self):
+        ok, err = _validate_cron_matches_description(
+            "0 7 * * 1",
+            "Each morning at 07:00 UTC, this chore drafts your day plan.",
+            "UTC",
+        )
+        assert not ok
+        assert "daily" in err.lower() or "day-of-week" in err.lower()
+
+    # ----- Specific named day -----
+
+    def test_friday_evening_cet_passes(self):
+        """'Every Friday at 18:00 CET' → UTC 17:00 Friday (summer ±1h)."""
+        ok, err = _validate_cron_matches_description(
+            "0 17 * * 5",
+            "Every Friday at 18:00 CET, this chore reviews your week.",
+            "Europe/Budapest",
+        )
+        assert ok, err
+
+    def test_monday_morning_passes(self):
+        ok, err = _validate_cron_matches_description(
+            "0 9 * * 1",
+            "Every Monday at 09:00 UTC, this chore queues your week.",
+            "UTC",
+        )
+        assert ok, err
+
+    def test_monday_morning_with_wrong_day_fails(self):
+        ok, err = _validate_cron_matches_description(
+            "0 9 * * 0",  # Sunday
+            "Every Monday at 09:00 UTC, this chore queues your week.",
+            "UTC",
+        )
+        assert not ok
+        assert "1" in err
+
+    def test_sunday_accepts_both_0_and_7(self):
+        ok, err = _validate_cron_matches_description(
+            "0 18 * * 7",
+            "Every Sunday at 18:00 UTC, this chore generates the weekly digest.",
+            "UTC",
+        )
+        assert ok, err
+
+    # ----- Weekday / weekend patterns -----
+
+    def test_weekdays_with_1_5_passes(self):
+        ok, err = _validate_cron_matches_description(
+            "0 9 * * 1-5",
+            "Weekdays at 09:00 UTC, this chore drafts a daily digest.",
+            "UTC",
+        )
+        assert ok, err
+
+    def test_weekdays_with_friday_only_fails(self):
+        """'Weekdays at 09:00' but cron only fires Friday → fail."""
+        ok, err = _validate_cron_matches_description(
+            "0 9 * * 5",
+            "Weekdays at 09:00 UTC, this chore drafts a daily digest.",
+            "UTC",
+        )
+        assert not ok
+        assert "weekday" in err.lower() or "Mon-Fri" in err
+
+    def test_weekends_with_0_and_6_passes(self):
+        ok, err = _validate_cron_matches_description(
+            "0 10 * * 0,6",
+            "On weekends at 10:00 UTC, this chore reviews personal projects.",
+            "UTC",
+        )
+        assert ok, err
+
+    def test_weekends_with_only_saturday_fails(self):
+        ok, err = _validate_cron_matches_description(
+            "0 10 * * 6",
+            "On weekends at 10:00 UTC, this chore reviews personal projects.",
+            "UTC",
+        )
+        assert not ok
+
+    # ----- Vague descriptions skip checks -----
+
+    def test_vague_description_skips_day_check(self):
+        ok, err = _validate_cron_matches_description(
+            "0 12 * * *",
+            "Regularly throughout the week, this chore checks for anomalies.",
+            "UTC",
+        )
+        assert ok, err
+
+    def test_no_time_no_day_passes_anything(self):
+        ok, err = _validate_cron_matches_description(
+            "0 18 * * 0",
+            "This chore reviews your activity and surfaces interesting items.",
+            "UTC",
+        )
+        assert ok, err
+
+    # ----- Empty / defensive inputs -----
+
+    def test_empty_cron_skips_check(self):
+        ok, err = _validate_cron_matches_description("", "Every day at 9am UTC", "UTC")
+        assert ok, err
+
+    def test_empty_description_skips_check(self):
+        ok, err = _validate_cron_matches_description("0 9 * * 0", "", "UTC")
+        assert ok, err
+
+    def test_garbage_cron_skips_check(self):
+        # Syntactic problems are someone else's job (_validate_cron_expression)
+        ok, err = _validate_cron_matches_description(
+            "definitely not a cron",
+            "Every Friday at 18:00 UTC",
+            "UTC",
+        )
+        assert ok, err
+
+    # ----- Time-only checks -----
+
+    def test_time_match_passes_for_utc(self):
+        ok, err = _validate_cron_matches_description(
+            "0 9 * * *",
+            "Daily at 09:00 UTC, this chore checks overnight events.",
+            "UTC",
+        )
+        assert ok, err
+
+    def test_time_mismatch_fails_for_utc(self):
+        """'09:00 UTC' but cron fires at 18:00 — 9-hour gap, far beyond ±1h."""
+        ok, err = _validate_cron_matches_description(
+            "0 18 * * *",
+            "Daily at 09:00 UTC, this chore checks overnight events.",
+            "UTC",
+        )
+        assert not ok
+        assert "off by" in err or "UTC" in err
+
+    def test_dst_tolerance_one_hour(self):
+        """CET = UTC+1 winter, CEST = UTC+2 summer. Either offset should pass
+        thanks to ±1h tolerance.
+        """
+        ok, err = _validate_cron_matches_description(
+            "30 13 * * 1-5",
+            "Every weekday at 14:30 CET, this chore drafts an afternoon recap.",
+            "Europe/Budapest",
+        )
+        assert ok, err
+        ok, err = _validate_cron_matches_description(
+            "30 12 * * 1-5",
+            "Every weekday at 14:30 CET, this chore drafts an afternoon recap.",
+            "Europe/Budapest",
+        )
+        assert ok, err
+
+    def test_cron_with_range_in_hour_skips_time_check(self):
+        """When cron uses 8-18 in the hour field we can't anchor a single
+        firing time, so the time check is skipped (the day check still runs).
+        """
+        ok, err = _validate_cron_matches_description(
+            "0 8-18/2 * * 1-5",
+            "Every weekday during business hours, this chore polls events.",
+            "UTC",
+        )
+        assert ok, err
+
+    def test_pm_marker_handled(self):
+        ok, err = _validate_cron_matches_description(
+            "0 21 * * *",
+            "Every day at 9 PM UTC, this chore drafts a recap.",
+            "UTC",
+        )
+        assert ok, err
+
+    def test_ampm_with_12pm_is_noon(self):
+        ok, err = _validate_cron_matches_description(
+            "0 12 * * *",
+            "Daily at 12pm UTC, this chore runs.",
+            "UTC",
+        )
+        assert ok, err
+
+
+# ---------------------------------------------------------------------------
+# _validate_envelope integration with _validate_cron_matches_description
+# ---------------------------------------------------------------------------
+
+class TestEnvelopeSemanticAlignment:
+    """When schedule + user_facing_description are both present and disagree,
+    _validate_envelope must reject the envelope so the retry loop fires."""
+
+    def _envelope(self, **overrides) -> dict:
+        env = {
+            "module_name": "morning_briefing",
+            "workflow_class_name": "MorningBriefingWorkflow",
+            "python_source": "from __future__ import annotations\n# ...",
+            "user_facing_description": (
+                "Every day at 05:30 CET, this chore assembles a single morning "
+                "briefing summarising your day-ahead calendar."
+            ),
+            "schedule": "0 18 * * 0",  # the bug: Sunday 18:00 UTC
+        }
+        env.update(overrides)
+        return env
+
+    def test_misaligned_envelope_rejected(self):
+        ok, err = _validate_envelope(self._envelope())
+        assert not ok
+        assert "user_facing_description" in err
+
+    def test_aligned_envelope_passes(self):
+        env = self._envelope(schedule="30 4 * * *")  # daily 04:30 UTC ≈ 05:30 CEST
+        ok, err = _validate_envelope(env)
+        assert ok, err
+
+    def test_envelope_without_description_passes_syntactic_only(self):
+        env = self._envelope()
+        env.pop("user_facing_description")
+        # Without a description we have nothing to compare against — only
+        # the syntactic cron validator runs (and `0 18 * * 0` is valid).
+        ok, err = _validate_envelope(env)
+        assert ok, err

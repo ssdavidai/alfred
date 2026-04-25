@@ -33,6 +33,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+try:
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+except ImportError:  # pragma: no cover — Python <3.9, never our case
+    ZoneInfo = None  # type: ignore[assignment]
+    ZoneInfoNotFoundError = Exception  # type: ignore[assignment,misc]
+
 from temporalio import activity
 
 from src.activities.chore_generation_prompts import build_generation_prompt
@@ -228,6 +234,479 @@ def _validate_cron_expression(cron: str) -> tuple[bool, str]:
     return True, ""
 
 
+# ---------------------------------------------------------------------------
+# Semantic-alignment validator (#478)
+#
+# The syntactic validator above only checks "is this a valid 5-field cron?"
+# It cannot catch the case where Opus emits a sensible-looking cron that
+# disagrees with the English description it just wrote in the same envelope:
+#
+#   description:  "Every day at 05:30 CET..."
+#   cron:         "0 18 * * 0"      (Sunday 18:00 UTC = Monday 00:00 CET)
+#                 ↑ wrong day AND wrong time
+#
+# This function parses regex-friendly cues out of the description (day-of-week
+# words, "every day", "weekdays", "at HH:MM TZ") and compares them against
+# the cron's day-of-week and minute/hour fields. When the description is
+# vague ("regularly", "throughout the week") we skip the check rather than
+# false-fail. Returns (True, "") on agreement / unknowable; (False, msg) on
+# a hard contradiction.
+# ---------------------------------------------------------------------------
+
+# Day-of-week words → cron numeric value(s). Cron accepts both 0 and 7 for
+# Sunday so we keep both in the acceptance set.
+_WEEKDAY_WORDS: dict[str, set[int]] = {
+    "sunday":    {0, 7},
+    "sundays":   {0, 7},
+    "sun":       {0, 7},
+    "monday":    {1},
+    "mondays":   {1},
+    "mon":       {1},
+    "tuesday":   {2},
+    "tuesdays":  {2},
+    "tue":       {2},
+    "tues":      {2},
+    "wednesday": {3},
+    "wednesdays":{3},
+    "wed":       {3},
+    "weds":      {3},
+    "thursday":  {4},
+    "thursdays": {4},
+    "thu":       {4},
+    "thur":      {4},
+    "thurs":     {4},
+    "friday":    {5},
+    "fridays":   {5},
+    "fri":       {5},
+    "saturday":  {6},
+    "saturdays": {6},
+    "sat":       {6},
+}
+
+# Phrases that mean "any day, daily cadence" — day-of-week MUST be wildcard.
+_DAILY_PHRASES = (
+    "every day",
+    "each day",
+    "every morning",
+    "each morning",
+    "every evening",
+    "each evening",
+    "every afternoon",
+    "each afternoon",
+    "every night",
+    "each night",
+    "daily",
+    "nightly",
+)
+
+# Phrases that mean "weekdays only" → day-of-week == 1-5
+_WEEKDAY_PHRASES = (
+    "every weekday",
+    "weekdays",
+    "each weekday",
+    "every business day",
+    "business days",
+    "workdays",
+    "every workday",
+)
+
+# Phrases that mean "weekend only" → day-of-week == 0,6
+_WEEKEND_PHRASES = (
+    "every weekend",
+    "weekends",
+    "each weekend",
+    "weekend mornings",
+    "weekend evenings",
+)
+
+# Vague phrases — explicit no-day signals; skip the day check entirely.
+_VAGUE_DAY_PHRASES = (
+    "regularly",
+    "periodically",
+    "occasionally",
+    "throughout the week",
+    "whenever",
+    "as needed",
+    "from time to time",
+    "now and then",
+    "every so often",
+)
+
+# Time pattern matchers. We accept:
+#   "at 05:30", "at 5:30am", "at 5 PM", "at 14:00", "at 9pm CET",
+#   "at 18:00 UTC", "at 9 PM Budapest time"
+# We DO NOT match bare numbers — "by 9" is too ambiguous.
+_TIME_RE = re.compile(
+    r"(?<![:\d])"                   # not preceded by digit/colon
+    r"at\s+"
+    r"(?P<hour>\d{1,2})"
+    r"(?::(?P<minute>\d{2}))?"
+    r"\s*"
+    r"(?P<ampm>am|pm|AM|PM|a\.m\.|p\.m\.)?"
+    r"(?:\s*(?P<tz>"
+        r"UTC|GMT|"
+        r"CET|CEST|EET|EEST|WET|WEST|"
+        r"EST|EDT|CST|CDT|MST|MDT|PST|PDT|"
+        r"AKST|AKDT|HST|"
+        r"JST|KST|IST|AEST|AEDT|NZST|NZDT|"
+        r"BST"
+    r")(?![A-Za-z]))?",
+    re.IGNORECASE,
+)
+
+# Recognised abbreviations → IANA zone we use for offset lookup. Only used
+# when the description names a tz EXPLICITLY; otherwise we fall back to
+# tenant_timezone.
+_TZ_ABBREV_TO_IANA: dict[str, str] = {
+    "utc": "UTC",
+    "gmt": "UTC",
+    "cet": "Europe/Paris",
+    "cest": "Europe/Paris",
+    "eet": "Europe/Bucharest",
+    "eest": "Europe/Bucharest",
+    "wet": "Europe/Lisbon",
+    "west": "Europe/Lisbon",
+    "est": "America/New_York",
+    "edt": "America/New_York",
+    "cst": "America/Chicago",
+    "cdt": "America/Chicago",
+    "mst": "America/Denver",
+    "mdt": "America/Denver",
+    "pst": "America/Los_Angeles",
+    "pdt": "America/Los_Angeles",
+    "akst": "America/Anchorage",
+    "akdt": "America/Anchorage",
+    "hst": "Pacific/Honolulu",
+    "jst": "Asia/Tokyo",
+    "kst": "Asia/Seoul",
+    "ist": "Asia/Kolkata",
+    "aest": "Australia/Sydney",
+    "aedt": "Australia/Sydney",
+    "nzst": "Pacific/Auckland",
+    "nzdt": "Pacific/Auckland",
+    "bst": "Europe/London",
+}
+
+
+def _parse_cron_dow(cron_dow_field: str) -> set[int] | None:
+    """Expand a cron day-of-week field into the set of integers it covers.
+
+    Returns None for the wildcard '*' (meaning all days). Returns an empty
+    set for an unparseable field (caller treats as "unknown — skip").
+    """
+    field = cron_dow_field.strip()
+    if field == "*":
+        return None
+    days: set[int] = set()
+    for part in field.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part == "*":
+            return None
+        if "/" in part:
+            base, _step = part.split("/", 1)
+            try:
+                step = int(_step)
+            except ValueError:
+                return set()
+            if base == "*":
+                base_lo, base_hi = 0, 7
+            elif "-" in base:
+                try:
+                    base_lo, base_hi = (int(x) for x in base.split("-", 1))
+                except ValueError:
+                    return set()
+            else:
+                try:
+                    base_lo = int(base)
+                except ValueError:
+                    return set()
+                base_hi = 7
+            days.update(range(base_lo, base_hi + 1, max(step, 1)))
+            continue
+        if "-" in part:
+            try:
+                lo, hi = (int(x) for x in part.split("-", 1))
+            except ValueError:
+                return set()
+            days.update(range(lo, hi + 1))
+            continue
+        try:
+            days.add(int(part))
+        except ValueError:
+            return set()
+    return days
+
+
+def _parse_cron_minute_hour(cron_minute: str, cron_hour: str) -> tuple[int, int] | None:
+    """Best-effort extraction of a single (minute, hour) firing time from cron.
+
+    Returns None if either field uses a range/step/list (in which case time
+    comparison is ambiguous and the caller should skip the time check).
+    """
+    minute = cron_minute.strip()
+    hour = cron_hour.strip()
+    if any(c in minute for c in ",-/*") or any(c in hour for c in ",-/*"):
+        return None
+    try:
+        return int(minute), int(hour)
+    except ValueError:
+        return None
+
+
+def _description_implies_daily(description: str) -> bool:
+    """True iff the description uses an unambiguous 'every day' phrase."""
+    low = description.lower()
+    return any(phrase in low for phrase in _DAILY_PHRASES)
+
+
+def _description_implies_weekdays(description: str) -> bool:
+    low = description.lower()
+    return any(phrase in low for phrase in _WEEKDAY_PHRASES)
+
+
+def _description_implies_weekend(description: str) -> bool:
+    low = description.lower()
+    return any(phrase in low for phrase in _WEEKEND_PHRASES)
+
+
+def _description_is_vague_about_day(description: str) -> bool:
+    low = description.lower()
+    return any(phrase in low for phrase in _VAGUE_DAY_PHRASES)
+
+
+def _description_named_days(description: str) -> set[int]:
+    """Return the union of cron day-of-week numbers explicitly named.
+
+    Empty set if the description doesn't name any day word. We use a word-
+    boundary check so 'sunset' doesn't match 'sun'.
+    """
+    low = description.lower()
+    found: set[int] = set()
+    for word, days in _WEEKDAY_WORDS.items():
+        if re.search(rf"\b{re.escape(word)}\b", low):
+            found.update(days)
+    return found
+
+
+def _convert_local_to_utc(
+    local_hour: int,
+    local_minute: int,
+    iana_zone: str,
+) -> tuple[int, int] | None:
+    """Convert a local clock time to UTC using a fixed reference date.
+
+    We use today's date in the named zone for the offset lookup. DST shifts
+    twice a year so we tolerate ±1 hour in the comparison, but anchoring on
+    the current date keeps the answer right for ~6 months at a time.
+
+    Returns None if the zone name is unrecognised.
+    """
+    if ZoneInfo is None:
+        return None
+    try:
+        zone = ZoneInfo(iana_zone)
+    except ZoneInfoNotFoundError:
+        return None
+    except Exception:
+        return None
+    from datetime import datetime
+    now_local = datetime.now(zone)
+    candidate = now_local.replace(
+        hour=local_hour,
+        minute=local_minute,
+        second=0,
+        microsecond=0,
+    )
+    utc = candidate.astimezone(ZoneInfo("UTC"))
+    return utc.minute, utc.hour
+
+
+def _validate_cron_matches_description(
+    cron: str,
+    description: str,
+    tenant_timezone: str = "UTC",
+) -> tuple[bool, str]:
+    """Compare a cron expression against the English `user_facing_description`.
+
+    The validator looks for two classes of disagreement:
+
+      1. **Day-of-week mismatch**. If the description says "every day" /
+         "daily" / "each morning", the cron's day-of-week field MUST be
+         wildcard (`*`). If the description names a specific day
+         ("every Friday", "Mondays at 9"), the cron's day-of-week MUST
+         contain that day's numeric value (Mon=1 … Sun=0 OR 7). Same for
+         "weekdays" (1-5) and "weekends" (0,6).
+
+      2. **Time mismatch**. If the description gives a time ("at 05:30 CET",
+         "at 9pm"), the cron's (minute, hour) must match within ±1 hour of
+         the stated time after converting from the description's named
+         timezone (or `tenant_timezone` if the description doesn't name one)
+         to UTC. The ±1 hour tolerance covers DST.
+
+    Both checks are skipped when the description is too vague to anchor on
+    ("regularly", "periodically", "throughout the week"). We err on the
+    side of NOT flagging an ambiguous description — false positives are
+    worse than false negatives because they trigger an Opus retry burn.
+
+    Args:
+        cron: A 5-field UTC cron expression. Must already pass
+            `_validate_cron_expression` (caller's responsibility — this
+            function focuses on semantic alignment, not syntax).
+        description: The `user_facing_description` Opus emitted in the same
+            envelope as `cron`.
+        tenant_timezone: IANA zone name for the tenant (e.g. "Europe/Budapest"),
+            used when the description states a time but no timezone. Defaults
+            to UTC so a description like "at 09:00" with cron `0 9 * * *`
+            passes.
+
+    Returns:
+        (True, "") on agreement or insufficient signal.
+        (False, message) when the cron contradicts the description.
+    """
+    if not isinstance(cron, str) or not cron.strip():
+        return True, ""
+    if not isinstance(description, str) or not description.strip():
+        return True, ""
+
+    parts = cron.strip().split()
+    if len(parts) != 5:
+        # Syntactic problem — leave it to _validate_cron_expression
+        return True, ""
+
+    cron_minute_field, cron_hour_field, _dom, _mon, cron_dow_field = parts
+    cron_dow_set = _parse_cron_dow(cron_dow_field)
+
+    # ----- DAY-OF-WEEK CHECK -----------------------------------------------
+    is_daily = _description_implies_daily(description)
+    is_weekdays = _description_implies_weekdays(description)
+    is_weekend = _description_implies_weekend(description)
+    named_days = _description_named_days(description)
+    is_vague = _description_is_vague_about_day(description)
+
+    # "every day" / "daily" / "each morning" → cron MUST be wildcard
+    if is_daily and not is_weekdays and not is_weekend and not named_days:
+        if cron_dow_set is not None:
+            return False, (
+                f"description says daily ('every day' / 'daily' / 'each morning') "
+                f"but cron `{cron.strip()}` has day-of-week `{cron_dow_field}` — "
+                f"day-of-week must be `*` for daily chores."
+            )
+
+    # "weekdays" → cron must be 1-5 (or contain 1,2,3,4,5)
+    elif is_weekdays and not named_days:
+        required = {1, 2, 3, 4, 5}
+        if cron_dow_set is None or not required.issubset(cron_dow_set):
+            return False, (
+                f"description says weekdays but cron `{cron.strip()}` "
+                f"day-of-week `{cron_dow_field}` does not cover Mon-Fri (1-5). "
+                f"Use `1-5` or `1,2,3,4,5`."
+            )
+
+    # "weekends" → cron must contain 0 (or 7) and 6
+    elif is_weekend and not named_days:
+        if cron_dow_set is None:
+            return False, (
+                f"description says weekends but cron `{cron.strip()}` "
+                f"day-of-week is `*` (fires every day). Use `0,6` or `6,0`."
+            )
+        has_sat = 6 in cron_dow_set
+        has_sun = (0 in cron_dow_set) or (7 in cron_dow_set)
+        if not (has_sat and has_sun):
+            return False, (
+                f"description says weekends but cron `{cron.strip()}` "
+                f"day-of-week `{cron_dow_field}` doesn't cover both Saturday "
+                f"and Sunday. Use `0,6` or `6,0`."
+            )
+
+    # Specific day(s) named ("every Friday", "Mondays") — cron must include them
+    elif named_days:
+        if cron_dow_set is None:
+            return False, (
+                f"description names specific day(s) {sorted(named_days)} but cron "
+                f"`{cron.strip()}` day-of-week is `*` (fires every day, including "
+                f"days the description didn't promise)."
+            )
+        normalized_cron = set(cron_dow_set)
+        if 7 in normalized_cron:
+            normalized_cron.add(0)
+        if 0 in normalized_cron:
+            normalized_cron.add(7)
+        if not (named_days & normalized_cron):
+            return False, (
+                f"description names day(s) {sorted(named_days)} but cron "
+                f"`{cron.strip()}` day-of-week `{cron_dow_field}` covers "
+                f"{sorted(cron_dow_set)} — no overlap. Update cron to include "
+                f"the named day(s)."
+            )
+
+    elif is_vague:
+        pass
+
+    # ----- TIME CHECK ------------------------------------------------------
+    time_match = _TIME_RE.search(description)
+    if time_match:
+        try:
+            hour = int(time_match.group("hour"))
+            minute = int(time_match.group("minute") or 0)
+        except (TypeError, ValueError):
+            return True, ""
+
+        ampm_raw = time_match.group("ampm")
+        ampm = ampm_raw.lower().replace(".", "") if ampm_raw else None
+        if ampm in ("pm", "p m") and hour < 12:
+            hour += 12
+        elif ampm in ("am", "a m") and hour == 12:
+            hour = 0
+
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return True, ""
+
+        tz_token_raw = time_match.group("tz")
+        if tz_token_raw:
+            iana = _TZ_ABBREV_TO_IANA.get(tz_token_raw.lower(), "UTC")
+        else:
+            iana = tenant_timezone or "UTC"
+
+        utc_tuple = _convert_local_to_utc(hour, minute, iana)
+        if utc_tuple is None:
+            expected_minute, expected_hour = minute, hour
+        else:
+            expected_minute, expected_hour = utc_tuple
+
+        cron_time = _parse_cron_minute_hour(cron_minute_field, cron_hour_field)
+        if cron_time is None:
+            return True, ""
+
+        actual_minute, actual_hour = cron_time
+
+        # ±1 hour tolerance for DST drift
+        hour_diff = (actual_hour - expected_hour) % 24
+        if hour_diff > 12:
+            hour_diff = 24 - hour_diff
+        if hour_diff > 1:
+            return False, (
+                f"description says time {hour:02d}:{minute:02d} "
+                f"({tz_token_raw or iana}) which is ~{expected_hour:02d}:"
+                f"{expected_minute:02d} UTC but cron `{cron.strip()}` fires at "
+                f"{actual_hour:02d}:{actual_minute:02d} UTC — off by "
+                f"{hour_diff} hour(s). Recompute the UTC equivalent of the "
+                f"local time and update minute/hour fields."
+            )
+
+    return True, ""
+
+
+def _resolve_tenant_timezone() -> str:
+    """Return the tenant's IANA timezone for description-cron comparison.
+
+    Reads the env var directly so this stays usable from the audit script
+    (which doesn't go through `load_config()`). Defaults to UTC when unset.
+    """
+    return os.environ.get("TENANT_TIMEZONE", "UTC") or "UTC"
+
+
 def _validate_envelope(parsed: dict[str, Any]) -> tuple[bool, str]:
     """Validate that the parsed Opus response has the required envelope keys.
 
@@ -290,6 +769,18 @@ def _validate_envelope(parsed: dict[str, Any]) -> tuple[bool, str]:
         ok, err = _validate_cron_expression(schedule)
         if not ok:
             return False, f"schedule invalid: {err}"
+        # #478 — semantic alignment between cron and user_facing_description.
+        # Only run this when both fields are present; the syntactic check
+        # above is sufficient for backwards-compat envelopes.
+        if isinstance(user_facing_description, str) and user_facing_description.strip():
+            tz = _resolve_tenant_timezone()
+            ok, err = _validate_cron_matches_description(
+                schedule,
+                user_facing_description,
+                tenant_timezone=tz,
+            )
+            if not ok:
+                return False, f"schedule does not match user_facing_description: {err}"
 
     return True, ""
 

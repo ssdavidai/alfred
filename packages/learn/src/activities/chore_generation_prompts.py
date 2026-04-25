@@ -224,6 +224,33 @@ Examples — pick the closest shape and fill in the specifics:
 
 No chore should fire more frequently than once per hour. If the opportunity needs closer monitoring, that belongs in a stream + enrichment pipeline, not a chore. The validator will reject sub-hourly patterns and the generation retries.
 
+### Self-check before emitting (REQUIRED — read your own description)
+
+Before you finalise the JSON, read your `user_facing_description` aloud to yourself and check that the `schedule` cron fires at exactly that cadence. The two fields are emitted in the same envelope; they must agree on day-of-week AND time. A second validator (#478) compares them and will reject any disagreement.
+
+Common failure mode the validator catches: the model defaults to `0 18 * * 0` (the example cron in the table above) when timezone math feels uncertain. **Do not do this.** Compute the UTC equivalent of the local time you wrote in the description, and only then pick the cron.
+
+Worked alignment examples (description → cron):
+
+| `user_facing_description` (excerpt) | Local time | Tenant TZ | UTC equivalent | Correct cron |
+|---|---|---|---|---|
+| "Every day at 05:30 CET, this chore assembles a morning briefing..." | 05:30 | Europe/Budapest (UTC+1 winter / +2 summer) | 03:30 winter / 04:30 summer | `30 4 * * *` (use summer offset; the description still reads correctly in winter ±1h) |
+| "Every Friday at 18:00 CET, this chore reviews your week..." | 18:00 Fri | Europe/Budapest | 16:00 Fri winter / 17:00 Fri summer | `0 17 * * 5` (note day-of-week 5 == Friday, NOT 0) |
+| "Every Monday at 06:30 Warsaw time, this chore queues your week..." | 06:30 Mon | Europe/Warsaw (UTC+1/+2) | 04:30 Mon winter / 05:30 Mon summer | `30 4 * * 1` (NOT `30 4 * * 0` — Monday is 1, Sunday is 0) |
+| "Every weekday at 09:00 UTC, this chore checks overnight Stripe payouts..." | 09:00 UTC | UTC | 09:00 | `0 9 * * 1-5` (NOT `0 9 * * 5` — weekdays means Mon-Fri, not Friday-only) |
+| "Every Sunday at 18:00 UTC, this chore generates the weekly digest..." | 18:00 Sun | UTC | 18:00 | `0 18 * * 0` |
+| "Every day at 22:00 New York time, this chore drafts a recap..." | 22:00 | America/New_York (UTC-5/-4) | 03:00 next day winter / 02:00 next day summer | `0 3 * * *` (NO day-of-week pin — daily is `*`, not `0`) |
+
+The mistakes the validator catches most often:
+
+- **Day mismatch.** "Every day" → cron day-of-week must be `*`. Emitting `0 5 * * 0` for "every day at 05:00" only fires on Sundays.
+- **Day-of-week confusion.** Cron uses Mon=1, Tue=2, …, Sat=6, **Sun=0 (or 7)**. "Friday" is `5`, not `0`. "Sunday" is `0` or `7`, never `1`.
+- **Wrong-direction timezone math.** CET is UTC+1; to convert local → UTC you SUBTRACT 1 hour. A 05:30 CET briefing fires at 04:30 UTC, not 06:30 UTC.
+- **"Weekdays" treated as a single day.** "Every weekday at 09:00" → `0 9 * * 1-5`, NOT `0 9 * * 5` (Friday-only) and NOT `0 9 * * 1` (Monday-only).
+- **Defaulting to the example cron.** Several chores all emitting `0 18 * * 0` is a tell that the model didn't actually compute timezones — it copied the example. Don't do this.
+
+If the description and cron contradict each other after your self-check, **fix the cron, not the description**. The description encodes the user-facing intent you derived from the opportunity; the cron is just the mechanical translation.
+
 ### Other field constraints
 
 The `module_name` must be a valid Python identifier (lowercase, snake_case). The `workflow_class_name` must end with `Workflow` and be a valid Python class name. The `user_facing_description` must be 80-1200 characters of plain English (no code, no markdown). The `python_source` must be the COMPLETE file contents — every line, every import, every blank line. Do NOT abbreviate with "...".
