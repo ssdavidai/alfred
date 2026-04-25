@@ -65,6 +65,7 @@ if str(_PKG_ROOT) not in sys.path:
     sys.path.insert(0, str(_PKG_ROOT))
 
 from src.activities.chore_generation import (  # noqa: E402
+    _extract_description_timezone,
     _validate_cron_matches_description,
 )
 
@@ -144,7 +145,13 @@ def _scan_chore_dir(chore_dir: Path) -> list[dict[str, Any]]:
 
 
 def _audit(records: list[dict[str, Any]], tenant_timezone: str) -> list[dict[str, Any]]:
-    """Run _validate_cron_matches_description over every record. Return mismatches."""
+    """Run _validate_cron_matches_description over every record. Return mismatches.
+
+    The validator already prefers a tz named in the description over the
+    tenant-level fallback (see ``_extract_description_timezone``), so we
+    pass ``tenant_timezone`` as a passive fallback. We also surface the
+    resolved tz on each mismatch row for easier operator triage.
+    """
     mismatches: list[dict[str, Any]] = []
     for rec in records:
         if "error" in rec:
@@ -156,12 +163,20 @@ def _audit(records: list[dict[str, Any]], tenant_timezone: str) -> list[dict[str
             # Nothing to compare — skip silently. Standard-template chores
             # often don't carry a user_facing_description.
             continue
+        # The validator does this internally too; we duplicate the lookup
+        # here purely so the report can attribute "this used tz X" without
+        # having to re-parse the error string.
+        resolved_tz = _extract_description_timezone(desc) or tenant_timezone
         ok, err = _validate_cron_matches_description(cron, desc, tenant_timezone)
         if not ok:
             mismatches.append({
                 **rec,
                 "kind": "mismatch",
                 "error": err,
+                "resolved_timezone": resolved_tz,
+                "tz_source": (
+                    "description" if _extract_description_timezone(desc) else "tenant_fallback"
+                ),
             })
     return mismatches
 
@@ -191,8 +206,12 @@ def _format_text_report(
         desc = (m.get("user_facing_description") or "").replace("\n", " ").strip()
         if len(desc) > 140:
             desc = desc[:137] + "..."
+        resolved_tz = m.get("resolved_timezone") or tenant_timezone
+        tz_source = m.get("tz_source") or "tenant_fallback"
         lines.append(
-            f"  {slug}  MISMATCH  \"{desc}\"  vs cron `{cron}`  -- {m['error']}"
+            f"  {slug}  MISMATCH  \"{desc}\"  vs cron `{cron}`"
+            f"  [tz={resolved_tz} via {tz_source}]"
+            f"  -- {m['error']}"
         )
     return "\n".join(lines) + "\n"
 

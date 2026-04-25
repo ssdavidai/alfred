@@ -387,6 +387,164 @@ _TZ_ABBREV_TO_IANA: dict[str, str] = {
     "bst": "Europe/London",
 }
 
+# Multi-word regional phrases the LLM reaches for when it doesn't write a
+# bare abbreviation. Match longest-first to avoid partial overlaps.
+_TZ_PHRASE_TO_IANA: dict[str, str] = {
+    "central european summer time": "Europe/Paris",
+    "central european time":        "Europe/Paris",
+    "eastern european summer time": "Europe/Bucharest",
+    "eastern european time":        "Europe/Bucharest",
+    "western european summer time": "Europe/Lisbon",
+    "western european time":        "Europe/Lisbon",
+    "british summer time":          "Europe/London",
+    "greenwich mean time":          "UTC",
+    "eastern daylight time":        "America/New_York",
+    "eastern standard time":        "America/New_York",
+    "eastern time":                 "America/New_York",
+    "central daylight time":        "America/Chicago",
+    "central standard time":        "America/Chicago",
+    "central time":                 "America/Chicago",
+    "mountain daylight time":       "America/Denver",
+    "mountain standard time":       "America/Denver",
+    "mountain time":                "America/Denver",
+    "pacific daylight time":        "America/Los_Angeles",
+    "pacific standard time":        "America/Los_Angeles",
+    "pacific time":                 "America/Los_Angeles",
+    "alaska time":                  "America/Anchorage",
+    "hawaii time":                  "Pacific/Honolulu",
+    "japan standard time":          "Asia/Tokyo",
+    "korea standard time":          "Asia/Seoul",
+    "india standard time":          "Asia/Kolkata",
+    "australian eastern time":      "Australia/Sydney",
+    "new zealand time":             "Pacific/Auckland",
+}
+
+# City / region names → IANA zone. Hit when the description writes
+# "Budapest time" or "Friday at 2pm Budapest time" instead of a bare abbrev.
+# Multi-word entries before single words because we iterate longest-first.
+_TZ_NAME_TO_IANA: dict[str, str] = {
+    "budapest":      "Europe/Budapest",
+    "warsaw":        "Europe/Warsaw",
+    "berlin":        "Europe/Berlin",
+    "vienna":        "Europe/Vienna",
+    "prague":        "Europe/Prague",
+    "paris":         "Europe/Paris",
+    "madrid":        "Europe/Madrid",
+    "rome":          "Europe/Rome",
+    "amsterdam":     "Europe/Amsterdam",
+    "brussels":      "Europe/Brussels",
+    "lisbon":        "Europe/Lisbon",
+    "london":        "Europe/London",
+    "dublin":        "Europe/Dublin",
+    "athens":        "Europe/Athens",
+    "bucharest":     "Europe/Bucharest",
+    "helsinki":      "Europe/Helsinki",
+    "stockholm":     "Europe/Stockholm",
+    "oslo":          "Europe/Oslo",
+    "copenhagen":    "Europe/Copenhagen",
+    "moscow":        "Europe/Moscow",
+    "istanbul":      "Europe/Istanbul",
+    "dubai":         "Asia/Dubai",
+    "singapore":     "Asia/Singapore",
+    "tokyo":         "Asia/Tokyo",
+    "seoul":         "Asia/Seoul",
+    "hong kong":     "Asia/Hong_Kong",
+    "shanghai":      "Asia/Shanghai",
+    "beijing":       "Asia/Shanghai",
+    "kolkata":       "Asia/Kolkata",
+    "mumbai":        "Asia/Kolkata",
+    "delhi":         "Asia/Kolkata",
+    "sydney":        "Australia/Sydney",
+    "melbourne":     "Australia/Melbourne",
+    "auckland":      "Pacific/Auckland",
+    "honolulu":      "Pacific/Honolulu",
+    "anchorage":     "America/Anchorage",
+    "los angeles":   "America/Los_Angeles",
+    "san francisco": "America/Los_Angeles",
+    "denver":        "America/Denver",
+    "chicago":       "America/Chicago",
+    "new york":      "America/New_York",
+    "toronto":       "America/Toronto",
+    "mexico city":   "America/Mexico_City",
+    "sao paulo":     "America/Sao_Paulo",
+    "buenos aires":  "America/Argentina/Buenos_Aires",
+}
+
+
+def _extract_description_timezone(description: str) -> str | None:
+    """Find an IANA timezone hinted at anywhere in the description.
+
+    The LLM that authors `user_facing_description` reaches for several
+    different ways to talk about timezones depending on context:
+
+      "Every day at 05:30 CET..."                    -> abbrev adjacent to time
+      "Every Friday at 18:00 CET..."                 -> abbrev adjacent
+      "Every Friday at 2pm Budapest time..."         -> city after time
+      "Every Sunday at 18:00 (Budapest time, 16:00 UTC), this..."
+                                                     -> city + sanity-check abbrev
+      "Every weekday at 14:30 (Central European time)..."
+                                                     -> regional phrase
+      "Every Monday at 06:30 local time (Budapest, ~04:30 UTC)..."
+                                                     -> city in parenthetical
+
+    The validator (and the offline audit script) used to look only at the
+    abbreviation immediately following the time, which meant any of the
+    other forms silently fell back to `tenant_timezone`. On a tenant whose
+    `TENANT_TIMEZONE` was UTC that produced "off by 2 hour" false positives
+    on every chore Opus authored in CET / CEST. This helper consolidates
+    the lookup so callers can prefer description-stated tz and only fall
+    back to the tenant-level setting when no signal is present.
+
+    Priority order (most specific first):
+
+      1. Abbreviation adjacent to the time clause (the existing _TIME_RE
+         tz group). Highest signal because the author tied the tz directly
+         to the time.
+      2. City / region name (e.g. "Budapest", "Warsaw"). The author named
+         a place; that is unambiguous.
+      3. Multi-word regional phrase (e.g. "Central European time").
+      4. Any abbreviation anywhere in the description (e.g. a parenthetical
+         "(Budapest time, 16:00 UTC)" sanity-check). Lowest signal because
+         the abbreviation may be the converted UTC equivalent rather than
+         the local time the cron is supposed to fire at.
+
+    Returns None when no signal is found, in which case callers should
+    fall back to the tenant-level timezone.
+    """
+    if not isinstance(description, str) or not description.strip():
+        return None
+    low = description.lower()
+
+    # 1) Abbreviation adjacent to the time clause — strongest signal.
+    time_match = _TIME_RE.search(description)
+    if time_match:
+        tz_token = time_match.group("tz")
+        if tz_token:
+            iana = _TZ_ABBREV_TO_IANA.get(tz_token.lower())
+            if iana:
+                return iana
+
+    # 2) City / region name. Iterate longest-first so "new york" beats "york",
+    # "hong kong" beats "kong", etc. Word-boundary on a per-token basis to
+    # avoid matching e.g. "rome" inside "syndrome".
+    for name in sorted(_TZ_NAME_TO_IANA, key=len, reverse=True):
+        # Multi-word names need a literal space-separator search; the simple
+        # word-boundary check still works because re.escape preserves spaces.
+        if re.search(rf"\b{re.escape(name)}\b", low):
+            return _TZ_NAME_TO_IANA[name]
+
+    # 3) Multi-word regional phrase.
+    for phrase in sorted(_TZ_PHRASE_TO_IANA, key=len, reverse=True):
+        if phrase in low:
+            return _TZ_PHRASE_TO_IANA[phrase]
+
+    # 4) Lone abbreviation anywhere in the description.
+    for abbrev, iana in _TZ_ABBREV_TO_IANA.items():
+        if re.search(rf"\b{re.escape(abbrev)}\b", low):
+            return iana
+
+    return None
+
 
 def _parse_cron_dow(cron_dow_field: str) -> set[int] | None:
     """Expand a cron day-of-week field into the set of integers it covers.
@@ -664,8 +822,14 @@ def _validate_cron_matches_description(
             return True, ""
 
         tz_token_raw = time_match.group("tz")
-        if tz_token_raw:
-            iana = _TZ_ABBREV_TO_IANA.get(tz_token_raw.lower(), "UTC")
+        # Prefer description-stated tz (anywhere in the text — "Budapest",
+        # "Central European time", "(Budapest time, 16:00 UTC)") over the
+        # tenant fallback. Only when the description gives no signal at all
+        # do we use tenant_timezone. See _extract_description_timezone for
+        # the priority rules.
+        iana_from_desc = _extract_description_timezone(description)
+        if iana_from_desc:
+            iana = iana_from_desc
         else:
             iana = tenant_timezone or "UTC"
 

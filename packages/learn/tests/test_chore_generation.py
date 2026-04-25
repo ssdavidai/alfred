@@ -7,6 +7,7 @@ exercised end-to-end in the smoke test on david.
 from __future__ import annotations
 
 from src.activities.chore_generation import (
+    _extract_description_timezone,
     _slice_profile_for_opportunity,
     _try_parse_envelope,
     _validate_cron_expression,
@@ -618,4 +619,262 @@ class TestEnvelopeSemanticAlignment:
         # Without a description we have nothing to compare against — only
         # the syntactic cron validator runs (and `0 18 * * 0` is valid).
         ok, err = _validate_envelope(env)
+        assert ok, err
+
+
+# ---------------------------------------------------------------------------
+# _extract_description_timezone — description-stated tz takes precedence
+# over the tenant-level fallback. Motivated by the audit-script false
+# positives on Miguel + Rapali (see audit_chore_description_cron_alignment).
+# ---------------------------------------------------------------------------
+
+class TestExtractDescriptionTimezone:
+    """The helper inspects the description for any tz signal; the validator
+    (and the offline audit script) prefer it over `tenant_timezone`."""
+
+    # ----- Adjacent abbreviation (highest signal) -----
+
+    def test_abbrev_adjacent_to_time_wins(self):
+        assert (
+            _extract_description_timezone(
+                "Every day at 05:30 CET, this chore briefs you."
+            )
+            == "Europe/Paris"
+        )
+
+    def test_abbrev_adjacent_utc_resolves_to_utc(self):
+        assert (
+            _extract_description_timezone("Daily at 09:00 UTC, fires the digest.")
+            == "UTC"
+        )
+
+    # ----- City name (covers the Rapali bugs) -----
+
+    def test_budapest_city_name(self):
+        # The exact form Opus produced for Rapali's penthouse-project-tracker.
+        assert (
+            _extract_description_timezone(
+                "Every Friday at 2pm Budapest time, this chore pulls events..."
+            )
+            == "Europe/Budapest"
+        )
+
+    def test_budapest_in_parenthetical_wins_over_lone_utc(self):
+        # The exact form Opus produced for Rapali's family-calendar-watch.
+        # 'UTC' also appears as a sanity-check; we must NOT prefer it over
+        # the city the author actually meant.
+        assert (
+            _extract_description_timezone(
+                "Every Sunday at 18:00 (Budapest time, 16:00 UTC), this chore..."
+            )
+            == "Europe/Budapest"
+        )
+
+    def test_budapest_in_local_time_parenthetical(self):
+        # Rapali's monday-strategy-brief.
+        assert (
+            _extract_description_timezone(
+                "Every Monday at 06:30 local time (Budapest, ~04:30 UTC), this chore..."
+            )
+            == "Europe/Budapest"
+        )
+
+    def test_warsaw_city_name(self):
+        assert (
+            _extract_description_timezone("Daily at 09:00 Warsaw time.")
+            == "Europe/Warsaw"
+        )
+
+    def test_new_york_multi_word_city(self):
+        assert (
+            _extract_description_timezone(
+                "Daily at 9am New York time, this chore fires."
+            )
+            == "America/New_York"
+        )
+
+    def test_word_boundary_no_partial_match(self):
+        # Don't pick up "rome" inside "syndrome".
+        assert (
+            _extract_description_timezone(
+                "Reviews recent posts about Stockholm syndrome at 18:00."
+            )
+            == "Europe/Stockholm"
+        )
+
+    def test_unrelated_word_does_not_match(self):
+        assert (
+            _extract_description_timezone(
+                "Daily at 9am, this chore monitors anomaly events."
+            )
+            is None
+        )
+
+    # ----- Multi-word regional phrase -----
+
+    def test_central_european_time_phrase(self):
+        # Rapali's italy-trip-planner / watch-subscriptions.
+        assert (
+            _extract_description_timezone(
+                "Every Monday and Thursday at 10:00 AM (Central European time), this chore..."
+            )
+            == "Europe/Paris"
+        )
+
+    def test_eastern_time_phrase(self):
+        assert (
+            _extract_description_timezone(
+                "Daily at 09:00 Eastern Time, this chore drafts a recap."
+            )
+            == "America/New_York"
+        )
+
+    def test_pacific_standard_time_full_phrase_beats_pst_word(self):
+        # Phrase match should still resolve correctly; either is acceptable
+        # because both map to America/Los_Angeles.
+        assert (
+            _extract_description_timezone(
+                "Daily at 09:00 Pacific Standard Time, this chore fires."
+            )
+            == "America/Los_Angeles"
+        )
+
+    # ----- Lone abbreviation (lowest signal) -----
+
+    def test_lone_abbreviation_in_parenthetical_when_no_city(self):
+        # If the description gives ONLY a UTC sanity-check (no city, no
+        # phrase), use it.
+        assert (
+            _extract_description_timezone("Every Friday afternoon (16:00 UTC).")
+            == "UTC"
+        )
+
+    # ----- No signal -----
+
+    def test_no_signal_returns_none(self):
+        # Miguel's daily-afternoon-briefing — author meant local time but
+        # didn't say so. Caller falls back to tenant_timezone.
+        assert (
+            _extract_description_timezone(
+                "Every weekday at 14:30, this chore pulls your Gmail activity."
+            )
+            is None
+        )
+
+    def test_empty_string_returns_none(self):
+        assert _extract_description_timezone("") is None
+
+    def test_whitespace_only_returns_none(self):
+        assert _extract_description_timezone("   \n\t  ") is None
+
+    def test_non_string_returns_none(self):
+        assert _extract_description_timezone(None) is None  # type: ignore[arg-type]
+        assert _extract_description_timezone(12345) is None  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# _validate_cron_matches_description with description-stated timezone —
+# regression tests for the 9 audit false positives on Miguel + Rapali.
+# ---------------------------------------------------------------------------
+
+class TestValidatorHonorsDescriptionTimezone:
+    """When the description names a timezone (city / phrase / parenthetical
+    abbrev), the validator must use it instead of the tenant_timezone arg."""
+
+    def test_rapali_family_calendar_watch_passes(self):
+        """The exact cron + description that produced a false positive on
+        Rapali. Cron `0 16 * * 0` fires Sunday 16:00 UTC = 18:00 Budapest
+        CEST. Description says "18:00 (Budapest time, 16:00 UTC)" so the
+        validator should resolve tz to Europe/Budapest, NOT the
+        UTC tenant fallback.
+        """
+        ok, err = _validate_cron_matches_description(
+            "0 16 * * 0",
+            "Every Sunday at 18:00 (Budapest time, 16:00 UTC), this chore "
+            "checks the family calendar.",
+            tenant_timezone="UTC",
+        )
+        assert ok, err
+
+    def test_rapali_monday_strategy_brief_passes(self):
+        ok, err = _validate_cron_matches_description(
+            "30 4 * * 1",
+            "Every Monday at 06:30 local time (Budapest, ~04:30 UTC), this "
+            "chore queues your week.",
+            tenant_timezone="UTC",
+        )
+        assert ok, err
+
+    def test_rapali_penthouse_project_tracker_passes(self):
+        ok, err = _validate_cron_matches_description(
+            "0 12 * * 5",
+            "Every Friday at 2pm Budapest time, this chore pulls all events "
+            "from the penthouse project.",
+            tenant_timezone="UTC",
+        )
+        assert ok, err
+
+    def test_rapali_site_health_patrol_passes(self):
+        ok, err = _validate_cron_matches_description(
+            "0 6 * * 3",
+            "Every Wednesday at 8:00 AM Budapest time, this chore scans the "
+            "site for issues.",
+            tenant_timezone="UTC",
+        )
+        assert ok, err
+
+    def test_rapali_italy_trip_planner_passes(self):
+        ok, err = _validate_cron_matches_description(
+            "0 8 * * 1,4",
+            "Every Monday and Thursday at 10:00 AM (Central European time), "
+            "this chore organises your Italy trip.",
+            tenant_timezone="UTC",
+        )
+        assert ok, err
+
+    def test_rapali_watch_subscriptions_passes(self):
+        ok, err = _validate_cron_matches_description(
+            "0 7 * * 5",
+            "Every Friday at 9:00 AM (Central European time), this chore "
+            "audits your subscriptions.",
+            tenant_timezone="UTC",
+        )
+        assert ok, err
+
+    def test_no_description_tz_falls_back_to_tenant_timezone(self):
+        """Miguel's daily-afternoon-briefing — description has no tz, so we
+        fall back to the tenant_timezone arg. With the correct fallback
+        (Europe/Warsaw), 14:30 Warsaw CEST = 12:30 UTC matches the cron.
+        """
+        ok, err = _validate_cron_matches_description(
+            "30 12 * * 1-5",
+            "Every weekday at 14:30, this chore pulls your Gmail activity.",
+            tenant_timezone="Europe/Warsaw",
+        )
+        assert ok, err
+
+    def test_no_description_tz_with_utc_fallback_still_fails(self):
+        """When the description has no tz AND tenant_timezone is UTC, the
+        existing behaviour is preserved — we still treat the time as UTC and
+        flag the 2-hour offset. Operator must run the audit with the right
+        --tenant-timezone for tenants whose chores were authored in local
+        time without saying so.
+        """
+        ok, _err = _validate_cron_matches_description(
+            "30 12 * * 1-5",
+            "Every weekday at 14:30, this chore pulls your Gmail activity.",
+            tenant_timezone="UTC",
+        )
+        assert not ok
+
+    def test_lone_utc_does_not_trump_city(self):
+        """Both 'Budapest time' AND 'UTC' appear in the description; the
+        author is using UTC as a sanity-check conversion, not declaring the
+        chore fires in UTC. City wins; cron matches.
+        """
+        ok, err = _validate_cron_matches_description(
+            "0 16 * * 0",
+            "Every Sunday at 18:00 (Budapest time, 16:00 UTC), reviews family.",
+            tenant_timezone="UTC",
+        )
         assert ok, err
