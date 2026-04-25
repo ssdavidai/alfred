@@ -429,7 +429,10 @@ const RECOMMENDED_STREAMS: Record<string, {
   args: Record<string, unknown>;
 }> = {
   googlecalendar: { action: "GOOGLECALENDAR_EVENTS_LIST", name: "Calendar Events", interval: 300, args: { calendarId: "primary" } },
-  gmail:          { action: "GMAIL_FETCH_EMAILS",         name: "Gmail Emails",     interval: 300, args: { userId: "me" } },
+  // Gmail polling stream: format=metadata strips bodies (~1 KB/msg) so the
+  // openclaw runtime's ~15 KB tool-result cap doesn't truncate after one
+  // message. See platform issue: openclaw runtime tool-result truncation.
+  gmail:          { action: "GMAIL_FETCH_EMAILS",         name: "Gmail Emails",     interval: 300, args: { userId: "me", format: "metadata", maxResults: 50 } },
   // slack omitted: SLACK_FETCH_CONVERSATION_HISTORY requires a channel ID (per-tenant config)
   // GITHUB_LIST_NOTIFICATIONS was renamed by Composio in early 2026 to
   // GITHUB_LIST_NOTIFICATIONS_FOR_THE_AUTHENTICATED_USER. Same behavior;
@@ -455,7 +458,12 @@ const DEFAULT_ARGS: Record<string, Record<string, unknown>> = {
   GOOGLECALENDAR_EVENTS_LIST: { calendarId: "primary" },
   GOOGLECALENDAR_FIND_EVENT: { calendarId: "primary" },
   GOOGLECALENDAR_CREATE_EVENT: { calendarId: "primary" },
-  GMAIL_FETCH_EMAILS: { userId: "me" },
+  // Gmail listing actions: default to format=metadata so the openclaw
+  // ~15 KB tool-result cap doesn't drop messages. A full message is
+  // ~14 KB; metadata is ~1 KB. Use format="full" only when fetching ONE
+  // specific message by id. See `alfred-composio-gmail` SKILL.md.
+  GMAIL_FETCH_EMAILS: { userId: "me", format: "metadata", maxResults: 50 },
+  GMAIL_LIST_THREADS: { userId: "me", format: "metadata", maxResults: 50 },
   GMAIL_SEND_EMAIL: { userId: "me" },
   GMAIL_LIST_LABELS: { userId: "me" },
 };
@@ -470,6 +478,60 @@ const TOOLKIT_EMOJI: Record<string, string> = {
 // ---------------------------------------------------------------------------
 // Skill generation
 // ---------------------------------------------------------------------------
+
+// Toolkit-specific extra guidance injected into the generated SKILL.md.
+// Today only Gmail needs special handling because of payload size + Gmail's
+// pageToken model; future toolkits with similar quirks (Notion's giant page
+// blocks, Calendar event lists, etc.) can be added here when investigated.
+//
+// Exported for tests.
+export function buildToolkitGuidance(toolkit: string): string {
+  if (toolkit !== "gmail") return "";
+  return `
+## Reading email — payload-size budget
+
+**The openclaw tool-result cap is ~15 KB. A full Gmail message is ~14 KB. So:**
+
+- **Always pass \`format: "metadata"\` for listing/scanning.** This strips the body — ~1 KB/message → ~12 messages fit per call.
+- **Only pass \`format: "full"\` when fetching ONE specific message** (e.g. Sir says "show me the one from Müller").
+- **Always paginate.** If the response has \`nextPageToken\`, call again with \`pageToken: <that token>\` until the token is empty or you have what Sir asked for.
+- **Use Gmail's native query for time windows.** \`query: "newer_than:1d"\` for the last 24h, \`"newer_than:7d"\` for the week, \`"after:2026/04/24"\` for a specific date.
+
+### Worked example: pull last 24 hours of email metadata
+
+\`\`\`js
+let allMessages = [];
+let pageToken = null;
+let pages = 0;
+
+do {
+  const resp = await self({
+    endpoint: "/api/v1/integrations/execute",
+    method: "POST",
+    body: {
+      action: "GMAIL_FETCH_EMAILS",
+      arguments: {
+        userId: "me",
+        query: "newer_than:1d",
+        format: "metadata",
+        maxResults: 50,
+        ...(pageToken && { pageToken }),
+      },
+    },
+  });
+  allMessages.push(...(resp.result?.data?.messages || []));
+  pageToken = resp.result?.data?.nextPageToken;
+  pages++;
+  if (pages >= 5) break; // sanity cap, ~250 messages
+} while (pageToken);
+
+// Now allMessages has [{id, threadId, subject, from, date, snippet}, ...]
+// To read the FULL body of one specific message:
+// await self({endpoint: "/api/v1/integrations/execute", method: "POST",
+//   body: {action: "GMAIL_FETCH_EMAILS", arguments: {userId: "me", query: \`rfc822msgid:<id>\`, format: "full", maxResults: 1}}})
+\`\`\`
+`;
+}
 
 async function generateComposioSkill(
   toolkit: string,
@@ -533,6 +595,14 @@ async function generateComposioSkill(
     actionTable += `| \`${a.slug}\` | ${a.type} | ${a.description} |\n`;
   }
 
+  // Toolkit-specific guidance. Gmail in particular needs explicit pagination +
+  // payload-budget rules: the openclaw runtime caps tool-result text at
+  // ~15 KB, while a single full Gmail message is ~14 KB — so without
+  // format="metadata" + pageToken pagination, Alfred only ever sees one
+  // message per call regardless of maxResults. See investigation that
+  // motivated PR fix/gmail-skill-pagination-defaults.
+  const toolkitGuidance = buildToolkitGuidance(toolkit);
+
   const skillContent = `---
 name: alfred-composio-${toolkit}
 description: ${displayName} integration — ${actions.length} available actions via the MCP self tool (POST /api/v1/integrations/execute).
@@ -551,7 +621,7 @@ Connected via Composio. Call actions through the MCP \`self\` tool: \`self({endp
 
 ${streamActions.length > 0 ? `**Stream**: ${recommended ? `${recommended.name} (auto-configured, polling every ${Math.round(recommended.interval / 60)} min)` : "available but not auto-configured"}` : ""}
 **Tool actions**: ${toolActions.length} | **Stream actions**: ${streamActions.length}
-
+${toolkitGuidance}
 ## Actions
 
 ${actionTable}
