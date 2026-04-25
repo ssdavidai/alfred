@@ -24,6 +24,13 @@ const OPENCLAW_WORKERS_CONFIG_PATH = "/mnt/encrypted/openclaw-workers/openclaw.j
 const OPENCLAW_SKILLS_DIR = "/mnt/encrypted/openclaw/workspace/skills";
 const OPENCLAW_WORKERS_SKILLS_DIR = "/mnt/encrypted/openclaw-workers/workspace/skills";
 
+// Reconnect ledger — tracks (old_connection_id → new_connection_id) pairs from
+// the /reconnect endpoint so the old connection can be deleted 1h after the
+// new one is verified ACTIVE. Persisted on disk so the grace window survives
+// ctrl-api restarts. See registerIntegrationRoutes for the lazy-reaper logic.
+const RECONNECT_LEDGER_PATH = "/mnt/encrypted/alfred/.composio-reconnect-ledger.json";
+const RECONNECT_GRACE_MS = 60 * 60 * 1000; // 1 hour
+
 function getComposioApiKey(): string {
   const key = process.env.COMPOSIO_API_KEY || "";
   if (!key) throw new ValidationError("COMPOSIO_API_KEY not configured on this tenant");
@@ -567,6 +574,181 @@ ${usageSection}`;
 }
 
 // ---------------------------------------------------------------------------
+// Reconnect ledger
+//
+// The reconnect endpoint creates a NEW Composio connected_account for the same
+// (toolkit, user_id) pair while the OLD one is still alive. Both must coexist
+// during the grace window so that:
+//   - In-flight composio_execute calls keyed off the old id keep working until
+//     stream configs / open sessions naturally migrate to the new id.
+//   - If Sir abandons the OAuth handshake on the new connection, we don't end
+//     up with NO connection at all (which would be the result of synchronously
+//     deleting the old one and waiting on a never-completed handshake).
+//
+// After RECONNECT_GRACE_MS (1h) we check whether the new connection is ACTIVE
+// and only then delete the old one. If the new connection never went ACTIVE,
+// we keep the old one around — Sir is no worse off than before he asked.
+//
+// Two cleanup mechanisms:
+//   1. In-process setTimeout, scheduled the moment the ledger entry is written.
+//      Fast-path for the common case (ctrl-api stays up for >1h).
+//   2. Lazy reaper that scans the ledger on every reconnect and on the
+//      POST /api/v1/integrations/reconnect-cleanup endpoint. Survives restarts.
+//      A future Temporal schedule (see follow-up issue) can call the cleanup
+//      endpoint on a cron to remove the in-process-timer dependency entirely.
+// ---------------------------------------------------------------------------
+
+interface ReconnectLedgerEntry {
+  old_connection_id: string;
+  new_connection_id: string;
+  toolkit: string;
+  user_id: string;
+  scheduled_at: number;   // ms since epoch — when the reconnect was requested
+  cleanup_after: number;  // ms since epoch — earliest time to delete the old one
+}
+
+function readReconnectLedger(): ReconnectLedgerEntry[] {
+  try {
+    const raw = fs.readFileSync(RECONNECT_LEDGER_PATH, "utf-8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeReconnectLedger(entries: ReconnectLedgerEntry[]): void {
+  try {
+    fs.mkdirSync(path.dirname(RECONNECT_LEDGER_PATH), { recursive: true });
+    fs.writeFileSync(RECONNECT_LEDGER_PATH, JSON.stringify(entries, null, 2));
+  } catch (err: any) {
+    console.error(`[reconnect] ledger write failed: ${err?.message ?? err}`);
+  }
+}
+
+function appendReconnectLedger(entry: ReconnectLedgerEntry): void {
+  const ledger = readReconnectLedger();
+  // Drop any prior entry for the same old_connection_id — a re-reconnect
+  // restarts the grace window against the newest new_connection_id.
+  const filtered = ledger.filter((e) => e.old_connection_id !== entry.old_connection_id);
+  filtered.push(entry);
+  writeReconnectLedger(filtered);
+}
+
+/**
+ * Try to delete one stale (old) Composio connected_account, but ONLY if its
+ * paired new connection has reached ACTIVE. If the new one never made it
+ * to ACTIVE, leave the old one alone — Sir's apps still work.
+ *
+ * Returns one of:
+ *   "deleted" — old connection removed, ledger entry purged.
+ *   "kept"    — new connection not yet ACTIVE; ledger entry kept for retry.
+ *   "purged"  — entry removed without deleting (old connection already gone,
+ *               or new connection itself is gone — nothing to clean up).
+ */
+async function reapReconnectEntry(
+  entry: ReconnectLedgerEntry,
+  apiKey: string,
+): Promise<"deleted" | "kept" | "purged"> {
+  // 1. Verify the new connection actually became ACTIVE. Without this guard
+  //    we'd risk deleting Sir's only working connection if he abandoned OAuth.
+  let newStatus = "";
+  try {
+    const newResp = await fetch(
+      `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(entry.new_connection_id)}`,
+      { headers: { "x-api-key": apiKey } },
+    );
+    if (newResp.status === 404) {
+      // New connection vanished — no point keeping ledger entry around.
+      return "purged";
+    }
+    if (newResp.ok) {
+      const newConn = (await newResp.json()) as any;
+      newStatus = String(newConn.status ?? "").toUpperCase();
+    }
+  } catch {
+    // Network / Composio outage — leave entry, retry later.
+    return "kept";
+  }
+
+  if (newStatus !== "ACTIVE") {
+    return "kept";
+  }
+
+  // 2. Delete the old connection.
+  try {
+    const delResp = await fetch(
+      `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(entry.old_connection_id)}`,
+      { method: "DELETE", headers: { "x-api-key": apiKey } },
+    );
+    // 404 = already gone, treat as success.
+    if (!delResp.ok && delResp.status !== 404) {
+      return "kept";
+    }
+  } catch {
+    return "kept";
+  }
+  return "deleted";
+}
+
+interface ReapSummary {
+  deleted: string[];
+  kept: string[];
+  purged: string[];
+}
+
+async function reapReconnectLedger(apiKey: string, opts?: { force?: boolean }): Promise<ReapSummary> {
+  const summary: ReapSummary = { deleted: [], kept: [], purged: [] };
+  const ledger = readReconnectLedger();
+  if (ledger.length === 0) return summary;
+
+  const now = Date.now();
+  const remaining: ReconnectLedgerEntry[] = [];
+
+  for (const entry of ledger) {
+    if (!opts?.force && now < entry.cleanup_after) {
+      remaining.push(entry);
+      continue;
+    }
+    const outcome = await reapReconnectEntry(entry, apiKey);
+    if (outcome === "deleted") {
+      summary.deleted.push(entry.old_connection_id);
+    } else if (outcome === "purged") {
+      summary.purged.push(entry.old_connection_id);
+    } else {
+      summary.kept.push(entry.old_connection_id);
+      remaining.push(entry);
+    }
+  }
+  writeReconnectLedger(remaining);
+  return summary;
+}
+
+/**
+ * Schedule an in-process timer to reap a single ledger entry once its grace
+ * window elapses. Fast-path optimization — the lazy reaper will catch it
+ * either way if ctrl-api restarts before the timer fires.
+ *
+ * The timer is unrefed so it does NOT block process shutdown.
+ */
+function scheduleInProcessReap(entry: ReconnectLedgerEntry): void {
+  const delay = Math.max(0, entry.cleanup_after - Date.now());
+  // Cap at a sane upper bound — if the entry is in the far future for some
+  // reason, don't sit on a 30-day timer.
+  const capped = Math.min(delay, 24 * 60 * 60 * 1000);
+  const timer = setTimeout(async () => {
+    try {
+      const apiKey = process.env.COMPOSIO_API_KEY || "";
+      if (!apiKey) return;
+      await reapReconnectLedger(apiKey);
+    } catch (err: any) {
+      console.error(`[reconnect] in-process reaper failed: ${err?.message ?? err}`);
+    }
+  }, capped);
+  if (typeof timer.unref === "function") timer.unref();
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -1040,6 +1222,168 @@ export function registerIntegrationRoutes(): void {
       });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to disconnect: ${err.message}` });
+    }
+  });
+
+  // =========================================================================
+  // POST /api/v1/integrations/:id/reconnect — refresh an expired OAuth in one call
+  //
+  // Composio OAuth tokens expire (Gmail every few weeks, Calendar similar). The
+  // pre-existing 4-step recovery dance (lookup toolkit → connect → wait → maybe
+  // delete-old) is too fiddly for the agent to get right every time, so this
+  // endpoint collapses it into one operation.
+  //
+  // What this does:
+  //   1. Look up the existing connection by id; assert it belongs to this
+  //      tenant (defense against cross-tenant id guessing). 404 if missing.
+  //   2. Reuse the SAME auth_config_id and SAME user_id to create a NEW
+  //      connected_account, returning the OAuth URL.
+  //   3. Append a ledger entry so the OLD connection is reaped 1h after the
+  //      NEW one becomes ACTIVE. The old one stays alive during the grace
+  //      window so in-flight tool calls / open sessions don't break.
+  //   4. Schedule an in-process timer for the reaper. Lazy reaper also runs
+  //      on every reconnect call + on POST /reconnect-cleanup to survive
+  //      ctrl-api restarts.
+  //
+  // The agent should:
+  //   - Surface `new_connection_link` to Sir verbatim.
+  //   - Wait for him to complete the OAuth handshake.
+  //   - Confirm via GET /api/v1/integrations or :id/capabilities on the new id.
+  //   - DO NOT delete the old connection manually — the reaper handles it.
+  // =========================================================================
+  addRoute("POST", "/api/v1/integrations/:id/reconnect", async ({ res, params }) => {
+    const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
+    const oldConnId = params.id;
+
+    try {
+      // 1. Lookup + ownership check.
+      const oldConn = await assertConnectionOwnedByTenant(res, oldConnId, userId, apiKey);
+      if (!oldConn) return; // assertConnectionOwnedByTenant already sent 404/500
+
+      const oldConnAny = oldConn as any;
+      const toolkit = String(oldConnAny.toolkit?.slug ?? oldConnAny.appName ?? "").toLowerCase();
+      const authConfigId =
+        oldConnAny.auth_config?.id ??
+        oldConnAny.authConfig?.id ??
+        oldConnAny.auth_config_id ??
+        oldConnAny.authConfigId ??
+        null;
+      const oldExpiresAt =
+        oldConnAny.expires_at ??
+        oldConnAny.expiresAt ??
+        oldConnAny.expiry ??
+        null;
+
+      if (!toolkit) {
+        sendJson(res, 422, {
+          error: "Connection has no toolkit_slug — cannot reconnect",
+          connection_id: oldConnId,
+        });
+        return;
+      }
+      if (!authConfigId) {
+        sendJson(res, 422, {
+          error: "Connection has no auth_config_id — cannot reconnect (try /connect with toolkit_slug)",
+          connection_id: oldConnId,
+          toolkit,
+        });
+        return;
+      }
+
+      // 2. Create a NEW connected_account against the SAME auth_config + user_id.
+      const connectResp = await fetch(`${COMPOSIO_API_V3}/connected_accounts`, {
+        method: "POST",
+        headers: {
+          "x-api-key": apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          auth_config: { id: authConfigId },
+          connection: { user_id: userId },
+        }),
+      });
+
+      if (!connectResp.ok) {
+        const errText = await connectResp.text().catch(() => "");
+        sendJson(res, connectResp.status, {
+          error: `Composio reconnect error: ${connectResp.status}`,
+          detail: errText.slice(0, 500),
+        });
+        return;
+      }
+
+      const connectData = (await connectResp.json()) as any;
+      const newConnectLink =
+        connectData.redirect_url ??
+        connectData.redirect_uri ??
+        connectData.redirectUrl ??
+        "";
+      const newConnId = connectData.id ?? "";
+
+      // 3. Persist the ledger entry so the reaper knows about this pair.
+      const now = Date.now();
+      const ledgerEntry: ReconnectLedgerEntry = {
+        old_connection_id: oldConnId,
+        new_connection_id: newConnId,
+        toolkit,
+        user_id: userId,
+        scheduled_at: now,
+        cleanup_after: now + RECONNECT_GRACE_MS,
+      };
+      appendReconnectLedger(ledgerEntry);
+
+      // 4. Schedule in-process reap + opportunistically reap any past-due entries.
+      scheduleInProcessReap(ledgerEntry);
+      reapReconnectLedger(apiKey).catch(() => { /* best effort */ });
+
+      sendJson(res, 200, {
+        old_connection_id: oldConnId,
+        new_connection_id: newConnId,
+        new_connection_link: newConnectLink,
+        app: toolkit,
+        toolkit,
+        expires_at: oldExpiresAt,
+        cleanup_after_ms: ledgerEntry.cleanup_after,
+        grace_window_seconds: Math.round(RECONNECT_GRACE_MS / 1000),
+        instructions:
+          "Send this link to Sir. After he completes the OAuth handshake, " +
+          "the new connection will become ACTIVE. The old connection will be " +
+          "cleaned up automatically 1 hour after the new one is verified ACTIVE.",
+      });
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Failed to initiate reconnect: ${err.message}` });
+    }
+  });
+
+  // =========================================================================
+  // POST /api/v1/integrations/reconnect-cleanup — drain expired ledger entries
+  //
+  // Manual / scheduled reaper for the reconnect ledger. Safe to call any time.
+  // Without `force=1`, only entries whose grace window (1h) has elapsed are
+  // considered. With `force=1`, every entry is checked immediately — useful
+  // for ops if Sir has explicitly confirmed the new connection is healthy and
+  // wants the old one gone right now.
+  //
+  // This endpoint is intentionally a manual trigger today. A follow-up Temporal
+  // schedule (e.g. al-reconnect-reaper, every 15 min) should call this so the
+  // grace window survives ctrl-api restarts even when the in-process timer is
+  // lost. See #645.
+  // =========================================================================
+  addRoute("POST", "/api/v1/integrations/reconnect-cleanup", async ({ res, query }) => {
+    const apiKey = getComposioApiKey();
+    const force = query.get("force") === "1";
+    try {
+      const summary = await reapReconnectLedger(apiKey, { force });
+      sendJson(res, 200, {
+        deleted: summary.deleted,
+        kept: summary.kept,
+        purged: summary.purged,
+        ledger_size_remaining: readReconnectLedger().length,
+        forced: force,
+      });
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Reaper failed: ${err.message}` });
     }
   });
 
