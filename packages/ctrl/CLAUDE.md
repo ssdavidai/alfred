@@ -108,6 +108,29 @@ Nunjucks templates imported as strings at build time:
 - `bootstrap-openclaw.sh.njk` — OpenClaw + Tailscale setup script
 - `cloudflared-config.yaml.njk` — Cloudflare Tunnel ingress rules
 
+#### Compose resource limits — source of truth
+
+`docker-compose.yaml.njk` is the canonical baseline for every per-tenant `mem_limit`, `pids_limit`, and Node `--max-old-space-size` in the fleet. Live tenant on-disk compose files only get the new values on the next regen sweep, so periodic drift between the template and `/opt/alfred/compose/docker-compose.yaml` on each VPS is expected.
+
+Current canonical values (last reconciled 2026-04-25, #145):
+
+| Service | mem_limit | pids_limit | Node heap |
+|---|---|---|---|
+| `init` | (none) | (none) | — |
+| `temporal` | 2g | 1024 | — |
+| `ollama` | 2g | 512 | — |
+| `openclaw` (main gateway) | 4g | 2048 | 3072 MB |
+| `openclaw-workers` | 6g | 2048 | 4096 MB |
+| `alfred` (worker daemons) | 2g | 512 | — |
+| `ctrl-api` | 1g | 1024 | 768 MB |
+| `alfred-learn` | 4g | 512 | — |
+
+The `openclaw-workers` 4096/6g sizing is non-negotiable: a busy tenant's `loadTaskRegistryStateFromSqlite` boot path materializes the entire `task_runs` table as UTF-16 strings on the JS heap, and 3072 MB only buys ~7 days of headroom before OOM. See PR #567 for the original analysis. Live evidence as of 2026-04-25: Rapali openclaw-workers RSS = 5.5 GiB / 6 GiB (92% of mem_limit), David RSS = 3.9 GiB / 4 GiB (97%, would already OOM under template defaults). The template values exist BECAUSE the higher numbers are needed under real load.
+
+When reconciling drift, the policy is:
+- **Template drifts down from a tenant** (template value < tenant value): treat the tenant value as evidence the template is undersized, raise the template, then push to other tenants. Don't shrink live tenants.
+- **Template drifts up from a tenant** (template value > tenant value): live tenant on-disk file is stale, run a regen sweep or hand-patch the relevant block + `docker compose up -d --force-recreate <service>`. For `pids_limit` only (no restart needed), `docker update --pids-limit <N> <container>` is a safe live patch in addition to the on-disk fix.
+
 ### Data Files (not in source control)
 
 - `data/alfred-ctrl.db` — SQLite database
