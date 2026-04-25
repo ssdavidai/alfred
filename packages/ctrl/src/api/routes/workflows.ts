@@ -1,9 +1,15 @@
 import fs from "node:fs";
+import path from "node:path";
 import { addRoute } from "../server.js";
-import { sendJson, ValidationError } from "../errors.js";
+import { sendJson, ApiError, ValidationError } from "../errors.js";
 import { dockerExec, parseJsonLines } from "../helpers.js";
 
 const ONBOARD_JSON_PATH = "/mnt/encrypted/alfred/onboard.json";
+
+// Vault chore record dir. Kept in sync with VAULT_PATH from vault.ts (which we
+// don't import here because the user-set file boundaries for #144 forbid
+// editing other route files; chore lookup is read-only and the path is stable).
+const CHORE_RECORD_DIR = "/mnt/encrypted/vault/chore";
 
 export function registerWorkflowRoutes(): void {
   // --- Workflows ---
@@ -303,6 +309,13 @@ export function registerWorkflowRoutes(): void {
   // Rewrite a schedule's cron in place by DELETE + CREATE. Preserves workflow
   // type, task queue, and input. Needed because Temporal CLI has no
   // update-cron verb and the old schedules on fleet are wrong — see #475.
+  //
+  // For chore schedules (schedule_id starts with `chore-`), this also updates
+  // the vault chore record's frontmatter `schedule:` field atomically, so the
+  // vault and Temporal can never drift after a successful call. Before #144
+  // callers had to issue a second PATCH against the chore record themselves;
+  // most callers forgot, leaving the audit script (which reads vault FM, not
+  // Temporal) showing the old cron. See #478.
   addRoute("POST", "/api/v1/schedules/:schId/rewrite-cron", async ({ res, params, body }) => {
     const b = body as Record<string, unknown> | undefined;
     if (!b || typeof b.cron !== "string" || !(b.cron as string).trim()) {
@@ -373,15 +386,150 @@ export function registerWorkflowRoutes(): void {
     if (overlapFlag) createArgs.push("--overlap-policy", overlapFlag);
 
     const createOut = await dockerExec("temporal", createArgs);
+
+    // 4. Atomically update the vault chore record's frontmatter `schedule:`
+    //    field if this is a chore schedule. Pre-#144 the rewrite-cron caller
+    //    was responsible for issuing a separate PATCH against
+    //    /api/v1/vault/records/chore/<slug>.md to update the FM; if they
+    //    forgot, the audit script (which reads vault FM, not Temporal) saw
+    //    the stale cron and flagged the chore as still broken. Now we do
+    //    both updates here so callers can't half-apply the fix.
+    //
+    //    If Temporal succeeded but the vault FM update fails, we surface a
+    //    500 with `partial_state: true` and details about which side is
+    //    authoritative — caller must retry to converge.
+    const vaultUpdate = _maybeUpdateChoreFrontmatterSchedule(schId, newCron);
+    if (vaultUpdate.attempted && !vaultUpdate.ok) {
+      console.error(
+        `[rewrite-cron] PARTIAL STATE on ${schId}: Temporal updated to "${newCron}" but vault FM update failed: ${vaultUpdate.error}`,
+      );
+      throw new ApiError(
+        500,
+        "PARTIAL_STATE",
+        `Schedule ${schId} updated in Temporal to "${newCron}" but vault chore frontmatter update FAILED — vault and Temporal are now divergent. Retry the same call to converge.`,
+        {
+          partial_state: true,
+          temporal_updated: true,
+          vault_updated: false,
+          new_cron: newCron,
+          schedule_id: schId,
+          vault_path: vaultUpdate.vaultPath,
+          vault_error: vaultUpdate.error,
+        },
+      );
+    }
+
     sendJson(res, 200, {
       message: "Schedule rewritten",
       schedule_id: schId,
       old_cron_replaced: true,
       new_cron: newCron,
       workflow_type: workflowType,
+      temporal_updated: true,
+      // `vault_updated` reflects "did we successfully touch the vault FM in
+      // this call" — false for non-chore schedules and for chore schedules
+      // whose vault record is missing. `vault_skip_reason` carries the
+      // explanation when false, so callers (and the audit script) can tell
+      // whether to escalate.
+      vault_updated: vaultUpdate.attempted && vaultUpdate.ok,
+      vault_skip_reason: vaultUpdate.skipReason,
+      vault_path: vaultUpdate.vaultPath,
       raw: createOut.trim() || undefined,
     });
   });
+}
+
+/**
+ * Atomic companion to the rewrite-cron Temporal flow. If schId looks like a
+ * chore schedule (`chore-<slug>`) and a vault chore record exists at
+ * /mnt/encrypted/vault/chore/<slug>.md, rewrite the frontmatter `schedule:`
+ * line in place to match newCron.
+ *
+ * Returns:
+ *   { attempted: false, ok: true, skipReason }  — not a chore schedule, or no
+ *                                                  vault record exists. Treat
+ *                                                  as success (Temporal-only).
+ *   { attempted: true,  ok: true,  vaultPath }  — FM rewritten successfully.
+ *   { attempted: true,  ok: false, error,
+ *     vaultPath }                                — write or read failed. Caller
+ *                                                  must surface 500.
+ *
+ * Idempotent: rewriting the same cron twice in a row leaves the file in the
+ * same state.
+ */
+export function _maybeUpdateChoreFrontmatterSchedule(
+  schId: string,
+  newCron: string,
+): {
+  attempted: boolean;
+  ok: boolean;
+  vaultPath?: string;
+  skipReason?: string;
+  error?: string;
+} {
+  if (!schId.startsWith("chore-")) {
+    return { attempted: false, ok: true, skipReason: "schedule_id is not a chore schedule" };
+  }
+  const slug = schId.slice("chore-".length);
+  if (!slug || !/^[a-z0-9][a-z0-9-]*[a-z0-9]?$/.test(slug)) {
+    return { attempted: false, ok: true, skipReason: `derived slug "${slug}" is not a valid chore slug` };
+  }
+  const vaultPath = path.join(CHORE_RECORD_DIR, `${slug}.md`);
+  if (!fs.existsSync(vaultPath)) {
+    return {
+      attempted: false,
+      ok: true,
+      vaultPath,
+      skipReason: `no vault chore record at ${vaultPath}`,
+    };
+  }
+  try {
+    const content = fs.readFileSync(vaultPath, "utf-8");
+    if (!content.startsWith("---")) {
+      return {
+        attempted: true,
+        ok: false,
+        vaultPath,
+        error: `vault record at ${vaultPath} has no frontmatter block`,
+      };
+    }
+    const fmEnd = content.indexOf("\n---", 3);
+    if (fmEnd === -1) {
+      return {
+        attempted: true,
+        ok: false,
+        vaultPath,
+        error: `vault record at ${vaultPath} has unterminated frontmatter block`,
+      };
+    }
+    const fmBlock = content.slice(0, fmEnd);
+    const rest = content.slice(fmEnd);
+    // YAML-safe single-quoted scalar — must mirror chores.ts's yamlScalarQuote.
+    const quoted = `'${newCron.replace(/'/g, "''")}'`;
+    let updatedFm: string;
+    if (/^schedule:\s*.*$/m.test(fmBlock)) {
+      updatedFm = fmBlock.replace(/^schedule:\s*.*$/m, `schedule: ${quoted}`);
+    } else {
+      // No existing schedule line — append one just before the closing fence.
+      // This shouldn't happen for a real chore record, but it's safer to
+      // insert than silently leave the FM stale.
+      updatedFm = fmBlock + `\nschedule: ${quoted}`;
+    }
+    if (updatedFm === fmBlock) {
+      // Idempotent no-op: the schedule line was already correct. Treat as a
+      // successful update so callers see vault_updated: true and don't retry.
+      return { attempted: true, ok: true, vaultPath };
+    }
+    fs.writeFileSync(vaultPath, updatedFm + rest, "utf-8");
+    return { attempted: true, ok: true, vaultPath };
+  } catch (err) {
+    return {
+      attempted: true,
+      ok: false,
+      vaultPath,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 function _extractCurrentInput(startWorkflow: any): string | undefined {
