@@ -47,3 +47,18 @@ Phase 5: Dashboard (`packages/saas` changes)
 Phase 6: Tests + polish
 
 Start with Phase 1. Get the worker booting and connecting to Temporal before writing any workflow logic.
+
+## Temporal workflow rewrites
+
+Temporal replays workflow history deterministically. Renaming an activity, reordering logic inside a workflow, or changing a workflow signature breaks replay for in-flight workflows started under the old code, surfacing as `NonDeterministicError` and stalling them until manually terminated.
+
+Before merging any PR that touches `packages/learn/src/workflows/**` or `packages/learn/src/activities/**`, confirm:
+
+- No activity renamed without a backwards-compat shim under the old name (`@activity.defn(name="old_name")`)
+- No workflow signature change that breaks history replay (params added/removed/reordered)
+- Logic-order changes inside a workflow gated with `workflow.patched(<name>)` or `use_compatible_version()`
+- New activities registered in `packages/learn/src/worker.py`
+- Pre-deploy plan documented for in-flight workflows: terminate, drain, OR rely on patched-version compat
+- Tested locally with a workflow started under old code + replayed under new code, if the change is non-additive
+
+Worked example: PR #628 (paginate `plane_sync.fetch_changed_tasks`) renamed activities and rewrote workflow logic without `workflow.patched()`. In-flight workflows hit `NonDeterministicError` post-deploy on David + Rapali, stalled for 12+ minutes, and required manual termination.
