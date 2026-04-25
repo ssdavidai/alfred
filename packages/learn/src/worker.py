@@ -30,6 +30,9 @@ from src.workflows.plane_sync_nudge import PlaneSyncNudgeWorkflow
 from src.workflows.plane_reverse_sync import PlaneReverseSyncWorkflow
 from src.workflows.plane_reconciliation import PlaneReconciliationWorkflow
 from src.workflows.fleet_audit import FleetAuditWorkflow
+from src.workflows.composio_reconnect_cleanup import (
+    ComposioReconnectCleanupWorkflow,
+)
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -321,6 +324,17 @@ from src.activities.fleet_audit import (
     write_fleet_audit_observation,
 )
 
+# Composio reconnect cleanup (#645) — Temporal-scheduled safety-net reaper for
+# the persistent reconnect ledger written by ctrl-api after PR #646. Coexists
+# with the in-process setTimeout fast path on ctrl-api; ledger semantics are
+# idempotent so whichever side wins the race, wins.
+from src.activities.composio_reconnect import (
+    delete_old_connection,
+    read_reconnect_ledger,
+    remove_ledger_entry,
+    verify_new_connection_active,
+)
+
 # Plane reverse sync (#536 B7) — Plane → vault ingress activities
 from src.activities.plane_reverse_sync import (
     append_plane_comment_to_vault,
@@ -375,6 +389,7 @@ _STATIC_WORKFLOWS = [
     PlaneReverseSyncWorkflow,
     PlaneReconciliationWorkflow,
     FleetAuditWorkflow,
+    ComposioReconnectCleanupWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -588,6 +603,11 @@ ALL_ACTIVITIES = [
     fleet_audit_is_enabled,
     audit_streams_for_owner_mismatch,
     write_fleet_audit_observation,
+    # Composio reconnect cleanup (#645)
+    read_reconnect_ledger,
+    verify_new_connection_active,
+    delete_old_connection,
+    remove_ledger_entry,
     # Plane reverse sync (#536 B7)
     plane_reverse_sync_is_enabled,
     load_reverse_sync_state,

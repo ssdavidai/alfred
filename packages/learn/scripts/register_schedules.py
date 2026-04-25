@@ -99,6 +99,21 @@ INTERVAL_SCHEDULES = [
         "workflow": "OmiAudioProcessorWorkflow",
         "interval": timedelta(minutes=10),
     },
+    {
+        # #645 — safety-net reaper for the persistent Composio reconnect
+        # ledger written by ctrl-api after PR #646. The ctrl-api side has
+        # an in-process setTimeout fast path; this Temporal schedule
+        # guarantees cleanup eventually fires even if ctrl-api restarts
+        # before the in-process timer (1h grace) elapses. 15-minute cadence
+        # matches the other low-priority interval workflows; ledger
+        # semantics are idempotent so overlap is harmless but we still
+        # SKIP for hygiene (see the schedule policy below — interval
+        # schedules in this list don't currently set an explicit policy,
+        # so overlap defaults to ALLOW which is fine here).
+        "id": "al-composio-reconnect-cleanup",
+        "workflow": "ComposioReconnectCleanupWorkflow",
+        "interval": timedelta(minutes=15),
+    },
 ]
 
 CALENDAR_SCHEDULES = [
