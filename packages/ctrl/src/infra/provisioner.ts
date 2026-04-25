@@ -49,6 +49,7 @@ import workspaceAgents from "../templates/workspace/AGENTS.md";
 import workspaceSoul from "../templates/workspace/SOUL.md";
 import workspaceMemory from "../templates/workspace/MEMORY.md";
 import workspaceUser from "../templates/workspace/USER.md";
+import workspaceKnownContacts from "../templates/workspace/KNOWN_CONTACTS.md.njk";
 import hookReadme from "../hooks/alfred-inbox/HOOK.md";
 // @ts-expect-error esbuild plugin loads handler.js as text
 import hookHandler from "../hooks/alfred-inbox/handler.js";
@@ -489,20 +490,37 @@ export async function provision(
       hostKeyOpts,
     );
 
-    // Upload workspace files (AGENTS.md, SOUL.md, MEMORY.md, USER.md)
-    // These provide the baked-in Alfred persona, entity-check rules, and
-    // memory structure that every tenant instance must start with.
+    // Upload workspace files (AGENTS.md, SOUL.md, MEMORY.md, USER.md, KNOWN_CONTACTS.md)
+    // These provide the baked-in Alfred persona, entity-check rules, the
+    // memory structure, and the channel-delivery shortcut table that every
+    // tenant instance must start with.
     log("Uploading workspace files...");
     const workspaceBasePath = "/mnt/encrypted/openclaw/workspace";
     const renderedUser = nunjucks.renderString(workspaceUser, {
       customer_name: config.customer_name,
       customer_email: config.customer_email ?? "",
     });
+    // KNOWN_CONTACTS.md.njk is rendered with whatever owner / channel data
+    // we already know at provision time. Slack + Telegram IDs only become
+    // available after the user pairs (so they start blank — the skill teaches
+    // Alfred to fall back to discovery and write the IDs back here once
+    // captured). AgentMail address is set if the inbox was provisioned ahead
+    // of this job; AgentPhone number is provisioned later (in
+    // provisionAgentPhone) and will land blank on first render.
+    const renderedKnownContacts = nunjucks.renderString(workspaceKnownContacts, {
+      customer_name: config.customer_name,
+      customer_email: config.customer_email ?? "",
+      owner_email: process.env.TENANT_OWNER_EMAIL ?? config.customer_email ?? "",
+      owner_display_name: "",
+      agentmail_inbox: process.env.TENANT_AGENTMAIL_INBOX_ADDRESS ?? "",
+      agentphone_number: "",
+    });
     await Promise.all([
       ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, workspaceAgents, `${workspaceBasePath}/AGENTS.md`, 0o644, undefined, hostKeyOpts),
       ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, workspaceSoul, `${workspaceBasePath}/SOUL.md`, 0o644, undefined, hostKeyOpts),
       ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, workspaceMemory, `${workspaceBasePath}/MEMORY.md`, 0o644, undefined, hostKeyOpts),
       ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, renderedUser, `${workspaceBasePath}/USER.md`, 0o644, undefined, hostKeyOpts),
+      ssh.upload(server.public_net.ipv4.ip, keyPair.privateKeyPath, renderedKnownContacts, `${workspaceBasePath}/KNOWN_CONTACTS.md`, 0o644, undefined, hostKeyOpts),
     ]);
     log("Workspace files uploaded");
 

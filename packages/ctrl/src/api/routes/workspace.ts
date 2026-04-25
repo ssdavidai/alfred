@@ -4,7 +4,7 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 
 const WORKSPACE_DIR = "/mnt/encrypted/openclaw/workspace";
-const ALLOWED_FILES = new Set(["SOUL.md", "USER.md", "MEMORY.md", "AGENTS.md", "TOOLS.md"]);
+const ALLOWED_FILES = new Set(["SOUL.md", "USER.md", "MEMORY.md", "AGENTS.md", "TOOLS.md", "KNOWN_CONTACTS.md"]);
 
 function validateFilename(filename: string): void {
   if (!filename || !ALLOWED_FILES.has(filename)) {
