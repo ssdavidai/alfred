@@ -1151,63 +1151,73 @@ export function registerIntegrationRoutes(): void {
         } catch { /* schedule may not exist */ }
       }
 
-      // 6. Clean up: remove Composio tool slugs from gateway.tools.allow
+      // 6 + 7. Per-toolkit cleanup, scoped to the deleted connection.
+      //
+      // Only strip the toolkit's `<TOOLKIT>_*` allow-list prefix and delete
+      // the shared `alfred-composio-<toolkit>` skill dir IF no other ACTIVE
+      // connection of the same toolkit remains for this tenant. With more
+      // than one connection of the same toolkit (e.g. two Gmail accounts
+      // for personal + work), the surviving connections still need both the
+      // tool surface and the skill file.
+      //
+      // We deliberately do NOT touch the global `composio_execute` tool nor
+      // do we sweep all toolkit prefixes here. Issue #658: the previous
+      // global cleanup branch (former step 8) trusted Composio's broken
+      // `?user_id=` query and would strip the entire Composio surface even
+      // when 8+ active connections survived. Global cleanup is now an
+      // explicit operation — see POST /api/v1/integrations/disconnect-all.
       const removedTools: string[] = [];
-      let toolsAllowMutated = false;
-      if (toolkit) {
-        try {
-          const cfg = readOpenclawConfig();
-          const allow: string[] = cfg?.gateway?.tools?.allow || [];
-          const prefix = toolkit.toUpperCase() + "_";
-          const kept = allow.filter((t) => {
-            if (t.startsWith(prefix)) {
-              removedTools.push(t);
-              return false;
-            }
-            return true;
-          });
-          if (removedTools.length > 0) {
-            cfg.gateway.tools.allow = kept;
-            writeOpenclawConfig(cfg);
-            toolsAllowMutated = true;
-          }
-        } catch { /* openclaw config cleanup is best-effort */ }
-      }
-
-      // 7. Clean up: remove skill files from both workspaces
       let skillRemoved = false;
-      if (toolkit) {
-        const skillDirName = `alfred-composio-${toolkit}`;
-        for (const baseDir of [OPENCLAW_SKILLS_DIR, OPENCLAW_WORKERS_SKILLS_DIR]) {
-          try {
-            fs.rmSync(path.join(baseDir, skillDirName), { recursive: true, force: true });
-            skillRemoved = true;
-          } catch { /* ok */ }
-        }
-      }
+      let toolsAllowMutated = false;
 
-      // 8. If no Composio connections remain for THIS tenant, remove
-      //    composio_execute from gateway. Scoped by user_id so one tenant
-      //    disconnecting does not yank the tool from another tenant.
-      let composioExecuteRemoved = false;
-      try {
-        const remainingUrl = new URL(`${COMPOSIO_API_V3}/connected_accounts`);
-        remainingUrl.searchParams.set("user_id", userId);
-        const remainingResp = await fetch(remainingUrl.toString(), {
-          headers: { "x-api-key": apiKey },
-        });
-        if (remainingResp.ok) {
-          const remainingData = (await remainingResp.json()) as any;
-          const remaining = (Array.isArray(remainingData.items) ? remainingData.items : [])
-            .filter((a: any) => a.status === "ACTIVE" && accountMatchesUserId(a, userId));
-          if (remaining.length === 0) {
-            if (removeToolFromGateway("ctrl_composio_execute")) {
+      if (toolkit) {
+        let lastOfToolkit = false;
+        try {
+          const owned = await fetchAllOwnedConnectedAccounts(apiKey, userId);
+          const sameToolkitActive = owned.filter(
+            (a: any) =>
+              a.id !== connId &&
+              a.status === "ACTIVE" &&
+              ((a.toolkit?.slug ?? a.appName ?? "") as string).toLowerCase() === toolkit,
+          );
+          lastOfToolkit = sameToolkitActive.length === 0;
+        } catch {
+          // If we cannot determine the remaining count, err on the side of
+          // PRESERVING surface — better to leave a dead toolkit prefix in
+          // place than to strip a surface that survivors still need.
+          lastOfToolkit = false;
+        }
+
+        if (lastOfToolkit) {
+          // 6. Strip <TOOLKIT>_* prefix from gateway.tools.allow
+          try {
+            const cfg = readOpenclawConfig();
+            const allow: string[] = cfg?.gateway?.tools?.allow || [];
+            const prefix = toolkit.toUpperCase() + "_";
+            const kept = allow.filter((t) => {
+              if (t.startsWith(prefix)) {
+                removedTools.push(t);
+                return false;
+              }
+              return true;
+            });
+            if (removedTools.length > 0) {
+              cfg.gateway.tools.allow = kept;
+              writeOpenclawConfig(cfg);
               toolsAllowMutated = true;
             }
-            composioExecuteRemoved = true;
+          } catch { /* openclaw config cleanup is best-effort */ }
+
+          // 7. Remove shared per-toolkit skill dir
+          const skillDirName = `alfred-composio-${toolkit}`;
+          for (const baseDir of [OPENCLAW_SKILLS_DIR, OPENCLAW_WORKERS_SKILLS_DIR]) {
+            try {
+              fs.rmSync(path.join(baseDir, skillDirName), { recursive: true, force: true });
+              skillRemoved = true;
+            } catch { /* ok */ }
           }
         }
-      } catch { /* best effort */ }
+      }
 
       sendJson(res, 200, {
         status: "disconnected",
@@ -1217,11 +1227,173 @@ export function registerIntegrationRoutes(): void {
         deleted_schedules: deletedSchedules,
         removed_tools: removedTools,
         skill_removed: skillRemoved,
-        composio_execute_removed: composioExecuteRemoved,
         gateway_restart_triggered: toolsAllowMutated,
       });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to disconnect: ${err.message}` });
+    }
+  });
+
+  // =========================================================================
+  // POST /api/v1/integrations/disconnect-all — explicit global Composio reset
+  //
+  // Decoupled from the per-id DELETE handler in PR for #658. Previously the
+  // DELETE handler tried to detect "this was the last Composio connection"
+  // and globally tear down the Composio surface. That detection trusted
+  // Composio's broken `?user_id=` filter and fired even with 8+ surviving
+  // connections, vapourising the entire tool surface mid-conversation.
+  //
+  // Global cleanup is now an explicit user action ("disconnect all
+  // integrations" button on the dashboard, or operator API call). Steps:
+  //   1. Enumerate ALL of the tenant's Composio connections (paginated, no
+  //      reliance on the broken server-side user_id filter).
+  //   2. DELETE each at Composio.
+  //   3. Best-effort cleanup of stream configs, streams.json, Temporal
+  //      schedules backed by any of those connection ids.
+  //   4. Strip every `<TOOLKIT>_*` allow-list entry across both openclaw
+  //      configs (only the toolkits we actually disconnected — preserves
+  //      any unrelated entries someone might have hand-added).
+  //   5. Remove `composio_execute` from the gateway allowlist.
+  //   6. Delete every `alfred-composio-*` skill dir from both workspaces.
+  // =========================================================================
+  addRoute("POST", "/api/v1/integrations/disconnect-all", async ({ res }) => {
+    const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
+
+    try {
+      // 1. Enumerate.
+      const owned = await fetchAllOwnedConnectedAccounts(apiKey, userId);
+      const disconnectedIds: string[] = [];
+      const failedIds: string[] = [];
+      const toolkits = new Set<string>();
+      for (const a of owned) {
+        const id = String(a.id ?? "");
+        const toolkit = String((a.toolkit?.slug ?? a.appName ?? "") as string).toLowerCase();
+        if (!id) continue;
+        if (toolkit) toolkits.add(toolkit);
+
+        // 2. DELETE at Composio.
+        try {
+          const delResp = await fetch(
+            `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(id)}`,
+            { method: "DELETE", headers: { "x-api-key": apiKey } },
+          );
+          if (!delResp.ok && delResp.status !== 404) {
+            failedIds.push(id);
+            continue;
+          }
+        } catch {
+          failedIds.push(id);
+          continue;
+        }
+        disconnectedIds.push(id);
+      }
+
+      // 3. Stream config + streams.json + Temporal schedule cleanup.
+      const cleanedStreams: string[] = [];
+      const deletedSchedules: string[] = [];
+      const disconnectedSet = new Set(disconnectedIds);
+      try {
+        fs.mkdirSync(STREAM_CONFIGS_DIR, { recursive: true });
+        const configFiles = fs.readdirSync(STREAM_CONFIGS_DIR).filter((f) => f.endsWith(".json"));
+        for (const file of configFiles) {
+          const configPath = path.join(STREAM_CONFIGS_DIR, file);
+          try {
+            const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+            if (config.composio_connection_id && disconnectedSet.has(config.composio_connection_id)) {
+              cleanedStreams.push(config.id || file.replace(".json", ""));
+              fs.unlinkSync(configPath);
+            }
+          } catch { /* skip unreadable */ }
+        }
+      } catch { /* best effort */ }
+
+      if (cleanedStreams.length > 0) {
+        try {
+          const streamsMetaPath = path.join(STREAMS_DIR, "streams.json");
+          let streams: any[] = JSON.parse(fs.readFileSync(streamsMetaPath, "utf-8"));
+          const cleanedSet = new Set(cleanedStreams);
+          streams = streams.filter((s: any) => !cleanedSet.has(s.id));
+          fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+        } catch { /* ok */ }
+      }
+
+      for (const streamId of cleanedStreams) {
+        const scheduleId = `al-stream-pull-composio-${streamId.slice(0, 20)}`;
+        try {
+          await dockerExec("temporal", [
+            "temporal", "schedule", "delete", "--schedule-id", scheduleId,
+          ]);
+          deletedSchedules.push(scheduleId);
+        } catch { /* ok */ }
+      }
+
+      // 4 + 5. Strip every <TOOLKIT>_* prefix we know about, plus
+      //        composio_execute itself.
+      const removedTools: string[] = [];
+      let toolsAllowMutated = false;
+      try {
+        const cfg = readOpenclawConfig();
+        const allow: string[] = cfg?.gateway?.tools?.allow || [];
+        const prefixes = [...toolkits].map((t) => t.toUpperCase() + "_");
+        const kept = allow.filter((t) => {
+          if (t === "composio_execute") {
+            removedTools.push(t);
+            return false;
+          }
+          for (const p of prefixes) {
+            if (t.startsWith(p)) {
+              removedTools.push(t);
+              return false;
+            }
+          }
+          return true;
+        });
+        if (removedTools.length > 0) {
+          cfg.gateway.tools.allow = kept;
+          writeOpenclawConfig(cfg);
+          toolsAllowMutated = true;
+        }
+      } catch { /* best effort */ }
+
+      // Mirror onto the workers config too — ensureToolInGateway /
+      // removeToolFromGateway both touch both, but our above loop only
+      // mutated main. Use removeToolFromGateway for symmetry on both.
+      if (removeToolFromGateway("composio_execute")) {
+        toolsAllowMutated = true;
+      }
+
+      // 6. Delete every alfred-composio-* skill dir.
+      const removedSkillDirs: string[] = [];
+      for (const baseDir of [OPENCLAW_SKILLS_DIR, OPENCLAW_WORKERS_SKILLS_DIR]) {
+        try {
+          fs.mkdirSync(baseDir, { recursive: true });
+          const entries = fs.readdirSync(baseDir);
+          for (const entry of entries) {
+            if (typeof entry === "string" && entry.startsWith("alfred-composio-")) {
+              try {
+                fs.rmSync(path.join(baseDir, entry), { recursive: true, force: true });
+                removedSkillDirs.push(`${baseDir}/${entry}`);
+              } catch { /* ok */ }
+            }
+          }
+        } catch { /* ok */ }
+      }
+
+      sendJson(res, 200, {
+        status: "all_disconnected",
+        disconnected_count: disconnectedIds.length,
+        disconnected_ids: disconnectedIds,
+        failed_ids: failedIds,
+        toolkits: [...toolkits],
+        cleaned_streams: cleanedStreams,
+        deleted_schedules: deletedSchedules,
+        removed_tools: removedTools,
+        removed_skill_dirs: removedSkillDirs,
+        gateway_restart_triggered: toolsAllowMutated,
+      });
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Failed to disconnect all: ${err.message}` });
     }
   });
 
@@ -1514,7 +1686,10 @@ export function registerIntegrationRoutes(): void {
       try {
         const cfg = readOpenclawConfig();
         const allow: string[] = cfg?.gateway?.tools?.allow || [];
-        composioExecuteEnabled = allow.includes("composio_execute") || allow.includes("ctrl_composio_execute");
+        // The legacy `ctrl_composio_execute` name was a ghost (issue #659),
+        // never dispatched, removed from auto-config in this PR. Only the
+        // canonical name signals enabled.
+        composioExecuteEnabled = allow.includes("composio_execute");
       } catch { /* ok */ }
 
       // 5. Build enriched stream_actions + tool_actions with pretty names
@@ -2300,7 +2475,13 @@ print(json.dumps(result, default=str))
       // openclaw will restart its gateway to pick up the new allow-list.
       // The dashboard uses `gateway_restart_triggered` to show a
       // "reconfiguring" banner and mask the ~40s 502 window.
-      const toolAdded = ensureToolInGateway("ctrl_composio_execute");
+      //
+      // The tool name is `composio_execute` (no prefix). The legacy
+      // `ctrl_composio_execute` name was a ghost — never registered in
+      // ctrl-api's TOOLS registry, never dispatched. Removed in PR #431
+      // for tenant-onboarding-time seeding; this auto-config path was
+      // missed in that sweep. See issue #659.
+      const toolAdded = ensureToolInGateway("composio_execute");
       summary.composio_execute_enabled = true;
       summary.gateway_restart_triggered = toolAdded;
 

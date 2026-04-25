@@ -194,8 +194,8 @@ Before calling DELETE, **walk Sir through the blast radius**. The disconnect cas
 - The Composio connected_account (credential gone — he'll need to re-OAuth to reconnect later).
 - All stream configs backed by this connection (Gmail digests, Calendar pulls, GitHub PR streams).
 - The associated Temporal schedules (no more periodic pulls).
-- The skill file in `~/.openclaw/workspace/skills/alfred-composio-<toolkit>/` (you lose the per-app conversational hints).
-- The toolkit's tool-prefix from `gateway.tools.allow` (no more `GMAIL_*` / `GOOGLECALENDAR_*` action calls).
+- The skill file in `~/.openclaw/workspace/skills/alfred-composio-<toolkit>/` (you lose the per-app conversational hints) — **only if this is the LAST connection of that toolkit**. Two Gmail accounts? Disconnecting one keeps the skill alive for the survivor.
+- The toolkit's tool-prefix from `gateway.tools.allow` (no more `GMAIL_*` / `GOOGLECALENDAR_*` action calls) — **also only if this is the LAST connection of that toolkit** (issue #658).
 
 If Sir has a daily chore reading from this stream, name it in your warning: "Disconnecting Gmail will stop your daily 6pm digest. Sure?"
 
@@ -207,6 +207,25 @@ self({
 ```
 
 Response lists what was actually cleaned up. If the response shows `gateway_restart_triggered: true`, openclaw will restart for ~40s. Tell Sir to expect a brief unresponsive window if he was about to ask something.
+
+A single-connection DELETE NEVER removes `composio_execute` from the gateway, even if it happens to be the last Composio connection on the tenant. That global teardown is intentionally a separate operation — see §6b.
+
+### 6b. Disconnect EVERYTHING (global Composio reset)
+
+**Sir says:** "Disconnect all my integrations." / "Wipe my Composio setup." / "Start fresh on my apps."
+
+This is the explicit nuclear option. Confirm clearly before calling it — it deletes EVERY Composio connection, EVERY auto-configured stream + schedule, removes the entire `composio_execute` tool surface, and deletes every `alfred-composio-*` skill dir. Sir will need to reconnect each app from scratch afterwards.
+
+```
+self({
+  endpoint: "/api/v1/integrations/disconnect-all",
+  method: "POST",
+})
+```
+
+Response shape: `{ disconnected_count, disconnected_ids[], failed_ids[], toolkits[], cleaned_streams[], deleted_schedules[], removed_tools[], removed_skill_dirs[], gateway_restart_triggered }`. Read the `failed_ids` carefully — anything in there will need a manual retry. Expect a ~40s gateway restart if `gateway_restart_triggered: true`.
+
+Use this only when Sir explicitly asks to wipe everything. Per-app disconnects should always go through §6.
 
 ## 7. Inspect a connection
 
