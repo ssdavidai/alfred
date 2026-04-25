@@ -4,6 +4,9 @@
       "model": {
         "primary": "openrouter/x-ai/grok-4.1-fast"
       },
+      "contextLimits": {
+        "toolResultMaxChars": 160000
+      },
       "heartbeat": {
         "every": "4h",
         "prompt": "Read HEARTBEAT.md if it exists. Follow it strictly. Additionally: scan recent conversation for any new people, pets, places, or organizations not yet in MEMORY.md — add them as one-line entity facts now. If nothing needs attention and no new entities, reply HEARTBEAT_OK."
