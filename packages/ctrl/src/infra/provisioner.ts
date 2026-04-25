@@ -1059,14 +1059,19 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
     setStep("provision_phone");
     log("Provisioning AgentPhone number...");
     try {
-      // Twilio account is not entitled to buy local numbers in HU (confirmed
-      // by the account error on 2026-04-20: /AvailablePhoneNumbers/HU/Local.json
-      // returns 404). All existing tenants (david, miguel, rapali) have US
-      // +1 717 numbers — US is the only country where new-number purchases
-      // currently succeed. Override via env if you add a new entitlement.
+      // Country resolution (issue #535):
+      //   1. Per-instance `config.country` from the SaaS `Instance.country`
+      //      column — set this once Twilio entitlement for that country
+      //      exists (HU regulatory bundle is in flight).
+      //   2. Fleet-wide override via `TWILIO_DEFAULT_COUNTRY` env.
+      //   3. "US" — the only country our Twilio account can currently buy
+      //      local numbers in. /AvailablePhoneNumbers/HU/Local.json returns
+      //      404 until the HU regulatory bundle lands.
+      const phoneCountry =
+        config.country ?? process.env.TWILIO_DEFAULT_COUNTRY ?? "US";
       await provisionAgentPhone({
         customerName: config.customer_name,
-        country: process.env.TWILIO_DEFAULT_COUNTRY ?? "US",
+        country: phoneCountry,
         serverIp: server.public_net.ipv4.ip,
         keyPath: keyPair.privateKeyPath,
         hostKeyOpts,

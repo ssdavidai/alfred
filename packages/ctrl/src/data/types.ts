@@ -55,6 +55,13 @@ export interface InstanceConfig {
   subdomain?: string;
   snapshot_id?: number;
   /**
+   * ISO-3166-1 alpha-2 country code passed through to AgentPhone provisioning
+   * (Twilio `buyNumberWithWebhooks`). When undefined, the provisioner falls
+   * back to `process.env.TWILIO_DEFAULT_COUNTRY ?? "US"`. Set per-tenant
+   * once Twilio entitlement for the requested country exists (issue #535).
+   */
+  country?: string;
+  /**
    * Opt-in flag to deploy Plane (self-hosted PM) alongside the Alfred stack.
    * When true, the compose template renders 12 additional services
    * (plane-db, plane-redis, plane-mq, plane-minio, plane-api, plane-worker,

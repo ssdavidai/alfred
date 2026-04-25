@@ -250,7 +250,7 @@ export const adminRejectDevice = async (
 };
 
 export const adminCreateInstance = async (
-  args: { userId: string; tier: string },
+  args: { userId: string; tier: string; country?: string },
   context: any,
 ) => {
   requireAdmin(context);
@@ -268,6 +268,21 @@ export const adminCreateInstance = async (
   const serverType = tierToServerType[tier];
   if (!serverType) throw new HttpError(400, `Invalid tier: ${args.tier}`);
 
+  // Validate country (ISO-3166-1 alpha-2). If unset, the schema default
+  // ("US") wins and the provisioner falls back through TWILIO_DEFAULT_COUNTRY.
+  // See issue #535 — this is the operator hook for buying a non-US Twilio
+  // number once the account has the relevant regulatory entitlement.
+  let country: string | undefined;
+  if (args.country !== undefined) {
+    if (!/^[A-Z]{2}$/.test(args.country)) {
+      throw new HttpError(
+        400,
+        `Invalid country "${args.country}": must be ISO-3166-1 alpha-2 (e.g. "US", "HU")`,
+      );
+    }
+    country = args.country;
+  }
+
   // Generate customer name: alfred-<email-slug>-<random8>
   const slug = (user.email || "user")
     .split("@")[0]
@@ -284,6 +299,7 @@ export const adminCreateInstance = async (
       tier: tier.toUpperCase(),
       serverType,
       status: "provisioning",
+      ...(country ? { country } : {}),
     },
   });
 

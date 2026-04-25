@@ -135,7 +135,9 @@ export const reprovisionInstance: ReprovisionInstance<
     .slice(0, 20);
   const customerName = `alfred-${slug}-${Date.now().toString(36)}`;
 
-  // Create fresh instance + job
+  // Create fresh instance + job. Preserve `country` from the prior row so
+  // an operator who set it before a failed provision (issue #535) doesn't
+  // have to set it again on the retry.
   const newInstance = await context.entities.Instance.create({
     data: {
       userId: user.id,
@@ -143,6 +145,7 @@ export const reprovisionInstance: ReprovisionInstance<
       tier: instance.tier,
       serverType,
       status: "provisioning",
+      ...(instance.country ? { country: instance.country } : {}),
     },
   });
 

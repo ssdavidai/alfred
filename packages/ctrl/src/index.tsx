@@ -145,6 +145,7 @@ program
   .option("--ts-key <key>", "Tailscale auth key")
   .option("--snapshot <id>", "Golden snapshot ID (auto-detects latest if set to 'auto')")
   .option("--plane", "Deploy Plane self-hosted PM sidecar (issue #536 — adds ~6GB RAM)")
+  .option("--country <iso2>", "ISO-3166-1 alpha-2 country for Twilio number (default: US, see #535)")
   .action(async (name, opts) => {
     getDb();
 
@@ -186,6 +187,7 @@ program
       openrouter_api_key: process.env.OPENROUTER_API_KEY,
       snapshot_id: snapshotId,
       planeEnabled: opts.plane === true,
+      country: opts.country,
     };
 
     console.log(`Provisioning "${name}" (${opts.type} in ${opts.location})...`);

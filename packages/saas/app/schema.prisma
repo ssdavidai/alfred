@@ -50,6 +50,15 @@ model Instance {
   tier                  String               // PREMIUM, BLACK (grandfathered: STARTER, PRO)
   serverType            String               // cx53 (grandfathered: cx33, cx43)
   status                String    @default("provisioning")  // provisioning|running|suspended|error|destroyed
+  // ISO-3166-1 alpha-2 country code that drives Twilio number provisioning
+  // (`buyNumberWithWebhooks` in `provisioner.ts:provisionAgentPhone`).
+  // Defaults to "US" because that is the only country our Twilio account is
+  // currently entitled to buy local numbers in. Once a regulatory bundle
+  // lands for HU / other EU countries (see issue #535), set this per-tenant
+  // (HU, DE, AT, …) before re-provisioning to get an in-country number.
+  // Distinct from `phoneCountry`, which is the country Twilio actually
+  // assigned and is written *after* provisioning.
+  country               String?   @default("US")
   tailscaleHostname     String?
   subdomainUrl          String?              // e.g. https://acme.alfred.black
   apiKey                String?              // encrypted AAS_API_KEY for tenant API

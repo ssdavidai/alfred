@@ -216,6 +216,14 @@ export async function provisionInstanceJob(
       );
       lastStderr = "";
 
+      // Per-instance country drives Twilio number provisioning (#535).
+      // When unset, the ctrl provisioner falls back to its own
+      // TWILIO_DEFAULT_COUNTRY → "US" chain so the behaviour is identical
+      // to before.
+      const countryArgs = instance.country
+        ? ["--country", instance.country]
+        : [];
+
       // Use spawn instead of execFileAsync for streaming output
       finalExitCode = await new Promise<number>((resolve, reject) => {
         const child = spawn(
@@ -230,6 +238,7 @@ export async function provisionInstanceJob(
             "--location",
             location,
             ...snapshotArgs,
+            ...countryArgs,
           ],
           {
             timeout: 1_200_000, // 20 minutes
