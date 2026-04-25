@@ -357,6 +357,190 @@ export function slugFromVaultPath(
 }
 
 // ---------------------------------------------------------------------------
+// Plane READ helpers (#629)
+//
+// The two GET /api/v1/plane/issues/... endpoints both need: param
+// validation, env-var configured Plane client, an HTTP GET helper that
+// returns either a parsed JSON body or an error envelope, and pruners
+// that strip workspace/project metadata from Plane's verbose response
+// before sending it back to the agent.
+// ---------------------------------------------------------------------------
+
+interface PlaneConfig {
+  token: string;
+  slug: string;
+  base: string;
+}
+
+function requirePlaneConfig(): PlaneConfig {
+  const token = process.env.PLANE_API_TOKEN;
+  const slug = process.env.PLANE_WORKSPACE_SLUG;
+  const baseRaw =
+    process.env.PLANE_API_BASE_URL ||
+    process.env.PLANE_API_URL ||
+    "http://plane-api:8000";
+  if (!token || !slug) {
+    throw new ApiError(
+      500,
+      "NOT_CONFIGURED",
+      "Plane not configured on this tenant (missing PLANE_API_TOKEN or PLANE_WORKSPACE_SLUG)",
+    );
+  }
+  return { token, slug, base: baseRaw.replace(/\/+$/, "") };
+}
+
+function requirePlaneIssueParams(params: Record<string, string>): {
+  projectId: string;
+  issueId: string;
+} {
+  const projectId = (params.project_id || "").trim();
+  const issueId = (params.issue_id || "").trim();
+  if (!projectId || !issueId) {
+    throw new ValidationError("project_id and issue_id are required");
+  }
+  return { projectId, issueId };
+}
+
+interface PlaneGetResult {
+  ok: boolean;
+  status: number;
+  data: unknown;
+  errorText?: string;
+}
+
+async function planeGet(url: string, token: string): Promise<PlaneGetResult> {
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        "x-api-key": token,
+        Accept: "application/json",
+      },
+    });
+  } catch (err) {
+    throw new ApiError(
+      502,
+      "PLANE_UNREACHABLE",
+      `Failed to reach Plane: ${(err as Error).message}`,
+    );
+  }
+  if (!resp.ok) {
+    const errorText = (await resp.text().catch(() => "")).slice(0, 500);
+    return { ok: false, status: resp.status, data: null, errorText };
+  }
+  let data: unknown = null;
+  try {
+    data = await resp.json();
+  } catch {
+    // Treat empty body as success-with-null. Callers expecting a shape
+    // will get the empty object/array fallback in the pruner.
+  }
+  return { ok: true, status: resp.status, data };
+}
+
+function asString(v: unknown): string {
+  return typeof v === "string" ? v : v == null ? "" : String(v);
+}
+
+function pruneAssignee(a: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: asString(a.id),
+    display_name: asString(a.display_name ?? a.first_name ?? a.email),
+    email: asString(a.email),
+  };
+}
+
+function pruneLabel(l: Record<string, unknown>): Record<string, unknown> {
+  return { id: asString(l.id), name: asString(l.name) };
+}
+
+function pruneState(s: unknown): Record<string, unknown> | null {
+  if (!s) return null;
+  if (typeof s === "string") return { id: s, name: "", group: "" };
+  if (typeof s !== "object") return null;
+  const obj = s as Record<string, unknown>;
+  return {
+    id: asString(obj.id),
+    name: asString(obj.name),
+    group: asString(obj.group),
+  };
+}
+
+function pruneIssue(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  const labelsRaw = Array.isArray(r.labels) ? r.labels : [];
+  const assigneesRaw = Array.isArray(r.assignees) ? r.assignees : [];
+  return {
+    id: asString(r.id),
+    name: asString(r.name),
+    description_html: asString(r.description_html),
+    description_stripped: asString(r.description_stripped),
+    state: pruneState(r.state ?? r.state_detail ?? null),
+    priority: asString(r.priority),
+    labels: labelsRaw
+      .map((l) =>
+        typeof l === "string"
+          ? { id: l, name: "" }
+          : pruneLabel(l as Record<string, unknown>),
+      ),
+    assignees: assigneesRaw
+      .map((a) =>
+        typeof a === "string"
+          ? { id: a, display_name: "", email: "" }
+          : pruneAssignee(a as Record<string, unknown>),
+      ),
+    target_date: asString(r.target_date),
+    external_id: asString(r.external_id),
+    external_source: asString(r.external_source),
+    created_at: asString(r.created_at),
+    updated_at: asString(r.updated_at),
+  };
+}
+
+interface PrunedComment {
+  id: string;
+  comment_stripped: string;
+  comment_html: string;
+  actor: { id: string; display_name: string; email: string };
+  created_at: string;
+  is_alfred: boolean;
+}
+
+function pruneComment(c: Record<string, unknown>, alfredUserId: string): PrunedComment {
+  // Plane carries the author either as ``actor: <uuid>`` + a parallel
+  // ``actor_detail: {...}`` object, or as ``created_by: <uuid>`` on
+  // older deployments. We collapse both shapes into a single ``actor``.
+  const actorIdRaw =
+    typeof c.actor === "string"
+      ? c.actor
+      : typeof (c.actor as Record<string, unknown>)?.id === "string"
+        ? ((c.actor as Record<string, unknown>).id as string)
+        : asString(c.created_by ?? c.actor_id ?? "");
+  const actorDetail =
+    typeof c.actor_detail === "object" && c.actor_detail !== null
+      ? (c.actor_detail as Record<string, unknown>)
+      : typeof c.actor === "object" && c.actor !== null
+        ? (c.actor as Record<string, unknown>)
+        : {};
+  return {
+    id: asString(c.id),
+    comment_stripped: asString(c.comment_stripped),
+    comment_html: asString(c.comment_html),
+    actor: {
+      id: actorIdRaw,
+      display_name: asString(
+        actorDetail.display_name ?? actorDetail.first_name ?? actorDetail.email,
+      ),
+      email: asString(actorDetail.email),
+    },
+    created_at: asString(c.created_at),
+    is_alfred: Boolean(alfredUserId) && actorIdRaw === alfredUserId,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -592,6 +776,82 @@ export function registerPlaneRoutes(): void {
 
     sendJson(res, 201, { ok: true, comment_id: commentId || null });
   });
+
+  // GET /api/v1/plane/issues/:project_id/:issue_id  (#629)
+  //
+  // Read-only issue fetch for Alfred's situational awareness. Wraps
+  // Plane's REST GET .../issues/:id/ and returns a pruned shape (drop
+  // workspace_detail / project_detail noise, keep the agent-relevant
+  // fields). Used by the main agent to refresh its view of an issue
+  // mid-conversation rather than relying solely on the spawn-time
+  // bootstrap prompt (#617).
+  addRoute(
+    "GET",
+    "/api/v1/plane/issues/:project_id/:issue_id",
+    async ({ res, params }) => {
+      const { projectId, issueId } = requirePlaneIssueParams(params);
+      const cfg = requirePlaneConfig();
+      const url = `${cfg.base}/api/v1/workspaces/${encodeURIComponent(
+        cfg.slug,
+      )}/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(
+        issueId,
+      )}/`;
+      const planeResp = await planeGet(url, cfg.token);
+      if (!planeResp.ok) {
+        return sendJson(res, planeResp.status, {
+          error: {
+            code: "PLANE_API_ERROR",
+            message: planeResp.errorText || `Plane responded with ${planeResp.status}`,
+          },
+        });
+      }
+      sendJson(res, 200, pruneIssue(planeResp.data));
+    },
+  );
+
+  // GET /api/v1/plane/issues/:project_id/:issue_id/comments  (#629)
+  //
+  // Read-only comment thread fetch. Returns oldest → newest with an
+  // ``is_alfred`` boolean computed from PLANE_ALFRED_USER_ID so the
+  // agent can identify its own past comments without an extra lookup.
+  // Plane returns comments newest-first by default, so we reverse the
+  // list before returning.
+  addRoute(
+    "GET",
+    "/api/v1/plane/issues/:project_id/:issue_id/comments",
+    async ({ res, params }) => {
+      const { projectId, issueId } = requirePlaneIssueParams(params);
+      const cfg = requirePlaneConfig();
+      const url = `${cfg.base}/api/v1/workspaces/${encodeURIComponent(
+        cfg.slug,
+      )}/projects/${encodeURIComponent(projectId)}/issues/${encodeURIComponent(
+        issueId,
+      )}/comments/`;
+      const planeResp = await planeGet(url, cfg.token);
+      if (!planeResp.ok) {
+        return sendJson(res, planeResp.status, {
+          error: {
+            code: "PLANE_API_ERROR",
+            message:
+              planeResp.errorText || `Plane responded with ${planeResp.status}`,
+          },
+        });
+      }
+      // Plane may return either a bare list or {results: [...]} depending
+      // on the deployed version (mirrors PlaneClient.list_issue_comments).
+      const raw = planeResp.data;
+      const items: unknown[] = Array.isArray(raw)
+        ? raw
+        : Array.isArray((raw as Record<string, unknown>)?.results)
+          ? ((raw as Record<string, unknown>).results as unknown[])
+          : [];
+      const alfredUserId = process.env.PLANE_ALFRED_USER_ID || "";
+      const comments = items
+        .map((c) => pruneComment(c as Record<string, unknown>, alfredUserId))
+        .sort((a, b) => (a.created_at < b.created_at ? -1 : 1));
+      sendJson(res, 200, { comments, total: comments.length });
+    },
+  );
 
   // POST /api/v1/plane/nudge
   //

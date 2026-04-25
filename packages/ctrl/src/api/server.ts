@@ -29,6 +29,7 @@ import { registerEmailRoutes } from "./routes/email.js";
 import { registerChannelsEmailRoutes } from "./routes/channelsEmail.js";
 import { registerChannelsAttachmentRoutes } from "./routes/channelsAttachment.js";
 import { registerPlaneRoutes } from "./routes/plane.js";
+import { registerContextRoutes } from "./routes/context.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -114,6 +115,7 @@ export function createApiServer(): http.Server {
   registerChannelsEmailRoutes();
   registerChannelsAttachmentRoutes();
   registerPlaneRoutes();
+  registerContextRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
