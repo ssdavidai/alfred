@@ -12,7 +12,7 @@ Tools come in five layers:
 2. **Built-in OpenClaw tools** — `web_search`, `web_fetch`, `image`, `image_generate`, `video_generate`, `music_generate`, `tts`, `pdf`, `canvas`, `cron`, `sessions_*`, `subagents`, `update_plan`, `message`. Always available.
 3. **`self` MCP tool** — generic proxy to THIS tenant's ctrl-api. Your default for all local vault / streams / learning / workflows / schedules / workers / admin operations.
 4. **Alfred Prime only** — `tenant` and `ask_alfred` tools for cross-tenant operations. If these aren't in your tool list, you're not Prime and cross-tenant work is not available to you. See `alfred-prime-federation/SKILL.md` for details.
-5. **Connected Apps** — `ctrl_composio_execute` gateway tool for third-party app actions (Gmail, GitHub, Notion, Calendar, Slack, Zoom, Drive). See the `alfred-composio-*` skills per app.
+5. **Connected Apps** — `composio_execute` gateway tool for third-party app actions (Gmail, GitHub, Notion, Calendar, Slack, Zoom, Drive). See the `alfred-composio-*` skills per app.
 
 ## The `self` tool
 
@@ -130,7 +130,7 @@ self({ endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
 |---|---|
 | `GET /api/v1/integrations` | List connected apps. |
 | `GET /api/v1/integrations/catalog` | Browse the 1,000+ available apps. |
-| `POST /api/v1/integrations/execute` | Execute a Composio action (most code paths use the `ctrl_composio_execute` gateway tool instead). |
+| `POST /api/v1/integrations/execute` | Execute a Composio action (most code paths use the `composio_execute` gateway tool instead). |
 
 For per-app action detail, consult the `alfred-composio-*` skills (gmail, googlecalendar, github, slack, notion, zoom, googledrive).
 
@@ -187,11 +187,10 @@ Sir can call or text his Alfred on the tenant's Twilio number. Inbound SMS from 
 
 | Endpoint | What it does |
 |---|---|
-| `GET /api/v1/phone/status` | Returns `{ configured, phone_number, country }` for this tenant. |
-| `POST /api/v1/phone/sms` | Send an outbound SMS. Body: `{ to, body }`. |
-| `GET /api/v1/phone/sms/threads` | List recent SMS threads (who texted, last N turns). |
-| `GET /api/v1/phone/sms/thread/:from` | Full SMS history with one counterparty. |
-| `GET /api/v1/phone/call/history` | Recent inbound + outbound call records. |
+| `GET /api/v1/phone/config` | Single endpoint for the dashboard PhonePage. Returns `{ phoneNumber, authorizedNumbers[], recentActivity[] }` (recent activity merges inbound + outbound voice + SMS). Use this as your "is the phone channel configured + what just happened" probe. |
+| `GET /api/v1/phone/voice-context` | Voice-bridge primer bundle (MEMORY.md + voice skill + open matters/tasks + recent main-agent sessions + Composio toolkits). Cached 60s. Mostly used by the bridge at call start, but you can read it for debugging context. |
+| `POST /api/v1/phone/sms` | Send an outbound SMS. Body: `{ to, body }`. Ships via SaaS → Twilio and logs to the `sms-outbound` stream for vault visibility. |
+| `POST /api/v1/phone/call` | Initiate an outbound call. Body: `{ to, message, mode? }` where `mode` is `"tts"` (default — one-shot TTS playback of `message`) or `"realtime"` (live Voice Bridge session, `message` becomes the Realtime initiator instructions). Returns `{ status: "initiated", sid, mode }`. |
 
 Authorized-numbers CRUD (lives on disk at `.authorized-phone-numbers.json`, same dispatch semantics as `/api/v1/auth/senders` for email):
 
@@ -233,7 +232,7 @@ If `tenant` and `ask_alfred` are not in your tool list, cross-tenant work is not
 | Adjust a recurring job | `self` → `/api/v1/schedules/…` |
 | Something broken or slow | `self` → `/api/v1/admin/dashboard` |
 | The world outside the vault | `web_search`, `web_fetch` |
-| Interact with a connected app | `ctrl_composio_execute` (see per-app skill) |
+| Interact with a connected app | `composio_execute` (see per-app skill) |
 | Something async | `sessions_spawn` or `cron` |
 
 ## Hard rules
