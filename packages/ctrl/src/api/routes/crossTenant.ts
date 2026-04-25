@@ -87,6 +87,11 @@ async function spawnAndPoll(
   // Prepend instructions to read workspace context files — the bootstrap may
   // truncate them if AGENTS.md is too large, so explicitly tell the subagent
   // to read them from disk.
+  //
+  // We also instruct the subagent to wrap its FINAL answer in <final>...</final>
+  // tags so the polling loop below can deterministically detect completion.
+  // The poll loop has a tagless fallback for Alfreds who forget to wrap
+  // (see TURNS_BEFORE_TAGLESS_FALLBACK), but the explicit form is preferred.
   const enrichedTask = [
     "IMPORTANT: Before answering, you MUST read these files using the read tool with EXACT paths:",
     "1. Read file at path: ~/.openclaw/workspace/USER.md",
@@ -96,6 +101,10 @@ async function spawnAndPoll(
     "Use the information from these files to answer this question:",
     "",
     prompt,
+    "",
+    "When you have your final answer, wrap it in <final>...</final> tags on a line by itself, e.g.:",
+    "<final>The answer is X because Y.</final>",
+    "Do not include commentary outside the tags. The relay returns only the wrapped content.",
   ].join("\n");
 
   // Spawn
@@ -111,29 +120,48 @@ async function spawnAndPoll(
     throw new Error("sessions_spawn did not return a childSessionKey");
   }
 
-  // Poll until done or timeout
-  const pollInterval = 5_000;
+  // After this many text-bearing assistant turns, we accept the most recent
+  // assistant text as the final answer even without <final>...</final> tags.
+  // The relay's enriched task instructs the agent to read 3 files (USER/SOUL/
+  // MEMORY) before answering, so realistic conversational shape is:
+  //   1–3: tool-call turns to read each file (no text)
+  //   4+ : the actual reasoned reply
+  // Setting the threshold at 4 means we wait for at least one substantive
+  // reply turn but bail out before pure timeout.
+  const TURNS_BEFORE_TAGLESS_FALLBACK = 4;
+
+  // Poll until done or timeout. Interval overridable via env for tests
+  // (default 5s in production keeps gateway pressure low).
+  const pollInterval = Math.max(
+    50,
+    Number(process.env.CROSS_TENANT_POLL_INTERVAL_MS) || 5_000,
+  );
   const deadline = start + timeoutMs;
   let lastAssistantText = "";
+  let assistantTextTurns = 0; // number of assistant messages with non-empty text seen so far
+  let lastSeenAssistantTextSig = ""; // dedupe text-turn counting across polls
 
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, pollInterval));
 
     const histResult = (await gatewayInvoke("sessions_history", {
       sessionKey,
-      limit: 10,
+      limit: 50,
     })) as { result?: { details?: { status?: string; messages?: Array<{ role: string; content: unknown }> } } };
 
     const details = histResult?.result?.details;
     const messages = details?.messages || [];
     const status = details?.status || "";
 
-    // Extract text from the last assistant message
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
+    // Walk all assistant messages this poll so we can count turns and find
+    // the most recent text-bearing one. We intentionally ignore tool-call /
+    // tool-result turns (which surface as content blocks of type "tool_use"
+    // / "tool_result" and produce no extracted text).
+    let lastTextThisPoll = "";
+    let turnCount = 0;
+    for (const msg of messages) {
       if (msg.role !== "assistant") continue;
 
-      // Content can be string or array of content blocks
       let text = "";
       if (typeof msg.content === "string") {
         text = msg.content;
@@ -144,28 +172,57 @@ async function spawnAndPoll(
           .join("\n");
       }
 
-      if (text) lastAssistantText = text;
-
-      // Check for <final> tag (subagent completion marker)
-      const finalMatch = text.match(/<final>([\s\S]*?)<\/final>/);
-      if (finalMatch) {
-        return {
-          answer: finalMatch[1].trim(),
-          sessionKey,
-          durationMs: Date.now() - start,
-        };
+      if (text) {
+        turnCount += 1;
+        lastTextThisPoll = text;
       }
+    }
 
-      // Also accept if the session status indicates completion
-      if (status === "completed" || status === "done") {
-        return {
-          answer: text.trim(),
-          sessionKey,
-          durationMs: Date.now() - start,
-        };
-      }
+    // Refresh state for downstream checks
+    if (lastTextThisPoll) lastAssistantText = lastTextThisPoll;
+    // Only update the count when the latest text differs from what we last
+    // saw (the messages list is cumulative — re-counting every poll would
+    // double-count turns that haven't changed).
+    const sig = `${turnCount}::${lastTextThisPoll.slice(-200)}`;
+    if (sig !== lastSeenAssistantTextSig) {
+      assistantTextTurns = turnCount;
+      lastSeenAssistantTextSig = sig;
+    }
 
-      break; // only inspect the last assistant message per poll
+    // ── Primary completion path: explicit <final>...</final> wrapper ────────
+    const finalMatch = lastAssistantText.match(/<final>([\s\S]*?)<\/final>/);
+    if (finalMatch) {
+      return {
+        answer: finalMatch[1].trim(),
+        sessionKey,
+        durationMs: Date.now() - start,
+      };
+    }
+
+    // ── Secondary: explicit session-status completion ───────────────────────
+    if (status === "completed" || status === "done") {
+      return {
+        answer: lastAssistantText.trim(),
+        sessionKey,
+        durationMs: Date.now() - start,
+      };
+    }
+
+    // ── Tertiary: tagless fallback ──────────────────────────────────────────
+    // If we've seen enough assistant-text turns and the last one isn't an
+    // empty tool-only artefact, treat it as the final answer. This covers
+    // the case where the peer's Alfred answers cleanly but forgets to wrap
+    // in <final> tags. We only fire after TURNS_BEFORE_TAGLESS_FALLBACK so
+    // we don't grab a mid-thought "let me check that" intermediate turn.
+    if (
+      assistantTextTurns >= TURNS_BEFORE_TAGLESS_FALLBACK &&
+      lastAssistantText.trim().length > 0
+    ) {
+      return {
+        answer: lastAssistantText.trim(),
+        sessionKey,
+        durationMs: Date.now() - start,
+      };
     }
 
     // Detect billing / LLM errors surfaced as session content or error status.

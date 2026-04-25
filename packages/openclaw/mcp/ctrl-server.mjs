@@ -50,8 +50,13 @@ const CTRL_URL = process.env.CTRL_API_URL || "http://ctrl-api:3100";
 const API_KEY = process.env.AAS_API_KEY || "";
 const IS_PRIME = process.env.ALFRED_PRIME === "true";
 
-// Default timeout for ask_alfred (peer's Alfred may take a while to think)
-const ASK_ALFRED_DEFAULT_TIMEOUT_S = 90;
+// Default timeout for ask_alfred (peer's Alfred may take a while to think).
+// A peer with a large system prompt + MEMORY/SOUL/USER files needs ~80–100s
+// for the spawn-and-first-answer roundtrip on Gemini, and chatty multi-turn
+// reasoning can push it well past that. 240s gives us comfortable headroom
+// while still bounding pathological hangs. Per-call override accepted via
+// the `timeout_seconds` arg (see askAlfredTool.inputSchema).
+const ASK_ALFRED_DEFAULT_TIMEOUT_S = 240;
 const ASK_ALFRED_FETCH_OVERHEAD_S = 30;
 
 // ── Peer discovery ───────────────────────────────────────────────────────────
