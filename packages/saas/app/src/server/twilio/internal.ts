@@ -14,6 +14,7 @@ import {
 } from "./client";
 import { decryptApiKey } from "../tenantProxy";
 import { recordAttempt, removeSpamNumber } from "./spam";
+import { getVoiceBridgeWsHost } from "./voice-bridge-host";
 
 // ── Token-bucket rate limiter (in-memory) ────────────────────────────────────
 // Per-tenant per-action. Resets every minute. Process-local — fine for a single
@@ -203,10 +204,12 @@ export function registerTwilioInternalRoutes(app: Application): void {
       .createHmac("sha256", token)
       .update(tenantId)
       .digest("hex");
-    const host =
-      (req.headers["x-forwarded-host"] as string) ||
-      (req.headers.host as string);
-    const wsUrl = `wss://${host}/voice/${tenantId}?sig=${sig}&initiator=${encodeURIComponent(initiator)}&intent=${encodeURIComponent(intent)}`;
+    // The WS host MUST be the DNS-only `voice.alfred.black` (or override),
+    // NOT the orange-cloud `alfred.black` Cloudflare drops Twilio Media
+    // Stream WS upgrades on with error 31920. Inbound (webhooks.ts) does
+    // the same — keep these in lockstep via the shared helper.
+    const wsHost = getVoiceBridgeWsHost();
+    const wsUrl = `wss://${wsHost}/voice/${tenantId}?sig=${sig}&initiator=${encodeURIComponent(initiator)}&intent=${encodeURIComponent(intent)}`;
     res
       .type("text/xml")
       .status(200)

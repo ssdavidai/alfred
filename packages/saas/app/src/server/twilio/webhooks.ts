@@ -11,6 +11,7 @@ import { prisma } from "wasp/server";
 import { proxyToTenant } from "../tenantProxy";
 import { validateTwilioSignature } from "./client";
 import { isSpamNumber } from "./spam";
+import { getVoiceBridgeWsHost } from "./voice-bridge-host";
 
 // Sign a tenantId so the Voice Bridge can verify the WS upgrade query came from us.
 // HMAC-SHA256 over `${tenantId}` keyed with VOICE_BRIDGE_INTERNAL_TOKEN. Hex.
@@ -79,8 +80,9 @@ export function registerTwilioWebhooks(app: Application): void {
       const sigParam = signTenantId(instance.id);
       // Route WS via `voice.alfred.black` (DNS-only subdomain, bypasses the
       // Cloudflare WAF which drops Twilio Media Stream WS upgrades with error
-      // 31920). Override via VOICE_BRIDGE_WS_HOST env var if needed.
-      const wsHost = process.env.VOICE_BRIDGE_WS_HOST || "voice.alfred.black";
+      // 31920). Override via VOICE_BRIDGE_WS_HOST env var if needed. Shared
+      // helper used by the outbound TwiML path too — keep them in lockstep.
+      const wsHost = getVoiceBridgeWsHost();
       const wsUrl = `wss://${wsHost}/voice/${instance.id}`;
 
       // Twilio <Stream> strips query strings from the URL — the sig MUST be
