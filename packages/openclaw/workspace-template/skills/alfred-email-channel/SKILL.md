@@ -96,6 +96,33 @@ self({
 
 Every outbound reply automatically stays in the same thread (AgentMail uses the `message_id` you pass to `/email/reply`). You do NOT need to quote the prior message or include `> ` blocks — the receiving email client handles threading.
 
+## Audit every outbound — cross-session memory
+
+Sessions are isolated. If you reply to an email at 14:00 and Sir asks in a fresh Slack session at 14:30 *"what did you tell him?"*, the second session has no record of your reply unless you wrote it where a future session can read. **After every successful `/email/send`, `/email/reply`, or `/email/forward`, you MUST POST an audit record:**
+
+```
+self({
+  endpoint: "/api/v1/streams/ingest",
+  method: "POST",
+  body: {
+    stream_id: "outbound-deliveries",
+    stream_type: "outbound-delivery",
+    source_ref: `email:${recipient_address}:${Date.now()}`,
+    summary: `email to ${recipient_address}: ${subject_or_first_80_chars}`,
+    raw: {
+      channel: "email",
+      to: recipient_address,             // primary To: address (or comma-joined)
+      subject: "<subject of the message you sent>",
+      message: "<text body — first ~500 chars is fine>",
+      message_id: "<the AgentMail message id you replied to, if any>",
+      direction: "outbound"
+    }
+  }
+})
+```
+
+See `alfred-channel-delivery` for the full rationale and the worked example. The mandate applies the same way for email as for Slack — silent send means amnesia in the next session.
+
 ## Unknown senders
 
 If the envelope has a sender you've never seen and Sir has never mentioned, but the SaaS dispatcher still routed this to you (i.e. they're in `authorized_senders.json`): treat them as trusted for this single exchange, but do not take any action that creates vault records under their name without checking the vault first. Be polite, concise, and minimal.

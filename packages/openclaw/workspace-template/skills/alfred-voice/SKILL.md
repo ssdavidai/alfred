@@ -73,6 +73,8 @@ Your `instructions` already contain the most recent week of conversation summari
 
 The call transcript is automatically posted to the streams pipeline by the Voice Bridge — you don't have to write anything explicitly. The next text turn in Slack/web will already know what was discussed.
 
+**However**, any other outbound deliveries you initiate DURING a call (e.g. you fire `/api/v1/phone/sms` to send Sir a link, or `/api/v1/notifications` to drop a Slack message into his channel) are NOT covered by the transcript pipeline — those need explicit audit records, exactly as in `alfred-channel-delivery`. SMS via `/api/v1/phone/sms` is the only exception: ctrl-api auto-ingests outbound SMS to the `sms-outbound` stream. Slack and Telegram sent mid-call still need a `POST /api/v1/streams/ingest` audit. Don't skip it because you're on a phone call.
+
 ## Outbound calls
 
 You can place a call, not just answer one. Triggers from Sir's verbs: **"call X"**, **"phone X about Y"**, **"ring X"**, **"leave a voicemail for X"**, or scheduled chores that escalate when Slack/SMS go unread.
@@ -110,6 +112,22 @@ Look up the recipient's number in `KNOWN_CONTACTS.md` first. If the number isn't
 ### Confirmation pattern
 
 After a successful call (`status: "initiated"`, `sid` returned), post a short status to Sir's most-immediate channel — voice if you're already on a call with him, otherwise SMS to his caller number, otherwise Slack DM. Examples: *"Driver notified, sir."* or *"Call placed to the front desk."* This closes the loop so Sir knows the action happened — silence after a "do X" instruction reads as failure.
+
+Then write the audit record so a fresh session knows the call happened:
+
+```
+self({
+  endpoint: "/api/v1/streams/ingest",
+  method: "POST",
+  body: {
+    stream_id: "outbound-deliveries",
+    stream_type: "outbound-delivery",
+    source_ref: `voice:${to}:${Date.now()}`,
+    summary: `voice call to ${to}: ${message.slice(0, 80)}`,
+    raw: { channel: "voice", to, message, mode, sid, direction: "outbound" }
+  }
+})
+```
 
 ### Error handling
 

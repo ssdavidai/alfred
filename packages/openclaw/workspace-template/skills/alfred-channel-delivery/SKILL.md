@@ -37,6 +37,78 @@ Returns `{ filename, content }` where `content` is the markdown. The bottom of t
 
 If a channel sub-object is missing or its values are empty strings, that channel hasn't been paired yet — see "Fallback: pair-then-cache" below.
 
+## Step 1.5 — Cross-session memory: AUDIT every outbound delivery
+
+**This is the most important rule in this skill. Read it twice.**
+
+Sessions on Alfred are isolated. When you send a Slack DM at 15:27 in session A, **session B at 15:35 cannot see your prior session — at all**. If Sir asks "what did you just send me?" in a new session, you have no memory of the send unless you wrote it somewhere a future session can read.
+
+This has actually happened on Rapali: Alfred sent a Slack DM at 15:27 UTC; eight minutes later in a fresh session, when Sir asked Alfred to quote what he'd sent, Alfred replied *"I have reviewed my logs and do not have a record of sending a Slack message to Mr. Rapali."* — the send happened, but only inside one session jsonl that the next session never opened.
+
+**Mandate**: after EVERY successful outbound delivery (Slack DM, Telegram, voice call init, email send/reply/forward), you MUST also POST to `/api/v1/streams/ingest` to write a tiny audit record. SMS is the only exception — `/api/v1/phone/sms` already auto-ingests to `sms-outbound`. For everything else, you do it.
+
+```
+self({
+  endpoint: "/api/v1/streams/ingest",
+  method: "POST",
+  body: {
+    stream_id: "outbound-deliveries",
+    stream_type: "outbound-delivery",
+    source_ref: "<channel>:<recipient_id>:<unix_ms>",   // dedup key
+    summary: "<channel> to <recipient>: <first 80 chars of message>",
+    raw: {
+      channel: "slack",                  // "slack" | "telegram" | "email" | "voice"
+      to: "D0AQYNQCJ5A",                 // the same `to` you sent on
+      message: "Sir, the weekly report is ready.",
+      session_id: "<your current session id, if known>",
+      direction: "outbound"
+    }
+  }
+})
+```
+
+The next session bootstrap reads `outbound-deliveries` events through `/api/v1/streams/:id/events` and surfaces recent sends, so a fresh session can answer *"what did you just send me on Slack?"* without amnesia.
+
+**Worked example — full Slack DM with audit:**
+
+```js
+// 1. Send the message.
+const send = await self({
+  endpoint: "/api/v1/notifications",
+  method: "POST",
+  body: {
+    channel: "slack",
+    to: "D0AQYNQCJ5A",
+    message: "Sir, the weekly report is ready.",
+    urgency: "normal"
+  }
+});
+
+// 2. Audit it. Do this synchronously in the same turn — no exceptions.
+await self({
+  endpoint: "/api/v1/streams/ingest",
+  method: "POST",
+  body: {
+    stream_id: "outbound-deliveries",
+    stream_type: "outbound-delivery",
+    source_ref: `slack:D0AQYNQCJ5A:${Date.now()}`,
+    summary: "slack DM to Sir: Sir, the weekly report is ready.",
+    raw: {
+      channel: "slack",
+      to: "D0AQYNQCJ5A",
+      message: "Sir, the weekly report is ready.",
+      direction: "outbound"
+    }
+  }
+});
+```
+
+If the audit POST fails, retry it once. Don't drop it silently.
+
+## Step 1.7 — When you discover a NEW channel id by searching, write it back
+
+If `KNOWN_CONTACTS.md` did NOT have the value (so you had to do the pair-then-cache flow OR you searched the channel directory to find Sir's id), you MUST patch `KNOWN_CONTACTS.md` so the next session doesn't re-discover. See "Fallback: pair-then-cache" below for the PUT shape — but the rule is: **search-then-send always ends with a `KNOWN_CONTACTS.md` update**, not just the send. Otherwise every fresh session pays the discovery cost again.
+
 ## Step 2 — Send via `/api/v1/notifications` (preferred)
 
 The unified delivery endpoint dispatches through OpenClaw's `message.send` tool to the right channel adapter. Pass the cached `to` value explicitly so the endpoint doesn't have to guess.
@@ -156,3 +228,10 @@ Before you call `/api/v1/notifications`, mentally check:
 > "Am I passing `channel:` explicitly?"
 
 If yes to all three, send.
+
+After the send returns successfully, mentally check:
+
+> "Did I POST the audit record to `outbound-deliveries`?"
+> "If I just discovered Sir's id by searching, did I patch `KNOWN_CONTACTS.md`?"
+
+If yes to both, the turn is complete. If you skip these, the next session goes blind and Sir is right to be annoyed.

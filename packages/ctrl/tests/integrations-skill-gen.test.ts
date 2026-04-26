@@ -71,7 +71,7 @@ mock.module("node:fs", {
   },
 });
 
-const { buildToolkitGuidance } = await import("../src/api/routes/integrations.js");
+const { buildToolkitGuidance, buildUserIdClarification } = await import("../src/api/routes/integrations.js");
 
 describe("buildToolkitGuidance", () => {
   it("returns empty string for non-gmail toolkits", () => {
@@ -149,5 +149,42 @@ describe("buildToolkitGuidance", () => {
         "should show format: \"full\" for the one-message case",
       );
     });
+  });
+});
+
+describe("buildUserIdClarification", () => {
+  // Rapali's Alfred wasted ~10s confused by a Slack response saying
+  // `user_id: "alfred-rapali-101"` (the tenant's Composio identity), trying
+  // to reconcile it with a Slack U-id. The clarification block in every
+  // generated alfred-composio-* SKILL.md guards against that misread.
+  const md = buildUserIdClarification();
+
+  it("names the field that confuses the agent", () => {
+    assert.match(md, /user_id/, "must mention the user_id field by name");
+  });
+
+  it("makes it clear this is the TENANT identity, not the human's app identity", () => {
+    assert.match(md, /tenant/i, "should label the value as the tenant's identity");
+    assert.match(
+      md,
+      /alfred-/,
+      "should give the actual `alfred-<tenant>-<n>` shape so the agent recognises it",
+    );
+  });
+
+  it("redirects the agent to KNOWN_CONTACTS.md for the human's per-app identity", () => {
+    assert.match(
+      md,
+      /KNOWN_CONTACTS\.md/,
+      "must point at KNOWN_CONTACTS.md as the source of truth for per-app identity",
+    );
+  });
+
+  it("warns against feeding the Composio user_id back into app-native targeting fields", () => {
+    assert.match(
+      md,
+      /never|do not|don't/i,
+      "should explicitly forbid passing the Composio user_id into provider user fields",
+    );
   });
 });

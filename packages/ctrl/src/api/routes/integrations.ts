@@ -674,6 +674,25 @@ do {
 `;
 }
 
+/**
+ * Short clarification injected into every generated alfred-composio-* SKILL.md.
+ * The `user_id` field returned by Composio responses is the TENANT's Composio
+ * identity (e.g. `alfred-rapali-101`), NOT Sir's identity in the underlying
+ * app (Slack U-ID, Gmail address, GitHub login, etc.). For Sir's actual
+ * per-app identity, the agent should consult `KNOWN_CONTACTS.md`.
+ *
+ * Exported for tests.
+ */
+export function buildUserIdClarification(): string {
+  return `
+## Note on \`user_id\`
+
+The \`user_id\` value you'll see in Composio responses (e.g. \`alfred-<tenant>-<n>\`) is the **tenant's Composio identity**, NOT Sir's identity inside the underlying app. It is shared across every connection on this tenant, regardless of which provider account is on the other end.
+
+For Sir's actual per-app identity (Slack U-ID, Gmail address, GitHub login, etc.) consult \`~/.openclaw/workspace/KNOWN_CONTACTS.md\`. Never feed the Composio \`user_id\` back into the underlying app's user-targeting fields — they expect the app's native identifier.
+`;
+}
+
 async function generateComposioSkill(
   toolkit: string,
   connId: string,
@@ -744,6 +763,13 @@ async function generateComposioSkill(
   // motivated PR fix/gmail-skill-pagination-defaults.
   const toolkitGuidance = buildToolkitGuidance(toolkit);
 
+  // Tenant Composio user_id ≠ Sir's identity in the underlying app. This
+  // confused Rapali's Alfred when a Slack action returned `user_id:
+  // "alfred-rapali-101"` and he spent ~10s trying to reconcile that with
+  // a Slack U-id. Apply the clarification across every generated SKILL.md
+  // so the agent never makes that mistake again, regardless of toolkit.
+  const userIdClarification = buildUserIdClarification();
+
   const skillContent = `---
 name: alfred-composio-${toolkit}
 description: ${displayName} integration — ${actions.length} available actions via the MCP self tool (POST /api/v1/integrations/execute).
@@ -762,7 +788,7 @@ Connected via Composio. Call actions through the MCP \`self\` tool: \`self({endp
 
 ${streamActions.length > 0 ? `**Stream**: ${recommended ? `${recommended.name} (auto-configured, polling every ${Math.round(recommended.interval / 60)} min)` : "available but not auto-configured"}` : ""}
 **Tool actions**: ${toolActions.length} | **Stream actions**: ${streamActions.length}
-${toolkitGuidance}
+${userIdClarification}${toolkitGuidance}
 ## Actions
 
 ${actionTable}
