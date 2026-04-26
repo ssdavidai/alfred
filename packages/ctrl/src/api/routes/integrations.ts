@@ -697,7 +697,7 @@ async function generateComposioSkill(
   toolkit: string,
   connId: string,
   apiKey: string,
-): Promise<{ actions_count: number; skill_path: string }> {
+): Promise<{ actions_count: number; skill_path: string; written_paths: string[] }> {
   // Fetch actions from Composio v2 API
   const resp = await fetch(
     `${COMPOSIO_API_V2}/actions?apps=${encodeURIComponent(toolkit)}&limit=50`,
@@ -794,20 +794,45 @@ ${userIdClarification}${toolkitGuidance}
 ${actionTable}
 ${usageSection}`;
 
-  // Write to both workspaces
+  // Write to both workspaces. Verify each write actually landed on disk by
+  // re-reading and comparing content — without this, a silently-truncated or
+  // a permission-denied write upstream of `writeFileSync` (e.g. immutable file
+  // attribute, full disk on tmpfs, host-side stale-handle quirks) could let
+  // the regen handler return `ok: true` while the file on disk is unchanged.
+  // That was the symptom that motivated this guard: David's slack SKILL.md
+  // stayed at the Apr 10 version through repeated regen calls that all
+  // reported success.
   const skillDirName = `alfred-composio-${toolkit}`;
+  const writtenPaths: string[] = [];
   for (const baseDir of [OPENCLAW_SKILLS_DIR, OPENCLAW_WORKERS_SKILLS_DIR]) {
     const skillDir = path.join(baseDir, skillDirName);
+    const skillFile = path.join(skillDir, "SKILL.md");
     fs.mkdirSync(skillDir, { recursive: true });
-    fs.writeFileSync(path.join(skillDir, "SKILL.md"), skillContent);
+    fs.writeFileSync(skillFile, skillContent);
     // Set ownership to node user (uid 1000) for openclaw containers
     try {
       fs.chownSync(skillDir, 1000, 1000);
-      fs.chownSync(path.join(skillDir, "SKILL.md"), 1000, 1000);
+      fs.chownSync(skillFile, 1000, 1000);
     } catch { /* may fail if not root, that's ok */ }
+    // Read-after-write verification: if the on-disk content doesn't match what
+    // we just wrote, surface a real error rather than swallowing it. The
+    // previous handler's response would say `ok: true` even when the write
+    // had no effect.
+    let onDisk = "";
+    try {
+      onDisk = fs.readFileSync(skillFile, "utf-8");
+    } catch (err: any) {
+      throw new Error(`SKILL.md write verification failed for ${skillFile}: read-after-write errored (${err?.message ?? err})`);
+    }
+    if (onDisk !== skillContent) {
+      throw new Error(
+        `SKILL.md write verification failed for ${skillFile}: on-disk content (${onDisk.length}b) differs from written content (${skillContent.length}b)`,
+      );
+    }
+    writtenPaths.push(skillFile);
   }
 
-  return { actions_count: actions.length, skill_path: skillDirName };
+  return { actions_count: actions.length, skill_path: skillDirName, written_paths: writtenPaths };
 }
 
 // ---------------------------------------------------------------------------
@@ -2855,14 +2880,29 @@ print(json.dumps(result, default=str))
   // ctrl→self tool rename) — without this, already-connected tenants would
   // have to click "Reconfigure" on every app one-at-a-time in the dashboard
   // to pick up the new template.
+  //
+  // Also performs a janitorial sweep of stale `alfred-composio-<toolkit>`
+  // skill dirs whose toolkit no longer has any ACTIVE connection. The
+  // disconnect handler removes the skill dir as best-effort, and historical
+  // disconnects (or out-of-band cleanups via Composio's dashboard) can leave
+  // these orphans behind. They're poison: openclaw still loads them, so the
+  // agent confidently invokes a toolkit that has no working credentials.
+  // David's slack SKILL.md was a real instance — the file persisted from
+  // Apr 10 and described `composio_execute` (the dead pre-#430 dispatch
+  // tool name) long after the slack connection itself was gone.
   // =========================================================================
   addRoute("POST", "/api/v1/integrations/regenerate-skills", async ({ res }) => {
     const apiKey = getComposioApiKey();
     const userId = getComposioUserId();
     const results: Array<Record<string, unknown>> = [];
+    const removed: Array<Record<string, unknown>> = [];
 
     try {
       const mine = await fetchAllOwnedConnectedAccounts(apiKey, userId);
+
+      // Track which toolkits have at least one ACTIVE connection — the
+      // janitorial sweep below uses this to decide what to remove.
+      const activeToolkits = new Set<string>();
 
       for (const a of mine) {
         const connId = a.id;
@@ -2873,15 +2913,58 @@ print(json.dumps(result, default=str))
         }
         try {
           const out = await generateComposioSkill(toolkit, connId, apiKey);
-          results.push({ connection_id: connId, toolkit, ok: true, actions: out.actions_count });
+          activeToolkits.add(toolkit);
+          results.push({
+            connection_id: connId,
+            toolkit,
+            ok: true,
+            actions: out.actions_count,
+            written_paths: out.written_paths,
+          });
         } catch (err: any) {
           results.push({ connection_id: connId, toolkit, error: err.message?.slice(0, 200) });
         }
       }
 
-      sendJson(res, 200, { regenerated: results.length, results });
+      // Janitorial sweep: any `alfred-composio-<toolkit>` dir whose toolkit
+      // is not in the ACTIVE set is stale and gets removed. We do NOT remove
+      // dirs for toolkits that had a generation error this run — those are
+      // ACTIVE-but-broken (e.g. transient Composio API hiccup), not orphans.
+      const erroredToolkits = new Set(
+        results
+          .filter((r) => r.error && typeof r.toolkit === "string")
+          .map((r) => r.toolkit as string),
+      );
+      for (const baseDir of [OPENCLAW_SKILLS_DIR, OPENCLAW_WORKERS_SKILLS_DIR]) {
+        let entries: string[] = [];
+        try {
+          entries = fs.readdirSync(baseDir);
+        } catch {
+          continue; // base dir may not exist on a fresh tenant
+        }
+        for (const entry of entries) {
+          if (!entry.startsWith("alfred-composio-")) continue;
+          const toolkit = entry.slice("alfred-composio-".length).toLowerCase();
+          if (!toolkit) continue;
+          if (activeToolkits.has(toolkit)) continue;
+          if (erroredToolkits.has(toolkit)) continue;
+          const dirPath = path.join(baseDir, entry);
+          try {
+            fs.rmSync(dirPath, { recursive: true, force: true });
+            removed.push({ path: dirPath, toolkit });
+          } catch (err: any) {
+            removed.push({ path: dirPath, toolkit, error: err?.message?.slice(0, 200) });
+          }
+        }
+      }
+
+      sendJson(res, 200, { regenerated: results.length, results, stale_removed: removed });
     } catch (err: any) {
-      sendJson(res, 500, { error: `Regenerate failed: ${err.message}`, partial_results: results });
+      sendJson(res, 500, {
+        error: `Regenerate failed: ${err.message}`,
+        partial_results: results,
+        stale_removed: removed,
+      });
     }
   });
 }
