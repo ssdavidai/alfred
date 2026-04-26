@@ -36,6 +36,16 @@ interface CachedResult {
 
 let cache: CachedResult | null = null;
 
+/**
+ * Drop the in-memory model catalog cache. Call this whenever the set of
+ * configured provider API keys changes (e.g. after PATCH /admin/credentials)
+ * so the next GET /admin/models reflects newly-available providers
+ * immediately instead of waiting up to {@link CACHE_TTL_MS}.
+ */
+export function invalidateModelCatalogCache(): void {
+  cache = null;
+}
+
 function readEnvKeys(): Set<string> {
   let content = "";
   try {
@@ -233,6 +243,43 @@ async function fetchXAIModels(apiKey: string): Promise<ModelEntry[]> {
   }
 }
 
+/**
+ * Kimi Code (Moonshot) catalog. Kimi's coding endpoint
+ * (https://api.kimi.com/coding/) does NOT expose a /v1/models listing,
+ * so we mirror the upstream openclaw `extensions/kimi-coding/provider-catalog.ts`
+ * static catalog. Pricing is $0 because access is subscription-based.
+ *
+ * The `apiKey` param is unused at the moment — we only emit the catalog
+ * when a key is present. Kept in the signature for symmetry with the
+ * other fetchers and to leave room for a future health probe.
+ */
+async function fetchKimiModels(_apiKey: string): Promise<ModelEntry[]> {
+  return [
+    {
+      id: "kimi/kimi-code",
+      name: "Kimi Code",
+      provider: "kimi",
+      contextWindow: 262144,
+      maxOutput: 32768,
+      pricing: { input: 0, output: 0 },
+      source: "direct" as const,
+      supportsImages: true,
+      supportsReasoning: true,
+    },
+    {
+      id: "kimi/k2p5",
+      name: "Kimi Code (legacy model id)",
+      provider: "kimi",
+      contextWindow: 262144,
+      maxOutput: 32768,
+      pricing: { input: 0, output: 0 },
+      source: "direct" as const,
+      supportsImages: true,
+      supportsReasoning: true,
+    },
+  ];
+}
+
 // --- Grouping and deduplication ---
 
 function groupModels(allModels: ModelEntry[]): ProviderGroup[] {
@@ -252,7 +299,7 @@ function groupModels(allModels: ModelEntry[]): ProviderGroup[] {
   const directIds = new Set(
     allModels.filter((m) => m.source === "direct").map((m) => {
       // Normalize: "anthropic/claude-sonnet-4-5-20250929" matches "openrouter/anthropic/claude-sonnet-4-5-20250929"
-      return m.id.replace(/^(openai|anthropic|google|x-ai)\//, "");
+      return m.id.replace(/^(openai|anthropic|google|x-ai|kimi)\//, "");
     }),
   );
 
@@ -311,6 +358,9 @@ async function fetchAllModels(): Promise<ProviderGroup[]> {
   }
   if (keys.has("XAI_API_KEY")) {
     fetchers.push(fetchXAIModels(getEnvValue("XAI_API_KEY")!));
+  }
+  if (keys.has("KIMI_API_KEY")) {
+    fetchers.push(fetchKimiModels(getEnvValue("KIMI_API_KEY")!));
   }
 
   const results = await Promise.allSettled(fetchers);

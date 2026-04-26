@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { dockerComposeCmd, COMPOSE_DIR } from "../helpers.js";
+import { invalidateModelCatalogCache } from "./models.js";
 
 const ENV_PATH = `${COMPOSE_DIR}/.env`;
 
@@ -41,6 +42,12 @@ const KNOWN_CREDENTIALS: CredentialDef[] = [
     key: "GOOGLE_API_KEY",
     label: "Google",
     description: "Gemini and other Google AI models",
+    used_by: ["OpenClaw agents (if model requires it)"],
+  },
+  {
+    key: "KIMI_API_KEY",
+    label: "Kimi Code",
+    description: "Moonshot Kimi Code subscription. Required for the main agent when set to a kimi/* model (kimi/kimi-code, kimi/k2p5). Get a key at https://platform.moonshot.ai/console/keys",
     used_by: ["OpenClaw agents (if model requires it)"],
   },
 ];
@@ -165,6 +172,11 @@ export function registerCredentialRoutes(): void {
     }
 
     patchEnv(updates);
+
+    // Drop the in-memory model catalog cache so the next GET /admin/models
+    // reflects the newly-available (or removed) providers immediately
+    // instead of waiting up to an hour for the cache to expire.
+    invalidateModelCatalogCache();
 
     // Respond immediately, then restart only the containers that need
     // the new API keys. CRITICAL: ctrl-api also uses env_file: .env,
