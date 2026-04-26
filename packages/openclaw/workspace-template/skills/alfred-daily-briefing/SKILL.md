@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-briefing
 description: Assemble and deliver Sir's morning briefing. Invoked at 05:30 local time by the chore system. You already know Sir — his matters, his people, his rhythms. This skill is the framing, not the script. Your judgment and care are the point.
-version: "1.1"
+version: "1.2"
 metadata:
   openclaw:
     emoji: "☀️"
@@ -35,14 +35,19 @@ Ask yourself, with Sir's full life in mind:
 
 That frame cuts the noise. A newsletter doesn't get mentioned. A receipt doesn't get mentioned. A personal message from someone he cares about on a matter he's actively working — that gets mentioned, and gets framed by its significance, not by its subject line.
 
-### Start by gathering
+### Gather in two passes — headlines first, full bodies on demand
 
-You need a real picture, not a summary. Fire these in parallel — one `self` call each, not the generic `/api/v1/vault/context` shortcut, which only returns counts:
+You DO NOT need full record bodies for every matter and every task in Sir's vault to write a 1200-character briefing. Pulling them all is what blows the context window and produces a worse briefing — the data buries the signal. Work in two passes.
 
-1. `self({endpoint:"/api/v1/streams/events", query:{limit:"500"}})` — last-72h events: email, GitHub, SMS, voice, Slack-thread captures. Filter client-side to `received_at` ≥ now−72h.
-2. `self({endpoint:"/api/v1/vault/list/matter"})` — Sir's active matters. Filter `status == "active"`. Use their `body_preview` for routing context.
-3. `self({endpoint:"/api/v1/vault/list/task"})` — open tasks. Flag any with `due`/`due_date` within 24h.
-4. `self({endpoint:"/api/v1/integrations/execute", method:"POST", body:{action:"GOOGLECALENDAR_EVENTS_LIST", arguments:{calendar_id:"primary", time_min:"<today 00:00 iso>", time_max:"<tomorrow+1 23:59 iso>", max_results:50, single_events:true, order_by:"startTime"}}})` — today + tomorrow's calendar. If it errors "no active googlecalendar connection", note that Sir needs to reconnect.
+**Pass 1 — headlines.** Fire these in parallel. Each one is small (no record bodies, just slugs/names/status):
+
+1. `self({endpoint:"/api/v1/vault/context"})` — every record in the vault grouped by type as `{path, name, status}` only. No bodies, no frontmatter. This is your map of what exists. From here you scan for active matters, open tasks, recent decisions.
+2. `self({endpoint:"/api/v1/streams/events", query:{limit:"50"}})` — the 50 most recent stream events (Gmail, Slack-thread captures, GitHub, SMS, voice). Filter client-side to `received_at` ≥ now−72h. Read the `summary` field, not the `raw` blob — that's where the signal lives.
+3. `self({endpoint:"/api/v1/integrations/execute", method:"POST", body:{action:"GOOGLECALENDAR_EVENTS_LIST", arguments:{calendar_id:"primary", time_min:"<today 00:00 iso>", time_max:"<tomorrow+1 23:59 iso>", max_results:50, single_events:true, order_by:"startTime"}}})` — today + tomorrow's calendar. If it errors "no active googlecalendar connection", note that Sir needs to reconnect.
+
+**Pass 2 — bodies, only for what you'll actually mention.** Once you've decided which 2–4 things matter (a stalled matter worth naming, a person whose anniversary is this week, a task due today), then and ONLY then pull the full body for those specific items via `self({endpoint:"/api/v1/vault/records/<path>"})`. One call per item you'll write about. Do NOT pre-fetch full bodies for an entire type.
+
+If pass 1 hands you a matter slug and the headline alone is enough to write the line ("the BakeryNext deck still hasn't moved"), don't pull the body at all. Bodies are for when you need a fact you can't infer from name + status + your existing memory of Sir's life.
 
 Then, with the data + your existing knowledge of Sir, think beyond the event stream:
 
