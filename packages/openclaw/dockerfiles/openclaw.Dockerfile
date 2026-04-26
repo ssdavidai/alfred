@@ -27,11 +27,8 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Clone OpenClaw at known-good commit — v2026.4.24 stable
-# Notable since 4.15: Gemini incomplete-turn recovery, malformed-tool-result guard,
-# voice-call shared webhook runtime, model catalog planner, plugin compatibility registry,
-# heartbeat scheduler delay clamp.
-ARG OPENCLAW_SHA=6507387f433deb0e7beb22abb4625a40f3b6b97e
+# Clone OpenClaw at known-good commit — v2026.4.15 (includes Slack media download fixes: PR #62239, PR #62996)
+ARG OPENCLAW_SHA=041266a6699cac3baef8ef39db41fa26f29f9db3
 RUN git init /openclaw-src && \
     git -C /openclaw-src fetch --depth 1 https://github.com/openclaw/openclaw.git ${OPENCLAW_SHA} && \
     git -C /openclaw-src checkout FETCH_HEAD

@@ -3,7 +3,7 @@
 # CI reads these values and passes them as --build-arg to docker build.
 
 # https://github.com/openclaw/openclaw
-OPENCLAW_SHA=6507387f433deb0e7beb22abb4625a40f3b6b97e
+OPENCLAW_SHA=041266a6699cac3baef8ef39db41fa26f29f9db3
 
 # https://github.com/ssdavidai/alfred
 ALFRED_SHA=320e6864a0ce84169e9839f15d15888b7d848c34
