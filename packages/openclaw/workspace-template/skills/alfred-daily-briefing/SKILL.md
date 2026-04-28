@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-briefing
 description: Assemble and deliver Sir's morning briefing as a continuous narrative — ground in last night's digest, ingest overnight inputs, reason about how matters moved, then write a butler's note. Invoked at Sir's local morning by the chore system. Output is BOTH a vault-persisted record (event/daily-brief-<date>.md) and the Slack message Sir sees at breakfast.
-version: "2.3"
+version: "2.4"
 metadata:
   openclaw:
     emoji: "☀️"
@@ -128,6 +128,22 @@ glance before your 10:00.
 Personal: Jázmin home sick today, Andrea handling. Camille's English camp
 deadline is Sunday — the form's been on your desk three days now.
 ```
+
+**System pulse — only if there's drift.** The data Sir relies on is only as good as the pipelines feeding you. If pass 1 surfaced any of these, name them in a short, plain line BEFORE the day's-anchor closer:
+
+- A stream is more than ~3× past its expected pull cadence (Gmail/calendar should pull every few minutes; if `last_event_at` is hours stale, the brief is missing data Sir would expect to see).
+- A Composio app connection has errored or expired (e.g. *"no active googlecalendar connection"* in pass-1 calendar response).
+- A chore has failed multiple recent runs (visible if its `last_result` shows errors, or if quarantine state regressed).
+- The `event/daily-digest-<yesterday>.md` you read in pass 1 was missing or empty (continuity broken).
+
+Phrase as a heads-up, not an alarm. Sir wants to know *what data the brief is and isn't grounded in*, not a system-status report.
+
+```
+Heads up — Gmail pull's been quiet since 02:00, so any overnight email
+wouldn't show up here yet. I'll loop back when it catches up.
+```
+
+If everything's healthy, **omit this section entirely**. Don't write *"all systems green"* — that's noise. Silent on health is the default.
 
 **Close with the day's anchor.** What's on the calendar, what to be ready for, what's coming. One sentence, two if today is genuinely full.
 

@@ -16,8 +16,44 @@ services:
 
   temporal:
     # temporalio/temporal is also kept at :latest so alfred-update.timer picks up patch releases automatically.
+    #
+    # blobSize / historySize bumps from defaults (2MB warn / 4MB error blob,
+    # 50MB / 50K events history) up to 16MB / 8MB blob and 200MB / 100K
+    # history. Driven by the composio_pull activity returning Gmail
+    # responses with full HTML bodies — at max_results=30 a busy tenant's
+    # response was hitting Temporal's 4MB blob limit, the activity
+    # `composio_pull` failed nonRetryable with "Complete result exceeds
+    # size limit", the schedule kept firing every 5 min but `last_pull_at`
+    # never advanced, and Gmail went stale for 22+ hours on Rapali before
+    # the daily-brief skill's stream-pull-health check surfaced it. Same
+    # class of failure can hit any high-fanout activity (Plane sync, Notion
+    # backfill, large vault list responses), so the fix is applied at the
+    # Temporal layer rather than per-activity truncation that would lose
+    # user data.
     image: temporalio/temporal:latest
-    command: ["server", "start-dev", "--db-filename", "/data/temporal.db", "--ip", "0.0.0.0", "--port", "7233", "--ui-port", "8233"]
+    command:
+      - "server"
+      - "start-dev"
+      - "--db-filename"
+      - "/data/temporal.db"
+      - "--ip"
+      - "0.0.0.0"
+      - "--port"
+      - "7233"
+      - "--ui-port"
+      - "8233"
+      - "--dynamic-config-value"
+      - "limit.blobSize.warn=8388608"
+      - "--dynamic-config-value"
+      - "limit.blobSize.error=16777216"
+      - "--dynamic-config-value"
+      - "limit.historySize.warn=104857600"
+      - "--dynamic-config-value"
+      - "limit.historySize.error=209715200"
+      - "--dynamic-config-value"
+      - "limit.historyCount.warn=51200"
+      - "--dynamic-config-value"
+      - "limit.historyCount.error=102400"
     volumes:
       - /mnt/encrypted/temporal:/data
     ports:

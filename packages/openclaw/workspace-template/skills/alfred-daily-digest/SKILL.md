@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-digest
 description: Assemble and deliver Sir's evening digest — a backward-looking close of the day that picks up where this morning's brief left off. Reports per-matter outcomes vs expectations, what's still open, and what tomorrow needs to be ready for. Invoked at Sir's local evening (default 19:00 CET / 17:00 UTC) by the chore system. Output is BOTH a vault-persisted record (event/daily-digest-<date>.md) and the Slack message Sir reads as he winds down.
-version: "1.3"
+version: "1.4"
 metadata:
   openclaw:
     emoji: "🌙"
@@ -115,6 +115,23 @@ Nova onboarding — Boris call went long; he wants to revisit clauses 4 and
 Andrea took Jázmin to the doctor — minor flu, she's clear by Tuesday.
 Camille's camp form is still on your desk; deadline Sunday hasn't moved.
 ```
+
+**System pulse — only if there's drift.** Same idea as the brief, end-of-day flavour. If anything from pass 1's health checks showed drift during the day, name it in a short heads-up BEFORE tomorrow's anchor:
+
+- A stream stayed stale for material chunks of the day.
+- An app connection dropped or errored.
+- A chore failed multiple times.
+- The morning brief was missing or empty (continuity broken on the front end).
+
+Phrase it as a hand-off note for tomorrow, not a system report.
+
+```
+Heads up — Gmail's pull was stuck from 13:25 yesterday until 10:00 this
+morning, so anything during that window may not be reflected. Caught up
+now.
+```
+
+If everything's healthy, **omit this section entirely**.
 
 **Close with tomorrow's anchor.** What tomorrow's brief should pick up first. One sentence — this is literally the hand-off to the next chore.
 
