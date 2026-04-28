@@ -29,6 +29,34 @@ const WORKFLOW_CLASS_RE = /^[A-Z][a-zA-Z0-9]*Workflow$/;
 
 const CHORE_DIR = path.join(VAULT_PATH, "chore");
 
+/**
+ * Chore templates that have been promoted from per-tenant generated
+ * (`/alfred-data/user-chores/<template>.py`) to platform built-ins
+ * shipped inside the alfred-learn Docker image at
+ * `packages/learn/src/workflows/chores/<template>.py`.
+ *
+ * A chore record's `generated: true` frontmatter flag is set at creation
+ * time and is NOT updated when a template is promoted, so the flag is
+ * not authoritative for these templates. Routes that read the .py from
+ * the user-chores directory must consult this list before treating a
+ * missing .py as "broken chore" — for these templates, the .py living
+ * outside user-chores is the correct, healthy state.
+ *
+ * Source of truth: `packages/learn/src/workflows/chores/__init__.py`
+ * `ALL_CHORE_TEMPLATES`. Keep this list in sync when chores get
+ * promoted (or unpromoted) in that file. Comparison is on the
+ * snake_case template name as written in the chore record's
+ * `template:` frontmatter field.
+ */
+const STANDARD_LIBRARY_CHORE_TEMPLATES: ReadonlySet<string> = new Set([
+  "daily_morning_briefing",
+  "subscription_watcher",
+  "weekly_matter_digest",
+]);
+
+const STANDARD_LIBRARY_BUILTIN_PATH = (template: string): string =>
+  `packages/learn/src/workflows/chores/${template}.py`;
+
 interface ChoreSummary {
   slug: string;
   name: string;
@@ -770,13 +798,27 @@ export function registerChoreRoutes(): void {
     if (!record) throw new NotFoundError(`chore ${slug} not found`);
 
     const fm = record.frontmatter;
-    const isGenerated = fm.generated === true || fm.generated === "true";
-    if (!isGenerated) {
+    const moduleName = String(fm.template ?? slug.replace(/-/g, "_"));
+    const isStandardLibrary = STANDARD_LIBRARY_CHORE_TEMPLATES.has(moduleName);
+    const flagSaysGenerated = fm.generated === true || fm.generated === "true";
+
+    // Standard-library chores ALWAYS take the built-in branch, even if the
+    // chore record's frontmatter still carries `generated: true`. The flag
+    // is set at creation time and isn't updated when a template gets
+    // promoted to the standard library. The template name is the
+    // authoritative signal.
+    if (isStandardLibrary || !flagSaysGenerated) {
       sendJson(res, 200, {
         slug,
         generated: false,
-        message: "This is a standard-library chore. Source lives in packages/learn/src/workflows/chores/ in the alfred-platform repo.",
-        template: String(fm.template ?? ""),
+        tier: isStandardLibrary ? "standard-library" : "unknown",
+        template: moduleName,
+        builtin_path: isStandardLibrary
+          ? STANDARD_LIBRARY_BUILTIN_PATH(moduleName)
+          : null,
+        message: isStandardLibrary
+          ? `Standard-library chore. The Python workflow ships inside the alfred-learn Docker image at ${STANDARD_LIBRARY_BUILTIN_PATH(moduleName)} in the alfred-platform repo. There is no per-tenant .py file for this chore — that's the correct, healthy state.`
+          : "This is a standard-library chore. Source lives in packages/learn/src/workflows/chores/ in the alfred-platform repo.",
         source: null,
         imported_activities: [],
         activity_calls: [],
@@ -784,8 +826,7 @@ export function registerChoreRoutes(): void {
       return;
     }
 
-    // The module_name in frontmatter is the filename stem
-    const moduleName = String(fm.template ?? slug.replace(/-/g, "_"));
+    // Generated chores: the .py lives in /alfred-data/user-chores/<template>.py
     const sourcePath = `/mnt/encrypted/alfred/user-chores/${moduleName}.py`;
 
     let source: string;
@@ -795,9 +836,11 @@ export function registerChoreRoutes(): void {
       sendJson(res, 404, {
         slug,
         generated: true,
+        tier: "generated-orphaned",
         template: moduleName,
         source: null,
         error: `Source file not found at ${sourcePath}`,
+        hint: `The chore record claims generated:true but the .py is missing. Either the file was deleted, or the template was promoted to the standard library and this list (chores.ts: STANDARD_LIBRARY_CHORE_TEMPLATES) is out of date. Check Temporal: 'self → /api/v1/schedules/chore-${slug}' will show ActionCounts; the chore body's '## Run log' section will show recent runs. If both show recent activity, the chore is running fine via a built-in workflow class — add the template name to STANDARD_LIBRARY_CHORE_TEMPLATES and the chore record's generated flag should be flipped to false via /api/v1/admin/chores/refresh-tier.`,
         imported_activities: [],
         activity_calls: [],
       });
@@ -963,6 +1006,7 @@ export function registerChoreRoutes(): void {
     sendJson(res, 200, {
       slug,
       generated: true,
+      tier: "generated",
       template: moduleName,
       workflow_class_name: String(fm.workflow_class_name ?? ""),
       source,
@@ -973,5 +1017,79 @@ export function registerChoreRoutes(): void {
       manifest: dataReadiness,
       unknown_activities: unknownActivities,
     });
+  });
+
+  // POST /api/v1/admin/chores/refresh-tier
+  //
+  // Sweep every chore record on this tenant and flip `generated:` from
+  // `true` to `false` for any chore whose template is in the
+  // STANDARD_LIBRARY_CHORE_TEMPLATES set above. Idempotent — running it
+  // twice on a fresh tenant is a no-op. Used by the v2 promotion
+  // migration; also safe to run any time a new template gets promoted.
+  //
+  // Returns the per-record result so the caller can see exactly what
+  // changed (and what didn't, in case a record was already correct).
+  addRoute("POST", "/api/v1/admin/chores/refresh-tier", async ({ res }) => {
+    if (!fs.existsSync(CHORE_DIR)) {
+      sendJson(res, 200, { changed: 0, results: [] });
+      return;
+    }
+    const results: Array<{
+      slug: string;
+      template: string;
+      tier: "standard-library" | "generated" | "no-template";
+      action: "flipped-to-builtin" | "already-correct" | "skipped";
+      detail?: string;
+    }> = [];
+    let changed = 0;
+    for (const entry of fs.readdirSync(CHORE_DIR)) {
+      if (!entry.endsWith(".md")) continue;
+      const slug = entry.slice(0, -3);
+      const record = readChoreFile(slug);
+      if (!record) continue;
+      const fm = record.frontmatter;
+      const template = String(fm.template ?? "").trim();
+      const isStandardLibrary =
+        template !== "" && STANDARD_LIBRARY_CHORE_TEMPLATES.has(template);
+      const flagSaysGenerated = fm.generated === true || fm.generated === "true";
+
+      if (template === "") {
+        results.push({ slug, template: "", tier: "no-template", action: "skipped", detail: "template field empty" });
+        continue;
+      }
+      if (!isStandardLibrary) {
+        results.push({
+          slug,
+          template,
+          tier: "generated",
+          action: "skipped",
+          detail: "not in STANDARD_LIBRARY_CHORE_TEMPLATES",
+        });
+        continue;
+      }
+      if (!flagSaysGenerated) {
+        results.push({ slug, template, tier: "standard-library", action: "already-correct" });
+        continue;
+      }
+      // Flip generated: true → false in frontmatter, leave body alone.
+      const fp = path.join(CHORE_DIR, `${slug}.md`);
+      const content = fs.readFileSync(fp, "utf-8");
+      const end = content.indexOf("\n---", 3);
+      if (end === -1) {
+        results.push({ slug, template, tier: "standard-library", action: "skipped", detail: "no closing frontmatter delimiter" });
+        continue;
+      }
+      const fmBlock = content.slice(0, end);
+      const rest = content.slice(end);
+      const updated = fmBlock.replace(/^generated:\s*.*$/m, "generated: false");
+      if (updated === fmBlock) {
+        results.push({ slug, template, tier: "standard-library", action: "skipped", detail: "frontmatter has no `generated:` line to replace" });
+        continue;
+      }
+      fs.writeFileSync(fp, updated + rest, "utf-8");
+      changed += 1;
+      results.push({ slug, template, tier: "standard-library", action: "flipped-to-builtin" });
+    }
+    sendJson(res, 200, { changed, results });
   });
 }

@@ -207,7 +207,11 @@ async def record_chore_run(
     ts_iso = datetime.now(timezone.utc).isoformat()
     ts_epoch = time.time()
 
-    # 1. Vault body log (human)
+    # 1. Vault body log (human) + frontmatter `last_run` / `last_result`.
+    # Body append is the audit trail; the frontmatter fields are what the
+    # dashboard + API list endpoints display, so they have to stay in
+    # sync with reality. Both writes are best-effort — never fail a chore
+    # run because the vault is briefly unreachable.
     config = load_config()
     client = VaultClient(config)
     try:
@@ -218,7 +222,16 @@ async def record_chore_run(
                 f"\n- {ts_iso}: {prefix}{result_summary}",
             )
         except Exception:
-            # Best-effort logging — never fail a chore run because of this.
+            pass
+        try:
+            # Cap last_result at 200 chars so we don't accidentally splat
+            # a multi-paragraph LLM digest into the frontmatter.
+            short_result = (prefix + result_summary)[:200]
+            await client.patch_frontmatter(
+                f"chore/{chore_slug}.md",
+                {"last_run": ts_iso, "last_result": short_result},
+            )
+        except Exception:
             pass
     finally:
         await client.close()

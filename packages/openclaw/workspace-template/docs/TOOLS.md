@@ -123,6 +123,7 @@ self({ endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
 | `GET /api/v1/admin/activity` | Recent API activity log. |
 | `GET /api/v1/admin/models` | Available AI models. |
 | `GET /api/v1/admin/credentials` | Provider credentials (masked). |
+| `POST /api/v1/admin/chores/refresh-tier` | Sweep every chore record and flip stale `generated: true → false` for chores whose template has been promoted to the platform standard library. Idempotent. Run this once after a platform update that promotes a previously-generated template. |
 
 ### Connected Apps (Composio)
 

@@ -1,7 +1,7 @@
 ---
 name: alfred-chore-management
-description: Inspect, trigger, pause, and reason about Sir's scheduled chores. Chores are recurring Temporal workflows with bespoke Python code generated during onboarding. Use whenever Sir asks about what's running on a schedule, wants to manually trigger a chore, pause/unpause one, or check why a chore hasn't produced results.
-version: "1.0"
+description: Inspect, trigger, pause, and reason about Sir's scheduled chores. Chores are recurring Temporal workflows — some shipped as platform built-ins, some bespoke Python generated for Sir during onboarding. Use whenever Sir asks about what's running on a schedule, wants to manually trigger a chore, pause/unpause one, or check why a chore hasn't produced results.
+version: "1.1"
 metadata:
   openclaw:
     emoji: "⏰"
@@ -9,7 +9,22 @@ metadata:
 
 # Alfred — Chore Management
 
-Chores are Sir's recurring background workflows. Each one is a bespoke Python Temporal workflow generated during onboarding based on Sir's goals, matters, and data sources. They live in the vault as `chore/` records with `generated: true` and a corresponding `.py` file in `/alfred-data/user-chores/`.
+Chores are Sir's recurring background workflows. They live in the vault as `chore/` records and are paired with a Temporal schedule named `chore-<slug>`.
+
+## Two tiers — and why this matters before you diagnose
+
+Every chore is one of two tiers. Telling them apart is the single most common place a fresh agent gets it wrong.
+
+| Tier | Where the Python lives | Who authored it | `/source` endpoint returns |
+|---|---|---|---|
+| **Standard library** | Inside the `alfred-learn` Docker image at `packages/learn/src/workflows/chores/<template>.py` (in the `alfred-platform` repo) | Platform team. Same code on every tenant. | `{generated: false, tier: "standard-library", builtin_path: "..."}` |
+| **Generated** | Per-tenant file at `/alfred-data/user-chores/<template>.py` | Opus, during onboarding, against Sir's specific matters | `{generated: true, tier: "generated", source: "<full .py>"}` |
+
+Today's standard-library templates: `daily_morning_briefing`, `subscription_watcher`, `weekly_matter_digest`. Anything else is generated.
+
+> **Warning — `generated: true` in frontmatter does NOT mean the chore is in the generated tier.** When a template gets promoted from generated to standard-library, existing chore records keep their original `generated: true` flag. The `/api/v1/chores/<slug>/source` endpoint detects promoted templates and returns the right tier regardless of the flag. **Trust the `tier` field in the response, not the frontmatter flag.**
+
+> **Warning — a 404 from `/api/v1/chores/<slug>/source` does NOT automatically mean the chore is broken.** For standard-library chores the endpoint returns `{generated: false, tier: "standard-library"}` (200 OK) — the .py living *outside* `/alfred-data/user-chores/` is the correct, healthy state. If you do see a 404 with `tier: "generated-orphaned"`, **cross-check before declaring breakage**: read `/api/v1/schedules/chore-<slug>` for `ActionCounts.Total` and read the chore body's `## Run log` section. If both show recent activity, the chore is running fine via a built-in workflow class — the platform's promotion list just needs updating; the chore itself is healthy.
 
 ## Two layers to a chore
 
@@ -24,7 +39,7 @@ Both layers must stay in sync. Use the `self` MCP tool to query both sides.
 
 - **`self endpoint="/api/v1/chores"`** — list all chore records, with frontmatter (name, schedule, status, template, quarantine, last_run).
 - **`self endpoint="/api/v1/chores/{slug}"`** — read the full chore body, including run log and generated description.
-- **`self endpoint="/api/v1/chores/{slug}/source"`** — full generated Python source + dependency audit.
+- **`self endpoint="/api/v1/chores/{slug}/source"`** — chore source + tier. For standard-library chores returns `{tier: "standard-library", builtin_path, source: null}`. For generated chores returns `{tier: "generated", source: "<full .py>"}`. For a missing-but-claimed-generated file returns 404 with `tier: "generated-orphaned"` and a hint about how to disambiguate.
 - **`self endpoint="/api/v1/schedules"`** — list all Temporal schedules. Cross-reference with vault records to spot orphans.
 
 ### Act
@@ -164,14 +179,15 @@ Three activity calls. All three are generic. No bespoke `fetch_weekly_events` or
 
 Each chore record frontmatter has:
 - `name` — human-readable label
-- `template` — the generated Python module name (e.g. `tuesday_cash_flow_forecast`)
+- `template` — the Python module name (e.g. `tuesday_cash_flow_forecast` or `daily_morning_briefing`). For generated chores it's the file stem under `/alfred-data/user-chores/`; for standard-library chores it's the file stem under `packages/learn/src/workflows/chores/` in the platform image.
 - `workflow_class_name` — the Python class (e.g. `TuesdayCashFlowForecastWorkflow`)
 - `schedule` — cron expression (e.g. `0 18 * * 2` = every Tuesday 18:00)
 - `schedule_id` — Temporal schedule id, prefixed `chore-`
 - `status` — `active` | `paused` | `completed`
-- `generated: true` — every chore on a user tenant is generated; no stock templates
-- `quarantine: true, quarantine_remaining: N` — new chores run in dry-run mode for 3 cycles before going live
-- `last_run` — ISO timestamp of most recent successful run
+- `generated: true | false` — **historically authoritative, currently advisory**. `true` was set at creation time when the template lived in the generated tier; it is not rewritten when a template is promoted to the standard library. Treat it as a hint, not as truth — call `/api/v1/chores/<slug>/source` and read its `tier` field for the authoritative answer.
+- `quarantine: true, quarantine_remaining: N` — new generated chores run in dry-run mode for 3 cycles before going live
+- `last_run` — ISO timestamp of the most recent run. Updated by `record_chore_run` after every cycle. If you need a richer history, read the body's `## Run log` section.
+- `last_result` — short summary of the most recent run (≤200 chars), e.g. `"4 events from 9 matters, briefing sent"` or `"[dry-run] quarantine dry-run (remaining before this: 2)"`.
 - `user_facing_description` — a plain-English paragraph describing what it does
 
 The body of the record has a `## Run log` section with entries like `- 2026-04-09T18:00:00.000Z: [dry-run] 0 anomalies`.
