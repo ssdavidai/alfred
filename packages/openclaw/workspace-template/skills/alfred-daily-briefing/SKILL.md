@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-briefing
 description: Assemble and deliver Sir's morning briefing as a continuous narrative — ground in last night's digest, ingest overnight inputs, reason about how matters moved, then write a butler's note. Invoked at Sir's local morning by the chore system. Output is BOTH a vault-persisted record (event/daily-brief-<date>.md) and the Slack message Sir sees at breakfast.
-version: "2.0"
+version: "2.1"
 metadata:
   openclaw:
     emoji: "☀️"
@@ -55,9 +55,21 @@ This is the layer that matters most. The current state from pass 1 plus the new 
 - Anything overdue? → mention, gently.
 
 **For new inputs that don't link to any known matter:**
-- From a known person about a known concern? → mention.
+- From a known person about a known concern? → mention as a standalone line. Do **not** label it with a matter heading. See "Strict matter labelling" below.
 - Ambient noise (newsletter, receipt, auto-alert)? → drop.
-- Possibly the start of a new matter? → flag for Sir, suggest he tell you to track it.
+- Possibly the start of a new matter? → flag for Sir, suggest he tell you to track it. Phrase it as a question, not as an assertion under a fabricated matter heading.
+
+**Strict matter labelling — non-negotiable.** A line in the body labelled `Matter Name —` MUST correspond to a real matter slug from your pass-1 `/api/v1/vault/list/matter` results. **Never attach a matter label to a line whose underlying event has `related_matters: []` or whose source you cannot verify against an actual matter record.** Misattributing a loose event to a matter just to satisfy the matter-led shape is a failure mode worse than not mentioning it — the surveyor will then wire the brief's `related_matters` frontmatter to the wrong matter, reinforcing the bad link permanently.
+
+When you have inputs that don't fit any existing matter, use **non-matter section headings** instead. Examples:
+- `Web` / `Websites` (work on a site or property without a matter record)
+- `Comms` (correspondence with a known person on something not yet a tracked matter)
+- `Ops` (infrastructure, hosting, payments outside an existing matter)
+- `Personal` (already in the standard shape — family, anniversaries, health)
+
+If you find yourself wanting to use a matter heading that isn't in your pass-1 list, stop and choose a non-matter heading instead. Then close the briefing with a one-line nudge: *"Worth tracking betonos.hu work as its own matter — let me know and I'll set one up."*
+
+**Frontmatter `related_matters` discipline.** When you persist the brief to vault (see Persistence section), the `related_matters` array MUST only contain slugs of matters whose body you actually touched in pass 2 OR whose name appeared as a section heading in your output. Do NOT pad the array with matters where you only mentioned a tangential person or topic. The surveyor uses this field for entity linking — bad data here propagates fleet-wide.
 
 **Pass-2 bodies on demand.** If a matter delta needs context you can't infer from the headline + your existing knowledge of Sir, then and ONLY then pull the full body via `self({endpoint: "/api/v1/vault/records/<path>"})`. One call per item you'll write about. Do NOT pre-fetch all matter bodies — that's what blows the context window and produces a worse briefing.
 

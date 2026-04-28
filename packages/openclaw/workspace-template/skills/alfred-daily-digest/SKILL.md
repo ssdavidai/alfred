@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-digest
 description: Assemble and deliver Sir's evening digest — a backward-looking close of the day that picks up where this morning's brief left off. Reports per-matter outcomes vs expectations, what's still open, and what tomorrow needs to be ready for. Invoked at Sir's local evening (default 19:00 CET / 17:00 UTC) by the chore system. Output is BOTH a vault-persisted record (event/daily-digest-<date>.md) and the Slack message Sir reads as he winds down.
-version: "1.0"
+version: "1.1"
 metadata:
   openclaw:
     emoji: "🌙"
@@ -62,6 +62,10 @@ This is the digest's analytical core. You have *"what the morning expected"* (pa
 **Tomorrow's anchor:**
 - What's on Sir's calendar tomorrow that needs preparation tonight?
 - What's still open from today that should be the morning brief's lead?
+
+**Strict matter labelling — non-negotiable.** A line in the body labelled `Matter Name —` MUST correspond to a real matter slug from your pass-1 `/api/v1/vault/list/matter` results. **Never attach a matter label to a line whose underlying event has `related_matters: []` or whose source you cannot verify against an actual matter record.** Misattributing a loose event to a matter just to satisfy the matter-led shape is a failure mode worse than not mentioning it — the surveyor will then wire the digest's `related_matters` frontmatter to the wrong matter, reinforcing the bad link permanently. Use non-matter headings (`Web`, `Comms`, `Ops`, `Personal`) for inputs that don't fit any existing matter, and consider closing with a "worth tracking X as its own matter" nudge.
+
+**Frontmatter `related_matters` discipline.** When you persist the digest to vault, the `related_matters` array MUST only contain slugs of matters whose body you actually touched in pass 2 OR whose name appeared as a section heading in your output. Do NOT pad the array with matters where you only mentioned a tangential person or topic.
 
 **Pass-2 bodies on demand.** Same rule as the brief: pull a matter's full body only if you need context the headline alone can't give.
 
