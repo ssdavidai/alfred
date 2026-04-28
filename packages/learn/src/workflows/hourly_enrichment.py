@@ -88,7 +88,14 @@ class HourlyEnrichmentWorkflow:
             enrichments: list[dict[str, Any]] = await workflow.execute_activity(
                 batch_enrich_events,
                 args=[batch],
-                start_to_close_timeout=timedelta(seconds=180),
+                # 600s ceiling for one clerk LLM call. Bumped 180→600 because
+                # learn-clerk runs `xai/grok-4-1-fast-reasoning` on
+                # openclaw-workers (fleet standard), and dense Rapali-class
+                # batches (40 events × up to 20K body chars + matter catalog +
+                # output of 40 enrichments) regularly exceeded 180s, causing
+                # consecutive runs to fail and the pending backlog to balloon.
+                # This is a background job — wallclock budget is fine.
+                start_to_close_timeout=timedelta(seconds=600),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
