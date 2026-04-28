@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-digest
 description: Assemble and deliver Sir's evening digest — a backward-looking close of the day that picks up where this morning's brief left off. Reports per-matter outcomes vs expectations, what's still open, and what tomorrow needs to be ready for. Invoked at Sir's local evening (default 19:00 CET / 17:00 UTC) by the chore system. Output is BOTH a vault-persisted record (event/daily-digest-<date>.md) and the Slack message Sir reads as he winds down.
-version: "1.2"
+version: "1.3"
 metadata:
   openclaw:
     emoji: "🌙"
@@ -29,15 +29,17 @@ Before looking at the day's events, load the answer to *"what did the morning ex
 
 4. **MEMORY.md** is in your context — re-anchor for who/what matters.
 
-5. **Today's main-agent sessions** — `self({endpoint: "/api/v1/openclaw/sessions"})`. Filter client-side to sessions whose `updatedAt` is past this morning's brief `generated_at`. Fetch `/api/v1/openclaw/sessions/<id>/history` for any whose content matters to the day's outcomes. This tells you what Sir said to you during the day on Slack / Telegram / voice / SMS — commitments he made, decisions he announced, things he asked you to handle. The digest should reconcile these against what actually happened.
+5. **Today's main-agent sessions** — `self({endpoint: "/api/v1/openclaw/sessions"})`. Returns the recent session list (cheap, no per-session bodies). Filter client-side to sessions whose `updatedAt` is past this morning's brief `generated_at`. Fetch `/api/v1/openclaw/sessions/<id>/history` ONLY for sessions whose content actually matters to today's outcomes. This tells you what Sir said to you during the day — commitments, decisions, things he asked you to handle.
 
-6. **Open approvals** — `self({endpoint: "/api/v1/approvals/pending"})`. Items still pending Sir's decision at end of day. Worth surfacing — these become tomorrow's "still waiting" items.
+6. **Open approvals** — `self({endpoint: "/api/v1/approvals/pending"})`. Items still pending Sir's decision at end of day. Small payload. These become tomorrow's "still waiting" items.
 
 7. **Stream pull health** — `self({endpoint: "/api/v1/streams"})`. Each stream's `last_event_at`. If a stream went stale during the day, the digest's "quiet stretch after lunch" might just be missing data. Name the staleness explicitly so Sir knows what's signal vs what's a gap.
 
-8. **Outbound notifications you sent today + Plane activity** — review stream events for `direction: outbound` entries you produced (sms-outbound, slack-outbound, etc). The digest should reference these as actions taken: *"I texted you about the Köhler reply at 16:30 — they confirmed."* Plane activity propagates via matters' `updated_at`; matters whose `updated_at` advanced today indicate Plane changes. For specific Plane issue context, `self({endpoint: "/api/v1/plane/issues/<project_id>/<issue_id>/comments"})` returns the comment thread.
+After pass 1 you can say: *"this morning I flagged X, Y, Z; these N matters were alive; these M tasks were due; these are the approvals still pending; here's what Sir told me during the day; these data sources may have gaps."* That's your "what should have happened" baseline.
 
-After pass 1 you can say: *"this morning I flagged X, Y, Z; these N matters were alive; these M tasks were due; these are the approvals still pending; here's what Sir told me during the day; these are the actions I took on his behalf; these data sources may have gaps."* That's your "what should have happened" baseline.
+**Plane activity rides through matters — no separate fetch needed.** Matters with `plane_project_id` whose `updated_at` advanced today indicate Plane changes. Use `self({endpoint: "/api/v1/plane/issues/<project_id>/<issue_id>/comments"})` only on-demand for matters you're going to mention.
+
+**Outbound notifications use the pass-2 stream events — no separate fetch.** When you read recent stream events, filter for `direction: outbound` entries you produced (sms-outbound, slack-outbound, telegram-outbound, email-outbound, voice-call). The digest should reference these as actions taken: *"I texted you about the Köhler reply at 16:30 — they confirmed."* Treat as a **filter on data already in context**, not as a separate trip to ctrl-api.
 
 ### Pass 2 — Ingest events that happened during the day
 

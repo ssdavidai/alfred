@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-briefing
 description: Assemble and deliver Sir's morning briefing as a continuous narrative — ground in last night's digest, ingest overnight inputs, reason about how matters moved, then write a butler's note. Invoked at Sir's local morning by the chore system. Output is BOTH a vault-persisted record (event/daily-brief-<date>.md) and the Slack message Sir sees at breakfast.
-version: "2.2"
+version: "2.3"
 metadata:
   openclaw:
     emoji: "☀️"
@@ -29,15 +29,17 @@ Before looking at anything new, load the answer to *"what's important right now?
 
 4. **MEMORY.md** is already in your context — re-anchor explicitly: who's important, what dates are coming, what themes are running.
 
-5. **Recent main-agent sessions** — `self({endpoint: "/api/v1/openclaw/sessions"})`. Filter client-side to sessions whose `updatedAt` is past the watermark (yesterday's digest's `generated_at`, or `now − 24h` if no digest). For each, you can fetch `/api/v1/openclaw/sessions/<id>/history` if you need the actual exchange. This tells you what Sir said to you overnight on Slack / Telegram / voice / SMS — including any commitments he made or instructions he gave that should colour today's brief. **Critical**: if Sir asked you to do something last night, the brief should either confirm it's done, flag it as still in progress, or surface the question if you couldn't act. Don't ignore what was said.
+5. **Recent main-agent sessions** — `self({endpoint: "/api/v1/openclaw/sessions"})`. Returns the recent main-agent session list (cheap, no per-session bodies). Filter client-side to sessions whose `updatedAt` is past the watermark (yesterday's digest's `generated_at`, or `now − 24h` if no digest). You only need the session LIST for grounding — fetch `/api/v1/openclaw/sessions/<id>/history` ONLY if a specific session looks load-bearing for today's brief and you need the exchange. **If Sir asked you to do something last night**, the brief should confirm it's done, flag it as still in progress, or surface the question if you couldn't act. Don't ignore what was said.
 
-6. **Open approvals** — `self({endpoint: "/api/v1/approvals/pending"})`. Instinct execution tasks waiting for Sir's yes/no. These are explicit "needs your attention" items and should always be surfaced, in their own line or paragraph.
+6. **Open approvals** — `self({endpoint: "/api/v1/approvals/pending"})`. Instinct execution tasks waiting for Sir's yes/no. Small payload. Always include if non-empty.
 
-7. **Stream pull health** — `self({endpoint: "/api/v1/streams"})`. Each stream returns `last_event_at`. **A stream that hasn't pulled in much longer than its expected cadence is the silent killer of brief accuracy** — if Gmail's `last_event_at` is six hours old, "quiet overnight" is a lie. Compare each active stream's `last_event_at` against its known cadence (Gmail: minutes; calendar: minutes; Plane sync: seconds). If a stream is more than ~3× stale, name it in the brief: *"Heads up — Gmail pull's been quiet since 02:00, the briefing may be missing overnight email."*
+7. **Stream pull health** — `self({endpoint: "/api/v1/streams"})`. Returns each stream's metadata including `last_event_at`. **A stream that hasn't pulled in much longer than its expected cadence is the silent killer of brief accuracy** — if Gmail's `last_event_at` is six hours old, "quiet overnight" is a lie. Compare each active stream's `last_event_at` against its known cadence (Gmail: minutes; calendar: minutes). If a stream is more than ~3× stale, name it in the brief: *"Heads up — Gmail pull's been quiet since 02:00, the briefing may be missing overnight email."*
 
-8. **Outbound notifications + Plane activity** — review the recent stream events you fetch in pass 2 for entries with `stream_type` of `sms-outbound` / `slack-outbound` / `telegram-outbound` / `email-outbound` / `voice-call` AND `direction: outbound` (you, Alfred, sent these). Anything you delivered to Sir overnight is something he's already aware of — don't re-flag it as news. Mention it only if there's a follow-up action ("the SMS I sent you about Köhler at 02:14 — they replied half an hour ago"). Plane activity rides through matters' `updated_at` — matters whose `updated_at` advanced since the watermark indicate Plane changes you should investigate. For specific Plane issue context on a matter with `plane_project_id`, `self({endpoint: "/api/v1/plane/issues/<project_id>/<issue_id>/comments"})` returns the comment thread.
+After pass 1 you can say to yourself: *"these N matters are alive, these M tasks are open, here's what Sir said to me last night, here are the approvals he hasn't decided on, these data sources are healthy / stale."* That's the base state.
 
-After pass 1 you can say to yourself: *"these N matters are alive, these M tasks are open, here's what Sir said to me last night, here are the approvals he hasn't decided on, these data sources are healthy / stale, here's what I already told him about overnight."* That's the base state.
+**Plane activity rides through matters — no separate fetch needed.** Matters synced from Plane have a `plane_project_id` field; their `updated_at` advances when their Plane state changes. When a matter's `updated_at` is past the watermark, that's already your Plane signal. If you need specific Plane comment context for a matter you're going to mention, `self({endpoint: "/api/v1/plane/issues/<project_id>/<issue_id>/comments"})` is available as a pass-2-on-demand call, not pass-1.
+
+**Outbound notifications dedup uses the pass-2 stream events — no separate fetch.** When you read the recent stream events in pass 2, filter for entries with `direction: outbound` and `stream_type` ending in `-outbound` (sms-outbound, slack-outbound, telegram-outbound, email-outbound) plus `voice-call`. Those are messages you, Alfred, delivered to Sir already — he's aware of them. Don't re-flag as news; mention only if there's a fresh follow-up. Treat this as a **filter on data already in your context**, not as a separate trip to ctrl-api.
 
 ### Pass 2 — Ingest new inputs since the last hand-off
 
