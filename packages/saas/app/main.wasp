@@ -884,6 +884,7 @@ action submitFactCorrections {
 }
 
 action submitAccessRequest {
+  // Keep landing page enquiry submissions public (no auth required)
   fn: import { submitAccessRequest } from "@src/landing-page/operations",
   entities: [],
   auth: false
