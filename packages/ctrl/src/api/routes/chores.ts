@@ -50,9 +50,52 @@ const CHORE_DIR = path.join(VAULT_PATH, "chore");
  */
 const STANDARD_LIBRARY_CHORE_TEMPLATES: ReadonlySet<string> = new Set([
   "daily_morning_briefing",
+  "daily_evening_digest",
   "subscription_watcher",
   "weekly_matter_digest",
 ]);
+
+/**
+ * Default schedule + display metadata for each standard-library chore,
+ * used by `POST /api/v1/admin/chores/install-standard` when the caller
+ * doesn't override. Times are in UTC. Local-time impact:
+ *   - daily_morning_briefing: 06:30 CET / 06:30 CEST (the agent reads
+ *     local time at run-time, so the message says "good morning")
+ *   - daily_evening_digest: 19:00 CET / 20:00 CEST
+ */
+const STANDARD_LIBRARY_DEFAULTS: Record<
+  string,
+  { name: string; schedule: string; description: string; workflow_class_name: string }
+> = {
+  daily_morning_briefing: {
+    name: "Daily morning briefing",
+    schedule: "30 4 * * *",
+    workflow_class_name: "DailyMorningBriefingWorkflow",
+    description:
+      "Every morning, your butler walks in with the coffee and brings you up to speed. Reads last night's digest, checks what changed across your active matters overnight, and writes a short note led by the matters that moved.",
+  },
+  daily_evening_digest: {
+    name: "Daily evening digest",
+    schedule: "0 18 * * *",
+    workflow_class_name: "DailyEveningDigestWorkflow",
+    description:
+      "End of day wrap. Reads this morning's brief, checks what actually happened today versus what we expected, and writes the hand-off note for tomorrow's brief. Closes the daily loop.",
+  },
+  subscription_watcher: {
+    name: "Subscription watcher",
+    schedule: "0 7 * * 5",
+    workflow_class_name: "SubscriptionWatcherWorkflow",
+    description:
+      "Weekly review of recurring charges across all payment domains. Surfaces failed payments, unexpected price increases, and zombie subscriptions. Silent on quiet weeks.",
+  },
+  weekly_matter_digest: {
+    name: "Weekly matter digest",
+    schedule: "0 16 * * 0",
+    workflow_class_name: "WeeklyMatterDigestWorkflow",
+    description:
+      "Weekly synthesis across all active matters. One paragraph per matter that had movement, plus what's still open and what next week should be ready for.",
+  },
+};
 
 const STANDARD_LIBRARY_BUILTIN_PATH = (template: string): string =>
   `packages/learn/src/workflows/chores/${template}.py`;
@@ -1091,5 +1134,127 @@ export function registerChoreRoutes(): void {
       results.push({ slug, template, tier: "standard-library", action: "flipped-to-builtin" });
     }
     sendJson(res, 200, { changed, results });
+  });
+
+  // POST /api/v1/admin/chores/install-standard
+  //
+  // Install one of the platform's standard-library chores on this tenant.
+  // Creates the chore vault record (with `generated: false, tier: standard-library`)
+  // and the Temporal schedule. Idempotent — if the chore already exists,
+  // updates the schedule + frontmatter to match the requested values.
+  //
+  // Body: {
+  //   template: "daily_evening_digest",          // required, must be in STANDARD_LIBRARY_CHORE_TEMPLATES
+  //   schedule?: "0 18 * * *",                    // override default; falls back to STANDARD_LIBRARY_DEFAULTS
+  //   name?: "Daily evening digest",              // override default
+  //   user_facing_description?: "...",            // override default
+  //   params?: {channel: "slack:default"}         // merged with {chore_slug} envelope
+  // }
+  //
+  // Used by the platform deploy script to roll out new standard-library
+  // chores to existing tenants, and by the operator to install a chore
+  // that an old tenant didn't get during onboarding.
+  addRoute("POST", "/api/v1/admin/chores/install-standard", async ({ res, body }) => {
+    const b = (body as Record<string, unknown> | undefined) ?? {};
+    const template = String(b.template ?? "").trim();
+    if (!template) throw new ValidationError("body.template (string) required");
+    if (!STANDARD_LIBRARY_CHORE_TEMPLATES.has(template)) {
+      throw new ValidationError(
+        `template '${template}' is not in STANDARD_LIBRARY_CHORE_TEMPLATES. Available: ${Array.from(STANDARD_LIBRARY_CHORE_TEMPLATES).join(", ")}`,
+      );
+    }
+    const defaults = STANDARD_LIBRARY_DEFAULTS[template];
+    if (!defaults) {
+      throw new ValidationError(
+        `template '${template}' has no entry in STANDARD_LIBRARY_DEFAULTS — needs to be added before this endpoint can install it`,
+      );
+    }
+
+    const slug = template.replace(/_/g, "-");
+    const cron = String(b.schedule ?? defaults.schedule).trim();
+    const name = String(b.name ?? defaults.name);
+    const description = String(b.user_facing_description ?? defaults.description);
+    const paramsInput = (b.params as Record<string, unknown>) ?? {};
+    const workflowInput = { chore_slug: slug, ...paramsInput };
+    const paramsJson = JSON.stringify(workflowInput);
+    const scheduleId = `chore-${slug}`;
+    const vaultPath = path.join(CHORE_DIR, `${slug}.md`);
+    const now = new Date().toISOString();
+
+    // Idempotency: if a chore record already exists, this is a re-install.
+    // Replace the schedule (delete + create) and overwrite the frontmatter
+    // so the values converge to what was requested. Preserve the body.
+    const existing = readChoreFile(slug);
+    let action: "created" | "updated" = existing ? "updated" : "created";
+
+    // Schedule: delete-then-create is the only path that lets us change cron.
+    try {
+      await dockerExec("temporal", [
+        "temporal", "schedule", "delete",
+        "--schedule-id", scheduleId,
+      ]);
+    } catch { /* swallow — likely doesn't exist */ }
+    try {
+      await dockerExec("temporal", [
+        "temporal", "schedule", "create",
+        "--schedule-id", scheduleId,
+        "--type", defaults.workflow_class_name,
+        "--task-queue", "alfred-learn",
+        "--cron", cron,
+        "--overlap-policy", "Skip",
+        "--input", JSON.stringify(workflowInput),
+      ]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new ValidationError(`schedule create failed: ${msg.slice(0, 300)}`);
+    }
+
+    // Vault record: write fresh frontmatter + a default body if creating;
+    // preserve body if updating.
+    const recordLines = [
+      "---",
+      `created: '${existing ? (existing.frontmatter.created ?? now) : now}'`,
+      "created_by: admin-install-standard",
+      "generated: false",
+      "last_result: ''",
+      "last_run: ''",
+      `name: ${yamlScalarQuote(name)}`,
+      `params: ${yamlScalarQuote(paramsJson)}`,
+      "quarantine: false",
+      "quarantine_remaining: 0",
+      `schedule: ${yamlScalarQuote(cron)}`,
+      `schedule_id: ${scheduleId}`,
+      "status: active",
+      "tags: []",
+      `template: ${template}`,
+      "type: chore",
+      `user_facing_description: ${yamlScalarQuote(description)}`,
+      `workflow_class_name: ${defaults.workflow_class_name}`,
+      "---",
+      "",
+    ];
+    const bodyText = existing && existing.body
+      ? existing.body
+      : [
+          `# ${name}`,
+          "",
+          description,
+          "",
+          "> **Standard-library chore.** Installed via `POST /api/v1/admin/chores/install-standard`. The Python workflow lives inside the alfred-learn image at `packages/learn/src/workflows/chores/" + template + ".py` — there is no per-tenant .py file for this chore.",
+          "",
+        ].join("\n");
+
+    fs.mkdirSync(CHORE_DIR, { recursive: true });
+    fs.writeFileSync(vaultPath, recordLines.join("\n") + bodyText, "utf-8");
+
+    sendJson(res, 200, {
+      slug,
+      template,
+      tier: "standard-library",
+      schedule_id: scheduleId,
+      schedule: cron,
+      action,
+      builtin_path: STANDARD_LIBRARY_BUILTIN_PATH(template),
+    });
   });
 }

@@ -124,6 +124,7 @@ self({ endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
 | `GET /api/v1/admin/models` | Available AI models. |
 | `GET /api/v1/admin/credentials` | Provider credentials (masked). |
 | `POST /api/v1/admin/chores/refresh-tier` | Sweep every chore record and flip stale `generated: true → false` for chores whose template has been promoted to the platform standard library. Idempotent. Run this once after a platform update that promotes a previously-generated template. |
+| `POST /api/v1/admin/chores/install-standard` | Install one of the platform's standard-library chores on this tenant (creates vault record + Temporal schedule). Idempotent — re-installing updates the schedule and frontmatter. Body: `{template, schedule?, name?, user_facing_description?, params?}`. Used to roll out new standard-library chores (e.g. `daily_evening_digest`) to existing tenants that didn't get them at onboarding. |
 
 ### Connected Apps (Composio)
 

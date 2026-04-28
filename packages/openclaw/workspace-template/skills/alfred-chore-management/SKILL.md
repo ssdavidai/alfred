@@ -20,7 +20,9 @@ Every chore is one of two tiers. Telling them apart is the single most common pl
 | **Standard library** | Inside the `alfred-learn` Docker image at `packages/learn/src/workflows/chores/<template>.py` (in the `alfred-platform` repo) | Platform team. Same code on every tenant. | `{generated: false, tier: "standard-library", builtin_path: "..."}` |
 | **Generated** | Per-tenant file at `/alfred-data/user-chores/<template>.py` | Opus, during onboarding, against Sir's specific matters | `{generated: true, tier: "generated", source: "<full .py>"}` |
 
-Today's standard-library templates: `daily_morning_briefing`, `subscription_watcher`, `weekly_matter_digest`. Anything else is generated.
+Today's standard-library templates: `daily_morning_briefing`, `daily_evening_digest`, `subscription_watcher`, `weekly_matter_digest`. Anything else is generated.
+
+> The morning brief and evening digest form a continuous narrative loop. The brief reads last night's digest as its starting point; the digest reads this morning's brief. Both persist their output as `event/daily-brief-<date>.md` and `event/daily-digest-<date>.md` so each can find the other. If Sir asks why the brief feels disconnected from yesterday, check whether the digest landed (`event/daily-digest-<yesterday>.md` should exist).
 
 > **Warning — `generated: true` in frontmatter does NOT mean the chore is in the generated tier.** When a template gets promoted from generated to standard-library, existing chore records keep their original `generated: true` flag. The `/api/v1/chores/<slug>/source` endpoint detects promoted templates and returns the right tier regardless of the flag. **Trust the `tier` field in the response, not the frontmatter flag.**
 
