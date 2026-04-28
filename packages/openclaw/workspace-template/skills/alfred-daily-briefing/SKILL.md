@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-briefing
 description: Assemble and deliver Sir's morning briefing as a continuous narrative — ground in last night's digest, ingest overnight inputs, reason about how matters moved, then write a butler's note. Invoked at Sir's local morning by the chore system. Output is BOTH a vault-persisted record (event/daily-brief-<date>.md) and the Slack message Sir sees at breakfast.
-version: "2.1"
+version: "2.2"
 metadata:
   openclaw:
     emoji: "☀️"
@@ -29,7 +29,15 @@ Before looking at anything new, load the answer to *"what's important right now?
 
 4. **MEMORY.md** is already in your context — re-anchor explicitly: who's important, what dates are coming, what themes are running.
 
-After pass 1 you can say to yourself: *"these N matters are alive, these M tasks are open, here's what I told Sir last night, here's what he said he'd do today."* That's the base state.
+5. **Recent main-agent sessions** — `self({endpoint: "/api/v1/openclaw/sessions"})`. Filter client-side to sessions whose `updatedAt` is past the watermark (yesterday's digest's `generated_at`, or `now − 24h` if no digest). For each, you can fetch `/api/v1/openclaw/sessions/<id>/history` if you need the actual exchange. This tells you what Sir said to you overnight on Slack / Telegram / voice / SMS — including any commitments he made or instructions he gave that should colour today's brief. **Critical**: if Sir asked you to do something last night, the brief should either confirm it's done, flag it as still in progress, or surface the question if you couldn't act. Don't ignore what was said.
+
+6. **Open approvals** — `self({endpoint: "/api/v1/approvals/pending"})`. Instinct execution tasks waiting for Sir's yes/no. These are explicit "needs your attention" items and should always be surfaced, in their own line or paragraph.
+
+7. **Stream pull health** — `self({endpoint: "/api/v1/streams"})`. Each stream returns `last_event_at`. **A stream that hasn't pulled in much longer than its expected cadence is the silent killer of brief accuracy** — if Gmail's `last_event_at` is six hours old, "quiet overnight" is a lie. Compare each active stream's `last_event_at` against its known cadence (Gmail: minutes; calendar: minutes; Plane sync: seconds). If a stream is more than ~3× stale, name it in the brief: *"Heads up — Gmail pull's been quiet since 02:00, the briefing may be missing overnight email."*
+
+8. **Outbound notifications + Plane activity** — review the recent stream events you fetch in pass 2 for entries with `stream_type` of `sms-outbound` / `slack-outbound` / `telegram-outbound` / `email-outbound` / `voice-call` AND `direction: outbound` (you, Alfred, sent these). Anything you delivered to Sir overnight is something he's already aware of — don't re-flag it as news. Mention it only if there's a follow-up action ("the SMS I sent you about Köhler at 02:14 — they replied half an hour ago"). Plane activity rides through matters' `updated_at` — matters whose `updated_at` advanced since the watermark indicate Plane changes you should investigate. For specific Plane issue context on a matter with `plane_project_id`, `self({endpoint: "/api/v1/plane/issues/<project_id>/<issue_id>/comments"})` returns the comment thread.
+
+After pass 1 you can say to yourself: *"these N matters are alive, these M tasks are open, here's what Sir said to me last night, here are the approvals he hasn't decided on, these data sources are healthy / stale, here's what I already told him about overnight."* That's the base state.
 
 ### Pass 2 — Ingest new inputs since the last hand-off
 
@@ -58,6 +66,12 @@ This is the layer that matters most. The current state from pass 1 plus the new 
 - From a known person about a known concern? → mention as a standalone line. Do **not** label it with a matter heading. See "Strict matter labelling" below.
 - Ambient noise (newsletter, receipt, auto-alert)? → drop.
 - Possibly the start of a new matter? → flag for Sir, suggest he tell you to track it. Phrase it as a question, not as an assertion under a fabricated matter heading.
+
+**Don't re-flag items Sir is already aware of.** Cross-reference everything against pass 1's outbound-notification log AND last night's session history:
+- If you SMS'd / Slacked / emailed / voiced Sir about an item already, treat it as known. Mention only if there's a fresh follow-up *to that item* (a reply, an escalation, a status change). Phrase as *"the X I texted you about — Y has happened since"* rather than as new news.
+- If Sir gave an instruction last night and you actioned it, confirm it's done. Don't re-pose the question.
+- If Sir gave an instruction and you couldn't action it, surface the blocker now.
+- If Sir made a commitment last night ("I'll handle Köhler tomorrow"), the brief should remember it — open with *"You wanted to handle Köhler this morning; here's what they said overnight"* rather than treating Köhler as a fresh discovery.
 
 **Strict matter labelling — non-negotiable.** A line in the body labelled `Matter Name —` MUST correspond to a real matter slug from your pass-1 `/api/v1/vault/list/matter` results. **Never attach a matter label to a line whose underlying event has `related_matters: []` or whose source you cannot verify against an actual matter record.** Misattributing a loose event to a matter just to satisfy the matter-led shape is a failure mode worse than not mentioning it — the surveyor will then wire the brief's `related_matters` frontmatter to the wrong matter, reinforcing the bad link permanently.
 

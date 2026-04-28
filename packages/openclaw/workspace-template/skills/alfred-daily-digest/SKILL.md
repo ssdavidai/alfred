@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-digest
 description: Assemble and deliver Sir's evening digest — a backward-looking close of the day that picks up where this morning's brief left off. Reports per-matter outcomes vs expectations, what's still open, and what tomorrow needs to be ready for. Invoked at Sir's local evening (default 19:00 CET / 17:00 UTC) by the chore system. Output is BOTH a vault-persisted record (event/daily-digest-<date>.md) and the Slack message Sir reads as he winds down.
-version: "1.1"
+version: "1.2"
 metadata:
   openclaw:
     emoji: "🌙"
@@ -29,7 +29,15 @@ Before looking at the day's events, load the answer to *"what did the morning ex
 
 4. **MEMORY.md** is in your context — re-anchor for who/what matters.
 
-After pass 1 you can say: *"this morning I flagged X, Y, Z; these N matters were alive; these M tasks were due."* That's your "what should have happened" baseline.
+5. **Today's main-agent sessions** — `self({endpoint: "/api/v1/openclaw/sessions"})`. Filter client-side to sessions whose `updatedAt` is past this morning's brief `generated_at`. Fetch `/api/v1/openclaw/sessions/<id>/history` for any whose content matters to the day's outcomes. This tells you what Sir said to you during the day on Slack / Telegram / voice / SMS — commitments he made, decisions he announced, things he asked you to handle. The digest should reconcile these against what actually happened.
+
+6. **Open approvals** — `self({endpoint: "/api/v1/approvals/pending"})`. Items still pending Sir's decision at end of day. Worth surfacing — these become tomorrow's "still waiting" items.
+
+7. **Stream pull health** — `self({endpoint: "/api/v1/streams"})`. Each stream's `last_event_at`. If a stream went stale during the day, the digest's "quiet stretch after lunch" might just be missing data. Name the staleness explicitly so Sir knows what's signal vs what's a gap.
+
+8. **Outbound notifications you sent today + Plane activity** — review stream events for `direction: outbound` entries you produced (sms-outbound, slack-outbound, etc). The digest should reference these as actions taken: *"I texted you about the Köhler reply at 16:30 — they confirmed."* Plane activity propagates via matters' `updated_at`; matters whose `updated_at` advanced today indicate Plane changes. For specific Plane issue context, `self({endpoint: "/api/v1/plane/issues/<project_id>/<issue_id>/comments"})` returns the comment thread.
+
+After pass 1 you can say: *"this morning I flagged X, Y, Z; these N matters were alive; these M tasks were due; these are the approvals still pending; here's what Sir told me during the day; these are the actions I took on his behalf; these data sources may have gaps."* That's your "what should have happened" baseline.
 
 ### Pass 2 — Ingest events that happened during the day
 
@@ -62,6 +70,8 @@ This is the digest's analytical core. You have *"what the morning expected"* (pa
 **Tomorrow's anchor:**
 - What's on Sir's calendar tomorrow that needs preparation tonight?
 - What's still open from today that should be the morning brief's lead?
+
+**Reference the actions you actually took.** The digest is the place to acknowledge work done on Sir's behalf during the day. For each outbound notification you sent today, weave it in: *"I confirmed the BakeryNext mixer fix with Lőrincz at 14:30."* Don't enumerate every nudge — pick the ones load-bearing for tomorrow's hand-off. If Sir explicitly asked you to do something today (visible in pass-1 sessions) and you did it, name the follow-through. If you didn't, name the blocker.
 
 **Strict matter labelling — non-negotiable.** A line in the body labelled `Matter Name —` MUST correspond to a real matter slug from your pass-1 `/api/v1/vault/list/matter` results. **Never attach a matter label to a line whose underlying event has `related_matters: []` or whose source you cannot verify against an actual matter record.** Misattributing a loose event to a matter just to satisfy the matter-led shape is a failure mode worse than not mentioning it — the surveyor will then wire the digest's `related_matters` frontmatter to the wrong matter, reinforcing the bad link permanently. Use non-matter headings (`Web`, `Comms`, `Ops`, `Personal`) for inputs that don't fit any existing matter, and consider closing with a "worth tracking X as its own matter" nudge.
 
