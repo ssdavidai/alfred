@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-briefing
 description: Assemble and deliver Sir's morning briefing as a continuous narrative — ground in last night's digest, ingest overnight inputs, reason about how matters moved, then write a butler's note. Invoked at Sir's local morning by the chore system. Output is BOTH a vault-persisted record (event/daily-brief-<date>.md) and the Slack message Sir sees at breakfast.
-version: "2.4"
+version: "2.5"
 metadata:
   openclaw:
     emoji: "☀️"
@@ -23,7 +23,7 @@ Before looking at anything new, load the answer to *"what's important right now?
 
 1. **Yesterday's evening digest** — `self({endpoint: "/api/v1/vault/records/event/daily-digest-<yesterday-YYYY-MM-DD>.md"})`. This is the world as you handed it off last night. It tells you what was open, what was expected today, what was worrying. If the digest doesn't exist (first morning, or it failed to land), fall back to yesterday's brief at `event/daily-brief-<yesterday>.md`. If neither exists, note that internally and proceed without — but flag the discontinuity in your reasoning.
 
-2. **Active matters** — `self({endpoint: "/api/v1/vault/list/matter", query: {status: "active", preview: "400"}})`. Each entry: name, slug, status, last activity, short preview. Not full bodies. This is the set of "what's currently alive" you'll be reasoning over. Anywhere from 3 matters (light week) to 15+ (Rapali on a busy week).
+2. **Active matters** — `self({endpoint: "/api/v1/vault/list/matter", query: {status: "active", preview: "200"}})`. Each entry: name, slug, status, last activity, short preview. Not full bodies. This is the set of "what's currently alive" you'll be reasoning over. Anywhere from 3 matters (light week) to 15+ (Rapali on a busy week). Keep preview at 200 chars — the matter NAME plus the first sentence is enough for ground state; richer context comes from pass-2 lazy fetch only when you'll write about a specific matter.
 
 3. **Open tasks** — `self({endpoint: "/api/v1/vault/list/task", query: {status: "active"}})`. Filter client-side to ones due today, this week, or recently overdue. These are the concrete commitments Sir is on the hook for; they should colour the briefing.
 
@@ -95,7 +95,7 @@ Now you have ground state + new inputs + their deltas. Write the briefing.
 
 ## Output shape
 
-A short message — plain prose, ≤ ~1500 characters, Slack-safe. Your reply IS the message Sir sees. No "here's your briefing" preamble.
+A short message — plain prose, **≤ ~1000 characters, hard limit**, Slack-safe. Your reply IS the message Sir sees. No "here's your briefing" preamble. Tight discipline here is non-negotiable: longer briefs both burn through your output budget AND read worse — a butler doesn't lecture at breakfast. If you're approaching the limit, cut.
 
 **Open with a butler's greeting.** Not "in medias res." A butler comes into the room with the coffee tray and *greets* Sir before launching into the news. One short opening line — a greeting plus a one-clause framing of the night. Then a beat (a blank line). Then content.
 
@@ -176,11 +176,19 @@ Good morning, sir. Nothing overnight. You're clear.
 
 Note the greeting is preserved even on a silent morning — you still come into the room with the coffee. Don't reach for silence lazily. If a partner's birthday is in three days, that deserves a line. If a matter Sir's been worrying about has been quiet, that silence is itself worth naming.
 
-## Persistence — write the brief to vault BEFORE replying
+## Persistence — vault POST is the FIRST action of your final turn, BEFORE the reply text
 
-The brief is half of a daily loop. Tonight's digest will read what you write this morning. So before your final reply, persist the briefing to vault:
+The brief is half of a daily loop. Tonight's digest will read what you write this morning. So persistence is mandatory.
+
+**Critical ordering:** in your final assistant turn, the **vault POST tool call MUST come first**, then the briefing text as your reply. This order matters because if anything gets truncated by output limits, the persist already landed and the reply text is what gets cut. If you put the text first and the tool call after, a truncation loses both.
+
+The structure of your final turn should be:
+
+1. (Tool call) `self({endpoint: "/api/v1/vault/records", method: "POST", body: { ... see below ... }})`
+2. (After tool result returns) Your final assistant text — the briefing prose itself, which becomes the channel message.
 
 ```js
+// FIRST — persist
 self({
   endpoint: "/api/v1/vault/records",
   method: "POST",
@@ -190,18 +198,21 @@ self({
       type: "event",
       kind: "daily-brief",
       generated_at: "<iso timestamp>",
-      related_matters: ["matter/avenir-solutions.md", "matter/penthouse.md", "matter/bakerynext.md"],
+      related_matters: ["matter/avenir-solutions.md"],  // only matters actually labeled in the body
       delta_count: 3,
       had_silence_call_outs: true
     },
-    body: "<the same prose you're about to send>"
+    body: "<the prose you're about to send as your reply>"
   }
 })
+
+// THEN — your reply text (this is what posts to Sir's channel via --announce)
+"Good morning, sir. Quiet overnight..."
 ```
 
-The `related_matters` array is what makes this queryable later — when Sir asks "show me every brief that mentioned the Penthouse matter" the surveyor will already have linked them.
+The `related_matters` array makes the brief queryable later. **Strict labelling rule still applies** — only matter slugs whose name actually appeared as a body section heading.
 
-If the vault write fails, still send the Slack reply. Don't leave Sir without his briefing because of a transient vault hiccup. But log the failure in your reply context so the next session knows to retry.
+If the vault write returns an error, still produce the reply text — don't leave Sir without his briefing because of a transient vault hiccup.
 
 ## Delivery
 

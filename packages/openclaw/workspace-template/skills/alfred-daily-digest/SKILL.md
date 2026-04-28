@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-digest
 description: Assemble and deliver Sir's evening digest — a backward-looking close of the day that picks up where this morning's brief left off. Reports per-matter outcomes vs expectations, what's still open, and what tomorrow needs to be ready for. Invoked at Sir's local evening (default 19:00 CET / 17:00 UTC) by the chore system. Output is BOTH a vault-persisted record (event/daily-digest-<date>.md) and the Slack message Sir reads as he winds down.
-version: "1.4"
+version: "1.5"
 metadata:
   openclaw:
     emoji: "🌙"
@@ -23,7 +23,7 @@ Before looking at the day's events, load the answer to *"what did the morning ex
 
 1. **This morning's brief** — `self({endpoint: "/api/v1/vault/records/event/daily-brief-<today-YYYY-MM-DD>.md"})`. This tells you what you flagged for Sir, what matters were expected to move, what tasks were due, what calendar was on the agenda. If today's brief doesn't exist (chore failed, first day after install), fall back to yesterday's digest. If neither exists, note the discontinuity and proceed.
 
-2. **Active matters** — `self({endpoint: "/api/v1/vault/list/matter", query: {status: "active", preview: "400"}})`. The set you'll be reasoning over. Same call as the brief makes.
+2. **Active matters** — `self({endpoint: "/api/v1/vault/list/matter", query: {status: "active", preview: "200"}})`. The set you'll be reasoning over. Same call as the brief makes — keep preview at 200; lazy-fetch full body only for matters you're going to mention.
 
 3. **Open tasks** — `self({endpoint: "/api/v1/vault/list/task", query: {status: "active"}})`. Filter client-side: which were due today, which got completed today (`status: completed` and `updated_at` >= morning brief's `generated_at`), which slipped, which are due tomorrow.
 
@@ -85,7 +85,7 @@ This is the digest's analytical core. You have *"what the morning expected"* (pa
 
 ## Output shape
 
-A short message — plain prose, ≤ ~1500 characters, Slack-safe. Your reply IS the message. No preamble.
+A short message — plain prose, **≤ ~1000 characters, hard limit**, Slack-safe. Your reply IS the message. No preamble. Same discipline as the brief: longer digests both burn through your output budget AND read worse.
 
 **Open with a butler's evening greeting.** The figure closing out the day. Short opening line — a greeting plus a one-clause framing of how the day went. Then a beat. Then content.
 
@@ -163,11 +163,19 @@ End of day, sir. Everything from this morning landed. Nothing carries over.
 
 Greet first even when silent. Don't reach for silence lazily — if BakeryNext is still down, that's tomorrow's lead and it deserves a line.
 
-## Persistence — write the digest to vault BEFORE replying
+## Persistence — vault POST is the FIRST action of your final turn, BEFORE the reply text
 
-Tomorrow's brief will read what you write tonight. Persist before sending:
+Tomorrow's brief will read what you write tonight. Persistence is mandatory.
+
+**Critical ordering:** in your final assistant turn, the **vault POST tool call MUST come first**, then the digest text as your reply. This way if anything truncates by output limits, the persist already landed.
+
+The structure of your final turn:
+
+1. (Tool call) `self({endpoint: "/api/v1/vault/records", method: "POST", body: { ... see below ... }})`
+2. (After tool result returns) Your final assistant text — the digest prose, which becomes the channel message.
 
 ```js
+// FIRST — persist
 self({
   endpoint: "/api/v1/vault/records",
   method: "POST",
@@ -177,19 +185,22 @@ self({
       type: "event",
       kind: "daily-digest",
       generated_at: "<iso timestamp>",
-      related_matters: ["matter/avenir-solutions.md", "matter/bakerynext.md", "matter/nova.md"],
+      related_matters: ["matter/bakerynext.md"],  // only matters actually labeled in body
       morning_brief_path: "event/daily-brief-<today>.md",
       open_for_tomorrow: ["BakeryNext line", "Köhler reply"],
       delta_count: 3
     },
-    body: "<the same prose you're about to send>"
+    body: "<the prose you're about to send>"
   }
 })
+
+// THEN — your reply text
+"End of day, sir. Mostly clean wrap..."
 ```
 
-The `morning_brief_path` field anchors the loop — tomorrow's brief can find this digest by date and read both halves of today.
+The `morning_brief_path` field anchors the loop. **Strict labelling rule applies** — only matter slugs whose name actually appeared as a body section heading.
 
-If the vault write fails, still send the Slack reply. Log the failure so tomorrow's brief knows the watermark may be wrong.
+If the vault write returns an error, still produce the reply text — don't leave Sir without his digest because of a transient vault hiccup.
 
 ## Delivery
 
