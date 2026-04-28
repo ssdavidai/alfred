@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-digest
 description: Assemble and deliver Sir's evening digest — a backward-looking close of the day that picks up where this morning's brief left off. Reports per-matter outcomes vs expectations, what's still open, and what tomorrow needs to be ready for. Invoked at Sir's local evening (default 19:00 CET / 17:00 UTC) by the chore system. Output is BOTH a vault-persisted record (event/daily-digest-<date>.md) and the Slack message Sir reads as he winds down.
-version: "1.5"
+version: "1.6"
 metadata:
   openclaw:
     emoji: "🌙"
@@ -175,22 +175,17 @@ The structure of your final turn:
 2. (After tool result returns) Your final assistant text — the digest prose, which becomes the channel message.
 
 ```js
-// FIRST — persist
+// FIRST — persist. ctrl-api wants {type, name, content} where content is
+// the full markdown including the frontmatter block (--- ... ---) at the
+// top followed by the body prose. Do NOT use {path, frontmatter, body} —
+// that shape returns 400 "type and name are required".
 self({
   endpoint: "/api/v1/vault/records",
   method: "POST",
   body: {
-    path: "event/daily-digest-<today-YYYY-MM-DD>.md",
-    frontmatter: {
-      type: "event",
-      kind: "daily-digest",
-      generated_at: "<iso timestamp>",
-      related_matters: ["matter/bakerynext.md"],  // only matters actually labeled in body
-      morning_brief_path: "event/daily-brief-<today>.md",
-      open_for_tomorrow: ["BakeryNext line", "Köhler reply"],
-      delta_count: 3
-    },
-    body: "<the prose you're about to send>"
+    type: "event",
+    name: "daily-digest-<today-YYYY-MM-DD>",   // no .md, no event/ prefix
+    content: "---\ntype: event\nkind: daily-digest\ngenerated_at: \"<iso>\"\nrelated_matters:\n  - matter/bakerynext.md\nmorning_brief_path: event/daily-brief-<today>.md\nopen_for_tomorrow:\n  - BakeryNext line\n  - Köhler reply\ndelta_count: 3\n---\n\n<the prose you're about to send>"
   }
 })
 

@@ -1,7 +1,7 @@
 ---
 name: alfred-daily-briefing
 description: Assemble and deliver Sir's morning briefing as a continuous narrative — ground in last night's digest, ingest overnight inputs, reason about how matters moved, then write a butler's note. Invoked at Sir's local morning by the chore system. Output is BOTH a vault-persisted record (event/daily-brief-<date>.md) and the Slack message Sir sees at breakfast.
-version: "2.5"
+version: "2.6"
 metadata:
   openclaw:
     emoji: "☀️"
@@ -188,21 +188,17 @@ The structure of your final turn should be:
 2. (After tool result returns) Your final assistant text — the briefing prose itself, which becomes the channel message.
 
 ```js
-// FIRST — persist
+// FIRST — persist. ctrl-api wants {type, name, content} where content is
+// the full markdown including the frontmatter block (--- ... ---) at the
+// top followed by the body prose. Do NOT use {path, frontmatter, body} —
+// that shape returns 400 "type and name are required".
 self({
   endpoint: "/api/v1/vault/records",
   method: "POST",
   body: {
-    path: "event/daily-brief-<today-YYYY-MM-DD>.md",
-    frontmatter: {
-      type: "event",
-      kind: "daily-brief",
-      generated_at: "<iso timestamp>",
-      related_matters: ["matter/avenir-solutions.md"],  // only matters actually labeled in the body
-      delta_count: 3,
-      had_silence_call_outs: true
-    },
-    body: "<the prose you're about to send as your reply>"
+    type: "event",
+    name: "daily-brief-<today-YYYY-MM-DD>",   // no .md, no event/ prefix
+    content: "---\ntype: event\nkind: daily-brief\ngenerated_at: \"<iso>\"\nrelated_matters:\n  - matter/avenir-solutions.md\ndelta_count: 3\nhad_silence_call_outs: true\n---\n\n<the prose you're about to send as your reply>"
   }
 })
 
