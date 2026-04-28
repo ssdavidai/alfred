@@ -636,27 +636,84 @@ export function registerChoreRoutes(): void {
     sendJson(res, 200, { slug, status: "active" });
   });
 
-  // Delete — removes the Temporal schedule and marks the vault record completed
+  // Delete — full teardown: Temporal schedule + any running workflow runs +
+  // vault record .md file + user-chore .py template (and .bak siblings).
+  // Each step is best-effort so partial-state cleanups still converge. The
+  // response reports each component so callers (and agents) can't misread
+  // a partial success as a complete delete.
   addRoute("DELETE", "/api/v1/chores/:slug", async ({ res, params }) => {
     const slug = params?.slug;
     if (!slug) throw new ValidationError("slug is required");
-    if (!readChoreFile(slug)) throw new NotFoundError(`chore ${slug} not found`);
+    const choreFile = readChoreFile(slug);
+    if (!choreFile) throw new NotFoundError(`chore ${slug} not found`);
+    const templateName = String(choreFile.frontmatter["template"] ?? "").trim();
 
-    // Best-effort schedule delete — if it's already gone we still mark the
-    // vault record completed so the state converges.
+    // 1. Schedule
+    let scheduleDeleted = false;
     try {
       await dockerExec("temporal", [
-        "temporal",
-        "schedule",
-        "delete",
-        "--schedule-id",
-        `chore-${slug}`,
+        "temporal", "schedule", "delete",
+        "--schedule-id", `chore-${slug}`,
       ]);
-    } catch {
-      // Swallow — the record cleanup below is the source of truth.
+      scheduleDeleted = true;
+    } catch { /* swallow — likely already gone */ }
+
+    // 2. Any running workflow runs spawned by the schedule. Schedule-spawned
+    // runs use the workflow id pattern `chore-<slug>-<timestamp>`. Terminate
+    // anything that's still Open.
+    let workflowsTerminated = 0;
+    try {
+      const listOut = await dockerExec("temporal", [
+        "temporal", "workflow", "list",
+        "--query", `WorkflowId STARTS_WITH "chore-${slug}-" AND ExecutionStatus="Running"`,
+        "--output", "json",
+      ]);
+      const runs = listOut
+        .trim().split("\n").filter(Boolean)
+        .map((line) => { try { return JSON.parse(line); } catch { return null; } })
+        .filter((r): r is { execution: { workflowId: string } } => !!r?.execution?.workflowId);
+      for (const r of runs) {
+        try {
+          await dockerExec("temporal", [
+            "temporal", "workflow", "terminate",
+            "--workflow-id", r.execution.workflowId,
+            "--reason", `chore ${slug} deleted via API`,
+          ]);
+          workflowsTerminated += 1;
+        } catch { /* swallow */ }
+      }
+    } catch { /* swallow — list failure shouldn't block the rest */ }
+
+    // 3. Vault record file
+    let vaultRecordDeleted = false;
+    try {
+      const fp = path.join(CHORE_DIR, `${slug}.md`);
+      fs.unlinkSync(fp);
+      vaultRecordDeleted = true;
+    } catch { /* swallow */ }
+
+    // 4. User-chore template (.py + any .bak siblings written by chore_authoring)
+    let templateDeleted = false;
+    if (templateName && /^[a-z0-9_]+$/.test(templateName) && fs.existsSync(USER_CHORES_DIR)) {
+      try {
+        const fp = path.join(USER_CHORES_DIR, `${templateName}.py`);
+        if (fs.existsSync(fp)) { fs.unlinkSync(fp); templateDeleted = true; }
+        for (const entry of fs.readdirSync(USER_CHORES_DIR)) {
+          if (entry.startsWith(`${templateName}.py.bak`)) {
+            try { fs.unlinkSync(path.join(USER_CHORES_DIR, entry)); } catch { /* swallow */ }
+          }
+        }
+      } catch { /* swallow */ }
     }
-    writeChoreStatus(slug, "completed");
-    sendJson(res, 200, { slug, status: "completed" });
+
+    sendJson(res, 200, {
+      slug,
+      deleted: vaultRecordDeleted,
+      schedule_deleted: scheduleDeleted,
+      workflows_terminated: workflowsTerminated,
+      vault_record_deleted: vaultRecordDeleted,
+      template_deleted: templateDeleted,
+    });
   });
 
   // Trigger — fires the chore workflow once outside its normal schedule.
