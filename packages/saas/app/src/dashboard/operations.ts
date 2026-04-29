@@ -181,10 +181,10 @@ interface AppInfo {
   status: "up" | "down";
 }
 
-export const getInstalledApps: GetInstalledApps<void, { apps: AppInfo[] }> = async (
-  _args,
-  context,
-) => {
+export const getInstalledApps: GetInstalledApps<void, any> = async (
+  _args: unknown,
+  context: any,
+): Promise<{ apps: AppInfo[] }> => {
   const instance = await getUserInstance(context);
   const raw: any = await proxyToTenant(instance, { path: "/api/v1/apps" });
   const apps = Array.isArray(raw?.apps) ? (raw.apps as AppInfo[]) : [];
