@@ -226,12 +226,21 @@ services:
       - /tmp:size=256m
     environment:
       # alfred (vault daemon) calls openclaw-wrapper which spawns
-      # vault-curator/janitor/distiller agents via sessions_spawn.
-      # The workers gateway rejects external sessions_spawn (allowed:
-      # none), so this MUST point at MAIN (:18789), same fix #614 made
-      # for alfred-learn. Pre-fix, every curator stage-1 returned a
-      # 90-char "no_session_key" error and inbox processing 100% failed.
-      - OPENCLAW_GATEWAY_URL=http://openclaw:18789
+      # vault-curator/janitor/distiller subagents via sessions_spawn.
+      # These subagents MUST run on the workers gateway, NOT main:
+      # - workers is where the agents (vault-curator etc.) are defined
+      # - workers' auto-announce on subagent completion lands inside
+      #   workers gateway and never touches main's user-facing session
+      # - PR #715 wrongly pointed this at main to bypass an
+      #   "agentId is not allowed for sessions_spawn (allowed: none)"
+      #   error on workers; the actual fix is to set workers'
+      #   agents.defaults.subagents.allowAgents=["*"] (see
+      #   openclaw-workers-config.json.njk), which permits external
+      #   spawns. Pre-revert, vault-curator subagent completions were
+      #   announced to agent:main:main and dumped 84K tokens of
+      #   curator-skill text into Sir's chat session per fire,
+      #   causing context overflow on his Slack/Telegram conversations.
+      - OPENCLAW_GATEWAY_URL=http://openclaw-workers:18790
       - ALFRED_CTRL_URL=http://ctrl-api:3100
     env_file:
       - .env
