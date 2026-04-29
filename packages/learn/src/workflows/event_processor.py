@@ -15,6 +15,7 @@ from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
+from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.noise import extract_log_line, is_tier3
@@ -25,6 +26,13 @@ with workflow.unsafe.imports_passed_through():
         mark_event_processed,
     )
     from src.activities.vault import drop_raw_event_to_inbox
+
+
+# Bounded retry so a 4xx (e.g. malformed event_id producing a 404) doesn't
+# stick the activity in Temporal's default infinite-retry loop. Live
+# evidence: David had an EventProcessorWorkflow run sit in attempt 4532
+# on /streams/events//processed for 5 days before manual termination.
+_MARK_RETRY = RetryPolicy(maximum_attempts=3)
 
 
 @dataclass
@@ -50,18 +58,33 @@ class EventProcessorWorkflow:
         result = ProcessorResult()
 
         for event in events[:20]:
+            # Skip events without an id. ctrl-api's mark-processed endpoint
+            # is /streams/events/<id>/processed; an empty id produces
+            # /streams/events//processed → 404, and Temporal's default
+            # retry policy (no maximum_attempts) sticks the activity
+            # forever. Better to skip and let it reappear next cycle than
+            # to enter a 4532-attempt retry loop.
+            event_id = event.get("id") or ""
+            if not event_id:
+                workflow.logger.warning(
+                    "event_processor: skipping event with no id (stream_type=%s, source_ref=%s)",
+                    event.get("stream_type"), event.get("source_ref"),
+                )
+                continue
+
             # Media streams still get routed to their dedicated workflow
             if event.get("stream_type") == "media":
                 await workflow.execute_child_workflow(
                     "MediaIngestionWorkflow",
                     event,
-                    id=f"media-{event.get('id', '')[:16]}",
+                    id=f"media-{event_id[:16]}",
                 )
                 result.media_triggered += 1
                 await workflow.execute_activity(
                     mark_event_processed,
-                    args=[event.get("id", ""), "media-ingestion", "media"],
+                    args=[event_id, "media-ingestion", "media"],
                     start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=_MARK_RETRY,
                 )
                 continue
 
@@ -69,8 +92,9 @@ class EventProcessorWorkflow:
             if is_tier3(event):
                 await workflow.execute_activity(
                     mark_event_processed,
-                    args=[event.get("id", ""), "noise-discarded", "tier3"],
+                    args=[event_id, "noise-discarded", "tier3"],
                     start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=_MARK_RETRY,
                 )
                 result.tier3_discarded += 1
                 continue
@@ -84,8 +108,9 @@ class EventProcessorWorkflow:
                 )
                 await workflow.execute_activity(
                     mark_event_processed,
-                    args=[event.get("id", ""), inbox_path, "tier1"],
+                    args=[event_id, inbox_path, "tier1"],
                     start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=_MARK_RETRY,
                 )
                 result.inbox_routed += 1
                 result.paths.append(inbox_path)
@@ -111,8 +136,9 @@ class EventProcessorWorkflow:
             # 3. Mark processed
             await workflow.execute_activity(
                 mark_event_processed,
-                args=[event.get("id", ""), vault_path, "stream-vault"],
+                args=[event_id, vault_path, "stream-vault"],
                 start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=_MARK_RETRY,
             )
 
             result.vault_records += 1

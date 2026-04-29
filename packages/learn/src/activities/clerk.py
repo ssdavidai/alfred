@@ -588,7 +588,13 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
     # 2. Poll sessions_history until assistant response appears
     # Use a fresh client with longer timeout for polling phase
     async with httpx.AsyncClient(timeout=60.0) as client:
-        for attempt in range(48):  # 48 × 10s = 480s max
+        # 58 × 10s = 580s, just under the 600s outer activity timeout set
+        # for batch_enrich_events (#705). Lets the clerk raise a clean
+        # TimeoutError before Temporal kills the activity with a less
+        # informative "task timed out" message. Live evidence: David,
+        # Miguel, Rapali all hit Rapali-class enrichment batches that
+        # exceeded 480s on grok-fast pre-PR-#705.
+        for attempt in range(58):  # 58 × 10s = 580s max
             await asyncio.sleep(10)
             try:
                 hist_resp = await client.post(
@@ -659,7 +665,7 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
                             return msg_content
                         return _extract_json(msg_content)
 
-    raise TimeoutError(f"Clerk subagent did not respond within 480s: {session_key}")
+    raise TimeoutError(f"Clerk subagent did not respond within 580s: {session_key}")
 
 
 async def _cleanup_session(session_key: str) -> None:
