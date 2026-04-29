@@ -107,6 +107,45 @@ The generated file goes through a strict static validator before deployment. ANY
 4. An input dataclass and a result dataclass, both at module scope
 5. NO top-level statements except: imports, class definitions, and `with workflow.unsafe.imports_passed_through():` for activity imports
 
+### Import ordering — CRITICAL (read this carefully)
+
+`from temporalio import workflow` MUST appear at module scope BEFORE any
+`with workflow.unsafe.imports_passed_through():` block. The with-block
+references the `workflow` name in its context expression
+(`workflow.unsafe.imports_passed_through()`); if you put the with-block
+first, Python raises `NameError: name 'workflow' is not defined` at
+import time, the workflow class never registers, and Temporal fires the
+schedule forever with `ApplicationError: NotFoundError: Workflow class
+... is not registered on this worker`. The validator rejects this and
+forces a re-roll.
+
+CANONICAL SHAPE (copy this top-of-file structure verbatim):
+
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import timedelta
+
+from temporalio import workflow              # <-- MUST come first
+from temporalio.common import RetryPolicy
+
+with workflow.unsafe.imports_passed_through():  # <-- ALWAYS after
+    from src.workflows.chores._base import load_chore_context, record_chore_run, is_quarantined, decrement_quarantine_remaining
+    from src.activities.chore_actions import <names from manifest>
+```
+
+DO NOT emit this (raj313 incident, 2026-04-29):
+
+```python
+from __future__ import annotations
+
+with workflow.unsafe.imports_passed_through():  # WRONG — workflow undefined here
+    from temporalio import workflow
+    from temporalio.common import RetryPolicy
+    from src.workflows.chores._base import ...
+```
+
 ### Allowed imports — and ONLY these
 - `from __future__ import annotations`
 - `from dataclasses import dataclass, field`

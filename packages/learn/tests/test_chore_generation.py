@@ -878,3 +878,245 @@ class TestValidatorHonorsDescriptionTimezone:
             tenant_timezone="UTC",
         )
         assert ok, err
+
+
+# ---------------------------------------------------------------------------
+# Generator re-roll on static validation failure (raj313 ordering bug)
+#
+# The retry loop inside generate_chore_template_code must trigger an Opus
+# re-roll when the generated python_source fails the static validator. We
+# mock _call_llm and verify (a) two attempts happen when the first response
+# is bad-then-good and (b) the violation message gets fed back into the
+# next prompt as retry_feedback so Opus can fix it.
+# ---------------------------------------------------------------------------
+
+import asyncio
+from unittest.mock import patch
+
+from temporalio.testing import ActivityEnvironment
+
+from src.activities.chore_generation import (
+    ChoreGenerationError,
+    generate_chore_template_code,
+)
+
+
+def _bad_ordering_python_source() -> str:
+    """The exact shape from the raj313 incident — workflow used in
+    `with workflow.unsafe.imports_passed_through():` BEFORE the
+    `from temporalio import workflow` import."""
+    return '''"""Bad ordering."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import timedelta
+
+with workflow.unsafe.imports_passed_through():
+    from temporalio import workflow
+    from temporalio.common import RetryPolicy
+    from src.workflows.chores._base import load_chore_context, record_chore_run
+    from src.activities.chore_actions import fetch_financial_events
+
+
+@dataclass
+class TestInput:
+    chore_slug: str
+
+
+@dataclass
+class TestResult:
+    notes: str = ""
+
+
+@workflow.defn(name="BadOrderingChoreWorkflow")
+class BadOrderingChoreWorkflow:
+    @workflow.run
+    async def run(self, input: TestInput) -> TestResult:
+        return TestResult(notes="x")
+'''
+
+
+def _good_python_source() -> str:
+    """Canonical shape — workflow imported at module scope before the
+    with-block."""
+    return '''"""Good ordering."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import timedelta
+
+from temporalio import workflow
+from temporalio.common import RetryPolicy
+
+with workflow.unsafe.imports_passed_through():
+    from src.workflows.chores._base import load_chore_context, record_chore_run
+    from src.activities.chore_actions import fetch_financial_events
+
+
+@dataclass
+class GoodOrderingInput:
+    chore_slug: str
+
+
+@dataclass
+class GoodOrderingResult:
+    notes: str = ""
+
+
+@workflow.defn(name="GoodOrderingChoreWorkflow")
+class GoodOrderingChoreWorkflow:
+    @workflow.run
+    async def run(self, input: GoodOrderingInput) -> GoodOrderingResult:
+        await workflow.execute_activity(
+            load_chore_context,
+            args=[input.chore_slug],
+            start_to_close_timeout=timedelta(seconds=15),
+        )
+        return GoodOrderingResult(notes="x")
+'''
+
+
+def _envelope(python_source: str, module="my_chore", cls="MyChoreWorkflow") -> str:
+    """Wrap a python_source in the JSON envelope the generator expects."""
+    import json
+    return json.dumps({
+        "module_name": module,
+        "workflow_class_name": cls,
+        "user_facing_description": (
+            "Every Monday at 09:00 UTC, this chore reviews the previous "
+            "week's financial events for anything unusual and only "
+            "notifies you when something exceeds the configured threshold."
+        ),
+        "schedule": "0 9 * * 1",
+        "python_source": python_source,
+    })
+
+
+class TestGeneratorReRollOnStaticValidation:
+    """Integration test: when Opus emits the raj313 import-ordering bug,
+    the generator must re-roll instead of returning the broken source."""
+
+    def _opportunity(self) -> dict:
+        return {
+            "id": "test-import-ordering",
+            "name": "Test re-roll",
+            "description": "Test that bad ordering triggers re-roll.",
+            "goal": "verify retry path",
+            "tags": ["test"],
+        }
+
+    def _profile(self) -> dict:
+        return {"rhythm": {"work_start_estimate": 9, "work_end_estimate": 17}}
+
+    def test_bad_ordering_response_triggers_reroll(self):
+        """First _call_llm returns bad ordering → second returns good →
+        generator returns the good one with attempts==2."""
+        responses = [
+            _envelope(_bad_ordering_python_source()),
+            _envelope(_good_python_source(), module="good_chore", cls="GoodOrderingChoreWorkflow"),
+        ]
+        captured_prompts: list[str] = []
+
+        async def fake_call_llm(prompt, max_tokens=8192, heartbeat_message=""):
+            captured_prompts.append(prompt)
+            return responses[len(captured_prompts) - 1]
+
+        async def run_it():
+            env = ActivityEnvironment()
+            with patch(
+                "src.activities.chore_generation._call_llm",
+                side_effect=fake_call_llm,
+            ):
+                with patch(
+                    "src.activities.chore_generation._read_template_examples",
+                    return_value={},
+                ):
+                    return await env.run(
+                        generate_chore_template_code,
+                        self._opportunity(),
+                        self._profile(),
+                    )
+
+        result = asyncio.run(run_it())
+
+        assert result["attempts"] == 2, (
+            f"expected 2 attempts (bad → good), got {result['attempts']}"
+        )
+        assert result["module_name"] == "good_chore"
+        assert "from temporalio import workflow" in result["python_source"]
+        # The second prompt must include retry feedback referencing the
+        # ordering violation so Opus can fix it.
+        assert len(captured_prompts) == 2
+        feedback_prompt = captured_prompts[1]
+        assert "previous generation attempt failed" in feedback_prompt
+        assert (
+            "imports_passed_through" in feedback_prompt
+            or "static validation" in feedback_prompt
+        ), "retry prompt must surface the static-validation feedback"
+
+    def test_three_bad_responses_raises_chore_generation_error(self):
+        """If every attempt has bad ordering, the generator exhausts its
+        budget and raises — caller in assign_chores then skips the
+        opportunity instead of writing broken code to disk."""
+        bad_envelope = _envelope(_bad_ordering_python_source())
+
+        async def fake_call_llm(prompt, max_tokens=8192, heartbeat_message=""):
+            return bad_envelope
+
+        async def run_it():
+            env = ActivityEnvironment()
+            with patch(
+                "src.activities.chore_generation._call_llm",
+                side_effect=fake_call_llm,
+            ):
+                with patch(
+                    "src.activities.chore_generation._read_template_examples",
+                    return_value={},
+                ):
+                    return await env.run(
+                        generate_chore_template_code,
+                        self._opportunity(),
+                        self._profile(),
+                    )
+
+        try:
+            asyncio.run(run_it())
+        except ChoreGenerationError as exc:
+            assert "static validation" in str(exc) or "imports_passed_through" in str(exc)
+            return
+        raise AssertionError(
+            "expected ChoreGenerationError after 3 bad-ordering attempts"
+        )
+
+    def test_good_response_on_first_attempt_no_reroll(self):
+        """Sanity check: when the first attempt is good, no retry happens."""
+        good_envelope = _envelope(
+            _good_python_source(),
+            module="good_chore",
+            cls="GoodOrderingChoreWorkflow",
+        )
+        call_count = {"n": 0}
+
+        async def fake_call_llm(prompt, max_tokens=8192, heartbeat_message=""):
+            call_count["n"] += 1
+            return good_envelope
+
+        async def run_it():
+            env = ActivityEnvironment()
+            with patch(
+                "src.activities.chore_generation._call_llm",
+                side_effect=fake_call_llm,
+            ):
+                with patch(
+                    "src.activities.chore_generation._read_template_examples",
+                    return_value={},
+                ):
+                    return await env.run(
+                        generate_chore_template_code,
+                        self._opportunity(),
+                        self._profile(),
+                    )
+
+        result = asyncio.run(run_it())
+        assert result["attempts"] == 1
+        assert call_count["n"] == 1

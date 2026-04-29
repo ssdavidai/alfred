@@ -170,7 +170,11 @@ def validate_template_source(source: str) -> ValidationResult:
       1. Source size (must be < 100KB)
       2. Syntax (ast.parse)
       3. Top-level structure: only Import / ImportFrom / ClassDef / FunctionDef
-         allowed at module scope (no loose statements, no module-level side effects)
+         allowed at module scope (no loose statements, no module-level side effects).
+         Also enforces import ordering: any
+         `with workflow.unsafe.imports_passed_through():` block at module
+         scope MUST come AFTER `from temporalio import workflow` so the
+         `workflow` name resolves at import time (raj313 ordering bug).
       4. Import whitelist: every Import / ImportFrom must reference an allowed module
          (and ImportFrom names from src.activities.chore_actions must be in the manifest)
       5. Workflow class structure: exactly one @workflow.defn class with one @workflow.run
@@ -206,8 +210,19 @@ def validate_template_source(source: str) -> ValidationResult:
     #     `_POLL_HOURS = 9`, `MAX_ITEMS: int = 20`, `TAGS: list[str] = ["a"]`.
     #     Opus naturally writes these and they're deterministic/replay-safe
     #     because they're evaluated once at module import time.
+    #
+    # Side-effect: track whether `from temporalio import workflow` has been
+    # seen at module scope before any `with workflow.unsafe.imports_passed_through()`
+    # block. The bug we're guarding against (raj313 incident, 2026-04-29):
+    # Opus sometimes emits the with-block BEFORE the workflow import, which
+    # raises NameError("workflow") at import time, the workflow class never
+    # registers, and Temporal's worker fires the schedule forever with an
+    # ApplicationError on every tick.
+    workflow_imported_at_module_scope = False
     for idx, node in enumerate(tree.body):
         if isinstance(node, (ast.Import, ast.ImportFrom, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            if _imports_temporal_workflow_name(node):
+                workflow_imported_at_module_scope = True
             continue
         # Module docstring: an Expr at index 0 wrapping a string Constant
         if (
@@ -219,6 +234,16 @@ def validate_template_source(source: str) -> ValidationResult:
             continue
         # Temporal import-deferral pattern
         if isinstance(node, ast.With) and _is_temporal_imports_passed_through(node):
+            if not workflow_imported_at_module_scope:
+                violations.append(
+                    f"`with workflow.unsafe.imports_passed_through():` at line "
+                    f"{node.lineno} appears before any `from temporalio import "
+                    f"workflow` (or `import temporalio.workflow`) at module "
+                    f"scope. The with-block references `workflow` in its "
+                    f"context expression — without the import first, Python "
+                    f"raises NameError at import time and the workflow class "
+                    f"never registers."
+                )
             # Validate imports INSIDE the with body via the same import-whitelist
             # walk we do at module scope (handled by the ast.walk pass below).
             continue
@@ -428,6 +453,47 @@ def _is_literal_value(node: ast.AST) -> bool:
     # Unary on a constant (e.g. -1, +0.5, ~3)
     if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd, ast.Invert)):
         return _is_literal_value(node.operand)
+    return False
+
+
+def _imports_temporal_workflow_name(
+    node: ast.Import | ast.ImportFrom | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
+    """Return True if `node` is an import that binds the name `workflow`
+    referring to the temporalio module (or submodule that includes it).
+
+    Recognised forms:
+      - `from temporalio import workflow`
+      - `from temporalio import workflow as workflow`  (degenerate alias)
+      - `import temporalio.workflow as workflow`
+      - `import temporalio.workflow`  (binds `temporalio`, NOT `workflow`,
+        so this form does NOT satisfy the guard)
+
+    The guard exists to catch the raj313 import-ordering bug where the
+    `with workflow.unsafe.imports_passed_through():` block was emitted
+    before `from temporalio import workflow`, raising NameError at import
+    time. Only the import forms that bind a top-level `workflow` symbol
+    in the module namespace count — `import temporalio.workflow` binds
+    only `temporalio`, so it would NOT prevent the NameError and is
+    correctly excluded here.
+    """
+    if isinstance(node, ast.ImportFrom):
+        if node.module != "temporalio":
+            return False
+        for alias in node.names:
+            # `from temporalio import workflow` (alias.name='workflow', asname=None)
+            # `from temporalio import workflow as workflow` (asname='workflow')
+            bound = alias.asname if alias.asname else alias.name
+            if bound == "workflow":
+                return True
+        return False
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            # `import temporalio.workflow as workflow` binds `workflow`.
+            # Plain `import temporalio.workflow` binds only `temporalio`.
+            if alias.asname == "workflow":
+                return True
+        return False
     return False
 
 

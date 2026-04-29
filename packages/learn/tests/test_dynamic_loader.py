@@ -283,6 +283,165 @@ class TestValidationImports:
 
 
 # ---------------------------------------------------------------------------
+# Import ordering — `with workflow.unsafe.imports_passed_through()` must
+# come AFTER `from temporalio import workflow`. Regression: raj313
+# incident 2026-04-29, two of nine generated chore files were emitted
+# with the with-block before the workflow import, raising NameError at
+# import time → workflow class never registered → Temporal fires
+# schedule forever with ApplicationError on every tick.
+# ---------------------------------------------------------------------------
+
+class TestValidationImportOrdering:
+    """Guard against the raj313 import-ordering bug.
+
+    The buggy shape Opus emitted (verbatim from raj313's broken files):
+
+        with workflow.unsafe.imports_passed_through():   # workflow undefined!
+            from temporalio import workflow
+            from temporalio.common import RetryPolicy
+            from src.workflows.chores._base import ...
+
+    The validator must reject this and force a re-roll. The canonical
+    shape has `from temporalio import workflow` at module scope BEFORE
+    the with-block.
+    """
+
+    def _bad_ordering_source(self) -> str:
+        """Reproduce the exact shape from the raj313 incident."""
+        return '''"""Bad ordering — workflow used in with-block context expr before import."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import timedelta
+
+with workflow.unsafe.imports_passed_through():
+    from temporalio import workflow
+    from temporalio.common import RetryPolicy
+    from src.workflows.chores._base import load_chore_context, record_chore_run
+    from src.activities.chore_actions import fetch_financial_events
+
+
+@dataclass
+class TestInput:
+    chore_slug: str
+
+
+@dataclass
+class TestResult:
+    notes: str = ""
+
+
+@workflow.defn(name="BadOrderWorkflow")
+class BadOrderWorkflow:
+    @workflow.run
+    async def run(self, input: TestInput) -> TestResult:
+        await workflow.execute_activity(
+            load_chore_context,
+            args=[input.chore_slug],
+            start_to_close_timeout=timedelta(seconds=15),
+        )
+        return TestResult(notes="x")
+'''
+
+    def test_with_block_before_workflow_import_rejected(self):
+        """The exact raj313 shape must be rejected."""
+        result = validate_template_source(self._bad_ordering_source())
+        assert not result.ok
+        # Must mention the with-block / NameError mechanism so Opus can fix it
+        assert any(
+            "imports_passed_through" in v and (
+                "before" in v or "workflow" in v
+            )
+            for v in result.violations
+        ), f"expected ordering violation, got: {result.violations}"
+
+    def test_canonical_ordering_accepted(self):
+        """Sanity-check: the good ordering still validates cleanly."""
+        result = validate_template_source(_good_template_source())
+        assert result.ok, f"canonical ordering rejected: {result.violations}"
+
+    def test_workflow_import_with_alias_accepted(self):
+        """`from temporalio import workflow as workflow` is degenerate but
+        valid — the name `workflow` is still bound at module scope."""
+        source = _good_template_source().replace(
+            "from temporalio import workflow",
+            "from temporalio import workflow as workflow",
+        )
+        result = validate_template_source(source)
+        assert result.ok, f"alias form rejected: {result.violations}"
+
+    def test_import_temporal_workflow_alias_accepted(self):
+        """`import temporalio.workflow as workflow` also binds `workflow`."""
+        # Replace the from-import with an alias-style import
+        source = _good_template_source().replace(
+            "from temporalio import workflow",
+            "import temporalio.workflow as workflow",
+        )
+        result = validate_template_source(source)
+        assert result.ok, f"import-as form rejected: {result.violations}"
+
+    def test_plain_import_temporal_workflow_does_not_satisfy_guard(self):
+        """`import temporalio.workflow` (no alias) binds only `temporalio`,
+        NOT `workflow`. So if the with-block then references `workflow`
+        directly it would still NameError. The guard must NOT be fooled
+        by this form."""
+        source = '''"""Plain import temporalio.workflow does not bind workflow."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import timedelta
+
+import temporalio.workflow
+
+with workflow.unsafe.imports_passed_through():
+    from temporalio import workflow
+    from temporalio.common import RetryPolicy
+    from src.workflows.chores._base import load_chore_context
+    from src.activities.chore_actions import fetch_financial_events
+
+
+@dataclass
+class TestInput:
+    chore_slug: str
+
+
+@dataclass
+class TestResult:
+    notes: str = ""
+
+
+@workflow.defn(name="PlainImportWorkflow")
+class PlainImportWorkflow:
+    @workflow.run
+    async def run(self, input: TestInput) -> TestResult:
+        return TestResult(notes="x")
+'''
+        result = validate_template_source(source)
+        assert not result.ok, (
+            "plain `import temporalio.workflow` only binds `temporalio`, "
+            "should not satisfy the workflow-name guard"
+        )
+
+    def test_violation_message_actionable_for_re_roll(self):
+        """The violation message must include enough context for Opus to
+        fix the issue on re-roll: it should name the failing pattern AND
+        the missing import."""
+        result = validate_template_source(self._bad_ordering_source())
+        assert not result.ok
+        # Find the import-ordering violation specifically
+        ordering_violations = [
+            v for v in result.violations
+            if "imports_passed_through" in v
+        ]
+        assert ordering_violations, (
+            f"no ordering violation found in: {result.violations}"
+        )
+        msg = ordering_violations[0]
+        assert "from temporalio import workflow" in msg
+        assert "NameError" in msg or "register" in msg.lower()
+
+
+# ---------------------------------------------------------------------------
 # Workflow class structure
 # ---------------------------------------------------------------------------
 

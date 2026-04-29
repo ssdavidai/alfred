@@ -1025,6 +1025,28 @@ async def generate_chore_template_code(
             last_error = f"envelope validation: {validation_err}"
             continue
 
+        # Static structural validation of the python_source. This is the
+        # SAME check that runs in assign_chores._generate_chore_from_opportunity
+        # (Phase 2) and in the worker's load_user_chore_templates() startup
+        # scan. Running it here gives us an early re-roll: when Opus emits
+        # something the static validator will reject (e.g. the raj313
+        # import-ordering bug — `with workflow.unsafe.imports_passed_through():`
+        # before `from temporalio import workflow`), we feed the violation
+        # back into the next prompt attempt instead of waiting for the
+        # downstream phase to fail and abandoning the opportunity.
+        static_result = validate_template_source(parsed["python_source"])
+        if not static_result.ok:
+            preview = "; ".join(static_result.violations[:3])
+            logger.error(
+                "chore_generation: static validation failed on attempt %d: %s",
+                attempt, preview,
+            )
+            last_error = (
+                "python_source failed static validation. Fix the following "
+                "and re-emit valid Python: " + preview
+            )
+            continue
+
         logger.info(
             "chore_generation: generated %s (%d chars) in %d attempt(s)",
             parsed["workflow_class_name"],
