@@ -54,6 +54,10 @@ services:
       - "limit.historyCount.warn=51200"
       - "--dynamic-config-value"
       - "limit.historyCount.error=102400"
+      - "--dynamic-config-value"
+      - "frontend.rpc.maxReceivedMessageSize=33554432"
+      - "--dynamic-config-value"
+      - "history.rpc.maxReceivedMessageSize=33554432"
     volumes:
       - /mnt/encrypted/temporal:/data
     ports:
