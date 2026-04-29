@@ -164,6 +164,46 @@ async def test_write_error_returns_false_without_crash() -> None:
 
 
 @pytest.mark.asyncio
+async def test_yaml_safe_when_ref_contains_brackets() -> None:
+    """org/claude[bot].md and similar GitHub-bot slugs contain YAML flow-
+    sequence specials. Without quoting, every subsequent `vault edit`
+    fails with "Malformed YAML frontmatter" and the record becomes
+    permanently un-editable until manually rewritten.
+    """
+    import yaml
+
+    client = MagicMock()
+    client.read_record = AsyncMock(side_effect=Exception("not found"))
+    client.write_record = AsyncMock(return_value="task/slug.md")
+
+    await _create_task_for_action_item(
+        client=client,
+        action_item="Review PR for issue 37",
+        source_event_path="event/some-pr.md",
+        related_matters=["matter/alfred-platform.md"],
+        related_persons=["person/ssdavidai.md"],
+        related_orgs=["org/claude[bot].md", "org/alfred-platform.md"],
+    )
+    _, _, content = client.write_record.call_args[0]
+    fm_text = content.split("---\n", 2)[1]
+    parsed = yaml.safe_load(fm_text)
+    assert parsed["related_orgs"] == ["org/claude[bot].md", "org/alfred-platform.md"]
+
+
+def test_format_fm_line_yaml_safe_with_specials() -> None:
+    """`_format_fm_line` is the second injection point — used by
+    `apply_enrichments` to overwrite enriched records' frontmatter.
+    Same bracket/colon/comma hazards apply.
+    """
+    import yaml
+    from src.activities.enrichment import _format_fm_line  # noqa: WPS433
+
+    line = _format_fm_line("entities", ["org/claude[bot]", "person/ssdavidai", "org/foo, bar"])
+    parsed = yaml.safe_load(line)
+    assert parsed["entities"] == ["org/claude[bot]", "person/ssdavidai", "org/foo, bar"]
+
+
+@pytest.mark.asyncio
 async def test_deduplicates_wikilinks_with_passed_related() -> None:
     client = MagicMock()
     client.read_record = AsyncMock(side_effect=Exception("not found"))

@@ -622,9 +622,12 @@ async def _create_task_for_action_item(
         pass
 
     def _yaml_list(items: list[str]) -> str:
+        # JSON-quote each item so refs containing YAML flow-sequence
+        # specials ([, ], :, #, ,) — e.g. "org/claude[bot].md" — don't
+        # poison the frontmatter and break every subsequent vault edit.
         if not items:
             return "[]"
-        return "[" + ", ".join(items) + "]"
+        return "[" + ", ".join(json.dumps(s) for s in items) + "]"
 
     now = datetime.now(timezone.utc).isoformat()
     safe_name = action_item.replace('"', '\\"').replace("\n", " ")[:180]
@@ -750,7 +753,10 @@ def _inject_frontmatter_fields(content: str, fields: dict[str, Any]) -> str:
 def _format_fm_line(key: str, value: Any) -> str:
     """Format a single YAML frontmatter line."""
     if isinstance(value, list):
-        items = ", ".join(str(v) for v in value)
+        # JSON-quote each item so refs containing YAML flow-sequence
+        # specials ([, ], :, #, ,) — e.g. "org/claude[bot].md" — don't
+        # poison the frontmatter and break every subsequent vault edit.
+        items = ", ".join(json.dumps(str(v)) for v in value)
         return f"{key}: [{items}]"
     if isinstance(value, bool):
         return f"{key}: {'true' if value else 'false'}"
