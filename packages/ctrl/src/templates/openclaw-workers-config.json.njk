@@ -48,17 +48,8 @@
     ]
   },
   "memory": {
-    "backend": "qmd",
-    "citations": "auto",
-    "qmd": {
-      "searchMode": "search",
-      "includeDefaultMemory": true,
-      "paths": [
-        {"path": "{{ vault_path }}", "name": "vault", "pattern": "**/*.md"}
-      ],
-      "update": {"interval": "5m", "debounceMs": 15000, "onBoot": true},
-      "limits": {"maxResults": 8, "timeoutMs": 5000}
-    }
+    "backend": "builtin",
+    "citations": "off"
   },
   "gateway": {
     "port": 18790,
