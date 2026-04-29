@@ -636,7 +636,7 @@ async def _create_task_for_action_item(
     content = f"""---
 type: task
 created: {now}
-status: pending
+status: todo
 name: "{safe_name}"
 source_event: "{source_event_path}"
 related_matters: {_yaml_list(related_matters)}
