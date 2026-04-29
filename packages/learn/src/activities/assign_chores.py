@@ -45,6 +45,7 @@ logger = logging.getLogger("alfred-learn")
 _TEMPLATE_TO_WORKFLOW = {
     "subscription_watcher": "SubscriptionWatcherWorkflow",
     "weekly_matter_digest": "WeeklyMatterDigestWorkflow",
+    "weekly_money_day": "WeeklyMoneyDayBriefWorkflow",
 }
 
 
@@ -386,6 +387,29 @@ def _decide_chores(profile: dict[str, Any], facts: list[dict[str, Any]]) -> list
         })
 
     return chores
+
+
+# Chores that fire for every tenant regardless of which matching path
+# `assign_initial_chores` took. The opportunity-driven paths (0, 1, 2)
+# never call `_decide_chores`, so universal chores live here and get
+# extended onto `decided` unconditionally.
+def _unconditional_chores() -> list[dict[str, Any]]:
+    return [
+        {
+            "template": "weekly_money_day",
+            "name": "Money Day",
+            "schedule": "0 6 * * 2",
+            "params": {"preview_only": False, "channel": "last"},
+            "description": (
+                "Every Tuesday at 06:00 UTC, asks Alfred to follow the "
+                "`alfred-sure-operations` skill and produce Sir's Money Day "
+                "brief: net worth with week-over-week delta, top three "
+                "outflow categories, anomalies, and the per-account balance "
+                "table grouped by currency."
+            ),
+            "tags": ["chore", "financial", "auto-generated"],
+        },
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1234,6 +1258,11 @@ async def assign_initial_chores(onboard_path: str, user_id: str) -> dict[str, An
         matching_source = "rules"
         decided = _decide_chores(profile, facts)
         activity.heartbeat(f"rule-based decision: {len(decided)} chores from profile")
+
+    decided_names = {c.get("name") for c in decided}
+    for chore in _unconditional_chores():
+        if chore["name"] not in decided_names:
+            decided.append(chore)
 
     # Persist unmatched opportunities for Step 4 to pick up later
     if unmatched:

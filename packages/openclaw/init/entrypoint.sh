@@ -506,4 +506,100 @@ else
     echo "[init]   (Email channel will have NO authorized senders until manually configured.)"
 fi
 
+# --- 12. Stage Sure (sure.am) first-boot bootstrap inputs ---
+#
+# Sure is an optional Rails sidecar (https://sure.am, github we-promise/sure).
+# It ships with no admin user and no API key, and it has no `sure:bootstrap`
+# rake task — the only way to mint an API key is to call ApiKey on a Rails
+# console / runner attached to its Postgres database (see
+# app/controllers/settings/api_keys_controller.rb in we-promise/sure).
+#
+# The init container (this script) cannot reach Sure's DB and has no Docker
+# socket, so it cannot run `bin/rails runner` itself. Following the same
+# precedent as `temporal-namespace-init` in docker-compose.yaml.njk, the
+# actual mint is done by a separate one-shot compose service (`sure-init`,
+# owned by W1A) that:
+#
+#   - uses the same image as the `sure-web` service (it needs Rails + DB
+#     credentials that are already configured for sure-web)
+#   - depends_on: sure-web: condition: service_healthy   (sure-web's
+#     `/up` endpoint is the standard Rails health check, see config/routes.rb)
+#   - mounts /alfred-data:/alfred-data (the same shared volume init writes to)
+#   - runs:  bin/rails runner /alfred-data/sure-bootstrap/bootstrap.rb
+#
+# Init's job here is to stage everything that Ruby script needs:
+#   1. Skip entirely unless SURE_ENABLED=true (set by W1A's compose block).
+#   2. Skip entirely if /alfred-data/.sure-api-key already exists (idempotent).
+#   3. Require OWNER_EMAIL (provisioner-supplied env, see step 11).
+#   4. Generate a 32-char URL-safe random password, write it to
+#      /alfred-data/.sure-bootstrap-password (mode 0600). The password must
+#      satisfy Sure's RegistrationsController rules: >=8 chars, upper+lower,
+#      digit, special. We force a special char + digit suffix so token_urlsafe
+#      output (which is base64url and may lack both) always passes.
+#   5. Mirror OWNER_EMAIL to /alfred-data/.sure-bootstrap-email so the Ruby
+#      script doesn't depend on inheriting env from the sure-init container.
+#   6. Deploy bootstrap.rb (baked into this image) to
+#      /alfred-data/sure-bootstrap/bootstrap.rb.
+#
+# After sure-init runs successfully, /alfred-data/.sure-api-key contains the
+# plaintext API key. Operator action: copy that value into
+# /opt/alfred/compose/.env as SURE_API_KEY=<value> and recreate the alfred
+# stack (the init container cannot write to the host's compose .env — same
+# fallback pattern as .composio-user-id above).
+if [[ "${SURE_ENABLED:-false}" != "true" ]]; then
+    echo "[init] SURE_ENABLED!=true, skipping Sure bootstrap staging."
+elif [[ -f /alfred-data/.sure-api-key && -s /alfred-data/.sure-api-key ]]; then
+    echo "[init] /alfred-data/.sure-api-key already present, skipping Sure bootstrap staging."
+else
+    if [[ -z "${OWNER_EMAIL:-}" ]]; then
+        echo "[init] ACTION REQUIRED: SURE_ENABLED=true but OWNER_EMAIL is unset."
+        echo "[init]   Cannot stage Sure bootstrap without an admin email."
+        echo "[init]   Fix: set OWNER_EMAIL=<owner@example.com> in /opt/alfred/compose/.env and recreate."
+    else
+        SURE_EMAIL_FILE=/alfred-data/.sure-bootstrap-email
+        SURE_PW_FILE=/alfred-data/.sure-bootstrap-password
+        SURE_SCRIPT_DIR=/alfred-data/sure-bootstrap
+        SURE_SCRIPT_DST="$SURE_SCRIPT_DIR/bootstrap.rb"
+        SURE_SCRIPT_SRC=/setup/sure-bootstrap.rb
+
+        OWNER_EMAIL_LOWER=$(echo "$OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')
+        echo -n "$OWNER_EMAIL_LOWER" > "$SURE_EMAIL_FILE"
+        chmod 600 "$SURE_EMAIL_FILE" 2>/dev/null || true
+
+        if [[ ! -f "$SURE_PW_FILE" || ! -s "$SURE_PW_FILE" ]]; then
+            # Build a password that satisfies Sure RegistrationsController:
+            # base = token_urlsafe(24) (>=32 chars, mixed-case + digits, base64url
+            # alphabet has no special chars), then suffix "!Aa1" to force a
+            # guaranteed special char on top of upper/lower/digit. Final length
+            # ~36 chars, well over the 8-char minimum.
+            SURE_PW=$(python3 -c "import secrets; print(secrets.token_urlsafe(24) + '!Aa1')")
+            (umask 077 && printf '%s' "$SURE_PW" > "$SURE_PW_FILE")
+            echo "[init] Generated Sure bootstrap password at $SURE_PW_FILE (mode 0600)"
+        else
+            echo "[init] Sure bootstrap password already present at $SURE_PW_FILE, reusing"
+        fi
+
+        if [[ -f "$SURE_SCRIPT_SRC" ]]; then
+            mkdir -p "$SURE_SCRIPT_DIR"
+            SURE_SRC_HASH=$(md5sum "$SURE_SCRIPT_SRC" | cut -d' ' -f1)
+            SURE_HASH_FILE="$SURE_SCRIPT_DIR/.bootstrap.rb.content-hash"
+            if [[ -f "$SURE_HASH_FILE" && "$(cat "$SURE_HASH_FILE")" == "$SURE_SRC_HASH" && -f "$SURE_SCRIPT_DST" ]]; then
+                echo "[init] Sure bootstrap.rb unchanged, skipping copy"
+            else
+                cp "$SURE_SCRIPT_SRC" "$SURE_SCRIPT_DST"
+                echo "$SURE_SRC_HASH" > "$SURE_HASH_FILE"
+                chmod 644 "$SURE_SCRIPT_DST" 2>/dev/null || true
+                echo "[init] Deployed Sure bootstrap.rb to $SURE_SCRIPT_DST"
+            fi
+        else
+            echo "[init] WARNING: $SURE_SCRIPT_SRC missing from image — Sure bootstrap will fail."
+        fi
+
+        echo "[init] Sure bootstrap staged. The sure-init compose service must run:"
+        echo "[init]   bin/rails runner /alfred-data/sure-bootstrap/bootstrap.rb"
+        echo "[init] After it succeeds, copy /alfred-data/.sure-api-key into"
+        echo "[init]   /opt/alfred/compose/.env as SURE_API_KEY=<value> and recreate."
+    fi
+fi
+
 echo "=== Init complete ==="

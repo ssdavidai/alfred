@@ -178,11 +178,19 @@ export async function provision(
     const serverLabels: Record<string, string> = {
       customer: config.customer_name,
     };
-    if (config.planeEnabled === true) {
+    // Plane + Sure are part of the standard tenant baseline. Pass
+    // `planeEnabled: false` / `sureEnabled: false` on `config` to opt
+    // a specific tenant out (rare — e.g. testing minimal stacks).
+    const planeOnDefault = config.planeEnabled !== false;
+    const sureOnDefault = config.sureEnabled !== false;
+    if (planeOnDefault) {
       // Marks the tenant as carrying the Plane sidecar stack — used by later
       // fleet-wide scans (e.g. "list all tenants running Plane") without
       // having to SSH and check docker ps. See issue #536.
       serverLabels["plane-enabled"] = "true";
+    }
+    if (sureOnDefault) {
+      serverLabels["sure-enabled"] = "true";
     }
     const { server } = await hetzner.createServer({
       name: `alfred-${config.customer_name}`,
@@ -307,6 +315,22 @@ export async function provision(
       envLines.push(`OWNER_EMAIL=${process.env.TENANT_OWNER_EMAIL}`);
     }
 
+    // Sure sidecar gate — the init container's step-12 staging logic gates
+    // on SURE_ENABLED=true, and ctrl-api's sure routes/proxy depend on
+    // SURE_API_KEY being present (written below by setupSure once
+    // sure-init has minted the key).
+    if (sureOnDefault) {
+      envLines.push(`SURE_ENABLED=true`);
+    }
+
+    // Tenant-scoped subdomain + domain — read by ctrl-api's /api/v1/apps
+    // endpoint to build the public per-app URLs (e.g. <subdomain>-sure.<domain>).
+    // Without these, apps.ts returns url: null for every tile and the dashboard
+    // can't link anywhere. The values mirror what cloudflared and the SaaS
+    // dashboard use.
+    envLines.push(`TENANT_SUBDOMAIN=${subdomain}`);
+    envLines.push(`TENANT_DOMAIN=${process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain}`);
+
     await ssh.exec(
       server.public_net.ipv4.ip,
       keyPair.privateKeyPath,
@@ -420,7 +444,8 @@ export async function provision(
     setStep("upload_compose");
     log("Uploading docker-compose.yaml...");
     const compose = nunjucks.renderString(dockerComposeTemplate, {
-      plane_enabled: config.planeEnabled === true,
+      plane_enabled: planeOnDefault,
+      sure_enabled: sureOnDefault,
     });
     await ssh.upload(
       server.public_net.ipv4.ip,
@@ -940,7 +965,8 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
         tunnel_id: tunnel.id,
         subdomain,
         domain,
-        plane_enabled: config.planeEnabled === true,
+        plane_enabled: planeOnDefault,
+        sure_enabled: sureOnDefault,
       });
       await ssh.upload(
         server.public_net.ipv4.ip,
@@ -1022,7 +1048,7 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
       // SINGLE-level subdomain so the `*.alfred.black` wildcard cert
       // continues to cover it.
       let planeDnsRecordId: string | null = null;
-      if (config.planeEnabled === true) {
+      if (planeOnDefault) {
         try {
           const planeRec = await cloudflare.createDnsRecord(
             `${subdomain}-plane`,
@@ -1037,12 +1063,29 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
         }
       }
 
+      let sureDnsRecordId: string | null = null;
+      if (sureOnDefault) {
+        try {
+          const sureRec = await cloudflare.createDnsRecord(
+            `${subdomain}-sure`,
+            tunnel.id,
+          );
+          sureDnsRecordId = sureRec.id;
+          log(`DNS record created: ${subdomain}-sure.${domain} → tunnel`);
+        } catch (e) {
+          log(
+            `Warning: could not create Sure DNS record (${subdomain}-sure.${domain}): ${e}`,
+          );
+        }
+      }
+
       // Update instance with tunnel metadata
       updateInstance(instance.id, {
         cf_tunnel_id: tunnel.id,
         cf_tunnel_name: tunnel.name,
         cf_dns_record_id: dnsRecord.id,
         cf_plane_dns_record_id: planeDnsRecordId,
+        cf_sure_dns_record_id: sureDnsRecordId,
       });
 
       insertEvent(
@@ -1101,8 +1144,8 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
       log(`Warning: AgentPhone provisioning failed: ${e}`);
     }
 
-    // --- Setup Plane (opt-in per-tenant PM sidecar) ---
-    if (config.planeEnabled === true) {
+    // --- Setup Plane (default-on per-tenant PM sidecar) ---
+    if (planeOnDefault) {
       setStep("setup_plane");
       log("Setting up Plane (workspace + Alfred user + webhook)...");
       await setupPlane({
@@ -1114,6 +1157,19 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
         log,
       });
       log("Plane setup complete");
+    }
+
+    // --- Setup Sure (default-on per-tenant personal-finance sidecar) ---
+    if (sureOnDefault) {
+      setStep("setup_sure");
+      log("Setting up Sure (Rails secrets + health wait)...");
+      await setupSure({
+        serverIp: server.public_net.ipv4.ip,
+        keyPath: keyPair.privateKeyPath,
+        hostKeyOpts,
+        log,
+      });
+      log("Sure setup complete");
     }
 
     // --- Health check ---
@@ -1218,6 +1274,16 @@ export async function destroy(
       log("Plane DNS record deleted");
     } catch (e) {
       log(`Warning: Plane DNS record deletion failed: ${e}`);
+    }
+  }
+
+  if (instance.cf_sure_dns_record_id) {
+    log(`Deleting Sure DNS record ${instance.cf_sure_dns_record_id}...`);
+    try {
+      await cloudflare.deleteDnsRecord(instance.cf_sure_dns_record_id);
+      log("Sure DNS record deleted");
+    } catch (e) {
+      log(`Warning: Sure DNS record deletion failed: ${e}`);
     }
   }
 
@@ -1369,9 +1435,9 @@ export async function deployApi(
 
   if (!hasCtrlApi) {
     log("Upgrading compose file to include ctrl-api service...");
-    // Preserve existing Plane-enabled state — if the tenant has any plane-*
-    // service running, re-render with plane_enabled=true so we don't strip
-    // their sidecar stack on a compose refresh.
+    // Preserve existing Plane / Sure-enabled state — if the tenant has any
+    // plane-* / sure-* service running, re-render with that flag set so we
+    // don't strip their sidecar stack on a compose refresh.
     let planeOn = false;
     try {
       const check = await ssh.exec(
@@ -1383,8 +1449,20 @@ export async function deployApi(
     } catch {
       planeOn = false;
     }
+    let sureOn = false;
+    try {
+      const check = await ssh.exec(
+        instance.ip_address,
+        sshKeyPath,
+        `docker ps --format '{{.Names}}' | grep -c '^compose-sure-web-' || echo 0`,
+      );
+      sureOn = parseInt(check.stdout.trim(), 10) > 0;
+    } catch {
+      sureOn = false;
+    }
     const composeYaml = nunjucks.renderString(dockerComposeTemplate, {
       plane_enabled: planeOn,
+      sure_enabled: sureOn,
     });
     await ssh.upload(
       instance.ip_address,
@@ -2233,6 +2311,13 @@ export async function deployPlane(
         seeded[k] = randomSecret(32);
       }
     }
+    if (!(await readTenantEnv(sshOpts, "TENANT_SUBDOMAIN"))) {
+      seeded.TENANT_SUBDOMAIN = instance.subdomain;
+    }
+    if (!(await readTenantEnv(sshOpts, "TENANT_DOMAIN"))) {
+      seeded.TENANT_DOMAIN =
+        process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain;
+    }
     if (Object.keys(seeded).length > 0) {
       await writeTenantEnv(sshOpts, seeded);
       log(`Seeded ${Object.keys(seeded).length} baseline Plane secret(s) in .env`);
@@ -2392,6 +2477,420 @@ export async function deployPlane(
   insertEvent(instanceId, "api_deployed", "Plane deployed + configured");
   log(
     `deploy-plane complete — Plane UI available at https://${instance.subdomain}-plane.${
+      process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain
+    }`,
+  );
+}
+
+// ── Sure provisioning helpers ───────────────────────────────────────────────
+//
+// Sure is the upstream we-promise/sure Rails app, packaged as
+// ghcr.io/we-promise/sure:stable. The compose template renders four services
+// (sure-db, sure-redis, sure-web, sure-worker) gated by the `sure_enabled`
+// flag. setupSure is idempotent: it generates the three Sure-owned secrets
+// (SURE_POSTGRES_PASSWORD, SURE_REDIS_PASSWORD, SURE_SECRET_KEY_BASE) into
+// the tenant's .env if they're missing, restarts the web/worker if .env
+// changed, and waits for sure-web to report healthy on /up.
+
+interface SetupSureOpts {
+  serverIp: string;
+  keyPath: string;
+  hostKeyOpts?: SSHHostKeyOptions;
+  log: (msg: string) => void;
+}
+
+const SURE_WEB_INTERNAL_URL = "http://127.0.0.1:3001/up";
+const SURE_READY_TIMEOUT_MS = 10 * 60 * 1000;
+const SURE_POLL_INTERVAL_MS = 5_000;
+
+async function waitForSureReady(opts: SetupSureOpts): Promise<void> {
+  const start = Date.now();
+  let last = "";
+  while (Date.now() - start < SURE_READY_TIMEOUT_MS) {
+    const r = await ssh.exec(
+      opts.serverIp,
+      opts.keyPath,
+      `curl -sS -o /dev/null -w '%{http_code}' ${SURE_WEB_INTERNAL_URL} || true`,
+      undefined,
+      opts.hostKeyOpts,
+    );
+    last = r.stdout.trim();
+    if (last === "200") {
+      opts.log("Sure web ready (HTTP 200 on /up)");
+      return;
+    }
+    await new Promise((r) => setTimeout(r, SURE_POLL_INTERVAL_MS));
+  }
+  throw new Error(
+    `Sure web did not become ready within ${SURE_READY_TIMEOUT_MS / 1000}s (last HTTP status: ${last || "unreachable"})`,
+  );
+}
+
+export async function setupSure(opts: SetupSureOpts): Promise<void> {
+  const sshOpts: Pick<SetupSureOpts, "serverIp" | "keyPath" | "hostKeyOpts"> = {
+    serverIp: opts.serverIp,
+    keyPath: opts.keyPath,
+    hostKeyOpts: opts.hostKeyOpts,
+  };
+
+  const seeded: Record<string, string> = {};
+  const existingPg = await readTenantEnv(sshOpts, "SURE_POSTGRES_PASSWORD");
+  if (!existingPg) seeded.SURE_POSTGRES_PASSWORD = randomSecret(32);
+  const existingRedis = await readTenantEnv(sshOpts, "SURE_REDIS_PASSWORD");
+  if (!existingRedis) seeded.SURE_REDIS_PASSWORD = randomSecret(32);
+  const existingSkb = await readTenantEnv(sshOpts, "SURE_SECRET_KEY_BASE");
+  // Rails convention: 64 random bytes → 128 hex chars. Matches `rails secret`.
+  if (!existingSkb) seeded.SURE_SECRET_KEY_BASE = randomSecret(64);
+
+  const newSecrets = Object.keys(seeded).length > 0;
+  if (newSecrets) {
+    await writeTenantEnv(sshOpts, seeded);
+    opts.log(`Seeded ${Object.keys(seeded).length} Sure secret(s) in .env`);
+
+    // Re-create web + worker so they pick up the new env. Postgres and Redis
+    // already booted with the correct password if it was seeded BEFORE first
+    // up; on a re-seed (rare — only if .env was hand-wiped) the operator
+    // will need to recreate the postgres volume manually.
+    const restartRes = await ssh.exec(
+      opts.serverIp,
+      opts.keyPath,
+      `cd ${DEFAULTS.dockerComposeDir} && docker compose up -d --force-recreate sure-web sure-worker`,
+      undefined,
+      opts.hostKeyOpts,
+    );
+    if (restartRes.code !== 0) {
+      throw new Error(
+        `sure-web/sure-worker restart failed (exit ${restartRes.code}): ${restartRes.stderr}`,
+      );
+    }
+    opts.log("sure-web + sure-worker recreated with seeded secrets");
+  } else {
+    opts.log("All Sure secrets already in .env — skipping seed");
+  }
+
+  opts.log("Waiting for Sure web to become ready (up to 10 min)...");
+  await waitForSureReady(opts);
+
+  const existingKey = await readTenantEnv(sshOpts, "SURE_API_KEY");
+  if (existingKey) {
+    opts.log("SURE_API_KEY already in .env — skipping sure-init bootstrap");
+    return;
+  }
+
+  opts.log("Triggering sure-init bootstrap...");
+  const upRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `cd ${DEFAULTS.dockerComposeDir} && docker compose up -d sure-init`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  if (upRes.code !== 0) {
+    throw new Error(`sure-init up failed (exit ${upRes.code}): ${upRes.stderr}`);
+  }
+
+  const waitRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `docker wait $(cd ${DEFAULTS.dockerComposeDir} && docker compose ps -q sure-init)`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  const exitCode = parseInt(waitRes.stdout.trim(), 10);
+  if (Number.isNaN(exitCode) || exitCode !== 0) {
+    const logsRes = await ssh.exec(
+      opts.serverIp,
+      opts.keyPath,
+      `cd ${DEFAULTS.dockerComposeDir} && docker compose logs --tail 50 sure-init`,
+      undefined,
+      opts.hostKeyOpts,
+    );
+    throw new Error(
+      `sure-init exited ${waitRes.stdout.trim() || "unknown"}. Logs:\n${logsRes.stdout}`,
+    );
+  }
+
+  const keyRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `sudo cat /mnt/encrypted/alfred/.sure-api-key`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  const apiKey = keyRes.stdout.trim();
+  if (!apiKey || apiKey.length < 32) {
+    throw new Error(
+      `sure-init produced unusable API key (length=${apiKey.length})`,
+    );
+  }
+
+  await writeTenantEnv(sshOpts, { SURE_API_KEY: apiKey });
+  opts.log(`SURE_API_KEY written to .env (length=${apiKey.length})`);
+
+  const recreateRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `cd ${DEFAULTS.dockerComposeDir} && docker compose up -d --force-recreate ctrl-api alfred alfred-learn`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  if (recreateRes.code !== 0) {
+    throw new Error(
+      `Recreating SURE_API_KEY consumers failed (exit ${recreateRes.code}): ${recreateRes.stderr}`,
+    );
+  }
+  opts.log("ctrl-api + alfred + alfred-learn recreated with SURE_API_KEY");
+}
+
+/**
+ * CLI retrofit: enable Sure on an already-provisioned tenant. Mirrors
+ * deployPlane: detects whether the Sure stack is already running, regenerates
+ * compose if not, seeds baseline secrets, brings up the four Sure services,
+ * runs setupSure, creates the `<subdomain>-sure` DNS record, and re-renders
+ * cloudflared with sure_enabled=true (preserving any existing plane_enabled
+ * flag).
+ */
+export async function deploySure(
+  instanceId: number,
+  onLog?: (msg: string) => void,
+): Promise<void> {
+  const { getInstance } = await import("../db/queries.js");
+  const instance = getInstance(instanceId);
+  if (!instance) throw new Error(`Instance ${instanceId} not found`);
+  if (!instance.ip_address || !instance.ssh_key_path) {
+    throw new Error("Instance not fully provisioned");
+  }
+  if (!instance.subdomain) {
+    throw new Error(
+      "Instance has no subdomain — deploySure needs it for the cloudflared ingress hostname",
+    );
+  }
+
+  const log = (msg: string) => onLog?.(msg);
+
+  const sshKeyPath = instance.ssh_key_path.replace(
+    /^\/app\/alfred-ctrl\//,
+    process.cwd() + "/",
+  );
+
+  const sshOpts: Pick<SetupSureOpts, "serverIp" | "keyPath" | "hostKeyOpts"> = {
+    serverIp: instance.ip_address,
+    keyPath: sshKeyPath,
+    hostKeyOpts: instance.ssh_host_key
+      ? { knownHostKey: instance.ssh_host_key }
+      : undefined,
+  };
+
+  log("Checking for existing Sure stack...");
+  const psResult = await ssh.exec(
+    instance.ip_address,
+    sshKeyPath,
+    `docker ps --format '{{.Names}}' | grep -c '^compose-sure-web-' || true`,
+    undefined,
+    sshOpts.hostKeyOpts,
+  );
+  const alreadyRunning = parseInt(psResult.stdout.trim(), 10) > 0;
+
+  // Detect existing Plane state so the compose regenerate doesn't strip
+  // the Plane block on tenants that already have it. Same probe shape as
+  // deployApi's Plane preservation logic.
+  let planeOn = false;
+  try {
+    const check = await ssh.exec(
+      instance.ip_address,
+      sshKeyPath,
+      `docker ps --format '{{.Names}}' | grep -c '^compose-plane-api-' || echo 0`,
+      undefined,
+      sshOpts.hostKeyOpts,
+    );
+    planeOn = parseInt(check.stdout.trim(), 10) > 0;
+  } catch {
+    planeOn = false;
+  }
+
+  if (!alreadyRunning) {
+    log("Sure stack not running — regenerating compose with sure_enabled=true");
+
+    await ssh.exec(
+      instance.ip_address,
+      sshKeyPath,
+      `sudo mkdir -p /mnt/encrypted/sure/pgdata /mnt/encrypted/sure/redis && sudo chmod 700 /mnt/encrypted/sure`,
+      undefined,
+      sshOpts.hostKeyOpts,
+    );
+
+    const composeYaml = nunjucks.renderString(dockerComposeTemplate, {
+      plane_enabled: planeOn,
+      sure_enabled: true,
+    });
+    await ssh.upload(
+      instance.ip_address,
+      sshKeyPath,
+      composeYaml,
+      `${DEFAULTS.dockerComposeDir}/docker-compose.yaml`,
+      0o600,
+      undefined,
+      sshOpts.hostKeyOpts,
+    );
+    log("docker-compose.yaml uploaded with Sure block");
+
+    const seeded: Record<string, string> = {};
+    if (!(await readTenantEnv(sshOpts, "SURE_POSTGRES_PASSWORD"))) {
+      seeded.SURE_POSTGRES_PASSWORD = randomSecret(32);
+    }
+    if (!(await readTenantEnv(sshOpts, "SURE_REDIS_PASSWORD"))) {
+      seeded.SURE_REDIS_PASSWORD = randomSecret(32);
+    }
+    if (!(await readTenantEnv(sshOpts, "SURE_SECRET_KEY_BASE"))) {
+      seeded.SURE_SECRET_KEY_BASE = randomSecret(64);
+    }
+    if (!(await readTenantEnv(sshOpts, "SURE_ENABLED"))) {
+      seeded.SURE_ENABLED = "true";
+    }
+    if (!(await readTenantEnv(sshOpts, "TENANT_SUBDOMAIN"))) {
+      seeded.TENANT_SUBDOMAIN = instance.subdomain;
+    }
+    if (!(await readTenantEnv(sshOpts, "TENANT_DOMAIN"))) {
+      seeded.TENANT_DOMAIN =
+        process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain;
+    }
+    if (Object.keys(seeded).length > 0) {
+      await writeTenantEnv(sshOpts, seeded);
+      log(`Seeded ${Object.keys(seeded).length} baseline Sure secret(s) in .env`);
+    } else {
+      log("All baseline Sure secrets already present in .env");
+    }
+
+    log("Pulling Sure images (first boot — up to ~3 min)...");
+    const pullRes = await ssh.exec(
+      instance.ip_address,
+      sshKeyPath,
+      `cd ${DEFAULTS.dockerComposeDir} && timeout 600 docker compose pull sure-db sure-redis sure-web sure-worker 2>&1`,
+      undefined,
+      sshOpts.hostKeyOpts,
+    );
+    if (pullRes.code !== 0) {
+      throw new Error(`Sure image pull failed (exit ${pullRes.code}): ${pullRes.stdout}`);
+    }
+    log("Sure images pulled");
+
+    log("Starting Sure services...");
+    const upRes = await ssh.exec(
+      instance.ip_address,
+      sshKeyPath,
+      `cd ${DEFAULTS.dockerComposeDir} && docker compose up -d sure-db sure-redis sure-web sure-worker`,
+      undefined,
+      sshOpts.hostKeyOpts,
+    );
+    if (upRes.code !== 0) {
+      throw new Error(`Sure up -d failed (exit ${upRes.code}): ${upRes.stderr}`);
+    }
+    log("Sure services started");
+  } else {
+    log("Sure stack already running — skipping compose regenerate");
+  }
+
+  await setupSure({
+    serverIp: instance.ip_address,
+    keyPath: sshKeyPath,
+    hostKeyOpts: sshOpts.hostKeyOpts,
+    log,
+  });
+
+  if (cloudflare.isConfigured()) {
+    const domain = process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain;
+    const subdomain = instance.subdomain;
+
+    try {
+      if (!instance.cf_tunnel_id) {
+        log(
+          "Warning: instance has no cf_tunnel_id — skipping Sure DNS + cloudflared re-render. Add DNS manually.",
+        );
+      } else {
+        if (!instance.cf_sure_dns_record_id) {
+          try {
+            const sureRec = await cloudflare.createDnsRecord(
+              `${subdomain}-sure`,
+              instance.cf_tunnel_id,
+            );
+            updateInstance(instance.id, {
+              cf_sure_dns_record_id: sureRec.id,
+            });
+            log(`DNS record created: ${subdomain}-sure.${domain} → tunnel`);
+          } catch (e) {
+            log(
+              `Warning: Sure DNS record creation failed (may already exist): ${e}`,
+            );
+          }
+        } else {
+          log(
+            `Sure DNS record already present (${instance.cf_sure_dns_record_id}) — skipping creation`,
+          );
+        }
+
+        const cfConfig = nunjucks.renderString(cloudflaredConfigTemplate, {
+          tunnel_id: instance.cf_tunnel_id,
+          subdomain,
+          domain,
+          plane_enabled: planeOn || !!instance.cf_plane_dns_record_id,
+          sure_enabled: true,
+        });
+        try {
+          await ssh.upload(
+            instance.ip_address,
+            sshKeyPath,
+            cfConfig,
+            `${DEFAULTS.cloudflaredDir}/config.yml`,
+            0o644,
+            undefined,
+            sshOpts.hostKeyOpts,
+          );
+          log("Cloudflared config re-rendered with Sure ingress");
+
+          const restartRes = await ssh.exec(
+            instance.ip_address,
+            sshKeyPath,
+            "sudo systemctl restart cloudflared",
+            undefined,
+            sshOpts.hostKeyOpts,
+          );
+          if (restartRes.code !== 0) {
+            log(
+              `Warning: cloudflared restart failed (exit ${restartRes.code}): ${restartRes.stderr.trim()}`,
+            );
+          } else {
+            await new Promise((r) => setTimeout(r, 3000));
+            const verifyRes = await ssh.exec(
+              instance.ip_address,
+              sshKeyPath,
+              "systemctl is-active cloudflared",
+              undefined,
+              sshOpts.hostKeyOpts,
+            );
+            if (verifyRes.stdout.trim() !== "active") {
+              log(
+                `Warning: cloudflared is not active after restart (got "${verifyRes.stdout.trim()}")`,
+              );
+            } else {
+              log("Cloudflared restarted and verified active");
+            }
+          }
+        } catch (e) {
+          log(`Warning: cloudflared re-render failed: ${e}`);
+        }
+      }
+    } catch (e) {
+      log(`Warning: Sure DNS/ingress wiring failed: ${e}`);
+    }
+  } else {
+    log(
+      "Skipping Sure DNS + cloudflared re-render (Cloudflare not configured on this host)",
+    );
+  }
+
+  insertEvent(instanceId, "api_deployed", "Sure deployed + configured");
+  log(
+    `deploy-sure complete — Sure UI available at https://${instance.subdomain}-sure.${
       process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain
     }`,
   );

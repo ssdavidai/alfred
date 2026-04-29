@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import {
   useQuery,
   getDashboardData,
+  getInstalledApps,
   getProvisioningStatus,
   getFirstBrief,
   getOnboardingProgress,
@@ -275,6 +276,67 @@ function buildOnboardingMessage(stage: string, progress: any): string {
 }
 
 // ---------------------------------------------------------------------------
+// Installed apps grid (desktop-style tiles on dashboard home)
+// ---------------------------------------------------------------------------
+
+interface AppInfo {
+  id: string;
+  name: string;
+  url: string | null;
+  icon: string;
+  status: "up" | "down";
+}
+
+function AppGrid({ apps }: { apps: AppInfo[] }) {
+  if (!apps || apps.length === 0) return null;
+
+  return (
+    <div className="pointer-events-auto mt-8 grid w-full max-w-2xl grid-cols-2 gap-6 px-4 md:grid-cols-4">
+      {apps.map((app) => {
+        const clickable = app.status === "up" && !!app.url;
+        const handleClick = () => {
+          if (clickable && app.url) {
+            window.open(app.url, "_blank", "noopener,noreferrer");
+          }
+        };
+
+        return (
+          <button
+            key={app.id}
+            type="button"
+            onClick={handleClick}
+            disabled={!clickable}
+            className={
+              "group relative flex flex-col items-center justify-center rounded-xl border border-[#C9A84C]/15 bg-black/40 p-4 backdrop-blur-sm transition-colors " +
+              (clickable
+                ? "cursor-pointer hover:bg-[#C9A84C]/10"
+                : "cursor-not-allowed opacity-40")
+            }
+          >
+            <span
+              className={
+                "absolute right-2 top-2 h-1.5 w-1.5 rounded-full " +
+                (app.status === "up" ? "bg-emerald-400/80" : "bg-[#8A8680]/40")
+              }
+              aria-hidden="true"
+            />
+            <img
+              src={app.icon}
+              alt=""
+              aria-hidden="true"
+              className="h-10 w-10 object-contain"
+            />
+            <span className="mt-3 font-mono text-[0.6rem] font-light uppercase tracking-[0.2em] text-[#F0EDE8]/80">
+              {app.name}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // DashboardPage — zero-config onboarding + VaultNebula home
 // ---------------------------------------------------------------------------
 
@@ -301,6 +363,10 @@ export default function DashboardPage() {
 
   const { data: onboardProgress } = useQuery(getOnboardingProgress, undefined, {
     refetchInterval: 5_000,
+  });
+
+  const { data: installedAppsData } = useQuery(getInstalledApps, undefined, {
+    refetchInterval: 60_000,
   });
 
   // ---------------------------------------------------------------------------
@@ -620,6 +686,9 @@ export default function DashboardPage() {
               </span>
             </div>
           )}
+
+          {/* Installed apps grid — desktop-style tiles */}
+          <AppGrid apps={installedAppsData?.apps ?? []} />
 
           {/* Breathing indicator — Alfred is alive */}
           <div className="mt-3">

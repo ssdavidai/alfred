@@ -83,6 +83,7 @@ export function updateInstance(
       | "cf_tunnel_name"
       | "cf_dns_record_id"
       | "cf_plane_dns_record_id"
+      | "cf_sure_dns_record_id"
       | "cf_access_app_id"
     >
   >

@@ -169,6 +169,28 @@ export const getDashboardData: GetDashboardData<void, any> = async (
 };
 
 // ============================================================
+// Installed Apps (desktop-style grid on dashboard home)
+// ============================================================
+
+interface AppInfo {
+  id: string;
+  name: string;
+  url: string | null;
+  icon: string;
+  status: "up" | "down";
+}
+
+export const getInstalledApps: any = async (
+  _args: unknown,
+  context: any,
+): Promise<{ apps: AppInfo[] }> => {
+  const instance = await getUserInstance(context);
+  const raw: any = await proxyToTenant(instance, { path: "/api/v1/apps" });
+  const apps = Array.isArray(raw?.apps) ? (raw.apps as AppInfo[]) : [];
+  return { apps };
+};
+
+// ============================================================
 // Inbox
 // ============================================================
 export const getInboxItems: GetInboxItems<void, any> = async (

@@ -368,6 +368,11 @@ query getDashboardData {
   entities: [Instance]
 }
 
+query getInstalledApps {
+  fn: import { getInstalledApps } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
 query getInboxItems {
   fn: import { getInboxItems } from "@src/dashboard/operations",
   entities: [Instance]

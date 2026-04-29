@@ -17,12 +17,14 @@ from src.workflows.chores.daily_morning_briefing import DailyMorningBriefingWork
 from src.workflows.chores.daily_evening_digest import DailyEveningDigestWorkflow
 from src.workflows.chores.subscription_watcher import SubscriptionWatcherWorkflow
 from src.workflows.chores.weekly_matter_digest import WeeklyMatterDigestWorkflow
+from src.workflows.chores.weekly_money_day import WeeklyMoneyDayBriefWorkflow
 
 ALL_CHORE_TEMPLATES = [
     DailyMorningBriefingWorkflow,
     DailyEveningDigestWorkflow,
     SubscriptionWatcherWorkflow,
     WeeklyMatterDigestWorkflow,
+    WeeklyMoneyDayBriefWorkflow,
 ]
 
 __all__ = [
@@ -31,4 +33,5 @@ __all__ = [
     "DailyEveningDigestWorkflow",
     "SubscriptionWatcherWorkflow",
     "WeeklyMatterDigestWorkflow",
+    "WeeklyMoneyDayBriefWorkflow",
 ]

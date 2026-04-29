@@ -33,6 +33,7 @@ export interface Instance {
   cf_tunnel_name: string | null;
   cf_dns_record_id: string | null;
   cf_plane_dns_record_id: string | null;
+  cf_sure_dns_record_id: string | null;
   cf_access_app_id: string | null;
   server_type: string;
   location: string;
@@ -62,15 +63,16 @@ export interface InstanceConfig {
    */
   country?: string;
   /**
-   * Opt-in flag to deploy Plane (self-hosted PM) alongside the Alfred stack.
-   * When true, the compose template renders 12 additional services
-   * (plane-db, plane-redis, plane-mq, plane-minio, plane-api, plane-worker,
-   * plane-beat, plane-web, plane-space, plane-admin, plane-live, plane-proxy)
-   * and the provisioner's `setup_plane` step creates a workspace, admin user,
-   * API token, and webhook. Adds ~6 GB RAM overhead — recommended on ccx33+.
-   * See issue #536.
+   * Deploy Plane (self-hosted PM) alongside the Alfred stack. Default-on for
+   * every new tenant — pass `false` explicitly to opt out.
    */
   planeEnabled?: boolean;
+  /**
+   * Deploy Sure (self-hosted personal-finance, ghcr.io/we-promise/sure:stable)
+   * alongside the Alfred stack. Default-on for every new tenant — pass `false`
+   * explicitly to opt out.
+   */
+  sureEnabled?: boolean;
 }
 
 // --- Provisioning ---
@@ -93,6 +95,7 @@ export type ProvisioningStep =
   | "setup_tunnel"
   | "provision_phone"
   | "setup_plane"
+  | "setup_sure"
   | "health_check"
   | "done";
 

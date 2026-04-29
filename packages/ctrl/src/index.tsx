@@ -25,7 +25,7 @@ import {
   getInstanceByName,
   getEvents,
 } from "./db/queries.js";
-import { provision, destroy, updateImages, rollback, deployApi, deployPlane, repairTunnel } from "./infra/provisioner.js";
+import { provision, destroy, updateImages, rollback, deployApi, deployPlane, deploySure, repairTunnel } from "./infra/provisioner.js";
 import { getHetznerClient } from "./infra/hetzner.js";
 import { runHealthChecks } from "./monitoring/health.js";
 import { exec as sshExec } from "./infra/ssh.js";
@@ -144,7 +144,8 @@ program
   .option("--location <loc>", "Location", process.env.DEFAULT_LOCATION ?? DEFAULTS.location)
   .option("--ts-key <key>", "Tailscale auth key")
   .option("--snapshot <id>", "Golden snapshot ID (auto-detects latest if set to 'auto')")
-  .option("--plane", "Deploy Plane self-hosted PM sidecar (issue #536 — adds ~6GB RAM)")
+  .option("--no-plane", "Skip the Plane self-hosted PM sidecar (default: enabled)")
+  .option("--no-sure", "Skip the Sure self-hosted personal-finance sidecar (default: enabled)")
   .option("--country <iso2>", "ISO-3166-1 alpha-2 country for Twilio number (default: US, see #535)")
   .action(async (name, opts) => {
     getDb();
@@ -186,7 +187,11 @@ program
       tailscale_authkey: tsKey,
       openrouter_api_key: process.env.OPENROUTER_API_KEY,
       snapshot_id: snapshotId,
-      planeEnabled: opts.plane === true,
+      // Commander's `--no-plane` / `--no-sure` set the boolean to false when
+      // passed; otherwise the value is undefined and the provisioner defaults
+      // it to on.
+      planeEnabled: opts.plane === false ? false : undefined,
+      sureEnabled: opts.sure === false ? false : undefined,
       country: opts.country,
     };
 
@@ -388,6 +393,36 @@ program
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`\nPlane deploy FAILED: ${msg}`);
+      closeDb();
+      process.exit(1);
+    }
+    closeDb();
+  });
+
+program
+  .command("deploy-sure <name>")
+  .description(
+    "Retrofit Sure (self-hosted personal-finance sidecar) onto an existing tenant",
+  )
+  .action(async (name) => {
+    getDb();
+    const instance = getInstanceByName(name);
+    if (!instance) {
+      console.error(`Instance "${name}" not found`);
+      closeDb();
+      process.exit(1);
+    }
+    if (!instance.ip_address || !instance.ssh_key_path) {
+      console.error("Instance not fully provisioned");
+      closeDb();
+      process.exit(1);
+    }
+    try {
+      await deploySure(instance.id, console.log);
+      console.log("\nSure deployed successfully.");
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`\nSure deploy FAILED: ${msg}`);
       closeDb();
       process.exit(1);
     }

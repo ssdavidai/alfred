@@ -174,8 +174,10 @@ class TestSkipTemplateMatching:
         result = _run_assign(onboard)
         # Every opportunity should be in the unmatched bucket
         assert result["unmatched"] == len(opps)
-        # None should be "decided" since generation is disabled
-        assert result["decided"] == 0
+        # `_unconditional_chores()` fires Money Day for every tenant on every
+        # path, regardless of skip-matching / generation flags. So `decided`
+        # is 1 here (just Money Day) — none of the opportunities got matched.
+        assert result["decided"] == 1
 
     def test_skip_matching_persists_unmatched_to_onboard_json(self, tmp_path, monkeypatch):
         import json

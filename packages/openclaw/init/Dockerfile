@@ -14,6 +14,7 @@ RUN git init /alfred-src && \
 RUN pip install --no-cache-dir --no-deps /alfred-src
 
 COPY init/entrypoint.sh ./entrypoint.sh
+COPY init/sure-bootstrap.rb ./sure-bootstrap.rb
 COPY config.yaml.tpl ./config.yaml.tpl
 # Platform-native workspace content: skills that teach the main Alfred
 # agent how to use its ctrl_* tools, plus the canonical TOOLS.md capability

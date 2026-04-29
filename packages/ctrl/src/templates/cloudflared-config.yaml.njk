@@ -14,4 +14,8 @@ ingress:
   - hostname: {{ subdomain }}-plane.{{ domain }}
     service: http://localhost:8080
 {%- endif %}
+{%- if sure_enabled %}
+  - hostname: {{ subdomain }}-sure.{{ domain }}
+    service: http://localhost:3001
+{%- endif %}
   - service: http_status:404
