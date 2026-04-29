@@ -562,9 +562,13 @@ else
         SURE_SCRIPT_DST="$SURE_SCRIPT_DIR/bootstrap.rb"
         SURE_SCRIPT_SRC=/setup/sure-bootstrap.rb
 
+        # Both bootstrap files must be readable by sure-init's non-root rails
+        # user (uid 1000), otherwise bin/rails runner gets EACCES on read.
+        # /alfred-data is on the encrypted volume, only mounted into trusted
+        # containers, so 0644 is fine.
         OWNER_EMAIL_LOWER=$(echo "$OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')
         echo -n "$OWNER_EMAIL_LOWER" > "$SURE_EMAIL_FILE"
-        chmod 600 "$SURE_EMAIL_FILE" 2>/dev/null || true
+        chmod 644 "$SURE_EMAIL_FILE" 2>/dev/null || true
 
         if [[ ! -f "$SURE_PW_FILE" || ! -s "$SURE_PW_FILE" ]]; then
             # Build a password that satisfies Sure RegistrationsController:
@@ -573,9 +577,11 @@ else
             # guaranteed special char on top of upper/lower/digit. Final length
             # ~36 chars, well over the 8-char minimum.
             SURE_PW=$(python3 -c "import secrets; print(secrets.token_urlsafe(24) + '!Aa1')")
-            (umask 077 && printf '%s' "$SURE_PW" > "$SURE_PW_FILE")
-            echo "[init] Generated Sure bootstrap password at $SURE_PW_FILE (mode 0600)"
+            printf '%s' "$SURE_PW" > "$SURE_PW_FILE"
+            chmod 644 "$SURE_PW_FILE" 2>/dev/null || true
+            echo "[init] Generated Sure bootstrap password at $SURE_PW_FILE (mode 0644)"
         else
+            chmod 644 "$SURE_PW_FILE" 2>/dev/null || true
             echo "[init] Sure bootstrap password already present at $SURE_PW_FILE, reusing"
         fi
 
