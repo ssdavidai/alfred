@@ -60,9 +60,10 @@ self({ endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
 | Endpoint | What it does |
 |---|---|
 | `GET /api/v1/streams` | List configured streams with status + event counts. |
+| `GET /api/v1/streams/schema` | **Read this first when creating or configuring a stream.** Returns field descriptor, archetypes (composio_pull / webhook_push / http_pull / ambient_omi / manual_ingest) with worked example bodies, recommended Composio templates, known stream_type values, and system-stream patterns the agent must not touch. |
 | `GET /api/v1/streams/events` | Recent events across all streams. `?status=unprocessed` to filter. |
 | `POST /api/v1/streams/ingest` | Manually push an event. Body: `{stream_id, stream_type, raw, summary?}` |
-| `POST /api/v1/streams` | Create a new stream. Body: `{id, name, type?, source?, enabled?, webhookToken?}`. Returns 201. |
+| `POST /api/v1/streams` | Create a new stream. Body accepts the meta fields `{id, name, type?, source?, enabled?, webhookToken?}`; full config (pull_endpoint, schedule, composio_*, auth_*, cursor_*, etc.) goes via a follow-up PATCH. Returns 201. **Call `/api/v1/streams/schema` first to pick the right archetype.** |
 | `PATCH /api/v1/streams/:id` | Update stream config fields. Body: any subset of `{name, type, source, enabled, status, pull_endpoint, pull_mode, schedule_cron, schedule_interval_seconds, composio_action, composio_args, ...}`. |
 | `DELETE /api/v1/streams/:id` | Delete a stream and its event history. Cannot delete system streams. |
 | `POST /api/v1/streams/:id/pause` | Pause a stream (sets `enabled: false`, `status: "paused"`). Cannot pause system streams. |

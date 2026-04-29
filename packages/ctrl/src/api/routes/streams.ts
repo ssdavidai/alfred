@@ -367,6 +367,220 @@ export function emitStreamEvent(args: {
 }
 
 // ---------------------------------------------------------------------------
+// Stream schema descriptor (agent-facing setup reference)
+//
+// Surfaces three things the agent needs in order to create or configure a
+// stream from a conversation, but which were previously only knowable by
+// reading the source: (1) the FIELDS that the PATCH route accepts and what
+// they mean, (2) the ARCHETYPES — end-to-end recipes for the five ways events
+// flow into Alfred, with worked example bodies, and (3) RECOMMENDED templates
+// for Composio toolkits that ship with auto-config defaults. Also lists known
+// stream_type values that downstream workflows route on, plus the system
+// stream id prefixes the agent must NOT delete or pause.
+//
+// This is documentation, not runtime: integrations.ts owns the canonical
+// RECOMMENDED_STREAMS used during auto-config. The mirror here is for agent
+// guidance and intentionally stays in sync by hand — drift is fine because
+// auto-config is what actually wires Composio streams up.
+// ---------------------------------------------------------------------------
+
+function getStreamsSchema(): Record<string, unknown> {
+  return {
+    fields: {
+      id: { type: "string", required: true, description: "Stable identifier, kebab-case. Used in URLs and event records. Cannot be changed once set." },
+      name: { type: "string", required: true, description: "Human-readable label shown in the dashboard." },
+      type: { type: "string", default: "custom", description: "Free-form classification. Common values: 'webhook', 'pull', 'composio', 'ambient', 'system', 'custom'." },
+      source: { type: "string", default: "custom", description: "Where events originate. Free-form but agents should prefer canonical slugs: 'gmail', 'googlecalendar', 'github', 'notion', 'omi', 'plane', 'agentmail', 'twilio', 'composio:<toolkit>', or a hostname for custom HTTP." },
+      enabled: { type: "boolean", default: true, description: "Stream is paused when false. Schedules skip disabled streams." },
+      status: { type: "enum", values: ["idle", "active", "paused", "error"], description: "Last-known runtime state. Set by pull workers; agent reads only." },
+      webhookToken: { type: "string", description: "Auto-generated for webhook archetype. External services POST to https://<tenant-host>/webhooks/<webhookToken>." },
+      pull_endpoint: { type: "string", description: "Custom HTTP-pull URL. Pull worker GETs this on the configured schedule." },
+      pull_method: { type: "enum", values: ["GET", "POST"], default: "GET", description: "HTTP method for pull_endpoint." },
+      pull_headers: { type: "object", description: "Static headers to send with each pull. Use auth_config for secrets, this for static keys like User-Agent." },
+      pull_params: { type: "object", description: "Static query params for GET / body for POST." },
+      pull_mode: { type: "enum", values: ["snapshot", "append", "sync"], description: "snapshot = blind every pull, dedupe via (stream_id, source_ref). append = filter by timestamp > cursor_value. sync = use a sync token (e.g. Google Calendar nextSyncToken)." },
+      detail_endpoint: { type: "string", description: "Optional second-stage URL template, e.g. {{id}} expanded per item from the list call." },
+      detail_id_field: { type: "string", description: "Field name on each list item used to expand detail_endpoint." },
+      parser: { type: "enum", values: ["json", "rss", "atom", "custom"], default: "json", description: "How to interpret the response body." },
+      auth_type: { type: "enum", values: ["none", "bearer", "basic", "api_key", "oauth"], description: "Auth scheme for pull_endpoint. Composio archetype handles auth via the connection — don't set this for composio streams." },
+      auth_config: { type: "object", description: "Auth params. bearer: {token}. basic: {username, password}. api_key: {header, value} or {query, value}." },
+      cursor_field: { type: "string", description: "Path to the timestamp/id on each event used for incremental pulls (append mode). Dot-notation supported, e.g. 'updated_at'." },
+      cursor_value: { type: "string", description: "Last-seen cursor. Pull worker writes back after each successful pull. Initialize to '' for full backfill on first run." },
+      cursor_param: { type: "string", description: "Query param name to send the cursor as on the next pull, e.g. 'since' or 'after'." },
+      schedule_cron: { type: "string", description: "Standard 5-field cron. Mutually exclusive with schedule_interval_seconds." },
+      schedule_interval_seconds: { type: "number", description: "Simple interval scheduler. Use this for most pulls. 300 = 5 min, 600 = 10 min." },
+      composio_action: { type: "string", description: "Composio SDK action slug, e.g. 'GMAIL_FETCH_EMAILS'. Required for the composio archetype." },
+      composio_connection_id: { type: "string", description: "ID of the ACTIVE ComposioConnection on this tenant. Look up via GET /api/v1/integrations." },
+      composio_toolkit: { type: "string", description: "Toolkit slug, e.g. 'gmail'. Must match a connection's toolkit." },
+      composio_args: { type: "object", description: "Arguments passed to the Composio action. See the recommended[] entries below for sane defaults per toolkit." },
+      last_pull_at: { type: "string", description: "ISO timestamp of last successful pull. Read-only." },
+      last_pull_status: { type: "string", description: "'ok' or error message. Read-only." },
+      last_pull_count: { type: "number", description: "Events returned by last pull. Read-only." },
+    },
+
+    archetypes: [
+      {
+        id: "composio_pull",
+        title: "Composio app stream (Gmail, Calendar, GitHub, Notion, etc.)",
+        when_to_use: "User has connected a third-party app via Composio and wants periodic ingestion. Prefer auto-config — POST /api/v1/integrations/:id/auto-config will create the stream + Temporal schedule + skill in one call.",
+        manual_recipe: {
+          step_1: "Look up the connection: self({endpoint: '/api/v1/integrations'}). Find the ACTIVE row for the toolkit.",
+          step_2: "Pick an action: see recommended[] below, or self({endpoint: '/api/v1/integrations/<toolkit>/actions'}) for the full list.",
+          step_3: "POST /api/v1/streams with the body example.",
+          step_4: "Register the schedule via Temporal — easier path: just call POST /api/v1/integrations/<connection_id>/auto-config and let it wire everything up.",
+        },
+        example_body: {
+          id: "composio-gmail",
+          name: "Gmail",
+          type: "composio",
+          source: "gmail",
+          enabled: true,
+          composio_action: "GMAIL_FETCH_EMAILS",
+          composio_toolkit: "gmail",
+          composio_connection_id: "<from /api/v1/integrations>",
+          composio_args: { userId: "me", format: "metadata", maxResults: 50 },
+          schedule_interval_seconds: 300,
+          pull_mode: "append",
+          cursor_field: "messageTimestamp",
+        },
+      },
+      {
+        id: "webhook_push",
+        title: "Custom webhook (external service POSTs events)",
+        when_to_use: "Any service that supports outgoing webhooks — Clockify, Zapier, custom scripts, GitHub repo webhooks (separate from the Composio github stream), monitoring tools, etc.",
+        manual_recipe: {
+          step_1: "POST /api/v1/streams with type: 'webhook'. The response includes a webhookToken — keep it.",
+          step_2: "Compose the public URL: https://<tenant-host>/webhooks/<webhookToken>. The tenant host varies — for the SaaS-proxied path use the dashboard's webhooks page or ask the user for their alfred.black subdomain.",
+          step_3: "Hand the URL to the user with instructions to paste it into the source service's webhook configuration.",
+          step_4: "No schedule needed — events arrive as the source pushes them.",
+        },
+        example_body: {
+          id: "webhook-clockify",
+          name: "Clockify Time Entries",
+          type: "webhook",
+          source: "clockify",
+          enabled: true,
+        },
+        post_create_response_includes: ["webhookToken"],
+        notes: "Body must be JSON. Currently no signature verification on the generic /webhooks/:token receiver — tokens are the only auth.",
+      },
+      {
+        id: "http_pull",
+        title: "Custom HTTP poll (no Composio adapter exists)",
+        when_to_use: "Public or simple-auth HTTP API the agent wants to poll directly. Use only when no Composio toolkit covers the service.",
+        manual_recipe: {
+          step_1: "POST /api/v1/streams with type: 'pull' and the example fields.",
+          step_2: "PATCH the auth_config separately (don't include secrets in conversation logs).",
+          step_3: "Register a Temporal schedule that calls the StreamPullerWorkflow with this stream_id, OR use schedule_interval_seconds and let the next reconciler pick it up.",
+        },
+        example_body: {
+          id: "pull-status-page",
+          name: "Vendor Status Page",
+          type: "pull",
+          source: "vendor.com",
+          enabled: true,
+          pull_endpoint: "https://api.vendor.com/v1/incidents",
+          pull_method: "GET",
+          parser: "json",
+          schedule_interval_seconds: 600,
+          pull_mode: "append",
+          cursor_field: "updated_at",
+          cursor_param: "since",
+          auth_type: "bearer",
+        },
+      },
+      {
+        id: "ambient_omi",
+        title: "Omi ambient audio (wearable transcription)",
+        when_to_use: "User wears an Omi pendant and wants conversations transcribed into the vault.",
+        manual_recipe: {
+          step_1: "DO NOT create the stream via this endpoint. Omi is a system stream provisioned by the init container when OMI_ENABLED=true is set in /opt/alfred/compose/.env.",
+          step_2: "Verify with self({endpoint: '/api/v1/streams'}) — look for id 'omi-audio'.",
+          step_3: "If missing, instruct the user to enable Omi via the dashboard's Apps page (preferred) or by SSH'ing in and adding OMI_ENABLED=true to .env.",
+          step_4: "After enable: events arrive at /api/v1/streams/ingest with stream_type 'omi-audio' and are processed by MediaIngestionWorkflow → Whisper (Groq) → conversation/ vault records.",
+        },
+        agent_creatable: false,
+      },
+      {
+        id: "manual_ingest",
+        title: "One-off event injection",
+        when_to_use: "User asks the agent to record something that didn't come through any stream — e.g. 'log this meeting note as if it were a calendar event'. Useful for testing.",
+        manual_recipe: {
+          step_1: "POST /api/v1/streams/ingest with stream_id, stream_type, and raw fields. Stream doesn't have to pre-exist — ingest auto-creates a meta entry.",
+        },
+        example_body: {
+          stream_id: "manual-notes",
+          stream_type: "note",
+          raw: { text: "Caught up with Anna re Series B at 3pm", timestamp: "2026-04-29T15:00:00Z" },
+          summary: "Series B catchup with Anna",
+        },
+      },
+    ],
+
+    // Mirrors integrations.ts:RECOMMENDED_STREAMS for agent reference. Auto-config
+    // remains the canonical path for setting these up — this list lets the agent
+    // *talk about* them and construct correct manual bodies if needed.
+    recommended: {
+      gmail: {
+        composio_action: "GMAIL_FETCH_EMAILS",
+        composio_args: { userId: "me", format: "metadata", maxResults: 50 },
+        schedule_interval_seconds: 300,
+        pull_mode: "append",
+        notes: "format=metadata strips bodies (~1KB/msg vs ~104KB) so the openclaw tool-result cap doesn't truncate. Use format='full' only for fetching one specific message by id.",
+      },
+      googlecalendar: {
+        composio_action: "GOOGLECALENDAR_EVENTS_LIST",
+        composio_args: { calendarId: "primary" },
+        schedule_interval_seconds: 300,
+        pull_mode: "sync",
+        notes: "Uses Google's nextSyncToken for true delta pulls.",
+      },
+      github: {
+        composio_action: "GITHUB_LIST_NOTIFICATIONS_FOR_THE_AUTHENTICATED_USER",
+        composio_args: {},
+        schedule_interval_seconds: 300,
+        pull_mode: "append",
+        notes: "Polls the authed user's notifications feed.",
+      },
+      notion: {
+        composio_action: "NOTION_FETCH_DATA",
+        composio_args: { get_all: false, get_pages: true, get_databases: true, page_size: 50 },
+        schedule_interval_seconds: 600,
+        pull_mode: "snapshot",
+        notes: "Snapshot mode + (stream_id, source_ref) dedupe — Notion's search API has no last_edited_time filter.",
+      },
+    },
+
+    // stream_type values on individual events. Workflows route on these.
+    // Anything not listed flows through generic EventProcessorWorkflow.
+    known_event_types: [
+      { type: "agentmail", processed_by: "EventProcessorWorkflow → email-template render", description: "Inbound email when sender is NOT in /vault/.auth/authorized_senders.json." },
+      { type: "voice-call", processed_by: "stream_vault → conversation/ record", description: "Twilio voice call transcript posted on hangup." },
+      { type: "sms", processed_by: "EventProcessorWorkflow", description: "Inbound SMS when sender is NOT authorized." },
+      { type: "omi-audio", processed_by: "MediaIngestionWorkflow → Whisper → conversation/", description: "Audio chunk from Omi pendant. Transcribed via Groq." },
+      { type: "media", processed_by: "MediaIngestionWorkflow", description: "Generic binary upload (image, PDF, audio). Routed by MIME type." },
+      { type: "inbox-upload", processed_by: "Curator", description: "Text content uploaded to inbox via dashboard or scan endpoint." },
+      { type: "plane", processed_by: "PlaneReverseSyncWorkflow", description: "Plane.so issue/cycle webhook events." },
+      { type: "conversation", processed_by: "EventProcessorWorkflow → conversation/ record", description: "Generic transcript-shaped event." },
+      { type: "note", processed_by: "EventProcessorWorkflow → event/ record", description: "Generic free-form event used by manual_ingest." },
+    ],
+
+    // System streams the agent must NOT delete or pause. The DELETE route
+    // already enforces this server-side, but listing the patterns here lets
+    // the agent reason about them without poking the API.
+    system_streams: [
+      "openclaw-sessions",
+      "system-inbox",
+      "agentmail-*",
+      "phone-voice",
+      "phone-sms",
+      "omi-audio",
+      "plane-webhook",
+    ],
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -616,6 +830,14 @@ export function registerStreamRoutes(): void {
     }
 
     sendJson(res, 200, { streams });
+  });
+
+  // GET /api/v1/streams/schema — agent-facing reference for creating + configuring
+  // streams. Returns the field descriptor, archetypes (recipes), recommended
+  // Composio templates, known stream_type values, and system-stream patterns.
+  // MUST be registered before "/:id" so "schema" doesn't match as a stream id.
+  addRoute("GET", "/api/v1/streams/schema", async ({ res }) => {
+    sendJson(res, 200, getStreamsSchema());
   });
 
   // GET /api/v1/streams/events — MUST be before /:id to avoid matching "events" as an ID
