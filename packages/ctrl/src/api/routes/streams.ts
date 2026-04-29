@@ -9,6 +9,28 @@ const VAULT_PATH = "/mnt/encrypted/vault";
 const PROCESSED_EVENTS_PATH = path.join(STREAMS_DIR, "processed-events.json");
 const STREAM_CONFIGS_DIR = path.join(STREAMS_DIR, "configs");
 
+// Public-facing host for SaaS-routed generic webhooks (everything that isn't
+// Omi audio, which has its own tenant-side endpoint). Override via env if a
+// non-default deployment moves the proxy.
+const SAAS_HOST = process.env.SAAS_HOST ?? "https://alfred.black";
+
+// Compose a ready-to-use public URL for a webhook-type stream so the agent
+// never has to know its own tenant subdomain or invent host/token strings.
+// Returns null when the stream isn't actually addressable (no webhookToken,
+// or Omi without a TENANT_BASE_URL injected at provision time).
+function composeWebhookUrl(
+  source: string,
+  webhookToken: string | undefined | null,
+): string | null {
+  if (!webhookToken) return null;
+  if (source === "omi") {
+    const base = process.env.TENANT_BASE_URL;
+    if (!base) return null;
+    return `${base.replace(/\/$/, "")}/api/v1/streams/omi/audio?token=${webhookToken}&uid=omi-device`;
+  }
+  return `${SAAS_HOST.replace(/\/$/, "")}/webhooks/${webhookToken}`;
+}
+
 // Ensure streams directory exists
 fs.mkdirSync(STREAMS_DIR, { recursive: true });
 fs.mkdirSync(STREAM_CONFIGS_DIR, { recursive: true });
@@ -393,7 +415,8 @@ function getStreamsSchema(): Record<string, unknown> {
       source: { type: "string", default: "custom", description: "Where events originate. Free-form but agents should prefer canonical slugs: 'gmail', 'googlecalendar', 'github', 'notion', 'omi', 'plane', 'agentmail', 'twilio', 'composio:<toolkit>', or a hostname for custom HTTP." },
       enabled: { type: "boolean", default: true, description: "Stream is paused when false. Schedules skip disabled streams." },
       status: { type: "enum", values: ["idle", "active", "paused", "error"], description: "Last-known runtime state. Set by pull workers; agent reads only." },
-      webhookToken: { type: "string", description: "Auto-generated for webhook archetype. External services POST to https://<tenant-host>/webhooks/<webhookToken>." },
+      webhookToken: { type: "string", description: "Server-generated for webhook archetype. The agent should never set or invent this — the POST handler creates one for any type='webhook' stream that doesn't already have one." },
+      webhook_url: { type: "string", description: "Read-only, server-composed. Present on responses for type='webhook' streams (GET list, GET single, POST create). Already includes the right host (SaaS proxy for generic webhooks, tenant subdomain for Omi audio) — copy it verbatim. Do NOT compose a webhook URL by hand." },
       pull_endpoint: { type: "string", description: "Custom HTTP-pull URL. Pull worker GETs this on the configured schedule." },
       pull_method: { type: "enum", values: ["GET", "POST"], default: "GET", description: "HTTP method for pull_endpoint." },
       pull_headers: { type: "object", description: "Static headers to send with each pull. Use auth_config for secrets, this for static keys like User-Agent." },
@@ -449,10 +472,9 @@ function getStreamsSchema(): Record<string, unknown> {
         title: "Custom webhook (external service POSTs events)",
         when_to_use: "Any service that supports outgoing webhooks — Clockify, Zapier, custom scripts, GitHub repo webhooks (separate from the Composio github stream), monitoring tools, etc.",
         manual_recipe: {
-          step_1: "Check first: GET /api/v1/streams — if a stream with this source already exists, reuse its webhookToken. Do NOT create duplicates.",
-          step_2: "If creating: POST /api/v1/streams with type: 'webhook'. THE RESPONSE BODY CONTAINS THE webhookToken — read it out of `response.stream.webhookToken`. NEVER invent a token; it must come from the server.",
-          step_3: "Compose the public URL: `https://alfred.black/webhooks/<webhookToken>`. The host is always `alfred.black` (the SaaS proxy) — do NOT make up subdomains like `gateway.alfred.black`. The SaaS receiver looks the stream up by token in its database and routes events to the correct tenant.",
-          step_4: "Hand the URL to the user with instructions to paste it into the source service's webhook configuration. No schedule needed — events arrive as the source pushes them.",
+          step_1: "Check first: GET /api/v1/streams. If a stream with this source already exists, reuse its existing `webhook_url` (every webhook-type stream in the list response carries the field). Do NOT create duplicates.",
+          step_2: "If creating: POST /api/v1/streams with type: 'webhook'. The server auto-generates the webhookToken AND composes a fully-formed public URL. Read `response.stream.webhook_url` — it is the complete URL, ready to hand to the user. Do NOT compose URLs yourself; do NOT invent hosts or tokens.",
+          step_3: "Hand `response.stream.webhook_url` to the user verbatim with instructions to paste it into the source service's webhook configuration. No schedule needed — events arrive as the source pushes them.",
         },
         example_body: {
           id: "webhook-clockify",
@@ -464,15 +486,13 @@ function getStreamsSchema(): Record<string, unknown> {
         post_create_response_shape: {
           stream: {
             id: "webhook-clockify",
-            name: "Clockify Time Entries",
             type: "webhook",
             source: "clockify",
-            enabled: true,
-            status: "idle",
-            webhookToken: "<48-char hex string the SERVER generates — copy this verbatim>",
+            webhookToken: "<server-generated 48-char hex>",
+            webhook_url: "https://alfred.black/webhooks/<webhookToken> — copy this field verbatim, do not reconstruct it",
           },
         },
-        notes: "Body must be JSON. Currently no signature verification on the generic /webhooks/:token receiver — tokens are the only auth. NEVER fabricate a webhookToken; if you don't see one in the response, the create failed.",
+        notes: "Body must be JSON. No signature verification on the generic /webhooks/:token receiver — tokens are the only auth. The webhook_url is composed server-side; if it is missing from the response, do not invent one — report the error to the user instead.",
       },
       {
         id: "http_pull",
@@ -504,10 +524,9 @@ function getStreamsSchema(): Record<string, unknown> {
         title: "Omi ambient audio (wearable / app feeds raw audio in)",
         when_to_use: "User wears an Omi pendant or runs the Omi mobile app and wants ambient conversations transcribed into the vault.",
         manual_recipe: {
-          step_1: "Check first: GET /api/v1/streams. If a stream with `source: \"omi\"` already exists, REUSE it — do NOT create a duplicate. Read its existing `webhookToken` out of the list response.",
-          step_2: "If creating: POST /api/v1/streams with the example body. The response will include a server-generated `webhookToken` at `response.stream.webhookToken` — read it out, never invent one.",
-          step_3: "Compose the URL: `<tenant-base-url>/api/v1/streams/omi/audio?token=<webhookToken>&uid=omi-device`. The tenant base URL is the user's specific subdomain (e.g. `https://david.alfred.black`) — NOT `alfred.black` and NOT a made-up host like `gateway.alfred.black`. If you don't know the user's subdomain, ask them; never guess.",
-          step_4: "Hand the URL to the user with instructions: 'Paste this into the Omi app developer settings as the audio stream endpoint.' Audio chunks POST as raw bytes (Content-Type: application/octet-stream); the tenant ctrl-api decodes them and emits stream_type 'omi-audio' events for MediaIngestionWorkflow to transcribe via Groq Whisper into conversation/ vault records.",
+          step_1: "Check first: GET /api/v1/streams. If a stream with `source: \"omi\"` already exists, REUSE it — read its existing `webhook_url` out of the list response and hand that to the user. Do NOT create a duplicate.",
+          step_2: "If creating: POST /api/v1/streams with the example body. The server auto-generates the webhookToken AND composes the full Omi audio URL using this tenant's own subdomain. Read `response.stream.webhook_url` — it is the complete URL, ready to paste into the Omi app.",
+          step_3: "Hand `response.stream.webhook_url` to the user verbatim with the instruction: 'Paste this into the Omi app developer settings as the audio stream endpoint.' Audio chunks POST as raw bytes (Content-Type: application/octet-stream); the tenant ctrl-api decodes them and emits stream_type 'omi-audio' events for MediaIngestionWorkflow to transcribe via Groq Whisper into conversation/ vault records.",
         },
         example_body: {
           id: "omi-audio",
@@ -519,13 +538,13 @@ function getStreamsSchema(): Record<string, unknown> {
         post_create_response_shape: {
           stream: {
             id: "omi-audio",
-            name: "Omi Ambient",
             type: "webhook",
             source: "omi",
-            webhookToken: "<48-char hex string the SERVER generates — copy this verbatim into the URL>",
+            webhookToken: "<server-generated>",
+            webhook_url: "<tenant-subdomain>/api/v1/streams/omi/audio?token=<webhookToken>&uid=omi-device — copy this field verbatim, do not reconstruct it",
           },
         },
-        notes: "Distinct from the generic webhook_push archetype: Omi has its own dedicated tenant-side endpoint (/api/v1/streams/omi/audio) that handles raw audio, not the SaaS-side /webhooks/:token JSON receiver. NEVER fabricate the webhookToken or the host.",
+        notes: "Distinct from the generic webhook_push archetype: Omi has its own dedicated tenant-side endpoint (/api/v1/streams/omi/audio) that handles raw audio, not the SaaS-side /webhooks/:token JSON receiver. webhook_url is composed server-side using TENANT_BASE_URL — if it is missing from the response, the tenant was provisioned without TENANT_BASE_URL and you should report the gap to the user, not fabricate a host.",
       },
       {
         id: "manual_ingest",
@@ -855,7 +874,16 @@ export function registerStreamRoutes(): void {
       }
     }
 
-    sendJson(res, 200, { streams });
+    // Attach a fully-composed public webhook_url to every webhook-type stream
+    // so the agent can copy it verbatim instead of constructing it. Omi uses
+    // its dedicated tenant endpoint; everything else routes via the SaaS proxy.
+    const enriched = streams.map((s) => {
+      if (s.type !== "webhook") return s;
+      const url = composeWebhookUrl(s.source, s.webhookToken);
+      return url ? { ...s, webhook_url: url } : s;
+    });
+
+    sendJson(res, 200, { streams: enriched });
   });
 
   // GET /api/v1/streams/schema — agent-facing reference for creating + configuring
@@ -898,6 +926,12 @@ export function registerStreamRoutes(): void {
           stream[key] = val;
         }
       }
+    }
+
+    // Compose webhook_url for webhook-type streams (see comment on the list route).
+    if (meta.type === "webhook") {
+      const url = composeWebhookUrl(meta.source, meta.webhookToken);
+      if (url) stream.webhook_url = url;
     }
 
     sendJson(res, 200, { stream });
@@ -1012,21 +1046,45 @@ export function registerStreamRoutes(): void {
       throw new ConflictError(`Stream ${b.id} already exists`);
     }
 
+    const type = typeof b.type === "string" ? b.type : "custom";
+    const source = typeof b.source === "string" ? b.source : "custom";
+
+    // Auto-generate a webhookToken for webhook-type streams when the caller
+    // didn't provide one. Mirrors SaaS-side streamCreate (operations.ts) so
+    // that a stream created directly through ctrl-api is immediately
+    // addressable — the agent can read webhook_url out of the response and
+    // hand it to the user without a follow-up request to seed the token.
+    let webhookToken: string | undefined;
+    if (typeof b.webhookToken === "string") {
+      webhookToken = b.webhookToken;
+    } else if (type === "webhook") {
+      webhookToken = crypto.randomBytes(24).toString("hex");
+    }
+
     const stream: StreamMeta = {
       id: b.id as string,
       name: b.name as string,
-      type: typeof b.type === "string" ? b.type : "custom",
-      source: typeof b.source === "string" ? b.source : "custom",
+      type,
+      source,
       enabled: b.enabled !== false,
       status: "idle",
       last_event_at: null,
       event_count: 0,
-      ...(typeof b.webhookToken === "string" ? { webhookToken: b.webhookToken } : {}),
+      ...(webhookToken ? { webhookToken } : {}),
     };
 
     streams.push(stream);
     saveStreamsMeta(streams);
-    sendJson(res, 201, { stream });
+
+    // Compose the public webhook URL so the agent never has to know its own
+    // tenant subdomain or hand-construct a URL. See composeWebhookUrl above.
+    const responseStream: Record<string, unknown> = { ...stream };
+    if (type === "webhook") {
+      const url = composeWebhookUrl(source, webhookToken);
+      if (url) responseStream.webhook_url = url;
+    }
+
+    sendJson(res, 201, { stream: responseStream });
   });
 
   // DELETE /api/v1/streams/:id — remove a stream and its events

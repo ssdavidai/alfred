@@ -323,13 +323,15 @@ export async function provision(
       envLines.push(`SURE_ENABLED=true`);
     }
 
-    // Tenant-scoped subdomain + domain — read by ctrl-api's /api/v1/apps
-    // endpoint to build the public per-app URLs (e.g. <subdomain>-sure.<domain>).
-    // Without these, apps.ts returns url: null for every tile and the dashboard
-    // can't link anywhere. The values mirror what cloudflared and the SaaS
-    // dashboard use.
+    // Tenant-scoped subdomain + domain + base URL — read by ctrl-api to build
+    // public per-app URLs (e.g. <subdomain>-sure.<domain>) and ready-to-use
+    // public webhook URLs (TENANT_BASE_URL is what makes the streams API
+    // compose webhook_url server-side instead of asking the agent to guess).
+    // The three values mirror what cloudflared and the SaaS dashboard use.
+    const cfDomain = process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain;
     envLines.push(`TENANT_SUBDOMAIN=${subdomain}`);
-    envLines.push(`TENANT_DOMAIN=${process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain}`);
+    envLines.push(`TENANT_DOMAIN=${cfDomain}`);
+    envLines.push(`TENANT_BASE_URL=https://${subdomain}.${cfDomain}`);
 
     await ssh.exec(
       server.public_net.ipv4.ip,
