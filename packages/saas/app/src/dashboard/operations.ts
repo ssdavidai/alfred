@@ -16,6 +16,7 @@ import type {
   GetWorkspaceFile,
   GetFirstBrief,
   GetOnboardingProgress,
+  GetInstalledApps,
 } from "wasp/server/operations";
 import type {
   SubmitInboxItem,
@@ -180,10 +181,10 @@ interface AppInfo {
   status: "up" | "down";
 }
 
-export const getInstalledApps: any = async (
-  _args: unknown,
-  context: any,
-): Promise<{ apps: AppInfo[] }> => {
+export const getInstalledApps: GetInstalledApps<void, { apps: AppInfo[] }> = async (
+  _args,
+  context,
+) => {
   const instance = await getUserInstance(context);
   const raw: any = await proxyToTenant(instance, { path: "/api/v1/apps" });
   const apps = Array.isArray(raw?.apps) ? (raw.apps as AppInfo[]) : [];
