@@ -225,7 +225,13 @@ services:
     tmpfs:
       - /tmp:size=256m
     environment:
-      - OPENCLAW_GATEWAY_URL=http://openclaw-workers:18790
+      # alfred (vault daemon) calls openclaw-wrapper which spawns
+      # vault-curator/janitor/distiller agents via sessions_spawn.
+      # The workers gateway rejects external sessions_spawn (allowed:
+      # none), so this MUST point at MAIN (:18789), same fix #614 made
+      # for alfred-learn. Pre-fix, every curator stage-1 returned a
+      # 90-char "no_session_key" error and inbox processing 100% failed.
+      - OPENCLAW_GATEWAY_URL=http://openclaw:18789
       - ALFRED_CTRL_URL=http://ctrl-api:3100
     env_file:
       - .env
