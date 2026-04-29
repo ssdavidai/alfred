@@ -13,7 +13,7 @@ build-saas:
 # dependency (pure functions, guards, validators). Uses Node's built-in
 # test runner + tsx for TS support so we don't have to add jest/vitest.
 test-saas-unit:
-	cd packages/saas/app && npx -y tsx --test "src/server/**/*.test.ts"
+	cd packages/saas/app && npx -y tsx --test "src/server/**/*.test.ts" "src/integrations/**/*.test.ts"
 
 test-learn:
 	cd packages/learn && pip install -r requirements.txt && pytest tests/ -v

@@ -744,6 +744,24 @@ query getOpenclawReadiness {
   entities: [Instance]
 }
 
+// Reconciler — closes the gap between "Composio reports ACTIVE" and
+// "tenant has its stream/skill/schedule wired up". Runs every minute and
+// picks up any ComposioConnection where Composio is ACTIVE but our
+// auto-config state is `pending` or `error` (with backoff). See
+// reconcileWorker.ts for the full rationale; this exists because the
+// frontend auto-fire effect in IntegrationsPage breaks down whenever the
+// user closes the popup or navigates away mid-OAuth.
+job reconcileComposioAutoConfig {
+  executor: PgBoss,
+  perform: {
+    fn: import { reconcileComposioAutoConfigJob } from "@src/integrations/reconcileWorker"
+  },
+  schedule: {
+    cron: "*/1 * * * *"
+  },
+  entities: [Instance, ComposioConnection, User]
+}
+
 // ============================================================
 // Tools (Gateway Allowlist Inspector)
 // ============================================================

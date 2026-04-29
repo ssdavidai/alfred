@@ -395,6 +395,86 @@ function ensureToolInGateway(toolName: string): boolean {
   return changed;
 }
 
+/**
+ * Describe a Temporal schedule and decode its first input payload as
+ * `{stream_id: ...}`. Used by /auto-config to detect when an existing
+ * schedule's encoded stream_id has gone stale (e.g. Composio renamed the
+ * action behind the previous stream config) so we can force-recreate
+ * instead of skipping with the obsolete args.
+ *
+ * Returns:
+ *   { exists: false }                     — describe failed (likely no such id)
+ *   { exists: true, streamId: undefined } — schedule exists but input was
+ *                                            unparseable / missing. Caller
+ *                                            should treat as a mismatch and
+ *                                            recreate (safer than running
+ *                                            forever against unknown args).
+ *   { exists: true, streamId: "..."     } — schedule exists, args decoded.
+ */
+export async function describeScheduleStreamId(
+  scheduleId: string,
+): Promise<{ exists: boolean; streamId?: string }> {
+  let raw: string;
+  try {
+    raw = await dockerExec("temporal", [
+      "temporal", "schedule", "describe",
+      "--schedule-id", scheduleId,
+      "--output", "json",
+    ]);
+  } catch {
+    // describe fails with non-zero exit when the schedule does not exist.
+    // Temporal CLI also fails closed when the cluster is unreachable; the
+    // caller treats `exists: false` as "go ahead and create", which is
+    // safe — if the schedule turns out to exist the create call will surface
+    // AlreadyExists and we degrade to the legacy "already exists" path.
+    return { exists: false };
+  }
+
+  let described: any;
+  try {
+    described = JSON.parse(raw);
+  } catch {
+    return { exists: true, streamId: undefined };
+  }
+
+  const action =
+    described?.scheduleInfo?.action ||
+    described?.schedule?.action ||
+    {};
+  const startWorkflow = action?.startWorkflow || action;
+  const payloads = startWorkflow?.input?.payloads;
+  if (Array.isArray(payloads) && payloads.length > 0) {
+    const first = payloads[0];
+    const data: unknown = first?.data;
+    if (typeof data === "string" && data.length > 0) {
+      try {
+        const decoded = Buffer.from(data, "base64").toString("utf-8");
+        const parsed = JSON.parse(decoded);
+        const streamId = parsed?.stream_id;
+        return {
+          exists: true,
+          streamId: typeof streamId === "string" ? streamId : undefined,
+        };
+      } catch {
+        // Fall through to fallback shape
+      }
+    }
+  }
+
+  // Legacy `args` shape, just in case (kept for parity with workflows.ts).
+  const args = startWorkflow?.args;
+  if (Array.isArray(args) && args.length > 0) {
+    const first = args[0];
+    const streamId = first?.stream_id;
+    return {
+      exists: true,
+      streamId: typeof streamId === "string" ? streamId : undefined,
+    };
+  }
+
+  return { exists: true, streamId: undefined };
+}
+
 /** Remove a tool from gateway.tools.allow in both openclaw configs.
  *  Returns true iff at least one config file was mutated. */
 function removeToolFromGateway(toolName: string): boolean {
@@ -2793,28 +2873,88 @@ print(json.dumps(result, default=str))
         });
         fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
 
-        // Create Temporal schedule
+        // Create Temporal schedule. Two paths:
+        //
+        //   (A) Schedule does not exist → `temporal schedule create`.
+        //   (B) Schedule already exists → inspect its encoded stream_id; if it
+        //       matches `streamId` we skip (idempotent rerun), otherwise we
+        //       force-recreate (delete + create) so the schedule fires against
+        //       the CURRENT stream config rather than a stale slug.
+        //
+        // The naive previous behaviour treated "AlreadyExists" as success even
+        // when the existing schedule's args pointed at a removed Composio
+        // action. Live evidence: Rapali's notion schedule fired 1,671 times
+        // against the deleted `composio-notion-notion-list-pages` stream id
+        // (whose action `NOTION_LIST_PAGES` was 404'd by Composio) before we
+        // manually swapped it. Auto-config now catches that on its own.
         const scheduleId = `al-stream-pull-composio-${streamId.slice(0, 20)}`;
         const intervalMin = Math.max(Math.round(rec.interval / 60), 1);
-        try {
+        const desiredInput = JSON.stringify({ stream_id: streamId });
+        const createSchedule = async (): Promise<void> => {
           await dockerExec("temporal", [
             "temporal", "schedule", "create",
             "--schedule-id", scheduleId,
             "--type", "StreamPullerWorkflow",
             "--task-queue", "alfred-learn",
             "--cron", `*/${intervalMin} * * * *`,
-            "--input", JSON.stringify({ stream_id: streamId }),
+            "--input", desiredInput,
             "--overlap-policy", "Skip",
           ]);
-          summary.stream_created = streamId;
-          summary.schedule_created = scheduleId;
-        } catch (err: any) {
-          // Schedule might already exist
-          if (err.message?.includes("already exists") || err.message?.includes("AlreadyExists") || err.message?.includes("already registered")) {
+        };
+
+        const existing = await describeScheduleStreamId(scheduleId);
+        if (existing.exists) {
+          if (existing.streamId === streamId) {
             summary.stream_created = streamId;
             summary.schedule_created = `${scheduleId} (already exists)`;
           } else {
-            summary.stream_error = err.message?.slice(0, 200);
+            // Stale schedule: encoded stream_id doesn't match the one
+            // auto-config wants. Delete + recreate so future pulls hit the
+            // fresh stream config rather than a dead action.
+            console.log(
+              `[auto-config] swapping stale schedule ${scheduleId}: ` +
+              `existing stream_id=${JSON.stringify(existing.streamId)} → desired=${streamId}`,
+            );
+            try {
+              await dockerExec("temporal", [
+                "temporal", "schedule", "delete",
+                "--schedule-id", scheduleId,
+              ]);
+            } catch (err: any) {
+              // If delete fails (race with another caller, or schedule
+              // disappeared between describe and delete), fall through to
+              // create — Temporal will refuse the create with AlreadyExists
+              // and we'll surface that below as a warning.
+              console.warn(`[auto-config] schedule delete failed (continuing): ${err?.message?.slice(0, 200)}`);
+            }
+            try {
+              await createSchedule();
+              summary.stream_created = streamId;
+              summary.schedule_created = scheduleId;
+              summary.schedule_replaced_stale = {
+                schedule_id: scheduleId,
+                old_stream_id: existing.streamId,
+                new_stream_id: streamId,
+              };
+            } catch (err: any) {
+              summary.stream_error = `Failed to recreate stale schedule: ${err.message?.slice(0, 200)}`;
+            }
+          }
+        } else {
+          try {
+            await createSchedule();
+            summary.stream_created = streamId;
+            summary.schedule_created = scheduleId;
+          } catch (err: any) {
+            // describeScheduleStreamId can fail closed (return exists=false)
+            // when Temporal is transiently unavailable; if create then races
+            // with another caller and hits AlreadyExists, treat as success.
+            if (err.message?.includes("already exists") || err.message?.includes("AlreadyExists") || err.message?.includes("already registered")) {
+              summary.stream_created = streamId;
+              summary.schedule_created = `${scheduleId} (already exists)`;
+            } else {
+              summary.stream_error = err.message?.slice(0, 200);
+            }
           }
         }
       } else {
