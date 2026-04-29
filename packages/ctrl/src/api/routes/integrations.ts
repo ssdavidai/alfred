@@ -2544,24 +2544,21 @@ export function registerIntegrationRoutes(): void {
     const mergedArgs = { ...defaults, ...userArgs };
 
     // Resolve connected account for this toolkit, scoped to this tenant.
+    // MUST paginate: Composio's server-side user_id filter is broken and
+    // returns accounts across every tenant, 10 per page. A single-page fetch
+    // misses connections that land on page 2+ of the global pool — manifesting
+    // as "No active <toolkit> connection found" even when the listing endpoint
+    // (which paginates correctly via fetchAllOwnedConnectedAccounts) shows the
+    // connection ACTIVE. See file-header pagination notes.
     const toolkit = actionSlug.split("_")[0].toLowerCase();
     let connectedAccountId = "";
     try {
-      const connUrl = new URL(`${COMPOSIO_API_V3}/connected_accounts`);
-      connUrl.searchParams.set("user_id", userId);
-      const connResp = await fetch(connUrl.toString(), {
-        headers: { "x-api-key": apiKey },
-      });
-      if (connResp.ok) {
-        const data = (await connResp.json()) as any;
-        const items = Array.isArray(data.items) ? data.items : [];
-        const match = items.find((a: any) =>
-          (a.toolkit?.slug ?? a.appName ?? "").toLowerCase() === toolkit &&
-          a.status === "ACTIVE" &&
-          accountMatchesUserId(a, userId),
-        );
-        if (match) connectedAccountId = match.id;
-      }
+      const owned = await fetchAllOwnedConnectedAccounts(apiKey, userId);
+      const match = owned.find((a: any) =>
+        (a.toolkit?.slug ?? a.appName ?? "").toLowerCase() === toolkit &&
+        a.status === "ACTIVE",
+      );
+      if (match) connectedAccountId = match.id;
     } catch { /* proceed without — SDK will refuse without a match */ }
 
     if (!connectedAccountId) {
