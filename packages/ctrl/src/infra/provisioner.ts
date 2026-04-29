@@ -2615,7 +2615,7 @@ export async function setupSure(opts: SetupSureOpts): Promise<void> {
   const keyRes = await ssh.exec(
     opts.serverIp,
     opts.keyPath,
-    `sudo cat /mnt/encrypted/alfred/.sure-api-key`,
+    `cat /mnt/encrypted/alfred/.sure-api-key`,
     undefined,
     opts.hostKeyOpts,
   );

@@ -59,7 +59,15 @@ def read_secret(path, label)
 end
 
 # --- Inputs ---
-email    = read_secret(EMAIL_FILE, "owner email").downcase
+# Prefer OWNER_EMAIL from env (the alfred-init container writes it to the
+# tenant .env which sure-init inherits via env_file). The file fallback
+# exists for older alfred-init builds whose .env didn't carry OWNER_EMAIL,
+# but on modern tenants the file is mode 0600 root-owned and unreadable
+# from sure-init's non-root rails user — so env is the load-bearing path.
+email_env  = ENV["OWNER_EMAIL"].to_s.strip
+email_file = File.exist?(EMAIL_FILE) && File.readable?(EMAIL_FILE) ? File.read(EMAIL_FILE).strip : ""
+email      = (email_env.empty? ? email_file : email_env).downcase
+die "owner email unavailable (OWNER_EMAIL env unset and #{EMAIL_FILE} missing/unreadable)" if email.empty?
 password = read_secret(PASSWORD_FILE, "bootstrap password")
 
 if File.exist?(KEY_FILE) && File.size(KEY_FILE) > 0
