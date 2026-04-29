@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -16,14 +17,30 @@ log = get_logger(__name__)
 
 
 def _clear_agent_sessions(agent_id: str) -> None:
-    """Remove all session files for an agent to avoid lock contention."""
+    """Archive existing session files for an agent to avoid lock contention.
+
+    We *archive* rather than delete because the per-call token-usage records
+    written into these session jsonls (input/output/cacheRead/cacheWrite/cost)
+    are the only audit trail for these stateless one-shot agents — wiping them
+    eliminates fleet-wide cost observability. Files are moved into
+    ``<sessions_dir>/_archive/<run-stamp>/`` instead of unlinked. Operators can
+    prune ``_archive/`` manually for now; a future change can add a retention
+    policy.
+    """
     sessions_dir = Path.home() / ".openclaw" / "agents" / agent_id / "sessions"
     if not sessions_dir.exists():
         return
+    run_stamp = f"{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    archive_root = sessions_dir / "_archive" / run_stamp
     for f in sessions_dir.iterdir():
+        # Don't recurse into the archive directory itself.
+        if f.name == "_archive":
+            continue
         try:
-            f.unlink(missing_ok=True)
+            archive_root.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(f), str(archive_root / f.name))
         except Exception:
+            # Match prior contract: a failed move must never block a new run.
             pass
 
 
