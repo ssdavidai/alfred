@@ -793,7 +793,7 @@ services:
     ports:
       - "127.0.0.1:3001:3000"
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/up >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/up >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 30
