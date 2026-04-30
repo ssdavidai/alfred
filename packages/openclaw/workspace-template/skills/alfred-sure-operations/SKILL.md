@@ -271,6 +271,15 @@ The ten endpoints above cover the vast majority of Sir's questions. The platform
 | DELETE | `/api/v1/sure/rules/{id}` | **Platform extension.** Delete a rule. |
 | POST | `/api/v1/sure/rules/preview` | **Platform extension.** Dry-run a rule definition; returns affected count + sample without saving. |
 | POST | `/api/v1/sure/rules/{id}/apply` | **Platform extension.** Re-run a rule against historical transactions. |
+| POST | `/api/v1/sure/transfers` | **Platform extension.** Create a transfer (paired outflow + inflow) via Transfer::Creator. |
+| POST | `/api/v1/sure/transfers/match` | **Platform extension.** Pair two existing transactions as a transfer (find_or_initialize_by). |
+| POST | `/api/v1/sure/transfers/{id}/confirm` | **Platform extension.** Confirm a pending transfer. |
+| POST | `/api/v1/sure/transfers/{id}/reject` | **Platform extension.** Reject a transfer; creates RejectedTransfer + destroys. |
+| DELETE | `/api/v1/sure/transfers/{id}` | **Platform extension.** Destroy a confirmed transfer; both legs flip back to `kind:standard`. |
+| POST | `/api/v1/sure/transactions/{id}/split` | **Platform extension.** Split a parent transaction into N children. |
+| POST | `/api/v1/sure/transactions/{id}/unsplit` | **Platform extension.** Restore a split parent (destroys children). |
+| POST | `/api/v1/sure/transactions/bulk_update` | **Platform extension.** Bulk-update many transactions in one call. |
+| POST | `/api/v1/sure/transactions/bulk_delete` | **Platform extension.** Bulk-delete many transactions in one call. |
 | GET | `/api/v1/sure/usage` | Current API rate-limit window. |
 | POST | `/api/v1/sure/valuations` | Mark a balance for an illiquid account. |
 | GET | `/api/v1/sure/valuations/{id}` | Retrieve a valuation. |
@@ -362,11 +371,126 @@ When Sir asks you to "set up auto-classification for my loan payments", walk him
 
 For a one-off payment that wasn't captured by a rule, Sir opens the transaction in the Sure UI and clicks **Mark as transfer → choose destination loan**. Sure's `Transfer::Creator` service handles the rest: pairs a generated inflow on the loan side, creates the `Transfer` record with status `confirmed`, syncs both accounts. There is no API equivalent — recommend the UI step.
 
-### Update — you CAN now create rules via API
+### Update — you CAN now create rules and transfers via API
 
-The platform has a Rails-runner-backed Rules API at `/api/v1/sure/rules` that bypasses Sure's missing REST surface. Use it whenever Sir asks for automated transaction classification — including loan-payment transfers, recurring-merchant categorization, and so on. Full reference + analysis playbook below.
+The platform has Rails-runner-backed surfaces for both Rules and Transfers. Use Transfers for **one-off** loan payments, inter-account moves, or "this transaction is actually a transfer" reclassifications. Use Rules (next section) for **recurring** patterns. Full reference for both below.
 
-You still cannot create a one-off `Transfer` via API (`POST /transfers` doesn't exist anywhere). For one-off transfers, recommend the UI's "Mark as transfer" button. For *recurring* patterns, build a rule.
+## Transfers (platform extension)
+
+A `Transfer` pairs an outflow on one account with an inflow on another. Sure auto-derives the transfer kind from the destination account: liability → `loan_payment` (or `cc_payment` for credit cards), investment → `investment_contribution`, otherwise `funds_movement`. Transfers are excluded from spending totals and reduce loan / credit-card balances on the destination side.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/v1/sure/transfers` | Create a fresh transfer (Transfer::Creator). Generates both legs. |
+| POST | `/api/v1/sure/transfers/match` | Pair two **existing** transactions as a transfer. |
+| POST | `/api/v1/sure/transfers/{id}/confirm` | Confirm a pending (auto-detected) transfer. |
+| POST | `/api/v1/sure/transfers/{id}/reject` | Reject a pending transfer; records a RejectedTransfer so the matcher won't re-suggest it. |
+| DELETE | `/api/v1/sure/transfers/{id}` | Destroy a confirmed transfer; both legs flip back to `kind:standard`. |
+
+### Create body shape
+
+```
+{
+  "source_account_id":      "<wise-huf-account-id>",
+  "destination_account_id": "<jbc-mortgage-account-id>",
+  "amount":                 "370847",         // string or number, currency-native units
+  "date":                   "2026-04-30",     // ISO yyyy-mm-dd
+  "exchange_rate":          "395.42"          // optional; required if accounts have different currencies and Sure has no rate for the date
+}
+```
+
+### Worked example — log Sir's monthly mortgage payment
+
+```
+self({
+  endpoint: "/api/v1/sure/transfers",
+  method: "POST",
+  body: {
+    source_account_id:      "<wise-huf-id>",
+    destination_account_id: "<jbc-mortgage-id>",
+    amount:                 "370847",
+    date:                   "2026-05-05"
+  }
+})
+// → 201 {transfer: {id, status: "confirmed", kind: "loan_payment", ...}}
+```
+
+The mortgage's outstanding balance drops by 370,847 Ft after the next account materializer pass. Confirm back to Sir: "Logged the May mortgage payment, Sir — 370,847 Ft against JBC Mortgage. Outstanding balance now ≈ 57,586,785 Ft." Then call `/api/v1/sure/balance_sheet` to verify.
+
+### When to use match vs create
+
+- **`POST /transfers`** — you are creating *both* sides. Use this for manual one-offs Sir asks for ("log a payment", "mark this as moving money to my brokerage").
+- **`POST /transfers/match`** — both transactions *already exist* (e.g. bank feed already imported the outflow on Wise HUF and the inflow on Mercury USD), and you just want to record that they are the same money movement. Body: `{inflow_transaction_id, outflow_transaction_id}`. Sure validates opposite amounts and date proximity.
+
+### Confirm / reject
+
+For pending transfers (Sure's auto-matcher creates these in `pending` status when it sees probable pairs in incoming sync data), Sir asks "is this Wise→Mercury actually the same transfer?" Use `confirm` to accept, `reject` to record a RejectedTransfer (the matcher learns and stops suggesting it). Always preview with `GET /transactions/{id}` on each leg before confirming, so Sir hears: "Wise outflow of 1,200 USD on April 28 ↔ Mercury inflow of 1,200 USD on April 29 — confirm?"
+
+## Transaction splits and bulk edits (platform extension)
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/v1/sure/transactions/{id}/split` | Split a parent transaction into multiple children (e.g. a 25,000 Ft Tesco run was 18,000 Ft groceries + 7,000 Ft cleaning supplies). |
+| POST | `/api/v1/sure/transactions/{id}/unsplit` | Restore a split parent — destroys all children. |
+| POST | `/api/v1/sure/transactions/bulk_update` | Reclassify many transactions in one call (date, notes, name, category_id, merchant_id, tag_ids). |
+| POST | `/api/v1/sure/transactions/bulk_delete` | Delete many transactions in one call. Refuses split children. |
+
+### Split body shape
+
+```
+{
+  "splits": [
+    {"name": "Groceries",        "amount": 18000, "category_id": "<groceries>"},
+    {"name": "Cleaning supplies", "amount":  7000, "category_id": "<household>"}
+  ]
+}
+```
+
+Sum of `amount` across splits must equal parent `amount`. Sure enforces this and returns 422 with the validation error if it doesn't. Currency is inherited from the parent.
+
+### Bulk update body shape
+
+```
+{
+  "transaction_ids": ["t1", "t2", "t3"],
+  "attributes": {
+    "category_id": "<groceries>",
+    "merchant_id": "<tesco>",     // optional
+    "tag_ids":    ["<weekly>"],   // optional; presence triggers tag replacement (vs no-op when absent)
+    "notes":      "March audit"   // optional
+  }
+}
+```
+
+Permitted attribute keys: `date`, `notes`, `name`, `category_id`, `merchant_id`, `tag_ids`. Anything else is silently ignored. The `update_tags` flag is set automatically when `tag_ids` is present in the body — pass an empty array to **clear** all tags, or omit the key to leave tags untouched.
+
+### Worked example — Sir asks "categorize all my Tesco transactions from last month as Groceries"
+
+```
+// 1. find them
+self({endpoint: "/api/v1/sure/transactions", method: "GET", query: {start_date: "2026-03-01", end_date: "2026-03-31", merchant_ids: ["<tesco-id>"]}})
+
+// 2. bulk reclassify
+self({
+  endpoint: "/api/v1/sure/transactions/bulk_update",
+  method: "POST",
+  body: {
+    transaction_ids: ["<id1>", "<id2>", ...],
+    attributes: { category_id: "<groceries-id>" }
+  }
+})
+// → 200 {ok: true, updated_count: 23, transaction_ids: [...]}
+```
+
+Confirm to Sir: "Recategorised 23 March Tesco transactions as Groceries, Sir."
+
+### Why prefer rules over manual bulk for recurring patterns
+
+`bulk_update` is for *one-off* historical cleanup. For anything that repeats, build a Rule (next section) so future imports auto-classify. The hint: if the bulk_update would target three or more transactions matching the same merchant/amount pattern, propose a Rule instead and ask Sir before running the bulk.
 
 ## Rules engine (platform extension)
 

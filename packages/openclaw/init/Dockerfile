@@ -15,8 +15,11 @@ RUN pip install --no-cache-dir --no-deps /alfred-src
 
 COPY init/entrypoint.sh ./entrypoint.sh
 COPY init/sure-bootstrap.rb ./sure-bootstrap.rb
+COPY init/sure-mutate-base.rb ./sure-mutate-base.rb
 COPY init/sure-account-mutate.rb ./sure-account-mutate.rb
 COPY init/sure-rule-mutate.rb ./sure-rule-mutate.rb
+COPY init/sure-transfer-mutate.rb ./sure-transfer-mutate.rb
+COPY init/sure-entry-mutate.rb ./sure-entry-mutate.rb
 COPY config.yaml.tpl ./config.yaml.tpl
 # Platform-native workspace content: skills that teach the main Alfred
 # agent how to use its ctrl_* tools, plus the canonical TOOLS.md capability

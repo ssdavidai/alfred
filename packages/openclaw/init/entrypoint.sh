@@ -607,10 +607,32 @@ else
             echo "[init] WARNING: $SURE_SCRIPT_SRC missing from image — Sure bootstrap will fail."
         fi
 
+        # Shared library file — required by every sure-*-mutate.rb script
+        # via require_relative, so it must land in the same staging dir.
+        # NOT in the runner-script loop below because ctrl-api never
+        # invokes it directly (it has no `case op` dispatch).
+        SURE_BASE_SRC=/setup/sure-mutate-base.rb
+        SURE_BASE_DST="$SURE_SCRIPT_DIR/sure-mutate-base.rb"
+        if [[ -f "$SURE_BASE_SRC" ]]; then
+            SURE_BASE_HASH=$(md5sum "$SURE_BASE_SRC" | cut -d' ' -f1)
+            SURE_BASE_HASH_FILE="$SURE_SCRIPT_DIR/.sure-mutate-base.rb.content-hash"
+            if [[ -f "$SURE_BASE_HASH_FILE" && "$(cat "$SURE_BASE_HASH_FILE")" == "$SURE_BASE_HASH" && -f "$SURE_BASE_DST" ]]; then
+                echo "[init] sure-mutate-base.rb unchanged, skipping copy"
+            else
+                cp "$SURE_BASE_SRC" "$SURE_BASE_DST"
+                echo "$SURE_BASE_HASH" > "$SURE_BASE_HASH_FILE"
+                chmod 644 "$SURE_BASE_DST" 2>/dev/null || true
+                echo "[init] Deployed sure-mutate-base.rb to $SURE_BASE_DST"
+            fi
+        else
+            echo "[init] WARNING: $SURE_BASE_SRC missing from image — every sure-*-mutate.rb script will fail at require_relative."
+        fi
+
         # Mutation scripts — give ctrl-api Rails-runner-backed CRUD paths
         # for surfaces Sure's REST API doesn't expose (accounts, rules,
-        # …). All hash-gated so re-running init is idempotent.
-        for SCRIPT in sure-account-mutate.rb sure-rule-mutate.rb; do
+        # transfers, entries, …). All hash-gated so re-running init is
+        # idempotent.
+        for SCRIPT in sure-account-mutate.rb sure-rule-mutate.rb sure-transfer-mutate.rb sure-entry-mutate.rb; do
             SURE_MUT_SRC=/setup/$SCRIPT
             SURE_MUT_DST="$SURE_SCRIPT_DIR/$SCRIPT"
             if [[ -f "$SURE_MUT_SRC" ]]; then

@@ -111,6 +111,10 @@ const ACCOUNT_MUTATE_CONTAINER_PATH =
   "/alfred-data/sure-bootstrap/sure-account-mutate.rb";
 const RULE_MUTATE_CONTAINER_PATH =
   "/alfred-data/sure-bootstrap/sure-rule-mutate.rb";
+const TRANSFER_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-transfer-mutate.rb";
+const ENTRY_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-entry-mutate.rb";
 
 interface MutateResult {
   ok: boolean;
@@ -182,6 +186,12 @@ const runAccountMutate = (op: string, payload: unknown) =>
 const runRuleMutate = (op: string, payload: unknown) =>
   runRailsRunnerMutate(RULE_MUTATE_CONTAINER_PATH, op, payload, "SURE_RULE_MUTATE_EXEC_FAILED");
 
+const runTransferMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(TRANSFER_MUTATE_CONTAINER_PATH, op, payload, "SURE_TRANSFER_MUTATE_EXEC_FAILED");
+
+const runEntryMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(ENTRY_MUTATE_CONTAINER_PATH, op, payload, "SURE_ENTRY_MUTATE_EXEC_FAILED");
+
 function statusFromMutateResult(result: MutateResult): number {
   if (result.ok) return 200;
   switch (result.status) {
@@ -208,13 +218,11 @@ function forwardMutateResult(
     });
     return;
   }
-  if (op === "create") {
-    sendJson(res, 201, result);
-  } else if (op === "delete") {
-    sendJson(res, 200, { deleted: result.deleted });
-  } else {
-    sendJson(res, 200, result);
-  }
+  // Always forward the whole envelope. `delete` previously projected only
+  // `{deleted}`; that broke as soon as scripts started emitting other
+  // shapes (e.g. {rejected: id}, {deleted_count: N, transaction_ids: [...]}).
+  // create gets 201; everything else gets 200.
+  sendJson(res, op === "create" ? 201 : 200, result);
 }
 
 export function registerSureRoutes(): void {
@@ -549,5 +557,57 @@ export function registerSureRoutes(): void {
     const id = requireParam(params, "id");
     const r = await sureProxy("PATCH", `/valuations/${encodeURIComponent(id)}`, null, body);
     forwardSureResponse(res, r);
+  });
+
+  // --- Transfers (platform extension — Sure has no /transfers REST API)
+  // Pairs an outflow on the source account with an inflow on the
+  // destination account via Transfer::Creator. Loan payments to
+  // liability accounts get kind: loan_payment automatically.
+  addRoute("POST", "/api/v1/sure/transfers", async ({ res, body }) => {
+    const result = await runTransferMutate("create", body);
+    forwardMutateResult(res, "create", result, "SURE_TRANSFER_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/transfers/match", async ({ res, body }) => {
+    const result = await runTransferMutate("match", body);
+    forwardMutateResult(res, "create", result, "SURE_TRANSFER_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/transfers/:id/confirm", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runTransferMutate("confirm", { id });
+    forwardMutateResult(res, "update", result, "SURE_TRANSFER_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/transfers/:id/reject", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runTransferMutate("reject", { id });
+    forwardMutateResult(res, "delete", result, "SURE_TRANSFER_MUTATE_ERROR");
+  });
+  addRoute("DELETE", "/api/v1/sure/transfers/:id", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runTransferMutate("destroy", { id });
+    forwardMutateResult(res, "delete", result, "SURE_TRANSFER_MUTATE_ERROR");
+  });
+
+  // --- Transaction split / unsplit / bulk operations (platform extension)
+  // Sure exposes none of these via REST; web controllers + Entry model
+  // methods (Entry#split! / Entry#unsplit! / Entry::Bulkable.bulk_update!)
+  // are the canonical paths.
+  addRoute("POST", "/api/v1/sure/transactions/:id/split", async ({ res, params, body }) => {
+    const id = requireParam(params, "id");
+    const payload = { ...(body as Record<string, unknown>), id };
+    const result = await runEntryMutate("split", payload);
+    forwardMutateResult(res, "update", result, "SURE_ENTRY_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/transactions/:id/unsplit", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runEntryMutate("unsplit", { id });
+    forwardMutateResult(res, "update", result, "SURE_ENTRY_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/transactions/bulk_update", async ({ res, body }) => {
+    const result = await runEntryMutate("bulk_update", body);
+    forwardMutateResult(res, "update", result, "SURE_ENTRY_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/transactions/bulk_delete", async ({ res, body }) => {
+    const result = await runEntryMutate("bulk_delete", body);
+    forwardMutateResult(res, "delete", result, "SURE_ENTRY_MUTATE_ERROR");
   });
 }
