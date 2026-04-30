@@ -220,3 +220,64 @@ When Sir asks "how do I hook up my bank?", walk him through the five steps above
 5. **Confirm writes with concrete details.** After `POST /transactions` or `POST /valuations`, echo back the amount, the account, the category, and the date. "Logged €400 from Revolut EUR on 29 April under Cash" — not "done" or "transaction created".
 6. **Read before you PATCH.** Recategorising or correcting a transaction without first confirming it's the right one leads to silent damage. Pull the transaction (or the day's list) and verify before issuing the PATCH.
 7. **Don't paste raw JSON to Sir.** Every endpoint here returns structured data — your job is to translate. If a call errors or returns `{}`, paraphrase in one sentence and offer a next step. Sir never sees `signed_amount_cents` or `account_id`.
+
+## Full API surface (reference)
+
+The ten endpoints above cover the vast majority of Sir's questions. The platform proxies the **complete** Sure REST API (`docs.sure.am/openapi.yaml`) under `/api/v1/sure/<sure-path>` — every operation Sure exposes is reachable through the MCP `self` tool. Use this table when Sir asks for something the curated ten don't cover.
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/sure/accounts` | List accounts (paginated). |
+| GET | `/api/v1/sure/balance_sheet` | Net worth + assets + liabilities, in family currency. |
+| GET | `/api/v1/sure/categories` | List categories (filters: `classification`, `roots_only`, `parent_id`). |
+| GET | `/api/v1/sure/categories/{id}` | Retrieve a single category. |
+| GET | `/api/v1/sure/chats` | List Sure-internal AI chats. (Distinct from this conversation, which lives in the external-assistant bridge.) |
+| POST | `/api/v1/sure/chats` | Start a new Sure-internal chat. |
+| GET | `/api/v1/sure/chats/{id}` | Retrieve a chat with its messages. |
+| PATCH | `/api/v1/sure/chats/{id}` | Update a chat (title, etc.). |
+| DELETE | `/api/v1/sure/chats/{id}` | Delete a chat. |
+| POST | `/api/v1/sure/chats/{chat_id}/messages` | Post a message into a Sure-internal chat. |
+| POST | `/api/v1/sure/chats/{chat_id}/messages/retry` | Re-run the last assistant turn in a chat. |
+| GET | `/api/v1/sure/holdings` | List investment holdings (positions). |
+| GET | `/api/v1/sure/holdings/{id}` | Retrieve a single holding. |
+| GET | `/api/v1/sure/imports` | List CSV imports. |
+| POST | `/api/v1/sure/imports` | Create a CSV import (bulk-insert transactions). |
+| GET | `/api/v1/sure/imports/{id}` | Retrieve import status + parsed rows. |
+| GET | `/api/v1/sure/merchants` | List merchants. |
+| GET | `/api/v1/sure/merchants/{id}` | Retrieve a single merchant. |
+| POST | `/api/v1/sure/sync` | Queue a family-wide sync across every connected provider. |
+| GET | `/api/v1/sure/tags` | List transaction tags. |
+| POST | `/api/v1/sure/tags` | Create a tag. |
+| GET | `/api/v1/sure/tags/{id}` | Retrieve a tag. |
+| PATCH | `/api/v1/sure/tags/{id}` | Update a tag. |
+| DELETE | `/api/v1/sure/tags/{id}` | Delete a tag. |
+| GET | `/api/v1/sure/trades` | List investment trades. |
+| POST | `/api/v1/sure/trades` | Record a buy/sell trade. |
+| GET | `/api/v1/sure/trades/{id}` | Retrieve a trade. |
+| PATCH | `/api/v1/sure/trades/{id}` | Update a trade. |
+| DELETE | `/api/v1/sure/trades/{id}` | Delete a trade. |
+| GET | `/api/v1/sure/transactions` | List transactions (extensive filters — see §3 above). |
+| POST | `/api/v1/sure/transactions` | Create a manual transaction. |
+| GET | `/api/v1/sure/transactions/{id}` | Retrieve a transaction. |
+| PATCH | `/api/v1/sure/transactions/{id}` | Update / recategorize a transaction. |
+| DELETE | `/api/v1/sure/transactions/{id}` | Delete a transaction. |
+| GET | `/api/v1/sure/usage` | Current API rate-limit window. |
+| POST | `/api/v1/sure/valuations` | Mark a balance for an illiquid account. |
+| GET | `/api/v1/sure/valuations/{id}` | Retrieve a valuation. |
+| PATCH | `/api/v1/sure/valuations/{id}` | Update a valuation. |
+| DELETE | `/api/v1/sure/users/me` | **Nuclear.** Deactivates Sir's API user. Never call this without explicit, in-the-moment confirmation. |
+| DELETE | `/api/v1/sure/users/reset` | **Nuclear.** Wipes ALL family data and returns Sure to a fresh state. Never call this without explicit, in-the-moment confirmation. |
+
+### What's NOT in the Sure API
+
+- **No `POST /accounts`.** Sure does not expose account creation through the REST API. Accounts come from one of two paths only:
+  - **Provider sync** — Lunchflow / Plaid / SimpleFIN / Sophtron / Binance / etc. discover accounts during the first `/sync` after Sir links the institution in the Sure UI. New accounts under an already-linked provider appear automatically on the next sync; new providers require Sir to add them through Sure → Settings → Providers.
+  - **Manual cash account** — Sir creates these in the Sure web UI at Settings → Accounts → New. There is no API path for it.
+
+  When Sir asks you to "add a new account", say so plainly and walk him through the UI step. Don't fabricate a request to `POST /api/v1/sure/accounts` — it doesn't exist and the proxy will return 404.
+
+- **No `DELETE /accounts/{id}`.** Account deletion is also UI-only.
+
+- **No category / merchant / institution mutations.** Categories and merchants are seeded by Sure and cannot be created or deleted via the API. You can only filter and group by them.
+
+For everything else — transactions, trades, valuations, tags, chats, imports — full CRUD is available.
