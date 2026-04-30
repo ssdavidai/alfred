@@ -921,3 +921,59 @@ self({endpoint: "/api/v1/sure/exports/fx1", method: "GET"})
 - **`copy_from` only copies `budgeted_spending` values, NOT category structure.** If the source budget has fewer categories than the target (Sir created new categories between the months), the new ones stay at 0 and need explicit `update_category_budget` calls.
 - **Export jobs run asynchronously.** Don't block-poll — return the export id to Sir and let him ask "is it ready?" in a later turn.
 - **`ai_enabled: false` disables Sure's own in-app AI features.** It does NOT disable Alfred's access to the API. Sir might still want it on for his Sure UI, even if he's primarily using Alfred.
+
+---
+
+## Transaction clustering pipeline (alfred-learn)
+
+When Sir's transaction list grows past a few hundred, manually-written rules get expensive to maintain. The `alfred-sure-operations` skill ships with a **clustering pipeline** that does the heavy lifting: it harvests every transaction in Sure, runs TF-IDF alias merging on the bank-feed name strings to collapse variants like `TESCO` / `BUDAORS TESCO 41520` / `Tesco Express` into a single canonical merchant, infers a category from a built-in keyword rulebook, and returns *proposals* — one canonical merchant + one rule per cluster — that you (and Sir) can review before executing.
+
+The pipeline lives in `alfred-learn` (the Temporal worker container) and is invoked by ctrl-api via `docker exec`. Two endpoints:
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/sure/_cluster` | POST | Harvest all transactions and run the pipeline. Returns `{proposals: [...], stats: {...}}`. Body (optional): `{similarity_threshold: 0.4, min_group_size: 2}` |
+| `/api/v1/sure/_cluster/apply` | POST | Execute approved proposals. Body: `{proposals: [...]}`. For each: creates a `FamilyMerchant` (skip if exists), creates a `Rule` (`transaction_name LIKE %keyword%` → set merchant + category + tag), then fires `apply_all`. Returns `{merchants_created, rules_created, failures, apply_all}` |
+
+### Worked example — bootstrap categorisation on a fresh tenant
+
+Sir just connected his bank feed and now has 3,000+ transactions sitting in Sure with no categorisation:
+
+```
+self({endpoint: "/api/v1/sure/_cluster", method: "POST", body: {}})
+// → {
+//     proposals: [
+//       {canonical_name: "Tesco", pattern_keyword: "tesco",
+//        proposed_category: "Groceries", proposed_tag: "Grocery",
+//        role: "merchant", txn_count: 45, confidence: 0.95, ...},
+//       {canonical_name: "Wolt", ..., proposed_category: "Food & Drink",
+//        proposed_tag: "Food Delivery", txn_count: 41, ...},
+//       ...
+//     ],
+//     stats: {input_count: 3267, proposals: 389, matched_txns: 1820, coverage_percent: 55.7}
+//   }
+```
+
+Walk Sir through the 30-50 highest-volume proposals — show canonical name + suggested category + sample bank descriptions — and ask which to accept. Then:
+
+```
+self({endpoint: "/api/v1/sure/_cluster/apply", method: "POST", body: {
+  proposals: [<approved subset>]
+}})
+// → {
+//     ok: true,
+//     merchants_created: 38,
+//     rules_created: 38,
+//     failures: [],
+//     apply_all: {ok: true, rules_applied: 38, results: [...]}
+//   }
+```
+
+Coverage on the typical Hungarian household runs ~55% — the rest is one-off contractor names and unique-merchant purchases that can't be pattern-matched. Top up over time as Sir reviews the long-tail himself.
+
+### Pitfalls
+
+- **The pipeline is *proposals* — review before applying.** It infers from a keyword rulebook. For ambiguous names (a person's name that could be either "contractor I paid" or "income from"), the role might be wrong. Always sanity-check the top 20 by volume before approving.
+- **TF-IDF needs corpus density.** On <50 transactions it falls back to shared-token merging, which works but is less discriminating. Don't run the pipeline on a freshly-bootstrapped account with one week of data.
+- **`apply_all` runs synchronously after creates.** A 50-rule batch over 3,000 transactions takes ~30 seconds. Acceptable for a Money Day brief, less so for an interactive chat — fire it during quiet hours.
+- **Internal transfers (Wise, Revolut, Apple Pay Top-Up, name-based self-transfers) are categorised as "Transfers".** This is convenience-only — Sure's own auto-transfer detection will pair them properly on next sync, at which point the category becomes redundant but not harmful.

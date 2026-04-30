@@ -3,7 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ApiError, ValidationError } from "../errors.js";
-import { dockerExec } from "../helpers.js";
+import { dockerExec, dockerExecWithStdin } from "../helpers.js";
 
 interface SureConfig {
   token: string;
@@ -864,5 +864,223 @@ export function registerSureRoutes(): void {
       return;
     }
     sendJson(res, 200, result);
+  });
+
+  // --- Transaction clustering pipeline (alfred-learn) ------------------
+  // Harvest all transactions from Sure, pipe to alfred-learn's CLI for
+  // TF-IDF alias merging + rule-based category inference, return the
+  // proposal JSON. The caller (Alfred or a human operator) reviews the
+  // proposals and POSTs them to /_cluster/apply for execution.
+  addRoute("POST", "/api/v1/sure/_cluster", async ({ res, body }) => {
+    const opts = (body || {}) as Record<string, unknown>;
+    const perPage = 100;
+    const allTxns: unknown[] = [];
+    let page = 1;
+    let totalPages = 1;
+    while (page <= totalPages) {
+      const q = new URLSearchParams({ per_page: String(perPage), page: String(page) });
+      const r = await sureProxy("GET", "/transactions", q, null);
+      if (!r.data) break;
+      const d = r.data as Record<string, unknown>;
+      const txns = (d["transactions"] as unknown[]) ?? [];
+      allTxns.push(...txns);
+      const pag = (d["pagination"] as Record<string, unknown>) ?? {};
+      const tp = Number(pag["total_pages"] || 1);
+      totalPages = Number.isFinite(tp) && tp > 0 ? tp : 1;
+      page += 1;
+      if (page > 100) break; // hard cap
+    }
+
+    const cliArgs = ["python", "-m", "src.cli.sure_cluster"];
+    const simThreshold = Number(opts["similarity_threshold"]);
+    if (Number.isFinite(simThreshold) && simThreshold > 0) {
+      cliArgs.push("--similarity-threshold", String(simThreshold));
+    }
+    const minGroup = Number(opts["min_group_size"]);
+    if (Number.isFinite(minGroup) && minGroup > 0) {
+      cliArgs.push("--min-group-size", String(Math.floor(minGroup)));
+    }
+
+    let stdout: string;
+    try {
+      const result = await dockerExecWithStdin(
+        "alfred-learn",
+        cliArgs,
+        JSON.stringify(allTxns),
+        180_000,
+      );
+      stdout = result.stdout;
+    } catch (err) {
+      sendJson(res, 502, {
+        error: {
+          code: "SURE_CLUSTER_EXEC_FAILED",
+          message: `alfred-learn cluster CLI failed: ${(err as Error).message}`,
+        },
+      });
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stdout);
+    } catch (err) {
+      sendJson(res, 502, {
+        error: {
+          code: "SURE_CLUSTER_PARSE_FAILED",
+          message: `Could not parse cluster CLI output: ${(err as Error).message}`,
+          stdout_preview: stdout.slice(0, 500),
+        },
+      });
+      return;
+    }
+    sendJson(res, 200, parsed);
+  });
+
+  // --- Apply a clustering proposal ------------------------------------
+  // Takes the {proposals: [...]} payload (typically the output of
+  // /_cluster, optionally filtered or edited) and:
+  //   1. Resolves category names to ids (lookup from Sure).
+  //   2. Resolves tag names to ids (creating any missing tag).
+  //   3. For each proposal: creates a FamilyMerchant (skipped if a
+  //      merchant with the same name already exists) and creates a
+  //      Rule that maps `transaction_name LIKE %keyword%` to the
+  //      proposal's merchant + category + tag.
+  //   4. Triggers POST /api/v1/sure/rules/apply_all to fan the new
+  //      rules across historical transactions.
+  // Returns a summary {merchants_created, rules_created, …}.
+  addRoute("POST", "/api/v1/sure/_cluster/apply", async ({ res, body }) => {
+    const proposals = (((body || {}) as Record<string, unknown>)["proposals"] as
+      | Array<Record<string, unknown>>
+      | undefined) ?? [];
+    if (!Array.isArray(proposals) || proposals.length === 0) {
+      sendJson(res, 400, {
+        error: { code: "VALIDATION_ERROR", message: "proposals[] required (non-empty)" },
+      });
+      return;
+    }
+
+    // Resolve category name → id
+    const catRes = await sureProxy("GET", "/categories", null, null);
+    const cats = (((catRes.data as Record<string, unknown>) || {})["categories"] as
+      | Array<Record<string, unknown>>
+      | undefined) ?? [];
+    const catByName: Record<string, string> = {};
+    for (const c of cats) {
+      catByName[(c["name"] as string).toLowerCase()] = c["id"] as string;
+    }
+
+    // Resolve tag name → id (create on the fly if missing)
+    const tagRes = await sureProxy("GET", "/tags", null, null);
+    const existingTags = (Array.isArray(tagRes.data) ? tagRes.data : []) as Array<
+      Record<string, unknown>
+    >;
+    const tagByName: Record<string, string> = {};
+    for (const t of existingTags) {
+      tagByName[(t["name"] as string).toLowerCase()] = t["id"] as string;
+    }
+    const ensureTag = async (name: string): Promise<string | null> => {
+      const k = name.toLowerCase();
+      if (tagByName[k]) return tagByName[k];
+      const created = await sureProxy("POST", "/tags", null, {
+        tag: { name, color: "#6b7280" },
+      });
+      const id = ((created.data as Record<string, unknown>) || {})["id"] as
+        | string
+        | undefined;
+      if (id) tagByName[k] = id;
+      return id ?? null;
+    };
+
+    // Existing merchants (skip dupes by name)
+    const merchRes = await sureProxy("GET", "/merchants", null, null);
+    const existingMerchants = (Array.isArray(merchRes.data) ? merchRes.data : []) as Array<
+      Record<string, unknown>
+    >;
+    const merchByName: Record<string, string> = {};
+    for (const m of existingMerchants) {
+      if (m["type"] !== "FamilyMerchant") continue;
+      merchByName[(m["name"] as string).toLowerCase()] = m["id"] as string;
+    }
+
+    let merchantsCreated = 0;
+    let rulesCreated = 0;
+    const failures: Array<{ canonical_name: string; reason: string }> = [];
+
+    for (const p of proposals) {
+      const canonical = String(p["canonical_name"] || "").trim();
+      const keyword = String(p["pattern_keyword"] || canonical).toLowerCase().trim();
+      const catName = String(p["proposed_category"] || "").trim();
+      const tagName = p["proposed_tag"] ? String(p["proposed_tag"]).trim() : "";
+
+      if (!canonical || !keyword || !catName) {
+        failures.push({ canonical_name: canonical, reason: "missing canonical/keyword/category" });
+        continue;
+      }
+      const catId = catByName[catName.toLowerCase()];
+      if (!catId) {
+        failures.push({ canonical_name: canonical, reason: `unknown category '${catName}'` });
+        continue;
+      }
+      // Ensure FamilyMerchant exists
+      let merchantId = merchByName[canonical.toLowerCase()];
+      if (!merchantId) {
+        const mr = await runRailsRunnerMutate(
+          MERCHANT_MUTATE_CONTAINER_PATH,
+          "create",
+          { name: canonical, color: String(p["color"] || "#6b7280") },
+          "SURE_MERCHANT_MUTATE_EXEC_FAILED",
+        );
+        if (!mr.ok) {
+          failures.push({ canonical_name: canonical, reason: `merchant create failed: ${mr.error}` });
+          continue;
+        }
+        const mObj = (mr["merchant"] as Record<string, unknown>) || {};
+        merchantId = String(mObj["id"] || "");
+        if (!merchantId) {
+          failures.push({ canonical_name: canonical, reason: "merchant create returned no id" });
+          continue;
+        }
+        merchByName[canonical.toLowerCase()] = merchantId;
+        merchantsCreated += 1;
+      }
+
+      // Resolve tag (optional)
+      const actions: Array<{ action_type: string; value: string }> = [
+        { action_type: "set_transaction_merchant", value: merchantId },
+        { action_type: "set_transaction_category", value: catId },
+      ];
+      if (tagName) {
+        const tagId = await ensureTag(tagName);
+        if (tagId) actions.push({ action_type: "set_transaction_tags", value: tagId });
+      }
+
+      // Create the rule
+      const ruleBody = {
+        name: `${canonical} → ${catName}${tagName ? ` [${tagName}]` : ""}`,
+        resource_type: "transaction",
+        active: true,
+        conditions: [
+          { condition_type: "transaction_name", operator: "like", value: keyword },
+        ],
+        actions,
+      };
+      const rr = await runRuleMutate("create", ruleBody);
+      if (!rr.ok) {
+        failures.push({ canonical_name: canonical, reason: `rule create failed: ${rr.error}` });
+        continue;
+      }
+      rulesCreated += 1;
+    }
+
+    // Fire apply_all to fan the new rules across historical txns
+    const applyAll = await runRuleMutate("apply_all", {});
+
+    sendJson(res, 200, {
+      ok: true,
+      merchants_created: merchantsCreated,
+      rules_created: rulesCreated,
+      failures,
+      apply_all: applyAll,
+    });
   });
 }

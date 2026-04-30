@@ -23,9 +23,11 @@ mock.module("node:child_process", {
   namedExports: {
     execFile: execFileFn,
     spawn: mock.fn(() => ({
+      stdout: { on: mock.fn() },
       stderr: { on: mock.fn() },
       stdin: { write: mock.fn(), end: mock.fn() },
       on: mock.fn(),
+      kill: mock.fn(),
     })),
   },
 });
@@ -655,6 +657,24 @@ describe("User preferences", () => {
     });
     const { status } = await req("PATCH", "/api/v1/sure/user/preferences", { admin_secret: "x" });
     assert.strictEqual(status, 422);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR6 — clustering pipeline (alfred-learn)
+// ---------------------------------------------------------------------------
+
+describe("Cluster apply route", () => {
+  it("POST /api/v1/sure/_cluster/apply → 400 when proposals empty", async () => {
+    const { status, data } = await req("POST", "/api/v1/sure/_cluster/apply", { proposals: [] });
+    assert.strictEqual(status, 400);
+    assert.strictEqual(data.error.code, "VALIDATION_ERROR");
+  });
+
+  it("POST /api/v1/sure/_cluster/apply → 400 when proposals key missing", async () => {
+    const { status, data } = await req("POST", "/api/v1/sure/_cluster/apply", {});
+    assert.strictEqual(status, 400);
+    assert.strictEqual(data.error.code, "VALIDATION_ERROR");
   });
 });
 

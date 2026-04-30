@@ -1,4 +1,4 @@
-import { execFile as execFileCb } from "node:child_process";
+import { execFile as execFileCb, spawn } from "node:child_process";
 import { ExecError } from "./errors.js";
 
 const COMPOSE_DIR = "/opt/alfred/compose";
@@ -88,6 +88,60 @@ export async function dockerExec(service: string, command: string[], envVars?: R
   try {
     const { stdout } = await execAsync("docker", args);
     return stdout;
+  } finally {
+    _releaseDockerExecSlot();
+  }
+}
+
+// dockerExecWithStdin pipes a string into the stdin of a `docker compose
+// exec` child process and returns its stdout. Used by long-running CLI
+// invocations (e.g. alfred-learn's transaction clustering) that need to
+// receive a payload too large for argv.
+export async function dockerExecWithStdin(
+  service: string,
+  command: string[],
+  stdinPayload: string,
+  timeoutMs = 120_000,
+): Promise<{ stdout: string; stderr: string }> {
+  const args = [
+    "compose",
+    "-f",
+    `${COMPOSE_DIR}/docker-compose.yaml`,
+    "exec",
+    "-T",
+    service,
+    ...command,
+  ];
+  await _acquireDockerExecSlot();
+  try {
+    return await new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
+      const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      const killTimer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new ExecError(`docker exec ${service} timed out after ${timeoutMs}ms`, stderr, stdout));
+      }, timeoutMs);
+      child.stdout.on("data", (d: Buffer) => { stdout += d.toString(); });
+      child.stderr.on("data", (d: Buffer) => { stderr += d.toString(); });
+      child.on("error", (err) => {
+        clearTimeout(killTimer);
+        reject(new ExecError(`docker exec ${service} failed to spawn: ${err.message}`, stderr, stdout));
+      });
+      child.on("close", (code) => {
+        clearTimeout(killTimer);
+        if (code === 0) {
+          resolve({ stdout, stderr });
+        } else {
+          reject(new ExecError(
+            `docker exec ${service} exited ${code}: ${stderr.slice(0, 500) || stdout.slice(0, 500)}`,
+            stderr,
+            stdout,
+          ));
+        }
+      });
+      child.stdin.end(stdinPayload);
+    });
   } finally {
     _releaseDockerExecSlot();
   }
