@@ -322,5 +322,42 @@ Soft-deletes the account (status flips to `pending_deletion`, async hard-delete 
 - **No category mutations.** Sure seeds the category tree; categories cannot be created, renamed, or deleted via the API. Sir adjusts them in the Sure UI.
 - **No merchant mutations.** Merchants are inferred from transactions; you can read them but not edit. To "rename" a merchant, recategorize the transactions instead.
 - **No institution mutations.** Provider links (Lunchflow / Plaid / etc.) are managed exclusively through the Sure web UI's Settings → Providers screen. Sir pastes API keys there.
+- **No transfer creation.** Sure models loan payments and inter-account moves as `Transfer` records (paired outflow + inflow). There is no `transfer` field on `POST/PATCH /transactions` and no `/transfers` endpoint. Transfer creation is web-UI only — see the Transfers section below.
+- **No rule mutations.** Sure has a Rules engine (Settings → Rules) for automated transaction classification (mark-as-transfer, set-category, add-tag, etc.) but the API does not expose it. Sir builds rules in the UI.
 
 For transactions, trades, valuations, tags, chats, and imports — full CRUD is available through the standard REST surface listed in the table above.
+
+## Loan repayments (and other transfers between accounts)
+
+Sure models a debt repayment as a `Transfer`: a paired outflow on the source account (e.g. Wise HUF) and an inflow on the destination account (e.g. JBC Mortgage), linked by a `Transfer` record. Marked-as-transfer transactions are excluded from spending totals and reduce the loan's outstanding balance instead.
+
+**Important — there is no API path to create or confirm transfers.** `POST /api/v1/sure/transactions` and `PATCH /api/v1/sure/transactions/{id}` accept only the standard transaction fields (`account_id`, `date`, `amount`, `name`, `description`, `notes`, `currency`, `category_id`, `merchant_id`, `nature`, `tag_ids`). The platform proxy mirrors that — there is no `transfer` field. Transfer creation goes through the Sure web UI's Transactions screen ("Mark as transfer" button) or the Rules engine (auto-classifier, see below).
+
+For Sir's manual loan accounts (no provider sync on the loan side), Sure's auto-matcher cannot pair the bank outflow with anything on the loan account because nothing exists there to match against. Two paths give the right behaviour:
+
+### Path A — automated rule (recommended for recurring payments)
+
+Sure's Rules engine watches new transactions and applies actions when conditions match. For Sir's mortgage and personal loan, the one-time setup is:
+
+1. Sir opens Sure → **Settings → Rules → New Rule**.
+2. Resource type: **Transaction**.
+3. Conditions (all must match):
+   - `Account = Wise HUF` (or whichever account the payment leaves)
+   - `Amount = -370,847 Ft` (exact monthly payment, signed for outflow) — or use a tight range like `-370,000 to -371,000`
+   - Optional: `Merchant contains "JBC"` or `Date day-of-month = 5` to disambiguate from other 370k outflows
+4. Action: **Mark as transfer to → JBC Mortgage** (Sure picks `loan_payment` as the transfer kind automatically because the destination is a Loan account).
+5. Save. The rule runs on every newly-imported transaction matching the conditions.
+
+Repeat for the CIB Előrelépő with its own amount and the CIB account as destination. Once both rules exist, Sir's monthly payments auto-classify as transfers from Wise → loan, the loan's outstanding balance decreases automatically each month, and net worth math stays correct without manual intervention.
+
+When Sir asks you to "set up auto-classification for my loan payments", walk him through these five steps. Don't try to create the rule via API — there is no such endpoint.
+
+### Path B — single payment, manual mark via UI
+
+For a one-off payment that wasn't captured by a rule, Sir opens the transaction in the Sure UI and clicks **Mark as transfer → choose destination loan**. Sure's `Transfer::Creator` service handles the rest: pairs a generated inflow on the loan side, creates the `Transfer` record with status `confirmed`, syncs both accounts. There is no API equivalent — recommend the UI step.
+
+### Why Alfred can't do this for Sir directly
+
+The Sure REST API exposes only the standard transaction CRUD. Marking a transaction as a transfer (or creating one outright) requires either the web `Transfer::Creator` service or the Rules engine — both UI-managed. If Sir asks you to "mark this as a transfer", the honest answer is: "I can't through the API, but you can in the Sure UI in two clicks — or set up a rule once and never do it again."
+
+The platform may later add a Rails-runner-backed transfer endpoint (similar to how `POST /api/v1/sure/accounts` bypasses Sure's API gap for account creation). Until then, transfers stay UI-only.
