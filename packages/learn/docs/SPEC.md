@@ -1113,6 +1113,61 @@ File: `hooks/alfred-learn-observer/handler.js` (maintained with Alfred Learn cha
 46. alfred-saas: Sidebar nav entry
 47. alfred-saas: Dashboard home widget (like StreamsSection)
 
+## Sure Transaction Clustering
+
+**Module:** `src/profiler/transaction_clustering.py`, `src/profiler/iterative.py`, `src/profiler/llm_inference.py`, `src/cli/sure_cluster.py`.
+
+**Purpose:** classify Sir's bank-feed transactions into Sure family-merchants + categories + tags without requiring him to write rules by hand. Coverage target: ≥80% on a typical Hungarian household.
+
+**Architecture:** sister of the existing `clustering.py` (which clusters email senders into priority tiers). Same skeleton (TF-IDF → cluster → feature-extract → role inference) re-tuned for short bank-feed name strings instead of email behaviour vectors.
+
+**Pipeline (multi-pass iterative loop):**
+
+1. **Pass 1 — Keyword + word-TFIDF clustering** (`cluster_transactions`):
+   - `clean_name()`: strips card numbers, postcodes, currency tokens, all digit runs, punctuation, 1-2 char leftover tokens.
+   - `_alias_groups()`: TF-IDF on word tokens (≥3 chars) with sublinear TF, then agglomerative cosine clustering. On corpora <50 docs falls back to union-find token-overlap merging (TF-IDF math degenerates without IDF context).
+   - `_classify_group()`: matches the canonical name + raw + cleaned member samples against ~80 keyword regex rules covering Hungarian + English merchants. Each rule maps to `(category, tag, role)`.
+   - Cheap, deterministic, no external calls.
+
+2. **Pass 2 — Behavioural co-occurrence** (`behavioural_groups`):
+   - Groups transactions by `(account_id, amount_band_1k_HUF)`.
+   - Keeps groups with ≥3 occurrences spanning ≥2 different months — that's "recurring monthly cadence" without requiring name overlap.
+   - Catches behaviour-equivalent variants of the same payee that name-tokens miss.
+   - Returns proposals with role (merchant vs income from signed direction) but no category — the LLM pass fills those.
+
+3. **Pass 3 — LLM category inference** (`llm_inference.infer_categories_for_clusters`):
+   - For any group still missing a category and with ≥2 transactions: batched (50 per call) into a structured prompt sent to the OpenClaw gateway's OpenAI-compatible `/v1/chat/completions` endpoint.
+   - Default model: `x-ai/grok-4.1-fast` (override via `SURE_CLUSTER_LLM_MODEL` env or request body `llm_model`).
+   - Prompt grounds the LLM in the tenant's actual category + tag list; explicit rules for Hungarian patika/orvosi/etterem/fizetés patterns and internal-transfer detection.
+   - Returns `[{canonical_name, proposed_category, proposed_tag, role, confidence}]` per group.
+   - Uses `/v1/chat/completions` (one-shot, ~5-15s) NOT `sessions_spawn` (subagent, 30-180s) — clustering is pure inference, no tool use needed.
+
+**Iteration loop** (`iterative_cluster`):
+
+```
+covered_ids = set()
+for iter in 1..max_iterations:
+    residual = txns minus covered_ids
+    pass1 = keyword_clustering(residual)
+    pass2 = behavioural_groups(residual)            # if use_behavioural
+    pass3 = llm_infer(pass1+pass2 unmatched groups) # if use_llm + token + cats
+    update covered_ids from new high-confidence proposals
+    if coverage >= target_coverage:    break (target_coverage_reached)
+    if new_matches < progress_threshold: break (no_progress)
+```
+
+Returns the union of proposals across all iterations, deduplicated by canonical name (highest confidence wins), plus per-iteration stats.
+
+**HTTP API (ctrl-api):**
+
+- `POST /api/v1/sure/_cluster` — harvest all transactions from Sure, run the iterative pipeline via `docker exec compose-alfred-learn-1 python -m src.cli.sure_cluster`, return `{proposals, stats[], coverage_percent, stopped_reason}`. Body params (all optional): `iterative`, `target_coverage`, `max_iterations`, `use_llm`, `use_behavioural`, `llm_model`, `available_categories[]`, `available_tags[]`, `similarity_threshold`, `min_group_size`. Hard timeout: 9 minutes.
+- `POST /api/v1/sure/_cluster/apply` — execute approved proposals: create FamilyMerchants (skip dupes by name), create Rules (`transaction_name LIKE %keyword%` → set merchant + category + tag), fire `apply_all`. Returns `{merchants_created, rules_created, failures, apply_all}`.
+
+**Operational notes:**
+- LLM pass costs ~30k tokens for a 5-iteration run on 3,000 txns (~$0.10-0.30 depending on model). One-shot bootstrap, not a recurring chore.
+- LLM is non-deterministic at temperature 0.1; same input may produce slightly different categories at the margin. Use `iterative: false` for deterministic builds.
+- The pipeline runs entirely inside `compose-alfred-learn-1`. No new ports, no new Temporal workflows. ctrl-api invokes via `dockerExecWithStdin` (mirrors the existing Rails-runner pattern for `sure-*-mutate.rb` scripts).
+
 ### Phase 6: Tests + Polish
 48. `tests/test_validators.py`
 49. `tests/test_scorer.py`

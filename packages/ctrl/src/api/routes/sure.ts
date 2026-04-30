@@ -901,13 +901,46 @@ export function registerSureRoutes(): void {
       cliArgs.push("--min-group-size", String(Math.floor(minGroup)));
     }
 
+    // Iterative-loop controls. Default mode is iterative=true with
+    // LLM + behavioural passes enabled (they no-op gracefully if their
+    // prerequisites — gateway token, recurring patterns — aren't met).
+    if (opts["iterative"] === false) {
+      cliArgs.push("--iterative", "false");
+    }
+    const targetCov = Number(opts["target_coverage"]);
+    if (Number.isFinite(targetCov) && targetCov > 0 && targetCov <= 1) {
+      cliArgs.push("--target-coverage", String(targetCov));
+    }
+    const maxIter = Number(opts["max_iterations"]);
+    if (Number.isFinite(maxIter) && maxIter >= 1) {
+      cliArgs.push("--max-iterations", String(Math.floor(maxIter)));
+    }
+    if (opts["use_llm"] === false) cliArgs.push("--use-llm", "false");
+    if (opts["use_behavioural"] === false) cliArgs.push("--use-behavioural", "false");
+    if (typeof opts["llm_model"] === "string" && (opts["llm_model"] as string).length > 0) {
+      cliArgs.push("--llm-model", String(opts["llm_model"]));
+    }
+
+    // Pass the tenant's category + tag names through env so the LLM
+    // prompt is grounded in what actually exists.
+    const envBag: Record<string, string> = {};
+    const cats = ((opts["available_categories"] as unknown) as string[]) || [];
+    if (Array.isArray(cats) && cats.length > 0) {
+      envBag.SURE_CLUSTER_CATEGORIES = cats.join(",");
+    }
+    const tags = ((opts["available_tags"] as unknown) as string[]) || [];
+    if (Array.isArray(tags) && tags.length > 0) {
+      envBag.SURE_CLUSTER_TAGS = tags.join(",");
+    }
+
     let stdout: string;
     try {
       const result = await dockerExecWithStdin(
         "alfred-learn",
         cliArgs,
         JSON.stringify(allTxns),
-        180_000,
+        540_000, // 9-minute hard cap — iterative + LLM can take 4-7 min on 3k txns
+        envBag,
       );
       stdout = result.stdout;
     } catch (err) {

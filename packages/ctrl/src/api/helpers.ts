@@ -102,12 +102,20 @@ export async function dockerExecWithStdin(
   command: string[],
   stdinPayload: string,
   timeoutMs = 120_000,
+  envVars?: Record<string, string>,
 ): Promise<{ stdout: string; stderr: string }> {
+  const envFlags: string[] = [];
+  if (envVars) {
+    for (const [k, v] of Object.entries(envVars)) {
+      envFlags.push("-e", `${k}=${v}`);
+    }
+  }
   const args = [
     "compose",
     "-f",
     `${COMPOSE_DIR}/docker-compose.yaml`,
     "exec",
+    ...envFlags,
     "-T",
     service,
     ...command,

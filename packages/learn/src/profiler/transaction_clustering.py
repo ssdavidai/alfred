@@ -598,3 +598,106 @@ def cluster_transactions(
 
 def proposals_to_dicts(proposals: Iterable[ClusterProposal]) -> list[dict[str, Any]]:
     return [p.asdict() for p in proposals]
+
+
+# ---------------------------------------------------------------------------
+# Behavioural co-occurrence clustering
+# ---------------------------------------------------------------------------
+#
+# Catches recurring patterns that name-clustering misses. Two transactions
+# from the same account with the same magnitude (within ±5%) recurring
+# monthly are almost certainly the same payee — even if the bank-feed
+# strings are entirely different (e.g. "Sp Mind Lab Pro" / "Sp Mind Lab
+# Pro Eu", or "MÓNIKA ARTAI" / "Mónika Artai Bt." in different formats).
+#
+# Strategy:
+#   1. Group transactions by (account_id, amount_band).
+#       amount_band = round(abs(amount_huf) / 1000) * 1000 — a 1k-HUF
+#       bucket — coarse enough that a 4,990 → 5,010 swing falls in the
+#       same band.
+#   2. Within a band, keep groups with N >= 3 occurrences spanning at
+#       least 2 different months (otherwise it's a coincidence, not a
+#       recurring pattern).
+#   3. Emit one proposal per group with role=merchant or income
+#       (depending on signed direction) and a synthetic canonical name
+#       formed from the most common token across the group.
+
+
+def behavioural_groups(
+    txns: list[dict[str, Any]],
+    *,
+    min_occurrences: int = 3,
+    min_months: int = 2,
+    amount_band_huf: float = 1000.0,
+    fx: dict[str, float] | None = None,
+) -> list[ClusterProposal]:
+    """Group transactions by (account, amount-band, monthly cadence).
+
+    Returns proposals for behavioural clusters that wouldn't be caught
+    by name-token clustering alone — i.e. recurring same-amount payments
+    to differently-named entities.
+    """
+    fx = fx if fx is not None else _DEFAULT_FX
+    if not txns:
+        return []
+
+    by_band: dict[tuple[str, float], list[int]] = defaultdict(list)
+    for i, t in enumerate(txns):
+        acct_id = (t.get("account") or {}).get("id") or "?"
+        huf = _signed_huf(t, fx)
+        if huf == 0:
+            continue
+        band = round(abs(huf) / amount_band_huf) * amount_band_huf
+        # Skip very small bands (noise, fees) and very large (one-off purchases)
+        if band < 1000 or band > 5_000_000:
+            continue
+        by_band[(acct_id, band)].append(i)
+
+    proposals: list[ClusterProposal] = []
+    for (acct_id, band), indices in by_band.items():
+        if len(indices) < min_occurrences:
+            continue
+        months = {((txns[i].get("date") or "")[:7]) for i in indices}
+        months.discard("")
+        if len(months) < min_months:
+            continue
+        # Pick canonical from the most common cleaned name in the group
+        cleaned = [clean_name(txns[i].get("name") or "") for i in indices]
+        first_tokens = Counter(
+            (c.split() or [""])[0] for c in cleaned if c
+        )
+        if not first_tokens:
+            continue
+        canonical_token = first_tokens.most_common(1)[0][0]
+        if not canonical_token:
+            continue
+
+        # Determine role from signed direction: mostly outflows → merchant; mostly inflows → income
+        positives = sum(1 for i in indices if (txns[i].get("signed_amount_cents", 0) or 0) > 0)
+        negatives = len(indices) - positives
+        role = "income" if positives > negatives else "merchant"
+
+        member_originals = [txns[i].get("name") or "" for i in indices]
+        accounts = Counter((txns[i].get("account") or {}).get("name", "?") for i in indices)
+        currencies = Counter(txns[i].get("currency", "?") for i in indices)
+
+        proposals.append(
+            ClusterProposal(
+                canonical_name=canonical_token.title(),
+                pattern_keyword=canonical_token.lower(),
+                proposed_category=None,  # left for LLM/human to decide
+                proposed_tag=None,
+                role=role,
+                member_names=list(dict.fromkeys(member_originals))[:5],
+                txn_count=len(indices),
+                total_volume_huf=round(band * len(indices), 2),
+                dominant_currency=currencies.most_common(1)[0][0],
+                dominant_account=accounts.most_common(1)[0][0],
+                monthly_regularity=0.0,  # placeholder; recurring by construction
+                confidence=0.5,
+                member_txn_ids=[txns[i].get("id", "") for i in indices][:50],
+            )
+        )
+
+    proposals.sort(key=lambda p: -p.txn_count)
+    return proposals

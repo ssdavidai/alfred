@@ -977,3 +977,52 @@ Coverage on the typical Hungarian household runs ~55% — the rest is one-off co
 - **TF-IDF needs corpus density.** On <50 transactions it falls back to shared-token merging, which works but is less discriminating. Don't run the pipeline on a freshly-bootstrapped account with one week of data.
 - **`apply_all` runs synchronously after creates.** A 50-rule batch over 3,000 transactions takes ~30 seconds. Acceptable for a Money Day brief, less so for an interactive chat — fire it during quiet hours.
 - **Internal transfers (Wise, Revolut, Apple Pay Top-Up, name-based self-transfers) are categorised as "Transfers".** This is convenience-only — Sure's own auto-transfer detection will pair them properly on next sync, at which point the category becomes redundant but not harmful.
+
+### Iterative loop (default mode — multi-pass)
+
+The pipeline now runs as an **iterative loop** by default. Single-pass keyword-only clustering tops out around 50-55% on a real Hungarian household; the loop typically pushes coverage to 75-85% by combining three signals:
+
+1. **Pass 1 — Keyword + word-TFIDF clustering** (the original pipeline). Cheap, deterministic, catches the obvious anchor-word merchants (Tesco, Wolt, Apple, etc.).
+2. **Pass 2 — Behavioural co-occurrence**. Same account + same amount-band + monthly cadence → recurring payment, even if the names differ ("Sp Mind Lab Pro" vs "Sp Mind Lab Pro Eu", "MÓNIKA ARTAI" vs "Mónika Artai Bt."). Returns a group with role but no category.
+3. **Pass 3 — LLM category inference**. For any group still without a category (typical: Hungarian individual names, single-occurrence phrases), batched into a single Claude prompt via OpenClaw's `/v1/chat/completions` — returns `{category, tag, role, confidence}` per group. Highest impact on Hungarian-language data.
+
+After each iteration, transactions matched by any high-confidence proposal are removed from the residual corpus and the three passes re-run. The loop stops when:
+- coverage ≥ target (default 80%), OR
+- a single iteration matches fewer than 5 new transactions (no progress), OR
+- 5 iterations completed.
+
+**Tunable via the request body:**
+
+```
+self({endpoint: "/api/v1/sure/_cluster", method: "POST", body: {
+  iterative: true,                  // default
+  target_coverage: 0.80,            // default
+  max_iterations: 5,                // default
+  use_llm: true,                    // default — set false for pure-deterministic mode
+  use_behavioural: true,            // default
+  llm_model: "x-ai/grok-4.1-fast",  // override the default OpenClaw model
+  available_categories: ["Groceries","Food & Drink",...],  // pass tenant's actual categories
+  available_tags: ["Subscription","Transfer",...]          // for the LLM prompt
+}})
+// → {
+//     proposals: [...],
+//     stats: [
+//       {iteration:1, keyword_proposals:38, behavioural_proposals:12, llm_proposals:24,
+//        matched_in_iteration:1820, cumulative_coverage_percent:55.7},
+//       {iteration:2, keyword_proposals:6, behavioural_proposals:4, llm_proposals:18,
+//        matched_in_iteration:412, cumulative_coverage_percent:68.3},
+//       {iteration:3, ..., cumulative_coverage_percent:81.2}
+//     ],
+//     coverage_percent: 81.2,
+//     stopped_reason: "target_coverage_reached"
+//   }
+```
+
+**Single-pass fallback** is still available with `iterative: false` — same as before, returns immediately without the LLM step. Use this when the OpenClaw gateway is unavailable or when you specifically want deterministic-only output for testing.
+
+### Pitfalls (iterative)
+
+- **LLM pass needs the gateway token mounted in alfred-learn.** It is, on every tenant — but a freshly-bootstrapped instance might race the token write. The pass silently falls back to "no LLM" if `OPENCLAW_GATEWAY_TOKEN_FILE` is empty.
+- **Each iteration costs ~3k–10k LLM tokens.** A typical 5-iteration run on 3,000 transactions burns ~30k tokens (~$0.10–0.30 depending on model). Acceptable as a one-shot bootstrap; not as a per-Money-Day chore.
+- **The LLM is non-deterministic.** Running the same input twice can produce slightly different category assignments at the margin (especially for ambiguous Hungarian phrases). For deterministic builds, use `iterative: false` or pin a temperature lower than the default 0.1 (not currently exposed — would need a new request param).
+- **Ctrl-api timeout is 9 minutes.** A 5-iteration run with LLM is typically 2-4 minutes on 3,000 transactions, but a slow model + large corpus can exceed this. If you hit a 502 timeout, retry with `max_iterations: 3` or split the corpus by date range.
