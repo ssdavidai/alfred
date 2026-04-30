@@ -749,3 +749,83 @@ self({endpoint: "/api/v1/sure/accounts/<property-id>/valuations", method: "POST"
 - **`remap_security` moves trades too.** If Sir had real trades on the *target* security before the remap, those will keep their qty/amount but be co-located with the remapped trades. In rare cases this can produce a holding that doesn't match either history. Confirm before remapping a security with non-trivial trade history.
 - **Cost basis is per-share, not total.** `set_manual_cost_basis` takes the per-share value (`value: "187.50"` for one share at 187.50). Sir is likely to ask for total cost basis — clarify before posting.
 - **Valuation id is the Entry id.** Sure models valuations as `Entry where entryable_type='Valuation'`. The id you pass to `DELETE /valuations/:id` is the Entry id from the transaction listing, not a separate valuation id.
+
+---
+
+## Recurring patterns and duplicate review (platform extensions — PR4)
+
+Sure auto-detects recurring transactions (rent, utilities, subscriptions, payroll) and surfaces "merge with posted duplicate?" prompts when a pending bank-feed entry matches a posted one. The web UI handles all of this; these endpoints expose the same surface to Alfred.
+
+### Recurring endpoints
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/sure/recurring/identify` | POST | Run pattern detection synchronously (`RecurringTransaction.identify_patterns_for!`). Returns the count of patterns identified plus the family's currently-active recurring list |
+| `/api/v1/sure/recurring/cleanup_stale` | POST | Mark recurring transactions inactive when their last occurrence is too old (`RecurringTransaction.cleanup_stale_for`) |
+| `/api/v1/sure/recurring/:id/activate` | POST | Re-enable a previously-deactivated recurring (`#mark_active!`) |
+| `/api/v1/sure/recurring/:id/deactivate` | POST | Hide a recurring without deleting it (`#mark_inactive!`) |
+
+### Duplicate endpoints
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/sure/transactions/:id/merge_duplicate` | POST | Sir confirms the pending and posted are the same — destroys the pending entry, keeps the posted one (`Transaction#merge_with_duplicate!`). 422 if no suggestion exists |
+| `/api/v1/sure/transactions/:id/dismiss_duplicate` | POST | Sir says they're different transactions — sets `extra.potential_posted_match.dismissed=true` so the suggestion stops appearing (`Transaction#dismiss_duplicate_suggestion!`) |
+
+### Worked example — Money Day pending review
+
+During a Money Day brief, surface every transaction with a duplicate suggestion and let Sir adjudicate:
+
+```
+self({endpoint: "/api/v1/sure/transactions", method: "GET", query: {has_duplicate_suggestion: true, per_page: 50}})
+// for each, summarise (pending name + amount + date) vs (posted name + amount + date)
+// ask Sir per row: "merge or keep separate?"
+self({endpoint: "/api/v1/sure/transactions/<id>/merge_duplicate", method: "POST"})
+// or
+self({endpoint: "/api/v1/sure/transactions/<id>/dismiss_duplicate", method: "POST"})
+```
+
+### Worked example — Sir cancelled Netflix, deactivate the pattern
+
+```
+self({endpoint: "/api/v1/sure/recurring", method: "GET"})
+// find Netflix recurring, id=r-netflix
+self({endpoint: "/api/v1/sure/recurring/r-netflix/deactivate", method: "POST"})
+// → {ok: true, recurring: {id: "r-netflix", status: "inactive"}}
+```
+
+When Sir starts a new subscription, run `POST /recurring/identify` after the second occurrence and it'll be picked up automatically.
+
+---
+
+## Account sharing (platform extension — PR4)
+
+Sure supports per-account sharing within a family — Sir can grant view-only or edit access on a specific account to a spouse or co-trustee without sharing the entire family. Permissions: `read_only` (default), `read_write` (annotate but not edit core fields), `full_control` (everything except destroy account).
+
+### Endpoint reference
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/sure/accounts/:account_id/shares` | POST | Create a share. Body: `{email: "..."}` or `{user_id: "..."}` plus `{permission, include_in_finances}` (defaults: `read_only`, `true`). User must be a member of Sir's family already |
+| `/api/v1/sure/shares/:id` | PATCH | Update permission or include_in_finances flag |
+| `/api/v1/sure/shares/:id` | DELETE | Revoke the share |
+
+### Worked example — share Wise EUR with spouse, view-only
+
+```
+self({endpoint: "/api/v1/sure/accounts/<wise-eur-id>/shares", method: "POST", body: {
+  email: "spouse@example.com",
+  permission: "read_only",
+  include_in_finances: false
+}})
+// → {ok: true, share: {id: "s1", permission: "read_only", include_in_finances: false}}
+```
+
+`include_in_finances: false` means the spouse sees the account in their list but it doesn't roll up into their net worth — useful for "view-only awareness" without polluting the spouse's primary view.
+
+### Pitfalls
+
+- **Target user must already be in Sir's family.** Sure validates this — if Sir wants to share with someone external, he has to invite them via `POST /api/v1/sure/invitations` first (PR5), wait for accept, then share.
+- **`merge_duplicate` destroys the pending entry.** No undo. Always confirm with Sir before calling — that's why this is a per-transaction confirmation flow, not a "merge all suggestions" bulk op.
+- **`recurring/identify` is synchronous and can take 10-20s on a large family.** Trigger it during quiet windows (Money Day brief), not in the middle of an interactive chat.
+- **Sharing is family-scoped, not platform-scoped.** Other tenants' users are invisible to Sir's family — `email` lookup only finds users already in his family.

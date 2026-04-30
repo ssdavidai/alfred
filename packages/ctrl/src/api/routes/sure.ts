@@ -125,6 +125,12 @@ const HOLDING_MUTATE_CONTAINER_PATH =
   "/alfred-data/sure-bootstrap/sure-holding-mutate.rb";
 const VALUATION_MUTATE_CONTAINER_PATH =
   "/alfred-data/sure-bootstrap/sure-valuation-mutate.rb";
+const RECURRING_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-recurring-mutate.rb";
+const DUPLICATE_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-duplicate-mutate.rb";
+const SHARE_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-share-mutate.rb";
 
 interface MutateResult {
   ok: boolean;
@@ -216,6 +222,15 @@ const runHoldingMutate = (op: string, payload: unknown) =>
 
 const runValuationMutate = (op: string, payload: unknown) =>
   runRailsRunnerMutate(VALUATION_MUTATE_CONTAINER_PATH, op, payload, "SURE_VALUATION_MUTATE_EXEC_FAILED");
+
+const runRecurringMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(RECURRING_MUTATE_CONTAINER_PATH, op, payload, "SURE_RECURRING_MUTATE_EXEC_FAILED");
+
+const runDuplicateMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(DUPLICATE_MUTATE_CONTAINER_PATH, op, payload, "SURE_DUPLICATE_MUTATE_EXEC_FAILED");
+
+const runShareMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(SHARE_MUTATE_CONTAINER_PATH, op, payload, "SURE_SHARE_MUTATE_EXEC_FAILED");
 
 function statusFromMutateResult(result: MutateResult): number {
   if (result.ok) return 200;
@@ -725,6 +740,57 @@ export function registerSureRoutes(): void {
     const id = requireParam(params, "id");
     const result = await runValuationMutate("destroy", { id });
     forwardMutateResult(res, "delete", result, "SURE_VALUATION_MUTATE_ERROR");
+  });
+
+  // --- Recurring transactions (platform extension — Sure has no REST surface)
+  addRoute("POST", "/api/v1/sure/recurring/identify", async ({ res }) => {
+    const result = await runRecurringMutate("identify", {});
+    forwardMutateResult(res, "update", result, "SURE_RECURRING_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/recurring/cleanup_stale", async ({ res }) => {
+    const result = await runRecurringMutate("cleanup_stale", {});
+    forwardMutateResult(res, "update", result, "SURE_RECURRING_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/recurring/:id/activate", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runRecurringMutate("mark_active", { id });
+    forwardMutateResult(res, "update", result, "SURE_RECURRING_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/recurring/:id/deactivate", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runRecurringMutate("mark_inactive", { id });
+    forwardMutateResult(res, "update", result, "SURE_RECURRING_MUTATE_ERROR");
+  });
+
+  // --- Duplicate transaction handling (pending vs posted reconciliation)
+  addRoute("POST", "/api/v1/sure/transactions/:id/merge_duplicate", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runDuplicateMutate("merge", { id });
+    forwardMutateResult(res, "update", result, "SURE_DUPLICATE_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/transactions/:id/dismiss_duplicate", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runDuplicateMutate("dismiss", { id });
+    forwardMutateResult(res, "update", result, "SURE_DUPLICATE_MUTATE_ERROR");
+  });
+
+  // --- Account sharing (full_control / read_write / read_only)
+  addRoute("POST", "/api/v1/sure/accounts/:account_id/shares", async ({ res, params, body }) => {
+    const accountId = requireParam(params, "account_id");
+    const payload = { ...(body as Record<string, unknown>), account_id: accountId };
+    const result = await runShareMutate("create", payload);
+    forwardMutateResult(res, "create", result, "SURE_SHARE_MUTATE_ERROR");
+  });
+  addRoute("PATCH", "/api/v1/sure/shares/:id", async ({ res, params, body }) => {
+    const id = requireParam(params, "id");
+    const payload = { ...(body as Record<string, unknown>), id };
+    const result = await runShareMutate("update", payload);
+    forwardMutateResult(res, "update", result, "SURE_SHARE_MUTATE_ERROR");
+  });
+  addRoute("DELETE", "/api/v1/sure/shares/:id", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runShareMutate("delete", { id });
+    forwardMutateResult(res, "delete", result, "SURE_SHARE_MUTATE_ERROR");
   });
 
   // --- Rule apply_all (runs every family rule against historical transactions)

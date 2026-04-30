@@ -465,6 +465,89 @@ describe("Valuation routes", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// PR4 — recurring, duplicates, sharing
+// ---------------------------------------------------------------------------
+
+describe("Recurring transactions", () => {
+  it("POST /api/v1/sure/recurring/identify → 200 with active_count", async () => {
+    setEnvelope({ ok: true, identified: 7, active_count: 12, recurring: [] });
+    const { status, data } = await req("POST", "/api/v1/sure/recurring/identify");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.identified, 7);
+    assert.strictEqual(data.active_count, 12);
+  });
+
+  it("POST /api/v1/sure/recurring/cleanup_stale → 200", async () => {
+    setEnvelope({ ok: true, cleaned: 3 });
+    const { status, data } = await req("POST", "/api/v1/sure/recurring/cleanup_stale");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.cleaned, 3);
+  });
+
+  it("POST /api/v1/sure/recurring/:id/activate → 200 with status active", async () => {
+    setEnvelope({ ok: true, recurring: { id: "r1", status: "active" } });
+    const { status, data } = await req("POST", "/api/v1/sure/recurring/r1/activate");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.recurring.status, "active");
+  });
+
+  it("POST /api/v1/sure/recurring/:id/deactivate → 200 with status inactive", async () => {
+    setEnvelope({ ok: true, recurring: { id: "r1", status: "inactive" } });
+    const { status, data } = await req("POST", "/api/v1/sure/recurring/r1/deactivate");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.recurring.status, "inactive");
+  });
+});
+
+describe("Duplicate handling", () => {
+  it("POST /api/v1/sure/transactions/:id/merge_duplicate → 200", async () => {
+    setEnvelope({ ok: true, merged: "txn-1" });
+    const { status, data } = await req("POST", "/api/v1/sure/transactions/txn-1/merge_duplicate");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.merged, "txn-1");
+  });
+
+  it("POST /api/v1/sure/transactions/:id/dismiss_duplicate → 200", async () => {
+    setEnvelope({ ok: true, dismissed: "txn-1" });
+    const { status, data } = await req("POST", "/api/v1/sure/transactions/txn-1/dismiss_duplicate");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.dismissed, "txn-1");
+  });
+
+  it("POST /api/v1/sure/transactions/:id/merge_duplicate → 422 when no suggestion", async () => {
+    setEnvelope({ ok: false, error: "transaction txn-2 has no potential duplicate suggestion", status: "validation_error" });
+    const { status } = await req("POST", "/api/v1/sure/transactions/txn-2/merge_duplicate");
+    assert.strictEqual(status, 422);
+  });
+});
+
+describe("Account sharing", () => {
+  it("POST /api/v1/sure/accounts/:account_id/shares → 201", async () => {
+    setEnvelope({ ok: true, share: { id: "s1", account_id: "acc-1", user_id: "u2", permission: "read_only", include_in_finances: true } });
+    const { status, data } = await req("POST", "/api/v1/sure/accounts/acc-1/shares", {
+      email: "spouse@example.com",
+      permission: "read_only",
+    });
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.share.permission, "read_only");
+  });
+
+  it("PATCH /api/v1/sure/shares/:id → 200 with new permission", async () => {
+    setEnvelope({ ok: true, share: { id: "s1", permission: "read_write" } });
+    const { status, data } = await req("PATCH", "/api/v1/sure/shares/s1", { permission: "read_write" });
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.share.permission, "read_write");
+  });
+
+  it("DELETE /api/v1/sure/shares/:id → 200", async () => {
+    setEnvelope({ ok: true, deleted: "s1" });
+    const { status, data } = await req("DELETE", "/api/v1/sure/shares/s1");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.deleted, "s1");
+  });
+});
+
 describe("regression — account + rule routes still mapped", () => {
   it("POST /api/v1/sure/accounts forwards to its own runner", async () => {
     setEnvelope({ ok: true, account: { id: "acc-1" } });
