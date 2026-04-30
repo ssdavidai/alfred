@@ -131,6 +131,14 @@ const DUPLICATE_MUTATE_CONTAINER_PATH =
   "/alfred-data/sure-bootstrap/sure-duplicate-mutate.rb";
 const SHARE_MUTATE_CONTAINER_PATH =
   "/alfred-data/sure-bootstrap/sure-share-mutate.rb";
+const INVITATION_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-invitation-mutate.rb";
+const BUDGET_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-budget-mutate.rb";
+const EXPORT_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-export-mutate.rb";
+const SETTINGS_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-settings-mutate.rb";
 
 interface MutateResult {
   ok: boolean;
@@ -231,6 +239,18 @@ const runDuplicateMutate = (op: string, payload: unknown) =>
 
 const runShareMutate = (op: string, payload: unknown) =>
   runRailsRunnerMutate(SHARE_MUTATE_CONTAINER_PATH, op, payload, "SURE_SHARE_MUTATE_EXEC_FAILED");
+
+const runInvitationMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(INVITATION_MUTATE_CONTAINER_PATH, op, payload, "SURE_INVITATION_MUTATE_EXEC_FAILED");
+
+const runBudgetMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(BUDGET_MUTATE_CONTAINER_PATH, op, payload, "SURE_BUDGET_MUTATE_EXEC_FAILED");
+
+const runExportMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(EXPORT_MUTATE_CONTAINER_PATH, op, payload, "SURE_EXPORT_MUTATE_EXEC_FAILED");
+
+const runSettingsMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(SETTINGS_MUTATE_CONTAINER_PATH, op, payload, "SURE_SETTINGS_MUTATE_EXEC_FAILED");
 
 function statusFromMutateResult(result: MutateResult): number {
   if (result.ok) return 200;
@@ -791,6 +811,47 @@ export function registerSureRoutes(): void {
     const id = requireParam(params, "id");
     const result = await runShareMutate("delete", { id });
     forwardMutateResult(res, "delete", result, "SURE_SHARE_MUTATE_ERROR");
+  });
+
+  // --- Family invitations (create + destroy only — accept is browser-only by design)
+  addRoute("POST", "/api/v1/sure/invitations", async ({ res, body }) => {
+    const result = await runInvitationMutate("create", body);
+    forwardMutateResult(res, "create", result, "SURE_INVITATION_MUTATE_ERROR");
+  });
+  addRoute("DELETE", "/api/v1/sure/invitations/:id", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runInvitationMutate("destroy", { id });
+    forwardMutateResult(res, "delete", result, "SURE_INVITATION_MUTATE_ERROR");
+  });
+
+  // --- Budgets (per-family monthly + per-category amounts)
+  addRoute("POST", "/api/v1/sure/budgets/find_or_bootstrap", async ({ res, body }) => {
+    const result = await runBudgetMutate("find_or_bootstrap", body);
+    forwardMutateResult(res, "create", result, "SURE_BUDGET_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/budgets/:id/copy_from", async ({ res, params, body }) => {
+    const id = requireParam(params, "id");
+    const payload = { ...(body as Record<string, unknown>), budget_id: id };
+    const result = await runBudgetMutate("copy_from", payload);
+    forwardMutateResult(res, "update", result, "SURE_BUDGET_MUTATE_ERROR");
+  });
+  addRoute("PATCH", "/api/v1/sure/budget_categories/:id", async ({ res, params, body }) => {
+    const id = requireParam(params, "id");
+    const payload = { ...(body as Record<string, unknown>), id };
+    const result = await runBudgetMutate("update_category_budget", payload);
+    forwardMutateResult(res, "update", result, "SURE_BUDGET_MUTATE_ERROR");
+  });
+
+  // --- Family data export (zip of transactions/accounts/holdings/recurring)
+  addRoute("POST", "/api/v1/sure/exports", async ({ res }) => {
+    const result = await runExportMutate("create", {});
+    forwardMutateResult(res, "create", result, "SURE_EXPORT_MUTATE_ERROR");
+  });
+
+  // --- User preferences (intentionally narrow — no global Setting writes)
+  addRoute("PATCH", "/api/v1/sure/user/preferences", async ({ res, body }) => {
+    const result = await runSettingsMutate("set_user_pref", body);
+    forwardMutateResult(res, "update", result, "SURE_SETTINGS_MUTATE_ERROR");
   });
 
   // --- Rule apply_all (runs every family rule against historical transactions)

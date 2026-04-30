@@ -829,3 +829,95 @@ self({endpoint: "/api/v1/sure/accounts/<wise-eur-id>/shares", method: "POST", bo
 - **`merge_duplicate` destroys the pending entry.** No undo. Always confirm with Sir before calling — that's why this is a per-transaction confirmation flow, not a "merge all suggestions" bulk op.
 - **`recurring/identify` is synchronous and can take 10-20s on a large family.** Trigger it during quiet windows (Money Day brief), not in the middle of an interactive chat.
 - **Sharing is family-scoped, not platform-scoped.** Other tenants' users are invisible to Sir's family — `email` lookup only finds users already in his family.
+
+---
+
+## Family administration — invitations, budgets, exports, prefs (PR5)
+
+The last cluster of platform extensions. Every endpoint here represents a household-management workflow Sir would otherwise have to do by clicking through Sure's web UI.
+
+### Invitations
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/sure/invitations` | POST | Create a family invitation. Body: `{email, role}` (role default `member`, must be one of `admin`/`member`/`guest`). Returns the encrypted token and the relative `accept_url_path` so Alfred can email the invitee a usable URL |
+| `/api/v1/sure/invitations/:id` | DELETE | Revoke a pending invitation before it's accepted |
+
+**Accept is intentionally NOT exposed.** Sure's `Invitation#accept_for(user)` requires either a token-bearing browser session or programmatic user resolution that bypasses the auth model. The right loop is: Sir asks Alfred → Alfred creates the invitation → Alfred emails the URL to the invitee → invitee opens the URL in their browser → invitee accepts in the Sure UI. Don't try to short-circuit that.
+
+### Budgets
+
+Sure has per-month budgets keyed by `start_date` (always start-of-month, except for families on a custom-month-start cycle). Each budget has a `BudgetCategory` row per family Category with its own `budgeted_spending` amount.
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/sure/budgets/find_or_bootstrap` | POST | Idempotent. Body: `{start_date: "2026-04-01"}`. Creates the Budget shell + sync_budget_categories from the current category set if missing, returns it if it already exists |
+| `/api/v1/sure/budgets/:id/copy_from` | POST | Clone budgeted_spending values from a prior month. Body: `{source_budget_id}`. Useful at month-end for "same as last month, ±a few categories" |
+| `/api/v1/sure/budget_categories/:id` | PATCH | Set the per-category target amount. Body: `{budgeted_spending: "120000.00"}` — string-decimal, currency from parent budget |
+
+### Exports
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/sure/exports` | POST | Create a `FamilyExport` row + enqueue `FamilyDataExportJob`. Returns the export id with status `pending`. Sir can poll `GET /api/v1/sure/exports/:id` (existing read endpoint) to check when status flips to `completed` and `export_file` becomes downloadable |
+
+### User preferences
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/sure/user/preferences` | PATCH | Update permitted user-level prefs. Body: any subset of `{first_name, last_name, theme, locale, ui_layout, show_sidebar, show_ai_sidebar, ai_enabled, rule_prompts_disabled, default_period, default_account_order, default_account_id}`. Defaults to the family owner if no `user_id` supplied |
+
+**Hosting/provider Setting keys (e.g. `Setting.openai_model`, `Setting.brand_fetch_logo_size`, exchange rate provider config) are NOT exposed.** They're nuclear-adjacent — wrong values can break the whole tenant. If Sir asks to change one, walk him through the Sure admin UI manually.
+
+### Worked example — month-end budget rollover
+
+It's the last day of the month. Sir wants next month's budget pre-populated with this month's amounts so he can tweak the few categories that need different numbers:
+
+```
+self({endpoint: "/api/v1/sure/budgets", method: "GET", query: {per_page: 4}})
+// → finds april = b-april (current), march = b-march
+
+self({endpoint: "/api/v1/sure/budgets/find_or_bootstrap", method: "POST", body: {start_date: "2026-05-01"}})
+// → {ok: true, budget: {id: "b-may", start_date: "2026-05-01", category_count: 12}}
+
+self({endpoint: "/api/v1/sure/budgets/b-may/copy_from", method: "POST", body: {source_budget_id: "b-april"}})
+// → b-may now has all of b-april's budgeted_spending values
+
+// Sir says "but bump Groceries by 10% — kids growing"
+self({endpoint: "/api/v1/sure/budget_categories/<bc-may-groceries-id>", method: "PATCH", body: {
+  budgeted_spending: "275000.00"
+}})
+```
+
+### Worked example — invite spouse to the family
+
+```
+self({endpoint: "/api/v1/sure/invitations", method: "POST", body: {
+  email: "spouse@example.com",
+  role: "member"
+}})
+// → {ok: true, invitation: {id: "inv-1", token: "...", accept_url_path: "/invitations/abc123/accept"}}
+
+// Alfred composes a brief email to the spouse:
+//   "Sir invited you to his Sure household. Open <https://sir.example.com/invitations/abc123/accept>
+//    in your browser to join."
+// Sends via email channel skill, NOT via Sure.
+```
+
+### Worked example — Sir wants a backup before doing something risky
+
+```
+self({endpoint: "/api/v1/sure/exports", method: "POST"})
+// → {ok: true, export: {id: "fx1", status: "pending", filename: "sure_export_20260430_180000.zip"}}
+
+// Wait a few minutes, then poll:
+self({endpoint: "/api/v1/sure/exports/fx1", method: "GET"})
+// when status = "completed", surface the download URL to Sir
+```
+
+### Pitfalls
+
+- **`find_or_bootstrap` returns null for out-of-window dates.** The valid window is `[max(2y ago, oldest_entry_date), 2y ahead]`. The script returns 422 in that case so Alfred surfaces a clean error rather than silently returning the wrong month.
+- **`copy_from` only copies `budgeted_spending` values, NOT category structure.** If the source budget has fewer categories than the target (Sir created new categories between the months), the new ones stay at 0 and need explicit `update_category_budget` calls.
+- **Export jobs run asynchronously.** Don't block-poll — return the export id to Sir and let him ask "is it ready?" in a later turn.
+- **`ai_enabled: false` disables Sure's own in-app AI features.** It does NOT disable Alfred's access to the API. Sir might still want it on for his Sure UI, even if he's primarily using Alfred.

@@ -548,6 +548,116 @@ describe("Account sharing", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// PR5 — invitations, budgets, exports, user prefs
+// ---------------------------------------------------------------------------
+
+describe("Family invitations", () => {
+  it("POST /api/v1/sure/invitations → 201 with token + accept_url_path", async () => {
+    setEnvelope({
+      ok: true,
+      invitation: {
+        id: "inv-1", email: "spouse@example.com", role: "member",
+        token: "abc123", accept_url_path: "/invitations/abc123/accept",
+      },
+    });
+    const { status, data } = await req("POST", "/api/v1/sure/invitations", {
+      email: "spouse@example.com", role: "member",
+    });
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.invitation.token, "abc123");
+  });
+
+  it("DELETE /api/v1/sure/invitations/:id → 200", async () => {
+    setEnvelope({ ok: true, deleted: "inv-1" });
+    const { status, data } = await req("DELETE", "/api/v1/sure/invitations/inv-1");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.deleted, "inv-1");
+  });
+});
+
+describe("Budgets", () => {
+  it("POST /api/v1/sure/budgets/find_or_bootstrap → 201 with shell + categories", async () => {
+    setEnvelope({
+      ok: true,
+      budget: { id: "b1", start_date: "2026-04-01", end_date: "2026-04-30", currency: "HUF", category_count: 12 },
+      categories: [{ id: "bc1", category_id: "c1", budgeted_spending: "0.00" }],
+    });
+    const { status, data } = await req("POST", "/api/v1/sure/budgets/find_or_bootstrap", {
+      start_date: "2026-04-01",
+    });
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.budget.category_count, 12);
+  });
+
+  it("POST /api/v1/sure/budgets/:id/copy_from → 200", async () => {
+    setEnvelope({ ok: true, budget: { id: "b2" } });
+    const { status, data } = await req("POST", "/api/v1/sure/budgets/b2/copy_from", {
+      source_budget_id: "b1",
+    });
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.budget.id, "b2");
+  });
+
+  it("PATCH /api/v1/sure/budget_categories/:id → 200 with new amount", async () => {
+    setEnvelope({ ok: true, budget_category: { id: "bc1", budgeted_spending: "120000.00" } });
+    const { status, data } = await req("PATCH", "/api/v1/sure/budget_categories/bc1", {
+      budgeted_spending: "120000.00",
+    });
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.budget_category.budgeted_spending, "120000.00");
+  });
+
+  it("POST /api/v1/sure/budgets/find_or_bootstrap → 422 when start_date out of window", async () => {
+    setEnvelope({
+      ok: false,
+      error: "start_date is outside the valid budget window",
+      status: "validation_error",
+    });
+    const { status } = await req("POST", "/api/v1/sure/budgets/find_or_bootstrap", {
+      start_date: "2018-01-01",
+    });
+    assert.strictEqual(status, 422);
+  });
+});
+
+describe("Family export", () => {
+  it("POST /api/v1/sure/exports → 201 with pending row + job enqueued", async () => {
+    setEnvelope({
+      ok: true,
+      export: { id: "fx1", status: "pending", filename: "sure_export_20260429_123456.zip" },
+      job_enqueued: "FamilyDataExportJob",
+    });
+    const { status, data } = await req("POST", "/api/v1/sure/exports");
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.export.status, "pending");
+  });
+});
+
+describe("User preferences", () => {
+  it("PATCH /api/v1/sure/user/preferences → 200", async () => {
+    setEnvelope({
+      ok: true,
+      user: { id: "u1", first_name: "Sir", ai_enabled: true, theme: "dark" },
+    });
+    const { status, data } = await req("PATCH", "/api/v1/sure/user/preferences", {
+      first_name: "Sir", ai_enabled: true, theme: "dark",
+    });
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.user.theme, "dark");
+  });
+
+  it("PATCH /api/v1/sure/user/preferences → 422 when no permitted fields", async () => {
+    setEnvelope({
+      ok: false,
+      error: "no permitted preferences in payload",
+      status: "validation_error",
+    });
+    const { status } = await req("PATCH", "/api/v1/sure/user/preferences", { admin_secret: "x" });
+    assert.strictEqual(status, 422);
+  });
+});
+
 describe("regression — account + rule routes still mapped", () => {
   it("POST /api/v1/sure/accounts forwards to its own runner", async () => {
     setEnvelope({ ok: true, account: { id: "acc-1" } });
