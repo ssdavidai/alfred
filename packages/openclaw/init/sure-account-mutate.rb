@@ -68,7 +68,15 @@ case op
 when "create"
   accountable_type  = data["accountable_type"]
   accountable_attrs = data["accountable_attributes"] || {}
-  account_attrs     = data.except("accountable_type", "accountable_attributes")
+  # `subtype` belongs to the accountable (Loan/Depository/etc.), not the
+  # Account itself. Account#subtype= delegates to accountable.subtype=,
+  # but only after accountable is assigned. Hoisting it into
+  # accountable_attrs keeps the contract simple for callers and avoids
+  # the silently-dropped attribute we observed in smoke tests.
+  if data.key?("subtype")
+    accountable_attrs["subtype"] = data["subtype"] unless accountable_attrs.key?("subtype")
+  end
+  account_attrs = data.except("accountable_type", "accountable_attributes", "subtype")
 
   FAIL.call("accountable_type required (one of: #{Accountable::TYPES.join(', ')})") if accountable_type.to_s.strip.empty?
 
