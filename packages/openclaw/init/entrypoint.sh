@@ -548,9 +548,15 @@ fi
 # fallback pattern as .composio-user-id above).
 if [[ "${SURE_ENABLED:-false}" != "true" ]]; then
     echo "[init] SURE_ENABLED!=true, skipping Sure bootstrap staging."
-elif [[ -f /alfred-data/.sure-api-key && -s /alfred-data/.sure-api-key ]]; then
-    echo "[init] /alfred-data/.sure-api-key already present, skipping Sure bootstrap staging."
 else
+    # Note: previously this block was short-circuited when /alfred-data/
+    # .sure-api-key already existed — an over-aggressive guard meant for
+    # bootstrap idempotency. The guard also blocked re-staging of the
+    # account-mutation script (and any future Rails-runner helpers), so
+    # tenants stayed stuck on whatever script revision was current the
+    # first time they bootstrapped. The staging steps below are each
+    # individually idempotent (content-hash gated for scripts; conditional
+    # creation for the bootstrap password), so we always run them.
     if [[ -z "${OWNER_EMAIL:-}" ]]; then
         echo "[init] ACTION REQUIRED: SURE_ENABLED=true but OWNER_EMAIL is unset."
         echo "[init]   Cannot stage Sure bootstrap without an admin email."
