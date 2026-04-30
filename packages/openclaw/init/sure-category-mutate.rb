@@ -23,7 +23,9 @@
 
 require_relative "sure-mutate-base"
 
-PERMITTED_ATTRS = %w[name color classification lucide_icon parent_id].freeze
+# NOTE: `classification` was removed upstream; the column is now
+# `classification_unused` (legacy, default "expense"). Do NOT expose it.
+PERMITTED_ATTRS = %w[name color lucide_icon parent_id].freeze
 
 def find_category(family, id)
   family.categories.find_by(id: id)
@@ -32,12 +34,11 @@ end
 def render_category(c)
   return nil unless c
   {
-    "id"             => c.id,
-    "name"           => c.name,
-    "color"          => c.color,
-    "classification" => c.classification,
-    "lucide_icon"    => c.try(:lucide_icon),
-    "parent_id"      => c.parent_id,
+    "id"          => c.id,
+    "name"        => c.name,
+    "color"       => c.color,
+    "lucide_icon" => c.try(:lucide_icon),
+    "parent_id"   => c.parent_id,
   }.compact
 end
 
