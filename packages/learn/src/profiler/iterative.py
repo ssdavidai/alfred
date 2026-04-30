@@ -128,6 +128,8 @@ async def iterative_cluster(
     use_llm: bool = True,
     min_group_size: int = 2,
     similarity_threshold: float = 0.4,
+    llm_top_n: int = 30,
+    llm_min_group_size: int = 3,
     available_categories: list[str] | None = None,
     available_tags: list[str] | None = None,
     llm_base_url: str | None = None,
@@ -201,7 +203,16 @@ async def iterative_cluster(
             unmatched_groups = [
                 p for p in (kw_props + bh_props) if not p.proposed_category
             ]
-            unmatched_groups = [p for p in unmatched_groups if p.txn_count >= 2]
+            unmatched_groups = [
+                p for p in unmatched_groups if p.txn_count >= llm_min_group_size
+            ]
+            # Cap to top-N largest groups per iteration. Each LLM batch
+            # is ~30s; without a cap, a fresh corpus with 200+ unknown
+            # groups blows past the ctrl-api timeout. Subsequent
+            # iterations see a smaller residual so they re-pick whatever
+            # didn't fit in iter 1.
+            unmatched_groups.sort(key=lambda p: -p.txn_count)
+            unmatched_groups = unmatched_groups[:llm_top_n]
             if unmatched_groups:
                 try:
                     raw_props = await infer_categories_for_clusters(

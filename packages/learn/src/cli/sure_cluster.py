@@ -108,6 +108,18 @@ def main(argv: list[str] | None = None) -> int:
         help="Iterative: enable Pass 2 behavioural co-occurrence.",
     )
     parser.add_argument(
+        "--llm-top-n",
+        type=int,
+        default=30,
+        help="Iterative: cap LLM Pass 3 to the N largest unknown groups per iteration.",
+    )
+    parser.add_argument(
+        "--llm-min-group-size",
+        type=int,
+        default=3,
+        help="Iterative: skip LLM Pass 3 for groups with fewer than this many txns.",
+    )
+    parser.add_argument(
         "--llm-model",
         default=os.environ.get("SURE_CLUSTER_LLM_MODEL", "openclaw"),
         help=(
@@ -175,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
                 use_llm=args.use_llm and bool(token) and bool(cats),
                 similarity_threshold=args.similarity_threshold,
                 min_group_size=args.min_group_size,
+                llm_top_n=args.llm_top_n,
+                llm_min_group_size=args.llm_min_group_size,
                 available_categories=cats,
                 available_tags=tags,
                 llm_base_url=base_url,

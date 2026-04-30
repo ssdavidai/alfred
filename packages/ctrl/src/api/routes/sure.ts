@@ -920,6 +920,14 @@ export function registerSureRoutes(): void {
     if (typeof opts["llm_model"] === "string" && (opts["llm_model"] as string).length > 0) {
       cliArgs.push("--llm-model", String(opts["llm_model"]));
     }
+    const llmTopN = Number(opts["llm_top_n"]);
+    if (Number.isFinite(llmTopN) && llmTopN > 0) {
+      cliArgs.push("--llm-top-n", String(Math.floor(llmTopN)));
+    }
+    const llmMinGroup = Number(opts["llm_min_group_size"]);
+    if (Number.isFinite(llmMinGroup) && llmMinGroup > 0) {
+      cliArgs.push("--llm-min-group-size", String(Math.floor(llmMinGroup)));
+    }
 
     // Pass the tenant's category + tag names through env so the LLM
     // prompt is grounded in what actually exists.
