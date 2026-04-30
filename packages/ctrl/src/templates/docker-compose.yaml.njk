@@ -790,6 +790,12 @@ services:
       - POSTGRES_USER=sure
       - POSTGRES_PASSWORD=${SURE_POSTGRES_PASSWORD}
       - REDIS_URL=redis://:${SURE_REDIS_PASSWORD}@sure-redis:6379/0
+    # Mount /alfred-data so ctrl-api's Rails-runner-backed account CRUD
+    # endpoints can hand sure-web a JSON payload via the shared volume.
+    # Same path the sure-init one-shot uses; long-running sure-web reads
+    # the script + payload on demand for create/update/delete.
+    volumes:
+      - /mnt/encrypted/alfred:/alfred-data
     ports:
       - "127.0.0.1:3001:3000"
     healthcheck:

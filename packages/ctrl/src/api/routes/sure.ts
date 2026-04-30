@@ -127,7 +127,11 @@ async function runAccountMutate(
   const containerFile = `/alfred-data/.sure-mutate-${id}.json`;
 
   fs.mkdirSync(ACCOUNT_MUTATE_HOST_DIR, { recursive: true });
-  fs.writeFileSync(hostFile, JSON.stringify(payload), { mode: 0o600 });
+  // 0644 (not 0600) — ctrl-api runs as root, sure-web runs as uid 1000
+  // (rails). Same EACCES we hit on the bootstrap files. The tempfile is
+  // on the encrypted volume mounted only into trusted containers, so
+  // world-read is safe.
+  fs.writeFileSync(hostFile, JSON.stringify(payload), { mode: 0o644 });
 
   let stdout: string;
   try {
