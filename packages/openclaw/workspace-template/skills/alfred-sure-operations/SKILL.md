@@ -980,7 +980,7 @@ Coverage on the typical Hungarian household runs ~55% — the rest is one-off co
 
 ### Iterative loop (default mode — multi-pass)
 
-The pipeline now runs as an **iterative loop** by default. Single-pass keyword-only clustering tops out around 50-55% on a real Hungarian household; the loop typically pushes coverage to 75-85% by combining three signals:
+The pipeline now runs as an **iterative loop** by default. Single-pass keyword-only clustering tops out around 50-55% on a real Hungarian household; the loop pushes coverage to **78%+ end-to-end** (measured on david's 3,267 transactions) by combining three signals:
 
 1. **Pass 1 — Keyword + word-TFIDF clustering** (the original pipeline). Cheap, deterministic, catches the obvious anchor-word merchants (Tesco, Wolt, Apple, etc.).
 2. **Pass 2 — Behavioural co-occurrence**. Same account + same amount-band + monthly cadence → recurring payment, even if the names differ ("Sp Mind Lab Pro" vs "Sp Mind Lab Pro Eu", "MÓNIKA ARTAI" vs "Mónika Artai Bt."). Returns a group with role but no category.
@@ -1019,6 +1019,73 @@ self({endpoint: "/api/v1/sure/_cluster", method: "POST", body: {
 ```
 
 **Single-pass fallback** is still available with `iterative: false` — same as before, returns immediately without the LLM step. Use this when the OpenClaw gateway is unavailable or when you specifically want deterministic-only output for testing.
+
+### `_cluster/apply` — automatic quality filter
+
+The apply route runs a quality filter before creating any merchants or rules. Verified on david's tenant: an unfiltered apply mis-categorises ~5% of high-volume groups (canonical bad case: a behavioural cluster of 41 unrelated restaurants + baby stores all in the same amount-band gets labelled "Transfers"). The defaults below were the smallest set of filters that dropped all such groups in the david sample without losing any correct ones.
+
+| Body param | Default | Effect |
+|---|---|---|
+| `min_confidence` | `0.85` | Drop any proposal with `confidence < this`. Tunes the precision/recall trade-off. |
+| `drop_low_conf_transfer` | `true` | Drop role=transfer proposals when their confidence is below `low_conf_transfer_threshold` (the LLM is least reliable on transfer-vs-merchant for individual-name clusters). |
+| `low_conf_transfer_threshold` | `0.9` | Threshold for the rule above. |
+| `drop_canonical_names` | `[]` | Explicit blacklist (lowercased) of canonical names to skip. Use after the first run when you spot a specific bad cluster. |
+
+Response includes:
+
+```
+{
+  proposals_in: 357,         // raw input
+  proposals_kept: 162,       // survived the filter
+  proposals_filtered_out: 195,
+  filter_reasons: [           // first 50, for debugging
+    {canonical_name: "Oliv", reason: "transfer-role with confidence 0.85 < 0.9"},
+    ...
+  ],
+  merchants_created: 90,
+  rules_created: 162,
+  failures: [],
+  apply_all: {ok: true, rules_applied: 162, ...}
+}
+```
+
+### "Bam, that's it" — bootstrap on a fresh tenant
+
+The full sequence for a freshly-connected Sure account is wrapped in a single composite endpoint:
+
+```
+self({endpoint: "/api/v1/sure/_bootstrap", method: "POST"})
+// → {
+//     ok: true,
+//     log: [
+//       "step 1: bootstrapping default categories",
+//       "step 2: 357 proposals, raw coverage 70%",
+//       "step 3: 90 merchants, 162 rules, apply_all rules_applied=162"
+//     ],
+//     bootstrap_categories: {...},
+//     cluster: {coverage_percent: 70, proposals_count: 357, stats: [...], stopped_reason: "..."},
+//     apply:   {merchants_created: 90, rules_created: 162, ...}
+//   }
+```
+
+This is a thin wrapper — it just calls these three steps in order:
+
+1. `POST /api/v1/sure/categories/bootstrap` (idempotent — only runs if Sir has no categories yet).
+2. `POST /api/v1/sure/_cluster` (with the actual category + tag names from Sir's family auto-discovered, no need to pass them).
+3. `POST /api/v1/sure/_cluster/apply` (the quality filter does its work; no manual review needed for the typical case).
+
+If you want to **review proposals before applying** — say, on a sensitive tenant or one with an unusual transaction history — fall back to the explicit two-step sequence:
+
+```
+# Get proposals only
+self({endpoint: "/api/v1/sure/_cluster", method: "POST", body: {...}})
+# Manually inspect, optionally edit, then:
+self({endpoint: "/api/v1/sure/_cluster/apply", method: "POST", body: {proposals: [...]}})
+```
+
+Total cost on a 3,000-txn tenant: ~30k LLM tokens (≈$0.10–0.30) + 30 minutes of ctrl-api work. One-shot only — you don't re-run this; from here, Sure's own auto-rule engine handles new transactions as they sync.
+
+All bootstrap params from `/_cluster` and `/_cluster/apply` pass through to `/_bootstrap` — `target_coverage`, `max_iterations`, `llm_top_n`, `min_confidence`, `drop_canonical_names[]`, etc. Empty body works fine for the default-everything case.
 
 ### Pitfalls (iterative)
 

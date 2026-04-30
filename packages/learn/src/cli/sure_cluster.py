@@ -92,8 +92,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--max-iterations",
         type=int,
-        default=5,
-        help="Iterative: hard cap on iterations (default: 5).",
+        default=6,
+        help="Iterative: hard cap on iterations (default: 6 — measured on david).",
     )
     parser.add_argument(
         "--use-llm",
@@ -110,13 +110,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--llm-top-n",
         type=int,
-        default=30,
+        default=100,
         help="Iterative: cap LLM Pass 3 to the N largest unknown groups per iteration.",
     )
     parser.add_argument(
         "--llm-min-group-size",
         type=int,
-        default=3,
+        default=2,
         help="Iterative: skip LLM Pass 3 for groups with fewer than this many txns.",
     )
     parser.add_argument(

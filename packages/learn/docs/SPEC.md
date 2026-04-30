@@ -1164,9 +1164,31 @@ Returns the union of proposals across all iterations, deduplicated by canonical 
 - `POST /api/v1/sure/_cluster/apply` — execute approved proposals: create FamilyMerchants (skip dupes by name), create Rules (`transaction_name LIKE %keyword%` → set merchant + category + tag), fire `apply_all`. Returns `{merchants_created, rules_created, failures, apply_all}`.
 
 **Operational notes:**
-- LLM pass costs ~30k tokens for a 5-iteration run on 3,000 txns (~$0.10-0.30 depending on model). One-shot bootstrap, not a recurring chore.
+- LLM pass costs ~30k tokens for a 6-iteration run on 3,000 txns (~$0.10-0.30 depending on model). One-shot bootstrap, not a recurring chore.
 - LLM is non-deterministic at temperature 0.1; same input may produce slightly different categories at the margin. Use `iterative: false` for deterministic builds.
 - The pipeline runs entirely inside `compose-alfred-learn-1`. No new ports, no new Temporal workflows. ctrl-api invokes via `dockerExecWithStdin` (mirrors the existing Rails-runner pattern for `sure-*-mutate.rb` scripts).
+- LLM uses `model: "openclaw"` (NOT a raw upstream id like `x-ai/grok-4.1-fast`). The gateway selects the actual upstream model from its per-agent `auth-profiles.json` config; arbitrary upstream ids return HTTP 400.
+
+**Measured baseline (david's tenant, 3,267 transactions, 2026-04-30):**
+- Pipeline run: 15min, 357 proposals, 70% raw coverage at proposal level.
+- After `_cluster/apply` quality filter (default `min_confidence=0.85`, drop low-confidence transfer-role proposals): 162 rules created, 90 family merchants created, **78.2% of all transactions categorised end-to-end** (2,555 of 3,267).
+- Distribution of categorised transactions: Subscriptions 543, Transfers 500, Food & Drink 216, Income 202, Groceries 201, Healthcare 132, Services 130, Shopping 129, Investment Contributions 121, Transportation 93, Taxes 57, Personal Care 55, Home Improvement 45, Entertainment 43, Utilities 37, Sports & Fitness 19, Fees 15, Travel 6, Insurance 4, Loan Payments 4, Mortgage / Rent 3.
+- Quality sample (manual review of 30 proposals across volume tiers): 25/30 correct, 3/30 borderline, 2/30 wrong (a behavioural mis-cluster + an LLM-mislabelled subscription). The default filter drops the wrong ones; the `drop_canonical_names` override exists for the rare borderline cases that survive the filter.
+
+**End-to-end bootstrap on a fresh tenant** — single endpoint, ~30 min wall-clock, ~$0.20 in LLM tokens:
+
+```
+POST /api/v1/sure/_bootstrap
+```
+
+Internally calls:
+1. `POST /api/v1/sure/categories/bootstrap` (idempotent — skipped if family has any categories).
+2. `POST /api/v1/sure/_cluster` (auto-discovers the family's category + tag names; no need to pass them).
+3. `POST /api/v1/sure/_cluster/apply` (with the quality filter).
+
+Returns a single combined response with `cluster.coverage_percent`, `apply.merchants_created`, `apply.rules_created`, and a step-by-step `log[]`. All params from `/_cluster` and `/_cluster/apply` pass through (target_coverage, max_iterations, llm_top_n, min_confidence, drop_canonical_names[], etc.) — empty body works for the default case.
+
+Use the explicit two-step (`/_cluster` then `/_cluster/apply`) when you need to review proposals before applying them. After this one-shot, Sure's own auto-rule engine handles new transactions on every sync.
 
 ### Phase 6: Tests + Polish
 48. `tests/test_validators.py`

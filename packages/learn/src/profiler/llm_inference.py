@@ -45,7 +45,11 @@ LLM_BATCH_SIZE = 50
 # are rejected with HTTP 400. The actual model is selected by the
 # gateway's per-agent config — see auth-profiles.json on each tenant.
 LLM_MODEL = os.environ.get("SURE_CLUSTER_LLM_MODEL", "openclaw")
-LLM_TIMEOUT_SECONDS = float(os.environ.get("SURE_CLUSTER_LLM_TIMEOUT", "60"))
+# 180s allows for cold-start gateway routing on the first batch of an
+# iteration. The actual response is typically 8-30s; 60s was hitting
+# ReadTimeout intermittently in production.
+LLM_TIMEOUT_SECONDS = float(os.environ.get("SURE_CLUSTER_LLM_TIMEOUT", "180"))
+LLM_RETRY_ON_TIMEOUT = True
 
 
 @dataclass
@@ -230,17 +234,37 @@ async def infer_categories_for_clusters(
     for i in range(0, len(clusters), batch_size):
         batch = clusters[i : i + batch_size]
         prompt = _build_prompt(batch, available_categories, available_tags)
-        try:
-            raw = await _post_chat(base_url, token, prompt, model=model)
-            parsed = _parse_response(raw, batch)
-            out.extend(parsed)
-        except (httpx.HTTPError, json.JSONDecodeError, ValueError, RuntimeError) as e:
+
+        # Try up to twice on transient timeouts. The first call to the
+        # gateway from a fresh worker can cold-start and exceed even
+        # the 180s default, but a retry typically lands on a warm
+        # backend in 5-15s.
+        last_err: Exception | None = None
+        for attempt in (1, 2):
+            try:
+                raw = await _post_chat(base_url, token, prompt, model=model)
+                parsed = _parse_response(raw, batch)
+                out.extend(parsed)
+                last_err = None
+                break
+            except httpx.ReadTimeout as e:
+                last_err = e
+                if attempt == 1 and LLM_RETRY_ON_TIMEOUT:
+                    logger.info(
+                        "LLM batch %d-%d timed out; retrying once",
+                        i, i + len(batch),
+                    )
+                    continue
+                break
+            except (httpx.HTTPError, json.JSONDecodeError, ValueError, RuntimeError) as e:
+                last_err = e
+                break
+        if last_err is not None:
             logger.warning(
-                "LLM cluster inference batch %d-%d failed: %s",
+                "LLM cluster inference batch %d-%d failed (%s): %s",
                 i,
                 i + len(batch),
-                e,
+                type(last_err).__name__,
+                last_err,
             )
-            # Skip the batch; don't let one bad call sink the whole run.
-            continue
     return out
