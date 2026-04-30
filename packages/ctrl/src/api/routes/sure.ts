@@ -1,5 +1,9 @@
+import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ApiError, ValidationError } from "../errors.js";
+import { dockerExec } from "../helpers.js";
 
 interface SureConfig {
   token: string;
@@ -97,6 +101,105 @@ function requireParam(params: Record<string, string>, name: string): string {
   return v;
 }
 
+// Account mutation goes through a Rails runner inside sure-web because
+// Sure's public API is read-only for accounts. The script reads JSON
+// from a file in the shared /alfred-data volume (mode 0o600), invokes
+// Sure's ActiveRecord models directly, and prints a single JSON line on
+// stdout. See packages/openclaw/init/sure-account-mutate.rb.
+const ACCOUNT_MUTATE_HOST_DIR = "/mnt/encrypted/alfred";
+const ACCOUNT_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-account-mutate.rb";
+
+interface AccountMutateResult {
+  ok: boolean;
+  account?: Record<string, unknown>;
+  deleted?: string;
+  error?: string;
+  status?: string;
+}
+
+async function runAccountMutate(
+  op: "create" | "update" | "delete",
+  payload: unknown,
+): Promise<AccountMutateResult> {
+  const id = crypto.randomBytes(8).toString("hex");
+  const hostFile = path.join(ACCOUNT_MUTATE_HOST_DIR, `.sure-mutate-${id}.json`);
+  const containerFile = `/alfred-data/.sure-mutate-${id}.json`;
+
+  fs.mkdirSync(ACCOUNT_MUTATE_HOST_DIR, { recursive: true });
+  fs.writeFileSync(hostFile, JSON.stringify(payload), { mode: 0o600 });
+
+  let stdout: string;
+  try {
+    stdout = await dockerExec("sure-web", [
+      "bin/rails",
+      "runner",
+      ACCOUNT_MUTATE_CONTAINER_PATH,
+      op,
+      containerFile,
+    ]);
+  } catch (err) {
+    fs.unlinkSync(hostFile);
+    throw new ApiError(
+      502,
+      "SURE_MUTATE_EXEC_FAILED",
+      `Failed to run account mutate via sure-web: ${(err as Error).message}`,
+    );
+  } finally {
+    try {
+      fs.unlinkSync(hostFile);
+    } catch {
+      /* best-effort cleanup */
+    }
+  }
+
+  // The script prints a single JSON line. Rails boot can emit warnings
+  // before our line, so scan from the bottom for the JSON object.
+  const lines = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (line.startsWith("{") && line.endsWith("}")) {
+      try {
+        return JSON.parse(line) as AccountMutateResult;
+      } catch {
+        // keep scanning
+      }
+    }
+  }
+  throw new ApiError(
+    502,
+    "SURE_MUTATE_PARSE_FAILED",
+    `Could not parse JSON from sure-account-mutate output: ${stdout.slice(0, 500)}`,
+  );
+}
+
+function forwardMutateResult(
+  res: import("node:http").ServerResponse,
+  op: "create" | "update" | "delete",
+  result: AccountMutateResult,
+): void {
+  if (!result.ok) {
+    const status = result.status === "validation_error"
+      ? 422
+      : result.status === "not_found"
+        ? 404
+        : result.status === "linked_account"
+          ? 409
+          : 400;
+    sendJson(res, status, {
+      error: { code: "SURE_ACCOUNT_MUTATE_ERROR", message: result.error || "unknown error" },
+    });
+    return;
+  }
+  if (op === "create") {
+    sendJson(res, 201, { account: result.account });
+  } else if (op === "delete") {
+    sendJson(res, 200, { deleted: result.deleted });
+  } else {
+    sendJson(res, 200, { account: result.account });
+  }
+}
+
 export function registerSureRoutes(): void {
   // Full Sure API surface — every endpoint in docs.sure.am/openapi.yaml is
   // mirrored here under /api/v1/sure/<sure-path>. Path parameters are
@@ -105,10 +208,27 @@ export function registerSureRoutes(): void {
   // POST /accounts: accounts are created by provider syncs (Lunchflow,
   // Plaid, etc.) or via the Sure web UI, not the REST API.
 
-  // --- Accounts (read-only — Sure does not expose POST /accounts) -----
+  // --- Accounts ------------------------------------------------------
+  // GET goes through Sure's REST API. POST/PATCH/DELETE go through the
+  // Rails-runner script because Sure's public API exposes only `index`.
   addRoute("GET", "/api/v1/sure/accounts", async ({ res, query }) => {
     const r = await sureProxy("GET", "/accounts", query, null);
     forwardSureResponse(res, r);
+  });
+  addRoute("POST", "/api/v1/sure/accounts", async ({ res, body }) => {
+    const result = await runAccountMutate("create", body);
+    forwardMutateResult(res, "create", result);
+  });
+  addRoute("PATCH", "/api/v1/sure/accounts/:id", async ({ res, params, body }) => {
+    const id = requireParam(params, "id");
+    const payload = { ...(body as Record<string, unknown>), id };
+    const result = await runAccountMutate("update", payload);
+    forwardMutateResult(res, "update", result);
+  });
+  addRoute("DELETE", "/api/v1/sure/accounts/:id", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runAccountMutate("delete", { id });
+    forwardMutateResult(res, "delete", result);
   });
 
   // --- Balance sheet --------------------------------------------------

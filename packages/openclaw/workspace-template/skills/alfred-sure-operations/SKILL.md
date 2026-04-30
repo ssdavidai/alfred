@@ -228,6 +228,9 @@ The ten endpoints above cover the vast majority of Sir's questions. The platform
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/v1/sure/accounts` | List accounts (paginated). |
+| POST | `/api/v1/sure/accounts` | **Platform extension.** Create a manual account (Loan, Depository, Property, etc.). See "Account CRUD" below. |
+| PATCH | `/api/v1/sure/accounts/{id}` | **Platform extension.** Update name, balance, classification, accountable_attributes. |
+| DELETE | `/api/v1/sure/accounts/{id}` | **Platform extension.** Soft-delete a manual account. 409 if account is linked to a provider. |
 | GET | `/api/v1/sure/balance_sheet` | Net worth + assets + liabilities, in family currency. |
 | GET | `/api/v1/sure/categories` | List categories (filters: `classification`, `roots_only`, `parent_id`). |
 | GET | `/api/v1/sure/categories/{id}` | Retrieve a single category. |
@@ -268,16 +271,56 @@ The ten endpoints above cover the vast majority of Sir's questions. The platform
 | DELETE | `/api/v1/sure/users/me` | **Nuclear.** Deactivates Sir's API user. Never call this without explicit, in-the-moment confirmation. |
 | DELETE | `/api/v1/sure/users/reset` | **Nuclear.** Wipes ALL family data and returns Sure to a fresh state. Never call this without explicit, in-the-moment confirmation. |
 
-### What's NOT in the Sure API
+### Account CRUD (platform extension)
 
-- **No `POST /accounts`.** Sure does not expose account creation through the REST API. Accounts come from one of two paths only:
-  - **Provider sync** — Lunchflow / Plaid / SimpleFIN / Sophtron / Binance / etc. discover accounts during the first `/sync` after Sir links the institution in the Sure UI. New accounts under an already-linked provider appear automatically on the next sync; new providers require Sir to add them through Sure → Settings → Providers.
-  - **Manual cash account** — Sir creates these in the Sure web UI at Settings → Accounts → New. There is no API path for it.
+Sure's *upstream* REST API is read-only for accounts (only `GET /accounts`). The platform fills the gap by routing `POST/PATCH/DELETE /api/v1/sure/accounts(/{id})` through a Rails runner inside `sure-web` that calls Sure's own ActiveRecord models — same code path as the web UI's Settings → Accounts → New, just bypassing the missing REST endpoint. Use these freely; they are full citizens of the platform.
 
-  When Sir asks you to "add a new account", say so plainly and walk him through the UI step. Don't fabricate a request to `POST /api/v1/sure/accounts` — it doesn't exist and the proxy will return 404.
+**Create a manual account** — `self({endpoint: "/api/v1/sure/accounts", method: "POST", body: {…}})`
 
-- **No `DELETE /accounts/{id}`.** Account deletion is also UI-only.
+Required body fields:
+- `name` *(string)* — display name, e.g. `"Erste Mortgage"`.
+- `balance` *(number)* — current balance in currency-native units. For liabilities, this is the **outstanding balance** (positive number — Sure stores liability balances as positives and the classification flag does the sign).
+- `currency` *(string)* — three-letter ISO, e.g. `"HUF"`.
+- `accountable_type` *(string)* — one of `"Depository"`, `"Investment"`, `"Crypto"`, `"Property"`, `"Vehicle"`, `"Loan"`, `"CreditCard"`, `"OtherAsset"`, `"OtherLiability"`. Determines what kind of account this is.
 
-- **No category / merchant / institution mutations.** Categories and merchants are seeded by Sure and cannot be created or deleted via the API. You can only filter and group by them.
+Optional body fields:
+- `classification` — `"asset"` or `"liability"`. Usually inferred from `accountable_type`; pass explicitly only if Sir wants to override (e.g. a CreditCard tracked as a budget tool rather than a liability).
+- `subtype` — accountable-type-specific sub-classification (e.g. `"mortgage"` / `"student"` / `"auto"` / `"other"` for Loan; `"checking"` / `"savings"` for Depository).
+- `accountable_attributes` *(object)* — extra fields specific to the accountable type. For a Loan: `interest_rate` (number, e.g. `6.29`), `term_months` (integer), `rate_type` (`"fixed"` or `"variable"`).
 
-For everything else — transactions, trades, valuations, tags, chats, imports — full CRUD is available.
+**Worked example — adding a 30-year HUF mortgage with 58.5M Ft outstanding at 6.29% fixed:**
+
+```
+self({
+  endpoint: "/api/v1/sure/accounts",
+  method: "POST",
+  body: {
+    name: "Erste Mortgage",
+    balance: 58500000,
+    currency: "HUF",
+    accountable_type: "Loan",
+    subtype: "mortgage",
+    accountable_attributes: {
+      interest_rate: 6.29,
+      term_months: 360,
+      rate_type: "fixed"
+    }
+  }
+})
+```
+
+**Update an account** — `self({endpoint: "/api/v1/sure/accounts/{id}", method: "PATCH", body: {…}})`
+
+Pass any of the create fields. Fields under `accountable_attributes` update the Loan/Depository/etc. record; everything else updates the Account itself. Always read the account first before patching.
+
+**Delete an account** — `self({endpoint: "/api/v1/sure/accounts/{id}", method: "DELETE"})`
+
+Soft-deletes the account (status flips to `pending_deletion`, async hard-delete follows). **Cannot delete linked accounts** (those tied to a Lunchflow / Plaid / etc. provider) — Sir must unlink the provider in the Sure UI first. The endpoint returns 409 if the account is linked.
+
+### Other gaps in the Sure API (still UI-only)
+
+- **No category mutations.** Sure seeds the category tree; categories cannot be created, renamed, or deleted via the API. Sir adjusts them in the Sure UI.
+- **No merchant mutations.** Merchants are inferred from transactions; you can read them but not edit. To "rename" a merchant, recategorize the transactions instead.
+- **No institution mutations.** Provider links (Lunchflow / Plaid / etc.) are managed exclusively through the Sure web UI's Settings → Providers screen. Sir pastes API keys there.
+
+For transactions, trades, valuations, tags, chats, and imports — full CRUD is available through the standard REST surface listed in the table above.

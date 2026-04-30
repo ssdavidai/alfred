@@ -601,6 +601,25 @@ else
             echo "[init] WARNING: $SURE_SCRIPT_SRC missing from image — Sure bootstrap will fail."
         fi
 
+        # Account mutation script — gives ctrl-api a Rails-runner-backed
+        # CRUD path for accounts (Sure's REST API exposes only GET).
+        SURE_MUT_SRC=/setup/sure-account-mutate.rb
+        SURE_MUT_DST="$SURE_SCRIPT_DIR/sure-account-mutate.rb"
+        if [[ -f "$SURE_MUT_SRC" ]]; then
+            SURE_MUT_HASH=$(md5sum "$SURE_MUT_SRC" | cut -d' ' -f1)
+            SURE_MUT_HASH_FILE="$SURE_SCRIPT_DIR/.sure-account-mutate.rb.content-hash"
+            if [[ -f "$SURE_MUT_HASH_FILE" && "$(cat "$SURE_MUT_HASH_FILE")" == "$SURE_MUT_HASH" && -f "$SURE_MUT_DST" ]]; then
+                echo "[init] sure-account-mutate.rb unchanged, skipping copy"
+            else
+                cp "$SURE_MUT_SRC" "$SURE_MUT_DST"
+                echo "$SURE_MUT_HASH" > "$SURE_MUT_HASH_FILE"
+                chmod 644 "$SURE_MUT_DST" 2>/dev/null || true
+                echo "[init] Deployed sure-account-mutate.rb to $SURE_MUT_DST"
+            fi
+        else
+            echo "[init] WARNING: $SURE_MUT_SRC missing from image — Sure account CRUD will fail."
+        fi
+
         echo "[init] Sure bootstrap staged. The sure-init compose service must run:"
         echo "[init]   bin/rails runner /alfred-data/sure-bootstrap/bootstrap.rb"
         echo "[init] After it succeeds, copy /alfred-data/.sure-api-key into"
