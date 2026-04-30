@@ -68,15 +68,24 @@ case op
 when "create"
   accountable_type  = data["accountable_type"]
   accountable_attrs = data["accountable_attributes"] || {}
-  # `subtype` belongs to the accountable (Loan/Depository/etc.), not the
-  # Account itself. Account#subtype= delegates to accountable.subtype=,
-  # but only after accountable is assigned. Hoisting it into
-  # accountable_attrs keeps the contract simple for callers and avoids
-  # the silently-dropped attribute we observed in smoke tests.
+  # `subtype` belongs to the accountable, not the Account. Hoist it
+  # into accountable_attributes so create_and_sync wires it correctly.
   if data.key?("subtype")
     accountable_attrs["subtype"] = data["subtype"] unless accountable_attrs.key?("subtype")
   end
-  account_attrs = data.except("accountable_type", "accountable_attributes", "subtype")
+  # opening_balance_date defaults to two years ago, matching what
+  # AccountableResource#create does in the upstream web controller. The
+  # caller may override via opening_balance_date in ISO yyyy-mm-dd form.
+  opening_balance_date =
+    begin
+      d = data["opening_balance_date"]
+      d.present? ? Date.parse(d) : (Date.today - 2.years)
+    rescue ArgumentError
+      Date.today - 2.years
+    end
+  account_attrs = data.except(
+    "accountable_type", "accountable_attributes", "subtype", "opening_balance_date"
+  )
 
   FAIL.call("accountable_type required (one of: #{Accountable::TYPES.join(', ')})") if accountable_type.to_s.strip.empty?
 
@@ -84,18 +93,31 @@ when "create"
     FAIL.call("invalid accountable_type '#{accountable_type}' — must be one of: #{Accountable::TYPES.join(', ')}")
   end
 
-  klass = accountable_type.constantize
-  accountable = klass.new(accountable_attrs)
+  # Mirror the web controller exactly: build the accountable into the
+  # account params under accountable_attributes, then call
+  # create_and_sync. This is what the LoansController inherits via
+  # AccountableResource#create — it creates the Account, the
+  # accountable subtype record, AND the initial Valuation entry that
+  # actually drives Sure's balance + net-worth calculations. Plain
+  # accounts.new + save! produces an Account with .balance == 0 because
+  # no valuation gets seeded.
+  create_params = account_attrs.merge(
+    "accountable_type"       => accountable_type,
+    "accountable_attributes" => accountable_attrs,
+  )
 
-  account = family.accounts.new(account_attrs)
-  account.accountable = accountable
-
+  account = nil
   begin
     Account.transaction do
-      account.save!
+      account = family.accounts.create_and_sync(
+        create_params,
+        opening_balance_date: opening_balance_date,
+      )
+      account.lock_saved_attributes! if account.respond_to?(:lock_saved_attributes!)
     end
   rescue ActiveRecord::RecordInvalid => e
-    FAIL.call("validation failed: #{account.errors.full_messages.join('; ')}", "validation_error")
+    msg = account ? account.errors.full_messages.join('; ') : e.message
+    FAIL.call("validation failed: #{msg}", "validation_error")
   rescue => e
     FAIL.call("create failed: #{e.class}: #{e.message}")
   end
@@ -108,11 +130,27 @@ when "update"
   account = family.accounts.find_by(id: id)
   FAIL.call("account not found: #{id}", "not_found") unless account
 
-  account_attrs     = data.except("id", "accountable_attributes")
-  accountable_attrs = data["accountable_attributes"]
+  # Balance updates need set_current_balance — it creates a new Valuation
+  # entry so the change is recorded historically. Direct .update on
+  # Account#balance only writes the denormalized cache and gets
+  # overwritten on the next sync.
+  new_balance = data["balance"]
+  account_attrs = data.except("id", "balance", "accountable_attributes", "subtype")
+  if data.key?("subtype")
+    accountable_attrs = (data["accountable_attributes"] || {}).dup
+    accountable_attrs["subtype"] = data["subtype"] unless accountable_attrs.key?("subtype")
+  else
+    accountable_attrs = data["accountable_attributes"]
+  end
 
   begin
     Account.transaction do
+      if new_balance.present? && new_balance.to_d != account.balance
+        result = account.set_current_balance(new_balance.to_d)
+        unless result.success?
+          FAIL.call("balance update failed: #{result.error_message}", "validation_error")
+        end
+      end
       account.update!(account_attrs) if account_attrs.any?
       if accountable_attrs.is_a?(Hash) && accountable_attrs.any? && account.accountable
         account.accountable.update!(accountable_attrs)
@@ -124,7 +162,7 @@ when "update"
     FAIL.call("update failed: #{e.class}: #{e.message}")
   end
 
-  SUCCESS.call("account" => render_account(account))
+  SUCCESS.call("account" => render_account(account.reload))
 
 when "delete"
   id = data["id"]
