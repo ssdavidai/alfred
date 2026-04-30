@@ -675,3 +675,77 @@ self({endpoint: "/api/v1/sure/rules/apply_all", method: "POST", body: {ignore_at
 - **Tag merge is one-way.** `POST /api/v1/sure/tags/<source>/merge_into/<target>` destroys the source. Confirm the target id is correct first via `GET /api/v1/sure/tags`.
 - **Provider merchants vs family merchants.** Sure has two merchant flavours: `ProviderMerchant` (auto-detected from bank-feed data, read-only) and `FamilyMerchant` (Sir's manual ones). The mutate endpoints only touch family merchants. `merchants/enhance` refreshes the provider side asynchronously.
 - **`apply_all` can take 30+ seconds on a busy family.** It loops every rule synchronously through the same scope-and-update path the manual `Apply` button uses. Acceptable for a 30s-budget tool call but consider running it during a Money Day brief, not in the middle of an interactive chat.
+
+---
+
+## Investments — holdings and valuations (platform extensions — PR3)
+
+Sure exposes investment data via `GET /api/v1/sure/accounts/{id}/holdings` but every write op (delete a holding, set a manual cost basis, fix a wrong security mapping, destroy a snapshot valuation) is web-UI only. These platform extension endpoints close that gap.
+
+### Endpoint reference
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/sure/holdings/:id` | DELETE | Destroy a holding **and every trade entry that produced it** — the model wraps a transaction over `account.entries.where(entryable: trades).destroy_all` then `holding.destroy`, then enqueues an account sync |
+| `/api/v1/sure/holdings/:id/set_manual_cost_basis` | POST | Set per-share cost basis manually. Body: `{value: "187.50"}`. Locks the holding so provider syncs can't overwrite it |
+| `/api/v1/sure/holdings/:id/unlock_cost_basis` | POST | Clears the manual lock so provider/calculated cost basis can take over again |
+| `/api/v1/sure/holdings/:id/remap_security` | POST | Move this holding (and every trade for the same security) to a different security. Body: `{security_id: "..."}` or `{ticker: "VOO", exchange_operating_mic: "XNAS"}`. On collision (existing holding for target security on same date+currency), qty/amount are merged with weighted-average cost basis |
+| `/api/v1/sure/holdings/:id/reset_security_to_provider` | POST | Revert a manual remap. Only valid when `provider_security_id` is set; restores the original security and unlocks the holding |
+| `/api/v1/sure/valuations/:id` | DELETE | Destroy a valuation snapshot. The `:id` here is the **Entry id**, not a separate valuation id — Sure models valuations as a delegated_type on Entry. Returns 422 if the entry isn't a Valuation |
+
+### Worked example — Sir manually adjusts AAPL cost basis
+
+Sir's brokerage sync didn't carry over the right cost basis after a corporate action and his AAPL position is showing the wrong gain. Set it manually:
+
+```
+self({endpoint: "/api/v1/sure/accounts/<broker-id>/holdings", method: "GET"})
+// → finds holding h1 for AAPL with cost_basis: "0.0", source: "provider"
+self({endpoint: "/api/v1/sure/holdings/h1/set_manual_cost_basis", method: "POST", body: {value: "147.32"}})
+// → {ok: true, holding: {id: "h1", cost_basis: "147.32", cost_basis_source: "manual", cost_basis_locked: true}}
+```
+
+If Sir later wants the brokerage to take over again:
+
+```
+self({endpoint: "/api/v1/sure/holdings/h1/unlock_cost_basis", method: "POST"})
+// → cost_basis_locked: false; the next provider sync can refresh
+```
+
+### Worked example — fix a wrong security mapping
+
+Sir's broker reported a holding under `CUSTOM:VOO123` (a fabricated synthetic ticker) but the real instrument is Vanguard S&P 500 ETF (`VOO` on XNAS). Remap:
+
+```
+self({endpoint: "/api/v1/sure/holdings/h1/remap_security", method: "POST", body: {
+  ticker: "VOO",
+  exchange_operating_mic: "XNAS"
+}})
+// → {ok: true, holding: {id: "h1", security_id: "<voo-uuid>"}, remapped_to: {id: "<voo-uuid>", ticker: "VOO"}}
+```
+
+If Sir was wrong about the remap and wants to revert to whatever the broker originally said:
+
+```
+self({endpoint: "/api/v1/sure/holdings/h1/reset_security_to_provider", method: "POST"})
+```
+
+### Worked example — destroy a wrong manual valuation
+
+Sir manually entered a valuation for his property at 200,000,000 HUF but realised it should have been 20,000,000. Destroy and re-create:
+
+```
+self({endpoint: "/api/v1/sure/transactions", method: "GET", query: {account_id: "<property-id>", per_page: 50}})
+// → among entries, find the Valuation entry id v1
+self({endpoint: "/api/v1/sure/valuations/v1", method: "DELETE"})
+// → {ok: true, deleted: "v1", account_id: "<property-id>"}
+self({endpoint: "/api/v1/sure/accounts/<property-id>/valuations", method: "POST", body: {
+  valuation: {date: "2026-04-29", amount: 20000000, currency: "HUF"}
+}})
+```
+
+### Pitfalls
+
+- **`DELETE /holdings/:id` also destroys every trade entry for that security.** This is by design — Sure's UI shows holdings as derived from trades, so destroying the holding without the trades would leave orphan entries that would re-create the holding on the next sync. Only call this when Sir explicitly wants to wipe the position, not "hide it temporarily".
+- **`remap_security` moves trades too.** If Sir had real trades on the *target* security before the remap, those will keep their qty/amount but be co-located with the remapped trades. In rare cases this can produce a holding that doesn't match either history. Confirm before remapping a security with non-trivial trade history.
+- **Cost basis is per-share, not total.** `set_manual_cost_basis` takes the per-share value (`value: "187.50"` for one share at 187.50). Sir is likely to ask for total cost basis — clarify before posting.
+- **Valuation id is the Entry id.** Sure models valuations as `Entry where entryable_type='Valuation'`. The id you pass to `DELETE /valuations/:id` is the Entry id from the transaction listing, not a separate valuation id.

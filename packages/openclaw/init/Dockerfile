@@ -23,6 +23,8 @@ COPY init/sure-entry-mutate.rb ./sure-entry-mutate.rb
 COPY init/sure-category-mutate.rb ./sure-category-mutate.rb
 COPY init/sure-tag-mutate.rb ./sure-tag-mutate.rb
 COPY init/sure-merchant-mutate.rb ./sure-merchant-mutate.rb
+COPY init/sure-holding-mutate.rb ./sure-holding-mutate.rb
+COPY init/sure-valuation-mutate.rb ./sure-valuation-mutate.rb
 COPY config.yaml.tpl ./config.yaml.tpl
 # Platform-native workspace content: skills that teach the main Alfred
 # agent how to use its ctrl_* tools, plus the canonical TOOLS.md capability

@@ -121,6 +121,10 @@ const TAG_MUTATE_CONTAINER_PATH =
   "/alfred-data/sure-bootstrap/sure-tag-mutate.rb";
 const MERCHANT_MUTATE_CONTAINER_PATH =
   "/alfred-data/sure-bootstrap/sure-merchant-mutate.rb";
+const HOLDING_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-holding-mutate.rb";
+const VALUATION_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-valuation-mutate.rb";
 
 interface MutateResult {
   ok: boolean;
@@ -206,6 +210,12 @@ const runTagMutate = (op: string, payload: unknown) =>
 
 const runMerchantMutate = (op: string, payload: unknown) =>
   runRailsRunnerMutate(MERCHANT_MUTATE_CONTAINER_PATH, op, payload, "SURE_MERCHANT_MUTATE_EXEC_FAILED");
+
+const runHoldingMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(HOLDING_MUTATE_CONTAINER_PATH, op, payload, "SURE_HOLDING_MUTATE_EXEC_FAILED");
+
+const runValuationMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(VALUATION_MUTATE_CONTAINER_PATH, op, payload, "SURE_VALUATION_MUTATE_EXEC_FAILED");
 
 function statusFromMutateResult(result: MutateResult): number {
   if (result.ok) return 200;
@@ -679,6 +689,42 @@ export function registerSureRoutes(): void {
   addRoute("POST", "/api/v1/sure/merchants/enhance", async ({ res }) => {
     const result = await runMerchantMutate("enhance", {});
     forwardMutateResult(res, "update", result, "SURE_MERCHANT_MUTATE_ERROR");
+  });
+
+  // --- Holding mutations (platform extension — Sure has no holding REST CRUD)
+  addRoute("DELETE", "/api/v1/sure/holdings/:id", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runHoldingMutate("destroy", { id });
+    forwardMutateResult(res, "delete", result, "SURE_HOLDING_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/holdings/:id/set_manual_cost_basis", async ({ res, params, body }) => {
+    const id = requireParam(params, "id");
+    const payload = { ...(body as Record<string, unknown>), id };
+    const result = await runHoldingMutate("set_manual_cost_basis", payload);
+    forwardMutateResult(res, "update", result, "SURE_HOLDING_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/holdings/:id/unlock_cost_basis", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runHoldingMutate("unlock_cost_basis", { id });
+    forwardMutateResult(res, "update", result, "SURE_HOLDING_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/holdings/:id/remap_security", async ({ res, params, body }) => {
+    const id = requireParam(params, "id");
+    const payload = { ...(body as Record<string, unknown>), id };
+    const result = await runHoldingMutate("remap_security", payload);
+    forwardMutateResult(res, "update", result, "SURE_HOLDING_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/holdings/:id/reset_security_to_provider", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runHoldingMutate("reset_security_to_provider", { id });
+    forwardMutateResult(res, "update", result, "SURE_HOLDING_MUTATE_ERROR");
+  });
+
+  // --- Valuation destroy (Entry id of the valuation)
+  addRoute("DELETE", "/api/v1/sure/valuations/:id", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runValuationMutate("destroy", { id });
+    forwardMutateResult(res, "delete", result, "SURE_VALUATION_MUTATE_ERROR");
   });
 
   // --- Rule apply_all (runs every family rule against historical transactions)

@@ -392,6 +392,79 @@ describe("Rules apply_all", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// PR3 — holdings, valuations
+// ---------------------------------------------------------------------------
+
+describe("Holding routes", () => {
+  it("DELETE /api/v1/sure/holdings/:id → 200", async () => {
+    setEnvelope({ ok: true, deleted: "h1", account_id: "acc-1" });
+    const { status, data } = await req("DELETE", "/api/v1/sure/holdings/h1");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.deleted, "h1");
+  });
+
+  it("POST /api/v1/sure/holdings/:id/set_manual_cost_basis → 200 with locked basis", async () => {
+    setEnvelope({
+      ok: true,
+      holding: { id: "h1", cost_basis: "187.50", cost_basis_source: "manual", cost_basis_locked: true },
+    });
+    const { status, data } = await req("POST", "/api/v1/sure/holdings/h1/set_manual_cost_basis", { value: "187.50" });
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.holding.cost_basis_source, "manual");
+    assert.strictEqual(data.holding.cost_basis_locked, true);
+  });
+
+  it("POST /api/v1/sure/holdings/:id/unlock_cost_basis → 200", async () => {
+    setEnvelope({ ok: true, holding: { id: "h1", cost_basis_locked: false } });
+    const { status, data } = await req("POST", "/api/v1/sure/holdings/h1/unlock_cost_basis");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.holding.cost_basis_locked, false);
+  });
+
+  it("POST /api/v1/sure/holdings/:id/remap_security → 200 with target ticker", async () => {
+    setEnvelope({
+      ok: true,
+      holding: { id: "h1", security_id: "s2" },
+      remapped_to: { id: "s2", ticker: "VOO" },
+    });
+    const { status, data } = await req("POST", "/api/v1/sure/holdings/h1/remap_security", {
+      ticker: "VOO",
+    });
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.remapped_to.ticker, "VOO");
+  });
+
+  it("POST /api/v1/sure/holdings/:id/reset_security_to_provider → 422 when no provider id", async () => {
+    setEnvelope({
+      ok: false,
+      error: "holding has no provider_security_id — nothing to reset",
+      status: "validation_error",
+    });
+    const { status } = await req("POST", "/api/v1/sure/holdings/h1/reset_security_to_provider");
+    assert.strictEqual(status, 422);
+  });
+});
+
+describe("Valuation routes", () => {
+  it("DELETE /api/v1/sure/valuations/:id → 200 with account_id", async () => {
+    setEnvelope({ ok: true, deleted: "v1", account_id: "acc-1" });
+    const { status, data } = await req("DELETE", "/api/v1/sure/valuations/v1");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.account_id, "acc-1");
+  });
+
+  it("DELETE /api/v1/sure/valuations/:id → 422 when entry is not a valuation", async () => {
+    setEnvelope({
+      ok: false,
+      error: "entry v1 is not a Valuation (entryable_type=\"Transaction\")",
+      status: "validation_error",
+    });
+    const { status } = await req("DELETE", "/api/v1/sure/valuations/v1");
+    assert.strictEqual(status, 422);
+  });
+});
+
 describe("regression — account + rule routes still mapped", () => {
   it("POST /api/v1/sure/accounts forwards to its own runner", async () => {
     setEnvelope({ ok: true, account: { id: "acc-1" } });

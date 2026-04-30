@@ -632,7 +632,7 @@ else
         # for surfaces Sure's REST API doesn't expose (accounts, rules,
         # transfers, entries, …). All hash-gated so re-running init is
         # idempotent.
-        for SCRIPT in sure-account-mutate.rb sure-rule-mutate.rb sure-transfer-mutate.rb sure-entry-mutate.rb sure-category-mutate.rb sure-tag-mutate.rb sure-merchant-mutate.rb; do
+        for SCRIPT in sure-account-mutate.rb sure-rule-mutate.rb sure-transfer-mutate.rb sure-entry-mutate.rb sure-category-mutate.rb sure-tag-mutate.rb sure-merchant-mutate.rb sure-holding-mutate.rb sure-valuation-mutate.rb; do
             SURE_MUT_SRC=/setup/$SCRIPT
             SURE_MUT_DST="$SURE_SCRIPT_DIR/$SCRIPT"
             if [[ -f "$SURE_MUT_SRC" ]]; then
