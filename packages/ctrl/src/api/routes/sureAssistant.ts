@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { addRoute } from "../server.js";
 import { sendJson, ApiError, ValidationError } from "../errors.js";
 
@@ -134,23 +136,25 @@ export function registerSureAssistantRoutes(): void {
       Connection: "keep-alive",
       "X-Accel-Buffering": "no",
     });
+    res.flushHeaders();
 
     if (!upstream.body) {
       res.end();
       return;
     }
 
-    const aborted = (): boolean => req.destroyed || res.writableEnded;
+    // Use Readable.fromWeb + pipeline so chunks flow as Node streams (the
+    // for-await pattern over a Web ReadableStream silently buffers under
+    // some conditions and Sure's SSE parser sees zero bytes despite a 200).
+    const nodeStream = Readable.fromWeb(
+      upstream.body as Parameters<typeof Readable.fromWeb>[0],
+    );
     try {
-      for await (const chunk of upstream.body as AsyncIterable<Uint8Array>) {
-        if (aborted()) break;
-        res.write(chunk);
-      }
+      await pipeline(nodeStream, res);
     } catch (err) {
       console.warn(
-        `[sure.assistant] stream interrupted: ${(err as Error).message}`,
+        `[sure.assistant] stream pipeline interrupted: ${(err as Error).message}`,
       );
-    } finally {
       if (!res.writableEnded) res.end();
     }
   });
