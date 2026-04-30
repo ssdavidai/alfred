@@ -275,6 +275,28 @@ when "preview"
 
   SUCCESS.call("affected_resource_count" => count, "sample" => sample)
 
+when "apply_all"
+  # Run every family rule against existing transactions in one pass —
+  # the equivalent of clicking "Apply all" in the Sure UI's Rules page.
+  ignore_locks = data["ignore_attribute_locks"] ? true : false
+  results = []
+  family.rules.order(:created_at).find_each do |r|
+    begin
+      r.apply(ignore_attribute_locks: ignore_locks)
+      results << {
+        "id" => r.id, "name" => r.name,
+        "affected_resource_count" => r.affected_resource_count,
+      }
+    rescue => e
+      results << { "id" => r.id, "name" => r.name, "error" => "#{e.class}: #{e.message}" }
+    end
+  end
+  SUCCESS.call(
+    "rules_applied"          => results.size,
+    "ignored_attribute_locks" => ignore_locks,
+    "results"                => results,
+  )
+
 else
-  FAIL.call("unknown op '#{op}' — must be list|show|create|update|delete|apply|preview")
+  FAIL.call("unknown op '#{op}' — must be list|show|create|update|delete|apply|apply_all|preview")
 end

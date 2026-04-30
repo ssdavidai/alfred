@@ -610,3 +610,68 @@ self({endpoint: "/api/v1/sure/rules/<new-rule-id>/apply", method: "POST", body: 
 ### Why this matters
 
 Sure is a tool. Sir is the customer. Sir is an operator. **Sir doesn't want to clickity-clackity through the Rules UI.** The whole point of running this finance app inside Alfred is that the user and the operator are different people. You analyse, you propose, you confirm, you execute — Sir reads the summary at the end of the day and sees that the books are clean.
+
+---
+
+## Categories, tags, merchants, and apply-all (platform extensions — PR2)
+
+Sure's REST surface for taxonomy is read-only. These platform extension routes give you write access via `bin/rails runner` scripts staged in the tenant's init image. Same envelope as account/rule mutate (HTTP 200/201/422/404/502).
+
+### Endpoint reference
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/v1/sure/categories/bootstrap` | POST | Seed Sir's family with the canonical default category set if empty |
+| `/api/v1/sure/categories` | POST | Create a category (`name`, `color`, `classification: "income"\|"expense"`, `lucide_icon`, `parent_id`) |
+| `/api/v1/sure/categories/:id` | PATCH | Update a category — same fields |
+| `/api/v1/sure/categories/:id?replacement_id=<id>` | DELETE | Destroy a category and replace it on every transaction with the replacement (drop `replacement_id` to leave them uncategorized) |
+| `/api/v1/sure/tags/:id/merge_into/:replacement_id` | POST | Merge a duplicate tag into a canonical one — every transaction's tag is rewritten then the source is destroyed |
+| `/api/v1/sure/merchants` | POST | Create a custom family merchant (`name`, `color`, `website_url`) — auto-fills the logo |
+| `/api/v1/sure/merchants/:id` | PATCH | Rename, recolor, or rewrite the website_url of a family merchant |
+| `/api/v1/sure/merchants/:id` | DELETE | Destroy a family merchant (transactions keep their string label) |
+| `/api/v1/sure/merchants/merge` | POST | Merge `source_merchant_ids[]` into `target_merchant_id`. Reassigns transactions then destroys the sources |
+| `/api/v1/sure/merchants/enhance` | POST | Enqueue `EnhanceProviderMerchantsJob` to refresh provider-merchant logos/metadata |
+| `/api/v1/sure/rules/apply_all` | POST | Run every family rule against historical transactions in one pass. Body: `{ignore_attribute_locks: false}` |
+
+### Worked example — merge four duplicate Tesco merchants
+
+Sir has somehow accumulated `Tesco`, `Tesco Express`, `TESCO`, and `Tesco Stores Ltd` as four separate family-merchant rows because his bank descriptions vary. Pick the canonical one and merge:
+
+```
+self({endpoint: "/api/v1/sure/merchants", method: "GET"})
+// → finds m1=Tesco, m2=Tesco Express, m3=TESCO, m4=Tesco Stores Ltd
+self({endpoint: "/api/v1/sure/merchants/merge", method: "POST", body: {
+  target_merchant_id: "m1",
+  source_merchant_ids: ["m2", "m3", "m4"]
+}})
+// → {ok: true, target_merchant_id: "m1", merged_count: 3, merged_source_ids: [...]}
+```
+
+Every transaction previously tagged with m2/m3/m4 now points at m1 and the duplicates are gone. Spending-by-merchant queries finally make sense.
+
+### Worked example — merge an extra category
+
+Sir created `Coffee` and later realised it overlaps with `Eating Out`. Replace and destroy:
+
+```
+self({endpoint: "/api/v1/sure/categories/<coffee-id>?replacement_id=<eating-out-id>", method: "DELETE"})
+// → {ok: true, deleted: "<coffee-id>", replacement_id: "<eating-out-id>", reassigned_transactions: 47}
+```
+
+### Worked example — apply every rule after a bulk import
+
+After Sir imports a CSV from his old bank, run all his rules in one pass so the new history gets categorised the way the live feed would:
+
+```
+self({endpoint: "/api/v1/sure/rules/apply_all", method: "POST", body: {ignore_attribute_locks: false}})
+// → {ok: true, rules_applied: 12, results: [{id, name, affected_resource_count}, ...]}
+```
+
+`ignore_attribute_locks: true` overrides any per-transaction locks Sir set when correcting an earlier mis-classification — only use it when Sir explicitly says "yes, replay the rules over my manual edits too".
+
+### Pitfalls
+
+- **Category `replacement_id` is optional but usually required.** Destroying a category with transactions attached and no replacement leaves them uncategorised — almost always wrong. Always offer a replacement unless Sir explicitly wants the orphan.
+- **Tag merge is one-way.** `POST /api/v1/sure/tags/<source>/merge_into/<target>` destroys the source. Confirm the target id is correct first via `GET /api/v1/sure/tags`.
+- **Provider merchants vs family merchants.** Sure has two merchant flavours: `ProviderMerchant` (auto-detected from bank-feed data, read-only) and `FamilyMerchant` (Sir's manual ones). The mutate endpoints only touch family merchants. `merchants/enhance` refreshes the provider side asynchronously.
+- **`apply_all` can take 30+ seconds on a busy family.** It loops every rule synchronously through the same scope-and-update path the manual `Apply` button uses. Acceptable for a 30s-budget tool call but consider running it during a Money Day brief, not in the middle of an interactive chat.

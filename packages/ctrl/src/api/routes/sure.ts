@@ -115,6 +115,12 @@ const TRANSFER_MUTATE_CONTAINER_PATH =
   "/alfred-data/sure-bootstrap/sure-transfer-mutate.rb";
 const ENTRY_MUTATE_CONTAINER_PATH =
   "/alfred-data/sure-bootstrap/sure-entry-mutate.rb";
+const CATEGORY_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-category-mutate.rb";
+const TAG_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-tag-mutate.rb";
+const MERCHANT_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-merchant-mutate.rb";
 
 interface MutateResult {
   ok: boolean;
@@ -191,6 +197,15 @@ const runTransferMutate = (op: string, payload: unknown) =>
 
 const runEntryMutate = (op: string, payload: unknown) =>
   runRailsRunnerMutate(ENTRY_MUTATE_CONTAINER_PATH, op, payload, "SURE_ENTRY_MUTATE_EXEC_FAILED");
+
+const runCategoryMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(CATEGORY_MUTATE_CONTAINER_PATH, op, payload, "SURE_CATEGORY_MUTATE_EXEC_FAILED");
+
+const runTagMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(TAG_MUTATE_CONTAINER_PATH, op, payload, "SURE_TAG_MUTATE_EXEC_FAILED");
+
+const runMerchantMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(MERCHANT_MUTATE_CONTAINER_PATH, op, payload, "SURE_MERCHANT_MUTATE_EXEC_FAILED");
 
 function statusFromMutateResult(result: MutateResult): number {
   if (result.ok) return 200;
@@ -609,5 +624,72 @@ export function registerSureRoutes(): void {
   addRoute("POST", "/api/v1/sure/transactions/bulk_delete", async ({ res, body }) => {
     const result = await runEntryMutate("bulk_delete", body);
     forwardMutateResult(res, "delete", result, "SURE_ENTRY_MUTATE_ERROR");
+  });
+
+  // --- Category mutations (platform extension — Sure's REST API is GET-only)
+  addRoute("POST", "/api/v1/sure/categories/bootstrap", async ({ res }) => {
+    const result = await runCategoryMutate("bootstrap", {});
+    forwardMutateResult(res, "update", result, "SURE_CATEGORY_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/categories", async ({ res, body }) => {
+    const result = await runCategoryMutate("create", body);
+    forwardMutateResult(res, "create", result, "SURE_CATEGORY_MUTATE_ERROR");
+  });
+  addRoute("PATCH", "/api/v1/sure/categories/:id", async ({ res, params, body }) => {
+    const id = requireParam(params, "id");
+    const payload = { ...(body as Record<string, unknown>), id };
+    const result = await runCategoryMutate("update", payload);
+    forwardMutateResult(res, "update", result, "SURE_CATEGORY_MUTATE_ERROR");
+  });
+  addRoute("DELETE", "/api/v1/sure/categories/:id", async ({ res, params, query }) => {
+    const id = requireParam(params, "id");
+    const replacementId = query.get("replacement_id") || undefined;
+    const result = await runCategoryMutate("replace_and_destroy", { id, replacement_id: replacementId });
+    forwardMutateResult(res, "delete", result, "SURE_CATEGORY_MUTATE_ERROR");
+  });
+
+  // --- Tag merge (platform extension — REST tag CRUD already covers create/update/delete)
+  addRoute("POST", "/api/v1/sure/tags/:id/merge_into/:replacement_id", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const replacementId = requireParam(params, "replacement_id");
+    const result = await runTagMutate("replace_and_destroy", { id, replacement_id: replacementId });
+    forwardMutateResult(res, "delete", result, "SURE_TAG_MUTATE_ERROR");
+  });
+
+  // --- Merchant mutations (platform extension — REST merchants endpoint is GET-only)
+  addRoute("POST", "/api/v1/sure/merchants", async ({ res, body }) => {
+    const result = await runMerchantMutate("create", body);
+    forwardMutateResult(res, "create", result, "SURE_MERCHANT_MUTATE_ERROR");
+  });
+  addRoute("PATCH", "/api/v1/sure/merchants/:id", async ({ res, params, body }) => {
+    const id = requireParam(params, "id");
+    const payload = { ...(body as Record<string, unknown>), id };
+    const result = await runMerchantMutate("update", payload);
+    forwardMutateResult(res, "update", result, "SURE_MERCHANT_MUTATE_ERROR");
+  });
+  addRoute("DELETE", "/api/v1/sure/merchants/:id", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runMerchantMutate("destroy", { id });
+    forwardMutateResult(res, "delete", result, "SURE_MERCHANT_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/merchants/merge", async ({ res, body }) => {
+    const result = await runMerchantMutate("merge", body);
+    forwardMutateResult(res, "update", result, "SURE_MERCHANT_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/merchants/enhance", async ({ res }) => {
+    const result = await runMerchantMutate("enhance", {});
+    forwardMutateResult(res, "update", result, "SURE_MERCHANT_MUTATE_ERROR");
+  });
+
+  // --- Rule apply_all (runs every family rule against historical transactions)
+  addRoute("POST", "/api/v1/sure/rules/apply_all", async ({ res, body }) => {
+    const result = await runRuleMutate("apply_all", body);
+    if (!result.ok) {
+      sendJson(res, statusFromMutateResult(result), {
+        error: { code: "SURE_RULE_APPLY_ERROR", message: result.error || "unknown error" },
+      });
+      return;
+    }
+    sendJson(res, 200, result);
   });
 }

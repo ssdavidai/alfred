@@ -306,6 +306,92 @@ describe("POST /api/v1/sure/transactions/bulk_delete", () => {
 // shared helper code path (no regressions from the helper extraction).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// PR2 — categories, tags, merchants, rules.apply_all
+// ---------------------------------------------------------------------------
+
+describe("Category routes", () => {
+  it("POST /api/v1/sure/categories/bootstrap → 200 with seeded set", async () => {
+    setEnvelope({ ok: true, categories: [{ id: "c1", name: "Income" }] });
+    const { status, data } = await req("POST", "/api/v1/sure/categories/bootstrap");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.categories.length, 1);
+  });
+
+  it("POST /api/v1/sure/categories → 201", async () => {
+    setEnvelope({ ok: true, category: { id: "c2", name: "Custom" } });
+    const { status, data } = await req("POST", "/api/v1/sure/categories", { name: "Custom", color: "#fff" });
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.category.name, "Custom");
+  });
+
+  it("PATCH /api/v1/sure/categories/:id → 200", async () => {
+    setEnvelope({ ok: true, category: { id: "c2", name: "Renamed" } });
+    const { status, data } = await req("PATCH", "/api/v1/sure/categories/c2", { name: "Renamed" });
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.category.name, "Renamed");
+  });
+
+  it("DELETE /api/v1/sure/categories/:id → 200 with deleted + replacement", async () => {
+    setEnvelope({ ok: true, deleted: "c2", replacement_id: "c1" });
+    const { status, data } = await req("DELETE", "/api/v1/sure/categories/c2?replacement_id=c1");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.deleted, "c2");
+    assert.strictEqual(data.replacement_id, "c1");
+  });
+});
+
+describe("Tag merge route", () => {
+  it("POST /api/v1/sure/tags/:id/merge_into/:replacement_id → 200", async () => {
+    setEnvelope({ ok: true, deleted: "tag-1", replacement_id: "tag-2" });
+    const { status, data } = await req("POST", "/api/v1/sure/tags/tag-1/merge_into/tag-2");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.deleted, "tag-1");
+  });
+});
+
+describe("Merchant routes", () => {
+  it("POST /api/v1/sure/merchants → 201", async () => {
+    setEnvelope({ ok: true, merchant: { id: "m1", name: "Tesco" } });
+    const { status, data } = await req("POST", "/api/v1/sure/merchants", { name: "Tesco" });
+    assert.strictEqual(status, 201);
+    assert.strictEqual(data.merchant.name, "Tesco");
+  });
+
+  it("POST /api/v1/sure/merchants/merge → 200 with merged_count", async () => {
+    setEnvelope({ ok: true, target_merchant_id: "m1", merged_count: 3, merged_source_ids: ["a", "b", "c"] });
+    const { status, data } = await req("POST", "/api/v1/sure/merchants/merge", {
+      target_merchant_id: "m1",
+      source_merchant_ids: ["a", "b", "c"],
+    });
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.merged_count, 3);
+  });
+
+  it("POST /api/v1/sure/merchants/enhance → 200 with enqueue confirmation", async () => {
+    setEnvelope({ ok: true, enqueued: "EnhanceProviderMerchantsJob", family_id: "fam-1" });
+    const { status, data } = await req("POST", "/api/v1/sure/merchants/enhance");
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.enqueued, "EnhanceProviderMerchantsJob");
+  });
+});
+
+describe("Rules apply_all", () => {
+  it("POST /api/v1/sure/rules/apply_all → 200 with per-rule results", async () => {
+    setEnvelope({
+      ok: true, rules_applied: 2,
+      results: [
+        { id: "r1", name: "JBC", affected_resource_count: 12 },
+        { id: "r2", name: "CIB", affected_resource_count: 4 },
+      ],
+    });
+    const { status, data } = await req("POST", "/api/v1/sure/rules/apply_all", {});
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.rules_applied, 2);
+    assert.strictEqual(data.results[0].affected_resource_count, 12);
+  });
+});
+
 describe("regression — account + rule routes still mapped", () => {
   it("POST /api/v1/sure/accounts forwards to its own runner", async () => {
     setEnvelope({ ok: true, account: { id: "acc-1" } });
