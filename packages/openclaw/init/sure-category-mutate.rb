@@ -14,7 +14,10 @@
 #
 # Source-of-truth references (we-promise/sure @ main):
 #   app/models/category.rb                       — Category model
-#       .bootstrap! (class method, NOT Family#categories.bootstrap!)
+#       .bootstrap! is a class method but its body uses find_or_create_by!
+#       without a family scope — call it via the association proxy
+#       (`family.categories.bootstrap!`) so the relation's default scope
+#       supplies family_id automatically.
 #       #replace_and_destroy!(replacement)       (takes Category object, NOT id)
 #   app/controllers/categories_controller.rb     — web equivalent
 
@@ -44,8 +47,10 @@ family   = SureMutate.family!
 case op
 when "bootstrap"
   # Seeds the default category set if categories are missing. Idempotent.
+  # Must be invoked through the association proxy so find_or_create_by!
+  # picks up the family_id from the relation's default scope.
   begin
-    Category.bootstrap! if Category.respond_to?(:bootstrap!)
+    family.categories.bootstrap!
   rescue => e
     SureMutate.fail!("bootstrap failed: #{e.class}: #{e.message}")
   end
