@@ -109,8 +109,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--llm-model",
-        default=os.environ.get("SURE_CLUSTER_LLM_MODEL", "x-ai/grok-4.1-fast"),
-        help="LLM model id (must be available on the OpenClaw gateway).",
+        default=os.environ.get("SURE_CLUSTER_LLM_MODEL", "openclaw"),
+        help=(
+            "OpenClaw model identifier ('openclaw' for default agent, or "
+            "'openclaw/<agentId>'). Arbitrary upstream IDs are rejected by "
+            "the gateway."
+        ),
     )
     parser.add_argument(
         "--available-categories",

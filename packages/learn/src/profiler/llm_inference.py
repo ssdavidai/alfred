@@ -39,7 +39,12 @@ import httpx
 logger = logging.getLogger(__name__)
 
 LLM_BATCH_SIZE = 50
-LLM_MODEL = os.environ.get("SURE_CLUSTER_LLM_MODEL", "x-ai/grok-4.1-fast")
+# OpenClaw's /v1/chat/completions endpoint accepts `openclaw` (default
+# agent) or `openclaw/<agentId>` (e.g. `openclaw/learn-clerk`). Arbitrary
+# upstream model IDs (`x-ai/grok-4.1-fast`, `claude-sonnet-4-6`, etc.)
+# are rejected with HTTP 400. The actual model is selected by the
+# gateway's per-agent config — see auth-profiles.json on each tenant.
+LLM_MODEL = os.environ.get("SURE_CLUSTER_LLM_MODEL", "openclaw")
 LLM_TIMEOUT_SECONDS = float(os.environ.get("SURE_CLUSTER_LLM_TIMEOUT", "60"))
 
 

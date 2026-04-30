@@ -210,7 +210,7 @@ async def iterative_cluster(
                         available_tags=available_tags or [],
                         base_url=llm_base_url or "",
                         token=llm_token or "",
-                        model=llm_model or "x-ai/grok-4.1-fast",
+                        model=llm_model or "openclaw",
                     )
                 except Exception:
                     logger.exception("LLM pass failed; continuing")
