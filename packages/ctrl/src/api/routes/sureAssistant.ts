@@ -4,7 +4,25 @@ import { pipeline } from "node:stream/promises";
 import { addRoute } from "../server.js";
 import { sendJson, ApiError, ValidationError } from "../errors.js";
 
-const SURE_SYSTEM_PROMPT = `You are Sir's financial Alfred — this conversation runs inside his Sure self-hosted finance app. Apply the \`alfred-sure-operations\` skill rigorously: before answering anything about money, call the MCP \`self\` tool with \`/api/v1/sure/balance_sheet\`, \`/api/v1/sure/accounts\`, or \`/api/v1/sure/transactions\` to ground every answer in current data. Sir uses HUF, EUR, USD, and GBP simultaneously — translate amounts to natural language with the correct currency symbol, name the FX assumption when totalling cross-currency, and never paste raw JSON to Sir. Lead with financial framing; fall back to other skills if Sir asks something unrelated.`;
+// OpenClaw's OpenAI-compatible /v1/chat/completions endpoint silently drops
+// user-supplied `role: "system"` messages and uses its own workspace-derived
+// system prompt. We can't override that, but we *can* establish session
+// context by injecting a synthetic user → assistant turn pair at the start of
+// the first conversation — OpenClaw treats those as real conversation history
+// and they persist in the session, so the agent stays primed for the rest of
+// the chat. (45 skills are loaded into the catalog in compact form; the
+// agent has to `read` SKILL.md files to bring details into context, hence the
+// explicit nudge.)
+const SURE_PRIMING_USER = `[Sure Chat Bridge] You are responding inside Sir's self-hosted Sure personal-finance app. For this entire conversation:
+
+1. **Read \`workspace/skills/alfred-sure-operations/SKILL.md\` first** and apply it rigorously.
+2. **Before answering anything about money**, call the MCP \`self\` tool with one of \`/api/v1/sure/balance_sheet\`, \`/api/v1/sure/accounts\`, \`/api/v1/sure/transactions\`, \`/api/v1/sure/categories\`, or \`/api/v1/sure/merchants\`. Never speculate from vault data alone — ground every figure in a fresh Sure API call.
+3. Sir uses **HUF, EUR, USD, and GBP** simultaneously. Translate amounts to natural language with the right currency symbol (€, $, Ft, £). Name the FX assumption when totalling cross-currency. Never paste raw JSON.
+4. Lead with financial framing. If Sir asks something unrelated, fall back to your other skills — but don't volunteer non-financial threads.
+
+Acknowledge briefly and wait for Sir's first question.`;
+
+const SURE_PRIMING_ASSISTANT = `Understood, Sir. I'll load \`alfred-sure-operations\` and lead with a fresh Sure API call for any question about your finances. Ready when you are.`;
 
 const OPENCLAW_URL = process.env.OPENCLAW_GATEWAY_URL || "http://openclaw:18789";
 const OPENCLAW_AGENT_ID = "openclaw/main";
@@ -87,10 +105,17 @@ export function registerSureAssistantRoutes(): void {
       fireAndForgetSync();
     }
 
-    const enhancedMessages = [
-      { role: "system", content: SURE_SYSTEM_PROMPT },
-      ...messages,
-    ];
+    // Only inject the priming turn pair on the FIRST user message — once
+    // OpenClaw's session has the priming as past context, it sticks for the
+    // life of the session. Subsequent calls forward Sure's history as-is.
+    const enhancedMessages =
+      userMessageCount === 1
+        ? [
+            { role: "user", content: SURE_PRIMING_USER },
+            { role: "assistant", content: SURE_PRIMING_ASSISTANT },
+            ...messages,
+          ]
+        : messages;
 
     const upstreamUrl = `${OPENCLAW_URL.replace(/\/+$/, "")}/v1/chat/completions`;
     let upstream: Response;
