@@ -101,53 +101,52 @@ function requireParam(params: Record<string, string>, name: string): string {
   return v;
 }
 
-// Account mutation goes through a Rails runner inside sure-web because
-// Sure's public API is read-only for accounts. The script reads JSON
-// from a file in the shared /alfred-data volume (mode 0o600), invokes
-// Sure's ActiveRecord models directly, and prints a single JSON line on
-// stdout. See packages/openclaw/init/sure-account-mutate.rb.
-const ACCOUNT_MUTATE_HOST_DIR = "/mnt/encrypted/alfred";
+// Mutation surfaces that Sure's REST API doesn't expose (account CRUD,
+// rule CRUD) go through Rails-runner scripts inside sure-web. Each
+// script reads JSON from a file in the shared /alfred-data volume,
+// invokes Sure's ActiveRecord models directly, and prints a single
+// JSON line on stdout. See packages/openclaw/init/sure-*-mutate.rb.
+const MUTATE_HOST_DIR = "/mnt/encrypted/alfred";
 const ACCOUNT_MUTATE_CONTAINER_PATH =
   "/alfred-data/sure-bootstrap/sure-account-mutate.rb";
+const RULE_MUTATE_CONTAINER_PATH =
+  "/alfred-data/sure-bootstrap/sure-rule-mutate.rb";
 
-interface AccountMutateResult {
+interface MutateResult {
   ok: boolean;
-  account?: Record<string, unknown>;
-  deleted?: string;
   error?: string;
   status?: string;
+  [key: string]: unknown;
 }
 
-async function runAccountMutate(
-  op: "create" | "update" | "delete",
+async function runRailsRunnerMutate(
+  scriptPath: string,
+  op: string,
   payload: unknown,
-): Promise<AccountMutateResult> {
+  errCode: string,
+): Promise<MutateResult> {
   const id = crypto.randomBytes(8).toString("hex");
-  const hostFile = path.join(ACCOUNT_MUTATE_HOST_DIR, `.sure-mutate-${id}.json`);
+  const hostFile = path.join(MUTATE_HOST_DIR, `.sure-mutate-${id}.json`);
   const containerFile = `/alfred-data/.sure-mutate-${id}.json`;
 
-  fs.mkdirSync(ACCOUNT_MUTATE_HOST_DIR, { recursive: true });
-  // 0644 (not 0600) — ctrl-api runs as root, sure-web runs as uid 1000
-  // (rails). Same EACCES we hit on the bootstrap files. The tempfile is
-  // on the encrypted volume mounted only into trusted containers, so
-  // world-read is safe.
-  fs.writeFileSync(hostFile, JSON.stringify(payload), { mode: 0o644 });
+  fs.mkdirSync(MUTATE_HOST_DIR, { recursive: true });
+  // 0644 — ctrl-api runs as root, sure-web runs as uid 1000 (rails).
+  fs.writeFileSync(hostFile, JSON.stringify(payload ?? {}), { mode: 0o644 });
 
   let stdout: string;
   try {
     stdout = await dockerExec("sure-web", [
       "bin/rails",
       "runner",
-      ACCOUNT_MUTATE_CONTAINER_PATH,
+      scriptPath,
       op,
       containerFile,
     ]);
   } catch (err) {
-    fs.unlinkSync(hostFile);
     throw new ApiError(
       502,
-      "SURE_MUTATE_EXEC_FAILED",
-      `Failed to run account mutate via sure-web: ${(err as Error).message}`,
+      errCode,
+      `Rails-runner exec failed: ${(err as Error).message}`,
     );
   } finally {
     try {
@@ -157,50 +156,64 @@ async function runAccountMutate(
     }
   }
 
-  // The script prints a single JSON line. Rails boot can emit warnings
-  // before our line, so scan from the bottom for the JSON object.
+  // Rails boot emits warnings before our line — scan from the bottom
+  // for the JSON object.
   const lines = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (line.startsWith("{") && line.endsWith("}")) {
       try {
-        return JSON.parse(line) as AccountMutateResult;
+        return JSON.parse(line) as MutateResult;
       } catch {
-        // keep scanning
+        /* keep scanning */
       }
     }
   }
   throw new ApiError(
     502,
     "SURE_MUTATE_PARSE_FAILED",
-    `Could not parse JSON from sure-account-mutate output: ${stdout.slice(0, 500)}`,
+    `Could not parse JSON from Rails-runner output: ${stdout.slice(0, 500)}`,
   );
+}
+
+const runAccountMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(ACCOUNT_MUTATE_CONTAINER_PATH, op, payload, "SURE_MUTATE_EXEC_FAILED");
+
+const runRuleMutate = (op: string, payload: unknown) =>
+  runRailsRunnerMutate(RULE_MUTATE_CONTAINER_PATH, op, payload, "SURE_RULE_MUTATE_EXEC_FAILED");
+
+function statusFromMutateResult(result: MutateResult): number {
+  if (result.ok) return 200;
+  switch (result.status) {
+    case "validation_error":
+      return 422;
+    case "not_found":
+      return 404;
+    case "linked_account":
+      return 409;
+    default:
+      return 400;
+  }
 }
 
 function forwardMutateResult(
   res: import("node:http").ServerResponse,
   op: "create" | "update" | "delete",
-  result: AccountMutateResult,
+  result: MutateResult,
+  errorCode: string,
 ): void {
   if (!result.ok) {
-    const status = result.status === "validation_error"
-      ? 422
-      : result.status === "not_found"
-        ? 404
-        : result.status === "linked_account"
-          ? 409
-          : 400;
-    sendJson(res, status, {
-      error: { code: "SURE_ACCOUNT_MUTATE_ERROR", message: result.error || "unknown error" },
+    sendJson(res, statusFromMutateResult(result), {
+      error: { code: errorCode, message: result.error || "unknown error" },
     });
     return;
   }
   if (op === "create") {
-    sendJson(res, 201, { account: result.account });
+    sendJson(res, 201, result);
   } else if (op === "delete") {
     sendJson(res, 200, { deleted: result.deleted });
   } else {
-    sendJson(res, 200, { account: result.account });
+    sendJson(res, 200, result);
   }
 }
 
@@ -221,18 +234,83 @@ export function registerSureRoutes(): void {
   });
   addRoute("POST", "/api/v1/sure/accounts", async ({ res, body }) => {
     const result = await runAccountMutate("create", body);
-    forwardMutateResult(res, "create", result);
+    forwardMutateResult(res, "create", result, "SURE_ACCOUNT_MUTATE_ERROR");
   });
   addRoute("PATCH", "/api/v1/sure/accounts/:id", async ({ res, params, body }) => {
     const id = requireParam(params, "id");
     const payload = { ...(body as Record<string, unknown>), id };
     const result = await runAccountMutate("update", payload);
-    forwardMutateResult(res, "update", result);
+    forwardMutateResult(res, "update", result, "SURE_ACCOUNT_MUTATE_ERROR");
   });
   addRoute("DELETE", "/api/v1/sure/accounts/:id", async ({ res, params }) => {
     const id = requireParam(params, "id");
     const result = await runAccountMutate("delete", { id });
-    forwardMutateResult(res, "delete", result);
+    forwardMutateResult(res, "delete", result, "SURE_ACCOUNT_MUTATE_ERROR");
+  });
+
+  // --- Rules (platform extension — Sure's Rules engine has no REST API)
+  // GET list / show via the runner's `list` and `show` ops.
+  // POST/PATCH/DELETE create/update/delete rules.
+  // POST /preview returns matching transactions WITHOUT saving the rule.
+  // POST /:id/apply runs the rule against historical transactions.
+  addRoute("GET", "/api/v1/sure/rules", async ({ res, query }) => {
+    const limit = parseInt(query.get("limit") || "100", 10);
+    const result = await runRuleMutate("list", { limit });
+    if (!result.ok) {
+      sendJson(res, statusFromMutateResult(result), {
+        error: { code: "SURE_RULE_MUTATE_ERROR", message: result.error || "unknown error" },
+      });
+      return;
+    }
+    sendJson(res, 200, result);
+  });
+  addRoute("GET", "/api/v1/sure/rules/:id", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runRuleMutate("show", { id });
+    if (!result.ok) {
+      sendJson(res, statusFromMutateResult(result), {
+        error: { code: "SURE_RULE_MUTATE_ERROR", message: result.error || "unknown error" },
+      });
+      return;
+    }
+    sendJson(res, 200, result);
+  });
+  addRoute("POST", "/api/v1/sure/rules", async ({ res, body }) => {
+    const result = await runRuleMutate("create", body);
+    forwardMutateResult(res, "create", result, "SURE_RULE_MUTATE_ERROR");
+  });
+  addRoute("PATCH", "/api/v1/sure/rules/:id", async ({ res, params, body }) => {
+    const id = requireParam(params, "id");
+    const payload = { ...(body as Record<string, unknown>), id };
+    const result = await runRuleMutate("update", payload);
+    forwardMutateResult(res, "update", result, "SURE_RULE_MUTATE_ERROR");
+  });
+  addRoute("DELETE", "/api/v1/sure/rules/:id", async ({ res, params }) => {
+    const id = requireParam(params, "id");
+    const result = await runRuleMutate("delete", { id });
+    forwardMutateResult(res, "delete", result, "SURE_RULE_MUTATE_ERROR");
+  });
+  addRoute("POST", "/api/v1/sure/rules/:id/apply", async ({ res, params, body }) => {
+    const id = requireParam(params, "id");
+    const payload = { ...(body as Record<string, unknown>), id };
+    const result = await runRuleMutate("apply", payload);
+    if (!result.ok) {
+      sendJson(res, statusFromMutateResult(result), {
+        error: { code: "SURE_RULE_APPLY_ERROR", message: result.error || "unknown error" },
+      });
+      return;
+    }
+    sendJson(res, 200, result);
+  });
+  addRoute("POST", "/api/v1/sure/rules/preview", async ({ res, body }) => {
+    const result = await runRuleMutate("preview", body);
+    if (!result.ok) {
+      sendJson(res, statusFromMutateResult(result), {
+        error: { code: "SURE_RULE_PREVIEW_ERROR", message: result.error || "unknown error" },
+      });
+      return;
+    }
+    sendJson(res, 200, result);
   });
 
   // --- Balance sheet --------------------------------------------------

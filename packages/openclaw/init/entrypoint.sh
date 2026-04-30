@@ -607,24 +607,27 @@ else
             echo "[init] WARNING: $SURE_SCRIPT_SRC missing from image — Sure bootstrap will fail."
         fi
 
-        # Account mutation script — gives ctrl-api a Rails-runner-backed
-        # CRUD path for accounts (Sure's REST API exposes only GET).
-        SURE_MUT_SRC=/setup/sure-account-mutate.rb
-        SURE_MUT_DST="$SURE_SCRIPT_DIR/sure-account-mutate.rb"
-        if [[ -f "$SURE_MUT_SRC" ]]; then
-            SURE_MUT_HASH=$(md5sum "$SURE_MUT_SRC" | cut -d' ' -f1)
-            SURE_MUT_HASH_FILE="$SURE_SCRIPT_DIR/.sure-account-mutate.rb.content-hash"
-            if [[ -f "$SURE_MUT_HASH_FILE" && "$(cat "$SURE_MUT_HASH_FILE")" == "$SURE_MUT_HASH" && -f "$SURE_MUT_DST" ]]; then
-                echo "[init] sure-account-mutate.rb unchanged, skipping copy"
+        # Mutation scripts — give ctrl-api Rails-runner-backed CRUD paths
+        # for surfaces Sure's REST API doesn't expose (accounts, rules,
+        # …). All hash-gated so re-running init is idempotent.
+        for SCRIPT in sure-account-mutate.rb sure-rule-mutate.rb; do
+            SURE_MUT_SRC=/setup/$SCRIPT
+            SURE_MUT_DST="$SURE_SCRIPT_DIR/$SCRIPT"
+            if [[ -f "$SURE_MUT_SRC" ]]; then
+                SURE_MUT_HASH=$(md5sum "$SURE_MUT_SRC" | cut -d' ' -f1)
+                SURE_MUT_HASH_FILE="$SURE_SCRIPT_DIR/.$SCRIPT.content-hash"
+                if [[ -f "$SURE_MUT_HASH_FILE" && "$(cat "$SURE_MUT_HASH_FILE")" == "$SURE_MUT_HASH" && -f "$SURE_MUT_DST" ]]; then
+                    echo "[init] $SCRIPT unchanged, skipping copy"
+                else
+                    cp "$SURE_MUT_SRC" "$SURE_MUT_DST"
+                    echo "$SURE_MUT_HASH" > "$SURE_MUT_HASH_FILE"
+                    chmod 644 "$SURE_MUT_DST" 2>/dev/null || true
+                    echo "[init] Deployed $SCRIPT to $SURE_MUT_DST"
+                fi
             else
-                cp "$SURE_MUT_SRC" "$SURE_MUT_DST"
-                echo "$SURE_MUT_HASH" > "$SURE_MUT_HASH_FILE"
-                chmod 644 "$SURE_MUT_DST" 2>/dev/null || true
-                echo "[init] Deployed sure-account-mutate.rb to $SURE_MUT_DST"
+                echo "[init] WARNING: $SURE_MUT_SRC missing from image — corresponding Sure mutation surface will fail."
             fi
-        else
-            echo "[init] WARNING: $SURE_MUT_SRC missing from image — Sure account CRUD will fail."
-        fi
+        done
 
         echo "[init] Sure bootstrap staged. The sure-init compose service must run:"
         echo "[init]   bin/rails runner /alfred-data/sure-bootstrap/bootstrap.rb"

@@ -264,6 +264,13 @@ The ten endpoints above cover the vast majority of Sir's questions. The platform
 | GET | `/api/v1/sure/transactions/{id}` | Retrieve a transaction. |
 | PATCH | `/api/v1/sure/transactions/{id}` | Update / recategorize a transaction. |
 | DELETE | `/api/v1/sure/transactions/{id}` | Delete a transaction. |
+| GET | `/api/v1/sure/rules` | **Platform extension.** List family rules. See "Rules engine" below. |
+| GET | `/api/v1/sure/rules/{id}` | **Platform extension.** Show one rule with conditions + actions + affected count. |
+| POST | `/api/v1/sure/rules` | **Platform extension.** Create a rule. |
+| PATCH | `/api/v1/sure/rules/{id}` | **Platform extension.** Update a rule (conditions/actions replaced wholesale when supplied). |
+| DELETE | `/api/v1/sure/rules/{id}` | **Platform extension.** Delete a rule. |
+| POST | `/api/v1/sure/rules/preview` | **Platform extension.** Dry-run a rule definition; returns affected count + sample without saving. |
+| POST | `/api/v1/sure/rules/{id}/apply` | **Platform extension.** Re-run a rule against historical transactions. |
 | GET | `/api/v1/sure/usage` | Current API rate-limit window. |
 | POST | `/api/v1/sure/valuations` | Mark a balance for an illiquid account. |
 | GET | `/api/v1/sure/valuations/{id}` | Retrieve a valuation. |
@@ -322,8 +329,7 @@ Soft-deletes the account (status flips to `pending_deletion`, async hard-delete 
 - **No category mutations.** Sure seeds the category tree; categories cannot be created, renamed, or deleted via the API. Sir adjusts them in the Sure UI.
 - **No merchant mutations.** Merchants are inferred from transactions; you can read them but not edit. To "rename" a merchant, recategorize the transactions instead.
 - **No institution mutations.** Provider links (Lunchflow / Plaid / etc.) are managed exclusively through the Sure web UI's Settings → Providers screen. Sir pastes API keys there.
-- **No transfer creation.** Sure models loan payments and inter-account moves as `Transfer` records (paired outflow + inflow). There is no `transfer` field on `POST/PATCH /transactions` and no `/transfers` endpoint. Transfer creation is web-UI only — see the Transfers section below.
-- **No rule mutations.** Sure has a Rules engine (Settings → Rules) for automated transaction classification (mark-as-transfer, set-category, add-tag, etc.) but the API does not expose it. Sir builds rules in the UI.
+- **No transfer creation (one-off).** Sure models loan payments and inter-account moves as `Transfer` records (paired outflow + inflow). There is no `transfer` field on `POST/PATCH /transactions` and no `/transfers` endpoint. **For recurring transfers — use the Rules engine via the platform extension at `/api/v1/sure/rules` (see below).** For one-off transfers, the Sure UI's "Mark as transfer" button is still the only path.
 
 For transactions, trades, valuations, tags, chats, and imports — full CRUD is available through the standard REST surface listed in the table above.
 
@@ -356,8 +362,127 @@ When Sir asks you to "set up auto-classification for my loan payments", walk him
 
 For a one-off payment that wasn't captured by a rule, Sir opens the transaction in the Sure UI and clicks **Mark as transfer → choose destination loan**. Sure's `Transfer::Creator` service handles the rest: pairs a generated inflow on the loan side, creates the `Transfer` record with status `confirmed`, syncs both accounts. There is no API equivalent — recommend the UI step.
 
-### Why Alfred can't do this for Sir directly
+### Update — you CAN now create rules via API
 
-The Sure REST API exposes only the standard transaction CRUD. Marking a transaction as a transfer (or creating one outright) requires either the web `Transfer::Creator` service or the Rules engine — both UI-managed. If Sir asks you to "mark this as a transfer", the honest answer is: "I can't through the API, but you can in the Sure UI in two clicks — or set up a rule once and never do it again."
+The platform has a Rails-runner-backed Rules API at `/api/v1/sure/rules` that bypasses Sure's missing REST surface. Use it whenever Sir asks for automated transaction classification — including loan-payment transfers, recurring-merchant categorization, and so on. Full reference + analysis playbook below.
 
-The platform may later add a Rails-runner-backed transfer endpoint (similar to how `POST /api/v1/sure/accounts` bypasses Sure's API gap for account creation). Until then, transfers stay UI-only.
+You still cannot create a one-off `Transfer` via API (`POST /transfers` doesn't exist anywhere). For one-off transfers, recommend the UI's "Mark as transfer" button. For *recurring* patterns, build a rule.
+
+## Rules engine (platform extension)
+
+Sure's Rules engine matches transactions against a set of conditions and applies actions when they match. New transactions are evaluated automatically on the next sync; existing transactions can be re-evaluated with `apply`. The platform exposes the full surface at `/api/v1/sure/rules`.
+
+### Endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/sure/rules` | List family rules (newest first). |
+| GET | `/api/v1/sure/rules/{id}` | Show one rule with its conditions + actions + affected count. |
+| POST | `/api/v1/sure/rules` | Create a rule. |
+| PATCH | `/api/v1/sure/rules/{id}` | Update a rule. Conditions/actions are replaced wholesale when supplied. |
+| DELETE | `/api/v1/sure/rules/{id}` | Delete a rule (and its conditions/actions). |
+| POST | `/api/v1/sure/rules/preview` | Dry-run: build the rule but don't save; return matching transactions + count. **Use this before every create.** |
+| POST | `/api/v1/sure/rules/{id}/apply` | Run a rule against existing transactions. Body: `{ignore_attribute_locks: bool}`. |
+
+### Body shape — create / update / preview
+
+```
+{
+  "name": "JBC Mortgage auto-classifier",
+  "resource_type": "transaction",        // only "transaction" supported today
+  "effective_date": "2024-01-01",        // optional; only transactions on/after this date evaluated
+  "conditions": [                        // ALL must match (AND)
+    {"condition_type": "transaction_account", "operator": "=", "value": "<wise-huf-account-id>"},
+    {"condition_type": "transaction_amount",  "operator": "=", "value": "370847"},
+    {"condition_type": "transaction_name",    "operator": "like", "value": "%JBC%"}
+  ],
+  "actions": [
+    {"action_type": "set_as_transfer_or_payment", "value": "<jbc-mortgage-account-id>"}
+  ]
+}
+```
+
+Compound (OR-of-ANDs) conditions are supported via `condition_type: "compound"` with a `sub_conditions` array — but most Alfred-authored rules will be flat AND. Avoid nesting unless Sir explicitly needs OR.
+
+### Condition types and operators
+
+| condition_type | type | Operators | Value shape |
+|---|---|---|---|
+| `transaction_name` | text | `like` (SQL LIKE — use `%foo%`), `=`, `is_null` | string |
+| `transaction_amount` | number | `>`, `>=`, `<`, `<=`, `=` | string-or-number, **absolute value** (Sure compares `ABS(amount)`) |
+| `transaction_type` | select | `=` | `"income"` \| `"expense"` \| `"transfer"` |
+| `transaction_merchant` | select | `=`, `is_null` | merchant `id` (UUID) |
+| `transaction_category` | select | `=`, `is_null` | category `id` (UUID) |
+| `transaction_account` | select | `=`, `is_null` | account `id` (UUID) |
+| `transaction_details` | text | `like`, `=`, `is_null` | string |
+| `transaction_notes` | text | `like`, `=`, `is_null` | string |
+
+Notes: `transaction_amount` filters on the unsigned magnitude, so a 370,847 outflow matches `value: "370847"`. Combine with `transaction_account` (the source account) to disambiguate from inflows of the same magnitude. For a tight match, use `=`; for a forgiving match (Sir's payment varies by a few hundred Ft due to interest), use a compound `>=` and `<=` pair.
+
+### Action types and value shapes
+
+| action_type | Value | Effect |
+|---|---|---|
+| `set_as_transfer_or_payment` | account `id` (UUID) | Pairs the transaction with a generated inflow/outflow on the target account, creates a `Transfer` record with `kind: loan_payment` (for liabilities), `kind: cc_payment` (for credit cards), or `kind: funds_movement` (for cash transfers). This is the right action for monthly debt payments. |
+| `set_transaction_category` | category `id` (UUID) | Reclassify to a specific category. |
+| `set_transaction_tags` | comma-separated tag `id`s | Tag the transaction. |
+| `set_transaction_merchant` | merchant `id` (UUID) | Force a merchant. |
+| `set_transaction_name` | string | Rename the transaction. |
+| `exclude_transaction` | (no value) | Hide from spending/income totals (one-off use, e.g. internal accounting noise). |
+| `set_investment_activity_label` | string | Label investment activity (advanced — rarely needed). |
+| `auto_categorize` / `auto_detect_merchants` | (no value) | AI-driven; only available if Sure has an OpenAI key configured. Skip on a self-hosted tenant unless Sir set that up. |
+
+### Rules setup playbook (the analyze → propose → create loop)
+
+When Sir says "set up rules to make sense of my finances" or "automate my classifications", run this loop:
+
+**Phase 1 — Read.** Pull the last ~100 days of transactions:
+```
+self({endpoint: "/api/v1/sure/transactions", method: "GET", query: {start_date: "<today-100d>", per_page: 100}})
+```
+If pagination, walk all pages until empty. Collect: account, signed amount, date, name, merchant, category.
+
+**Phase 2 — Find patterns.** Look for groups of 3+ transactions sharing all of:
+- Same source account
+- Same magnitude (within ~1% — interest/fee variance is normal)
+- Monthly cadence (date-of-month within ±3 days)
+- Same or similar name/merchant
+Then check the destination: does the magnitude match a Sure account's expected payment (loan monthly_payment, credit card balance), or does the merchant name suggest a category that's currently uncategorized?
+
+Common pattern types:
+1. **Loan / credit-card payments** — recurring outflow → `set_as_transfer_or_payment` with destination = the loan/card account
+2. **Recurring subscriptions** — recurring outflow with stable merchant → `set_transaction_category` to "Subscriptions" (or whatever Sir uses)
+3. **Salary / income** — recurring inflow on Sir's checking → `set_transaction_category` to "Salary"
+4. **Transfers between Sir's own accounts** — outflow on one + inflow of same magnitude on another within 2 days → `set_as_transfer_or_payment` with the inflow account as destination
+
+**Phase 3 — Propose.** Summarise each pattern in prose for Sir, with the proposed rule shape (conditions + actions in plain English) and the affected count from preview:
+```
+self({endpoint: "/api/v1/sure/rules/preview", method: "POST", body: {<proposed rule>}})
+```
+The preview returns `affected_resource_count` and a `sample` of up to 20 matching transactions. Show Sir the count + the first 3-5 samples so he can sanity-check.
+
+**Phase 4 — Confirm.** Ask Sir: "Shall I create these N rules? (yes / yes-but-skip-X / no)". Wait for explicit confirmation before any `POST /api/v1/sure/rules`.
+
+**Phase 5 — Create.** For each confirmed rule:
+```
+self({endpoint: "/api/v1/sure/rules", method: "POST", body: {<rule>}})
+```
+After creation, immediately apply to historical transactions:
+```
+self({endpoint: "/api/v1/sure/rules/<new-rule-id>/apply", method: "POST", body: {}})
+```
+
+**Phase 6 — Report.** Summarise: rules created, transactions affected, before-and-after liabilities + spending category totals if relevant. End with "I'll keep these rules running on every new sync."
+
+### Good behaviour for the rules workflow
+
+1. **Preview before create — every time.** Don't save a rule that would affect 200 transactions when Sir asked for "the mortgage". Confirm `affected_resource_count` matches your expectation.
+2. **One purpose per rule.** A rule that does both "mark as transfer" and "set category to X" should usually be two rules. Easier to delete or refine later.
+3. **Tight conditions for transfers, loose for categories.** A loan-payment rule should be narrow (account + amount + name) so it never mis-fires; a "categorize all Tesco transactions as Groceries" rule can be a single merchant condition.
+4. **Don't auto-create rules without confirmation.** The analysis is yours; the decision is Sir's. Always show the preview and ask.
+5. **Use names Sir will recognise.** "JBC Mortgage auto-classifier" beats "Rule 7". The name shows up in Sure's UI when Sir browses rules.
+6. **Don't fight Sir's existing rules.** Before creating, list existing rules (`GET /api/v1/sure/rules`) and skip patterns Sir has already covered.
+
+### Why this matters
+
+Sure is a tool. Sir is the customer. Sir is an operator. **Sir doesn't want to clickity-clackity through the Rules UI.** The whole point of running this finance app inside Alfred is that the user and the operator are different people. You analyse, you propose, you confirm, you execute — Sir reads the summary at the end of the day and sees that the books are clean.
