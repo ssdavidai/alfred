@@ -2544,6 +2544,31 @@ export async function setupSure(opts: SetupSureOpts): Promise<void> {
   // Rails convention: 64 random bytes → 128 hex chars. Matches `rails secret`.
   if (!existingSkb) seeded.SURE_SECRET_KEY_BASE = randomSecret(64);
 
+  // Wire Sure's external assistant chat into Alfred via the ctrl-api bridge
+  // (see packages/ctrl/src/api/routes/sureAssistant.ts). The bridge prepends
+  // a finance-focused system prompt and rewrites X-Session-Key per family
+  // so each Sure family gets a persistent OpenClaw session — instead of the
+  // default behaviour where every Sure chat shares one global thread.
+  const existingAssistantType = await readTenantEnv(sshOpts, "ASSISTANT_TYPE");
+  if (!existingAssistantType) seeded.ASSISTANT_TYPE = "external";
+  const existingAssistantUrl = await readTenantEnv(sshOpts, "EXTERNAL_ASSISTANT_URL");
+  if (!existingAssistantUrl) {
+    seeded.EXTERNAL_ASSISTANT_URL = "http://ctrl-api:3100/api/v1/sure/assistant";
+  }
+  const existingAssistantAgent = await readTenantEnv(sshOpts, "EXTERNAL_ASSISTANT_AGENT_ID");
+  if (!existingAssistantAgent) seeded.EXTERNAL_ASSISTANT_AGENT_ID = "openclaw/main";
+  const existingAssistantToken = await readTenantEnv(sshOpts, "EXTERNAL_ASSISTANT_TOKEN");
+  if (!existingAssistantToken) {
+    const aasKey = await readTenantEnv(sshOpts, "AAS_API_KEY");
+    if (aasKey) {
+      seeded.EXTERNAL_ASSISTANT_TOKEN = aasKey;
+    } else {
+      opts.log(
+        "Warning: AAS_API_KEY not set on tenant — EXTERNAL_ASSISTANT_TOKEN cannot be seeded; Sure chat will fall back to builtin assistant",
+      );
+    }
+  }
+
   const newSecrets = Object.keys(seeded).length > 0;
   if (newSecrets) {
     await writeTenantEnv(sshOpts, seeded);
