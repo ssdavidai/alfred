@@ -10,6 +10,7 @@ import * as ssh from "./ssh.js";
 import type { SSHHostKeyOptions } from "./ssh.js";
 import * as tailscale from "./tailscale.js";
 import * as cloudflare from "./cloudflare.js";
+import { registerPeerOnPrime } from "./peer-registration.js";
 import {
   generateSubdomain as _generateSubdomain,
   planeSlug as _planeSlug,
@@ -19,6 +20,7 @@ import {
   createInstance,
   updateInstance,
   insertEvent,
+  getInstance,
 } from "../db/queries.js";
 import { DEFAULTS } from "../data/constants.js";
 import type { InstanceConfig, ProvisioningState, ProvisioningStep } from "../data/types.js";
@@ -1204,6 +1206,38 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
       } catch {
         log(`Warning: subdomain not yet reachable — DNS propagation may take a few minutes`);
       }
+    }
+
+    // --- Register this tenant on Alfred Prime's peer list ---
+    // Auto-append the new tenant to Prime's CROSS_TENANT_PEERS so the
+    // `tenant` and `ask_alfred` MCP tools can reach it without manual
+    // env-var editing. Non-fatal: if Prime can't be reached, log and move
+    // on — the operator can still hand-edit Prime's .env.
+    try {
+      const fresh = getInstance(instance.id);
+      const tailscaleHost = fresh?.tailscale_hostname
+        ? `${fresh.tailscale_hostname}.${process.env.TAILSCALE_TAILNET ?? "tail5ec603.ts.net"}`
+        : null;
+      const tailscaleIp = fresh?.tailscale_ip ?? null;
+      const apiKey = fresh?.api_key ?? null;
+      if (tailscaleHost && tailscaleIp && apiKey) {
+        await registerPeerOnPrime(
+          {
+            id: config.customer_name,
+            tailscaleHost,
+            tailscaleIp,
+            apiKey,
+            label: config.customer_name,
+          },
+          log,
+        );
+      } else {
+        log(
+          `Prime registration skipped: missing tailscale_hostname/ip/api_key on instance #${instance.id}.`,
+        );
+      }
+    } catch (e) {
+      log(`Prime registration failed (non-fatal): ${e}`);
     }
 
     // --- Done ---

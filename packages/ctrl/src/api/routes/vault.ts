@@ -588,9 +588,28 @@ export function registerVaultRoutes(): void {
     // Serialise concurrent writes to the same file at the ctrl-api
     // boundary so we don't fan-out a fork-storm of `docker compose
     // exec` waiting on the in-container alfred-CLI file lock (#593).
-    const stdout = await _withVaultPathLock(
-      recordPath, () => dockerExec("alfred", args, VAULT_ENV),
-    );
+    let stdout: string;
+    try {
+      stdout = await _withVaultPathLock(
+        recordPath, () => dockerExec("alfred", args, VAULT_ENV),
+      );
+    } catch (err) {
+      // Surface stderr + the failing argv so transient 500s on this
+      // path leave a diagnosable trace (the alfred CLI writes lock
+      // contention, schema errors, etc. only to stderr).
+      const e = err as { stderr?: string; stdout?: string; message?: string };
+      console.error(
+        "[vault PATCH] dockerExec failed",
+        JSON.stringify({
+          recordPath,
+          args: args.join(" "),
+          stderr: (e.stderr ?? "").slice(0, 1000),
+          stdout: (e.stdout ?? "").slice(0, 1000),
+          message: e.message ?? String(err),
+        }),
+      );
+      throw err;
+    }
 
     // body_set: replace the body wholesale AFTER the CLI PATCH has
     // written any frontmatter changes. The alfred CLI has no

@@ -150,6 +150,26 @@ export function createApiServer(): http.Server {
       if (!isPublic) {
         authenticate(req);
       }
+
+      // Cross-tenant auth is bearer-token only; X-Tenant-ID is NOT a real
+      // header in this platform. If an Alfred hallucinates one (it has happened),
+      // fail loudly with a clear message instead of letting the request proceed
+      // — otherwise the symptom looks like a tenant-identity mismatch and wastes
+      // an investigation cycle. See docs/cross-tenant-auth in the SKILL.md for
+      // alfred-prime-federation.
+      if (req.headers["x-tenant-id"]) {
+        sendJson(res, 400, {
+          error: {
+            code: "X_TENANT_ID_NOT_SUPPORTED",
+            message:
+              "X-Tenant-ID header is not used by this platform. " +
+              "Cross-tenant auth uses Authorization: Bearer <peer.apiKey> only. " +
+              "Remove the header and route through the MCP `tenant` tool or `crossTenantProxy`.",
+          },
+        });
+        logRequest(method, url, 400, Date.now() - start);
+        return;
+      }
       // Routes that receive exact-byte payloads and do their own parsing
       // (needed for HMAC-over-raw-body signature schemes).
       const isRawBody = pathname === "/api/v1/plane/webhook";
