@@ -156,7 +156,7 @@ export async function provision(
     log("Creating encrypted volume...");
     const { volume } = await hetzner.createVolume({
       name: `alfred-${config.customer_name}-data`,
-      size: 20,
+      size: DEFAULTS.volumeSizeGb,
       location: config.location,
       labels: { customer: config.customer_name },
     });

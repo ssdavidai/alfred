@@ -217,6 +217,21 @@ class HetznerClient {
     await this.request("POST", `/volumes/${volumeId}/actions/detach`);
   }
 
+  /**
+   * Online-resize a Hetzner volume. The block device grows live; the LUKS
+   * layer + filesystem still need `cryptsetup resize` + `resize2fs` on the
+   * tenant. Hetzner only supports growing — shrink is not allowed.
+   *
+   * Idempotency: if the volume is already at `newSizeGb`, Hetzner returns
+   * 422 "size already met" / "invalid_input". The caller (volume-resize CLI)
+   * inspects the thrown error and treats that case as a no-op.
+   */
+  async resizeVolume(volumeId: number, newSizeGb: number): Promise<void> {
+    await this.request("POST", `/volumes/${volumeId}/actions/resize`, {
+      size: newSizeGb,
+    });
+  }
+
   // --- SSH Keys ---
 
   async createSSHKey(

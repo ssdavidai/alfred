@@ -430,6 +430,36 @@ program
   });
 
 program
+  .command("volume-resize <name> <new_size_gb>")
+  .description(
+    "Online-resize a tenant's encrypted data volume (Hetzner API + cryptsetup + resize2fs). Idempotent.",
+  )
+  .action(async (name, newSizeGbArg) => {
+    getDb();
+    const newSizeGb = Number(newSizeGbArg);
+    if (!Number.isInteger(newSizeGb) || newSizeGb <= 0) {
+      console.error(`Error: <new_size_gb> must be a positive integer (got "${newSizeGbArg}")`);
+      closeDb();
+      process.exit(1);
+    }
+    const { resizeVolume } = await import("./cli/volume-resize.js");
+    try {
+      const result = await resizeVolume(name, newSizeGb, console.log);
+      console.log(
+        `\nVolume ${result.volumeId} now at ${result.requestedSizeGb}GB` +
+          (result.hetznerNoOp ? " (Hetzner reported no-op)" : "") +
+          ".",
+      );
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`\nvolume-resize FAILED: ${msg}`);
+      closeDb();
+      process.exit(1);
+    }
+    closeDb();
+  });
+
+program
   .command("rollback <name>")
   .description("Rollback to last healthy image")
   .option("--sha <sha>", "Specific SHA to rollback to")

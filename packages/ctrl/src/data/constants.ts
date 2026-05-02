@@ -14,6 +14,11 @@ export const DEFAULTS = {
   cloudflareDomain: "alfred.black",
   cloudInitTimeout: 1_200_000, // 20 minutes (snapshot deploys take 10+ min on Hetzner before cloud-init starts)
   healthInterval: 60_000, // 1 minute
+  // Default Hetzner volume size for new tenants. Raised 20 → 50 GB (#781) so
+  // the first quarter of organic data growth + a few sidecars (Sure, Plane,
+  // Vaultwarden, etc.) doesn't immediately blow past /mnt/encrypted capacity.
+  // Existing tenants live-resize via `alfred-ctrl volume-resize <name> <gb>`.
+  volumeSizeGb: 50,
 } as const;
 
 export const STATUS_COLORS: Record<InstanceStatus, string> = {
