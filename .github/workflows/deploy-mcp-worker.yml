@@ -1,9 +1,7 @@
 name: Deploy MCP Worker
-
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - 'packages/mcp-worker/**'
       - '.github/workflows/deploy-mcp-worker.yml'
@@ -12,25 +10,21 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: 22
 
       - name: Install
-        run: npm ci
-        working-directory: packages/mcp-worker
+        run: cd packages/mcp-worker && npm ci
 
       - name: Type-check
-        run: npm run typecheck
-        working-directory: packages/mcp-worker
+        run: cd packages/mcp-worker && npm run typecheck
 
       - name: Deploy
-        run: npx wrangler deploy
-        working-directory: packages/mcp-worker
+        run: cd packages/mcp-worker && npx wrangler deploy
         env:
           CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
           CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
