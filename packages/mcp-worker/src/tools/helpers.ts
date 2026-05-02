@@ -2,15 +2,16 @@
 // ctrl-api with the right auth headers, parse the response, return a
 // uniform MCP `content` payload.
 //
-// Two auth headers are sent on every outbound request:
-//   1. Authorization: Bearer <DAVID_AAS_API_KEY>
-//      — ctrl-api's own API-key gate (validated in packages/ctrl/src/api/auth.ts)
-//   2. CF-Access-Client-Id + CF-Access-Client-Secret
-//      — Cloudflare Access service-token credentials. The david tenant
-//      subdomain has an Access policy (Sir's identity required for browsers);
-//      the service token bypasses that policy for this Worker only.
+// Auth headers attached on every outbound request:
+//   1. Authorization: Bearer <ctx.aasApiKey>
+//      — ctrl-api's own API-key gate. The bearer comes from the OAuth
+//      grant's `props` payload (set at /authorize approval time), not
+//      from a global env secret.
+//   2. CF-Access-Client-Id + CF-Access-Client-Secret (optional)
+//      — only attached if the OAuth grant's `props` carry both. David's
+//      subdomain has no Access policy today, so these are unset.
 
-import type { Env } from "../env.js";
+import type { CtrlContext } from "./types.js";
 
 export interface ProxyOptions {
   /** HTTP method. Defaults to GET. */
@@ -64,21 +65,17 @@ export function buildUrl(baseUrl: string, path: string, query?: ProxyOptions["qu
  * surface as an error result or pass through (e.g. 404 may be expected
  * when the tool is "find by name" and the name doesn't exist).
  */
-export async function proxyToCtrl(env: Env, opts: ProxyOptions): Promise<ProxyResult> {
-  const url = buildUrl(env.DAVID_CTRL_URL, opts.path, opts.query);
+export async function proxyToCtrl(ctx: CtrlContext, opts: ProxyOptions): Promise<ProxyResult> {
+  const url = buildUrl(ctx.ctrlUrl, opts.path, opts.query);
   const method = opts.method ?? "GET";
 
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${env.DAVID_AAS_API_KEY}`,
+    Authorization: `Bearer ${ctx.aasApiKey}`,
     Accept: "application/json",
   };
-  // Attach Cloudflare Access service-token headers only when both are
-  // configured. David's subdomain has no Access policy today, so these are
-  // typically absent; future tenants behind Access can opt in by setting
-  // both secrets.
-  if (env.DAVID_CF_ACCESS_CLIENT_ID && env.DAVID_CF_ACCESS_CLIENT_SECRET) {
-    headers["CF-Access-Client-Id"] = env.DAVID_CF_ACCESS_CLIENT_ID;
-    headers["CF-Access-Client-Secret"] = env.DAVID_CF_ACCESS_CLIENT_SECRET;
+  if (ctx.cfAccessClientId && ctx.cfAccessClientSecret) {
+    headers["CF-Access-Client-Id"] = ctx.cfAccessClientId;
+    headers["CF-Access-Client-Secret"] = ctx.cfAccessClientSecret;
   }
 
   const init: RequestInit = { method, headers };

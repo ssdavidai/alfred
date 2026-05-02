@@ -19,6 +19,15 @@
     { "tag": "v1", "new_sqlite_classes": ["SureMCP"] }
   ],
 
+  // OAuth provider state — registered clients, grants, access tokens.
+  // Required because Claude Custom Connectors UI rejects bearer-only servers
+  // and instead expects the OAuth 2.1 + DCR flow advertised at
+  // /.well-known/oauth-authorization-server. The library auto-stores grants
+  // and clients here.
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV", "id": "ec8f6f9a0e424fbcaf10323a76ce8196" }
+  ],
+
   // Bind the entire mcp.alfred.black subdomain to this Worker as a Custom
   // Domain. Cloudflare's Custom Domain feature does NOT accept wildcards or
   // paths (those are reserved for regular Worker routes), so we claim the
@@ -31,9 +40,11 @@
   "observability": { "enabled": true }
 
   // Secrets (set via `wrangler secret put`, never committed):
-  //   MCP_DAVID_BEARER             — token Sir pastes into Claude Desktop config
+  //   MCP_APPROVAL_SECRET          — pre-shared secret Sir enters once on /authorize to approve a new Claude
+  //                                   Custom Connector registration (single-tenant gate)
+  //   COOKIE_ENCRYPTION_KEY        — 32-byte hex; encrypts the OAuthProvider's client/grant cookies in KV
   //   DAVID_AAS_API_KEY            — david's ctrl-api bearer
-  //   DAVID_CF_ACCESS_CLIENT_ID    — Cloudflare Access service-token client id
-  //   DAVID_CF_ACCESS_CLIENT_SECRET — Cloudflare Access service-token secret
-  //   DAVID_CTRL_URL               — base URL of david's ctrl-api proxy (e.g. https://alfred-david-mnbqn4jg.alfred.black)
+  //   DAVID_CTRL_URL               — base URL of david's ctrl-api (e.g. https://alfred-david-mnbqn4jg.alfred.black)
+  //   DAVID_CF_ACCESS_CLIENT_ID    — OPTIONAL Cloudflare Access service-token client id (subdomain has no Access today)
+  //   DAVID_CF_ACCESS_CLIENT_SECRET — OPTIONAL Cloudflare Access service-token secret
 }

@@ -11,6 +11,7 @@
     "build": "wrangler deploy --dry-run --outdir dist"
   },
   "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^0.4.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "agents": "0.12.3",
     "zod": "^4.0.0"

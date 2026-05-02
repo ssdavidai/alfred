@@ -1,14 +1,28 @@
 // Shared types for Sure MCP tool definitions.
 //
 // A tool is defined declaratively (name + description + zod input schema +
-// async handler that proxies to ctrl-api), then registered with the MCP
-// server in src/mcp/server.ts. The handler returns a ProxyResult; the
-// shared `respond()` helper converts that into the MCP content format.
+// buildRequest fn that returns the ProxyOptions). The actual HTTP call lives
+// in proxyToCtrl(); runTool wires both together.
+//
+// Why CtrlContext instead of pulling from env directly: with OAuth, the
+// authenticated principal's bearer token + ctrl URL come from the OAuth
+// `props` payload attached to the access token, not from the Worker's
+// global secrets. The DO's tool handler builds a CtrlContext from
+// `this.props` per request and passes it through.
 
 import { z } from "zod";
-import type { Env } from "../env.js";
 import { proxyToCtrl, toolResult } from "./helpers.js";
 import type { ProxyOptions, ProxyResult } from "./helpers.js";
+
+export interface CtrlContext {
+  /** Base URL of the target ctrl-api (e.g. https://alfred-david-mnbqn4jg.alfred.black). */
+  ctrlUrl: string;
+  /** Bearer token forwarded as Authorization on every backend call. */
+  aasApiKey: string;
+  /** Optional Cloudflare Access service-token credentials. */
+  cfAccessClientId?: string;
+  cfAccessClientSecret?: string;
+}
 
 // `buildRequest` takes `any` rather than `z.infer<TSchema>` because we store
 // heterogeneous tool defs in a single ALL_TOOLS array. The McpServer's zod
@@ -27,11 +41,11 @@ export interface ToolDef<TSchema extends z.ZodTypeAny = z.ZodTypeAny> {
  * into the MCP tool-result content shape.
  */
 export async function runTool(
-  env: Env,
+  ctx: CtrlContext,
   tool: ToolDef,
   args: unknown,
 ): Promise<ReturnType<typeof toolResult>> {
   const opts = tool.buildRequest(args);
-  const result: ProxyResult = await proxyToCtrl(env, opts);
+  const result: ProxyResult = await proxyToCtrl(ctx, opts);
   return toolResult(result);
 }

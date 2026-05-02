@@ -10,9 +10,22 @@ export interface Env {
   // Durable Object class binding (declared in wrangler.jsonc → durable_objects)
   MCP_OBJECT: DurableObjectNamespace;
 
-  // Bearer token Sir pastes into Claude Desktop's MCP config. Validated in
-  // the outer fetch handler before any request reaches the DO.
-  MCP_DAVID_BEARER: string;
+  // KV namespace where @cloudflare/workers-oauth-provider stores registered
+  // OAuth clients (DCR), grants, and access/refresh tokens. Required because
+  // Claude Custom Connectors UI mandates an OAuth 2.1 flow — bearer-only
+  // servers are rejected at the connector add step.
+  OAUTH_KV: KVNamespace;
+
+  // Pre-shared secret Sir enters ONCE on the /authorize approval page when
+  // adding a new Claude Custom Connector. Single-tenant gate so that even
+  // though the OAuth /authorize endpoint is public, only Sir (with this
+  // value) can complete the grant. Same value Sir keeps in his password
+  // manager — rotates rarely.
+  MCP_APPROVAL_SECRET: string;
+
+  // 32-byte hex string used by OAuthProvider to encrypt OAuth state stored
+  // in OAUTH_KV. Generate via `openssl rand -hex 32`.
+  COOKIE_ENCRYPTION_KEY: string;
 
   // Used to call david's ctrl-api (`/api/v1/sure/*`).
   DAVID_AAS_API_KEY: string;
