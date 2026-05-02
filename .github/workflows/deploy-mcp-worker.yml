@@ -2,10 +2,11 @@ name: Deploy MCP Worker
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
-      - "packages/mcp-worker/**"
-      - ".github/workflows/deploy-mcp-worker.yml"
+      - 'packages/mcp-worker/**'
+      - '.github/workflows/deploy-mcp-worker.yml'
   workflow_dispatch:
 
 jobs:
@@ -14,32 +15,27 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 10
-    defaults:
-      run:
-        working-directory: packages/mcp-worker
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
-          cache: "npm"
+          node-version: '22'
+          cache: npm
           cache-dependency-path: packages/mcp-worker/package-lock.json
 
       - name: Install
+        working-directory: packages/mcp-worker
         run: npm ci
 
       - name: Type-check
+        working-directory: packages/mcp-worker
         run: npm run typecheck
 
       - name: Deploy
+        working-directory: packages/mcp-worker
         run: npx wrangler deploy
         env:
-          # Wrangler v4 prefers CLOUDFLARE_API_TOKEN (a scoped Bearer token).
-          # This repo currently uses the legacy Global API Key pair
-          # (CLOUDFLARE_API_KEY + CLOUDFLARE_EMAIL) — wrangler accepts that
-          # as a fallback. Once a scoped token is provisioned, replace the
-          # two legacy lines with a single CLOUDFLARE_API_TOKEN secret.
           CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
           CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
