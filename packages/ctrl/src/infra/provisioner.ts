@@ -8,6 +8,7 @@ import { generateKeyPair } from "./keys.js";
 import { ensureFirewall } from "./firewall.js";
 import * as ssh from "./ssh.js";
 import type { SSHHostKeyOptions } from "./ssh.js";
+import { buildEnvWriteCommand } from "./env-write.js";
 import * as tailscale from "./tailscale.js";
 import * as cloudflare from "./cloudflare.js";
 import { registerPeerOnPrime } from "./peer-registration.js";
@@ -1813,17 +1814,21 @@ async function provisionAgentPhone(opts: ProvisionAgentPhoneOpts): Promise<void>
 
   // 2. Push TENANT_ID + AGENTPHONE_PHONE_NUMBER to tenant .env so ctrl-api can
   //    use them (TENANT_ID is read by phone.ts to call SaaS for outbound, etc.).
-  //    Append rather than rewrite to avoid stomping anything else.
-  const envLines = [
-    `TENANT_ID=${provision.tenantId}`,
-    `AGENTPHONE_PHONE_NUMBER=${provision.phoneNumber}`,
-    `SAAS_INTERNAL_URL=${SAAS_INTERNAL_URL}`,
-    `VOICE_BRIDGE_INTERNAL_TOKEN=${VOICE_BRIDGE_INTERNAL_TOKEN}`,
-  ].join("\n");
+  //    Use writeTenantEnv (sed-strip + printf '%s\n' per arg) so each KEY=VALUE
+  //    lands on its own physical line. The earlier inline `printf '%s'` with a
+  //    pre-joined string and `.replace(/\n/g, '\\n')` produced literal
+  //    backslash-n characters in .env on every newer-wave tenant (#681), causing
+  //    only TENANT_ID to parse and the rest to be silently dropped.
+  await writeTenantEnv(opts, {
+    TENANT_ID: provision.tenantId,
+    AGENTPHONE_PHONE_NUMBER: provision.phoneNumber,
+    SAAS_INTERNAL_URL,
+    VOICE_BRIDGE_INTERNAL_TOKEN,
+  });
   await ssh.exec(
     opts.serverIp,
     opts.keyPath,
-    `printf '\\n# AgentPhone\\n%s\\n' "${envLines.replace(/"/g, '\\"').replace(/\n/g, '\\n')}" >> ${DEFAULTS.dockerComposeDir}/.env && cd ${DEFAULTS.dockerComposeDir} && docker compose restart ctrl-api 2>/dev/null || true`,
+    `cd ${DEFAULTS.dockerComposeDir} && docker compose restart ctrl-api 2>/dev/null || true`,
     undefined,
     opts.hostKeyOpts,
   );
@@ -1909,28 +1914,8 @@ async function writeTenantEnv(
   opts: Pick<SetupPlaneOpts, "serverIp" | "keyPath" | "hostKeyOpts">,
   entries: Record<string, string>,
 ): Promise<void> {
-  const keys = Object.keys(entries);
-  if (keys.length === 0) return;
-  // Build a sed script that deletes existing assignments, then append.
-  const sedDeletes = keys
-    .map((k) => `-e ${JSON.stringify(`/^${k}=/d`)}`)
-    .join(" ");
-  // printf '%s\n' repeats the format string once per argument, emitting each
-  // on its own line — this replaces an earlier version that joined with a
-  // literal "\n" sequence that printf's %s does NOT interpret, so every key
-  // landed on a single physical line (#552).
-  const printfArgs = keys
-    .map((k) => {
-      // Shell-safe single-quoting for the value side. The only forbidden char
-      // is a literal single quote; we replace `'` with `'"'"'`.
-      const v = entries[k].replace(/'/g, `'"'"'`);
-      return JSON.stringify(`${k}='${v}'`);
-    })
-    .join(" ");
-  const envPath = `${DEFAULTS.dockerComposeDir}/.env`;
-  // Use a tmp file + mv to keep the write atomic. sed -i on Ubuntu creates a
-  // backup by default only with -i''; explicitly omit the backup suffix.
-  const cmd = `set -e; _tmp=$(mktemp); sed ${sedDeletes} ${envPath} > "$_tmp" 2>/dev/null || cp ${envPath} "$_tmp"; printf '\\n' >> "$_tmp"; printf '%s\\n' ${printfArgs} >> "$_tmp"; mv "$_tmp" ${envPath}; chmod 600 ${envPath}`;
+  const cmd = buildEnvWriteCommand(`${DEFAULTS.dockerComposeDir}/.env`, entries);
+  if (cmd === null) return;
   const result = await ssh.exec(
     opts.serverIp,
     opts.keyPath,
