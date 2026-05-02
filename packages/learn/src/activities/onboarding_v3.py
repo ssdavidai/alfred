@@ -548,16 +548,23 @@ Make each file genuinely useful — not generic templates. Reference specific na
     async with httpx.AsyncClient(base_url=config.alfred_ctrl_url, timeout=30.0, headers=headers) as client:
         for filename, key in [("USER.md", "user_md"), ("SOUL.md", "soul_md"), ("MEMORY.md", "memory_md"), ("TOOLS.md", "tools_md")]:
             content = files.get(key, "")
-            if content:
-                try:
-                    await client.put(
-                        f"/api/v1/admin/workspace/{filename}",
-                        json={"content": content},
-                    )
-                    written.append(filename)
-                    logger.info("onboarding_v3: wrote %s (%d chars)", filename, len(content))
-                except Exception as exc:
-                    logger.error("onboarding_v3: failed to write %s: %s", filename, exc)
+            if not content:
+                continue
+            resp = await client.put(
+                f"/api/v1/admin/workspace/{filename}",
+                json={"content": content},
+            )
+            if not resp.is_success:
+                logger.error(
+                    "onboarding_v3: %s write failed status=%d body=%s",
+                    filename, resp.status_code, resp.text[:300],
+                )
+                raise RuntimeError(
+                    f"personalize_opus: {filename} write failed "
+                    f"status={resp.status_code} body={resp.text[:300]}"
+                )
+            written.append(filename)
+            logger.info("onboarding_v3: wrote %s (%d chars)", filename, len(content))
 
     onboard["user_md"] = files.get("user_md", "")
     onboard["soul_md"] = files.get("soul_md", "")
