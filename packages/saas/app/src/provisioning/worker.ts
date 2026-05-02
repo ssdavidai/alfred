@@ -1,6 +1,7 @@
 import { spawn, execFile } from "child_process";
 import { promisify } from "util";
 import { encryptApiKey, decryptApiKey } from "../server/tenantProxy";
+import { ensureInstanceHasAgentMail } from "../server/agentmail";
 import { prisma } from "wasp/server";
 
 const execFileAsync = promisify(execFile);
@@ -191,22 +192,58 @@ export async function provisionInstanceJob(
     // N times is wasted DB traffic (and hides the "no User in entities list"
     // bug deeper in the stack trace when it throws, see #446 followup).
     const agentmailEnv: Record<string, string> = {};
-    if (
-      instance.agentmailInboxId &&
-      instance.agentmailInboxAddress &&
-      instance.agentmailInboxApiKey
-    ) {
-      agentmailEnv.TENANT_AGENTMAIL_INBOX_ID = instance.agentmailInboxId;
-      agentmailEnv.TENANT_AGENTMAIL_INBOX_ADDRESS = instance.agentmailInboxAddress;
-      agentmailEnv.TENANT_AGENTMAIL_API_KEY = decryptApiKey(instance.agentmailInboxApiKey);
-    }
+
     // Owner email — used by init container to seed /vault/.auth/authorized_senders.json
-    // and by outbound email defaults. Derive from the user record.
+    // and by outbound email defaults. Derive from the user record. Fetched
+    // FIRST because the AgentMail mint step below needs it too.
     const owner = await context.entities.User.findUnique({
       where: { id: instance.userId },
     });
     if (owner?.email) {
       agentmailEnv.TENANT_OWNER_EMAIL = owner.email;
+    }
+
+    // AgentMail per-tenant inbox. Idempotent: if the Instance row already
+    // has credentials persisted (e.g. by a previous run of this worker)
+    // the helper just decrypts and returns them. Otherwise it mints a
+    // fresh inbox + scoped API key, persists everything to the Instance
+    // row encrypted, and hands back plaintext for the env overlay. Mint
+    // failures are captured on the Instance row
+    // (`agentmailProvisionStatus = "failed"`) but DO NOT abort VM
+    // provisioning — the tenant still ships, just without an email
+    // channel until a retry succeeds. See issue #686.
+    //
+    // Always run this even when `owner` resolves to null (User row deleted
+    // or orphaned): the reused-credentials path doesn't need user fields,
+    // and a fresh-mint attempt without an email will fail cleanly and be
+    // captured on the Instance row. Gating the call on `owner` would
+    // silently skip TENANT_AGENTMAIL_* env injection on reprovisions of
+    // instances that DO have persisted credentials but no resolvable User.
+    {
+      const am = await ensureInstanceHasAgentMail({
+        prismaInstance: context.entities.Instance,
+        instance,
+        user: owner ?? { id: instance.userId },
+      });
+      if (am.status === "ok" || am.status === "reused") {
+        agentmailEnv.TENANT_AGENTMAIL_INBOX_ID = am.inboxId!;
+        agentmailEnv.TENANT_AGENTMAIL_INBOX_ADDRESS = am.inboxAddress!;
+        agentmailEnv.TENANT_AGENTMAIL_API_KEY = am.apiKey!;
+        logs.push(
+          `AgentMail inbox ${am.status}: ${am.inboxAddress}`,
+        );
+        console.info(
+          `[provision:${instance.customerName}] AgentMail inbox ${am.status}: ${am.inboxAddress}`,
+        );
+      } else if (am.status === "failed") {
+        logs.push(
+          `AgentMail provisioning failed (continuing without email channel): ${am.error}`,
+        );
+        console.warn(
+          `[provision:${instance.customerName}] AgentMail mint failed: ${am.error}`,
+        );
+      }
+      // status === "skipped" → AGENTMAIL_ENABLED=false, nothing to log
     }
 
     for (const location of availableLocations) {

@@ -1,6 +1,6 @@
 import { HttpError } from "wasp/server";
 import { Instance } from "wasp/entities";
-import crypto from "crypto";
+import { encryptApiKey, decryptApiKey } from "./columnCrypto";
 
 const TENANT_API_TIMEOUT = 15_000;
 
@@ -118,39 +118,9 @@ export async function getUserInstance(context: any): Promise<Instance | null> {
   });
 }
 
-// Encryption helpers for API keys stored in PostgreSQL
-const ALGORITHM = "aes-256-gcm";
-
-function getEncryptionKey(): Buffer {
-  const key = process.env.COLUMN_ENCRYPTION_KEY;
-  if (!key) {
-    throw new Error("COLUMN_ENCRYPTION_KEY environment variable is required");
-  }
-  return Buffer.from(key, "hex");
-}
-
-export function encryptApiKey(plaintext: string): string {
-  const key = getEncryptionKey();
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
-  let encrypted = cipher.update(plaintext, "utf8", "hex");
-  encrypted += cipher.final("hex");
-  const tag = cipher.getAuthTag().toString("hex");
-  return `${iv.toString("hex")}:${tag}:${encrypted}`;
-}
-
-export function decryptApiKey(ciphertext: string): string {
-  const key = getEncryptionKey();
-  const [ivHex, tagHex, encrypted] = ciphertext.split(":");
-  if (!ivHex || !tagHex || !encrypted) {
-    // If not encrypted (e.g. during development), return as-is
-    return ciphertext;
-  }
-  const iv = Buffer.from(ivHex, "hex");
-  const tag = Buffer.from(tagHex, "hex");
-  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
-  decipher.setAuthTag(tag);
-  let decrypted = decipher.update(encrypted, "hex", "utf8");
-  decrypted += decipher.final("utf8");
-  return decrypted;
-}
+// Encryption helpers for API keys stored in PostgreSQL.
+// Implementation lives in columnCrypto.ts so callers / tests can use
+// these without pulling Wasp's `wasp/server` runtime; re-exported here
+// for back-compat with every existing `from "../server/tenantProxy"`
+// import in the codebase.
+export { encryptApiKey, decryptApiKey };

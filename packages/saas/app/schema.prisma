@@ -69,9 +69,16 @@ model Instance {
   lastHealthStatus      String?              // ok|degraded|down|unreachable
 
   // AgentMail — per-tenant email inbox (see deploy/agentmail-bootstrap.md)
-  agentmailInboxId      String?              // AgentMail internal inbox_id
-  agentmailInboxAddress String?              // e.g. "alfred.david@mail.alfred.black"
-  agentmailInboxApiKey  String?              // inbox-scoped API key, encrypted via COLUMN_ENCRYPTION_KEY
+  agentmailInboxId         String?           // AgentMail internal inbox_id
+  agentmailInboxAddress    String?           // e.g. "alfred.david@mail.alfred.black"
+  agentmailInboxApiKey     String?           // inbox-scoped API key, encrypted via COLUMN_ENCRYPTION_KEY
+  // Provisioning state tracker so the admin UI can surface mint failures
+  // without crashing VM provisioning. NULL = never attempted (legacy rows
+  // pre-#686), "ok" = inbox + key minted successfully, "failed" = mint
+  // attempt threw and the tenant ships without an email channel until a
+  // retry succeeds. See packages/saas/app/src/server/agentmail.ts.
+  agentmailProvisionStatus String?           // null|ok|failed
+  agentmailProvisionError  String?           // human-readable last error
 
   // AgentPhone (Twilio + OpenAI Realtime) — see plan
   phoneNumber           String?   @unique    // E.164, e.g. +36705551234
