@@ -12,8 +12,6 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -21,20 +19,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: packages/mcp-worker/package-lock.json
 
       - name: Install
-        working-directory: packages/mcp-worker
         run: npm ci
+        working-directory: packages/mcp-worker
 
       - name: Type-check
-        working-directory: packages/mcp-worker
         run: npm run typecheck
+        working-directory: packages/mcp-worker
 
       - name: Deploy
-        working-directory: packages/mcp-worker
         run: npx wrangler deploy
+        working-directory: packages/mcp-worker
         env:
           CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
           CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
