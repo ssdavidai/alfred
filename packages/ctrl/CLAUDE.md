@@ -112,7 +112,7 @@ Nunjucks templates imported as strings at build time:
 
 `docker-compose.yaml.njk` is the canonical baseline for every per-tenant `mem_limit`, `pids_limit`, and Node `--max-old-space-size` in the fleet. Live tenant on-disk compose files only get the new values on the next regen sweep, so periodic drift between the template and `/opt/alfred/compose/docker-compose.yaml` on each VPS is expected.
 
-Current canonical values (last reconciled 2026-04-25, #145):
+Current canonical values (last reconciled 2026-04-29):
 
 | Service | mem_limit | pids_limit | Node heap |
 |---|---|---|---|
@@ -121,9 +121,11 @@ Current canonical values (last reconciled 2026-04-25, #145):
 | `ollama` | 2g | 512 | — |
 | `openclaw` (main gateway) | 4g | 2048 | 3072 MB |
 | `openclaw-workers` | 6g | 2048 | 4096 MB |
-| `alfred` (worker daemons) | 2g | 512 | — |
+| `alfred` (worker daemons) | 6g | 512 | — |
 | `ctrl-api` | 1g | 1024 | 768 MB |
 | `alfred-learn` | 4g | 512 | — |
+
+`alfred` raised 2g → 6g (2026-04-29): the surveyor daemon was getting SIGKILLed (-9) on David's 10K+ vault during the HDBSCAN clustering pass. Cosine distance on 10K × 768-dim vectors is roughly an 800 MB pairwise matrix on its own; combined with the embedder cache, igraph + leidenalg structures, and ~500 MB of normal daemon RSS, peak memory ran ~3.4 GB — well above the 2 GB ceiling. Hot-applied to all four live tenants (david/miguel/rapali/raj313) the same day. 6g gives ~1.75× headroom over observed peak with room for vault growth.
 
 The `openclaw-workers` 4096/6g sizing is non-negotiable: a busy tenant's `loadTaskRegistryStateFromSqlite` boot path materializes the entire `task_runs` table as UTF-16 strings on the JS heap, and 3072 MB only buys ~7 days of headroom before OOM. See PR #567 for the original analysis. Live evidence as of 2026-04-25: Rapali openclaw-workers RSS = 5.5 GiB / 6 GiB (92% of mem_limit), David RSS = 3.9 GiB / 4 GiB (97%, would already OOM under template defaults). The template values exist BECAUSE the higher numbers are needed under real load.
 

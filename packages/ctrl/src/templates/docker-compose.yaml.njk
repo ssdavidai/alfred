@@ -259,11 +259,19 @@ services:
       - DAC_OVERRIDE
       - FOWNER
       - CHOWN
-    mem_limit: 2g
-    # Bumped from 256 → 512 (2026-04-24). The alfred worker runs multiple
-    # long-lived daemon processes (curator, janitor, distiller, surveyor)
-    # plus periodic child processes for vault CLI calls, embedding
-    # generation via ollama, and openclaw gateway sessions.
+    mem_limit: 6g
+    # mem_limit: 2g → 6g (2026-04-29). Surveyor OOMKilled (-9) on David's
+    # 10K+ vault during the HDBSCAN clustering pass — the cosine-distance
+    # matrix on 10K × 768-dim vectors plus embedder caches and Leiden
+    # graph state pushed peak RSS to ~3.4 GB, well above the 2 GB limit.
+    # 6g gives ~1.75× headroom over observed peak and room for vault
+    # growth (next obvious step is fitting 20K+ files). Hot-applied to
+    # david/miguel/rapali/raj313 same day; template updated to keep all
+    # future tenants on the same architecture.
+    # pids_limit bumped 256 → 512 (2026-04-24). The alfred worker runs
+    # multiple long-lived daemon processes (curator, janitor, distiller,
+    # surveyor) plus periodic child processes for vault CLI calls,
+    # embedding generation via ollama, and openclaw gateway sessions.
     pids_limit: 512
 
   ctrl-api:
