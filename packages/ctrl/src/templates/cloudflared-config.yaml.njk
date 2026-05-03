@@ -13,7 +13,7 @@ ingress:
   # plus all OAuth and .well-known endpoints. MUST come BEFORE the
   # openclaw catch-all so MCP traffic doesn't leak through to the agent.
   - hostname: {{ subdomain }}.{{ domain }}
-    path: ^/(sure/mcp|plane/mcp|authorize|token|register|approve|\.well-known)(/.*)?$
+    path: ^/(sure/mcp|plane/mcp|alfred/mcp|authorize|token|register|approve|\.well-known)(/.*)?$
     service: http://localhost:8787
   - hostname: {{ subdomain }}.{{ domain }}
     service: http://localhost:18789
