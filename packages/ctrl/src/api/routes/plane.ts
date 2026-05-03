@@ -409,15 +409,37 @@ interface PlaneGetResult {
 }
 
 async function planeGet(url: string, token: string): Promise<PlaneGetResult> {
+  return planeRequest("GET", url, token);
+}
+
+/**
+ * Generic Plane HTTP helper. Used by the v2 read/write surface
+ * (#629 v2): list / search / create / update issues, list cycles,
+ * projects, states, labels. Returns either a parsed JSON body on 2xx
+ * or `{ok: false, errorText}` so callers can map errors uniformly.
+ *
+ * Errors that prevent the request from being sent (DNS, connection)
+ * still throw an `ApiError(502, PLANE_UNREACHABLE)` — those are
+ * tenant-config bugs, not Plane-side problems.
+ */
+async function planeRequest(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  url: string,
+  token: string,
+  body?: unknown,
+): Promise<PlaneGetResult> {
+  const headers: Record<string, string> = {
+    "x-api-key": token,
+    Accept: "application/json",
+  };
+  const init: RequestInit = { method, headers };
+  if (body !== undefined && method !== "GET") {
+    headers["Content-Type"] = "application/json";
+    init.body = JSON.stringify(body);
+  }
   let resp: Response;
   try {
-    resp = await fetch(url, {
-      method: "GET",
-      headers: {
-        "x-api-key": token,
-        Accept: "application/json",
-      },
-    });
+    resp = await fetch(url, init);
   } catch (err) {
     throw new ApiError(
       502,
@@ -431,12 +453,53 @@ async function planeGet(url: string, token: string): Promise<PlaneGetResult> {
   }
   let data: unknown = null;
   try {
-    data = await resp.json();
+    const text = await resp.text();
+    data = text ? JSON.parse(text) : null;
   } catch {
-    // Treat empty body as success-with-null. Callers expecting a shape
-    // will get the empty object/array fallback in the pruner.
+    // Treat empty body / non-JSON as success-with-null. Callers
+    // expecting a shape will get the empty object/array fallback in
+    // the pruner.
   }
   return { ok: true, status: resp.status, data };
+}
+
+/**
+ * Build a query string from a record where values are either
+ * scalars, arrays, or undefined. Arrays are joined by comma —
+ * Plane's REST accepts comma-separated values for multi-select
+ * filters (e.g. `?priority=high,urgent`). Undefined/null/empty are
+ * skipped.
+ */
+function buildPlaneQuery(params: Record<string, unknown>): string {
+  const usp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === "") continue;
+    if (Array.isArray(v)) {
+      const joined = v
+        .filter((x) => x !== undefined && x !== null && x !== "")
+        .map((x) => String(x))
+        .join(",");
+      if (joined) usp.set(k, joined);
+    } else {
+      usp.set(k, String(v));
+    }
+  }
+  const s = usp.toString();
+  return s ? `?${s}` : "";
+}
+
+/**
+ * Extract a list-of-objects from a Plane response that may be a bare
+ * array OR a `{results: [...]}` envelope (older Plane builds). Used
+ * by every list-style pruner.
+ */
+function unwrapList(raw: unknown): unknown[] {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object") {
+    const r = (raw as Record<string, unknown>).results;
+    if (Array.isArray(r)) return r;
+  }
+  return [];
 }
 
 function asString(v: unknown): string {
@@ -496,6 +559,58 @@ function pruneIssue(raw: unknown): Record<string, unknown> {
     external_source: asString(r.external_source),
     created_at: asString(r.created_at),
     updated_at: asString(r.updated_at),
+  };
+}
+
+function pruneCycle(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  return {
+    id: asString(r.id),
+    name: asString(r.name),
+    description: asString(r.description),
+    start_date: asString(r.start_date),
+    end_date: asString(r.end_date),
+    status: asString(r.status),
+    project: asString(r.project),
+    total_issues: typeof r.total_issues === "number" ? r.total_issues : 0,
+    completed_issues: typeof r.completed_issues === "number" ? r.completed_issues : 0,
+  };
+}
+
+function pruneProject(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  return {
+    id: asString(r.id),
+    name: asString(r.name),
+    identifier: asString(r.identifier),
+    description: asString(r.description),
+    archived_at: asString(r.archived_at),
+  };
+}
+
+function pruneStateRecord(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  return {
+    id: asString(r.id),
+    name: asString(r.name),
+    group: asString(r.group),
+    color: asString(r.color),
+    project: asString(r.project),
+    default: Boolean(r.default),
+  };
+}
+
+function pruneLabelRecord(raw: unknown): Record<string, unknown> {
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  return {
+    id: asString(r.id),
+    name: asString(r.name),
+    color: asString(r.color),
+    project: asString(r.project),
   };
 }
 
@@ -880,5 +995,503 @@ export function registerPlaneRoutes(): void {
       ok: outcome.scheduled,
       ...outcome,
     });
+  });
+
+  // ─── v2: list / search / create / update issues, list cycles /
+  // projects / states / labels ──────────────────────────────────────
+  //
+  // These routes flesh out the read+write surface so the MCP layer
+  // can drive Plane without bouncing through the vault. All proxy to
+  // Plane's REST under the workspace slug ctrl-api holds in env.
+  // Responses are pruned to the subset the MCP descriptions promise —
+  // verbose workspace_detail / project_detail blocks are dropped.
+  //
+  // CROSS-PROJECT SEARCH NOTE (search_issues):
+  //   Plane's REST issues endpoint is project-scoped: there is no
+  //   `GET /workspaces/:slug/issues/`. To answer "all blocked
+  //   tickets across projects" without project_ids, we fan out:
+  //   discover projects via `GET /workspaces/:slug/projects/`, then
+  //   call the per-project issues endpoint for each, merging
+  //   results client-side. We cap the fan-out at MAX_FANOUT_PROJECTS
+  //   (15) — beyond that the user MUST pass `project_ids`. The fan
+  //   -out path also enforces the global `limit`/`offset` AFTER the
+  //   merge, so the upstream Plane page sizes don't leak into the
+  //   response shape.
+
+  // GET /api/v1/plane/issues
+  //
+  // Simple paginated list of issues in ONE project. Anything fancier
+  // (cross-project, state-group filters, blocked-tickets queries)
+  // belongs in POST /api/v1/plane/issues/search.
+  addRoute("GET", "/api/v1/plane/issues", async ({ res, query }) => {
+    const cfg = requirePlaneConfig();
+    const projectId = (query.get("project_id") || "").trim();
+    if (!projectId) {
+      throw new ValidationError("project_id query param is required");
+    }
+    const limit = Math.min(
+      Math.max(parseInt(query.get("limit") || "50", 10) || 50, 1),
+      200,
+    );
+    const offset = Math.max(parseInt(query.get("offset") || "0", 10) || 0, 0);
+    const stateId = query.get("state_id") || undefined;
+    const assigneeId = query.get("assignee_id") || undefined;
+    const cycleId = query.get("cycle_id") || undefined;
+    const orderBy = query.get("order_by") || undefined;
+
+    const upstream = buildPlaneQuery({
+      per_page: limit,
+      cursor: offset ? `${offset}` : undefined,
+      state: stateId,
+      assignees: assigneeId,
+      cycle: cycleId,
+      order_by: orderBy,
+    });
+    const url =
+      `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+      `/projects/${encodeURIComponent(projectId)}/issues/${upstream}`;
+
+    const planeResp = await planeGet(url, cfg.token);
+    if (!planeResp.ok) {
+      return sendJson(res, planeResp.status, {
+        error: {
+          code: "PLANE_API_ERROR",
+          message:
+            planeResp.errorText || `Plane responded with ${planeResp.status}`,
+        },
+      });
+    }
+    const items = unwrapList(planeResp.data).map((i) => pruneIssue(i));
+    sendJson(res, 200, { issues: items, total: items.length, limit, offset });
+  });
+
+  // POST /api/v1/plane/issues
+  //
+  // Create an issue in ONE project. Body fields map onto Plane's
+  // create payload — required: project_id, name. Optional: state,
+  // assignees, labels, priority, target_date, description_html,
+  // cycle, parent.
+  addRoute("POST", "/api/v1/plane/issues", async ({ res, body }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const projectId =
+      typeof b.project_id === "string" ? b.project_id.trim() : "";
+    const name = typeof b.name === "string" ? b.name.trim() : "";
+    if (!projectId || !name) {
+      throw new ValidationError("project_id and name are required");
+    }
+    const cfg = requirePlaneConfig();
+
+    // Whitelist the fields we forward — anything else (workspace_detail
+    // etc.) is dropped to keep upstream calls predictable.
+    const payload: Record<string, unknown> = { name };
+    const passthrough = [
+      "description_html",
+      "description_stripped",
+      "state",
+      "priority",
+      "assignees",
+      "labels",
+      "target_date",
+      "start_date",
+      "parent",
+      "cycle",
+      "external_id",
+      "external_source",
+    ];
+    for (const k of passthrough) {
+      if (b[k] !== undefined && b[k] !== null) payload[k] = b[k];
+    }
+
+    const url =
+      `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+      `/projects/${encodeURIComponent(projectId)}/issues/`;
+    const planeResp = await planeRequest("POST", url, cfg.token, payload);
+    if (!planeResp.ok) {
+      return sendJson(res, planeResp.status, {
+        error: {
+          code: "PLANE_API_ERROR",
+          message:
+            planeResp.errorText || `Plane responded with ${planeResp.status}`,
+        },
+      });
+    }
+    sendJson(res, 201, pruneIssue(planeResp.data));
+  });
+
+  // PATCH /api/v1/plane/issues/:project_id/:issue_id
+  //
+  // Update state, priority, assignees, labels, dates, name,
+  // description. Body is a partial issue — anything passed through
+  // overrides Plane's stored value. Empty body is a no-op (Plane
+  // returns 200 with the unchanged record).
+  addRoute(
+    "PATCH",
+    "/api/v1/plane/issues/:project_id/:issue_id",
+    async ({ res, params, body }) => {
+      const { projectId, issueId } = requirePlaneIssueParams(params);
+      const cfg = requirePlaneConfig();
+      const b = (body ?? {}) as Record<string, unknown>;
+      const passthrough = [
+        "name",
+        "description_html",
+        "description_stripped",
+        "state",
+        "priority",
+        "assignees",
+        "labels",
+        "target_date",
+        "start_date",
+        "parent",
+        "cycle",
+      ];
+      const payload: Record<string, unknown> = {};
+      for (const k of passthrough) {
+        if (b[k] !== undefined) payload[k] = b[k];
+      }
+      const url =
+        `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+        `/projects/${encodeURIComponent(projectId)}` +
+        `/issues/${encodeURIComponent(issueId)}/`;
+      const planeResp = await planeRequest("PATCH", url, cfg.token, payload);
+      if (!planeResp.ok) {
+        return sendJson(res, planeResp.status, {
+          error: {
+            code: "PLANE_API_ERROR",
+            message:
+              planeResp.errorText || `Plane responded with ${planeResp.status}`,
+          },
+        });
+      }
+      sendJson(res, 200, pruneIssue(planeResp.data));
+    },
+  );
+
+  // POST /api/v1/plane/issues/search
+  //
+  // Sophisticated multi-dimensional issue search. See the file
+  // header CROSS-PROJECT SEARCH NOTE for the fan-out limitation.
+  // Filter dimensions: project_ids, cycle_ids, state_ids,
+  // state_groups (mapped client-side), assignee_ids, assigned_to_me,
+  // priority, label_ids, created_after/before, target_date_*,
+  // updated_after, text_search, is_blocked, order_by, limit, offset.
+  //
+  // Plane natively supports: state, assignees, labels, priority,
+  // cycle, created_at, target_date, search (text). It does NOT have
+  // a first-class "blocked" flag, so `is_blocked` is implemented as
+  // a label-name match on the literal label "blocked" — agents that
+  // need a more nuanced answer should call list_labels first and
+  // pass the resolved label_ids directly.
+  addRoute("POST", "/api/v1/plane/issues/search", async ({ res, body }) => {
+    const cfg = requirePlaneConfig();
+    const f = (body ?? {}) as Record<string, unknown>;
+
+    const arrStr = (v: unknown): string[] | undefined => {
+      if (!Array.isArray(v)) return undefined;
+      const out = v
+        .filter((x) => typeof x === "string" && x.length > 0)
+        .map((x) => x as string);
+      return out.length ? out : undefined;
+    };
+    const optStr = (v: unknown): string | undefined =>
+      typeof v === "string" && v.length ? v : undefined;
+    const optBool = (v: unknown): boolean | undefined =>
+      typeof v === "boolean" ? v : undefined;
+    const optNum = (v: unknown): number | undefined =>
+      typeof v === "number" && Number.isFinite(v) ? v : undefined;
+
+    const STATE_GROUPS = new Set([
+      "backlog",
+      "unstarted",
+      "started",
+      "completed",
+      "cancelled",
+    ]);
+    const PRIORITY_VALS = new Set([
+      "urgent",
+      "high",
+      "medium",
+      "low",
+      "none",
+    ]);
+
+    const projectIds = arrStr(f.project_ids);
+    const cycleIds = arrStr(f.cycle_ids);
+    const stateIds = arrStr(f.state_ids);
+    const stateGroups = (arrStr(f.state_groups) || []).filter((g) =>
+      STATE_GROUPS.has(g),
+    );
+    let assigneeIds = arrStr(f.assignee_ids);
+    if (optBool(f.assigned_to_me)) {
+      const me = process.env.PLANE_ALFRED_USER_ID;
+      if (me) {
+        assigneeIds = assigneeIds ? [...assigneeIds, me] : [me];
+      }
+    }
+    const priority = (arrStr(f.priority) || []).filter((p) =>
+      PRIORITY_VALS.has(p),
+    );
+    const labelIds = arrStr(f.label_ids);
+    const createdAfter = optStr(f.created_after);
+    const createdBefore = optStr(f.created_before);
+    const targetAfter = optStr(f.target_date_after);
+    const targetBefore = optStr(f.target_date_before);
+    const updatedAfter = optStr(f.updated_after);
+    const textSearch = optStr(f.text_search);
+    const isBlocked = optBool(f.is_blocked);
+    const orderBy = optStr(f.order_by);
+    const limit = Math.min(Math.max(optNum(f.limit) ?? 50, 1), 200);
+    const offset = Math.max(optNum(f.offset) ?? 0, 0);
+
+    // Resolve state_groups → state_ids client-side. We have to fetch
+    // the project's states and match by `group`. Skip if the caller
+    // already passed state_ids OR if no project scope (group filter
+    // is meaningless workspace-wide without per-project resolution).
+    let resolvedStateIds = stateIds ? [...stateIds] : undefined;
+    if (!resolvedStateIds && stateGroups.length > 0) {
+      // Resolve from EACH project in scope. If projectIds is empty
+      // we resolve from the discovered fan-out projects below.
+      // We defer the actual lookup to the fan-out loop so each
+      // project gets its own state_ids set.
+    }
+
+    // Determine which projects to query.
+    const MAX_FANOUT_PROJECTS = 15;
+    let scopeProjects: string[];
+    if (projectIds && projectIds.length > 0) {
+      scopeProjects = projectIds;
+    } else {
+      // Fan-out discovery: list workspace projects.
+      const projUrl =
+        `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+        `/projects/`;
+      const projResp = await planeGet(projUrl, cfg.token);
+      if (!projResp.ok) {
+        return sendJson(res, projResp.status, {
+          error: {
+            code: "PLANE_API_ERROR",
+            message:
+              projResp.errorText ||
+              `Plane responded with ${projResp.status}`,
+          },
+        });
+      }
+      const allProjects = unwrapList(projResp.data)
+        .map((p) => pruneProject(p))
+        .filter((p) => !p.archived_at);
+      scopeProjects = allProjects.map((p) => String(p.id)).filter(Boolean);
+      if (scopeProjects.length > MAX_FANOUT_PROJECTS) {
+        return sendJson(res, 400, {
+          error: {
+            code: "FANOUT_TOO_LARGE",
+            message: `Workspace has ${scopeProjects.length} projects; pass project_ids to scope (max ${MAX_FANOUT_PROJECTS} for workspace-wide queries).`,
+          },
+        });
+      }
+    }
+
+    // Per-project: resolve state-groups into state_ids if needed,
+    // build the upstream query, fetch, accumulate.
+    const merged: Record<string, unknown>[] = [];
+    for (const pid of scopeProjects) {
+      let projectStateIds = resolvedStateIds;
+      if (!projectStateIds && stateGroups.length > 0) {
+        const stUrl =
+          `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+          `/projects/${encodeURIComponent(pid)}/states/`;
+        const stResp = await planeGet(stUrl, cfg.token);
+        if (stResp.ok) {
+          const states = unwrapList(stResp.data).map((s) => pruneStateRecord(s));
+          projectStateIds = states
+            .filter((s) => stateGroups.includes(String(s.group)))
+            .map((s) => String(s.id));
+        }
+      }
+
+      // Plane's per-project issues endpoint accepts comma-separated
+      // multi-value filters on state, assignees, labels, priority,
+      // cycle. created_at/target_date use ISO range params.
+      const upstreamParams: Record<string, unknown> = {
+        per_page: Math.min(limit + offset, 200),
+        order_by: orderBy,
+        search: textSearch,
+        state: projectStateIds,
+        assignees: assigneeIds,
+        labels: labelIds,
+        priority: priority.length ? priority : undefined,
+        cycle: cycleIds,
+        // Plane accepts created_at__gte / __lte etc. for filtering.
+        "created_at__gte": createdAfter,
+        "created_at__lte": createdBefore,
+        "target_date__gte": targetAfter,
+        "target_date__lte": targetBefore,
+        "updated_at__gte": updatedAfter,
+      };
+      const qs = buildPlaneQuery(upstreamParams);
+      const url =
+        `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+        `/projects/${encodeURIComponent(pid)}/issues/${qs}`;
+      const issResp = await planeGet(url, cfg.token);
+      if (!issResp.ok) {
+        // Per-project failure: log + skip — don't fail the whole
+        // search because one project errored.
+        console.warn(
+          `[plane.search] project ${pid} returned ${issResp.status}: ${issResp.errorText}`,
+        );
+        continue;
+      }
+      const items = unwrapList(issResp.data).map((i) => pruneIssue(i));
+      for (const it of items) {
+        // Tag the project for downstream callers (PATCH/get_issue
+        // need both project_id and issue_id).
+        it.project_id = pid;
+      }
+      merged.push(...items);
+    }
+
+    // Client-side filters: is_blocked (label name match), text
+    // search fallback, ordering / pagination.
+    let results = merged;
+    if (isBlocked === true) {
+      results = results.filter((it) => {
+        const labels = Array.isArray(it.labels) ? it.labels : [];
+        return labels.some(
+          (l) =>
+            typeof l === "object" &&
+            l !== null &&
+            String((l as Record<string, unknown>).name).toLowerCase() ===
+              "blocked",
+        );
+      });
+    } else if (isBlocked === false) {
+      results = results.filter((it) => {
+        const labels = Array.isArray(it.labels) ? it.labels : [];
+        return !labels.some(
+          (l) =>
+            typeof l === "object" &&
+            l !== null &&
+            String((l as Record<string, unknown>).name).toLowerCase() ===
+              "blocked",
+        );
+      });
+    }
+
+    // Apply order_by client-side over the merged list (we already
+    // asked Plane to order per-project, but cross-project the merge
+    // can interleave). Default: -updated_at.
+    const sortKey = orderBy || "-updated_at";
+    const desc = sortKey.startsWith("-");
+    const field = desc ? sortKey.slice(1) : sortKey;
+    results.sort((a, b) => {
+      const av = String((a as Record<string, unknown>)[field] ?? "");
+      const bv = String((b as Record<string, unknown>)[field] ?? "");
+      if (av === bv) return 0;
+      return desc ? (av < bv ? 1 : -1) : av < bv ? -1 : 1;
+    });
+
+    const total = results.length;
+    const page = results.slice(offset, offset + limit);
+    sendJson(res, 200, {
+      issues: page,
+      total,
+      limit,
+      offset,
+      scope: {
+        projects_searched: scopeProjects.length,
+        cross_project: scopeProjects.length > 1,
+        is_blocked_via_label_match: typeof isBlocked === "boolean",
+      },
+    });
+  });
+
+  // GET /api/v1/plane/cycles?project_id=...
+  addRoute("GET", "/api/v1/plane/cycles", async ({ res, query }) => {
+    const cfg = requirePlaneConfig();
+    const projectId = (query.get("project_id") || "").trim();
+    if (!projectId) {
+      throw new ValidationError("project_id query param is required");
+    }
+    const url =
+      `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+      `/projects/${encodeURIComponent(projectId)}/cycles/`;
+    const planeResp = await planeGet(url, cfg.token);
+    if (!planeResp.ok) {
+      return sendJson(res, planeResp.status, {
+        error: {
+          code: "PLANE_API_ERROR",
+          message:
+            planeResp.errorText || `Plane responded with ${planeResp.status}`,
+        },
+      });
+    }
+    const cycles = unwrapList(planeResp.data).map((c) => pruneCycle(c));
+    sendJson(res, 200, { cycles, total: cycles.length });
+  });
+
+  // GET /api/v1/plane/projects
+  addRoute("GET", "/api/v1/plane/projects", async ({ res }) => {
+    const cfg = requirePlaneConfig();
+    const url = `${cfg.base}/api/v1/workspaces/${encodeURIComponent(
+      cfg.slug,
+    )}/projects/`;
+    const planeResp = await planeGet(url, cfg.token);
+    if (!planeResp.ok) {
+      return sendJson(res, planeResp.status, {
+        error: {
+          code: "PLANE_API_ERROR",
+          message:
+            planeResp.errorText || `Plane responded with ${planeResp.status}`,
+        },
+      });
+    }
+    const projects = unwrapList(planeResp.data).map((p) => pruneProject(p));
+    sendJson(res, 200, { projects, total: projects.length });
+  });
+
+  // GET /api/v1/plane/states?project_id=...
+  addRoute("GET", "/api/v1/plane/states", async ({ res, query }) => {
+    const cfg = requirePlaneConfig();
+    const projectId = (query.get("project_id") || "").trim();
+    if (!projectId) {
+      throw new ValidationError("project_id query param is required");
+    }
+    const url =
+      `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+      `/projects/${encodeURIComponent(projectId)}/states/`;
+    const planeResp = await planeGet(url, cfg.token);
+    if (!planeResp.ok) {
+      return sendJson(res, planeResp.status, {
+        error: {
+          code: "PLANE_API_ERROR",
+          message:
+            planeResp.errorText || `Plane responded with ${planeResp.status}`,
+        },
+      });
+    }
+    const states = unwrapList(planeResp.data).map((s) => pruneStateRecord(s));
+    sendJson(res, 200, { states, total: states.length });
+  });
+
+  // GET /api/v1/plane/labels?project_id=...
+  addRoute("GET", "/api/v1/plane/labels", async ({ res, query }) => {
+    const cfg = requirePlaneConfig();
+    const projectId = (query.get("project_id") || "").trim();
+    if (!projectId) {
+      throw new ValidationError("project_id query param is required");
+    }
+    const url =
+      `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+      `/projects/${encodeURIComponent(projectId)}/labels/`;
+    const planeResp = await planeGet(url, cfg.token);
+    if (!planeResp.ok) {
+      return sendJson(res, planeResp.status, {
+        error: {
+          code: "PLANE_API_ERROR",
+          message:
+            planeResp.errorText || `Plane responded with ${planeResp.status}`,
+        },
+      });
+    }
+    const labels = unwrapList(planeResp.data).map((l) => pruneLabelRecord(l));
+    sendJson(res, 200, { labels, total: labels.length });
   });
 }
