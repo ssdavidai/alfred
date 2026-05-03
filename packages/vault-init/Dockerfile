@@ -1,18 +1,23 @@
-# vault-init — one-shot that pulls every tenant secret out of the local
-# Vaultwarden and rewrites /opt/alfred/compose/.env. Runs after vaultwarden
-# is healthy on every `docker compose up`. The fetch script (vault-init.sh)
-# ships in PR2 of the Vaultwarden rollout; this Dockerfile is the runtime
-# scaffolding so PR1 produces a buildable image to wire into the compose
-# template.
+# vault-init — pulls every secret out of the local Vaultwarden and rewrites
+# /opt/alfred/compose/.env on every `docker compose up`. Also ships the
+# bootstrap-signup + migration scripts so the SAME image can be used as a
+# one-shot for the david cutover (and future tenant rollouts) without needing
+# a second container.
 #
-# Alpine + node + the Bitwarden CLI. Image stays small (~80MB) since bw
-# CLI is the only meaningful dep. jq + curl + bash are available because
-# vault-init.sh will use them (PR2 wires them in).
+# Bundled scripts (all under /opt/vault-init):
+#   vault-init.sh          — runtime fetch+rewrite (default CMD)
+#   migrate.sh             — one-shot .env → vaultwarden importer
+#   bootstrap-signup.mjs   — Bitwarden client-crypto + /api/accounts/register
+#                            so Sir's account is auto-created without browser
+#                            interaction (fallback: web-UI signup)
 FROM node:22-alpine
 RUN apk add --no-cache bash jq curl ca-certificates \
     && npm install --global --omit=dev @bitwarden/cli@2024.10.0 \
     && npm cache clean --force
-WORKDIR /work
-# Default CMD is a no-op so PR1's compose can `up` the service safely.
-# vault-init.sh replaces this in PR2.
-CMD ["bash", "-c", "echo 'vault-init no-op; awaiting PR2 fetch script' && exit 0"]
+WORKDIR /opt/vault-init
+COPY vault-init.sh /opt/vault-init/vault-init.sh
+COPY migrate.sh /opt/vault-init/migrate.sh
+COPY bootstrap-signup.mjs /opt/vault-init/bootstrap-signup.mjs
+RUN chmod 0755 /opt/vault-init/vault-init.sh /opt/vault-init/migrate.sh \
+    && chmod 0755 /opt/vault-init/bootstrap-signup.mjs
+CMD ["bash", "/opt/vault-init/vault-init.sh"]

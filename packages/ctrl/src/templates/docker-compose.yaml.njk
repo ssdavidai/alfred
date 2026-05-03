@@ -975,9 +975,10 @@ services:
         condition: service_healthy
     volumes:
       - /opt/alfred/compose:/host/compose
-    # The fetch-and-write script (vault-init.sh) is baked into the image
-    # in a follow-up PR. Phase 0 ships this service block but the image's
-    # default CMD is a no-op until then.
+    # The fetch-and-write script (vault-init.sh) is baked into the image as
+    # the default CMD. Soft-failure semantics: if vaultwarden is unreachable
+    # vault-init exits non-zero and leaves the existing .env in place, so
+    # tenant boot keeps working with last-good secrets.
     mem_limit: 128m
     pids_limit: 128
 {% endif %}
