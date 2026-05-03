@@ -25,4 +25,8 @@ ingress:
   - hostname: {{ subdomain }}-sure.{{ domain }}
     service: http://localhost:3001
 {%- endif %}
+{%- if vaultwarden_enabled %}
+  - hostname: {{ subdomain }}-vault.{{ domain }}
+    service: http://localhost:18080
+{%- endif %}
   - service: http_status:404

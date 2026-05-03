@@ -39,6 +39,8 @@ export function getDb(): DatabaseSync {
     "cf_dns_record_id TEXT",
     "cf_plane_dns_record_id TEXT",
     "cf_sure_dns_record_id TEXT",
+    "cf_vault_dns_record_id TEXT",
+    "cf_vault_access_app_id TEXT",
     "cf_access_app_id TEXT",
   ]) {
     try {

@@ -34,6 +34,8 @@ export interface Instance {
   cf_dns_record_id: string | null;
   cf_plane_dns_record_id: string | null;
   cf_sure_dns_record_id: string | null;
+  cf_vault_dns_record_id: string | null;
+  cf_vault_access_app_id: string | null;
   cf_access_app_id: string | null;
   server_type: string;
   location: string;
@@ -73,6 +75,14 @@ export interface InstanceConfig {
    * explicitly to opt out.
    */
   sureEnabled?: boolean;
+  /**
+   * Deploy Vaultwarden (self-hosted Bitwarden-compatible vault) on the tenant
+   * VPS so Sir can manage tenant secrets through a web UI instead of editing
+   * `.env` over SSH. Default-off; flip to `true` per tenant after the canary
+   * (david) soaks. See `setupVaultwarden` in `infra/provisioner.ts` for the
+   * full setup story.
+   */
+  vaultwardenEnabled?: boolean;
 }
 
 // --- Provisioning ---
@@ -96,6 +106,7 @@ export type ProvisioningStep =
   | "provision_phone"
   | "setup_plane"
   | "setup_sure"
+  | "setup_vaultwarden"
   | "health_check"
   | "done";
 

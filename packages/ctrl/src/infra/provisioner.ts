@@ -186,6 +186,9 @@ export async function provision(
     // a specific tenant out (rare — e.g. testing minimal stacks).
     const planeOnDefault = config.planeEnabled !== false;
     const sureOnDefault = config.sureEnabled !== false;
+    // Vaultwarden is opt-IN (default false) until david's canary soaks. Once
+    // it's proven, flip the default to `!== false` to match plane/sure.
+    const vaultwardenOnDefault = config.vaultwardenEnabled === true;
     if (planeOnDefault) {
       // Marks the tenant as carrying the Plane sidecar stack — used by later
       // fleet-wide scans (e.g. "list all tenants running Plane") without
@@ -194,6 +197,9 @@ export async function provision(
     }
     if (sureOnDefault) {
       serverLabels["sure-enabled"] = "true";
+    }
+    if (vaultwardenOnDefault) {
+      serverLabels["vaultwarden-enabled"] = "true";
     }
     const { server } = await hetzner.createServer({
       name: `alfred-${config.customer_name}`,
@@ -451,6 +457,10 @@ export async function provision(
     const compose = nunjucks.renderString(dockerComposeTemplate, {
       plane_enabled: planeOnDefault,
       sure_enabled: sureOnDefault,
+      vaultwarden_enabled: vaultwardenOnDefault,
+      subdomain: subdomain ?? config.customer_name,
+      domain: process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain,
+      customer_name: config.customer_name,
     });
     await ssh.upload(
       server.public_net.ipv4.ip,
@@ -986,6 +996,7 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
         domain,
         plane_enabled: planeOnDefault,
         sure_enabled: sureOnDefault,
+        vaultwarden_enabled: vaultwardenOnDefault,
       });
       await ssh.upload(
         server.public_net.ipv4.ip,
@@ -1098,6 +1109,50 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
         }
       }
 
+      // Vaultwarden gets `<subdomain>-vault.<domain>` (single-level — the
+      // wildcard cert `*.<domain>` doesn't cover two-level subdomains, see
+      // setup_plane / setup_sure for the same constraint). Access app
+      // restricts to the owner's email so cloudflared fronts a Sir-only
+      // login surface even though Vaultwarden itself is reachable from
+      // the open internet behind the tunnel.
+      let vaultDnsRecordId: string | null = null;
+      let vaultAccessAppId: string | null = null;
+      if (vaultwardenOnDefault) {
+        try {
+          const vaultRec = await cloudflare.createDnsRecord(
+            `${subdomain}-vault`,
+            tunnel.id,
+          );
+          vaultDnsRecordId = vaultRec.id;
+          log(`DNS record created: ${subdomain}-vault.${domain} → tunnel`);
+        } catch (e) {
+          log(
+            `Warning: could not create Vault DNS record (${subdomain}-vault.${domain}): ${e}`,
+          );
+        }
+        const ownerEmail = process.env.TENANT_OWNER_EMAIL ?? config.customer_email;
+        if (vaultDnsRecordId && ownerEmail) {
+          try {
+            const accessApp = await cloudflare.createAccessApplication(
+              `${subdomain}-vault`,
+              [ownerEmail],
+            );
+            vaultAccessAppId = accessApp.id;
+            log(
+              `Cloudflare Access app created for ${subdomain}-vault.${domain} (allowedEmails=[${ownerEmail}])`,
+            );
+          } catch (e) {
+            log(
+              `Warning: could not create Cloudflare Access app for vault: ${e} — vault.<subdomain> will be reachable WITHOUT SSO until this is fixed`,
+            );
+          }
+        } else if (vaultDnsRecordId && !ownerEmail) {
+          log(
+            "Warning: TENANT_OWNER_EMAIL / customer_email not set — skipping Cloudflare Access app for vault. Configure manually before exposing.",
+          );
+        }
+      }
+
       // Update instance with tunnel metadata
       updateInstance(instance.id, {
         cf_tunnel_id: tunnel.id,
@@ -1105,6 +1160,8 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
         cf_dns_record_id: dnsRecord.id,
         cf_plane_dns_record_id: planeDnsRecordId,
         cf_sure_dns_record_id: sureDnsRecordId,
+        cf_vault_dns_record_id: vaultDnsRecordId,
+        cf_vault_access_app_id: vaultAccessAppId,
       });
 
       insertEvent(
@@ -1189,6 +1246,27 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
         log,
       });
       log("Sure setup complete");
+    }
+
+    // --- Setup Vaultwarden (opt-in per-tenant secrets manager) ---
+    if (vaultwardenOnDefault) {
+      const ownerEmail = process.env.TENANT_OWNER_EMAIL ?? config.customer_email;
+      if (!ownerEmail) {
+        log(
+          "Warning: TENANT_OWNER_EMAIL / customer_email not set — skipping Vaultwarden setup. Configure manually with `setupVaultwarden`.",
+        );
+      } else {
+        setStep("setup_vaultwarden");
+        log("Setting up Vaultwarden (admin token + invite + health wait)...");
+        await setupVaultwarden({
+          serverIp: server.public_net.ipv4.ip,
+          keyPath: keyPair.privateKeyPath,
+          hostKeyOpts,
+          ownerEmail,
+          log,
+        });
+        log("Vaultwarden setup complete");
+      }
     }
 
     // --- Health check ---
@@ -1335,6 +1413,26 @@ export async function destroy(
       log("Sure DNS record deleted");
     } catch (e) {
       log(`Warning: Sure DNS record deletion failed: ${e}`);
+    }
+  }
+
+  if (instance.cf_vault_dns_record_id) {
+    log(`Deleting Vault DNS record ${instance.cf_vault_dns_record_id}...`);
+    try {
+      await cloudflare.deleteDnsRecord(instance.cf_vault_dns_record_id);
+      log("Vault DNS record deleted");
+    } catch (e) {
+      log(`Warning: Vault DNS record deletion failed: ${e}`);
+    }
+  }
+
+  if (instance.cf_vault_access_app_id) {
+    log(`Deleting Vault Access app ${instance.cf_vault_access_app_id}...`);
+    try {
+      await cloudflare.deleteAccessApplication(instance.cf_vault_access_app_id);
+      log("Vault Access app deleted");
+    } catch (e) {
+      log(`Warning: Vault Access app deletion failed: ${e}`);
     }
   }
 
@@ -2955,3 +3053,151 @@ export async function deploySure(
     }`,
   );
 }
+
+// ── Vaultwarden setup ────────────────────────────────────────────────────────
+//
+// Per-tenant Vaultwarden: each tenant VPS runs its own Bitwarden-compatible
+// secrets-manager container. Sir reaches the web UI at
+// https://<subdomain>-vault.<domain> (behind Cloudflare Access — Google SSO
+// scoped to the owner's email). Other tenant containers will eventually pull
+// secrets from this Vaultwarden via vault-init (PR2 in the rollout); Phase 0
+// just stands up Vaultwarden and prepares Sir's login so he can manually
+// import his existing .env entries through the web UI.
+//
+// Idempotency: setupVaultwarden is safe to re-run. It generates secrets only
+// when they're missing, and posts /admin/invite as a no-op if Sir's email is
+// already invited (Vaultwarden returns 200 + a "user already exists" payload).
+//
+// Why /admin/invite + not /admin/users: Vaultwarden has NO admin endpoint
+// that creates a user with a known password. The only path is invite +
+// user-completes-signup. We POST /admin/invite to create the Invitation
+// record, generate a master password, and surface it to Sir so he can do the
+// one-time signup at the web UI using the pre-generated password (Vaultwarden
+// honours the Invitation even with SIGNUPS_ALLOWED=false).
+
+interface SetupVaultwardenOpts {
+  serverIp: string;
+  keyPath: string;
+  hostKeyOpts?: SSHHostKeyOptions;
+  ownerEmail: string;
+  log: (msg: string) => void;
+}
+
+const VAULTWARDEN_INTERNAL_HEALTH_URL = "http://127.0.0.1:18080/alive";
+const VAULTWARDEN_READY_TIMEOUT_MS = 5 * 60 * 1000;
+const VAULTWARDEN_POLL_INTERVAL_MS = 3_000;
+
+async function waitForVaultwardenReady(
+  opts: Pick<SetupVaultwardenOpts, "serverIp" | "keyPath" | "hostKeyOpts" | "log">,
+): Promise<void> {
+  const start = Date.now();
+  let last = "";
+  while (Date.now() - start < VAULTWARDEN_READY_TIMEOUT_MS) {
+    const r = await ssh.exec(
+      opts.serverIp,
+      opts.keyPath,
+      `curl -sS -o /dev/null -w '%{http_code}' ${VAULTWARDEN_INTERNAL_HEALTH_URL} || true`,
+      undefined,
+      opts.hostKeyOpts,
+    );
+    last = r.stdout.trim();
+    if (last === "200") {
+      opts.log("Vaultwarden ready (HTTP 200 on /alive)");
+      return;
+    }
+    await new Promise((r) => setTimeout(r, VAULTWARDEN_POLL_INTERVAL_MS));
+  }
+  throw new Error(
+    `Vaultwarden did not become ready within ${VAULTWARDEN_READY_TIMEOUT_MS / 1000}s (last HTTP status: ${last || "unreachable"})`,
+  );
+}
+
+export async function setupVaultwarden(opts: SetupVaultwardenOpts): Promise<void> {
+  const sshOpts: Pick<SetupVaultwardenOpts, "serverIp" | "keyPath" | "hostKeyOpts"> = {
+    serverIp: opts.serverIp,
+    keyPath: opts.keyPath,
+    hostKeyOpts: opts.hostKeyOpts,
+  };
+
+  // 1. Generate / reuse bootstrap secrets.
+  const seeded: Record<string, string> = {};
+  const existingAdminToken = await readTenantEnv(sshOpts, "VAULTWARDEN_ADMIN_TOKEN");
+  if (!existingAdminToken) seeded.VAULTWARDEN_ADMIN_TOKEN = randomSecret(32);
+  const existingBwPassword = await readTenantEnv(sshOpts, "BW_PASSWORD");
+  if (!existingBwPassword) seeded.BW_PASSWORD = randomPassword();
+  const existingBwUser = await readTenantEnv(sshOpts, "BW_USER");
+  if (!existingBwUser) seeded.BW_USER = opts.ownerEmail;
+  const existingBwServerUrl = await readTenantEnv(sshOpts, "BW_SERVER_URL");
+  // Internal compose-network alias — vault-init runs in the same compose
+  // network and resolves "vaultwarden" to the container.
+  if (!existingBwServerUrl) seeded.BW_SERVER_URL = "http://vaultwarden:80";
+
+  if (Object.keys(seeded).length > 0) {
+    await writeTenantEnv(sshOpts, seeded);
+    opts.log(`Seeded ${Object.keys(seeded).length} Vaultwarden bootstrap secret(s) in .env`);
+  } else {
+    opts.log("All Vaultwarden bootstrap secrets already in .env — skipping seed");
+  }
+
+  // 2. Bring up the vaultwarden container (idempotent — `up -d` is a no-op
+  //    if it's already running with the right env). The compose template's
+  //    {% if vaultwarden_enabled %} guard means this fails harmlessly with
+  //    "no such service" if the caller routed us here without the flag.
+  const upRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `cd ${DEFAULTS.dockerComposeDir} && docker compose up -d vaultwarden`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  if (upRes.code !== 0) {
+    throw new Error(
+      `Vaultwarden container up failed (exit ${upRes.code}): ${upRes.stderr}`,
+    );
+  }
+
+  // 3. Wait for Vaultwarden's /alive endpoint.
+  opts.log("Waiting for Vaultwarden to become ready (up to 5 min)...");
+  await waitForVaultwardenReady({ ...sshOpts, log: opts.log });
+
+  // 4. Bootstrap Sir's user via /admin/invite. Vaultwarden's admin API does
+  //    NOT have a "create user with password" path; the closest thing is
+  //    POST /admin/invite which creates an Invitation record. With
+  //    SIGNUPS_ALLOWED=false but a pending Invitation, the user can still
+  //    sign up at the web UI using the email + their own password. We
+  //    surface the pre-generated BW_PASSWORD via the log so the dashboard
+  //    can show it to Sir as the master password to use during signup.
+  const adminToken = seeded.VAULTWARDEN_ADMIN_TOKEN ?? existingAdminToken!;
+  const inviteRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    [
+      `curl -sS -o /tmp/vw-invite.out -w '%{http_code}'`,
+      `-X POST http://127.0.0.1:18080/admin/invite`,
+      `-H 'Content-Type: application/json'`,
+      `-H 'Cookie: VW_ADMIN=${adminToken}'`,
+      `-d '${JSON.stringify({ email: opts.ownerEmail })}'`,
+      `; echo; cat /tmp/vw-invite.out; rm -f /tmp/vw-invite.out`,
+    ].join(" "),
+    undefined,
+    opts.hostKeyOpts,
+  );
+  // Vaultwarden returns 200 on success (also 200 if the user is already
+  // invited — admin/invite is idempotent). We log non-2xx as a soft warning
+  // because a tenant can still proceed; Sir can hit /admin manually if
+  // needed.
+  const lines = inviteRes.stdout.trim().split("\n");
+  const status = (lines[0] ?? "").trim();
+  if (status.startsWith("2")) {
+    opts.log(`Vaultwarden invite created for ${opts.ownerEmail} (HTTP ${status})`);
+  } else {
+    opts.log(
+      `Warning: Vaultwarden invite returned HTTP ${status || "?"} — Sir may need to invite ${opts.ownerEmail} manually via the /admin panel. Body: ${lines.slice(1).join(" ").slice(0, 200)}`,
+    );
+  }
+
+  opts.log(
+    `Vaultwarden setup complete. Sir signs up at https://<subdomain>-vault.<domain> using email=${opts.ownerEmail}; master password is in .env as BW_PASSWORD (also surfaced via the dashboard's tenant detail view).`,
+  );
+}
+

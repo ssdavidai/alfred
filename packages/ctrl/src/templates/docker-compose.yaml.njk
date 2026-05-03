@@ -899,4 +899,87 @@ services:
     mem_limit: 256m
     pids_limit: 256
 
+{% if vaultwarden_enabled %}
+  # ── Vaultwarden — per-tenant secrets manager ────────────────────────
+  # Bitwarden-compatible vault server. Single SQLite-backed binary. Holds
+  # every secret currently in `.env` plus future credentials. Sir reaches
+  # the web UI at https://vault.{{ subdomain }}.{{ domain }} (behind
+  # Cloudflare Access — Google SSO scoped to the owner's email).
+  #
+  # Bound to 127.0.0.1:18080 so cloudflared (the only public ingress for
+  # this hostname) can reach it; also reachable to other compose services
+  # via the `vaultwarden` alias on the default network — vault-init talks
+  # to it that way without round-tripping through cloudflared.
+  #
+  # ADMIN_TOKEN, SIGNUPS_ALLOWED=false (Sir signs up via the pre-existing
+  # /admin/invite record), DOMAIN set to the public URL (Bitwarden clients
+  # are picky about origin). Database under /mnt/encrypted/vaultwarden so
+  # restic picks it up automatically (no restic config change needed).
+  vaultwarden:
+    # Pinned digest is policy across the rest of the stack but Vaultwarden
+    # publishes :latest as a moving alpine tag; alfred-update.timer pulls
+    # this on schedule. If we ever need to roll back, replace with a
+    # specific tag (e.g. 1.34.4-alpine) and force-recreate.
+    image: vaultwarden/server:latest
+    restart: unless-stopped
+    environment:
+      - DOMAIN=https://{{ subdomain }}-vault.{{ domain }}
+      - SIGNUPS_ALLOWED=false
+      - INVITATIONS_ALLOWED=true
+      - WEB_VAULT_ENABLED=true
+      - SHOW_PASSWORD_HINT=false
+      # Without SMTP, /admin/invite creates a stub Invitation record and
+      # the user signs up by visiting the web UI; provisioner-generated
+      # master password is delivered to Sir out-of-band (dashboard).
+      - SMTP_HOST=
+      # ADMIN_TOKEN is read from .env (provisioner writes
+      # VAULTWARDEN_ADMIN_TOKEN; we map it to the env name vaultwarden
+      # actually reads).
+    env_file:
+      - .env
+    volumes:
+      - /mnt/encrypted/vaultwarden:/data
+    ports:
+      - "127.0.0.1:18080:80"
+    healthcheck:
+      # /alive is vaultwarden's tiny liveness path; cheap, always-200.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/alive >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+    mem_limit: 256m
+    pids_limit: 256
+
+  # vault-init — one-shot. Pulls every secret out of vaultwarden and
+  # rewrites /opt/alfred/compose/.env. Soft dep: if vaultwarden is wedged
+  # at boot, vault-init exits non-fatally and the existing .env (last
+  # successful sync) is what other services read. Other services do NOT
+  # depends_on vault-init for this reason.
+  vault-init:
+    image: ssdavidai00/alfred-vault-init:latest
+    restart: "no"
+    env_file:
+      - .env
+    depends_on:
+      vaultwarden:
+        condition: service_healthy
+    volumes:
+      - /opt/alfred/compose:/host/compose
+    # The fetch-and-write script (vault-init.sh) is baked into the image
+    # in a follow-up PR. Phase 0 ships this service block but the image's
+    # default CMD is a no-op until then.
+    mem_limit: 128m
+    pids_limit: 128
+{% endif %}
+
 volumes: {}

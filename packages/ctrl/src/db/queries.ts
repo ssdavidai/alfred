@@ -84,6 +84,8 @@ export function updateInstance(
       | "cf_dns_record_id"
       | "cf_plane_dns_record_id"
       | "cf_sure_dns_record_id"
+      | "cf_vault_dns_record_id"
+      | "cf_vault_access_app_id"
       | "cf_access_app_id"
     >
   >
