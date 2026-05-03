@@ -186,9 +186,11 @@ export async function provision(
     // a specific tenant out (rare — e.g. testing minimal stacks).
     const planeOnDefault = config.planeEnabled !== false;
     const sureOnDefault = config.sureEnabled !== false;
-    // Vaultwarden is opt-IN (default false) until david's canary soaks. Once
-    // it's proven, flip the default to `!== false` to match plane/sure.
-    const vaultwardenOnDefault = config.vaultwardenEnabled === true;
+    // Vaultwarden is on by default for new tenants now that david's canary
+    // soaked the full down/up cycle (#808). Pass `vaultwardenEnabled: false`
+    // explicitly to opt out — useful for staging tenants where the extra
+    // /admin/invite step adds no value.
+    const vaultwardenOnDefault = config.vaultwardenEnabled !== false;
     if (planeOnDefault) {
       // Marks the tenant as carrying the Plane sidecar stack — used by later
       // fleet-wide scans (e.g. "list all tenants running Plane") without
