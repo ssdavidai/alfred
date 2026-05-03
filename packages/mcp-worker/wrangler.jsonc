@@ -19,13 +19,16 @@
     { "tag": "v1", "new_sqlite_classes": ["SureMCP"] }
   ],
 
-  // OAuth provider state — registered clients, grants, access tokens.
-  // Required because Claude Custom Connectors UI rejects bearer-only servers
-  // and instead expects the OAuth 2.1 + DCR flow advertised at
-  // /.well-known/oauth-authorization-server. The library auto-stores grants
-  // and clients here.
+  // KV namespaces:
+  //   OAUTH_KV     — OAuthProvider's runtime state (clients/grants/tokens)
+  //   MCP_TENANTS  — multi-tenant routing config. Keyed on tenant_id (e.g.
+  //                  "david"); value is the JSON described in src/tenants.ts
+  //                  (ctrlUrl + aasApiKey + approvalSecret + label, plus
+  //                  optional CF Access service-token credentials). Written
+  //                  by the provisioner at tenant-ship time (#761 pattern).
   "kv_namespaces": [
-    { "binding": "OAUTH_KV", "id": "ec8f6f9a0e424fbcaf10323a76ce8196" }
+    { "binding": "OAUTH_KV", "id": "ec8f6f9a0e424fbcaf10323a76ce8196" },
+    { "binding": "MCP_TENANTS", "id": "bde5e3f32fac43b0a2c5d2814b9a3479" }
   ],
 
   // Bind the entire mcp.alfred.black subdomain to this Worker as a Custom
@@ -40,11 +43,10 @@
   "observability": { "enabled": true }
 
   // Secrets (set via `wrangler secret put`, never committed):
-  //   MCP_APPROVAL_SECRET          — pre-shared secret Sir enters once on /authorize to approve a new Claude
-  //                                   Custom Connector registration (single-tenant gate)
-  //   COOKIE_ENCRYPTION_KEY        — 32-byte hex; encrypts the OAuthProvider's client/grant cookies in KV
-  //   DAVID_AAS_API_KEY            — david's ctrl-api bearer
-  //   DAVID_CTRL_URL               — base URL of david's ctrl-api (e.g. https://alfred-david-mnbqn4jg.alfred.black)
-  //   DAVID_CF_ACCESS_CLIENT_ID    — OPTIONAL Cloudflare Access service-token client id (subdomain has no Access today)
-  //   DAVID_CF_ACCESS_CLIENT_SECRET — OPTIONAL Cloudflare Access service-token secret
+  //   COOKIE_ENCRYPTION_KEY — 32-byte hex; encrypts OAuthProvider state in KV
+  //
+  // Per-tenant config (ctrl URL, AAS API key, approval secret, etc.) now
+  // lives in MCP_TENANTS KV instead of worker secrets. This lets new tenants
+  // ship without redeploying the worker — the provisioner writes a row at
+  // /api/v1/sure-style provision time.
 }
