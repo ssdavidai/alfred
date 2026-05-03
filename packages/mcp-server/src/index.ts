@@ -50,6 +50,26 @@ async function main() {
     });
   });
 
+  // Per-app oauth-protected-resource metadata. MCP clients (claude.ai's
+  // Custom Connectors) follow this chain: POST /<app>/mcp → 401 with
+  // WWW-Authenticate header pointing at the per-app metadata URL → fetch
+  // metadata → use metadata.resource as the `resource` param in /authorize.
+  // Each app advertises a distinct canonical URI (`/<app>/mcp`) so the
+  // /authorize handler can extract the app from `params.resource` and bind
+  // the token to it. MUST be mounted BEFORE mcpAuthRouter, which serves a
+  // separate (now-unused) bare-hostname doc at /.well-known/oauth-protected-resource.
+  for (const appId of SUPPORTED_APPS) {
+    const resourceUri = new URL(`/${appId}/mcp`, issuerUrl).href;
+    app.get(`/.well-known/oauth-protected-resource/${appId}/mcp`, (_req, res) => {
+      res.json({
+        resource: resourceUri,
+        authorization_servers: [issuerUrl.href],
+        scopes_supported: [],
+        resource_name: `Alfred MCP — ${env.TENANT_LABEL} — ${appId}`,
+      });
+    });
+  }
+
   // OAuth: /register, /authorize (GET shows form via provider.authorize),
   //        /token, /revoke, /.well-known/{oauth-authorization-server,oauth-protected-resource}
   app.use(
@@ -116,12 +136,18 @@ async function main() {
   // default); state is fine for v1 single-instance deployments. If we ever
   // multi-replica this, swap to a SQLite-backed sessionStore.
 
-  const auth = requireBearerAuth({
-    verifier: provider,
-    resourceMetadataUrl: new URL("/.well-known/oauth-protected-resource", issuerUrl).href,
-  });
-
   for (const appId of SUPPORTED_APPS) {
+    // Per-app bearer middleware so the WWW-Authenticate challenge points at
+    // the per-app metadata URL — that's what makes claude.ai send the right
+    // `resource` param into /authorize.
+    const auth = requireBearerAuth({
+      verifier: provider,
+      resourceMetadataUrl: new URL(
+        `/.well-known/oauth-protected-resource/${appId}/mcp`,
+        issuerUrl,
+      ).href,
+    });
+
     const tools = getToolsForApp(appId);
     const mcp = new McpServer({
       name: `alfred-${env.TENANT_LABEL.toLowerCase()}-${appId}`,
