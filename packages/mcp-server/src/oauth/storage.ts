@@ -17,7 +17,12 @@ import * as fs from "node:fs";
 
 export interface ClientRow {
   client_id: string;
-  client_secret_hash: string | null;
+  // Stored RAW (not hashed) because the MCP SDK's clientAuth middleware
+  // does a string-equals comparison against the value returned from
+  // getClient(). Storing a hash would break confidential-client auth.
+  // Acceptable here because the SQLite file lives on the LUKS-encrypted
+  // /mnt/encrypted volume, alongside .env which already holds raw secrets.
+  client_secret: string | null;
   client_secret_expires_at: number;
   metadata: Record<string, unknown>;
   created_at: number;
@@ -66,10 +71,21 @@ export class OAuthStorage {
   }
 
   private migrate(): void {
+    // clients: drop+recreate if the legacy hash column is present. The fleet
+    // is single-tenant + SDK-generated DCR clients, so re-registration on
+    // the next /register call is cheaper than a careful column migration.
+    const cols = this.db
+      .prepare("PRAGMA table_info('clients')")
+      .all() as Array<{ name: string }>;
+    const hasLegacyHash = cols.some((c) => c.name === "client_secret_hash");
+    if (hasLegacyHash) {
+      this.db.exec("DROP TABLE clients;");
+    }
+
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS clients (
         client_id TEXT PRIMARY KEY,
-        client_secret_hash TEXT,
+        client_secret TEXT,
         client_secret_expires_at INTEGER NOT NULL DEFAULT 0,
         metadata_json TEXT NOT NULL,
         created_at INTEGER NOT NULL
@@ -112,18 +128,18 @@ export class OAuthStorage {
 
   insertClient(c: ClientRow): void {
     this.db.prepare(
-      "INSERT INTO clients(client_id, client_secret_hash, client_secret_expires_at, metadata_json, created_at) VALUES(?, ?, ?, ?, ?)",
-    ).run(c.client_id, c.client_secret_hash, c.client_secret_expires_at, JSON.stringify(c.metadata), c.created_at);
+      "INSERT INTO clients(client_id, client_secret, client_secret_expires_at, metadata_json, created_at) VALUES(?, ?, ?, ?, ?)",
+    ).run(c.client_id, c.client_secret, c.client_secret_expires_at, JSON.stringify(c.metadata), c.created_at);
   }
 
   getClient(client_id: string): ClientRow | null {
     const row = this.db.prepare("SELECT * FROM clients WHERE client_id = ?").get(client_id) as
-      | { client_id: string; client_secret_hash: string | null; client_secret_expires_at: number; metadata_json: string; created_at: number }
+      | { client_id: string; client_secret: string | null; client_secret_expires_at: number; metadata_json: string; created_at: number }
       | undefined;
     if (!row) return null;
     return {
       client_id: row.client_id,
-      client_secret_hash: row.client_secret_hash,
+      client_secret: row.client_secret,
       client_secret_expires_at: row.client_secret_expires_at,
       metadata: JSON.parse(row.metadata_json),
       created_at: row.created_at,

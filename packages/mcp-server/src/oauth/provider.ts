@@ -28,7 +28,7 @@ import {
   InvalidTokenError,
 } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 
-import { OAuthStorage, randomShort, randomToken, sha256 } from "./storage.js";
+import { OAuthStorage, randomToken, sha256 } from "./storage.js";
 import { isAppId } from "../tools/registry.js";
 import type { AppId } from "../tools/registry.js";
 
@@ -63,37 +63,46 @@ export class SqliteOAuthProvider implements OAuthServerProvider {
       async getClient(client_id) {
         const row = storage.getClient(client_id);
         if (!row) return undefined;
-        return {
-          client_id,
-          client_secret: undefined, // never returned; only the hash is stored
-          client_id_issued_at: Math.floor(row.created_at / 1000),
-          client_secret_expires_at: row.client_secret_expires_at || undefined,
-          ...(row.metadata as Omit<OAuthClientInformationFull, "client_id">),
-        };
+        // Trust the persisted metadata as the canonical client record.
+        // The SDK's /register handler pre-populates client_id, client_secret,
+        // client_id_issued_at, client_secret_expires_at on the OAuthClient-
+        // InformationFull object before calling registerClient(); we stored
+        // it verbatim, so we return it verbatim. The SDK's clientAuth
+        // middleware does a string-equals check against client.client_secret,
+        // so the raw secret has to be present (we keep it on disk in the
+        // LUKS-encrypted volume — see ClientRow.client_secret in storage.ts).
+        return row.metadata as OAuthClientInformationFull;
       },
       async registerClient(metadata) {
-        const client_id = randomShort();
-        const auth = metadata.token_endpoint_auth_method ?? "none";
-        let client_secret: string | undefined;
-        let client_secret_hash: string | null = null;
-        if (auth !== "none") {
-          client_secret = randomToken();
-          client_secret_hash = sha256(client_secret);
-        }
+        // With the SDK's default `clientIdGeneration: true`, the register
+        // handler has already set client_id (randomUUID) and client_secret
+        // (randomBytes for confidential clients) on the input object — its
+        // TS type still says Omit<…,"client_id"|…> but at runtime the
+        // fields are present. Earlier we generated our OWN client_id and
+        // stored the SDK's id inside metadata, which clobbered the explicit
+        // client_id field on getClient spread → invalid_grant. Now we
+        // accept whichever id the SDK gave us, fall back to one of our
+        // own only when the caller has explicitly opted into provider-side
+        // generation, and persist the resulting object as the canonical
+        // record so /register response and getClient() lookup are byte-
+        // identical.
+        const m = metadata as OAuthClientInformationFull & { client_id?: string };
         const now = Date.now();
+        const client_id = m.client_id ?? crypto.randomBytes(12).toString("base64url");
+        const client_id_issued_at = m.client_id_issued_at ?? Math.floor(now / 1000);
+        const full: OAuthClientInformationFull = {
+          ...m,
+          client_id,
+          client_id_issued_at,
+        };
         storage.insertClient({
           client_id,
-          client_secret_hash,
-          client_secret_expires_at: 0, // never
-          metadata,
+          client_secret: full.client_secret ?? null,
+          client_secret_expires_at: full.client_secret_expires_at ?? 0,
+          metadata: full,
           created_at: now,
         });
-        return {
-          ...metadata,
-          client_id,
-          client_secret,
-          client_id_issued_at: Math.floor(now / 1000),
-        } as OAuthClientInformationFull;
+        return full;
       },
     };
   }
