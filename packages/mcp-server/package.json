@@ -1,0 +1,31 @@
+{
+  "name": "@alfred/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Per-tenant MCP server. Runs as a Docker container in each tenant's compose stack alongside ctrl-api / sure-web / openclaw. Cloudflare Tunnel routes <tenant>.alfred.black/<app>/mcp to this service. OAuth 2.1 + DCR over SQLite for Claude Custom Connectors.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node --experimental-sqlite dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "express-rate-limit": "^7.4.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.5.0"
+  }
+}

@@ -1,0 +1,38 @@
+name: Build mcp-server image
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/mcp-server/**'
+      - '.github/workflows/build-mcp-server.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install
+        run: cd packages/mcp-server && npm ci
+
+      - name: Type-check
+        run: cd packages/mcp-server && npm run typecheck
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: packages/mcp-server
+          file: packages/mcp-server/Dockerfile
+          push: true
+          tags: |
+            ssdavidai00/alfred-mcp-server:latest
+            ssdavidai00/alfred-mcp-server:${{ github.sha }}

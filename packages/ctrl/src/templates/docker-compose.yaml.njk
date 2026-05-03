@@ -873,4 +873,30 @@ services:
     pids_limit: 256
 {% endif %}
 
+  # alfred-mcp-server — per-tenant MCP HTTP server for Claude Custom
+  # Connectors. Cloudflared routes <subdomain>.<domain>/<app>/mcp +
+  # the OAuth + .well-known paths to this container on :8787; everything
+  # else stays on ctrl-api / openclaw. Per-tenant deploy gives true
+  # isolation (one tenant's compromise doesn't expose another's API key).
+  mcp-server:
+    image: ssdavidai00/alfred-mcp-server:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=8787
+      - CTRL_URL=http://ctrl-api:3100
+      - DATA_DIR=/data
+      - PUBLIC_URL=https://{{ subdomain }}.{{ domain }}
+      - TENANT_LABEL={{ customer_name }}
+      # AAS_API_KEY + MCP_APPROVAL_SECRET come from .env (provisioner writes
+      # MCP_APPROVAL_SECRET; AAS_API_KEY is shared with ctrl-api itself)
+    volumes:
+      - /mnt/encrypted/mcp-server:/data
+    depends_on:
+      ctrl-api:
+        condition: service_started
+    mem_limit: 256m
+    pids_limit: 256
+
 volumes: {}

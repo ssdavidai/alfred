@@ -788,6 +788,20 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
         );
         updateInstance(instance.id, { api_key: preApiKey });
         log("AAS_API_KEY ready");
+
+        // alfred-mcp-server pre-shared approval secret. Sir enters this
+        // once per Claude Custom Connector add. Generated here so it's
+        // available before mcp-server first boots (otherwise the container
+        // crashloops because MCP_APPROVAL_SECRET is required).
+        const mcpApprovalSecret = crypto.randomBytes(24).toString("hex");
+        await ssh.exec(
+          server.public_net.ipv4.ip,
+          keyPair.privateKeyPath,
+          `echo 'MCP_APPROVAL_SECRET=${mcpApprovalSecret}' >> ${DEFAULTS.dockerComposeDir}/.env`,
+          undefined,
+          hostKeyOpts,
+        );
+        log(`MCP_APPROVAL_SECRET written (${mcpApprovalSecret.length} chars)`);
       } catch (e) {
         log(`Warning: pre-deploy api.mjs failed: ${e}`);
       }
