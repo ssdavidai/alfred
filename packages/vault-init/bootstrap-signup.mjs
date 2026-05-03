@@ -155,14 +155,27 @@ const registerPayload = {
   captchaResponse: null,
 };
 
+// Vaultwarden mounts the registration handler under `/identity/accounts/register`
+// in current versions (was `/api/accounts/register` in older releases — kept
+// as a fallback in case we run against an old fork). Try identity first; on
+// 404 fall back to the legacy api path.
+const REGISTER_PATHS = ["/identity/accounts/register", "/api/accounts/register"];
 console.error(
-  `[bootstrap-signup] POSTing /api/accounts/register (${JSON.stringify(registerPayload).length} bytes)`,
+  `[bootstrap-signup] POSTing register (${JSON.stringify(registerPayload).length} bytes); trying ${REGISTER_PATHS.join(", ")}`,
 );
-const resp = await fetch(`${serverUrl}/api/accounts/register`, {
-  method: "POST",
-  headers: { "content-type": "application/json", "device-type": "21" /* SDK */ },
-  body: JSON.stringify(registerPayload),
-});
+let resp;
+for (const path of REGISTER_PATHS) {
+  resp = await fetch(`${serverUrl}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "device-type": "21" /* SDK */ },
+    body: JSON.stringify(registerPayload),
+  });
+  if (resp.status !== 404) {
+    console.error(`[bootstrap-signup] register hit at ${path} (HTTP ${resp.status})`);
+    break;
+  }
+  console.error(`[bootstrap-signup] ${path} returned 404, trying next path`);
+}
 const respText = await resp.text();
 if (!resp.ok) {
   // Vaultwarden returns 400 with a JSON body if the email is already

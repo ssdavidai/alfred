@@ -928,13 +928,18 @@ services:
       - INVITATIONS_ALLOWED=true
       - WEB_VAULT_ENABLED=true
       - SHOW_PASSWORD_HINT=false
-      # Without SMTP, /admin/invite creates a stub Invitation record and
-      # the user signs up by visiting the web UI; provisioner-generated
-      # master password is delivered to Sir out-of-band (dashboard).
-      - SMTP_HOST=
-      # ADMIN_TOKEN is read from .env (provisioner writes
-      # VAULTWARDEN_ADMIN_TOKEN; we map it to the env name vaultwarden
-      # actually reads).
+      # SMTP intentionally LEFT UNSET — setting SMTP_HOST="" (empty) trips
+      # Vaultwarden's "partial SMTP config" validation since it treats empty
+      # as "set but invalid". Unset = SMTP disabled, which is what we want
+      # for a self-hosted single-user deployment. /admin/invite creates a
+      # stub Invitation that the bootstrap-signup script accepts via
+      # /api/accounts/register; no email is ever sent.
+      #
+      # Vaultwarden reads ADMIN_TOKEN, but our .env stores it as
+      # VAULTWARDEN_ADMIN_TOKEN to keep the namespace explicit. Map via
+      # docker-compose's ${VAR} interpolation (works because env_file values
+      # are resolvable via ${...} during compose render).
+      - ADMIN_TOKEN=${VAULTWARDEN_ADMIN_TOKEN}
     env_file:
       - .env
     volumes:
@@ -942,8 +947,10 @@ services:
     ports:
       - "127.0.0.1:18080:80"
     healthcheck:
-      # /alive is vaultwarden's tiny liveness path; cheap, always-200.
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/alive >/dev/null 2>&1 || exit 1"]
+      # /alive is vaultwarden's tiny liveness path; cheap, always-200. Use
+      # curl rather than wget — the vaultwarden:latest image (Debian-based
+      # alpine variant) has curl but not wget.
+      test: ["CMD-SHELL", "curl -sSf http://127.0.0.1:80/alive >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30

@@ -44,22 +44,28 @@ log "Configuring bw → $BW_SERVER_URL"
 bw config server "$BW_SERVER_URL" >/dev/null
 
 log "Logging in as $BW_USER"
-LOGIN_OUT=$(bw login "$BW_USER" "$BW_PASSWORD" --raw 2>&1) || LOGIN_RC=$?
+# Keep stderr separate from stdout — bw on Node emits the punycode
+# DeprecationWarning to stderr; if 2>&1, that warning gets captured into the
+# session token and downstream `bw <cmd> --session $TOKEN` parses the trailing
+# text as positional args. Session token comes only on stdout under --raw.
+LOGIN_ERR=$(mktemp)
+LOGIN_OUT=$(bw login "$BW_USER" "$BW_PASSWORD" --raw </dev/null 2>"$LOGIN_ERR") || LOGIN_RC=$?
 LOGIN_RC=${LOGIN_RC:-0}
 if [ "$LOGIN_RC" -ne 0 ]; then
-  if echo "$LOGIN_OUT" | grep -q "already logged in"; then
-    LOGIN_OUT=$(bw unlock "$BW_PASSWORD" --raw 2>&1) || fatal "bw unlock failed: $LOGIN_OUT"
+  if grep -q "already logged in" "$LOGIN_ERR"; then
+    LOGIN_OUT=$(bw unlock "$BW_PASSWORD" --raw </dev/null 2>"$LOGIN_ERR") || fatal "bw unlock failed: $(cat "$LOGIN_ERR")"
   else
-    fatal "bw login failed: $LOGIN_OUT"
+    fatal "bw login failed: $(cat "$LOGIN_ERR")"
   fi
 fi
+rm -f "$LOGIN_ERR"
 export BW_SESSION="$LOGIN_OUT"
 
 log "Syncing"
-bw sync >/dev/null
+bw sync --session "$BW_SESSION" </dev/null >/dev/null
 
 # Pull existing item names so we can dedupe on re-runs.
-EXISTING_NAMES=$(bw list items | jq -r '.[].name' | sort -u)
+EXISTING_NAMES=$(bw list items --session "$BW_SESSION" </dev/null | jq -r '.[].name' | sort -u)
 
 CREATED=0
 SKIPPED=0
@@ -116,7 +122,12 @@ while IFS= read -r line || [ -n "$line" ]; do
     }')
   ITEM_B64=$(printf '%s' "$ITEM_JSON" | base64 | tr -d '\n')
 
-  if bw create item "$ITEM_B64" >/dev/null 2>&1; then
+  # Redirect bw's stdin from /dev/null because the outer `done < "$ENV_PATH"`
+  # has stdin pointed at the .env file; without redirect, bw consumes the
+  # rest of the file looking for a master password and the loop ends after
+  # one iteration. Pass --session explicitly so bw uses the live session
+  # rather than re-prompting. Hard-won lessons; see issue #808.
+  if bw create item --session "$BW_SESSION" "$ITEM_B64" </dev/null >/dev/null 2>&1; then
     CREATED=$((CREATED + 1))
     log "+ $key"
   else
