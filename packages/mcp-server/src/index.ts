@@ -40,6 +40,41 @@ async function main() {
   const app = express();
   app.set("trust proxy", true); // behind cloudflared
 
+  // CORS — claude.ai's browser-side connector wiring sends a preflight
+  // OPTIONS before the real POST /<app>/mcp. Our bearer middleware runs
+  // before the route handler, so an unauthenticated OPTIONS gets rejected
+  // with 401 and no CORS headers — the browser blocks the actual POST,
+  // claude.ai surfaces "Authorization with the MCP server failed", and
+  // the user never sees the OAuth approval form.
+  //
+  // Fix: short-circuit preflight at the top of the middleware stack with
+  // permissive CORS. Echo the request's Origin (rather than `*`) because
+  // some browsers refuse `*` when credentials are involved, and add
+  // long enough max-age to keep the OPTIONS round trips off the hot path.
+  // Real auth still happens on the subsequent POST.
+  app.use((req, res, next) => {
+    const origin = req.headers.origin as string | undefined;
+    if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Authorization, Content-Type, MCP-Protocol-Version, mcp-session-id",
+    );
+    res.setHeader(
+      "Access-Control-Expose-Headers",
+      "WWW-Authenticate, mcp-session-id",
+    );
+    res.setHeader("Access-Control-Max-Age", "600");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+    next();
+  });
+
   // Liveness probe
   app.get("/health", (_req, res) => {
     res.json({

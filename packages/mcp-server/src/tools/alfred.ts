@@ -65,13 +65,16 @@ const vaultTools: ToolDef[] = [
   {
     name: "search_vault",
     description:
-      "Free-text and/or glob search across the entire vault. Pass `grep` for a case-insensitive substring match against the raw file content (frontmatter + body), `glob` for a path pattern (e.g. `matter/*` or `**/firstbase*`), or both to AND them. Returns `path`, `name`, `type`, `status` per hit. Use this when Sir says 'what do we have on Firstbase?' or 'find anything mentioning Robert Clarke' and you don't yet know the record's path. Prefer `grep` over walking list_vault_by_type for cross-type queries. Cheap; safe to call freely. Backing: filesystem walk + substring scan (no index — keep `grep` reasonably specific on large vaults).",
+      "Free-text and/or glob search across the entire vault. Pass `grep` for a case-insensitive substring match against the raw file content (frontmatter + body), `glob` for a path pattern (e.g. `matter/*` or `**/firstbase*`), or both to AND them. **The route REQUIRES at least one of `grep` or `glob`** — calling without either throws 400 (refuses to walk the whole vault). DO NOT use `q` or any other param name; the route ignores unrecognised params and would otherwise return everything, blowing the MCP transport size cap. Returns `{results, count, truncated}` — each result is `{path, name, type, status}`. Capped at 100 results by default (max 500 via `limit`); when `truncated: true`, narrow the search rather than asking for more. Use when Sir says 'what do we have on Firstbase?' or 'find anything mentioning Robert Clarke' and you don't yet know the record's path. Backing: filesystem walk + substring scan (no index — keep `grep` reasonably specific on large vaults).",
     inputSchema: z.object({
       grep: z.string().optional().describe(
         "Case-insensitive substring matched against raw file content. Use multi-word phrases or distinctive terms — single common words match thousands of records.",
       ),
       glob: z.string().optional().describe(
         "Path glob (relative to vault root). `*` matches a single segment, `**` matches across segments. No leading slash, no `..` traversal.",
+      ),
+      limit: z.number().int().min(1).max(500).optional().describe(
+        "Cap on results (default 100, max 500). Bound to keep responses under claude.ai's MCP transport size limit.",
       ),
     }).refine(
       (v) => Boolean(v.grep || v.glob),
@@ -86,7 +89,7 @@ const vaultTools: ToolDef[] = [
   {
     name: "get_vault_record",
     description:
-      "Read one vault record by its vault-relative path. Returns `{path, frontmatter, body}` — the full Markdown body and the parsed YAML frontmatter as a JSON object. The path can be passed with or without a `.md` suffix; the backend appends `.md` automatically if needed. ALWAYS call this before update_vault_record so you can read current frontmatter (status, owner, tags, related[]) and craft a minimal patch that doesn't clobber other fields. 404 means the record doesn't exist — surface that to Sir, don't fabricate. Backing: filesystem read + js-yaml frontmatter parse.",
+      "Read one vault record by its EXACT vault-relative path. Returns `{path, frontmatter, body}` — the full Markdown body and the parsed YAML frontmatter as a JSON object. The path can be passed with or without a `.md` suffix; the backend appends `.md` automatically if needed. **DON'T GUESS PATHS.** Always derive the path from a prior `search_vault` or `list_vault_by_type` result — a hallucinated 'matter/firstbase.md' returns 404 and looks like a tool failure to Sir. ALWAYS call this before update_vault_record so you can read current frontmatter (status, owner, tags, related[]) and craft a minimal patch that doesn't clobber other fields. 404 means the record doesn't exist at the path you passed — re-search rather than retrying with a tweaked path. Backing: filesystem read + js-yaml frontmatter parse.",
     inputSchema: z.object({
       path: VaultRelPath,
     }),

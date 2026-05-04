@@ -420,6 +420,32 @@ export function registerVaultRoutes(): void {
     const globPat = query.get("glob");
     const grepPat = query.get("grep");
 
+    // Cap result count. Unbounded responses on a large vault hit ~2MB which
+    // exceeds claude.ai's MCP transport limit and surfaces to Sir as "tool
+    // failed". Default 100; max 500 — claude.ai's wider MCP envelope is
+    // around 1MB, and 500 metadata records is comfortably under that.
+    let limit = 100;
+    const limitRaw = query.get("limit");
+    if (limitRaw !== null && limitRaw !== "") {
+      const n = Number.parseInt(limitRaw, 10);
+      if (!Number.isFinite(n) || n < 1 || n > 500) {
+        throw new ValidationError("limit must be 1..500");
+      }
+      limit = n;
+    }
+
+    // Refuse the unfiltered case. Without a grep or glob we'd walk every
+    // file in the vault and return up to `limit` arbitrary records — slow,
+    // surprising, and the LLM-callable callers (notably the alfred MCP)
+    // shouldn't be doing that. Earlier this route silently accepted bad
+    // params (`?q=hello` instead of `?grep=hello`) and returned the full
+    // vault — surfaced as a transport-size failure on the MCP side.
+    if (!globPat && !grepPat) {
+      throw new ValidationError(
+        "At least one of `grep` or `glob` query params is required. Got neither — refusing to walk the whole vault.",
+      );
+    }
+
     // Validate glob (no traversal)
     if (globPat && (globPat.includes("..") || path.isAbsolute(globPat))) {
       throw new ValidationError("Invalid glob pattern");
@@ -436,6 +462,7 @@ export function registerVaultRoutes(): void {
     }
 
     const results: Array<{ path: string; name: string; type: string; status: string }> = [];
+    let truncated = false;
     for (const relPath of files) {
       if (grepPat) {
         try {
@@ -453,8 +480,12 @@ export function registerVaultRoutes(): void {
         type: String(rec.fm.type || ""),
         status: String(rec.fm.status || ""),
       });
+      if (results.length >= limit) {
+        truncated = true;
+        break;
+      }
     }
-    sendJson(res, 200, { results, count: results.length });
+    sendJson(res, 200, { results, count: results.length, truncated });
   });
 
   // Vault list by type
