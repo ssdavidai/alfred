@@ -218,6 +218,7 @@ class PlaneReverseSyncWorkflow:
                     outbound_sigs=outbound_sigs,
                     result=result,
                     retry=retry,
+                    state_groups=state_groups,
                 )
             except Exception as exc:  # noqa: BLE001
                 result.errors += 1
@@ -278,6 +279,7 @@ class PlaneReverseSyncWorkflow:
         outbound_sigs: dict[str, dict[str, Any]],
         result: PlaneReverseSyncResult,
         retry: RetryPolicy,
+        state_groups: Optional[dict[str, str]] = None,
     ) -> None:
         """Route a single ``stream_type: "plane"`` event to the right branch."""
         raw = event.get("raw") or {}
