@@ -400,11 +400,27 @@ def plane_issue_to_vault_patch(
     else:
         labels = set()
 
+    # Plane returns `state` in three different shapes depending on which
+    # surface emitted the payload. Support all three so reverse sync
+    # behaves the same on webhook events vs API fetches:
+    #
+    #   1. WEBHOOK: state is a nested object with group inline:
+    #        {"state": {"id":"...", "name":"Done", "group":"completed"}}
+    #   2. REST API: state is just a UUID string with no inline group:
+    #        {"state": "9f8e2596-089e-4323-9daf-74766f2ec27d"}
+    #      → resolve via state_groups map (must be passed in by caller).
+    #   3. LEGACY: older payloads exposed group via state_detail.group
+    #      or state_group at the top level.
     state_group: Optional[str] = None
-    if state_groups:
-        state_id = plane_issue.get("state")
-        if isinstance(state_id, str) and state_id:
-            state_group = state_groups.get(state_id)
+    state_field = plane_issue.get("state")
+    if isinstance(state_field, dict):
+        # Webhook shape — group is inline.
+        grp = state_field.get("group")
+        if isinstance(grp, str) and grp:
+            state_group = grp
+    elif isinstance(state_field, str) and state_field and state_groups:
+        # API shape — state is a UUID; resolve via lookup.
+        state_group = state_groups.get(state_field)
     if not state_group:
         state_group = (
             plane_issue.get("state_detail", {}).get("group")
