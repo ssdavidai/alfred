@@ -63,8 +63,8 @@ runcmd:
       mount /dev/mapper/alfred-data /mnt/encrypted
 
       # Create data directories — all owned by deploy (uid 1000)
-      mkdir -p /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal
-      chown -R deploy:deploy /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal
+      mkdir -p /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden /mnt/encrypted/mcp-server
+      chown -R deploy:deploy /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden /mnt/encrypted/mcp-server
     fi
 
   # --- Update LUKS auto-unlock service with this tenant's volume ID ---

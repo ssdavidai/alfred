@@ -142,8 +142,8 @@ runcmd:
 
       # Create data directories — all owned by deploy (uid 1000)
       # temporal image also runs as uid 1000 (temporal user)
-      mkdir -p /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden
-      chown -R deploy:deploy /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden
+      mkdir -p /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden /mnt/encrypted/mcp-server
+      chown -R deploy:deploy /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden /mnt/encrypted/mcp-server
     fi
 
   # --- Setup auto-unlock on boot ---
