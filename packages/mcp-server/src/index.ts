@@ -166,10 +166,26 @@ async function main() {
 
   // ── MCP route: per-app under /<app>/mcp ───────────────────────────────────
   //
-  // We mount one McpServer + one StreamableHTTPServerTransport pair per
-  // supported app. Each transport's session state lives in memory (SDK
-  // default); state is fine for v1 single-instance deployments. If we ever
-  // multi-replica this, swap to a SQLite-backed sessionStore.
+  // McpServer + StreamableHTTPServerTransport are PER-SESSION, not per-app.
+  // The earlier "one transport per app at startup" pattern only handled the
+  // first client; every subsequent client's `initialize` returned 400
+  // ("Server already initialized") because the McpServer had been bound to
+  // the first session for the lifetime of the process. claude.ai opens a
+  // fresh session every chat, so after the first chat the connector looked
+  // permanently broken — every tool call surfaced as "tool failed", which
+  // is what Sir reported.
+  //
+  // Correct shape:
+  //   - One Map<sessionId, transport> per app (transports live in memory
+  //     keyed by the session id the SDK generates on initialize).
+  //   - Each new initialize without a session header creates a fresh
+  //     transport + McpServer pair and stores it under the new session id.
+  //   - Subsequent requests with mcp-session-id route to the existing
+  //     transport.
+  //   - When a transport closes, drop the entry.
+  // Memory profile: ~25 KB per session, capped naturally by Sir's
+  // concurrent-chat count. If we ever need to multi-replica, swap to a
+  // shared session store keyed off SQLite or Redis.
 
   for (const appId of SUPPORTED_APPS) {
     // Per-app bearer middleware so the WWW-Authenticate challenge points at
@@ -184,50 +200,83 @@ async function main() {
     });
 
     const tools = getToolsForApp(appId);
-    const mcp = new McpServer({
-      name: `alfred-${env.TENANT_LABEL.toLowerCase()}-${appId}`,
-      version: "1.0.0",
-    });
 
-    for (const tool of tools) {
-      const shape = (tool.inputSchema as ZodObject<ZodRawShape>).shape;
-      mcp.registerTool(
-        tool.name,
-        { description: tool.description, inputSchema: shape },
-        async (args: unknown, extra: { authInfo?: { extra?: Record<string, unknown> } }) => {
-          // Build the per-request CtrlContext from the access token's bound
-          // props (the appId here MUST match the URL path's appId — bearer
-          // middleware already enforced the resource binding, so this is
-          // belt-and-braces).
-          const props = (extra.authInfo?.extra ?? {}) as Partial<MCPProps>;
-          if (props.appId !== appId) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `app mismatch: token bound to "${props.appId}", but called via /${appId}/mcp`,
-                },
-              ],
-              isError: true,
+    // Build a fresh McpServer + transport pair on demand for a new session.
+    // Closing one entry must remove it from the map so memory doesn't leak.
+    const sessions = new Map<string, StreamableHTTPServerTransport>();
+
+    const buildTransport = (): StreamableHTTPServerTransport => {
+      const mcp = new McpServer({
+        name: `alfred-${env.TENANT_LABEL.toLowerCase()}-${appId}`,
+        version: "1.0.0",
+      });
+      for (const tool of tools) {
+        const shape = (tool.inputSchema as ZodObject<ZodRawShape>).shape;
+        mcp.registerTool(
+          tool.name,
+          { description: tool.description, inputSchema: shape },
+          async (args: unknown, extra: { authInfo?: { extra?: Record<string, unknown> } }) => {
+            const props = (extra.authInfo?.extra ?? {}) as Partial<MCPProps>;
+            if (props.appId !== appId) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `app mismatch: token bound to "${props.appId}", but called via /${appId}/mcp`,
+                  },
+                ],
+                isError: true,
+              };
+            }
+            const ctx: CtrlContext = {
+              ctrlUrl: env.CTRL_URL,
+              aasApiKey: env.AAS_API_KEY,
             };
-          }
-          const ctx: CtrlContext = {
-            ctrlUrl: env.CTRL_URL,
-            aasApiKey: env.AAS_API_KEY,
-          };
-          return runTool(ctx, tool, args);
+            return runTool(ctx, tool, args);
+          },
+        );
+      }
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (sid: string) => {
+          sessions.set(sid, transport);
         },
-      );
-    }
-
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
-    });
-    await mcp.connect(transport);
+      });
+      transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid) sessions.delete(sid);
+      };
+      void mcp.connect(transport);
+      return transport;
+    };
 
     const path = `/${appId}/mcp`;
     app.all(path, auth, express.json(), async (req, res) => {
       try {
+        const sessionHeader = req.headers["mcp-session-id"];
+        const sessionId = Array.isArray(sessionHeader) ? sessionHeader[0] : sessionHeader;
+
+        let transport: StreamableHTTPServerTransport | undefined;
+        if (sessionId) {
+          transport = sessions.get(sessionId);
+          if (!transport) {
+            res.status(404).json({
+              jsonrpc: "2.0",
+              error: {
+                code: -32001,
+                message: `Session not found: ${sessionId} (it expired or never existed; re-initialize)`,
+              },
+              id: null,
+            });
+            return;
+          }
+        } else {
+          // No session header → must be an initialize request to spin up a
+          // new session. Anything else without a session is a protocol error
+          // from a confused client; the SDK will produce a clean error body.
+          transport = buildTransport();
+        }
+
         await transport.handleRequest(req, res, req.body);
       } catch (err) {
         console.error(`[${appId}/mcp]`, err);
