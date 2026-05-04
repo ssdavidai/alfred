@@ -76,10 +76,20 @@ export function registerClaudeSetupRoutes(): void {
       },
     ];
 
+    // Custom Instructions: not per-app — a single file Sir pastes into
+    // claude.ai's profile-level Personalisation field. Identity transfer
+    // (Claude becomes Alfred) plus operating discipline. Same vendoring
+    // pattern as the skills (canonical in mcp-server, copy in saas/public).
+    const customInstructions = {
+      url: `${skillBase}/alfred-custom-instructions.md`,
+      filename: "alfred-custom-instructions.md",
+    };
+
     sendJson(res, 200, {
       tenant_url: tenantUrl,
       approval_secret: approvalSecret,
       apps,
+      custom_instructions: customInstructions,
     });
   });
 }

@@ -398,6 +398,7 @@ interface ClaudeSetupData {
   tenant_url: string | null;
   approval_secret: string | null;
   apps: ClaudeSetupApp[];
+  custom_instructions?: { url: string; filename: string };
 }
 
 export function ClaudeSetupContent() {
@@ -520,6 +521,54 @@ export function ClaudeSetupContent() {
         )}
       </SpotlightCard>
 
+      {/* Custom Instructions */}
+      {setup.custom_instructions && (
+        <SpotlightCard className="p-6">
+          <h2 className="font-serif text-xl font-light text-cream mb-1">
+            Custom Instructions
+          </h2>
+          <p className="font-mono text-[0.65rem] uppercase tracking-wider text-[#8A8680] mb-4">
+            One-time paste into claude.ai → Settings → Personalisation
+          </p>
+          <p className="text-[0.75rem] text-[#8A8680] mb-4 leading-relaxed">
+            Identity transfer: makes Claude in your account act as Alfred —
+            same voice, same operating discipline, same hard limits — with
+            reach scoped to the four MCP connectors above. Paste once, never
+            again.
+          </p>
+          <div className="rounded-lg border border-white/[0.06] bg-black/20 p-3 transition-colors hover:bg-black/30">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="font-mono text-xs text-cream">
+                  {setup.custom_instructions.filename}
+                </div>
+                <div className="mt-1 text-[0.7rem] text-[#8A8680]">
+                  Paste into claude.ai's Personalisation field, NOT into
+                  Custom Skills. The header before the <code>---</code> rule
+                  is for you; everything after is Claude-facing.
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                size="sm"
+                asChild
+                className="shrink-0 font-mono text-[0.6rem]"
+              >
+                <a
+                  href={setup.custom_instructions.url}
+                  download={setup.custom_instructions.filename}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  Download
+                </a>
+              </Button>
+            </div>
+          </div>
+        </SpotlightCard>
+      )}
+
       {/* Custom Skills */}
       <SpotlightCard className="p-6">
         <h2 className="font-serif text-xl font-light text-cream mb-1">
@@ -596,13 +645,29 @@ export function ClaudeSetupContent() {
             <span className="font-mono text-gold">3.</span> Under{" "}
             <span className="font-mono">Custom Skills</span>, click{" "}
             <span className="font-mono">New skill</span>, paste the contents of
-            the downloaded <span className="font-mono">.md</span> file. One
+            each downloaded <span className="font-mono">.md</span> file. One
             skill per app.
           </li>
           <li>
-            <span className="font-mono text-gold">4.</span> Sir's claude.ai
-            chats now reach Alfred, Sure, Plane, and Vault directly — without
-            SSH or this dashboard.
+            <span className="font-mono text-gold">4.</span> Open{" "}
+            <a
+              href="https://claude.ai/settings/profile"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-gold underline"
+            >
+              claude.ai → Settings → Personalisation
+            </a>
+            . Paste{" "}
+            <span className="font-mono">alfred-custom-instructions.md</span>{" "}
+            into the "What personal preferences should Claude consider in
+            responses?" field. Skip the header before the{" "}
+            <span className="font-mono">---</span> rule.
+          </li>
+          <li>
+            <span className="font-mono text-gold">5.</span> Your claude.ai
+            account now hosts Alfred — same voice, same discipline, reach
+            scoped to your four connectors. No SSH, no dashboard hopping.
           </li>
         </ol>
       </SpotlightCard>
