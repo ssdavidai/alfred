@@ -399,6 +399,13 @@ interface ClaudeSetupData {
   approval_secret: string | null;
   apps: ClaudeSetupApp[];
   custom_instructions?: { url: string; filename: string };
+  composio_skills?: Array<{
+    slug: string;
+    toolkit: string;
+    name: string;
+    description: string;
+    content: string;
+  }>;
 }
 
 export function ClaudeSetupContent() {
@@ -615,6 +622,70 @@ export function ClaudeSetupContent() {
           ))}
         </ul>
       </SpotlightCard>
+
+      {/* Composio Skills (auto-generated, one per connected toolkit) */}
+      {setup.composio_skills && setup.composio_skills.length > 0 && (
+        <SpotlightCard className="p-6">
+          <h2 className="font-serif text-xl font-light text-cream mb-1">
+            Composio Skills
+          </h2>
+          <p className="font-mono text-[0.65rem] uppercase tracking-wider text-[#8A8680] mb-4">
+            Auto-generated, one per connected app — paste alongside the
+            others into claude.ai → Custom Skills
+          </p>
+          <p className="text-[0.75rem] text-[#8A8680] mb-4 leading-relaxed">
+            Each one documents the available actions + payload shapes for a
+            specific Composio toolkit (Gmail's metadata-mode trim, Slack's
+            channel/user-id resolution, etc.). They pair with the Execute
+            connector — install both and Alfred uses the right action with
+            the right arguments first time.
+          </p>
+          <ul className="space-y-2">
+            {setup.composio_skills.map((s) => (
+              <li
+                key={s.slug}
+                className="rounded-lg border border-white/[0.06] bg-black/20 p-3 transition-colors hover:bg-black/30"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="font-mono text-xs text-cream">
+                      {s.slug}.md
+                    </div>
+                    <div className="mt-1 text-[0.7rem] text-[#8A8680]">
+                      {s.description}
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0 font-mono text-[0.6rem]"
+                    onClick={() => {
+                      // Inlined skill content — turn it into a Blob and
+                      // trigger a download. Avoids needing a session-
+                      // authenticated GET endpoint for what's essentially
+                      // already-fetched data.
+                      const blob = new Blob([s.content], {
+                        type: "text/markdown",
+                      });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url;
+                      a.download = `${s.slug}.md`;
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(url);
+                    }}
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    Download
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </SpotlightCard>
+      )}
 
       {/* Help block */}
       <SpotlightCard className="p-6">

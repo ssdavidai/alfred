@@ -10,6 +10,8 @@
 // on the existing AAS_API_KEY bearer auth that wraps every other admin
 // route, so the approval secret is never exposed without auth.
 
+import fs from "node:fs";
+import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson } from "../errors.js";
 
@@ -20,6 +22,60 @@ interface McpApp {
   mcp_url: string | null;
   skill_url: string;
   enabled: boolean;
+}
+
+interface ComposioSkill {
+  slug: string;        // e.g. "alfred-composio-gmail"
+  toolkit: string;     // e.g. "gmail"
+  name: string;        // display name from frontmatter
+  description: string;
+  // Full SKILL.md text content. Inlined (rather than served from a separate
+  // endpoint) because the dashboard's session auth doesn't trivially extend
+  // to one-off file downloads through Wasp; inlining keeps the entire bundle
+  // shippable via the same getClaudeSetup query the rest of the page uses.
+  // Files are typically 2–5 KB each; the whole tenant set is well under
+  // 100 KB, comfortably below any reasonable response size.
+  content: string;
+}
+
+const OPENCLAW_SKILLS_DIR = "/mnt/encrypted/openclaw/workspace/skills";
+const COMPOSIO_SKILL_PREFIX = "alfred-composio-";
+
+function readComposioSkills(): ComposioSkill[] {
+  if (!fs.existsSync(OPENCLAW_SKILLS_DIR)) return [];
+  const entries = fs.readdirSync(OPENCLAW_SKILLS_DIR, { withFileTypes: true });
+  const skills: ComposioSkill[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (!entry.name.startsWith(COMPOSIO_SKILL_PREFIX)) continue;
+    const skillFile = path.join(OPENCLAW_SKILLS_DIR, entry.name, "SKILL.md");
+    if (!fs.existsSync(skillFile)) continue;
+    const toolkit = entry.name.slice(COMPOSIO_SKILL_PREFIX.length);
+    let content = "";
+    try {
+      content = fs.readFileSync(skillFile, "utf8");
+    } catch {
+      continue;
+    }
+    let displayName = toolkit;
+    let description = `Composio ${toolkit} integration — auto-generated skill describing the available actions.`;
+    const m = content.match(/^---\n([\s\S]*?)\n---/);
+    if (m) {
+      const fm = m[1];
+      const nameLine = fm.match(/^name:\s*(.+)$/m);
+      const descLine = fm.match(/^description:\s*(.+)$/m);
+      if (nameLine) displayName = nameLine[1].trim().replace(/^["']|["']$/g, "");
+      if (descLine) description = descLine[1].trim().replace(/^["']|["']$/g, "");
+    }
+    skills.push({
+      slug: entry.name,
+      toolkit,
+      name: displayName,
+      description,
+      content,
+    });
+  }
+  return skills.sort((a, b) => a.toolkit.localeCompare(b.toolkit));
 }
 
 export function registerClaudeSetupRoutes(): void {
@@ -74,7 +130,22 @@ export function registerClaudeSetupRoutes(): void {
         skill_url: `${skillBase}/alfred-vaultwarden.md`,
         enabled: !!process.env.BW_USER,
       },
+      {
+        id: "execute",
+        name: "Execute",
+        description:
+          "Composio surface — every connected third-party app (Gmail, GitHub, Notion, Slack, Calendar, Drive, Linear, Zoom, …) through one execute primitive. Six tools: list_composio_tools, composio_execute, list_connections, create_connection, reconnect_connection, delete_connection.",
+        mcp_url: tenantUrl ? `${tenantUrl}/execute/mcp` : null,
+        skill_url: `${skillBase}/alfred-execute.md`,
+        enabled: !!process.env.COMPOSIO_API_KEY,
+      },
     ];
+
+    // Auto-generated alfred-composio-* skills, one per connected toolkit.
+    // Tenant-specific (each contains the connected_account id), so served live
+    // from /api/v1/claude-setup/composio-skills/:slug rather than vendored
+    // into the SaaS public/ directory.
+    const composioSkills = readComposioSkills();
 
     // Custom Instructions: not per-app — a single file Sir pastes into
     // claude.ai's profile-level Personalisation field. Identity transfer
@@ -90,6 +161,7 @@ export function registerClaudeSetupRoutes(): void {
       approval_secret: approvalSecret,
       apps,
       custom_instructions: customInstructions,
+      composio_skills: composioSkills,
     });
   });
 }

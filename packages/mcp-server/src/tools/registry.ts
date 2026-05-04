@@ -7,14 +7,16 @@ import { ALL_TOOLS as ALL_SURE_TOOLS } from "./sure.js";
 import { ALL_PLANE_TOOLS } from "./plane.js";
 import { ALL_ALFRED_TOOLS } from "./alfred.js";
 import { ALL_VAULTWARDEN_TOOLS } from "./vaultwarden.js";
+import { ALL_EXECUTE_TOOLS } from "./execute.js";
 
-export type AppId = "sure" | "plane" | "alfred" | "vaultwarden";
+export type AppId = "sure" | "plane" | "alfred" | "vaultwarden" | "execute";
 
 export const SUPPORTED_APPS: ReadonlySet<AppId> = new Set([
   "sure",
   "plane",
   "alfred",
   "vaultwarden",
+  "execute",
 ]);
 
 export function isAppId(value: string): value is AppId {
@@ -26,6 +28,7 @@ const REGISTRY: Record<AppId, ToolDef[]> = {
   plane: ALL_PLANE_TOOLS,
   alfred: ALL_ALFRED_TOOLS,
   vaultwarden: ALL_VAULTWARDEN_TOOLS,
+  execute: ALL_EXECUTE_TOOLS,
 };
 
 export function getToolsForApp(app: AppId): ToolDef[] {
