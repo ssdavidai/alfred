@@ -833,6 +833,10 @@ def _make_b8_stubs(
     async def stub_fetch(since_id: str) -> list[dict[str, Any]]:
         return list(events)
 
+    @activity.defn(name="fetch_plane_state_groups")
+    async def stub_fetch_state_groups() -> dict[str, str]:
+        return {}
+
     @activity.defn(name="check_loop_guards")
     async def stub_guards(
         plane_id: str,
@@ -856,6 +860,7 @@ def _make_b8_stubs(
     async def stub_create(
         issue: dict[str, Any],
         matter_slug: Optional[str],
+        state_groups_arg: Optional[dict[str, str]] = None,
     ) -> dict[str, Any]:
         return {"path": "task/stub.md", "slug": "stub", "plane_issue_id": issue.get("id")}
 
@@ -915,6 +920,7 @@ def _make_b8_stubs(
         stub_load_state,
         stub_save_cursor,
         stub_fetch,
+        stub_fetch_state_groups,
         stub_guards,
         stub_apply,
         stub_create,

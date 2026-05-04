@@ -129,6 +129,7 @@ def _make_stubs(
     enabled: bool = True,
     raise_on_apply_path: Optional[str] = None,
     fixed_now_ms: Optional[int] = None,
+    test_state_groups: Optional[dict[str, str]] = None,
 ) -> tuple[list, dict[str, Any]]:
     """Build the full set of stub activities for one workflow run.
 
@@ -197,6 +198,18 @@ def _make_stubs(
                 if ev.get("id") == since_id:
                     seen_cursor = True
         return out
+
+    @activity.defn(name="fetch_plane_state_groups")
+    async def stub_fetch_state_groups() -> dict[str, str]:
+        # The workflow gates this behind workflow.patched(...). The test
+        # environment's WorkflowEnvironment treats every workflow run as
+        # "new", so the patched branch is taken and this stub is invoked.
+        # Returning {} makes plane_issue_to_vault_patch fall back to the
+        # legacy state_detail.group / state_group resolution — the same
+        # behaviour the tests originally exercised. Tests that want to
+        # exercise the new state-id lookup can override via test_state_groups.
+        _CALL_LOG.append(("fetch_state_groups", None))
+        return dict(test_state_groups or {})
 
     @activity.defn(name="check_loop_guards")
     async def stub_guards(
@@ -272,6 +285,7 @@ def _make_stubs(
     async def stub_create(
         issue: dict[str, Any],
         matter_slug: Optional[str],
+        state_groups_arg: Optional[dict[str, str]] = None,
     ) -> dict[str, Any]:
         _CALL_LOG.append(("create_task", (issue.get("id"), matter_slug)))
         slug = f"from-{issue.get('id')}"
@@ -281,7 +295,7 @@ def _make_stubs(
             "matter_slug": matter_slug,
         })
         # Seed frontmatter so subsequent updates in the same run see it
-        patch = plane_issue_to_vault_patch(issue)
+        patch = plane_issue_to_vault_patch(issue, state_groups_arg)
         state["frontmatter"][path] = {
             "type": "task",
             "plane_issue_id": str(issue.get("id") or ""),
@@ -318,6 +332,7 @@ def _make_stubs(
         stub_load_state,
         stub_save_cursor,
         stub_fetch,
+        stub_fetch_state_groups,
         stub_guards,
         stub_apply,
         stub_create,
