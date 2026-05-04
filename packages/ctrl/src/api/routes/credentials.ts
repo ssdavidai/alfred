@@ -227,4 +227,126 @@ export function registerCredentialRoutes(): void {
       console.error("Background container restart failed:", err);
     });
   });
+
+  // POST /api/v1/admin/vault/refresh — pull every secret out of Vaultwarden,
+  // rewrite .env, and (optionally) restart impacted services. The dashboard's
+  // "rotate secret" flow calls this after Sir edits an item in the Vaultwarden
+  // web UI: one click instead of SSH + two compose commands.
+  //
+  // Body shape:
+  //   {
+  //     services?: string[]   // services to recreate after vault-init runs.
+  //                           // Defaults to ["openclaw", "alfred"] which
+  //                           // matches PATCH /admin/credentials. Pass
+  //                           // explicitly when rotating tenant-specific
+  //                           // creds (e.g. ["sure-web", "sure-worker"]
+  //                           // for Sure DB password rotation).
+  //   }
+  //
+  // Behaviour:
+  //   1. Refuses if VAULTWARDEN_ADMIN_TOKEN is missing (= tenant not migrated)
+  //   2. Runs `docker compose run --rm vault-init` synchronously and waits
+  //      for exit. vault-init exit codes:
+  //        0 → secrets fetched + .env rewritten
+  //        1 → vaultwarden unreachable (soft — last-good .env stays)
+  //        2 → data error (.env unchanged)
+  //        3 → config error (missing env vars)
+  //      We surface the exit code; only on 0 do we proceed to restart.
+  //   3. Recreates impacted services with --no-deps + --force-recreate so
+  //      ctrl-api itself isn't touched (would 502 the response we just sent).
+  //   4. Returns synchronously after vault-init exits but BEFORE the restart
+  //      finishes — same fire-and-forget pattern as PATCH /admin/credentials.
+  addRoute("POST", "/api/v1/admin/vault/refresh", async ({ res, body }) => {
+    // Cheap pre-flight: refuse if vaultwarden's bootstrap secrets aren't in
+    // .env yet. Running vault-init without them would just exit 3 and
+    // surface a confusing error.
+    const envContents = fs.readFileSync(ENV_PATH, "utf8");
+    if (!/^VAULTWARDEN_ADMIN_TOKEN=/m.test(envContents)) {
+      sendJson(res, 409, {
+        error: "Vaultwarden not provisioned on this tenant — VAULTWARDEN_ADMIN_TOKEN missing from .env. Run setupVaultwarden via the provisioner first.",
+      });
+      return;
+    }
+
+    const b = (body ?? {}) as { services?: unknown };
+    let services: string[] = ["openclaw", "alfred"];
+    if (b.services !== undefined) {
+      if (!Array.isArray(b.services)) {
+        throw new ValidationError("services must be an array of service names");
+      }
+      services = b.services.map((s) => {
+        if (typeof s !== "string") {
+          throw new ValidationError("each service must be a string");
+        }
+        // Same charset rule as validateServiceName — keeps shell-injection
+        // surface flat.
+        if (!/^[a-zA-Z0-9_-]+$/.test(s)) {
+          throw new ValidationError(`Invalid service name: ${s}`);
+        }
+        return s;
+      });
+      // Refuse self-restart unless explicitly opted in via the same header
+      // pattern other admin routes use. ctrl-api restarting itself mid-
+      // request would 502 the response.
+      const SELF_LOCKOUT = ["ctrl-api"];
+      const hits = services.filter((s) => SELF_LOCKOUT.includes(s));
+      if (hits.length > 0) {
+        sendJson(res, 409, {
+          error: `Refusing to restart ${hits.join(", ")} via vault refresh — would kill the API connection mid-request. Restart these manually via SSH or the per-service /admin/containers/:service/restart route.`,
+        });
+        return;
+      }
+    }
+
+    // Run vault-init synchronously. `docker compose run --rm vault-init`
+    // re-uses the existing service definition (env_file, depends_on, volumes)
+    // but exits when the script does, leaving no zombie container. The
+    // service is restart: "no" in the template so this doesn't create a
+    // long-lived process.
+    let vaultInitOutput = "";
+    let vaultInitExitCode = 0;
+    try {
+      vaultInitOutput = await dockerComposeCmd(["run", "--rm", "vault-init"]);
+    } catch (err: unknown) {
+      // dockerComposeCmd → execAsync wraps non-zero exit in ExecError. Pull
+      // the exit code out of the message; the helper doesn't expose it
+      // directly but the format is "docker failed (CODE): ..."
+      const msg = err instanceof Error ? err.message : String(err);
+      const match = /failed \((\d+)\)/.exec(msg);
+      vaultInitExitCode = match ? parseInt(match[1], 10) : -1;
+      vaultInitOutput = msg;
+    }
+
+    if (vaultInitExitCode !== 0) {
+      sendJson(res, 502, {
+        error: "vault-init failed; .env was NOT rewritten and no services were restarted",
+        exit_code: vaultInitExitCode,
+        // Trim to keep the response payload reasonable; full output is in
+        // `docker compose logs vault-init` if Sir wants the detail.
+        output: vaultInitOutput.slice(-2000),
+      });
+      return;
+    }
+
+    // Respond immediately, then restart in the background — same pattern as
+    // PATCH /admin/credentials. The restart is `up -d --no-deps
+    // --force-recreate` per service, sequential so dependent containers
+    // don't trample each other on startup.
+    invalidateModelCatalogCache();
+    sendJson(res, 200, {
+      message: "Vault refreshed. Services are restarting (may take ~30s).",
+      vault_init_output: vaultInitOutput.slice(-1000),
+      restarted: services,
+    });
+
+    (async () => {
+      for (const svc of services) {
+        try {
+          await dockerComposeCmd(["up", "-d", "--no-deps", "--force-recreate", svc]);
+        } catch (err) {
+          console.error(`Vault refresh: restart of ${svc} failed:`, err);
+        }
+      }
+    })();
+  });
 }
