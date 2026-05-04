@@ -64,6 +64,24 @@ export function registerAppsRoutes(): void {
       );
     }
 
+    // Vaultwarden — present when this tenant has been migrated. We key off
+    // BW_USER (the only Vaultwarden bootstrap value that's set the moment
+    // setupVaultwarden runs) rather than VAULTWARDEN_ADMIN_TOKEN so the dock
+    // surfaces correctly even on tenants where the operator has revoked the
+    // admin token (BW_USER + BW_PASSWORD remain because vault-init still
+    // needs them).
+    if (process.env.BW_USER) {
+      checks.push(
+        (async (): Promise<InstalledApp> => ({
+          id: "vaultwarden",
+          name: "Vault",
+          url: subdomain ? `https://${subdomain}-vault.${domain}` : null,
+          icon: "/app-icons/vaultwarden.svg",
+          status: await checkHealth("http://vaultwarden:80/alive"),
+        }))(),
+      );
+    }
+
     const apps = await Promise.all(checks);
     sendJson(res, 200, { apps });
   });
