@@ -406,6 +406,11 @@ interface ClaudeSetupData {
     description: string;
     content: string;
   }>;
+  vault_login?: {
+    url: string;
+    email: string;
+    master_password: string;
+  } | null;
 }
 
 export function ClaudeSetupContent() {
@@ -416,6 +421,7 @@ export function ClaudeSetupContent() {
   const setup = data as ClaudeSetupData | undefined;
 
   const [revealSecret, setRevealSecret] = useState(false);
+  const [revealVaultPwd, setRevealVaultPwd] = useState(false);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   const copy = (key: string, value: string) => {
@@ -445,6 +451,116 @@ export function ClaudeSetupContent() {
 
   return (
     <div className="space-y-6">
+      {/* Vault login — comes first because users have no other way to
+          retrieve their master password. Shown only if BW_USER and
+          BW_PASSWORD are set on the tenant (i.e. Vaultwarden was
+          provisioned). */}
+      {setup.vault_login && (
+        <SpotlightCard className="p-6">
+          <h2 className="font-serif text-xl font-light text-cream mb-1">
+            Vault Login
+          </h2>
+          <p className="font-mono text-[0.65rem] uppercase tracking-wider text-[#8A8680] mb-4">
+            Your per-tenant Vaultwarden — open in browser, log in once, save
+            to your password manager
+          </p>
+          <p className="text-[0.75rem] text-[#8A8680] mb-4 leading-relaxed">
+            Every tenant runs its own Vaultwarden on the VPS, holding ~45
+            tenant secrets (API keys, admin credentials, OAuth tokens).
+            This is the master password for that vault — it's also a service
+            credential used internally by vault-init, so don't change it via
+            the web UI's "Change Master Password" without coordinating with
+            ops. Treat as static; copy to your password manager once and
+            you're done.
+          </p>
+          <div className="space-y-2">
+            <div className="rounded-lg border border-white/[0.06] bg-black/20 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[0.6rem] uppercase tracking-wider text-[#8A8680]">
+                    Web URL
+                  </div>
+                  <div className="mt-1 font-mono text-xs text-cream break-all">
+                    {setup.vault_login.url}
+                  </div>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  asChild
+                  className="shrink-0 font-mono text-[0.6rem]"
+                >
+                  <a
+                    href={setup.vault_login.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    Open
+                  </a>
+                </Button>
+              </div>
+            </div>
+            <div className="rounded-lg border border-white/[0.06] bg-black/20 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[0.6rem] uppercase tracking-wider text-[#8A8680]">
+                    Email
+                  </div>
+                  <div className="mt-1 font-mono text-xs text-cream break-all">
+                    {setup.vault_login.email}
+                  </div>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="shrink-0 font-mono text-[0.6rem]"
+                  onClick={() => copy("vault-email", setup.vault_login!.email)}
+                >
+                  <Copy className="h-3 w-3" />
+                  {copiedKey === "vault-email" ? "Copied" : "Copy"}
+                </Button>
+              </div>
+            </div>
+            <div className="rounded-lg border border-gold-dim/30 bg-black/30 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-[0.6rem] uppercase tracking-wider text-[#8A8680]">
+                    Master Password
+                  </div>
+                  <div className="mt-1 font-mono text-xs text-cream break-all">
+                    {revealVaultPwd
+                      ? setup.vault_login.master_password
+                      : "•".repeat(Math.min(48, setup.vault_login.master_password.length))}
+                  </div>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="font-mono text-[0.6rem]"
+                    onClick={() => setRevealVaultPwd((v) => !v)}
+                  >
+                    {revealVaultPwd ? "Hide" : "Reveal"}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="font-mono text-[0.6rem]"
+                    onClick={() =>
+                      copy("vault-pwd", setup.vault_login!.master_password)
+                    }
+                  >
+                    <Copy className="h-3 w-3" />
+                    {copiedKey === "vault-pwd" ? "Copied" : "Copy"}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </SpotlightCard>
+      )}
+
       {/* Custom Connectors */}
       <SpotlightCard className="p-6">
         <h2 className="font-serif text-xl font-light text-cream mb-1">

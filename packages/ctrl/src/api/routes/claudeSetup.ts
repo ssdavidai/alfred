@@ -156,12 +156,33 @@ export function registerClaudeSetupRoutes(): void {
       filename: "alfred-custom-instructions.md",
     };
 
+    // Vaultwarden login bundle. Surfaces the master password the user
+    // needs to log into the per-tenant Vaultwarden web UI — without
+    // this, the password lives only in /opt/alfred/compose/.env on the
+    // tenant VPS, which the user has no SSH access to. Returned in
+    // FULL (not masked) because you need the entire password string to
+    // type into Vaultwarden's login form. The dashboard hides it
+    // behind a Reveal toggle, same pattern as the approval secret.
+    //
+    // Gated on BW_USER being set so tenants that haven't been
+    // provisioned with Vaultwarden don't show an empty card.
+    const bwUser = process.env.BW_USER || null;
+    const bwPassword = process.env.BW_PASSWORD || null;
+    const vaultLogin = bwUser && bwPassword && subdomain
+      ? {
+          url: `https://${subdomain}-vault.${domain}`,
+          email: bwUser,
+          master_password: bwPassword,
+        }
+      : null;
+
     sendJson(res, 200, {
       tenant_url: tenantUrl,
       approval_secret: approvalSecret,
       apps,
       custom_instructions: customInstructions,
       composio_skills: composioSkills,
+      vault_login: vaultLogin,
     });
   });
 }
