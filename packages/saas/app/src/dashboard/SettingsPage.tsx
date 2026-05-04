@@ -7,6 +7,7 @@ import {
   listApiKeys,
   createApiKey,
   revokeApiKey,
+  getClaudeSetup,
 } from "wasp/client/operations";
 import DashboardLayout from "./DashboardLayout";
 
@@ -403,10 +404,7 @@ export function ClaudeSetupContent() {
   // Wasp's `useQuery` returns a hook bound to the import — re-using the
   // pattern from the rest of the dashboard. The query proxies to ctrl-api's
   // /api/v1/claude-setup; backing impl in src/dashboard/operations.ts.
-  const { data, isLoading, error } = useQuery(
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    require("wasp/client/operations").getClaudeSetup as any,
-  );
+  const { data, isLoading, error } = useQuery(getClaudeSetup);
   const setup = data as ClaudeSetupData | undefined;
 
   const [revealSecret, setRevealSecret] = useState(false);
