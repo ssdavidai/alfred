@@ -112,6 +112,166 @@ def _save_outbound_sigs_to_disk(path: Path, sigs: dict[str, dict[str, Any]]) -> 
     _atomic_write(path, payload)
 
 
+# ── Staleness check (forward-sync conflict resolution) ─────────────────────
+#
+# Forward sync (vault → Plane) was previously a blind PATCH: every field in
+# `issue_body` was sent regardless of whether Plane held a more recent value.
+# That's the right shape when WE'RE the only writer, but Plane is also a
+# user-facing surface — Sir closing a task in Plane's UI mints an
+# `updated_at` that's newer than the vault's mtime. If reverse-sync hasn't
+# yet mirrored that close into the vault (queue lag, worker restart, the
+# 1h wedge Sir hit), forward-sync sees vault.status="todo" and pushes
+# "todo" to Plane, silently overwriting Sir's close.
+#
+# The fix here is a per-field staleness check that runs BEFORE the PATCH:
+#   1. Fetch the current Plane issue once, get its updated_at + current
+#      values of every field we'd push.
+#   2. Look up the most recent outbound signature for this plane_id. If
+#      we wrote it within the tolerance window (2s) of plane.updated_at,
+#      Plane's last update WAS our own write → safe to push everything.
+#   3. Otherwise, build the PATCH body field-by-field:
+#        - vault[f] == plane[f]: drop (no diff to send).
+#        - vault[f] != plane[f] AND we own the most recent write: include.
+#        - vault[f] != plane[f] AND Plane is newer: drop, log warning.
+#          Reverse-sync will land Plane's value into the vault on its
+#          next tick; the next forward-sync tick then sees vault==plane
+#          and stays out of the way.
+#   4. If the resulting body is empty, skip the HTTP PATCH entirely.
+#
+# Cost: one Plane GET per forward-sync update. Bounded by Sir's edit rate
+# (forward-sync only runs when vault has changes since the cursor).
+
+# Tolerance for clock skew between this worker (docker host time) and
+# Plane's API (running in the same compose stack — usually identical, but
+# leave headroom for NTP drift / suspend-resume).
+_PLANE_TS_TOLERANCE_MS = 2_000
+
+
+def _parse_plane_updated_at_ms(raw: Any) -> Optional[int]:
+    """Convert Plane's ISO-8601 updated_at (e.g. '2026-05-04T07:57:44.461769Z')
+    to epoch ms. Returns None on parse failure."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        # Plane uses 'Z' suffix; datetime.fromisoformat needs '+00:00'
+        # in 3.10. From 3.11 onward 'Z' works directly. Be defensive.
+        s = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+        dt = datetime.fromisoformat(s)
+        return int(dt.timestamp() * 1000)
+    except (ValueError, OverflowError):
+        return None
+
+
+def _our_signature_is_authoritative(
+    plane_id: str,
+    plane_updated_at_ms: Optional[int],
+) -> bool:
+    """Return True if our most recent outbound signature for `plane_id`
+    was recorded within tolerance of Plane's `updated_at` — meaning
+    Plane's last update was OUR own write echoing back, so we own the
+    state and a fresh push is safe.
+
+    Returns False if either we have no signature for this plane_id, the
+    signature is older than plane.updated_at, or plane.updated_at is
+    unparseable (defensive default — assume Plane was touched
+    externally).
+    """
+    if plane_updated_at_ms is None:
+        return False
+    try:
+        sigs = _load_outbound_sigs_from_disk(_outbound_sigs_path())
+    except Exception:  # noqa: BLE001
+        return False
+    sig = sigs.get(str(plane_id))
+    if not isinstance(sig, dict):
+        return False
+    sig_ts = sig.get("ts")
+    if not isinstance(sig_ts, int):
+        return False
+    # Our signature must be at least as recent as Plane's updated_at,
+    # within the clock-skew tolerance.
+    return sig_ts >= plane_updated_at_ms - _PLANE_TS_TOLERANCE_MS
+
+
+def _filter_stale_fields(
+    issue_body: dict[str, Any],
+    plane_issue: dict[str, Any],
+    plane_id: str,
+    slug: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Field-level staleness filter. Drops fields from `issue_body` whose
+    Plane value is newer than ours.
+
+    Returns (filtered_body, deferred_field_names). Caller decides what
+    to do with an empty body (typically: skip the HTTP PATCH).
+
+    Comparison rules per field:
+      - If Plane's current value matches what we're about to send: drop
+        (no diff — sending it is a no-op that wastes a webhook round
+        trip).
+      - If our outbound signature is authoritative (most recent author
+        was us): keep all fields. We own the state; the diff IS our
+        latest intent.
+      - If Plane is the most recent author and the values differ: drop
+        the field, append to deferred.
+    """
+    plane_updated_ms = _parse_plane_updated_at_ms(plane_issue.get("updated_at"))
+    we_authored_last = _our_signature_is_authoritative(plane_id, plane_updated_ms)
+
+    if we_authored_last:
+        # Strip only true no-op fields. Authoring matches → push everything
+        # else as today. (Strictly speaking we could skip identical-value
+        # fields too; the pre-existing code didn't, so neither do we — keeps
+        # behaviour identical when our writes are the most recent.)
+        return issue_body, []
+
+    # Plane was touched by an external actor since our last write. Drop
+    # any field where Plane's value diverges from ours.
+    filtered: dict[str, Any] = {}
+    deferred: list[str] = []
+    for field, our_value in issue_body.items():
+        plane_value = _normalise_plane_field(field, plane_issue)
+        our_norm = _normalise_our_field(field, our_value)
+        if plane_value == our_norm:
+            # Identical — no diff to send. Drop.
+            continue
+        # Plane is newer AND values differ → defer to reverse-sync.
+        deferred.append(field)
+        logger.info(
+            "plane_sync.deferred_by_staleness slug=%s plane_id=%s field=%s "
+            "(plane.updated_at newer than our last outbound signature; "
+            "letting reverse-sync land Plane's value first)",
+            slug, plane_id, field,
+        )
+    return filtered, deferred
+
+
+def _normalise_plane_field(field: str, plane_issue: dict[str, Any]) -> Any:
+    """Pull the comparable value of `field` out of a Plane issue payload.
+
+    Plane's REST returns shapes that don't always match what we PATCH:
+      - `state` is a UUID string (we send a UUID — direct compare).
+      - `labels` is a list of label-id UUIDs (matches our payload shape
+        as `label_ids`).
+      - `assignees` is a list of user UUIDs.
+      - `target_date` / `name` / `priority` / `description_html` are
+        scalars.
+    """
+    if field == "labels":
+        return list(plane_issue.get("labels") or [])
+    if field == "assignees":
+        return list(plane_issue.get("assignees") or [])
+    return plane_issue.get(field)
+
+
+def _normalise_our_field(field: str, value: Any) -> Any:
+    """Mirror of _normalise_plane_field for our outbound payload — keeps
+    the comparison apples-to-apples."""
+    if field in ("labels", "assignees"):
+        return list(value or [])
+    return value
+
+
 def _record_outbound_signature(plane_id: str, payload: dict[str, Any]) -> None:
     """Record the hash of an outbound Plane write. Best-effort — logs and
     continues on any I/O failure.
@@ -1295,6 +1455,48 @@ async def sync_task_to_plane(
             issue_body["assignees"] = assignees
 
         if existing_id:
+            # ── Staleness check (per-field conflict resolution) ──────────
+            #
+            # Fetch Plane's current state once before issuing any PATCH so
+            # we can:
+            #   * Drop fields where Plane already matches (no-op savings).
+            #   * Drop fields where Plane was touched more recently than
+            #     us (prevents stomping a Sir-edit-in-Plane that
+            #     reverse-sync hasn't yet mirrored to vault).
+            # On 404 the existing 404-handler below takes over (cross-
+            # project move / stale_dropped path) — we only do the
+            # staleness filter when the issue actually exists in the
+            # expected project.
+            try:
+                plane_current = await client.get_issue(project_id, existing_id)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    plane_current = None
+                else:
+                    raise
+            if isinstance(plane_current, dict):
+                filtered_body, deferred_fields = _filter_stale_fields(
+                    issue_body, plane_current, existing_id, slug,
+                )
+                if not filtered_body:
+                    # Either Plane already matches us on every field, or
+                    # every divergent field was deferred to reverse-sync.
+                    # Either way — no PATCH is correct.
+                    logger.info(
+                        "plane_sync.skipped_no_diff slug=%s plane_id=%s "
+                        "deferred=%s",
+                        slug, existing_id, deferred_fields,
+                    )
+                    return {
+                        "slug": slug,
+                        "plane_id": existing_id,
+                        "action": "skipped_no_diff" if not deferred_fields else "deferred_by_staleness",
+                        "project_id": project_id,
+                        "deferred_fields": deferred_fields,
+                    }
+                # Update the body for the PATCH — only fields that
+                # actually need to change.
+                issue_body = filtered_body
             try:
                 await client.update_issue(project_id, existing_id, issue_body)
                 action = "update"

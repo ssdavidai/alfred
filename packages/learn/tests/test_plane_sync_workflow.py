@@ -2479,3 +2479,216 @@ class TestPaginationActivities:
         # worst case (frontmatter + 30 KB body cap × 100). Typical
         # records are ~2 KB so a real batch is more like 200 KB.
         assert TASK_FETCH_BATCH_SIZE == 100
+
+
+# ---------------------------------------------------------------------------
+# Staleness check (forward-sync conflict resolution)
+# ---------------------------------------------------------------------------
+
+
+class TestStalenessCheck:
+    """Forward sync used to blind-PATCH every field regardless of whether
+    Plane held a newer value, which silently overwrote Sir's Plane-side
+    edits during reverse-sync delays. These tests pin the new staleness
+    filter that runs before update_issue.
+    """
+
+    def _run_activity(
+        self,
+        *,
+        task: dict,
+        project_map: dict,
+        issue_map: dict,
+        fake_client,
+        monkeypatch,
+    ):
+        from src.activities import plane_sync as ps
+        monkeypatch.setattr(ps, "_plane_client_from_env", lambda: fake_client)
+        # Bypass label-cache fetch: it's tested elsewhere and would
+        # require a separate fake; for staleness tests we only care
+        # about the get_issue → filter → maybe-update path.
+        monkeypatch.setattr(
+            ps, "_resolve_labels_with_cache",
+            _AsyncReturn([])
+        )
+        from temporalio.testing import ActivityEnvironment
+        env = ActivityEnvironment()
+        return asyncio.run(
+            env.run(
+                ps.sync_task_to_plane, task, project_map, issue_map, None,
+            )
+        )
+
+    def test_plane_newer_with_diverging_status_drops_status_field(
+        self, monkeypatch, tmp_path,
+    ):
+        """The exact scenario Sir hit: Plane shows Done (state group
+        completed), vault still says todo because reverse-sync hasn't
+        landed the close yet. Without the staleness filter we'd PATCH
+        state=todo and stomp Sir's close. WITH the filter, the state
+        field is dropped from the PATCH.
+        """
+        from src.activities import plane_sync as ps
+        # Point outbound signature storage at a clean tmpfile so we
+        # don't pick up signatures from earlier tests.
+        sig_path = tmp_path / "sigs.json"
+        monkeypatch.setattr(ps, "_outbound_sigs_path", lambda: sig_path)
+
+        update_calls: list[dict] = []
+
+        class FakeClient:
+            async def get_issue(self, project_id, issue_id):
+                # Plane's API shape: state is a UUID string.
+                # updated_at is much newer than any of our (absent)
+                # signatures.
+                return {
+                    "id": issue_id,
+                    "name": "pavilion",
+                    "state": "DONE-STATE-UUID",
+                    "priority": "none",
+                    "updated_at": "2026-05-04T12:00:00.000000Z",
+                    "labels": [],
+                    "assignees": [],
+                }
+
+            async def update_issue(self, project_id, issue_id, body):
+                update_calls.append({"project_id": project_id, "issue_id": issue_id, "body": body})
+                return {}
+
+            async def close(self):
+                pass
+
+        out = self._run_activity(
+            task={
+                "slug": "pavilion",
+                "frontmatter": {
+                    "name": "pavilion",
+                    "status": "todo",  # vault says todo
+                    "priority": "none",
+                },
+                "matter_slug": "alpha",
+                "body": "",
+            },
+            project_map={"alpha": "prj-alpha"},
+            issue_map={"pavilion": "iss-pavilion"},
+            fake_client=FakeClient(),
+            monkeypatch=monkeypatch,
+        )
+
+        # Assert the activity reported it deferred the field rather than
+        # silently sending the stomp. update_issue should NOT have been
+        # called (Plane is newer on every field that diverges).
+        assert update_calls == [], (
+            f"update_issue must not be called when Plane is newer; got {update_calls}"
+        )
+        assert out["action"] in ("skipped_no_diff", "deferred_by_staleness"), out
+
+    def test_plane_matches_vault_skips_update(self, monkeypatch, tmp_path):
+        """If Plane already has the same values, no PATCH should fire —
+        the no-diff short-circuit is faster than a noop network round
+        trip.
+        """
+        from src.activities import plane_sync as ps
+        sig_path = tmp_path / "sigs.json"
+        monkeypatch.setattr(ps, "_outbound_sigs_path", lambda: sig_path)
+
+        update_calls: list[dict] = []
+
+        class FakeClient:
+            async def get_issue(self, project_id, issue_id):
+                return {
+                    "id": issue_id,
+                    "name": "pavilion",
+                    "state": None,
+                    "priority": "none",
+                    "updated_at": "2026-05-04T12:00:00.000000Z",
+                    "labels": [],
+                    "assignees": [],
+                }
+
+            async def update_issue(self, project_id, issue_id, body):
+                update_calls.append({"body": body})
+                return {}
+
+            async def close(self):
+                pass
+
+        out = self._run_activity(
+            task={
+                "slug": "pavilion",
+                "frontmatter": {"name": "pavilion", "priority": "none"},
+                "matter_slug": "alpha",
+                "body": "",
+            },
+            project_map={"alpha": "prj-alpha"},
+            issue_map={"pavilion": "iss-pavilion"},
+            fake_client=FakeClient(),
+            monkeypatch=monkeypatch,
+        )
+        assert update_calls == [], (
+            f"update_issue should not fire when no diff; got {update_calls}"
+        )
+        assert out["action"] in ("skipped_no_diff", "deferred_by_staleness"), out
+
+    def test_our_recent_signature_allows_push_through(self, monkeypatch, tmp_path):
+        """When our most recent outbound signature for the issue is at
+        least as recent as Plane's updated_at, we own the state and the
+        update_issue call MUST go through (this is the "echo" / round-
+        trip case — without this carve-out we'd never push anything).
+        """
+        from src.activities import plane_sync as ps
+        sig_path = tmp_path / "sigs.json"
+        monkeypatch.setattr(ps, "_outbound_sigs_path", lambda: sig_path)
+
+        # Seed an outbound signature 1s AFTER plane.updated_at.
+        plane_updated_iso = "2026-05-04T12:00:00.000000Z"
+        plane_updated_ms = ps._parse_plane_updated_at_ms(plane_updated_iso)
+        assert plane_updated_ms is not None
+        sig_payload = {"sig-issue": {"hash": "x", "ts": plane_updated_ms + 1000}}
+        sig_path.write_text(json.dumps(sig_payload))
+
+        update_calls: list[dict] = []
+
+        class FakeClient:
+            async def get_issue(self, project_id, issue_id):
+                return {
+                    "id": issue_id,
+                    "name": "different-name-on-plane",  # diverges from vault
+                    "state": "OLD-STATE",
+                    "priority": "none",
+                    "updated_at": plane_updated_iso,
+                    "labels": [],
+                    "assignees": [],
+                }
+
+            async def update_issue(self, project_id, issue_id, body):
+                update_calls.append({"body": body})
+                return {}
+
+            async def close(self):
+                pass
+
+        out = self._run_activity(
+            task={
+                "slug": "renamed",
+                "frontmatter": {"name": "new-vault-name", "priority": "none"},
+                "matter_slug": "alpha",
+                "body": "",
+            },
+            project_map={"alpha": "prj-alpha"},
+            issue_map={"renamed": "sig-issue"},
+            fake_client=FakeClient(),
+            monkeypatch=monkeypatch,
+        )
+        assert len(update_calls) == 1, (
+            f"update_issue must fire when our signature is authoritative; got {update_calls}"
+        )
+
+
+class _AsyncReturn:
+    """Tiny coroutine helper for monkeypatching async functions in tests."""
+    def __init__(self, value):
+        self._value = value
+
+    async def __call__(self, *args, **kwargs):
+        return self._value

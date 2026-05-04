@@ -223,6 +223,11 @@ async def register_plane_sync(client: Client, task_queue: str) -> None:
         PLANE_SYNC_WORKFLOW,
         id=f"{PLANE_SYNC_SCHEDULE_ID}-run",
         task_queue=task_queue,
+        # 5-minute timeout: same wedge protection as reverse-sync. Forward
+        # sync's per-batch cursor advancement means a wedged run also
+        # blocks the schedule (SKIP overlap) until the wedge clears.
+        execution_timeout=timedelta(minutes=5),
+        run_timeout=timedelta(minutes=5),
     )
     spec = ScheduleSpec(
         intervals=[ScheduleIntervalSpec(every=timedelta(seconds=15))],
@@ -293,6 +298,15 @@ async def register_plane_reverse_sync(client: Client, task_queue: str) -> None:
         PLANE_REVERSE_SYNC_WORKFLOW,
         id=f"{PLANE_REVERSE_SYNC_SCHEDULE_ID}-run",
         task_queue=task_queue,
+        # Run timeout: if a single workflow run is still ticking after 5
+        # minutes, kill it. With OverlapPolicy.SKIP a wedged run blocks
+        # the schedule indefinitely (see #823: a WorkflowTaskTimedOut
+        # workflow ran for 1h+ on david, blocking 17,016 scheduled runs
+        # and Sir's pavilion close along with them). 5 min is generous
+        # for the 10s tick — a healthy run finishes in <2s on a 50-event
+        # backlog. The sweep means a wedge auto-recovers.
+        execution_timeout=timedelta(minutes=5),
+        run_timeout=timedelta(minutes=5),
     )
     spec = ScheduleSpec(
         intervals=[ScheduleIntervalSpec(every=timedelta(seconds=10))],
