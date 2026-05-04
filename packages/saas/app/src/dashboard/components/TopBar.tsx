@@ -11,6 +11,9 @@ import {
   Smartphone,
   Loader2,
   Copy,
+  Wallet,
+  Kanban,
+  KeyRound,
 } from "lucide-react";
 import FileUploadDialog from "./FileUploadDialog";
 import AnimatedCounter from "../../components/ui/AnimatedCounter";
@@ -58,6 +61,44 @@ export default function TopBar({
   const subdomainUrl = data.instance?.subdomainUrl ?? null;
   const agentmailAddress = (data.instance as any)?.agentmailInboxAddress ?? null;
   const gatewayToken = data.gatewayToken ?? null;
+
+  // Sidecar URL derivation. Tenants live at https://<sub>.alfred.black; each
+  // sidecar gets a single-level subdomain prefix (matches the wildcard cert
+  // and the cloudflared template — see packages/ctrl/src/templates/
+  // cloudflared-config.yaml.njk for the canonical mapping):
+  //   sure       → https://<sub>-sure.alfred.black
+  //   plane      → https://<sub>-plane.alfred.black
+  //   vaultwarden → https://<sub>-vault.alfred.black
+  // We derive these from subdomainUrl rather than threading them through
+  // the dashboard data shape because the transform is mechanical and the
+  // canonical truth lives in the cloudflared template.
+  const sidecarUrl = (suffix: string): string | null => {
+    if (!subdomainUrl) return null;
+    try {
+      const u = new URL(subdomainUrl);
+      const [first, ...rest] = u.hostname.split(".");
+      if (!first || rest.length === 0) return null;
+      u.hostname = `${first}-${suffix}.${rest.join(".")}`;
+      return u.toString().replace(/\/$/, "");
+    } catch {
+      return null;
+    }
+  };
+
+  // Render sidecar buttons only when the underlying container is actually
+  // up — not every tenant runs every sidecar (Vaultwarden is opt-in for
+  // older tenants; sure/plane can also be disabled via InstanceConfig
+  // flags). Using `containers` as truth keeps the dashboard honest: if the
+  // service is wedged or never deployed, no button.
+  const containerRunning = (service: string): boolean =>
+    containers?.some((c: any) => c.Service === service && c.State === "running") ?? false;
+
+  const showSure = containerRunning("sure-web");
+  const showPlane = containerRunning("plane-proxy");
+  const showVault = containerRunning("vaultwarden");
+  const sureUrl = showSure ? sidecarUrl("sure") : null;
+  const planeUrl = showPlane ? sidecarUrl("plane") : null;
+  const vaultUrl = showVault ? sidecarUrl("vault") : null;
 
   return (
     <>
@@ -227,6 +268,51 @@ export default function TopBar({
               >
                 <ExternalLink className="h-3 w-3" />
                 OpenClaw
+              </a>
+            </Button>
+          )}
+
+          {sureUrl && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 font-mono text-[0.65rem] text-muted-foreground hover:text-[#F0EDE8]"
+              title="Sure — personal finance"
+              asChild
+            >
+              <a href={sureUrl} target="_blank" rel="noopener noreferrer">
+                <Wallet className="h-3 w-3" />
+                Sure
+              </a>
+            </Button>
+          )}
+
+          {planeUrl && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 font-mono text-[0.65rem] text-muted-foreground hover:text-[#F0EDE8]"
+              title="Plane — project management"
+              asChild
+            >
+              <a href={planeUrl} target="_blank" rel="noopener noreferrer">
+                <Kanban className="h-3 w-3" />
+                Plane
+              </a>
+            </Button>
+          )}
+
+          {vaultUrl && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 font-mono text-[0.65rem] text-muted-foreground hover:text-[#F0EDE8]"
+              title="Vaultwarden — secrets manager"
+              asChild
+            >
+              <a href={vaultUrl} target="_blank" rel="noopener noreferrer">
+                <KeyRound className="h-3 w-3" />
+                Vault
               </a>
             </Button>
           )}
