@@ -368,11 +368,30 @@ def vault_matter_to_plane_update(
     return payload
 
 
-def plane_issue_to_vault_patch(plane_issue: dict) -> dict:
+def plane_issue_to_vault_patch(
+    plane_issue: dict,
+    state_groups: Optional[dict[str, str]] = None,
+) -> dict:
     """Transform a Plane issue webhook/API payload into a vault task
     frontmatter patch. Returns only the fields safe to overwrite —
     never touches related_matters / related_persons / source_event
     (those are Alfred-managed).
+
+    `state_groups`: optional dict mapping state_id (UUID) → state_group
+    ("backlog"|"unstarted"|"started"|"completed"|"cancelled"). Modern
+    Plane REST returns ``issue.state`` as a UUID without an inline group;
+    callers that want correct status mapping must pre-fetch the workspace
+    states via ``PlaneClient.list_states`` and pass the lookup in. When
+    omitted, we fall back to the older `state_detail.group` /
+    `state_group` keys for back-compat with webhook payloads, but this
+    SILENTLY masks state changes for issues fetched via /api/v1/.../
+    issues/ — which is what plane_reverse_sync uses (#558).
+
+    Resolution order for the state group:
+      1. `state_groups[issue.state]`      — explicit lookup (correct)
+      2. `state_detail.group`              — legacy/expanded payloads
+      3. `state_group`                     — older webhook shape
+      4. ``backlog``                       — last-resort default
     """
     labels: set[str]
     raw_labels = plane_issue.get("labels", [])
@@ -381,10 +400,16 @@ def plane_issue_to_vault_patch(plane_issue: dict) -> dict:
     else:
         labels = set()
 
-    state_group = (
-        plane_issue.get("state_detail", {}).get("group")
-        or plane_issue.get("state_group")
-    )
+    state_group: Optional[str] = None
+    if state_groups:
+        state_id = plane_issue.get("state")
+        if isinstance(state_id, str) and state_id:
+            state_group = state_groups.get(state_id)
+    if not state_group:
+        state_group = (
+            plane_issue.get("state_detail", {}).get("group")
+            or plane_issue.get("state_group")
+        )
 
     status = PLANE_STATE_GROUP_TO_VAULT_TASK.get(state_group or "backlog", "todo")
     # Blocked label wins over state group

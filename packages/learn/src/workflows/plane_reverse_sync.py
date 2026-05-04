@@ -36,6 +36,7 @@ with workflow.unsafe.imports_passed_through():
         check_loop_guards,
         create_vault_task_from_plane_issue,
         fetch_plane_events,
+        fetch_plane_state_groups,
         find_vault_task_path_by_plane_id,
         load_reverse_sync_state,
         mark_plane_event_processed,
@@ -148,6 +149,22 @@ class PlaneReverseSyncWorkflow:
         outbound_sigs: dict[str, dict[str, Any]] = dict(
             state.get("outbound_signatures") or {}
         )
+
+        # state_id → state_group lookup. Plane returns issue.state as
+        # UUID without inline group metadata, so plane_issue_to_vault_patch
+        # needs this map to translate Plane "state" to vault "status".
+        # Refreshed every workflow tick — cheap (~60 entries) and avoids
+        # staleness when Sir adds custom states. On error, returns {} so
+        # the patch builder falls back to legacy state_detail.group keys.
+        # Gated by workflow.patched so in-flight workflows under old code
+        # replay deterministically (without the new activity call).
+        state_groups: dict[str, str] = {}
+        if workflow.patched("plane-reverse-sync-state-groups-2026-05-04"):
+            state_groups = await workflow.execute_activity(
+                fetch_plane_state_groups,
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=retry,
+            )
 
         # Invert the forward-sync maps so we can go plane_id → slug
         # without an extra activity round-trip.
@@ -354,7 +371,7 @@ class PlaneReverseSyncWorkflow:
                     # hash compare in apply_plane_patch_to_vault will
                     # still noop.
                     path = _task_path_for_slug(slug)
-                    patch = plane_issue_to_vault_patch(data)
+                    patch = plane_issue_to_vault_patch(data, state_groups)
                     outcome = await workflow.execute_activity(
                         apply_plane_patch_to_vault,
                         args=["task", path, patch, ""],
@@ -370,7 +387,7 @@ class PlaneReverseSyncWorkflow:
                 matter_slug = plane_project_to_slug.get(project_id)
                 await workflow.execute_activity(
                     create_vault_task_from_plane_issue,
-                    args=[data, matter_slug],
+                    args=[data, matter_slug, state_groups],
                     start_to_close_timeout=timedelta(seconds=60),
                     retry_policy=retry,
                 )
@@ -422,13 +439,13 @@ class PlaneReverseSyncWorkflow:
                     matter_slug = plane_project_to_slug.get(project_id)
                     await workflow.execute_activity(
                         create_vault_task_from_plane_issue,
-                        args=[data, matter_slug],
+                        args=[data, matter_slug, state_groups],
                         start_to_close_timeout=timedelta(seconds=60),
                         retry_policy=retry,
                     )
                     result.tasks_created += 1
                     return
-                patch = plane_issue_to_vault_patch(data)
+                patch = plane_issue_to_vault_patch(data, state_groups)
 
                 # Detect matter reassignment: if the issue has moved to a
                 # different Plane project, propagate the new matter slug

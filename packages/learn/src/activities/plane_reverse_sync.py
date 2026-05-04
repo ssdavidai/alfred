@@ -45,6 +45,7 @@ import httpx
 from temporalio import activity
 
 from src.config import Config, load_config
+from src.utils.plane_client import PlaneClient
 from src.utils.plane_mapping import (
     compute_loop_guard_hash,
     plane_issue_to_vault_patch,
@@ -200,6 +201,68 @@ async def plane_reverse_sync_is_enabled() -> bool:
 # ---------------------------------------------------------------------------
 # Activity: fetch Plane events from ctrl-api streams endpoint
 # ---------------------------------------------------------------------------
+
+@activity.defn
+async def fetch_plane_state_groups() -> dict[str, str]:
+    """Build a workspace-wide ``state_id → state_group`` map.
+
+    Plane returns ``issue.state`` as a UUID without inline group metadata,
+    so reverse sync can't translate Plane's status to vault status without
+    this lookup. We hit ``/api/v1/.../projects/{id}/states/`` per project
+    (Plane provisions ~5 default states per project, so 12 projects ≈ 60
+    rows total — cheap, fits in a single workflow heartbeat).
+
+    Cached per workflow run by the caller, not globally — Plane's state
+    UUIDs are stable but new ones can appear when Sir adds custom states,
+    and we'd rather pay the few-hundred-ms refresh on every reverse-sync
+    run than risk stale lookups.
+
+    Returns ``{}`` on any client error so the patch builder falls back to
+    its older ``state_detail.group`` / ``state_group`` resolution paths.
+    """
+    base_url = os.environ.get("PLANE_API_BASE_URL") or os.environ.get(
+        "PLANE_API_URL"
+    )
+    token = os.environ.get("PLANE_API_TOKEN")
+    workspace = os.environ.get("PLANE_WORKSPACE_SLUG")
+    if not (base_url and token and workspace):
+        logger.warning(
+            "fetch_plane_state_groups: Plane creds not in env — returning empty lookup",
+        )
+        return {}
+    client = PlaneClient(base_url=base_url, token=token, workspace_slug=workspace)
+    try:
+        try:
+            projects = await client.list_projects()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("fetch_plane_state_groups: list_projects failed: %s", e)
+            return {}
+        result: dict[str, str] = {}
+        for proj in projects:
+            pid = proj.get("id")
+            if not isinstance(pid, str):
+                continue
+            try:
+                states = await client.list_states(pid)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "fetch_plane_state_groups: list_states(%s) failed: %s — skipping",
+                    pid, e,
+                )
+                continue
+            for s in states:
+                sid = s.get("id")
+                grp = s.get("group")
+                if isinstance(sid, str) and isinstance(grp, str) and sid and grp:
+                    result[sid] = grp
+        logger.info(
+            "fetch_plane_state_groups: built lookup projects=%d states=%d",
+            len(projects), len(result),
+        )
+        return result
+    finally:
+        await client.close()
+
 
 @activity.defn
 async def fetch_plane_events(since_id: str) -> list[dict[str, Any]]:
@@ -522,6 +585,7 @@ async def apply_plane_patch_to_vault(
 async def create_vault_task_from_plane_issue(
     issue: dict[str, Any],
     matter_slug: Optional[str],
+    state_groups: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     """Create a vault task mirroring a Plane issue that has no
     ``alfred:<slug>`` external_id.
@@ -530,12 +594,18 @@ async def create_vault_task_from_plane_issue(
     ``project_map`` (``plane_project_id`` → matter slug). When it's
     None we still create the task, just without a matter link —
     surveyor will eventually attach one.
+
+    ``state_groups`` is the optional state_id → state_group lookup
+    fetched once per workflow run (see fetch_plane_state_groups). When
+    omitted, plane_issue_to_vault_patch falls back to legacy keys —
+    fine for back-compat but produces wrong status on issues fetched
+    via /api/v1 (which only return state as UUID).
     """
     plane_issue_id = str(issue.get("id") or "")
     if not plane_issue_id:
         raise ValueError("plane issue has no id — cannot create vault task")
 
-    patch = plane_issue_to_vault_patch(issue)
+    patch = plane_issue_to_vault_patch(issue, state_groups)
     name = str(patch.get("name") or "").strip() or f"plane-issue-{plane_issue_id[:8]}"
     # Sanitize a slug from the name — lowercase, alnum + dashes, trunc.
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:60]
