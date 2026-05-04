@@ -393,6 +393,11 @@ query getInstalledApps {
   entities: [Instance]
 }
 
+query getClaudeSetup {
+  fn: import { getClaudeSetup } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
 query getInboxItems {
   fn: import { getInboxItems } from "@src/dashboard/operations",
   entities: [Instance]

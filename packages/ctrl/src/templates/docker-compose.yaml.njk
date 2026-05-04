@@ -988,6 +988,33 @@ services:
     # tenant boot keeps working with last-good secrets.
     mem_limit: 128m
     pids_limit: 128
+
+  # vault-cli — long-running side-container that holds an unlocked bw
+  # session and exposes Vaultwarden over `bw serve` (the Bitwarden CLI's
+  # built-in REST API). ctrl-api proxies the Vaultwarden MCP tool calls to
+  # this service over the compose internal network at http://vault-cli:8087.
+  # Avoids the ~3-second login + unlock latency on every Vaultwarden tool
+  # call from claude.ai while keeping the bearer-token surface flat (the
+  # bw serve endpoint is reachable only from inside the compose network).
+  vault-cli:
+    image: ssdavidai00/alfred-vault-init:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      vaultwarden:
+        condition: service_healthy
+    entrypoint: ["bash", "/opt/vault-init/serve.sh"]
+    healthcheck:
+      # bw serve responds to GET /status with {"data": ...} on auth-success.
+      # Curl is in the alpine image; jq isn't strictly needed here.
+      test: ["CMD-SHELL", "curl -sSf http://127.0.0.1:8087/status >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    mem_limit: 256m
+    pids_limit: 256
 {% endif %}
 
 volumes: {}

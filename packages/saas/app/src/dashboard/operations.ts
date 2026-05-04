@@ -17,6 +17,7 @@ import type {
   GetFirstBrief,
   GetOnboardingProgress,
   GetInstalledApps,
+  GetClaudeSetup,
 } from "wasp/server/operations";
 import type {
   SubmitInboxItem,
@@ -189,6 +190,17 @@ export const getInstalledApps: GetInstalledApps<void, any> = async (
   const raw: any = await proxyToTenant(instance, { path: "/api/v1/apps" });
   const apps = Array.isArray(raw?.apps) ? (raw.apps as AppInfo[]) : [];
   return { apps };
+};
+
+// ============================================================
+// Claude Setup — connector URLs + approval secret + skill links
+// ============================================================
+export const getClaudeSetup: GetClaudeSetup<void, any> = async (
+  _args: unknown,
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/claude-setup" });
 };
 
 // ============================================================

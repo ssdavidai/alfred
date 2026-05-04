@@ -3199,7 +3199,70 @@ export async function setupVaultwarden(opts: SetupVaultwardenOpts): Promise<void
   }
 
   opts.log(
-    `Vaultwarden setup complete. Sir signs up at https://<subdomain>-vault.<domain> using email=${opts.ownerEmail}; master password is in .env as BW_PASSWORD (also surfaced via the dashboard's tenant detail view).`,
+    `Vaultwarden invite recorded for ${opts.ownerEmail}; running auto-signup`,
+  );
+
+  // 5. Auto-signup via Bitwarden client crypto. The /admin/invite call
+  // creates a pending User record; we then complete registration by POSTing
+  // the encrypted-key payload to /identity/accounts/register, which the
+  // existing Invitation gates open for. After this, BW_USER + BW_PASSWORD
+  // can `bw login` against Vaultwarden — no Sir-action required.
+  const signupRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `cd ${DEFAULTS.dockerComposeDir} && docker compose run --rm --entrypoint node vault-init /opt/vault-init/bootstrap-signup.mjs`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  if (signupRes.code !== 0) {
+    // Soft-fail: bootstrap-signup may legitimately exit 2 if the user
+    // already exists from a prior run (idempotent). Log and continue.
+    opts.log(
+      `Warning: bootstrap-signup exited ${signupRes.code} — may indicate the user already exists (idempotent re-run) or that the invite step partially succeeded. Stdout/stderr tail:\n${signupRes.stderr.slice(-500)}`,
+    );
+  } else {
+    opts.log("Bootstrap-signup OK — Sir's account fully provisioned");
+  }
+
+  // 6. Migrate the existing .env into Vaultwarden. Idempotent on its own
+  // (dedupes by item name), so re-running on a partially-migrated tenant
+  // is safe.
+  const migrateRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `cd ${DEFAULTS.dockerComposeDir} && docker compose run --rm vault-init bash /opt/vault-init/migrate.sh /host/compose/.env`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  if (migrateRes.code !== 0) {
+    opts.log(
+      `Warning: migrate.sh exited ${migrateRes.code}; some secrets may not have been imported. Tail:\n${migrateRes.stderr.slice(-500)}`,
+    );
+  } else {
+    opts.log("Migrate OK — .env contents now in Vaultwarden");
+  }
+
+  // 7. Import the file-on-disk secrets that don't go through .env:
+  //    .gateway-token, .sure-bootstrap-email, .sure-bootstrap-password.
+  // These remain authoritative on disk; this step just snapshots them
+  // into Vaultwarden for visibility.
+  const importRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `cd ${DEFAULTS.dockerComposeDir} && docker compose run --rm -v /mnt/encrypted/alfred:/alfred-data:ro vault-init bash /opt/vault-init/import-files.sh`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  if (importRes.code !== 0) {
+    opts.log(
+      `Warning: import-files.sh exited ${importRes.code}; some file-based secrets may not be in Vaultwarden. Tail:\n${importRes.stderr.slice(-500)}`,
+    );
+  } else {
+    opts.log("import-files OK — gateway token + Sure admin creds now in Vaultwarden");
+  }
+
+  opts.log(
+    `Vaultwarden setup complete. Sir browses https://<subdomain>-vault.<domain>; login=${opts.ownerEmail}, master password=BW_PASSWORD from .env (also surfaced in the dashboard).`,
   );
 }
 

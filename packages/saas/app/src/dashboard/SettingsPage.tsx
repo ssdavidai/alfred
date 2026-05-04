@@ -57,6 +57,7 @@ interface SettingsTab {
 const SETTINGS_TABS: SettingsTab[] = [
   { id: "services", label: "Services", icon: Server },
   { id: "credentials", label: "Credentials", icon: KeyRound },
+  { id: "claude", label: "Claude Setup", icon: BookOpen },
   { id: "workspace", label: "Workspace", icon: FolderOpen },
   { id: "logs", label: "Logs", icon: ScrollText },
   { id: "terminal", label: "Terminal", icon: TerminalSquare },
@@ -121,6 +122,7 @@ export default function SettingsPage() {
       >
         {activeTab === "services" && <AssistantsContent />}
         {activeTab === "credentials" && <CredentialsContent />}
+        {activeTab === "claude" && <ClaudeSetupContent />}
         {activeTab === "workspace" && <WorkspaceContent />}
         {activeTab === "logs" && <LogsContent />}
         {activeTab === "terminal" && <TerminalContent />}
@@ -374,5 +376,238 @@ function ApiKeysSection() {
           </DialogContent>
         </Dialog>
     </SpotlightCard>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Claude Setup content — MCP connector URLs + downloadable skills   */
+/* ------------------------------------------------------------------ */
+
+
+interface ClaudeSetupApp {
+  id: string;
+  name: string;
+  description: string;
+  mcp_url: string | null;
+  skill_url: string;
+  enabled: boolean;
+}
+
+interface ClaudeSetupData {
+  tenant_url: string | null;
+  approval_secret: string | null;
+  apps: ClaudeSetupApp[];
+}
+
+export function ClaudeSetupContent() {
+  // Wasp's `useQuery` returns a hook bound to the import — re-using the
+  // pattern from the rest of the dashboard. The query proxies to ctrl-api's
+  // /api/v1/claude-setup; backing impl in src/dashboard/operations.ts.
+  const { data, isLoading, error } = useQuery(
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require("wasp/client/operations").getClaudeSetup as any,
+  );
+  const setup = data as ClaudeSetupData | undefined;
+
+  const [revealSecret, setRevealSecret] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  const copy = (key: string, value: string) => {
+    void navigator.clipboard.writeText(value).catch(() => {});
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 1500);
+  };
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <Loader2 className="h-6 w-6 animate-spin text-gold" />
+      </div>
+    );
+  }
+  if (error || !setup) {
+    return (
+      <SpotlightCard className="p-6">
+        <p className="font-mono text-xs text-[#8A8680]">
+          Failed to load Claude setup. Refresh, or check that ctrl-api is up.
+        </p>
+      </SpotlightCard>
+    );
+  }
+
+  const enabledApps = setup.apps.filter((a) => a.enabled && a.mcp_url);
+
+  return (
+    <div className="space-y-6">
+      {/* Custom Connectors */}
+      <SpotlightCard className="p-6">
+        <h2 className="font-serif text-xl font-light text-cream mb-1">
+          Custom Connectors
+        </h2>
+        <p className="font-mono text-[0.65rem] uppercase tracking-wider text-[#8A8680] mb-4">
+          Add to claude.ai → Settings → Capabilities → Custom Connectors
+        </p>
+
+        {/* Approval secret */}
+        {setup.approval_secret && (
+          <div className="mb-6 rounded-lg border border-gold-dim/30 bg-black/30 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="font-mono text-[0.6rem] uppercase tracking-wider text-[#8A8680]">
+                  Approval Secret (one secret for all connectors)
+                </div>
+                <div className="mt-1 font-mono text-xs text-cream break-all">
+                  {revealSecret
+                    ? setup.approval_secret
+                    : "•".repeat(Math.min(48, setup.approval_secret.length))}
+                </div>
+              </div>
+              <div className="flex shrink-0 gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="font-mono text-[0.6rem]"
+                  onClick={() => setRevealSecret((v) => !v)}
+                >
+                  {revealSecret ? "Hide" : "Reveal"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="font-mono text-[0.6rem]"
+                  onClick={() => copy("secret", setup.approval_secret!)}
+                >
+                  <Copy className="h-3 w-3" />
+                  {copiedKey === "secret" ? "Copied" : "Copy"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Per-app URLs */}
+        <ul className="space-y-2">
+          {enabledApps.map((app) => (
+            <li
+              key={app.id}
+              className="rounded-lg border border-white/[0.06] bg-black/20 p-3 transition-colors hover:bg-black/30"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-xs text-cream">{app.name}</div>
+                  <div className="mt-1 font-mono text-[0.65rem] text-[#8A8680] break-all">
+                    {app.mcp_url}
+                  </div>
+                  <div className="mt-1 text-[0.7rem] text-[#8A8680]">
+                    {app.description}
+                  </div>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="shrink-0 font-mono text-[0.6rem]"
+                  onClick={() => copy(`url-${app.id}`, app.mcp_url!)}
+                >
+                  <Copy className="h-3 w-3" />
+                  {copiedKey === `url-${app.id}` ? "Copied" : "Copy URL"}
+                </Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+        {enabledApps.length === 0 && (
+          <p className="font-mono text-xs text-[#8A8680]">
+            No MCP-enabled apps on this tenant yet.
+          </p>
+        )}
+      </SpotlightCard>
+
+      {/* Custom Skills */}
+      <SpotlightCard className="p-6">
+        <h2 className="font-serif text-xl font-light text-cream mb-1">
+          Custom Skills
+        </h2>
+        <p className="font-mono text-[0.65rem] uppercase tracking-wider text-[#8A8680] mb-4">
+          Download each, then paste into claude.ai → Settings → Capabilities → Custom Skills
+        </p>
+        <ul className="space-y-2">
+          {enabledApps.map((app) => (
+            <li
+              key={app.id}
+              className="rounded-lg border border-white/[0.06] bg-black/20 p-3 transition-colors hover:bg-black/30"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="font-mono text-xs text-cream">
+                    alfred-{app.id}.md
+                  </div>
+                  <div className="mt-1 text-[0.7rem] text-[#8A8680]">
+                    Drives {app.name} via the connector above. Frontmatter:
+                    name, description, license. Body has tool index, common
+                    flows, and good-behaviour rules.
+                  </div>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  asChild
+                  className="shrink-0 font-mono text-[0.6rem]"
+                >
+                  <a
+                    href={app.skill_url}
+                    download={`alfred-${app.id}.md`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    Download
+                  </a>
+                </Button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </SpotlightCard>
+
+      {/* Help block */}
+      <SpotlightCard className="p-6">
+        <h3 className="font-mono text-[0.7rem] uppercase tracking-wider text-[#8A8680] mb-3">
+          How to wire it up
+        </h3>
+        <ol className="space-y-2 text-xs text-[#E8E4DE]">
+          <li>
+            <span className="font-mono text-gold">1.</span> Open{" "}
+            <a
+              href="https://claude.ai/settings"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-gold underline"
+            >
+              claude.ai → Settings → Capabilities
+            </a>
+            .
+          </li>
+          <li>
+            <span className="font-mono text-gold">2.</span> Under{" "}
+            <span className="font-mono">Custom Connectors</span>, click{" "}
+            <span className="font-mono">Add custom connector</span>. Paste the
+            URL for each app above. When the approval form appears, paste the
+            approval secret.
+          </li>
+          <li>
+            <span className="font-mono text-gold">3.</span> Under{" "}
+            <span className="font-mono">Custom Skills</span>, click{" "}
+            <span className="font-mono">New skill</span>, paste the contents of
+            the downloaded <span className="font-mono">.md</span> file. One
+            skill per app.
+          </li>
+          <li>
+            <span className="font-mono text-gold">4.</span> Sir's claude.ai
+            chats now reach Alfred, Sure, Plane, and Vault directly — without
+            SSH or this dashboard.
+          </li>
+        </ol>
+      </SpotlightCard>
+    </div>
   );
 }
