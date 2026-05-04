@@ -21,6 +21,7 @@ What's covered:
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from typing import Any
 
@@ -1470,10 +1471,13 @@ class TestStaleDroppedActivity:
         }
         # The issue was deleted from the project Plane actually holds it in.
         assert deleted == [("prj-beta", "iss-moved")]
-        # The search never probed the current project (alpha) — only
-        # the OTHER projects in the map.
+        # The current project (alpha) is probed exactly once — the
+        # pre-PATCH staleness check (introduced after this test was
+        # written; see plane_sync.py:_filter_stale_fields). The
+        # cross-project SEARCH that follows the 404 must NOT redundantly
+        # probe alpha again, hence "exactly once" not "more than once".
         probed_pids = [c[0] for c in get_calls]
-        assert "prj-alpha" not in probed_pids
+        assert probed_pids.count("prj-alpha") == 1, probed_pids
         # The issue_id under probe is always the stale one.
         assert all(c[1] == "iss-moved" for c in get_calls)
 
