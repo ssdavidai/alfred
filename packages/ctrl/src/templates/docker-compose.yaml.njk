@@ -530,7 +530,13 @@ services:
       - AWS_S3_ENDPOINT_URL=http://plane-minio:9000
       - AWS_S3_BUCKET_NAME=uploads
       - AWS_REGION=us-east-1
-      - WEB_URL=http://plane-proxy:8080
+      # WEB_URL is what Plane uses to build absolute URLs for browser
+      # redirects (after login, in email links, etc.). It must point at the
+      # PUBLIC tenant URL — using http://plane-proxy:8080 (the internal
+      # alias) sends Sir's browser into the void after login. Internal
+      # plane→plane traffic uses the per-service compose aliases, not
+      # WEB_URL, so it's safe to set this to the public URL.
+      - WEB_URL=https://{{ subdomain }}-plane.{{ domain }}
       - ENABLE_SIGNUP=0
       - ENABLE_EMAIL_PASSWORD=1
       - ENABLE_MAGIC_LINK_LOGIN=0

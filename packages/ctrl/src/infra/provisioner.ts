@@ -3261,6 +3261,25 @@ export async function setupVaultwarden(opts: SetupVaultwardenOpts): Promise<void
     opts.log("import-files OK — gateway token + Sure admin creds now in Vaultwarden");
   }
 
+  // 8. Create combined login items so Vaultwarden's browser autofill works
+  // on Sure / Plane / Vaultwarden's own login pages. These are NEW items
+  // ("Sure", "Plane", "Vaultwarden") with username + password + uri set,
+  // alongside (not replacing) the env-var-name items vault-init relies on.
+  const importLoginsRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `cd ${DEFAULTS.dockerComposeDir} && docker compose run --rm -v /mnt/encrypted/alfred:/alfred-data:ro vault-init bash /opt/vault-init/import-logins.sh`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  if (importLoginsRes.code !== 0) {
+    opts.log(
+      `Warning: import-logins.sh exited ${importLoginsRes.code}; browser autofill may not work for Sure/Plane/Vaultwarden. Tail:\n${importLoginsRes.stderr.slice(-500)}`,
+    );
+  } else {
+    opts.log("import-logins OK — Sure/Plane/Vaultwarden login items with autofill URIs created");
+  }
+
   opts.log(
     `Vaultwarden setup complete. Sir browses https://<subdomain>-vault.<domain>; login=${opts.ownerEmail}, master password=BW_PASSWORD from .env (also surfaced in the dashboard).`,
   );

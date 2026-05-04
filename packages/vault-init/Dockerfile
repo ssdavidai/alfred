@@ -18,10 +18,12 @@ WORKDIR /opt/vault-init
 COPY vault-init.sh /opt/vault-init/vault-init.sh
 COPY migrate.sh /opt/vault-init/migrate.sh
 COPY import-files.sh /opt/vault-init/import-files.sh
+COPY import-logins.sh /opt/vault-init/import-logins.sh
 COPY bootstrap-signup.mjs /opt/vault-init/bootstrap-signup.mjs
 COPY serve.sh /opt/vault-init/serve.sh
 RUN chmod 0755 /opt/vault-init/vault-init.sh /opt/vault-init/migrate.sh \
     && chmod 0755 /opt/vault-init/import-files.sh \
+    && chmod 0755 /opt/vault-init/import-logins.sh \
     && chmod 0755 /opt/vault-init/bootstrap-signup.mjs \
     && chmod 0755 /opt/vault-init/serve.sh
 CMD ["bash", "/opt/vault-init/vault-init.sh"]
