@@ -1467,13 +1467,29 @@ async def sync_task_to_plane(
             # project move / stale_dropped path) — we only do the
             # staleness filter when the issue actually exists in the
             # expected project.
+            plane_current: Optional[dict[str, Any]] = None
             try:
                 plane_current = await client.get_issue(project_id, existing_id)
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 404:
-                    plane_current = None
-                else:
-                    raise
+                if exc.response.status_code != 404:
+                    # On non-404 GET errors, log + fall through. Better
+                    # to risk one stomp than block forward-sync on a
+                    # transient Plane outage.
+                    logger.warning(
+                        "plane_sync.staleness_get_failed slug=%s plane_id=%s "
+                        "status=%s — proceeding with blind PATCH",
+                        slug, existing_id, exc.response.status_code,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                # Network glitch, test-double without get_issue, anything
+                # unexpected — fall through to the original blind-PATCH
+                # path. Staleness filtering is a safety enhancement, not
+                # a prerequisite for the activity to function.
+                logger.warning(
+                    "plane_sync.staleness_get_unexpected slug=%s plane_id=%s "
+                    "err=%s — proceeding with blind PATCH",
+                    slug, existing_id, exc,
+                )
             if isinstance(plane_current, dict):
                 filtered_body, deferred_fields = _filter_stale_fields(
                     issue_body, plane_current, existing_id, slug,

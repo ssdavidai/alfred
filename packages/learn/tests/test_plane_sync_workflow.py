@@ -2555,6 +2555,9 @@ class TestStalenessCheck:
                 update_calls.append({"project_id": project_id, "issue_id": issue_id, "body": body})
                 return {}
 
+            async def resolve_state_id(self, project_id, state_group):
+                return None
+
             async def close(self):
                 pass
 
@@ -2610,6 +2613,9 @@ class TestStalenessCheck:
                 update_calls.append({"body": body})
                 return {}
 
+            async def resolve_state_id(self, project_id, state_group):
+                return None
+
             async def close(self):
                 pass
 
@@ -2664,6 +2670,9 @@ class TestStalenessCheck:
             async def update_issue(self, project_id, issue_id, body):
                 update_calls.append({"body": body})
                 return {}
+
+            async def resolve_state_id(self, project_id, state_group):
+                return None
 
             async def close(self):
                 pass
