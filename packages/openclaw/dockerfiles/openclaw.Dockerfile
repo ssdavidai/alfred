@@ -27,8 +27,8 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Clone OpenClaw at known-good commit — v2026.4.15 (includes Slack media download fixes: PR #62239, PR #62996)
-ARG OPENCLAW_SHA=041266a6699cac3baef8ef39db41fa26f29f9db3
+# Clone OpenClaw at known-good commit — v2026.5.3 (file-transfer plugin, lazy-load gateway perf, hardened plugin install/update, fail-closed invalid config)
+ARG OPENCLAW_SHA=06d46f7cf638a31c4852c068aeeaa76f5e949941
 RUN git init /openclaw-src && \
     git -C /openclaw-src fetch --depth 1 https://github.com/openclaw/openclaw.git ${OPENCLAW_SHA} && \
     git -C /openclaw-src checkout FETCH_HEAD
