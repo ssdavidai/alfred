@@ -58,5 +58,12 @@ export function buildEnvWriteCommand(
     .join(" ");
   // Use a tmp file + mv to keep the write atomic. sed -i on Ubuntu creates a
   // backup by default only with -i''; explicitly omit the backup suffix.
-  return `set -e; _tmp=$(mktemp); sed ${sedDeletes} ${envPath} > "$_tmp" 2>/dev/null || cp ${envPath} "$_tmp"; printf '\\n' >> "$_tmp"; printf '%s\\n' ${printfArgs} >> "$_tmp"; mv "$_tmp" ${envPath}; chmod 600 ${envPath}`;
+  // First-write case: when the target .env doesn't exist yet (fresh
+  // tenant getting Vexa retrofitted, any new compose project), the sed
+  // strip and the cp fallback both fail and `set -e` aborts the whole
+  // command. Touching the path first guarantees an empty starting file
+  // the sed step can operate on. The dirname mkdir -p covers tenants
+  // where the parent directory was just created earlier in the same
+  // SSH transcript.
+  return `set -e; mkdir -p $(dirname ${envPath}); touch ${envPath}; _tmp=$(mktemp); sed ${sedDeletes} ${envPath} > "$_tmp"; printf '\\n' >> "$_tmp"; printf '%s\\n' ${printfArgs} >> "$_tmp"; mv "$_tmp" ${envPath}; chmod 600 ${envPath}`;
 }
