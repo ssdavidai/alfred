@@ -3663,7 +3663,11 @@ async function registerVexaWebhook(
     `-X PUT http://127.0.0.1:18056/user/webhook`,
     `-H 'Content-Type: application/json'`,
     `-H 'X-API-Key: ${apiKey}'`,
-    `-d '${JSON.stringify({ url: webhookUrl, secret: webhookSecret })}'`,
+    // Vexa 0.10.6 PUT /user/webhook expects `webhook_url`, not `url`
+    // (verified against vexa-api-gateway error: `loc:["body","webhook_url"]`).
+    // Earlier versions accepted `url`; we send the new field name and
+    // omit the old one to keep the body schema-tight.
+    `-d '${JSON.stringify({ webhook_url: webhookUrl, secret: webhookSecret })}'`,
     `; echo`,
     `; cat /tmp/vexa-hook.json`,
     `; rm -f /tmp/vexa-hook.json`,
