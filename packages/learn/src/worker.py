@@ -33,6 +33,9 @@ from src.workflows.fleet_audit import FleetAuditWorkflow
 from src.workflows.composio_reconnect_cleanup import (
     ComposioReconnectCleanupWorkflow,
 )
+from src.workflows.steward import StewardWorkflow
+from src.workflows.meeting_capture import MeetingCaptureWorkflow
+from src.workflows.transcript_intake import TranscriptIntakeWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -363,6 +366,57 @@ from src.activities.plane_alfred_triggers import (
     spawn_alfred_for_plane_trigger,
 )
 
+# Steward (#835 Phase 0 + #836 Phase 0.5 + #837 Phase 1 + #838 Phase 2)
+# — per-matter perception loop.
+# Phase 0: no-op evaluator + cursor-stamping activity (registered for
+# the Schedule infrastructure). Phase 0.5 adds ``apply_state_change`` —
+# the audit-trail emitter that writes one ``event/steward-action-*.md``
+# vault record per Steward decision in shadow mode (no task mutation,
+# no Plane action). Phase 1 (#837) wires the first signal source
+# (``vault:record``) and shadow LLM evaluation: ``evaluate_task`` now
+# orchestrates ``gather_signals_vault_record`` → ``evaluate_state`` →
+# ``apply_state_change(mode="shadow")``. Phase 2 (#838) adds three more
+# signal sources (gmail / sure / ctrl-api stream) plus the matter-level
+# cadence backoff bookkeeping. Phase 3 (#839) will flip
+# ``apply_state_change`` to ``mode="live"``.
+from src.activities.steward import (
+    apply_state_change as steward_apply_state_change,
+    evaluate_state as steward_evaluate_state,
+    evaluate_task as steward_evaluate_task,
+    gather_signals_ctrl_api_stream as steward_gather_signals_ctrl_api_stream,
+    gather_signals_gmail as steward_gather_signals_gmail,
+    gather_signals_sure as steward_gather_signals_sure,
+    gather_signals_vault_record as steward_gather_signals_vault_record,
+    load_matter_tasks as steward_load_matter_tasks,
+    record_steward_check as steward_record_steward_check,
+    update_matter_cadence as steward_update_matter_cadence,
+)
+
+# Steward Phase 5 (#841) — briefing-cache helpers used by the daily
+# morning briefing chore. Activity surface only; the rate-guard's
+# core API is invoked from within the steward.evaluate_task activity
+# (no @activity.defn export needed because it isn't called by a
+# workflow directly).
+from src.activities.briefing_cache import (
+    compute_briefing_context as briefing_compute_briefing_context,
+    stamp_brief_completed as briefing_stamp_brief_completed,
+)
+
+# Steward Phase 4 (#840) — Vexa transcript intake. Activities back the
+# MeetingCaptureWorkflow + TranscriptIntakeWorkflow. NO direct Plane
+# writes from these — every action becomes a Steward signal of kind
+# ``transcript:action_candidate`` for Phase 3's apply_state_change to
+# consume on the relevant matter's next tick.
+from src.activities.transcript import (
+    apply_transcript_action,
+    extract_actions_from_transcript,
+    find_upcoming_meet_events,
+    list_unprocessed_transcript_events,
+    mark_transcript_event_processed,
+    vexa_get_transcript,
+    vexa_join_meeting,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -391,6 +445,9 @@ _STATIC_WORKFLOWS = [
     PlaneReconciliationWorkflow,
     FleetAuditWorkflow,
     ComposioReconnectCleanupWorkflow,
+    StewardWorkflow,
+    MeetingCaptureWorkflow,
+    TranscriptIntakeWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -631,6 +688,33 @@ ALL_ACTIVITIES = [
     resolve_plane_approval,
     record_alfred_self_comment,
     load_alfred_self_comments,
+    # Steward (#835 Phase 0 + #836 Phase 0.5 + #837 Phase 1 + #838
+    # Phase 2) — per-matter perception loop. Phase 1 added
+    # gather_signals_vault_record + evaluate_state. Phase 2 adds the
+    # gmail / sure / ctrl-api stream gatherers plus the matter-level
+    # cadence backoff helper.
+    steward_load_matter_tasks,
+    steward_evaluate_task,
+    steward_record_steward_check,
+    steward_apply_state_change,
+    steward_gather_signals_vault_record,
+    steward_gather_signals_gmail,
+    steward_gather_signals_sure,
+    steward_gather_signals_ctrl_api_stream,
+    steward_evaluate_state,
+    steward_update_matter_cadence,
+    # Steward Phase 5 (#841): briefing-cache activities used by the
+    # daily morning briefing chore for Steward-aware filtering.
+    briefing_compute_briefing_context,
+    briefing_stamp_brief_completed,
+    # Steward Phase 4 (#840) — Vexa transcript intake activities.
+    find_upcoming_meet_events,
+    vexa_join_meeting,
+    vexa_get_transcript,
+    extract_actions_from_transcript,
+    apply_transcript_action,
+    list_unprocessed_transcript_events,
+    mark_transcript_event_processed,
 ]
 
 

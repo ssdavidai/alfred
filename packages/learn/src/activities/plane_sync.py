@@ -1068,7 +1068,7 @@ def _project_identifier_for_slug(slug: str) -> str:
 async def sync_matter_to_plane(
     matter: dict[str, Any],
     project_map: dict[str, str],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Create or update the Plane project mirroring this matter record.
 
     Returns ``{"slug", "plane_id", "action"}`` where action is ``"create"``
@@ -1299,7 +1299,7 @@ async def sync_task_to_plane(
     project_map: dict[str, str],
     issue_map: dict[str, str],
     label_cache: Optional[dict[str, dict[str, str]]] = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Create or update the Plane issue mirroring this task record.
 
     Resolution order for the destination project:

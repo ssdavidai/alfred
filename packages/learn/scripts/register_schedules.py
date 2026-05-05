@@ -11,7 +11,9 @@ import logging
 import os
 import sys
 from datetime import timedelta
+from typing import Any
 
+import httpx
 from temporalio.client import (
     Client,
     Schedule,
@@ -22,6 +24,8 @@ from temporalio.client import (
     ScheduleSpec,
     ScheduleCalendarSpec,
     ScheduleRange,
+    ScheduleUpdate,
+    ScheduleUpdateInput,
 )
 from temporalio.service import RPCError, RPCStatusCode
 
@@ -56,6 +60,27 @@ FLEET_AUDIT_NOTE = (
     "the tenant owner. Feature-gated by FLEET_AUDIT_ENABLED env (default "
     "true)."
 )
+
+# Steward (#835) — per-matter perception loop. One schedule per
+# matter named ``al-steward-<matter-slug>``. Phase 0 cadence is the
+# Layer 3 default (30 min). Layer 2 polled-source-tied cadences and
+# Layer 1 webhook nudges arrive in Phase 2.
+STEWARD_SCHEDULE_PREFIX = "al-steward-"
+STEWARD_WORKFLOW = "StewardWorkflow"
+STEWARD_DEFAULT_INTERVAL = timedelta(minutes=30)
+
+# Steward Phase 4 (#840) — Vexa transcript intake. Two singleton
+# schedules: MeetingCapture polls the gcal stream and dispatches the
+# Vexa bot for upcoming Meet events; TranscriptIntake polls Vexa's
+# webhook stream and feeds extracted action items back into Steward.
+# Both are gated on ``VEXA_ENABLED=true`` — david-only initially.
+MEETING_CAPTURE_SCHEDULE_ID = "al-meeting-capture"
+MEETING_CAPTURE_WORKFLOW = "MeetingCaptureWorkflow"
+MEETING_CAPTURE_INTERVAL = timedelta(seconds=60)
+
+TRANSCRIPT_INTAKE_SCHEDULE_ID = "al-transcript-intake"
+TRANSCRIPT_INTAKE_WORKFLOW = "TranscriptIntakeWorkflow"
+TRANSCRIPT_INTAKE_INTERVAL = timedelta(seconds=60)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("register-schedules")
@@ -511,6 +536,362 @@ async def register_fleet_audit(client: Client, task_queue: str) -> None:
         raise
 
 
+# ---------------------------------------------------------------------------
+# Vexa transcript intake (#840 Phase 4) — singleton schedule registration
+# ---------------------------------------------------------------------------
+
+def _vexa_enabled() -> bool:
+    """Feature flag for Vexa transcript intake (#840).
+
+    Default OFF. Tenants opt in by setting ``VEXA_ENABLED=true``. Phase 4
+    initially enables this only on david — the compose template's vexa
+    block is also gated on the same flag, so flipping the env var alone
+    isn't enough to start the bot stack on a tenant that wasn't
+    provisioned with it.
+    """
+    return os.environ.get("VEXA_ENABLED", "").strip().lower() == "true"
+
+
+async def _register_or_delete_singleton_schedule(
+    client: Client,
+    schedule_id: str,
+    workflow_name: str,
+    task_queue: str,
+    interval: timedelta,
+    enabled: bool,
+    *,
+    label: str,
+) -> None:
+    """Generic create-or-delete helper for VEXA-flag-gated singleton schedules.
+
+    Mirrors the pattern in ``register_plane_sync`` / ``register_fleet_audit``
+    but parameterised so the two Vexa schedules don't duplicate the same
+    20 lines.
+    """
+    handle = client.get_schedule_handle(schedule_id)
+
+    if not enabled:
+        try:
+            await handle.describe()
+        except RPCError as e:
+            if e.status == RPCStatusCode.NOT_FOUND:
+                logger.info("%s disabled — schedule skipped", label)
+                return
+            raise
+        await handle.delete()
+        logger.info(
+            "%s disabled — existing schedule %s deleted",
+            label, schedule_id,
+        )
+        return
+
+    action = ScheduleActionStartWorkflow(
+        workflow_name,
+        id=f"{schedule_id}-run",
+        task_queue=task_queue,
+        # 5-minute envelope: same wedge protection as plane_sync. The
+        # workflow itself ticks fast (gcal stream poll + Vexa API
+        # calls) — a healthy run finishes in <5s. The cap protects
+        # against a clerk wedge during transcript-action extraction.
+        execution_timeout=timedelta(minutes=5),
+        run_timeout=timedelta(minutes=5),
+    )
+    spec = ScheduleSpec(
+        intervals=[ScheduleIntervalSpec(every=interval)],
+    )
+    # SKIP overlap: both workflows are idempotent but a wedged run that
+    # somehow continued past the run_timeout (shouldn't happen) would
+    # still be safe to overlap on the next tick — the activities all
+    # dedupe by stream id / cursor file. We pick SKIP for hygiene
+    # (matches plane_sync / fleet_audit defaults).
+    policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
+
+    try:
+        await client.create_schedule(
+            schedule_id,
+            Schedule(action=action, spec=spec, policy=policy),
+        )
+        logger.info(
+            "Created schedule: %s → %s (%ds, SKIP overlap)",
+            schedule_id, workflow_name, int(interval.total_seconds()),
+        )
+    except RPCError as e:
+        if e.status == RPCStatusCode.ALREADY_EXISTS:
+            logger.info(
+                "Schedule already exists: %s (skipping)", schedule_id,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s", schedule_id, e,
+        )
+        raise
+    except Exception as e:  # noqa: BLE001 — parity with sibling helpers
+        err = str(e).lower()
+        if "already" in err or "exists" in err:
+            logger.info(
+                "Schedule already exists: %s (skipping)", schedule_id,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s", schedule_id, e,
+        )
+        raise
+
+
+async def register_meeting_capture(client: Client, task_queue: str) -> None:
+    """Create-or-delete ``al-meeting-capture`` based on ``VEXA_ENABLED``."""
+    await _register_or_delete_singleton_schedule(
+        client,
+        MEETING_CAPTURE_SCHEDULE_ID,
+        MEETING_CAPTURE_WORKFLOW,
+        task_queue,
+        MEETING_CAPTURE_INTERVAL,
+        _vexa_enabled(),
+        label="meeting_capture",
+    )
+
+
+async def register_transcript_intake(client: Client, task_queue: str) -> None:
+    """Create-or-delete ``al-transcript-intake`` based on ``VEXA_ENABLED``."""
+    await _register_or_delete_singleton_schedule(
+        client,
+        TRANSCRIPT_INTAKE_SCHEDULE_ID,
+        TRANSCRIPT_INTAKE_WORKFLOW,
+        task_queue,
+        TRANSCRIPT_INTAKE_INTERVAL,
+        _vexa_enabled(),
+        label="transcript_intake",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Steward (#835) — per-matter schedule registration
+# ---------------------------------------------------------------------------
+
+def _matter_slug_from_path(path: str) -> str:
+    """Extract the slug portion of a ``matter/<slug>.md`` path.
+
+    Returns the empty string when ``path`` doesn't look like a matter
+    record. Used for both schedule-id construction and matter-id
+    arguments to the workflow.
+    """
+    if not isinstance(path, str):
+        return ""
+    s = path.strip()
+    if not s.startswith("matter/") or not s.endswith(".md"):
+        return ""
+    return s[len("matter/"):-len(".md")]
+
+
+def _schedule_id_for_matter(slug: str) -> str:
+    return f"{STEWARD_SCHEDULE_PREFIX}{slug}"
+
+
+async def _list_matter_paths(ctrl_url: str) -> list[str]:
+    """Enumerate every ``matter/*.md`` path via ctrl-api.
+
+    Returns an empty list on transport failure — better to skip Steward
+    schedule registration this run than to delete every existing
+    ``al-steward-*`` schedule because the API was momentarily down.
+    """
+    api_key = os.environ.get("AAS_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    paths: list[str] = []
+    try:
+        async with httpx.AsyncClient(
+            base_url=ctrl_url, timeout=30.0, headers=headers,
+        ) as client:
+            resp = await client.get(
+                "/api/v1/vault/list/matter", params={"preview": 0}
+            )
+            resp.raise_for_status()
+            records = resp.json().get("results", [])
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "register_steward_schedules: ctrl-api list/matter failed: %s "
+            "— skipping Steward schedule registration this run", exc,
+        )
+        return []
+    for rec in records:
+        path = rec.get("path") or ""
+        if _matter_slug_from_path(path):
+            paths.append(path)
+    return paths
+
+
+def _make_steward_schedule(
+    slug: str, task_queue: str,
+) -> Schedule:
+    """Build the Schedule object for one matter.
+
+    Args carry ``[matter_path]`` (e.g. ``["matter/inbox.md"]``) so the
+    workflow's normalizer accepts both bare slugs and canonical paths.
+    """
+    matter_id = f"matter/{slug}.md"
+    action = ScheduleActionStartWorkflow(
+        STEWARD_WORKFLOW,
+        args=[matter_id],
+        id=f"{_schedule_id_for_matter(slug)}-run",
+        task_queue=task_queue,
+        # Generous 5-minute envelope. A typical no-op Phase 0 tick
+        # finishes in <1s; the cap protects against a wedge during
+        # Phase 1+ when LLM calls land in evaluate_task.
+        execution_timeout=timedelta(minutes=5),
+        run_timeout=timedelta(minutes=5),
+    )
+    spec = ScheduleSpec(
+        intervals=[ScheduleIntervalSpec(every=STEWARD_DEFAULT_INTERVAL)],
+    )
+    policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
+    return Schedule(action=action, spec=spec, policy=policy)
+
+
+async def _create_or_update_steward_schedule(
+    client: Client, slug: str, task_queue: str,
+) -> str:
+    """Create the schedule, or update its action+spec if it already exists.
+
+    Returns one of ``"created"``, ``"updated"``, ``"unchanged"`` for
+    summary logging. Update is idempotent: we always re-issue the
+    full Schedule definition so a deploy that bumps the cadence /
+    workflow signature lands cleanly without a manual purge.
+    """
+    schedule_id = _schedule_id_for_matter(slug)
+    schedule = _make_steward_schedule(slug, task_queue)
+    handle = client.get_schedule_handle(schedule_id)
+
+    try:
+        await handle.describe()
+        exists = True
+    except RPCError as exc:
+        if exc.status == RPCStatusCode.NOT_FOUND:
+            exists = False
+        else:
+            raise
+
+    if not exists:
+        try:
+            await client.create_schedule(schedule_id, schedule)
+            return "created"
+        except RPCError as exc:
+            if exc.status == RPCStatusCode.ALREADY_EXISTS:
+                # Race with another registrar instance — fall through
+                # to the update path.
+                pass
+            else:
+                raise
+        except Exception as exc:  # noqa: BLE001 — parity with sibling helpers
+            err = str(exc).lower()
+            if "already" in err or "exists" in err:
+                pass
+            else:
+                raise
+
+    # Update path: refresh action + spec so cadence / workflow-name
+    # changes flow through without a manual delete.
+    async def _updater(input: ScheduleUpdateInput) -> ScheduleUpdate:
+        return ScheduleUpdate(schedule=schedule)
+
+    try:
+        await handle.update(_updater)
+        return "updated"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "register_steward_schedules: update %s failed: %s",
+            schedule_id, exc,
+        )
+        return "unchanged"
+
+
+async def _delete_orphan_steward_schedules(
+    client: Client, live_ids: set[str],
+) -> int:
+    """Delete any ``al-steward-*`` schedule whose matter no longer exists.
+
+    Returns the number of schedules deleted. Best-effort — failures on
+    individual deletes are logged and don't abort the whole sweep.
+    """
+    deleted = 0
+    try:
+        existing_ids: list[str] = []
+        async for entry in client.list_schedules():
+            sid = getattr(entry, "id", None) or ""
+            if sid.startswith(STEWARD_SCHEDULE_PREFIX):
+                existing_ids.append(sid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "register_steward_schedules: list_schedules failed: %s "
+            "— skipping orphan sweep", exc,
+        )
+        return 0
+
+    for sid in existing_ids:
+        if sid in live_ids:
+            continue
+        try:
+            await client.get_schedule_handle(sid).delete()
+            logger.info("register_steward_schedules: deleted orphan %s", sid)
+            deleted += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "register_steward_schedules: delete %s failed: %s",
+                sid, exc,
+            )
+    return deleted
+
+
+async def register_steward_schedules(client: Client) -> None:
+    """Create-or-update one ``al-steward-<slug>`` schedule per matter.
+
+    Idempotent: re-running creates missing schedules, refreshes existing
+    ones (so a cadence change lands without a manual purge), and
+    deletes orphaned schedules whose matter no longer exists in the
+    vault.
+    """
+    cfg = load_config()
+    matter_paths = await _list_matter_paths(cfg.alfred_ctrl_url)
+    if not matter_paths:
+        logger.info(
+            "register_steward_schedules: no matters found in vault "
+            "— nothing to register"
+        )
+        return
+
+    live_ids: set[str] = set()
+    counts = {"created": 0, "updated": 0, "unchanged": 0}
+    for path in matter_paths:
+        slug = _matter_slug_from_path(path)
+        if not slug:
+            continue
+        live_ids.add(_schedule_id_for_matter(slug))
+        try:
+            outcome = await _create_or_update_steward_schedule(
+                client, slug, cfg.task_queue,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "register_steward_schedules: %s failed: %s",
+                _schedule_id_for_matter(slug), exc,
+            )
+            continue
+        counts[outcome] = counts.get(outcome, 0) + 1
+        logger.info(
+            "register_steward_schedules: %s %s",
+            _schedule_id_for_matter(slug), outcome,
+        )
+
+    deleted = await _delete_orphan_steward_schedules(client, live_ids)
+    logger.info(
+        "register_steward_schedules: matters=%d created=%d updated=%d "
+        "unchanged=%d deleted_orphans=%d",
+        len(live_ids),
+        counts.get("created", 0),
+        counts.get("updated", 0),
+        counts.get("unchanged", 0),
+        deleted,
+    )
+
+
 async def register_all() -> None:
     config = load_config()
     try:
@@ -561,6 +942,21 @@ async def register_all() -> None:
     await register_plane_reconciliation(client, config.task_queue)
     # Fleet audit — daily wrong-tenant stream contamination check.
     await register_fleet_audit(client, config.task_queue)
+    # Steward (#835) — per-matter schedule (Phase 0). Always-on; the
+    # workflow itself is a no-op until Phase 1 swaps in evaluator
+    # logic, so registration cost is negligible.
+    await register_steward_schedules(client)
+    # Steward Phase 4 (#840) — Vexa transcript intake. VEXA_ENABLED-gated
+    # at registration time so a tenant without Vexa never gets these
+    # schedules created. Both workflows tick every 60s; the
+    # MeetingCapture path drives bot dispatch from gcal events and
+    # TranscriptIntake processes Vexa's post-meeting webhook into
+    # Steward signals. Neither workflow writes to Plane directly —
+    # actions land in streams/steward-signals.jsonl as
+    # ``transcript:action_candidate`` for Phase 3 to consume on the
+    # relevant matter's next tick.
+    await register_meeting_capture(client, config.task_queue)
+    await register_transcript_intake(client, config.task_queue)
 
 
 def main() -> None:

@@ -89,6 +89,48 @@ class VaultClient:
         )
         resp.raise_for_status()
 
+    async def patch_frontmatter_structured(
+        self,
+        path: str,
+        scalar_updates: dict[str, Any] | None = None,
+        json_updates: dict[str, Any] | None = None,
+    ) -> None:
+        """Update frontmatter with structured (lists/dicts/bools/nums) values.
+
+        Phase 2 (#838) added a ``json_set`` body to ctrl-api's PATCH that
+        keeps native JSON shape end-to-end via direct YAML manipulation.
+        Use this when you need structured frontmatter (e.g. Steward's
+        ``signal_sources`` list-of-dicts, ``last_steward_outcome`` dict)
+        to round-trip without becoming Python repr strings.
+
+        ``scalar_updates`` still goes through the alfred-CLI ``--set``
+        path so the response shape stays compatible with consumers that
+        rely on the CLI's validation.
+        """
+        body: dict[str, Any] = {}
+        if scalar_updates:
+            set_map: dict[str, str] = {}
+            for k, v in scalar_updates.items():
+                if isinstance(v, bool):
+                    set_map[k] = "true" if v else "false"
+                elif v is None:
+                    set_map[k] = ""
+                else:
+                    set_map[k] = str(v)
+            if set_map:
+                body["set"] = set_map
+        if json_updates:
+            # Don't coerce — ctrl-api PATCH preserves native shape via the
+            # json_set path.
+            body["json_set"] = json_updates
+        if not body:
+            return
+        resp = await self._client.patch(
+            f"/api/v1/vault/records/{path}",
+            json=body,
+        )
+        resp.raise_for_status()
+
     async def delete_record(self, path: str) -> bool:
         """Delete a vault record by path. Returns True if a record was
         removed, False if it didn't exist (404). Raises on other errors.
@@ -193,3 +235,77 @@ class VaultClient:
         # Best-effort — don't raise on failure
         if resp.status_code >= 500:
             resp.raise_for_status()
+
+    # --- Plane Steward action helpers (#839 Phase 3) -----------------------
+
+    async def plane_post_steward_action(
+        self,
+        *,
+        project_id: str,
+        issue_id: str,
+        decision: str,
+        confidence: float,
+        evidence: list[dict[str, Any]],
+        audit_record_path: str,
+    ) -> dict[str, Any]:
+        """Post a Steward auto-action to Plane via ctrl-api.
+
+        Wraps ``POST /api/v1/plane/steward-action`` which posts a comment
+        (``"Auto-update by Alfred ..."``) and, when the decision implies
+        a state transition (``likely_done`` → ``completed``,
+        ``stale_archive_candidate`` → archived), transitions the Plane
+        issue's state. Returns the full response so the caller can
+        record the comment id + prior state into the undo recipe.
+
+        Response shape::
+
+            {
+              "ok": true,
+              "comment_id": "<uuid>" | null,
+              "transitioned_to_state_id": "<uuid>" | null,
+              "transitioned_to_state_group": "completed" | null,
+              "prior_state_id": "<uuid>" | null,
+              "prior_archived": false,
+              "archived": false
+            }
+        """
+        resp = await self._client.post(
+            "/api/v1/plane/steward-action",
+            json={
+                "project_id": project_id,
+                "issue_id": issue_id,
+                "decision": decision,
+                "confidence": confidence,
+                "evidence": evidence,
+                "audit_record_path": audit_record_path,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def plane_revert_steward_action(
+        self,
+        *,
+        project_id: str,
+        issue_id: str,
+        delete_comment_id: str | None,
+        restore_state_id: str | None,
+        restore_archived: bool | None,
+    ) -> dict[str, Any]:
+        """Reverse a previously-posted Steward Plane action via ctrl-api.
+
+        Wraps ``POST /api/v1/plane/steward-action/revert``. Idempotent —
+        a 404 on comment delete is treated as success (already gone).
+        """
+        resp = await self._client.post(
+            "/api/v1/plane/steward-action/revert",
+            json={
+                "project_id": project_id,
+                "issue_id": issue_id,
+                "delete_comment_id": delete_comment_id,
+                "restore_state_id": restore_state_id,
+                "restore_archived": restore_archived,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()
