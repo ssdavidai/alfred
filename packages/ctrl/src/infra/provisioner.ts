@@ -32,6 +32,7 @@ import dockerComposeTemplate from "../templates/docker-compose.yaml.njk";
 import bootstrapTemplate from "../templates/bootstrap-openclaw.sh.njk";
 import cloudflaredConfigTemplate from "../templates/cloudflared-config.yaml.njk";
 import vexaStackTemplate from "../templates/vexa-stack.yaml.njk";
+import vexaProfilesTemplate from "../templates/vexa-profiles.yaml";
 import openclawConfigTemplate from "../templates/openclaw-config.json.njk";
 import openclawWorkersConfigTemplate from "../templates/openclaw-workers-config.json.njk";
 import workflowAuthorSkill from "../templates/skills/workflow-author.md";
@@ -3762,7 +3763,37 @@ export async function setupVexa(opts: SetupVexaOpts): Promise<void> {
     opts.log("All Vexa bootstrap values already present — skipping seed");
   }
 
-  // 2. Render & upload vexa-stack.yaml.njk.
+  // 2. Upload the canonical runtime-api profiles.yaml. Upstream's image
+  //    only ships demo profiles (web-server, worker, sandbox, gpu-compute);
+  //    bot dispatch needs ``meeting`` + ``browser-session``. setupVexa
+  //    bind-mounts this file into runtime-api at /app/profiles.yaml.
+  await ssh.upload(
+    opts.serverIp,
+    opts.keyPath,
+    vexaProfilesTemplate,
+    `${VEXA_DIR}/profiles.yaml`,
+    0o644,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  opts.log(`vexa runtime profiles uploaded to ${VEXA_DIR}/profiles.yaml`);
+
+  // 3. Mirror the public URLs into vexa/.env. The dashboard reads these
+  //    for SSR hydration of NEXT_PUBLIC_VEXA_WS_URL / NEXT_PUBLIC_APP_URL.
+  const vexaPublicHost = `${opts.subdomain}-vexa.${opts.domain}`;
+  const publicEnvUpdates: Record<string, string> = {};
+  if (!(await readEnvAt(sshOpts, vexaEnvPath, "VEXA_PUBLIC_URL"))) {
+    publicEnvUpdates.VEXA_PUBLIC_URL = `https://${vexaPublicHost}`;
+  }
+  if (!(await readEnvAt(sshOpts, vexaEnvPath, "VEXA_PUBLIC_WS_URL"))) {
+    publicEnvUpdates.VEXA_PUBLIC_WS_URL = `wss://${vexaPublicHost}/ws`;
+  }
+  if (Object.keys(publicEnvUpdates).length > 0) {
+    await writeEnvAt(sshOpts, vexaEnvPath, publicEnvUpdates);
+    opts.log(`Wrote VEXA_PUBLIC_URL/VEXA_PUBLIC_WS_URL for ${vexaPublicHost}`);
+  }
+
+  // 4. Render & upload vexa-stack.yaml.njk.
   const alfredNetwork = await detectAlfredNetwork(sshOpts);
   const vexaCompose = nunjucks.renderString(vexaStackTemplate, {
     alfred_network: alfredNetwork,

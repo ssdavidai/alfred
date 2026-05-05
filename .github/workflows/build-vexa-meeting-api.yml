@@ -1,0 +1,37 @@
+name: Build vexa-meeting-api image
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/vexa-meeting-api/**'
+      - '.github/workflows/build-vexa-meeting-api.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sanity-check patched meetings.py
+        run: |
+          # Patch markers — fail the build if our three patches got
+          # accidentally reverted by an upstream sync.
+          grep -q '"whisper-large-v3-turbo"' packages/vexa-meeting-api/meetings.py
+          grep -q '"verbose_json"' packages/vexa-meeting-api/meetings.py
+          grep -q 'req.bot_name or "Alfred"' packages/vexa-meeting-api/meetings.py
+          python3 -m py_compile packages/vexa-meeting-api/meetings.py
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: packages/vexa-meeting-api
+          file: packages/vexa-meeting-api/Dockerfile
+          push: true
+          tags: |
+            ssdavidai00/vexa-meeting-api:latest
+            ssdavidai00/vexa-meeting-api:${{ github.sha }}

@@ -1,0 +1,31 @@
+name: Build vexa-live-transcriber image
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/vexa-live-transcriber/**'
+      - '.github/workflows/build-vexa-live-transcriber.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sanity-check worker.py
+        run: python3 -m py_compile packages/vexa-live-transcriber/worker.py
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: packages/vexa-live-transcriber
+          file: packages/vexa-live-transcriber/Dockerfile
+          push: true
+          tags: |
+            ssdavidai00/vexa-live-transcriber:latest
+            ssdavidai00/vexa-live-transcriber:${{ github.sha }}

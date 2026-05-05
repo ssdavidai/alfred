@@ -1,0 +1,35 @@
+name: Build vexa-dashboard image
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/vexa-dashboard/**'
+      - '.github/workflows/build-vexa-dashboard.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sanity-check patched dashboard chunks
+        run: |
+          # Patch markers — fail the build if either chunk lacks the
+          # `stopping` status entry we added (the original crash trigger).
+          grep -q 'stopping:{label:"Stopping"' packages/vexa-dashboard/afb3e188b168113b.js
+          grep -q 'stopping:{label:"Stopping"' packages/vexa-dashboard/88aee780a629308d.js
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: packages/vexa-dashboard
+          file: packages/vexa-dashboard/Dockerfile
+          push: true
+          tags: |
+            ssdavidai00/vexa-dashboard:latest
+            ssdavidai00/vexa-dashboard:${{ github.sha }}

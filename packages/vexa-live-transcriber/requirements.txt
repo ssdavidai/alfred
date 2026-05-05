@@ -1,0 +1,4 @@
+asyncpg==0.30.0
+httpx==0.28.1
+minio==7.2.10
+redis==5.2.0
