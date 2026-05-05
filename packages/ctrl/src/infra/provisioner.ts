@@ -3881,10 +3881,13 @@ export async function setupVexa(opts: SetupVexaOpts): Promise<void> {
   if (!webhookSecret) {
     throw new Error("Internal: VEXA_WEBHOOK_SECRET missing post-seed");
   }
-  // Webhooks travel inside the alfred_default network — never out to the
-  // public internet. The vexa-bot containers spawned by runtime-api join
-  // alfred_default and resolve `ctrl-api` as an alias.
-  const webhookUrl = "http://ctrl-api:3100/api/v1/webhooks/vexa";
+  // Webhook URL must be the PUBLIC cloudflared hostname, not the internal
+  // alfred_default alias (which Vexa's SSRF guard rejects with HTTP 400
+  // "Webhook URL cannot target internal or private networks"). The public
+  // URL still resolves to ctrl-api because cloudflared routes
+  // /api/v1/* on ${subdomain}.${domain} to localhost:3100 (see
+  // cloudflared-config.yaml.njk path rule).
+  const webhookUrl = `https://${opts.subdomain}.${opts.domain}/api/v1/webhooks/vexa`;
   try {
     await registerVexaWebhook(
       { ...sshOpts, log: opts.log },
