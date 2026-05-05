@@ -25,7 +25,7 @@ import {
   getInstanceByName,
   getEvents,
 } from "./db/queries.js";
-import { provision, destroy, updateImages, rollback, deployApi, deployPlane, deploySure, repairTunnel } from "./infra/provisioner.js";
+import { provision, destroy, updateImages, rollback, deployApi, deployPlane, deploySure, deployVexa, repairTunnel } from "./infra/provisioner.js";
 import { getHetznerClient } from "./infra/hetzner.js";
 import { runHealthChecks } from "./monitoring/health.js";
 import { exec as sshExec } from "./infra/ssh.js";
@@ -423,6 +423,36 @@ program
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`\nSure deploy FAILED: ${msg}`);
+      closeDb();
+      process.exit(1);
+    }
+    closeDb();
+  });
+
+program
+  .command("deploy-vexa <name>")
+  .description(
+    "Retrofit Vexa (meeting transcription stack) onto an existing tenant — renders /opt/alfred/vexa/docker-compose.yaml, brings the stack up, mints an admin token + user API key, registers the meeting.completed webhook, and adds the <subdomain>-vexa.<domain> ingress.",
+  )
+  .action(async (name) => {
+    getDb();
+    const instance = getInstanceByName(name);
+    if (!instance) {
+      console.error(`Instance "${name}" not found`);
+      closeDb();
+      process.exit(1);
+    }
+    if (!instance.ip_address || !instance.ssh_key_path) {
+      console.error("Instance not fully provisioned");
+      closeDb();
+      process.exit(1);
+    }
+    try {
+      await deployVexa(instance.id, console.log);
+      console.log("\nVexa deployed successfully.");
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`\nVexa deploy FAILED: ${msg}`);
       closeDb();
       process.exit(1);
     }

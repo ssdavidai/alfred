@@ -36,6 +36,9 @@ import { registerVaultwardenRoutes } from "./routes/vaultwarden.js";
 import { registerClaudeSetupRoutes } from "./routes/claudeSetup.js";
 import { registerSkillsRoutes } from "./routes/skills.js";
 import { registerContextRoutes } from "./routes/context.js";
+import { registerStewardRoutes } from "./routes/steward.js";
+import { registerPlaneStewardWebhookRoute } from "./routes/webhooks/plane.js";
+import { registerVexaWebhookRoute } from "./routes/webhooks/vexa.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -128,6 +131,9 @@ export function createApiServer(): http.Server {
   registerClaudeSetupRoutes();
   registerSkillsRoutes();
   registerContextRoutes();
+  registerStewardRoutes();
+  registerPlaneStewardWebhookRoute();
+  registerVexaWebhookRoute();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
@@ -150,7 +156,9 @@ export function createApiServer(): http.Server {
       // HMAC signature).
       const isPublic =
         pathname.startsWith("/api/v1/streams/omi/") ||
-        pathname === "/api/v1/plane/webhook";
+        pathname === "/api/v1/plane/webhook" ||
+        pathname === "/api/v1/webhooks/plane/steward" ||
+        pathname === "/api/v1/webhooks/vexa";
       if (!isPublic) {
         authenticate(req);
       }
@@ -176,7 +184,10 @@ export function createApiServer(): http.Server {
       }
       // Routes that receive exact-byte payloads and do their own parsing
       // (needed for HMAC-over-raw-body signature schemes).
-      const isRawBody = pathname === "/api/v1/plane/webhook";
+      const isRawBody =
+        pathname === "/api/v1/plane/webhook" ||
+        pathname === "/api/v1/webhooks/plane/steward" ||
+        pathname === "/api/v1/webhooks/vexa";
       const query = new URLSearchParams(qIdx >= 0 ? url.slice(qIdx + 1) : "");
 
       const matched = matchRoute(method, pathname);

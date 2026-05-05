@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError, ExecError } from "../errors.js";
@@ -14,6 +15,47 @@ import {
 export const VAULT_PATH = "/mnt/encrypted/vault";
 const INBOX_PATH = `${VAULT_PATH}/inbox`;
 export const VAULT_ENV = { ALFRED_VAULT_PATH: "/vault" };
+
+// ---------------------------------------------------------------------------
+// Steward signal stream (#838 Phase 2)
+//
+// Every vault write — PATCH, POST (create), DELETE — appends a
+// ``vault:edit`` signal record to ``/alfred-data/streams/steward-signals.jsonl``
+// so the Phase 1 ``gather_signals_vault_record`` activity (and Phase 2's
+// Plane / Gmail / Sure / ctrl-api stream gatherers) can fan out off a
+// single append-only ledger. Best-effort: a write failure is logged but
+// never propagates to the API caller — a missing signal record is recoverable
+// (Steward's Layer 3 periodic catch-all picks the change up on the next tick).
+// ---------------------------------------------------------------------------
+
+const STEWARD_SIGNALS_FILE = "/alfred-data/streams/steward-signals.jsonl";
+
+/** Emit a single ``vault:edit`` Steward signal for ``relPath``.
+ *
+ * Schedules the write off the current event-loop tick so the API
+ * response is never blocked by disk I/O. Failures are logged but do
+ * not propagate.
+ */
+export function emitVaultEditSignal(relPath: string, kind: "create" | "edit" | "delete" = "edit"): void {
+  if (!relPath) return;
+  setImmediate(() => {
+    try {
+      fs.mkdirSync(path.dirname(STEWARD_SIGNALS_FILE), { recursive: true });
+      const record = {
+        id: `evt_${crypto.randomUUID()}`,
+        ts: new Date().toISOString(),
+        kind: "vault:edit",
+        ref: `vault:${relPath.replace(/\\/g, "/")}`,
+        note: kind,
+      };
+      fs.appendFileSync(STEWARD_SIGNALS_FILE, JSON.stringify(record) + "\n");
+    } catch (err) {
+      console.warn(
+        `[vault.steward_signal] failed to append vault:edit signal path=${relPath} err=${(err as Error).message}`,
+      );
+    }
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Per-path write mutex (#593).
@@ -115,9 +157,36 @@ const LIST_FIELDS = [
   "outputs", "depends_on", "blocked_by", "based_on", "supports",
   "challenged_by", "approved_by", "confirmed_by", "invalidated_by",
   "cluster_sources", "governed_by", "references", "project",
+  // Steward (#835 Phase 0) — per-matter perception loop. signal_sources
+  // is the only list-shaped Steward field; the rest of the Steward
+  // schema is scalars (state, surface_class, ...) which don't need
+  // list-parsing hints.
+  "signal_sources",
 ];
 
 const REQUIRED_FIELDS = ["type", "created"];
+
+// Steward (#835 Phase 0) — frontmatter fields owned by the Steward
+// state machine. Exposed via /api/v1/vault/schema so consumers (the
+// alfred-learn migration scripts, dashboard, MCP) can discover them
+// without hard-coding the list. Steward owns every transition; no
+// other component should write these.
+const STEWARD_FIELDS = [
+  // State machine
+  "state",                  // open | snoozed | done | archived
+  "blocked_on",             // ref to blocking task/matter, or null
+  "pending_confirmation",   // bool — true between low-confidence Steward
+                            //        decision and human ack
+  "staleness_score",        // 0..1, computed
+  "surface_class",          // high | normal | none
+  // Audit / cadence
+  "last_steward_check_at",  // ISO timestamp
+  "last_steward_outcome",   // dict — decision/evidence/confidence/undo_recipe
+  "next_check_after",       // ISO timestamp — Steward's per-task cursor
+  "signal_sources",         // list of {name, confidence, calibration_status}
+  // Hard invariant for tasks
+  "parent_matter",          // matter/<slug>.md ref; orphans → matter/inbox.md
+];
 
 const NAME_FIELD_BY_TYPE: Record<string, string> = {
   conversation: "subject",
@@ -574,6 +643,7 @@ export function registerVaultRoutes(): void {
       await fs.promises.writeFile(fullPath, b.content, "utf-8");
       sendJson(res, 201, { path: filePath });
       scheduleNudgeForPath(filePath);
+      emitVaultEditSignal(filePath, "create");
       return;
     }
 
@@ -591,9 +661,32 @@ export function registerVaultRoutes(): void {
       sendJson(res, 201, { raw: stdout });
     }
     scheduleNudgeForRecord(b.type as string, b.name as string);
+    // Best-effort: derive the canonical relPath from the type+name. The CLI's
+    // sanitization pass may have produced a slightly different filename, but
+    // the resulting signal is still useful — Steward consumers join by the
+    // task slug, not the exact filename.
+    {
+      const namePart = (b.name as string).endsWith(".md")
+        ? (b.name as string)
+        : `${b.type as string}/${(b.name as string)}.md`;
+      emitVaultEditSignal(namePart, "create");
+    }
   });
 
   // Edit vault record
+  //
+  // Body shape (all optional, at least one required):
+  //   set:        { key: scalar }     — stringified, routed through `alfred vault edit --set`
+  //   append:     { key: scalar }     — stringified, routed through `alfred vault edit --append`
+  //   body_append: string             — appended to body via `alfred vault edit --body-append`
+  //   body_set:   string              — replaces body wholesale (post-CLI, under path lock)
+  //   json_set:   { key: native }     — #838 Phase 2: native JSON values (lists, dicts, bools,
+  //                                     numbers) merged into frontmatter via direct YAML
+  //                                     read-modify-write. The CLI's `--set` flag stringifies
+  //                                     everything which round-trips structured frontmatter as
+  //                                     Python repr strings; `json_set` preserves shape end-to-end
+  //                                     so Steward signal_sources, undo_recipe.evidence, etc.
+  //                                     stay structured all the way through the PATCH cycle.
   addRoute("PATCH", "/api/v1/vault/records/*", async ({ res, params, body }) => {
     const recordPath = params.path;
     const b = body as Record<string, unknown> | undefined;
@@ -616,30 +709,130 @@ export function registerVaultRoutes(): void {
     // body-stdin is a flag, not an argument — would need stdin piping
     // For now, body-append handles most use cases
 
+    // Determine whether we have any CLI-shaped work to do (the alfred CLI
+    // exits non-zero if no --set/--append/--body-append/--body-stdin was
+    // passed). When the caller sent ONLY json_set / body_set, the CLI run
+    // is skipped entirely — we still take the path lock for the YAML
+    // edit below.
+    const hasCliArgs =
+      (b.set && typeof b.set === "object" && Object.keys(b.set as Record<string, unknown>).length > 0) ||
+      (b.append && typeof b.append === "object" && Object.keys(b.append as Record<string, unknown>).length > 0) ||
+      typeof b.body_append === "string";
+
     // Serialise concurrent writes to the same file at the ctrl-api
     // boundary so we don't fan-out a fork-storm of `docker compose
     // exec` waiting on the in-container alfred-CLI file lock (#593).
-    let stdout: string;
-    try {
-      stdout = await _withVaultPathLock(
-        recordPath, () => dockerExec("alfred", args, VAULT_ENV),
-      );
-    } catch (err) {
-      // Surface stderr + the failing argv so transient 500s on this
-      // path leave a diagnosable trace (the alfred CLI writes lock
-      // contention, schema errors, etc. only to stderr).
-      const e = err as { stderr?: string; stdout?: string; message?: string };
-      console.error(
-        "[vault PATCH] dockerExec failed",
-        JSON.stringify({
-          recordPath,
-          args: args.join(" "),
-          stderr: (e.stderr ?? "").slice(0, 1000),
-          stdout: (e.stdout ?? "").slice(0, 1000),
-          message: e.message ?? String(err),
-        }),
-      );
-      throw err;
+    let stdout: string = "";
+    if (hasCliArgs) {
+      try {
+        stdout = await _withVaultPathLock(
+          recordPath, () => dockerExec("alfred", args, VAULT_ENV),
+        );
+      } catch (err) {
+        // Surface stderr + the failing argv so transient 500s on this
+        // path leave a diagnosable trace (the alfred CLI writes lock
+        // contention, schema errors, etc. only to stderr).
+        const e = err as { stderr?: string; stdout?: string; message?: string };
+        console.error(
+          "[vault PATCH] dockerExec failed",
+          JSON.stringify({
+            recordPath,
+            args: args.join(" "),
+            stderr: (e.stderr ?? "").slice(0, 1000),
+            stdout: (e.stdout ?? "").slice(0, 1000),
+            message: e.message ?? String(err),
+          }),
+        );
+        throw err;
+      }
+    }
+
+    // json_set: structured-value frontmatter merge. Direct YAML read-modify-
+    // write under the same path lock. The alfred CLI's --set flag stringifies
+    // every value, which causes lists/dicts to round-trip as Python repr
+    // strings (Phase 1 added a read-side json.loads/ast.literal_eval fallback
+    // in alfred-learn; this is the proper write-side fix). We perform the
+    // merge AFTER the CLI run so a single PATCH carrying both `set` (scalars)
+    // and `json_set` (structured) lands the scalars first and the structured
+    // values on top — last-writer-wins on key collisions, json_set wins by
+    // design since it's the more expressive shape.
+    if (b.json_set && typeof b.json_set === "object" && !Array.isArray(b.json_set)) {
+      const jsonSet = b.json_set as Record<string, unknown>;
+      if (Object.keys(jsonSet).length > 0) {
+        // Path traversal protection — the json_set path bypasses the
+        // alfred CLI which has its own scoping checks, so we enforce
+        // the same boundary here before touching the filesystem.
+        resolveVaultPath(recordPath);
+        await _withVaultPathLock(recordPath, async () => {
+          const fullPath = path.resolve(VAULT_PATH, recordPath);
+          let raw: string;
+          try {
+            raw = await fs.promises.readFile(fullPath, "utf-8");
+          } catch (err) {
+            // Record doesn't exist — `json_set` requires an existing file
+            // since we're merging into existing frontmatter. The CLI
+            // would have failed already if the caller sent `set` too.
+            throw new NotFoundError(
+              `Cannot json_set on missing record: ${recordPath} (${(err as Error).message})`,
+            );
+          }
+          // Locate the frontmatter block — same heuristic the read path uses.
+          let fm: Record<string, unknown> = {};
+          let body = raw;
+          let hadFrontmatter = false;
+          if (raw.startsWith("---")) {
+            const end = raw.indexOf("\n---", 3);
+            if (end !== -1) {
+              const yamlBlock = raw.slice(4, end);
+              body = raw.slice(end + 4).replace(/^\r?\n/, "");
+              try {
+                const parsed = yaml.load(yamlBlock, { schema: yaml.DEFAULT_SCHEMA });
+                if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                  fm = parsed as Record<string, unknown>;
+                  hadFrontmatter = true;
+                }
+              } catch (err) {
+                throw new ValidationError(
+                  `Cannot json_set on record with malformed frontmatter: ${recordPath} (${(err as Error).message})`,
+                );
+              }
+            }
+          }
+          // Merge json_set on top — values that are explicitly null delete
+          // the key (matches the CLI's `--set k=` semantics that the read
+          // path's null-to-empty-string contract preserves).
+          for (const [k, v] of Object.entries(jsonSet)) {
+            if (v === null) {
+              delete fm[k];
+            } else {
+              fm[k] = v;
+            }
+          }
+          // Re-emit the file. js-yaml's dump with default-flow=false +
+          // lineWidth=Infinity gives us human-readable block style for
+          // top-level scalars and nested structures while keeping long
+          // strings on one line (matches the alfred CLI's output style).
+          const newYaml = yaml.dump(fm, {
+            schema: yaml.DEFAULT_SCHEMA,
+            indent: 2,
+            lineWidth: -1,
+            noRefs: true,
+            sortKeys: false,
+          });
+          // Strip the trailing newline yaml.dump adds so the closing `---`
+          // sits on its own line without a blank gap above it.
+          const newYamlClean = newYaml.endsWith("\n") ? newYaml.slice(0, -1) : newYaml;
+          let bodyOut = body;
+          if (!hadFrontmatter && bodyOut.length === 0) {
+            // Brand-new file with just frontmatter — no body bytes.
+            bodyOut = "";
+          }
+          const rewritten =
+            "---\n" + newYamlClean + "\n---\n" +
+            (bodyOut.startsWith("\n") ? bodyOut : (bodyOut ? "\n" + bodyOut : ""));
+          await fs.promises.writeFile(fullPath, rewritten, "utf-8");
+        });
+      }
     }
 
     // body_set: replace the body wholesale AFTER the CLI PATCH has
@@ -685,12 +878,20 @@ export function registerVaultRoutes(): void {
       });
     }
 
-    try {
-      sendJson(res, 200, JSON.parse(stdout));
-    } catch {
-      sendJson(res, 200, { raw: stdout });
+    if (stdout) {
+      try {
+        sendJson(res, 200, JSON.parse(stdout));
+      } catch {
+        sendJson(res, 200, { raw: stdout });
+      }
+    } else {
+      // No CLI run — only json_set and/or body_set were applied. Surface a
+      // shape that mirrors the CLI's success envelope so callers don't need
+      // to branch on which path executed.
+      sendJson(res, 200, { ok: true, path: recordPath });
     }
     scheduleNudgeForPath(recordPath);
+    emitVaultEditSignal(recordPath, "edit");
   });
 
   // Move vault record
@@ -710,6 +911,8 @@ export function registerVaultRoutes(): void {
     // task Plane needs to learn about the rename.
     scheduleNudgeForPath(b.from as string);
     scheduleNudgeForPath(b.to as string);
+    emitVaultEditSignal(b.from as string, "delete");
+    emitVaultEditSignal(b.to as string, "create");
   });
 
   // Delete vault record
@@ -759,6 +962,7 @@ export function registerVaultRoutes(): void {
     // is truly gone it no-ops and the cron's delete detection picks
     // the removal up on its next pass.
     scheduleNudgeForPath(recordPath);
+    emitVaultEditSignal(recordPath, "delete");
   });
 
   // Promote triage → task (errand)
@@ -1146,6 +1350,9 @@ export function registerVaultRoutes(): void {
       required_fields: REQUIRED_FIELDS,
       name_field_by_type: NAME_FIELD_BY_TYPE,
       type_directory: TYPE_DIRECTORY,
+      // Steward (#835 Phase 0) — fields owned by the Steward state
+      // machine. Consumers should treat these as Steward-write-only.
+      steward_fields: STEWARD_FIELDS,
     });
   });
 

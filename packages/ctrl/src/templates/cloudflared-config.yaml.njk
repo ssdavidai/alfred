@@ -29,4 +29,14 @@ ingress:
   - hostname: {{ subdomain }}-vault.{{ domain }}
     service: http://localhost:18080
 {%- endif %}
+{%- if vexa_enabled %}
+  # Vexa Dashboard (Synapsr/Vexa-Dashboard, image synapsr/vexa-dashboard).
+  # The container in the standalone vexa compose project at
+  # /opt/alfred/vexa/ publishes 127.0.0.1:18057 → 3000 so cloudflared can
+  # reach it without needing to share the alfred_default network on the
+  # host side. (alfred-learn / ctrl-api still reach the api-gateway over
+  # the shared compose network at http://vexa-api-gateway:8000.)
+  - hostname: {{ subdomain }}-vexa.{{ domain }}
+    service: http://localhost:18057
+{%- endif %}
   - service: http_status:404

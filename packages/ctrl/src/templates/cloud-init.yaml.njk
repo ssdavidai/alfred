@@ -142,8 +142,15 @@ runcmd:
 
       # Create data directories — all owned by deploy (uid 1000)
       # temporal image also runs as uid 1000 (temporal user)
-      mkdir -p /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden /mnt/encrypted/mcp-server
-      chown -R deploy:deploy /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden /mnt/encrypted/mcp-server
+      # /mnt/encrypted/vexa is created unconditionally — the cost of an
+      # empty directory is zero, and creating it lazily would mean a
+      # tenant-flip to vexa_enabled would also need a re-run of
+      # cloud-init (or a manual mkdir) before the Vexa stack could
+      # start. Same rationale as /mnt/encrypted/vaultwarden +
+      # /mnt/encrypted/mcp-server above (both unconditional even when
+      # the corresponding compose blocks are gated behind a flag).
+      mkdir -p /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden /mnt/encrypted/mcp-server /mnt/encrypted/vexa
+      chown -R deploy:deploy /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden /mnt/encrypted/mcp-server /mnt/encrypted/vexa
     fi
 
   # --- Setup auto-unlock on boot ---

@@ -656,6 +656,18 @@ action resumeSchedule {
   entities: [Instance]
 }
 
+// Steward (#836 Phase 0.5) — recent-actions list + undo proxy.
+// Both wrap ctrl-api endpoints in packages/ctrl/src/api/routes/steward.ts.
+query getRecentStewardActions {
+  fn: import { getRecentStewardActions } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action undoStewardAction {
+  fn: import { undoStewardAction } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
 // ============================================================
 // Chores (Plan C — generated chore lifecycle)
 // ============================================================

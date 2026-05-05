@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS instances (
   cf_vault_dns_record_id TEXT,
   cf_vault_access_app_id TEXT,
   cf_access_app_id TEXT,
+  cf_vexa_dns_record_id TEXT,
   current_image_sha TEXT,
   last_healthy_sha TEXT,
   last_health_check TEXT,

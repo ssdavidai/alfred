@@ -1,12 +1,18 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   useQuery,
   getTasks,
   getTaskDetail,
   updateTaskStatus,
   updateTask,
+  getRecentStewardActions,
+  undoStewardAction,
 } from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
+import StewardBadge, {
+  type StewardOutcome,
+  type StewardRecentAction,
+} from "../components/StewardBadge";
 import {
   Select,
   SelectContent,
@@ -70,6 +76,58 @@ export function TasksContent() {
     refetchInterval: 30_000,
     retry: false,
   });
+
+  // Steward (#836 Phase 0.5) — fetch the last 24 h of audit records so
+  // each task row can render the matching badge inline. Errors here
+  // are non-fatal: if the steward route is unavailable (older ctrl-api,
+  // network blip), task rows render without badges instead of failing
+  // the whole page.
+  const {
+    data: stewardData,
+    refetch: refetchSteward,
+  } = useQuery(getRecentStewardActions, undefined, {
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const recentActions: any[] = stewardData?.actions ?? [];
+  // Index by ``target`` so each task row picks up its badge in O(1)
+  // and we only render the most recent action per task.
+  const actionByTaskPath = useMemo(() => {
+    const map = new Map<string, StewardRecentAction>();
+    for (const a of recentActions) {
+      if (!a || typeof a.target !== "string") continue;
+      const existing = map.get(a.target);
+      if (!existing) {
+        map.set(a.target, a as StewardRecentAction);
+        continue;
+      }
+      // ``recent-actions`` is sorted newest-first by ctrl-api; we
+      // still defensively keep whichever has the larger timestamp so
+      // a future client-side merge (eg from a long-poll source)
+      // doesn't accidentally surface a stale audit entry.
+      const aTs = Date.parse(String(a.timestamp || "")) || 0;
+      const bTs = Date.parse(String(existing.timestamp || "")) || 0;
+      if (aTs > bTs) map.set(a.target, a as StewardRecentAction);
+    }
+    return map;
+  }, [recentActions]);
+
+  const handleUndoSteward = async (actionPath: string): Promise<void> => {
+    // ``actionPath`` is ``event/steward-action-<id>.md``. The ctrl-api
+    // route takes only ``<id>`` so we strip the prefix + suffix here.
+    const m = actionPath.match(/^event\/steward-action-(.+)\.md$/);
+    const actionId = m ? m[1] : actionPath;
+    try {
+      await undoStewardAction({ actionId });
+      // Both lists need to refresh — task frontmatter changes (the
+      // vault_patch reverts ``last_steward_outcome`` etc.) AND the
+      // steward list needs to drop ``is_reversible`` for this entry.
+      refetch();
+      refetchSteward();
+    } catch (err: any) {
+      console.error("Steward undo failed:", err);
+    }
+  };
 
   const [filter, setFilter] = useState<FilterTab>("all");
   const [expandedPath, setExpandedPath] = useState<string | null>(null);
@@ -232,6 +290,8 @@ export function TasksContent() {
                   }
                   onStatusChange={handleStatusChange}
                   onRefetch={refetch}
+                  stewardAction={actionByTaskPath.get(task.path) ?? null}
+                  onUndoSteward={handleUndoSteward}
                 />
               ))}
             </div>
@@ -300,6 +360,8 @@ function TaskRow({
   onToggle,
   onStatusChange,
   onRefetch,
+  stewardAction,
+  onUndoSteward,
 }: {
   task: any;
   isExpanded: boolean;
@@ -307,11 +369,37 @@ function TaskRow({
   onToggle: () => void;
   onStatusChange: (path: string, status: string) => void;
   onRefetch: () => void;
+  stewardAction?: StewardRecentAction | null;
+  onUndoSteward?: (actionPath: string) => Promise<void> | void;
 }) {
   const fm = task.frontmatter ?? {};
   const statusClass = STATUS_COLORS[task.status] ?? STATUS_COLORS.queued;
   const priorityClass = fm.priority ? PRIORITY_COLORS[fm.priority] : null;
   const hasAlfredInstructions = !!(fm.alfred_instructions || task.alfred_instructions);
+
+  // Steward (#836 Phase 0.5) — derive the badge inputs once. If the
+  // task carries a ``last_steward_outcome`` we show it; if there's a
+  // recent audit record (live or shadow) we let the badge component
+  // pick the right branch. Both can be present on the same task — the
+  // outcome is the rolled-up summary, the recentAction is the row in
+  // the audit log.
+  const stewardOutcomeRaw = fm.last_steward_outcome;
+  const stewardOutcome: StewardOutcome | null =
+    stewardOutcomeRaw && typeof stewardOutcomeRaw === "object" && !Array.isArray(stewardOutcomeRaw)
+      ? {
+          decision: String((stewardOutcomeRaw as any).decision ?? ""),
+          confidence: Number((stewardOutcomeRaw as any).confidence ?? 0),
+          evidence: Array.isArray((stewardOutcomeRaw as any).evidence)
+            ? (stewardOutcomeRaw as any).evidence
+            : [],
+          mode: typeof (stewardOutcomeRaw as any).mode === "string"
+            ? (stewardOutcomeRaw as any).mode
+            : undefined,
+        }
+      : null;
+  const pendingConfirmation =
+    fm.pending_confirmation === true ||
+    fm.pending_confirmation === "true";
 
   return (
     <div className="rounded-sm border border-gold-dim/20 bg-black/20">
@@ -335,6 +423,13 @@ function TaskRow({
         </button>
 
         <div className="flex items-center gap-2">
+          <StewardBadge
+            taskPath={task.path}
+            outcome={stewardOutcome}
+            pendingConfirmation={pendingConfirmation}
+            recentAction={stewardAction ?? null}
+            onUndo={onUndoSteward}
+          />
           {(fm.project || task.project) && (
             <span className="flex-shrink-0 font-mono text-[0.6rem] text-muted-foreground/50">
               {String(fm.project || task.project).replace(/^\[\[|\]\]$/g, "")}

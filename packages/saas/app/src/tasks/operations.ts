@@ -19,6 +19,8 @@ import type {
   TriggerSchedule,
   PauseSchedule,
   ResumeSchedule,
+  GetRecentStewardActions,
+  UndoStewardAction,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
@@ -216,5 +218,50 @@ export const resumeSchedule: ResumeSchedule<{ id: string }, any> = async (args, 
   return proxyToTenant(instance, {
     method: "POST",
     path: `/api/v1/schedules/${args.id}/unpause`,
+  });
+};
+
+// ---------------------------------------------------------------------------
+// Steward (#836 Phase 0.5) — recent-actions list + undo proxy.
+// ---------------------------------------------------------------------------
+//
+// Both endpoints sit on alfred-ctrl (port 3100, see
+// packages/ctrl/src/api/routes/steward.ts) — these wrappers just push
+// the request through the same Tailscale + Cloudflare proxy chain
+// every other tenant call uses. The dashboard never talks to ctrl-api
+// directly because the Wasp container can't reach Tailscale.
+
+export const getRecentStewardActions: GetRecentStewardActions<
+  { since?: string; limit?: number; target?: string } | void,
+  any
+> = async (args, context) => {
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args && typeof args === "object") {
+    if (typeof args.since === "string" && args.since) query.since = args.since;
+    if (typeof args.limit === "number" && Number.isFinite(args.limit)) {
+      query.limit = String(args.limit);
+    }
+    if (typeof args.target === "string" && args.target) query.target = args.target;
+  }
+  return proxyToTenant(instance, {
+    method: "GET",
+    path: "/api/v1/steward/recent-actions",
+    query: Object.keys(query).length ? query : undefined,
+  });
+};
+
+export const undoStewardAction: UndoStewardAction<{ actionId: string }, any> = async (
+  args,
+  context,
+) => {
+  const instance = await getUserInstance(context);
+  if (!args || typeof args.actionId !== "string" || !args.actionId.trim()) {
+    throw new Error("actionId is required");
+  }
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/steward/undo/${encodeURIComponent(args.actionId.trim())}`,
+    body: {},
   });
 };

@@ -656,6 +656,398 @@ function pruneComment(c: Record<string, unknown>, alfredUserId: string): PrunedC
 }
 
 // ---------------------------------------------------------------------------
+// Steward action helpers (#839 Phase 3)
+//
+// Steward fires Plane writes through these helpers — both the live cutover
+// path in alfred-learn (``apply_state_change(mode="live")``) and the
+// dashboard undo handler in ``routes/steward.ts``. Keeping the helpers
+// here, alongside the rest of the Plane HTTP plumbing, means there's one
+// owner for the comment-format / state-transition contract.
+//
+// Steward decisions and their Plane consequences:
+//
+//   ``likely_done``             → comment + transition to a state in the
+//                                 ``completed`` group.
+//   ``stale_archive_candidate`` → comment + set ``is_archived: true`` on
+//                                 the issue (Plane has no ``archived``
+//                                 state group; archival is an issue-level
+//                                 boolean).
+//   any other decision          → comment only, no transition.
+//
+// All Plane mutations go through ``planeRequest`` so a transient Plane
+// outage maps to a uniform error envelope. The helpers throw an
+// ``ApiError`` on Plane failure — callers are expected to record the
+// partial-applied flag in the audit record (alfred-learn does this in
+// ``apply_state_change``).
+// ---------------------------------------------------------------------------
+
+export interface StewardEvidenceItem {
+  source?: string;
+  ref?: string;
+  note?: string;
+}
+
+export interface StewardActionResult {
+  ok: true;
+  comment_id: string | null;
+  transitioned_to_state_id: string | null;
+  transitioned_to_state_group: string | null;
+  prior_state_id: string | null;
+  prior_archived: boolean;
+  archived: boolean;
+}
+
+const STEWARD_AUTO_COMMENT_PREFIX = "Auto-update by Alfred";
+
+function formatStewardComment(
+  decision: string,
+  confidence: number,
+  evidence: StewardEvidenceItem[],
+  auditRecordPath: string,
+): { html: string; stripped: string } {
+  // Confidence rendered as 0..100 % so the comment reads naturally
+  // alongside the decision label.
+  const pct = Math.max(0, Math.min(100, Math.round(confidence * 100)));
+  const evidenceLines: string[] = [];
+  for (const e of evidence ?? []) {
+    if (!e || typeof e !== "object") continue;
+    const src = (e.source ?? "").toString().trim();
+    const ref = (e.ref ?? "").toString().trim();
+    const note = (e.note ?? "").toString().trim();
+    let line: string;
+    if (src && ref) line = `${src}:${ref}`;
+    else if (src) line = src;
+    else if (ref) line = ref;
+    else if (note) line = note;
+    else continue;
+    if (note && (src || ref)) line = `${line} — ${note}`;
+    evidenceLines.push(line);
+  }
+  const evidenceText = evidenceLines.length
+    ? evidenceLines.join("; ")
+    : "no signals";
+
+  const headline =
+    `${STEWARD_AUTO_COMMENT_PREFIX} (${decision}, confidence ${pct}%): ${evidenceText}`;
+  const reference = auditRecordPath
+    ? `See vault: ${auditRecordPath}`
+    : "";
+
+  const stripped = reference ? `${headline}\n\n${reference}` : headline;
+  const html = reference
+    ? `<p>${escapeHtml(headline)}</p><p><em>${escapeHtml(reference)}</em></p>`
+    : `<p>${escapeHtml(headline)}</p>`;
+
+  return { html, stripped };
+}
+
+async function fetchPlaneIssue(
+  cfg: PlaneConfig,
+  projectId: string,
+  issueId: string,
+): Promise<Record<string, unknown> | null> {
+  const url =
+    `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+    `/projects/${encodeURIComponent(projectId)}` +
+    `/issues/${encodeURIComponent(issueId)}/`;
+  const resp = await planeGet(url, cfg.token);
+  if (!resp.ok) {
+    if (resp.status === 404) return null;
+    throw new ApiError(
+      502,
+      "PLANE_API_ERROR",
+      resp.errorText || `Plane responded with ${resp.status}`,
+    );
+  }
+  return (resp.data ?? null) as Record<string, unknown> | null;
+}
+
+async function listPlaneStates(
+  cfg: PlaneConfig,
+  projectId: string,
+): Promise<Array<Record<string, unknown>>> {
+  const url =
+    `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+    `/projects/${encodeURIComponent(projectId)}/states/`;
+  const resp = await planeGet(url, cfg.token);
+  if (!resp.ok) {
+    throw new ApiError(
+      502,
+      "PLANE_API_ERROR",
+      resp.errorText || `Plane responded with ${resp.status}`,
+    );
+  }
+  return unwrapList(resp.data) as Array<Record<string, unknown>>;
+}
+
+async function resolvePlaneStateIdForGroup(
+  cfg: PlaneConfig,
+  projectId: string,
+  stateGroup: string,
+): Promise<string | null> {
+  const states = await listPlaneStates(cfg, projectId);
+  for (const s of states) {
+    if (typeof s.group === "string" && s.group === stateGroup) {
+      const id = s.id;
+      if (typeof id === "string" && id) return id;
+    }
+  }
+  return null;
+}
+
+async function postPlaneCommentRaw(
+  cfg: PlaneConfig,
+  projectId: string,
+  issueId: string,
+  html: string,
+  stripped: string,
+): Promise<string | null> {
+  const url =
+    `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+    `/projects/${encodeURIComponent(projectId)}` +
+    `/issues/${encodeURIComponent(issueId)}/comments/`;
+  const resp = await planeRequest("POST", url, cfg.token, {
+    comment_html: html,
+    comment_stripped: stripped,
+  });
+  if (!resp.ok) {
+    throw new ApiError(
+      502,
+      "PLANE_API_ERROR",
+      resp.errorText || `Plane responded with ${resp.status}`,
+    );
+  }
+  const data = (resp.data ?? {}) as Record<string, unknown>;
+  const commentId =
+    typeof data.id === "string"
+      ? data.id
+      : typeof data.id === "number"
+        ? String(data.id)
+        : null;
+  if (commentId) appendSelfCommentId(commentId);
+  return commentId;
+}
+
+async function patchPlaneIssue(
+  cfg: PlaneConfig,
+  projectId: string,
+  issueId: string,
+  body: Record<string, unknown>,
+): Promise<void> {
+  const url =
+    `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+    `/projects/${encodeURIComponent(projectId)}` +
+    `/issues/${encodeURIComponent(issueId)}/`;
+  const resp = await planeRequest("PATCH", url, cfg.token, body);
+  if (!resp.ok) {
+    throw new ApiError(
+      502,
+      "PLANE_API_ERROR",
+      resp.errorText || `Plane responded with ${resp.status}`,
+    );
+  }
+}
+
+async function deletePlaneCommentIfPresent(
+  cfg: PlaneConfig,
+  projectId: string,
+  issueId: string,
+  commentId: string,
+): Promise<void> {
+  const url =
+    `${cfg.base}/api/v1/workspaces/${encodeURIComponent(cfg.slug)}` +
+    `/projects/${encodeURIComponent(projectId)}` +
+    `/issues/${encodeURIComponent(issueId)}` +
+    `/comments/${encodeURIComponent(commentId)}/`;
+  const resp = await planeRequest("DELETE", url, cfg.token);
+  if (!resp.ok) {
+    // 404 → already gone, idempotent success.
+    if (resp.status === 404) return;
+    throw new ApiError(
+      502,
+      "PLANE_API_ERROR",
+      resp.errorText || `Plane responded with ${resp.status}`,
+    );
+  }
+}
+
+/**
+ * Post a Steward auto-action to Plane: a comment formatted as
+ *   "Auto-update by Alfred (<decision>, confidence X%): <evidence>"
+ * plus, when the decision implies a state change, a state transition
+ * (``likely_done`` → completed group) or an archival (
+ * ``stale_archive_candidate`` → ``is_archived: true``).
+ *
+ * Captures the issue's prior state + archived flag BEFORE mutating so
+ * the caller can record the values into the undo recipe. Returns
+ * ``prior_state_id`` and ``prior_archived`` even when no transition
+ * was performed (for forward-compat: Phase 5 may want them in the
+ * audit trail even for comment-only decisions).
+ *
+ * Throws ``ApiError(502, PLANE_API_ERROR)`` on Plane failures.
+ * Callers are responsible for marking the audit record with
+ * ``partially_applied: true`` if the post succeeded but the transition
+ * (or vice versa) failed mid-flight — this function performs comment
+ * + transition as separate Plane requests; the second can fail after
+ * the first succeeded.
+ */
+export async function postStewardAction(
+  issueId: string,
+  decision: string,
+  confidence: number,
+  evidence: StewardEvidenceItem[],
+  auditRecordPath: string,
+  projectId: string,
+): Promise<StewardActionResult> {
+  if (!projectId) {
+    throw new ValidationError("project_id is required for postStewardAction");
+  }
+  if (!issueId) {
+    throw new ValidationError("issue_id is required for postStewardAction");
+  }
+  const cfg = requirePlaneConfig();
+
+  // Snapshot the prior state + archived flag for the undo recipe.
+  const issue = await fetchPlaneIssue(cfg, projectId, issueId);
+  if (!issue) {
+    throw new ApiError(
+      404,
+      "PLANE_ISSUE_NOT_FOUND",
+      `issue ${issueId} not found in project ${projectId}`,
+    );
+  }
+  const priorStateId =
+    typeof issue.state === "string"
+      ? issue.state
+      : issue.state && typeof issue.state === "object"
+        ? asString((issue.state as Record<string, unknown>).id)
+        : "";
+  const priorArchived = Boolean(issue.is_archived || issue.archived_at);
+
+  // Decide what transition to perform.
+  let toStateGroup: string | null = null;
+  let willArchive = false;
+  if (decision === "likely_done") {
+    toStateGroup = "completed";
+  } else if (decision === "stale_archive_candidate") {
+    willArchive = true;
+  }
+
+  // Resolve the destination state id (per-project; group→id varies).
+  let toStateId: string | null = null;
+  if (toStateGroup) {
+    toStateId = await resolvePlaneStateIdForGroup(cfg, projectId, toStateGroup);
+    if (!toStateId) {
+      // Defensively skip the transition and surface the failure to
+      // the caller. Comment still goes out so the audit trail in
+      // Plane is honest about Alfred's intent even when the
+      // transition couldn't land.
+      console.warn(
+        `[plane.steward_action] no state in group=${toStateGroup} for project=${projectId} — comment-only`,
+      );
+      toStateGroup = null;
+    }
+  }
+
+  // Compose + post the comment.
+  const { html, stripped } = formatStewardComment(
+    decision,
+    confidence,
+    evidence,
+    auditRecordPath,
+  );
+  const commentId = await postPlaneCommentRaw(
+    cfg,
+    projectId,
+    issueId,
+    html,
+    stripped,
+  );
+
+  // Apply the transition / archival.
+  let appliedStateId: string | null = null;
+  let appliedStateGroup: string | null = null;
+  let archivedNow = false;
+  if (toStateId) {
+    await patchPlaneIssue(cfg, projectId, issueId, { state: toStateId });
+    appliedStateId = toStateId;
+    appliedStateGroup = toStateGroup;
+  }
+  if (willArchive) {
+    await patchPlaneIssue(cfg, projectId, issueId, { is_archived: true });
+    archivedNow = true;
+  }
+
+  return {
+    ok: true,
+    comment_id: commentId,
+    transitioned_to_state_id: appliedStateId,
+    transitioned_to_state_group: appliedStateGroup,
+    prior_state_id: priorStateId || null,
+    prior_archived: priorArchived,
+    archived: archivedNow,
+  };
+}
+
+/**
+ * Reverse a previously-posted Steward Plane action.
+ *
+ * Idempotent: a 404 on comment delete is treated as success (already
+ * gone). State / archived restores are issued unconditionally — Plane
+ * accepts a PATCH that sets a field to its current value as a no-op,
+ * so re-running the revert is a safe no-op.
+ *
+ * Throws ``ApiError(502)`` on Plane failures other than 404 on the
+ * comment delete.
+ */
+export async function revertStewardAction(
+  issueId: string,
+  commentId: string | null,
+  restoreStateId: string | null,
+  restoreArchived: boolean | null,
+  projectId: string,
+): Promise<{ ok: true; deleted_comment: boolean; restored_state: boolean; restored_archived: boolean }> {
+  if (!projectId) {
+    throw new ValidationError(
+      "project_id is required for revertStewardAction",
+    );
+  }
+  if (!issueId) {
+    throw new ValidationError(
+      "issue_id is required for revertStewardAction",
+    );
+  }
+  const cfg = requirePlaneConfig();
+
+  let deletedComment = false;
+  if (commentId) {
+    await deletePlaneCommentIfPresent(cfg, projectId, issueId, commentId);
+    deletedComment = true;
+  }
+
+  let restoredState = false;
+  if (restoreStateId) {
+    await patchPlaneIssue(cfg, projectId, issueId, { state: restoreStateId });
+    restoredState = true;
+  }
+
+  let restoredArchived = false;
+  if (restoreArchived !== null) {
+    await patchPlaneIssue(cfg, projectId, issueId, {
+      is_archived: !!restoreArchived,
+    });
+    restoredArchived = true;
+  }
+
+  return {
+    ok: true,
+    deleted_comment: deletedComment,
+    restored_state: restoredState,
+    restored_archived: restoredArchived,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -1494,4 +1886,117 @@ export function registerPlaneRoutes(): void {
     const labels = unwrapList(planeResp.data).map((l) => pruneLabelRecord(l));
     sendJson(res, 200, { labels, total: labels.length });
   });
+
+  // POST /api/v1/plane/steward-action  (#839 Phase 3)
+  //
+  // Internal endpoint used by alfred-learn's ``apply_state_change``
+  // (live mode) to post a Steward auto-comment + state transition.
+  // Body shape::
+  //
+  //   {
+  //     "project_id": "<uuid>",
+  //     "issue_id":   "<uuid>",
+  //     "decision":   "likely_done" | "stale_archive_candidate" | ...,
+  //     "confidence": 0.0..1.0,
+  //     "evidence":   [{ "source", "ref", "note" }, ...],
+  //     "audit_record_path": "event/steward-action-<ts>-<slug>.md"
+  //   }
+  //
+  // Returns the StewardActionResult shape from postStewardAction —
+  // comment_id, transitioned_to_state_id, prior_state_id,
+  // prior_archived, etc — so the audit record can record the prior
+  // values into its undo_recipe.plane_revert.
+  addRoute("POST", "/api/v1/plane/steward-action", async ({ res, body }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const projectId =
+      typeof b.project_id === "string" ? b.project_id.trim() : "";
+    const issueId =
+      typeof b.issue_id === "string" ? b.issue_id.trim() : "";
+    const decision =
+      typeof b.decision === "string" ? b.decision.trim() : "";
+    const confidenceRaw = b.confidence;
+    let confidence = 0;
+    if (typeof confidenceRaw === "number" && Number.isFinite(confidenceRaw)) {
+      confidence = confidenceRaw;
+    } else if (typeof confidenceRaw === "string" && confidenceRaw.trim()) {
+      const n = Number.parseFloat(confidenceRaw);
+      if (Number.isFinite(n)) confidence = n;
+    }
+    const auditRecordPath =
+      typeof b.audit_record_path === "string"
+        ? b.audit_record_path.trim()
+        : "";
+    const evidenceRaw = Array.isArray(b.evidence) ? b.evidence : [];
+    const evidence: StewardEvidenceItem[] = evidenceRaw
+      .filter((e): e is Record<string, unknown> => !!e && typeof e === "object")
+      .map((e) => ({
+        source: typeof e.source === "string" ? e.source : undefined,
+        ref: typeof e.ref === "string" ? e.ref : undefined,
+        note: typeof e.note === "string" ? e.note : undefined,
+      }));
+
+    if (!projectId || !issueId || !decision) {
+      throw new ValidationError(
+        "project_id, issue_id, and decision are required",
+      );
+    }
+
+    const result = await postStewardAction(
+      issueId,
+      decision,
+      confidence,
+      evidence,
+      auditRecordPath,
+      projectId,
+    );
+    sendJson(res, 200, result);
+  });
+
+  // POST /api/v1/plane/steward-action/revert  (#839 Phase 3)
+  //
+  // Internal endpoint used by the dashboard undo handler to reverse a
+  // previously-posted Steward Plane action. Body shape mirrors the
+  // ``undo_recipe.plane_revert`` block::
+  //
+  //   {
+  //     "project_id":        "<uuid>",
+  //     "issue_id":          "<uuid>",
+  //     "delete_comment_id": "<uuid> | null",
+  //     "restore_state_id":  "<uuid> | null",
+  //     "restore_archived":  bool | null
+  //   }
+  addRoute(
+    "POST",
+    "/api/v1/plane/steward-action/revert",
+    async ({ res, body }) => {
+      const b = (body ?? {}) as Record<string, unknown>;
+      const projectId =
+        typeof b.project_id === "string" ? b.project_id.trim() : "";
+      const issueId =
+        typeof b.issue_id === "string" ? b.issue_id.trim() : "";
+      const deleteCommentId =
+        typeof b.delete_comment_id === "string" && b.delete_comment_id.trim()
+          ? b.delete_comment_id.trim()
+          : null;
+      const restoreStateId =
+        typeof b.restore_state_id === "string" && b.restore_state_id.trim()
+          ? b.restore_state_id.trim()
+          : null;
+      const restoreArchived =
+        typeof b.restore_archived === "boolean" ? b.restore_archived : null;
+
+      if (!projectId || !issueId) {
+        throw new ValidationError("project_id and issue_id are required");
+      }
+
+      const result = await revertStewardAction(
+        issueId,
+        deleteCommentId,
+        restoreStateId,
+        restoreArchived,
+        projectId,
+      );
+      sendJson(res, 200, result);
+    },
+  );
 }

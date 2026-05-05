@@ -42,6 +42,7 @@ export function getDb(): DatabaseSync {
     "cf_vault_dns_record_id TEXT",
     "cf_vault_access_app_id TEXT",
     "cf_access_app_id TEXT",
+    "cf_vexa_dns_record_id TEXT",
   ]) {
     try {
       db.exec(`ALTER TABLE instances ADD COLUMN ${col}`);

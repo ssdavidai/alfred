@@ -87,6 +87,7 @@ export function updateInstance(
       | "cf_vault_dns_record_id"
       | "cf_vault_access_app_id"
       | "cf_access_app_id"
+      | "cf_vexa_dns_record_id"
     >
   >
 ): void {

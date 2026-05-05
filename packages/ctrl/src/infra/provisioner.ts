@@ -31,6 +31,7 @@ import cloudInitSnapshotTemplate from "../templates/cloud-init-snapshot.yaml.njk
 import dockerComposeTemplate from "../templates/docker-compose.yaml.njk";
 import bootstrapTemplate from "../templates/bootstrap-openclaw.sh.njk";
 import cloudflaredConfigTemplate from "../templates/cloudflared-config.yaml.njk";
+import vexaStackTemplate from "../templates/vexa-stack.yaml.njk";
 import openclawConfigTemplate from "../templates/openclaw-config.json.njk";
 import openclawWorkersConfigTemplate from "../templates/openclaw-workers-config.json.njk";
 import workflowAuthorSkill from "../templates/skills/workflow-author.md";
@@ -191,6 +192,10 @@ export async function provision(
     // explicitly to opt out — useful for staging tenants where the extra
     // /admin/invite step adds no value.
     const vaultwardenOnDefault = config.vaultwardenEnabled !== false;
+    // Vexa is OPT-IN (default off). The 9-container vexa stack pulls a
+    // ~2.5 GB resource floor on top of alfred — only stand it up where
+    // Steward Phase 4 (#840) is wanted. Pass `vexaEnabled: true` to opt in.
+    const vexaOnDefault = config.vexaEnabled === true;
     if (planeOnDefault) {
       // Marks the tenant as carrying the Plane sidecar stack — used by later
       // fleet-wide scans (e.g. "list all tenants running Plane") without
@@ -202,6 +207,9 @@ export async function provision(
     }
     if (vaultwardenOnDefault) {
       serverLabels["vaultwarden-enabled"] = "true";
+    }
+    if (vexaOnDefault) {
+      serverLabels["vexa-enabled"] = "true";
     }
     const { server } = await hetzner.createServer({
       name: `alfred-${config.customer_name}`,
@@ -460,6 +468,7 @@ export async function provision(
       plane_enabled: planeOnDefault,
       sure_enabled: sureOnDefault,
       vaultwarden_enabled: vaultwardenOnDefault,
+      vexa_enabled: vexaOnDefault,
       subdomain: subdomain ?? config.customer_name,
       domain: process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain,
       customer_name: config.customer_name,
@@ -999,6 +1008,7 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
         plane_enabled: planeOnDefault,
         sure_enabled: sureOnDefault,
         vaultwarden_enabled: vaultwardenOnDefault,
+        vexa_enabled: vexaOnDefault,
       });
       await ssh.upload(
         server.public_net.ipv4.ip,
@@ -1155,6 +1165,27 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
         }
       }
 
+      // Vexa Dashboard gets `<subdomain>-vexa.<domain>` (single-level —
+      // wildcard cert constraint). Unlike vault, vexa is NOT behind
+      // Cloudflare Access — the dashboard runs in direct-login mode and
+      // its admin token already gates write paths; ingress on the open
+      // tunnel is fine. Sir can layer Access on later if he wants.
+      let vexaDnsRecordId: string | null = null;
+      if (vexaOnDefault) {
+        try {
+          const vexaRec = await cloudflare.createDnsRecord(
+            `${subdomain}-vexa`,
+            tunnel.id,
+          );
+          vexaDnsRecordId = vexaRec.id;
+          log(`DNS record created: ${subdomain}-vexa.${domain} → tunnel`);
+        } catch (e) {
+          log(
+            `Warning: could not create Vexa DNS record (${subdomain}-vexa.${domain}): ${e}`,
+          );
+        }
+      }
+
       // Update instance with tunnel metadata
       updateInstance(instance.id, {
         cf_tunnel_id: tunnel.id,
@@ -1164,6 +1195,7 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
         cf_sure_dns_record_id: sureDnsRecordId,
         cf_vault_dns_record_id: vaultDnsRecordId,
         cf_vault_access_app_id: vaultAccessAppId,
+        cf_vexa_dns_record_id: vexaDnsRecordId,
       });
 
       insertEvent(
@@ -1268,6 +1300,27 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
           log,
         });
         log("Vaultwarden setup complete");
+      }
+    }
+
+    // --- Setup Vexa (opt-in per-tenant transcript stack — Steward Phase 4) ---
+    if (vexaOnDefault) {
+      setStep("setup_vexa");
+      log("Setting up Vexa (stack render + admin user + webhook registration)...");
+      try {
+        await setupVexa({
+          subdomain: subdomain ?? config.customer_name,
+          domain: process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain,
+          serverIp: server.public_net.ipv4.ip,
+          keyPath: keyPair.privateKeyPath,
+          hostKeyOpts,
+          log,
+        });
+        log("Vexa setup complete");
+      } catch (e) {
+        // Soft-fail: Vexa is opt-in and not on the critical path. The
+        // tenant boots fine without it; operator can re-run setupVexa.
+        log(`Warning: Vexa setup failed: ${e}`);
       }
     }
 
@@ -3285,3 +3338,768 @@ export async function setupVaultwarden(opts: SetupVaultwardenOpts): Promise<void
   );
 }
 
+// ---------------------------------------------------------------------------
+// setupVexa — Steward Phase 4 (#840) per-tenant transcription stack.
+//
+// Vexa is the open-source meeting-transcription engine used by Alfred to
+// join Google Meet / MS Teams calls, transcribe via Groq Whisper, and POST
+// `meeting.completed` webhooks back into ctrl-api. The full stack is 9
+// containers (postgres / redis / minio / minio-init / admin-api /
+// runtime-api / meeting-api / api-gateway / vexa-dashboard) so we keep it
+// in a SEPARATE compose project at /opt/alfred/vexa/ — see the long-form
+// rationale in templates/vexa-stack.yaml.njk's header.
+//
+// What setupVexa does, in order:
+//   1. Generate / reuse the three bootstrap secrets (ADMIN_API_TOKEN,
+//      INTERNAL_API_SECRET, VEXA_WEBHOOK_SECRET) and the static stack
+//      env (IMAGE_TAG, BROWSER_IMAGE, DOCKER_GID). These live in
+//      /opt/alfred/vexa/.env.
+//   2. Render templates/vexa-stack.yaml.njk to
+//      /opt/alfred/vexa/docker-compose.yaml with `alfred_network` set
+//      to whatever the alfred compose project's default network is
+//      named (auto-detected — usually `alfred_default`).
+//   3. `docker compose up -d` the standalone vexa project. Wait for
+//      vexa-api-gateway to come ready on http://127.0.0.1:18056/.
+//   4. Mint a real Vexa user + API key via the admin API:
+//        POST /admin/users           → user_id
+//        POST /admin/users/<id>/tokens → api_token
+//      Stores the token as VEXA_API_KEY in BOTH /opt/alfred/vexa/.env
+//      (so the dashboard env-passthrough works) AND
+//      /opt/alfred/compose/.env (so alfred-learn can use it).
+//   5. Register the meeting-completed webhook by PUT /user/webhook
+//      against the api-gateway, signed with VEXA_WEBHOOK_SECRET. The
+//      webhook URL points at ctrl-api over the alfred_default network
+//      so callbacks never leave the host.
+//   6. Mirror VEXA_ENABLED=true + VEXA_API_URL into
+//      /opt/alfred/compose/.env and recreate alfred-learn so the
+//      transcript schedules get registered on its next workflow boot.
+//   7. Re-run the vault-init import-files / import-logins scripts with
+//      /opt/alfred/vexa mounted as /host/vexa:ro so the Vexa secrets
+//      land in Vaultwarden alongside the other tenant credentials.
+//   8. Install + start `vexa-stack-up.timer` (systemd) so the standalone
+//      vexa compose comes up on every host boot — independent of the
+//      alfred compose's own systemd unit. Same shape as the Plane and
+//      Sure timers; just points at /opt/alfred/vexa instead.
+//
+// All steps are idempotent. Re-running setupVexa on an already-deployed
+// tenant only refreshes whatever is missing (the secrets stay; .env is
+// merged; the compose is re-rendered; the API key is reused if it's
+// still valid).
+// ---------------------------------------------------------------------------
+
+interface SetupVexaOpts {
+  serverIp: string;
+  keyPath: string;
+  hostKeyOpts?: SSHHostKeyOptions;
+  subdomain: string;
+  domain: string;
+  log: (msg: string) => void;
+}
+
+const VEXA_DIR = "/opt/alfred/vexa";
+const VEXA_GATEWAY_INTERNAL_URL = "http://127.0.0.1:18056/";
+const VEXA_DASHBOARD_INTERNAL_URL = "http://127.0.0.1:18057/api/health";
+const VEXA_READY_TIMEOUT_MS = 5 * 60 * 1000;
+const VEXA_POLL_INTERVAL_MS = 5_000;
+const VEXA_IMAGE_TAG = "0.10.6";
+const VEXA_BROWSER_IMAGE = "vexaai/vexa-bot:0.10.6";
+
+async function waitForVexaGatewayReady(
+  opts: Pick<SetupVexaOpts, "serverIp" | "keyPath" | "hostKeyOpts" | "log">,
+): Promise<void> {
+  const start = Date.now();
+  let last = "";
+  while (Date.now() - start < VEXA_READY_TIMEOUT_MS) {
+    const r = await ssh.exec(
+      opts.serverIp,
+      opts.keyPath,
+      `curl -sS -o /dev/null -w '%{http_code}' ${VEXA_GATEWAY_INTERNAL_URL} || true`,
+      undefined,
+      opts.hostKeyOpts,
+    );
+    last = r.stdout.trim();
+    // The api-gateway returns a JSON welcome payload at "/" with HTTP 200.
+    if (last === "200") {
+      opts.log("Vexa api-gateway ready (HTTP 200)");
+      return;
+    }
+    await new Promise((r) => setTimeout(r, VEXA_POLL_INTERVAL_MS));
+  }
+  throw new Error(
+    `Vexa api-gateway did not become ready within ${VEXA_READY_TIMEOUT_MS / 1000}s (last HTTP status: ${last || "unreachable"})`,
+  );
+}
+
+/**
+ * Read a single KEY=... value from a non-default env file on the tenant
+ * (e.g. /opt/alfred/vexa/.env). Mirrors readTenantEnv but takes an
+ * explicit path. Returns `undefined` if absent.
+ */
+async function readEnvAt(
+  opts: Pick<SetupVexaOpts, "serverIp" | "keyPath" | "hostKeyOpts">,
+  envPath: string,
+  key: string,
+): Promise<string | undefined> {
+  const cmd = `grep -E '^${key}=' ${envPath} 2>/dev/null | tail -n1 || true`;
+  const result = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    cmd,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  const line = result.stdout.trim();
+  if (!line) return undefined;
+  const eq = line.indexOf("=");
+  if (eq === -1) return undefined;
+  let val = line.slice(eq + 1);
+  if (val.startsWith("'") && val.endsWith("'") && val.length >= 2) {
+    val = val.slice(1, -1);
+  }
+  return val;
+}
+
+/**
+ * Append-or-replace KEY=VALUE pairs in an arbitrary .env on the tenant.
+ * Mirrors writeTenantEnv but takes an explicit path. Used for both
+ * /opt/alfred/vexa/.env and /opt/alfred/compose/.env.
+ */
+async function writeEnvAt(
+  opts: Pick<SetupVexaOpts, "serverIp" | "keyPath" | "hostKeyOpts">,
+  envPath: string,
+  entries: Record<string, string>,
+): Promise<void> {
+  const cmd = buildEnvWriteCommand(envPath, entries);
+  if (cmd === null) return;
+  const result = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    cmd,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  if (result.code !== 0) {
+    throw new Error(`Env write to ${envPath} failed (exit ${result.code}): ${result.stderr}`);
+  }
+}
+
+/**
+ * Detect the alfred compose project's default network name. Compose
+ * generates this from the directory basename — typically `compose_default`
+ * or `alfred_default` depending on what the operator named the dir. We
+ * ask docker directly so a tenant-specific override (COMPOSE_PROJECT_NAME)
+ * is respected.
+ */
+async function detectAlfredNetwork(
+  opts: Pick<SetupVexaOpts, "serverIp" | "keyPath" | "hostKeyOpts">,
+): Promise<string> {
+  const r = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `cd ${DEFAULTS.dockerComposeDir} && docker compose ls --format json 2>/dev/null | head -c 4096`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  // Best-effort parse; we only need the project name.
+  let projectName: string | null = null;
+  try {
+    const list = JSON.parse(r.stdout.trim() || "[]");
+    if (Array.isArray(list) && list.length > 0 && list[0]?.Name) {
+      projectName = list[0].Name as string;
+    }
+  } catch {
+    // ignore — fall through to docker network ls
+  }
+  if (projectName) {
+    return `${projectName}_default`;
+  }
+  // Fallback: enumerate networks and pick one ending in _default that
+  // any alfred container is attached to.
+  const ls = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `docker network ls --format '{{.Name}}' | grep -E '_default$' | head -n1 || true`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  const fallback = ls.stdout.trim();
+  return fallback || "alfred_default";
+}
+
+/**
+ * Detect the host's `docker` group GID — Vexa's runtime-api needs this so
+ * the spawned Vexa-bot containers can talk to the docker socket. Hetzner
+ * Debian images typically use 998; some Ubuntu images use 999.
+ */
+async function detectDockerGid(
+  opts: Pick<SetupVexaOpts, "serverIp" | "keyPath" | "hostKeyOpts">,
+): Promise<string> {
+  const r = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `getent group docker | cut -d: -f3 || echo 998`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  const gid = r.stdout.trim();
+  return /^\d+$/.test(gid) ? gid : "998";
+}
+
+/**
+ * Mint a Vexa user + API token via the admin API. The api-gateway proxies
+ * /admin/* to admin-api (X-Admin-API-Key auth), so we hit the gateway on
+ * the host-bound port to keep the curl simple. Returns the new token on
+ * success; throws otherwise.
+ */
+async function mintVexaApiKey(
+  opts: Pick<SetupVexaOpts, "serverIp" | "keyPath" | "hostKeyOpts" | "log">,
+  adminToken: string,
+  ownerEmail: string,
+): Promise<string> {
+  // 1. Create user (idempotent on the email — Vexa returns the existing
+  //    user record if the email is already registered).
+  const createUserCmd = [
+    `curl -sS -o /tmp/vexa-user.json -w '%{http_code}'`,
+    `-X POST http://127.0.0.1:18056/admin/users`,
+    `-H 'Content-Type: application/json'`,
+    `-H 'X-Admin-API-Key: ${adminToken}'`,
+    `-d '${JSON.stringify({ email: ownerEmail, max_concurrent_bots: 3 })}'`,
+    `; echo`,
+    `; cat /tmp/vexa-user.json`,
+    `; rm -f /tmp/vexa-user.json`,
+  ].join(" ");
+  const userRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    createUserCmd,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  const userLines = userRes.stdout.trim().split("\n");
+  const userStatus = (userLines[0] ?? "").trim();
+  if (!userStatus.startsWith("2")) {
+    throw new Error(
+      `Vexa POST /admin/users returned HTTP ${userStatus} — body: ${userLines.slice(1).join(" ").slice(0, 300)}`,
+    );
+  }
+  let userId: number | null = null;
+  try {
+    const body = JSON.parse(userLines.slice(1).join("\n"));
+    userId =
+      typeof body?.id === "number"
+        ? body.id
+        : typeof body?.user_id === "number"
+        ? body.user_id
+        : null;
+  } catch {
+    // fall through
+  }
+  if (userId === null) {
+    throw new Error(
+      `Vexa POST /admin/users returned 2xx but no parseable id — body: ${userLines.slice(1).join(" ").slice(0, 300)}`,
+    );
+  }
+  opts.log(`Vexa user provisioned (id=${userId}, email=${ownerEmail})`);
+
+  // 2. Mint a token for that user. Vexa's admin endpoint returns
+  //    {"id": "...", "token": "...", "user_id": N} on 201.
+  const mintTokenCmd = [
+    `curl -sS -o /tmp/vexa-tok.json -w '%{http_code}'`,
+    `-X POST http://127.0.0.1:18056/admin/users/${userId}/tokens`,
+    `-H 'Content-Type: application/json'`,
+    `-H 'X-Admin-API-Key: ${adminToken}'`,
+    `-d '{}'`,
+    `; echo`,
+    `; cat /tmp/vexa-tok.json`,
+    `; rm -f /tmp/vexa-tok.json`,
+  ].join(" ");
+  const tokenRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    mintTokenCmd,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  const tokenLines = tokenRes.stdout.trim().split("\n");
+  const tokenStatus = (tokenLines[0] ?? "").trim();
+  if (!tokenStatus.startsWith("2")) {
+    throw new Error(
+      `Vexa POST /admin/users/${userId}/tokens returned HTTP ${tokenStatus} — body: ${tokenLines.slice(1).join(" ").slice(0, 300)}`,
+    );
+  }
+  let token: string | null = null;
+  try {
+    const body = JSON.parse(tokenLines.slice(1).join("\n"));
+    token =
+      typeof body?.token === "string"
+        ? body.token
+        : typeof body?.api_token === "string"
+        ? body.api_token
+        : null;
+  } catch {
+    // fall through
+  }
+  if (!token || token.length < 16) {
+    throw new Error(
+      `Vexa token endpoint returned 2xx but no parseable token — body: ${tokenLines.slice(1).join(" ").slice(0, 300)}`,
+    );
+  }
+  return token;
+}
+
+/**
+ * Register the `meeting.completed` webhook URL with Vexa. PUT /user/webhook
+ * against the api-gateway with the user-scoped X-API-Key.
+ */
+async function registerVexaWebhook(
+  opts: Pick<SetupVexaOpts, "serverIp" | "keyPath" | "hostKeyOpts" | "log">,
+  apiKey: string,
+  webhookUrl: string,
+  webhookSecret: string,
+): Promise<void> {
+  const cmd = [
+    `curl -sS -o /tmp/vexa-hook.json -w '%{http_code}'`,
+    `-X PUT http://127.0.0.1:18056/user/webhook`,
+    `-H 'Content-Type: application/json'`,
+    `-H 'X-API-Key: ${apiKey}'`,
+    `-d '${JSON.stringify({ url: webhookUrl, secret: webhookSecret })}'`,
+    `; echo`,
+    `; cat /tmp/vexa-hook.json`,
+    `; rm -f /tmp/vexa-hook.json`,
+  ].join(" ");
+  const r = await ssh.exec(opts.serverIp, opts.keyPath, cmd, undefined, opts.hostKeyOpts);
+  const lines = r.stdout.trim().split("\n");
+  const status = (lines[0] ?? "").trim();
+  if (!status.startsWith("2")) {
+    throw new Error(
+      `Vexa PUT /user/webhook returned HTTP ${status} — body: ${lines.slice(1).join(" ").slice(0, 300)}`,
+    );
+  }
+  opts.log(`Vexa webhook registered: url=${webhookUrl} (HTTP ${status})`);
+}
+
+const VEXA_STACK_TIMER_UNIT = `[Unit]
+Description=Bring Vexa compose stack up after boot
+Requires=docker.service alfred-data.service
+After=docker.service alfred-data.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=${VEXA_DIR}
+ExecStart=/usr/bin/docker compose up -d
+RemainAfterExit=true
+`;
+
+const VEXA_STACK_TIMER_TIMER = `[Unit]
+Description=Trigger Vexa compose stack on boot
+After=docker.service
+
+[Timer]
+OnBootSec=2min
+Unit=vexa-stack-up.service
+
+[Install]
+WantedBy=timers.target
+`;
+
+export async function setupVexa(opts: SetupVexaOpts): Promise<void> {
+  const sshOpts: Pick<SetupVexaOpts, "serverIp" | "keyPath" | "hostKeyOpts"> = {
+    serverIp: opts.serverIp,
+    keyPath: opts.keyPath,
+    hostKeyOpts: opts.hostKeyOpts,
+  };
+
+  // 0. mkdir for the standalone compose project.
+  await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `sudo mkdir -p ${VEXA_DIR} && sudo chown deploy:deploy ${VEXA_DIR}`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+
+  // 1. Generate / reuse the three bootstrap secrets + static config.
+  const vexaEnvPath = `${VEXA_DIR}/.env`;
+  const seeded: Record<string, string> = {};
+  const existingAdminToken = await readEnvAt(sshOpts, vexaEnvPath, "ADMIN_API_TOKEN");
+  if (!existingAdminToken) seeded.ADMIN_API_TOKEN = randomSecret(32);
+  const existingInternal = await readEnvAt(sshOpts, vexaEnvPath, "INTERNAL_API_SECRET");
+  if (!existingInternal) seeded.INTERNAL_API_SECRET = randomSecret(32);
+  const existingHookSecret = await readEnvAt(sshOpts, vexaEnvPath, "VEXA_WEBHOOK_SECRET");
+  if (!existingHookSecret) seeded.VEXA_WEBHOOK_SECRET = randomSecret(32);
+  const existingImageTag = await readEnvAt(sshOpts, vexaEnvPath, "IMAGE_TAG");
+  if (!existingImageTag) seeded.IMAGE_TAG = VEXA_IMAGE_TAG;
+  const existingBrowserImage = await readEnvAt(sshOpts, vexaEnvPath, "BROWSER_IMAGE");
+  if (!existingBrowserImage) seeded.BROWSER_IMAGE = VEXA_BROWSER_IMAGE;
+  const existingDockerGid = await readEnvAt(sshOpts, vexaEnvPath, "DOCKER_GID");
+  if (!existingDockerGid) seeded.DOCKER_GID = await detectDockerGid(sshOpts);
+
+  // Groq Whisper transcription — read from the alfred .env (where the
+  // operator dropped it) and mirror into vexa's .env so the meeting-api
+  // can hit Groq directly. Skip if absent — the operator can manually
+  // populate /opt/alfred/vexa/.env later.
+  const existingGroqUrl = await readEnvAt(sshOpts, vexaEnvPath, "TRANSCRIPTION_SERVICE_URL");
+  if (!existingGroqUrl) {
+    seeded.TRANSCRIPTION_SERVICE_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
+  }
+  const existingGroqToken = await readEnvAt(sshOpts, vexaEnvPath, "TRANSCRIPTION_SERVICE_TOKEN");
+  if (!existingGroqToken) {
+    const alfredEnvPath = `${DEFAULTS.dockerComposeDir}/.env`;
+    const groqFromAlfred = await readEnvAt(sshOpts, alfredEnvPath, "GROQ_API_KEY");
+    if (groqFromAlfred) {
+      seeded.TRANSCRIPTION_SERVICE_TOKEN = groqFromAlfred;
+    } else {
+      opts.log(
+        "Warning: GROQ_API_KEY not in /opt/alfred/compose/.env — vexa-meeting-api will fail to transcribe until TRANSCRIPTION_SERVICE_TOKEN is set in /opt/alfred/vexa/.env",
+      );
+    }
+  }
+
+  if (Object.keys(seeded).length > 0) {
+    await writeEnvAt(sshOpts, vexaEnvPath, seeded);
+    opts.log(`Seeded ${Object.keys(seeded).length} Vexa bootstrap value(s) in ${vexaEnvPath}`);
+  } else {
+    opts.log("All Vexa bootstrap values already present — skipping seed");
+  }
+
+  // 2. Render & upload vexa-stack.yaml.njk.
+  const alfredNetwork = await detectAlfredNetwork(sshOpts);
+  const vexaCompose = nunjucks.renderString(vexaStackTemplate, {
+    alfred_network: alfredNetwork,
+    tenant_id: "alfred",
+  });
+  await ssh.upload(
+    opts.serverIp,
+    opts.keyPath,
+    vexaCompose,
+    `${VEXA_DIR}/docker-compose.yaml`,
+    0o600,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  opts.log(`vexa-stack rendered to ${VEXA_DIR}/docker-compose.yaml (alfred_network=${alfredNetwork})`);
+
+  // 3. Bring up the standalone vexa compose project. Soft-pull first so
+  //    image-cold tenants don't block the whole step on registry latency.
+  const pullRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `cd ${VEXA_DIR} && timeout 600 docker compose pull 2>&1 | tail -n 20`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  if (pullRes.code !== 0) {
+    opts.log(`Warning: docker compose pull exited ${pullRes.code} — proceeding anyway. Tail:\n${pullRes.stderr.slice(-500)}`);
+  }
+
+  const upRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `cd ${VEXA_DIR} && docker compose up -d`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  if (upRes.code !== 0) {
+    throw new Error(
+      `vexa stack up failed (exit ${upRes.code}): ${upRes.stderr.slice(-500)}`,
+    );
+  }
+  opts.log("vexa compose project up — waiting for api-gateway to become ready");
+
+  await waitForVexaGatewayReady({ ...sshOpts, log: opts.log });
+
+  // 4. Mint user + token via the admin-api proxied through api-gateway.
+  //    We tag the user with the tenant subdomain (so a multi-user Vexa
+  //    instance later — if we ever go that direction — can disambiguate
+  //    Sir's account from operator accounts).
+  const adminToken =
+    seeded.ADMIN_API_TOKEN ??
+    (await readEnvAt(sshOpts, vexaEnvPath, "ADMIN_API_TOKEN"));
+  if (!adminToken) {
+    throw new Error("Internal: ADMIN_API_TOKEN missing post-seed");
+  }
+  const ownerEmail =
+    process.env.TENANT_OWNER_EMAIL ??
+    (await readTenantEnv(sshOpts, "OWNER_EMAIL")) ??
+    `alfred@${opts.subdomain}.${opts.domain}`;
+
+  const existingApiKey = await readEnvAt(sshOpts, vexaEnvPath, "VEXA_API_KEY");
+  let vexaApiKey: string;
+  if (existingApiKey && existingApiKey.length >= 16) {
+    vexaApiKey = existingApiKey;
+    opts.log("VEXA_API_KEY already present in vexa/.env — reusing");
+  } else {
+    vexaApiKey = await mintVexaApiKey(
+      { ...sshOpts, log: opts.log },
+      adminToken,
+      ownerEmail,
+    );
+    await writeEnvAt(sshOpts, vexaEnvPath, { VEXA_API_KEY: vexaApiKey });
+    opts.log("VEXA_API_KEY minted + written to vexa/.env");
+  }
+
+  // 5. Register the meeting-completed webhook. Idempotent on Vexa's side
+  //    (PUT replaces the existing record).
+  const webhookSecret =
+    seeded.VEXA_WEBHOOK_SECRET ??
+    (await readEnvAt(sshOpts, vexaEnvPath, "VEXA_WEBHOOK_SECRET"));
+  if (!webhookSecret) {
+    throw new Error("Internal: VEXA_WEBHOOK_SECRET missing post-seed");
+  }
+  // Webhooks travel inside the alfred_default network — never out to the
+  // public internet. The vexa-bot containers spawned by runtime-api join
+  // alfred_default and resolve `ctrl-api` as an alias.
+  const webhookUrl = "http://ctrl-api:3100/api/v1/webhooks/vexa";
+  try {
+    await registerVexaWebhook(
+      { ...sshOpts, log: opts.log },
+      vexaApiKey,
+      webhookUrl,
+      webhookSecret,
+    );
+  } catch (e) {
+    opts.log(
+      `Warning: webhook registration failed: ${e}. Run setupVexa again or curl PUT /user/webhook by hand.`,
+    );
+  }
+
+  // 6. Mirror the alfred-side env so alfred-learn picks up the changes.
+  const alfredEnvUpdates: Record<string, string> = {
+    VEXA_ENABLED: "true",
+    VEXA_API_URL: "http://vexa-api-gateway:8000",
+    VEXA_API_KEY: vexaApiKey,
+    VEXA_WEBHOOK_SECRET: webhookSecret,
+  };
+  await writeEnvAt(sshOpts, `${DEFAULTS.dockerComposeDir}/.env`, alfredEnvUpdates);
+  opts.log("Mirrored VEXA_* env vars into /opt/alfred/compose/.env");
+
+  // Recreate alfred-learn (so Temporal schedule registration picks up
+  // VEXA_ENABLED=true) and ctrl-api (so the apps catalog now lists
+  // Vexa). Best-effort — don't blow up the whole step on a recreate
+  // hiccup.
+  const recreateRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `cd ${DEFAULTS.dockerComposeDir} && docker compose up -d --force-recreate alfred-learn ctrl-api`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  if (recreateRes.code !== 0) {
+    opts.log(
+      `Warning: failed to recreate alfred-learn/ctrl-api (exit ${recreateRes.code}); restart manually with docker compose up -d --force-recreate. Tail:\n${recreateRes.stderr.slice(-500)}`,
+    );
+  } else {
+    opts.log("alfred-learn + ctrl-api recreated with VEXA_ENABLED=true");
+  }
+
+  // 7. Push the new Vexa secrets into Vaultwarden via the import-files
+  //    + import-logins scripts. Mount /opt/alfred/vexa as /host/vexa:ro
+  //    so the scripts can read ADMIN_API_TOKEN / VEXA_WEBHOOK_SECRET
+  //    out of vexa/.env without us having to copy them.
+  const bwUser = await readTenantEnv(sshOpts, "BW_USER");
+  if (bwUser) {
+    const importRes = await ssh.exec(
+      opts.serverIp,
+      opts.keyPath,
+      `cd ${DEFAULTS.dockerComposeDir} && docker compose run --rm -v /mnt/encrypted/alfred:/alfred-data:ro -v ${VEXA_DIR}:/host/vexa:ro vault-init bash /opt/vault-init/import-files.sh`,
+      undefined,
+      opts.hostKeyOpts,
+    );
+    if (importRes.code !== 0) {
+      opts.log(
+        `Warning: import-files.sh exited ${importRes.code} after Vexa setup; Vexa creds may not be in Vaultwarden. Tail:\n${importRes.stderr.slice(-500)}`,
+      );
+    } else {
+      opts.log("Vexa secrets pushed to Vaultwarden via import-files.sh");
+    }
+    const importLoginsRes = await ssh.exec(
+      opts.serverIp,
+      opts.keyPath,
+      `cd ${DEFAULTS.dockerComposeDir} && docker compose run --rm -v /mnt/encrypted/alfred:/alfred-data:ro -v ${VEXA_DIR}:/host/vexa:ro vault-init bash /opt/vault-init/import-logins.sh`,
+      undefined,
+      opts.hostKeyOpts,
+    );
+    if (importLoginsRes.code !== 0) {
+      opts.log(
+        `Warning: import-logins.sh exited ${importLoginsRes.code} after Vexa setup; Vexa autofill login may not have been created. Tail:\n${importLoginsRes.stderr.slice(-500)}`,
+      );
+    } else {
+      opts.log("Vexa login item pushed to Vaultwarden via import-logins.sh");
+    }
+  } else {
+    opts.log("BW_USER not set — skipping Vaultwarden import for Vexa secrets (manual step: re-run import-files.sh once Vaultwarden is up)");
+  }
+
+  // 8. Install the boot-time stack-up timer so Vexa starts even if the
+  //    operator power-cycles the VM. The unit lives outside the alfred
+  //    compose's own systemd surface; a separate timer + service pair
+  //    keeps the lifecycles independent.
+  const installTimer = [
+    `sudo install -m 0644 /dev/stdin /etc/systemd/system/vexa-stack-up.service <<'__EOF_VEXA_SVC__'`,
+    VEXA_STACK_TIMER_UNIT,
+    `__EOF_VEXA_SVC__`,
+    `sudo install -m 0644 /dev/stdin /etc/systemd/system/vexa-stack-up.timer <<'__EOF_VEXA_TIMER__'`,
+    VEXA_STACK_TIMER_TIMER,
+    `__EOF_VEXA_TIMER__`,
+    `sudo systemctl daemon-reload`,
+    `sudo systemctl enable --now vexa-stack-up.timer`,
+  ].join("\n");
+  const timerRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `bash -s <<'__OUTER_VEXA_TIMER__'
+${installTimer}
+__OUTER_VEXA_TIMER__
+`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  if (timerRes.code !== 0) {
+    opts.log(
+      `Warning: vexa-stack-up.timer install exited ${timerRes.code}; Vexa will not auto-start on host reboot until fixed. Tail:\n${timerRes.stderr.slice(-500)}`,
+    );
+  } else {
+    opts.log("vexa-stack-up.timer installed + enabled");
+  }
+
+  // 9. Sanity check — the dashboard should now answer 200 on /api/health.
+  const healthRes = await ssh.exec(
+    opts.serverIp,
+    opts.keyPath,
+    `curl -sS -o /dev/null -w '%{http_code}' ${VEXA_DASHBOARD_INTERNAL_URL} || true`,
+    undefined,
+    opts.hostKeyOpts,
+  );
+  const healthCode = healthRes.stdout.trim();
+  if (healthCode === "200") {
+    opts.log(
+      `Vexa setup complete. Sir browses https://${opts.subdomain}-vexa.${opts.domain}; admin token in Vaultwarden as VEXA_ADMIN_API_TOKEN.`,
+    );
+  } else {
+    opts.log(
+      `Warning: vexa-dashboard /api/health returned HTTP ${healthCode || "?"}; the stack came up but the dashboard may still be initializing. Re-check in ~30s.`,
+    );
+  }
+}
+
+/**
+ * CLI retrofit: enable Vexa on an already-provisioned tenant. Mirrors
+ * `deploySure` shape — runs `setupVexa`, ensures the
+ * `<subdomain>-vexa.<domain>` DNS record exists, and re-renders
+ * cloudflared with `vexa_enabled=true` (preserving any existing
+ * plane / sure / vaultwarden flags).
+ */
+export async function deployVexa(
+  instanceId: number,
+  onLog?: (msg: string) => void,
+): Promise<void> {
+  const { getInstance: getInstanceLazy } = await import("../db/queries.js");
+  const instance = getInstanceLazy(instanceId);
+  if (!instance) throw new Error(`Instance ${instanceId} not found`);
+  if (!instance.ip_address || !instance.ssh_key_path) {
+    throw new Error("Instance not fully provisioned");
+  }
+  if (!instance.subdomain) {
+    throw new Error(
+      "Instance has no subdomain — deployVexa needs it for the cloudflared ingress hostname",
+    );
+  }
+
+  const log = (msg: string) => onLog?.(msg);
+
+  // Re-resolve absolute SSH key path for non-container runs.
+  const sshKeyPath = instance.ssh_key_path.replace(
+    /^\/app\/alfred-ctrl\//,
+    process.cwd() + "/",
+  );
+  const hostKeyOpts: SSHHostKeyOptions | undefined = instance.ssh_host_key
+    ? { knownHostKey: instance.ssh_host_key }
+    : undefined;
+
+  const subdomain = instance.subdomain;
+  const domain = process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain;
+
+  // 1. Run the actual stack-up + bootstrap.
+  await setupVexa({
+    subdomain,
+    domain,
+    serverIp: instance.ip_address,
+    keyPath: sshKeyPath,
+    hostKeyOpts,
+    log,
+  });
+
+  // 2. Ensure the public DNS record + re-render cloudflared (preserving
+  // existing per-app flags by reading the per-instance DNS record IDs as
+  // a proxy for whether each block is currently in the ingress list).
+  if (cloudflare.isConfigured() && instance.cf_tunnel_id) {
+    if (!instance.cf_vexa_dns_record_id) {
+      try {
+        const vexaRec = await cloudflare.createDnsRecord(
+          `${subdomain}-vexa`,
+          instance.cf_tunnel_id,
+        );
+        updateInstance(instance.id, { cf_vexa_dns_record_id: vexaRec.id });
+        log(`DNS record created: ${subdomain}-vexa.${domain} → tunnel`);
+      } catch (e) {
+        log(
+          `Warning: Vexa DNS record creation failed (may already exist): ${e}`,
+        );
+      }
+    } else {
+      log(
+        `Vexa DNS record already present (${instance.cf_vexa_dns_record_id}) — skipping creation`,
+      );
+    }
+
+    const cfConfig = nunjucks.renderString(cloudflaredConfigTemplate, {
+      tunnel_id: instance.cf_tunnel_id,
+      subdomain,
+      domain,
+      plane_enabled: !!instance.cf_plane_dns_record_id,
+      sure_enabled: !!instance.cf_sure_dns_record_id,
+      vaultwarden_enabled: !!instance.cf_vault_dns_record_id,
+      vexa_enabled: true,
+    });
+    try {
+      await ssh.upload(
+        instance.ip_address,
+        sshKeyPath,
+        cfConfig,
+        `${DEFAULTS.cloudflaredDir}/config.yml`,
+        0o644,
+        undefined,
+        hostKeyOpts,
+      );
+      log("Cloudflared config re-rendered with Vexa ingress");
+
+      const restartRes = await ssh.exec(
+        instance.ip_address,
+        sshKeyPath,
+        "sudo systemctl restart cloudflared",
+        undefined,
+        hostKeyOpts,
+      );
+      if (restartRes.code !== 0) {
+        log(
+          `Warning: cloudflared restart failed (exit ${restartRes.code}): ${restartRes.stderr.trim()}`,
+        );
+      } else {
+        log("cloudflared restarted");
+      }
+    } catch (e) {
+      log(`Warning: cloudflared re-render failed: ${e}`);
+    }
+  } else {
+    log(
+      "Cloudflare not configured (or tenant has no tunnel) — skipping DNS + cloudflared. Vexa is reachable internally only.",
+    );
+  }
+
+  // Note: this retrofit deliberately does NOT update the Hetzner
+  // ``vexa-enabled`` label — the existing Plane / Sure retrofits don't
+  // either, since Hetzner labels are advisory and the tenant's actual
+  // vexa state is now in /opt/alfred/vexa/.env + the cf_vexa_dns_record_id
+  // column. Add it back here if a fleet-wide Vexa scan ever needs label
+  // discovery.
+}

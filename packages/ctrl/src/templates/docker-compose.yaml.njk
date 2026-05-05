@@ -362,6 +362,19 @@ services:
       - SAAS_API_URL=https://alfred.black
       - WORKERS_OPENCLAW_CONFIG=/openclaw-workers-state/openclaw.json
       - EXECUTION_GATEWAY_URL=http://openclaw-workers:18790
+      # Steward Phase 4 (#840) — Vexa transcript intake. VEXA_ENABLED
+      # gates schedule registration; when false the meeting_capture +
+      # transcript_intake schedules are not created and the activities
+      # are dormant. VEXA_API_URL points at the Vexa stack's api-gateway
+      # alias on the alfred_default network (the standalone Vexa compose
+      # joins this network — see packages/openclaw/vexa-david.yaml).
+      # VEXA_API_KEY and VEXA_WEBHOOK_SECRET come from .env (provisioned
+      # via Vaultwarden alongside other tenant secrets).
+      - VEXA_ENABLED=${VEXA_ENABLED:-false}
+      - VEXA_API_URL=${VEXA_API_URL:-http://vexa-api-gateway:8000}
+      - VEXA_BOT_DISPLAY_NAME=${VEXA_BOT_DISPLAY_NAME:-Alfred}
+      - VEXA_GCAL_STREAM_ID=${VEXA_GCAL_STREAM_ID:-composio-googlecalendar}
+      - ALFRED_OWNER_EMAIL=${ALFRED_OWNER_EMAIL:-}
     env_file:
       - .env
     restart: unless-stopped
@@ -877,6 +890,37 @@ services:
     restart: "no"
     mem_limit: 512m
     pids_limit: 256
+{% endif %}
+
+{% if vexa_enabled %}
+  # ── Vexa transcript bot (Steward Phase 4 — #840) ────────────────────
+  # Sidecar stack that joins Google Meet calls as "Alfred", transcribes
+  # via Groq Whisper, surfaces a web UI at https://<sub>-vexa.<domain>,
+  # and POSTs ``meeting.completed`` webhooks to ctrl-api at
+  # http://ctrl-api:3100/api/v1/webhooks/vexa.
+  #
+  # Vexa runs as a SEPARATE compose project at /opt/alfred/vexa/, NOT in
+  # this file. Why: vexa-0.10.6 is a 9-container stack (postgres, redis,
+  # minio, admin-api, runtime-api, meeting-api, api-gateway, vexa-bot
+  # spawner, vexa-dashboard). Folding all of that into the per-tenant
+  # alfred stack would balloon the resource footprint by ~3 GB even when
+  # no meetings are active, and would entangle two unrelated lifecycles.
+  #
+  # The provisioner's ``setupVexa`` step in
+  # packages/ctrl/src/infra/provisioner.ts renders the canonical Vexa
+  # stack template (packages/ctrl/src/templates/vexa-stack.yaml.njk) to
+  # /opt/alfred/vexa/docker-compose.yaml on the tenant VPS, generates
+  # /opt/alfred/vexa/.env, and brings the stack up via
+  # ``cd /opt/alfred/vexa && docker compose up -d``. See
+  # packages/openclaw/vexa-david.yaml for the original david-direct
+  # deploy that the fleet template was extracted from.
+  #
+  # alfred-learn talks to Vexa over the alfred_default network alias
+  # ``vexa-api-gateway`` (the standalone vexa stack joins this network
+  # via its `external: true` declaration). The env-passthrough that
+  # makes that work lives on the alfred-learn block above (search for
+  # VEXA_ENABLED) — present even when {% raw %}{% if vexa_enabled %}{% endraw %} is
+  # false so a manual flip on the VPS works without a compose regen.
 {% endif %}
 
   # alfred-mcp-server — per-tenant MCP HTTP server for Claude Custom
