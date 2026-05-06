@@ -478,6 +478,17 @@ action updateCredentials {
   entities: [Instance]
 }
 
+// Vexa meeting-bot auto-join toggle
+query getVexaAutoJoin {
+  fn: import { getVexaAutoJoin } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action setVexaAutoJoin {
+  fn: import { setVexaAutoJoin } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
 // AgentPhone (Phase 8)
 query getPhoneConfig {
   fn: import { getPhoneConfig } from "@src/dashboard/operations",

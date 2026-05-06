@@ -37,6 +37,7 @@ import { registerClaudeSetupRoutes } from "./routes/claudeSetup.js";
 import { registerSkillsRoutes } from "./routes/skills.js";
 import { registerContextRoutes } from "./routes/context.js";
 import { registerStewardRoutes } from "./routes/steward.js";
+import { registerVexaRoutes } from "./routes/vexa.js";
 import { registerPlaneStewardWebhookRoute } from "./routes/webhooks/plane.js";
 import { registerVexaWebhookRoute } from "./routes/webhooks/vexa.js";
 
@@ -132,6 +133,7 @@ export function createApiServer(): http.Server {
   registerSkillsRoutes();
   registerContextRoutes();
   registerStewardRoutes();
+  registerVexaRoutes();
   registerPlaneStewardWebhookRoute();
   registerVexaWebhookRoute();
 

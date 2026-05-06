@@ -484,6 +484,34 @@ export const updateCredentials: UpdateCredentials<
 };
 
 // ============================================================
+// Vexa auto-join toggle
+// ============================================================
+// Bridges the Settings UI's switch to ctrl-api's vexa.ts route. Returns
+// `{enabled, schedule_paused}`. The two values can disagree briefly
+// while the toggle is mid-flight; the UI should treat `enabled` as
+// authoritative and use `schedule_paused` only as a "did the temporal
+// pause/unpause actually land" indicator.
+export const getVexaAutoJoin: any = async (
+  _args: void,
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/admin/vexa/auto-join" });
+};
+
+export const setVexaAutoJoin: any = async (
+  args: { enabled: boolean },
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/admin/vexa/auto-join",
+    body: { enabled: args.enabled },
+  });
+};
+
+// ============================================================
 // Agent Config
 // ============================================================
 export const getModelCatalog: GetModelCatalog<
