@@ -1019,8 +1019,19 @@ function SurveyorTab({
  * the dashboard, transcript history, etc. to remain accessible while
  * auto-join is paused).
  */
+type VexaAutoJoinState = {
+  enabled?: boolean;
+  schedule_paused?: boolean | null;
+  warning?: string | null;
+};
+
 function VexaAutoJoinToggle() {
-  const { data, isLoading, error, refetch } = useQuery(getVexaAutoJoin);
+  // Wasp infers the operation return as `{}` since we don't type the
+  // server function (proxy operations like this one return whatever
+  // ctrl-api emitted, dynamically). Cast at the boundary so the UI can
+  // read the three fields the route documents.
+  const { data: rawData, isLoading, error, refetch } = useQuery(getVexaAutoJoin);
+  const data = rawData as VexaAutoJoinState | undefined;
   const [pending, setPending] = useState(false);
   const [warning, setWarning] = useState<string | null>(null);
 
@@ -1031,7 +1042,8 @@ function VexaAutoJoinToggle() {
     setPending(true);
     setWarning(null);
     try {
-      const result = await setVexaAutoJoin({ enabled: next });
+      const rawResult = await setVexaAutoJoin({ enabled: next });
+      const result = rawResult as VexaAutoJoinState | undefined;
       if (result?.warning) setWarning(String(result.warning));
       await refetch();
     } catch (e) {
