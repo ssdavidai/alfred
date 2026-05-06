@@ -123,28 +123,35 @@ async function readSchedulePaused(): Promise<boolean | null> {
       "json",
     ]);
     const parsed = JSON.parse(out);
-    // Two shapes seen in the wild — the new (v2) describe wraps under
-    // `schedule.state`; the legacy one puts paused at the top level.
+    // Temporal CLI 1.7 wraps state under `schedule.state` and ONLY
+    // emits the `paused` field when the schedule is paused — an
+    // unpaused schedule has `state: {}`. So the absence of a paused
+    // field on a schedule we know exists means "running normally".
+    // Two shapes still tolerated below for forward-compat with newer
+    // CLI versions that might include the field unconditionally.
+    if (!parsed) return null;
+    const stateNode =
+      parsed?.schedule?.state ?? parsed?.state ?? null;
+    if (stateNode === null) return null;
     const paused =
       parsed?.schedule?.state?.paused ??
       parsed?.state?.paused ??
       parsed?.paused ??
-      null;
-    return typeof paused === "boolean" ? paused : null;
+      false;
+    return typeof paused === "boolean" ? paused : false;
   } catch {
     return null;
   }
 }
 
 async function setSchedulePaused(paused: boolean): Promise<void> {
+  // Temporal CLI 1.7's `schedule pause/unpause` accepts only --schedule-id
+  // (no --reason / --note in this version). The audit story for the
+  // toggle lives in ctrl-api request logs, not in temporal's metadata.
   await temporalCli([
     paused ? "pause" : "unpause",
     "--schedule-id",
     SCHEDULE_ID,
-    "--reason",
-    paused
-      ? "auto-join disabled via dashboard"
-      : "auto-join enabled via dashboard",
   ]);
 }
 
