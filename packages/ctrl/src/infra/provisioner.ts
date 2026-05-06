@@ -3902,14 +3902,28 @@ export async function setupVexa(opts: SetupVexaOpts): Promise<void> {
   }
 
   // 6. Mirror the alfred-side env so alfred-learn picks up the changes.
+  //    Two extra fields beyond the obvious VEXA_* trio:
+  //      ALFRED_OWNER_EMAIL — the email find_upcoming_meet_events
+  //        matches against gcal attendees/creator/organizer to decide
+  //        "is this Sir's meeting?". Without it the activity returns
+  //        zero candidates and the bot never dispatches. Pulled from
+  //        the same source we pass into mintVexaApiKey above.
+  //      VEXA_GCAL_STREAM_ID — pin to the canonical Composio slug so
+  //        the workflow doesn't fall back to the generic short names
+  //        (which don't match the actual filename Composio writes).
   const alfredEnvUpdates: Record<string, string> = {
     VEXA_ENABLED: "true",
     VEXA_API_URL: "http://vexa-api-gateway:8000",
     VEXA_API_KEY: vexaApiKey,
     VEXA_WEBHOOK_SECRET: webhookSecret,
+    ALFRED_OWNER_EMAIL: ownerEmail,
+    VEXA_GCAL_STREAM_ID:
+      "composio-googlecalendar-googlecalendar-events-list",
   };
   await writeEnvAt(sshOpts, `${DEFAULTS.dockerComposeDir}/.env`, alfredEnvUpdates);
-  opts.log("Mirrored VEXA_* env vars into /opt/alfred/compose/.env");
+  opts.log(
+    `Mirrored VEXA_* + ALFRED_OWNER_EMAIL=${ownerEmail} into /opt/alfred/compose/.env`,
+  );
 
   // Recreate alfred-learn (so Temporal schedule registration picks up
   // VEXA_ENABLED=true) and ctrl-api (so the apps catalog now lists

@@ -998,7 +998,13 @@ def _gcal_stream_candidates() -> list[str]:
     override = os.environ.get("VEXA_GCAL_STREAM_ID", "").strip()
     if override:
         return [override]
+    # Canonical slug first (matches the stream Composio's connector
+    # auto-creates: ``composio-{toolkit}-{action_lowercased}``). The
+    # short fallbacks are kept for older tenants that pre-date the
+    # auto-naming convention; new fleet tenants always land on the
+    # canonical slug, so this list shouldn't grow.
     return [
+        "composio-googlecalendar-googlecalendar-events-list",
         "composio-googlecalendar",
         "googlecalendar",
         "composio-calendar",
