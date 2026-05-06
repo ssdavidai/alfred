@@ -145,13 +145,21 @@ async function readSchedulePaused(): Promise<boolean | null> {
 }
 
 async function setSchedulePaused(paused: boolean): Promise<void> {
-  // Temporal CLI 1.7's `schedule pause/unpause` accepts only --schedule-id
-  // (no --reason / --note in this version). The audit story for the
-  // toggle lives in ctrl-api request logs, not in temporal's metadata.
+  // Temporal CLI 1.7 doesn't have `schedule pause` / `schedule unpause`
+  // subcommands — pausing goes through `schedule toggle --pause` /
+  // `--unpause`. The earlier attempt used the standalone subcommand
+  // names which fail with `unknown flag: --schedule-id` because the
+  // CLI treats "pause" as an unrecognized positional arg and parses
+  // the flags against the parent `schedule` command instead.
   await temporalCli([
-    paused ? "pause" : "unpause",
+    "toggle",
     "--schedule-id",
     SCHEDULE_ID,
+    paused ? "--pause" : "--unpause",
+    "--reason",
+    paused
+      ? "auto-join disabled via dashboard"
+      : "auto-join enabled via dashboard",
   ]);
 }
 
