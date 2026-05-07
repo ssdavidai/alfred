@@ -132,10 +132,12 @@ class SignalExtractWorkflow:
         #    inside the activity returns [] (logged by the activity);
         #    Temporal-level failure surfaces as an exception we record
         #    on the result and bail.
+        # Bumped 100 → 200 (workflow.patched) to double per-tick throughput.
+        effective_limit = 200 if workflow.patched("signal_extract_batch_200") else BATCH_LIMIT
         try:
             paths: list[str] = await workflow.execute_activity(
                 list_unprocessed_stream_events,
-                args=[None, BATCH_LIMIT, None],
+                args=[None, effective_limit, None],
                 # 300s — ctrl-api list reads frontmatter for 6500+ events
                 # AND the activity does a sidecar bootstrap on first run.
                 # Earlier 180s timed out repeatedly, leaving listed=0
@@ -153,6 +155,8 @@ class SignalExtractWorkflow:
             )
             return result
 
+        # Defensive cap (activity should already return ≤ effective_limit).
+        paths = paths[:effective_limit]
         result.listed = len(paths)
         if not paths:
             workflow.logger.info("signal_extract.no_events")
@@ -169,10 +173,16 @@ class SignalExtractWorkflow:
         #    maxChildrenPerAgent=20 cap (4 slots of breathing room for
         #    cross-tick session leakage).
         import asyncio
-        # Reduced from 16 to 8 to relieve openclaw subagent-announce
-        # contention; 16 parallel children blew past the 120s announce
-        # timeout under load.
-        EXTRACT_CHUNK_SIZE: int = 8 if workflow.patched("signal_extract_chunk_8") else 16
+        # Restored to 16: the original `chunk_8` patch was a stop-gap
+        # while the gateway was saturated by orphan subagent state. With
+        # the v5.6 dispatcher fix in place + cold-restart hygiene, 16
+        # concurrent stays comfortably under the 20-cap because Skip
+        # overlap means at most one tick is active at a time.
+        EXTRACT_CHUNK_SIZE: int = (
+            16
+            if workflow.patched("signal_extract_chunk_16_v2")
+            else (8 if workflow.patched("signal_extract_chunk_8") else 16)
+        )
         # 600s gives the slow tail of grok-4.1-fast responses room to land —
         # observed extracts returning past 300s and being cancelled by the
         # activity timeout, losing the result. clerk's polling is bounded
