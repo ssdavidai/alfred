@@ -229,9 +229,16 @@ function handleStart(req: Request, res: Response) {
   }
 
   const scopesParam = queryString(req.query.scopes);
-  const scopes: string[] = scopesParam
-    ? scopesParam.split(",")
-    : config.defaultScopes;
+  // Always merge requested scopes with defaultScopes. Without this, callers
+  // that pass only narrow scopes (e.g. `gmail.readonly` for the post-signup
+  // refresh-token flow) get an access_token that lacks `email`/`profile`,
+  // and the tenant-email guard's call to googleapis.com/oauth2/v2/userinfo
+  // fails 401 → 500 identity_verification_failed. Surfaced 2026-05-07
+  // when daveszab tried to re-register after admin-panel delete.
+  const requestedScopes = scopesParam ? scopesParam.split(",") : [];
+  const scopes: string[] = Array.from(
+    new Set([...config.defaultScopes, ...requestedScopes]),
+  );
 
   const redirectAfter = queryString(req.query.redirectAfter) || "/dashboard/streams";
 
