@@ -26,6 +26,9 @@ const VAULT_TYPES = [
   "assumption", "decision", "constraint", "contradiction", "synthesis",
   // Intuition
   "observation", "instinct", "reflection",
+  // Phase 6 — signal layer (#160). ctrl-api /api/v1/vault/list/<type>
+  // already supports these (KNOWN_TYPES in routes/vault.ts).
+  "signal", "needs_attention", "stream_event",
   // Special folders
   "inbox",
 ];

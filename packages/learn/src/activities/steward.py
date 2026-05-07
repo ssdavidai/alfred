@@ -398,6 +398,12 @@ PIN_HYSTERESIS_FLOOR = 0.5  # pinned sources only re-enter normal scoring
 LOW_CONFIDENCE_PRUNE_TICKS = 3  # consecutive low-confidence ticks
                                 # before a live source is pruned
 
+# Phase 6.7 (T6.7.5) — reversal-driven negative feedback. When Sir undoes a
+# Steward action (or a signal-routed mutation gets reversed), the contributing
+# source's confidence drops by this flat amount. NOT an EMA: reversals are
+# rare, high-information events and deserve an immediate hit. Floor at 0.0.
+NEGATIVE_FEEDBACK_PENALTY = 0.1
+
 
 def _next_check_after(
     state: str,
@@ -1753,6 +1759,7 @@ def _update_calibration(
     sources: list[Any],
     signal_source_names: set[str],
     source_contributions: Optional[dict[str, float]] = None,
+    negative_signal: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
     """Advance the calibration tracker for each signal source on this tick.
 
@@ -1802,6 +1809,27 @@ def _update_calibration(
     Pruned sources are returned untouched — they're already terminal,
     we just preserve them in the output list so the frontmatter round-
     trip is lossless.
+
+    Phase 6.7 (T6.7.5) ``negative_signal=True`` mode:
+
+        When a Steward action is reversed (Sir clicks Undo on the
+        dashboard, or a signal-routed mutation is undone), the
+        contributing source's confidence is dropped by a flat
+        ``NEGATIVE_FEEDBACK_PENALTY`` (default 0.1). This is
+        deliberately NOT an EMA path — the EMA's smoothing would dilute
+        a clear "Sir reversed me" signal across multiple ticks before it
+        moves the needle. Reversals are rare and high-information; we
+        want the per-source confidence to react fast. Floor at 0.0.
+
+        In this mode we DON'T advance ``tick_count`` / ``signal_count``
+        (a reversal isn't a tick), DON'T touch
+        ``low_confidence_streak`` directly (the next normal tick will
+        recompute it from the new lower confidence), DON'T transition
+        ``calibration_status`` here (let the next normal tick prune via
+        the regular hysteresis path so we stay on a single state
+        machine). We DO stamp ``last_negative_at`` (ISO timestamp) and
+        increment ``negative_count`` so the dashboard can surface
+        per-source reversal stats.
     """
     contribs = source_contributions or {}
     if not isinstance(contribs, dict):
@@ -1832,6 +1860,34 @@ def _update_calibration(
 
         if status == "pruned":
             # Don't touch — terminal state.
+            out.append(src)
+            continue
+
+        # Phase 6.7 (T6.7.5) — reversal-driven negative feedback.
+        # Apply BEFORE the tick-counter advance because a reversal
+        # is not a tick. We deliberately skip the EMA path here:
+        # reversals are rare, high-information events and deserve
+        # an immediate confidence drop; the EMA's 0.9/0.1 smoothing
+        # would dilute the signal across many ticks. Floor at 0.0
+        # so a series of reversals can't drive confidence negative.
+        if negative_signal:
+            new_conf = prior_conf - NEGATIVE_FEEDBACK_PENALTY
+            if new_conf < 0.0:
+                new_conf = 0.0
+            src["confidence"] = round(new_conf, 4)
+            src["last_negative_at"] = (
+                datetime.now(timezone.utc)
+                .isoformat(timespec="seconds")
+            )
+            src["negative_count"] = int(src.get("negative_count") or 0) + 1
+            transitions.append(
+                f"{name}: reversal penalty -{NEGATIVE_FEEDBACK_PENALTY:.2f} "
+                f"({prior_conf:.2f} -> {new_conf:.2f})"
+            )
+            # Preserve everything else — tick_count, signal_count,
+            # low_confidence_streak, calibration_status all stay put.
+            # The next normal tick will recompute the streak from the
+            # new lower confidence and prune via the usual hysteresis.
             out.append(src)
             continue
 
@@ -2165,44 +2221,151 @@ async def evaluate_task(task_id: str, task_data: dict[str, Any]) -> dict[str, An
             )
             return {"signals": [], "snapshots_path": "", "evaluated_sources": []}
 
-    if vault_record_sources:
-        gather_result = await _run_gatherer(
-            "gather_signals_vault_record",
-            gather_signals_vault_record,
-            vault_record_sources,
-        )
-        signals.extend(gather_result.get("signals") or [])
-        snapshots_path = gather_result.get("snapshots_path") or snapshots_path
+    # Phase 6 (T6.2.3): unified signal-layer gather reads vault/signal/*.md
+    # filtered by target_path. That alone is INSUFFICIENT for closure
+    # detection: when Sir pays a bill out-of-band (SEPA, in person), the
+    # only trace is a Sure transaction or vault edit that no upstream
+    # signal_extract pass would observe. So we run BOTH paths now:
+    #
+    #   1. Unified gather (Phase 6.2)     — vault/signal/*.md targeting this task
+    #   2. Legacy per-source gather (this) — actively polls Sure / Gmail / etc.
+    #                                        using predicates declared in the
+    #                                        task's signal_sources frontmatter
+    #
+    # Auto-tasks created by signal_extract now ship with synthesized
+    # `signal_sources` predicates (see task_creation._synthesize_closure_
+    # predicates), so this path actually fires for them. Sir-created
+    # tasks with explicit predicates also benefit.
+    #
+    # Env knobs:
+    #   STEWARD_USE_LEGACY_GATHER=true     — exclusive legacy mode
+    #                                        (emergency rollback, Phase 6.2 era)
+    #   STEWARD_LEGACY_GATHER_ADDITIVE=true (default) — additive: run BOTH
+    #   STEWARD_LEGACY_GATHER_ADDITIVE=false           — disable legacy entirely
+    import os as _os  # local import — keep evaluate_task's top-level imports tight
 
-    if gmail_sources:
-        g = await _run_gatherer(
-            "gather_signals_gmail",
-            gather_signals_gmail,
-            gmail_sources,
-        )
-        signals.extend(g.get("signals") or [])
+    use_legacy = _os.environ.get("STEWARD_USE_LEGACY_GATHER", "").lower() in ("true", "1", "yes")
+    additive_legacy = _os.environ.get(
+        "STEWARD_LEGACY_GATHER_ADDITIVE", "true"
+    ).lower() in ("true", "1", "yes")
 
-    if sure_sources:
-        g = await _run_gatherer(
-            "gather_signals_sure",
-            gather_signals_sure,
-            sure_sources,
-        )
-        signals.extend(g.get("signals") or [])
+    async def _run_legacy_gatherers() -> None:
+        """Run the four per-source legacy gatherers, appending to signals."""
+        nonlocal snapshots_path
+        if vault_record_sources:
+            g = await _run_gatherer(
+                "gather_signals_vault_record",
+                gather_signals_vault_record,
+                vault_record_sources,
+            )
+            signals.extend(g.get("signals") or [])
+            snapshots_path = g.get("snapshots_path") or snapshots_path
 
-    if ctrl_api_stream_sources:
-        g = await _run_gatherer(
-            "gather_signals_ctrl_api_stream",
-            gather_signals_ctrl_api_stream,
-            ctrl_api_stream_sources,
-        )
-        signals.extend(g.get("signals") or [])
+        if gmail_sources:
+            g = await _run_gatherer(
+                "gather_signals_gmail",
+                gather_signals_gmail,
+                gmail_sources,
+            )
+            signals.extend(g.get("signals") or [])
 
-    if not (vault_record_sources or gmail_sources or sure_sources or ctrl_api_stream_sources):
-        logger.info(
-            "steward.evaluate: task=%s has no recognised signal sources — skipping gather",
-            task_id,
-        )
+        if sure_sources:
+            g = await _run_gatherer(
+                "gather_signals_sure",
+                gather_signals_sure,
+                sure_sources,
+            )
+            signals.extend(g.get("signals") or [])
+
+        if ctrl_api_stream_sources:
+            g = await _run_gatherer(
+                "gather_signals_ctrl_api_stream",
+                gather_signals_ctrl_api_stream,
+                ctrl_api_stream_sources,
+            )
+            signals.extend(g.get("signals") or [])
+
+    if use_legacy:
+        # === Legacy-only path (emergency rollback) ===
+        await _run_legacy_gatherers()
+        if not (vault_record_sources or gmail_sources or sure_sources or ctrl_api_stream_sources):
+            logger.info(
+                "steward.evaluate: task=%s has no recognised signal sources — skipping gather",
+                task_id,
+            )
+    else:
+        # === Phase 6 unified path (default) ===
+        # Single ctrl-api call reads /vault/signal/*.md filtered by target_path.
+        # All sources surface uniformly — gmail, slack, omi, openclaw-chat,
+        # vexa, sure, gcal, etc. — because Phase 6.0's signal extractor
+        # already classified them. Steward no longer needs source-by-source
+        # awareness here.
+        from src.activities.signal_gather import gather_signals as _signal_gather
+        try:
+            # Note: this is the WORKFLOW activity, called via execute_activity
+            # in workflow context. Inside evaluate_task we're already in
+            # activity context (evaluate_task is itself @activity.defn) so
+            # we can call gather_signals directly as a Python function — but
+            # gather_signals is also @activity.defn, which means it has
+            # special framing for retries/timeouts when called via Temporal.
+            # Direct invocation is fine here since we're already inside an
+            # activity (Temporal nesting is supported), and we want the
+            # exception path to be the same as the legacy gather.
+            gather_result = await _signal_gather(
+                task_path=task_path,
+                since=last_check or None,
+                limit=50,
+            )
+            signals.extend(gather_result.get("signals") or [])
+            # snapshots_path stays "" — signal layer doesn't use per-task
+            # snapshot files (signal records are themselves the persistent
+            # snapshot).
+            evaluated_sources = gather_result.get("evaluated_sources") or []
+            if not signals and not evaluated_sources:
+                # No signals at all means either nothing has happened OR
+                # legacy sources still firing through the old streams
+                # haven't been consumed yet. Either way, no-signal-gate
+                # below handles it correctly.
+                logger.info("steward.evaluate: task=%s no signals (unified gather)", task_id)
+            else:
+                logger.info(
+                    "steward.evaluate: task=%s gathered=%d sources=%s (unified)",
+                    task_id, len(signals), evaluated_sources,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "steward.evaluate: gather_signals (unified) failed task=%s err=%s",
+                task_id, exc,
+            )
+            # Fail-open: empty signals → no-signal-gate engages → low-cost tick.
+
+        # Additive legacy path: when the task has Sure/Gmail/etc.
+        # predicates in signal_sources, ALSO actively poll those sources.
+        # This is the closure-evidence path: bills paid out-of-band leave
+        # only a Sure transaction trace; the unified path won't see it
+        # because no signal_extract upstream observed it.
+        if additive_legacy and (
+            vault_record_sources or gmail_sources or sure_sources or ctrl_api_stream_sources
+        ):
+            try:
+                signals_before = len(signals)
+                await _run_legacy_gatherers()
+                added = len(signals) - signals_before
+                if added:
+                    logger.info(
+                        "steward.evaluate: task=%s legacy-additive gather added=%d "
+                        "(predicates: vault=%d gmail=%d sure=%d ctrl=%d)",
+                        task_id, added,
+                        len(vault_record_sources),
+                        len(gmail_sources),
+                        len(sure_sources),
+                        len(ctrl_api_stream_sources),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "steward.evaluate: additive legacy gather failed task=%s err=%s",
+                    task_id, exc,
+                )
 
     has_signals = len(signals) > 0
     no_signal_streak = _get_no_signal_streak(fm)
@@ -2688,6 +2851,21 @@ def _slug_from_task_path(task_path: str) -> str:
     return s
 
 
+def _slug_from_matter_path(matter_path: str) -> str:
+    """Extract the bare slug from a ``matter/<slug>.md`` path.
+
+    Accepts ``"foo"``, ``"matter/foo"``, or ``"matter/foo.md"``.
+    """
+    s = (matter_path or "").strip()
+    if not s:
+        return ""
+    if s.endswith(".md"):
+        s = s[:-3]
+    if s.startswith("matter/"):
+        s = s[len("matter/"):]
+    return s
+
+
 def _safe_filename_slug(s: str) -> str:
     """Lowercase + hyphenate a slug so it survives as a filename component.
 
@@ -2937,10 +3115,32 @@ async def apply_state_change(
     decision: dict[str, Any],
     signals_summary: dict[str, Any],
     mode: str = "shadow",
+    target_kind: str = "task",
 ) -> dict[str, Any]:
     """Emit an audit-trail vault record for one Steward decision and,
-    in live mode, mutate vault frontmatter + post a Plane comment +
-    transition the Plane issue's state.
+    in live mode, mutate vault frontmatter + (for tasks only) post a
+    Plane comment + transition the Plane issue's state.
+
+    Target kinds
+    ------------
+    ``target_kind`` switches the activity between two paths:
+
+    * ``"task"`` (default, legacy behavior) — full Plane fan-out plus
+      vault frontmatter mutation. Backward compatible: callers that
+      omit ``target_kind`` get the exact same behavior as before this
+      parameter existed.
+    * ``"matter"`` — vault frontmatter mutation only. Matters are not
+      Plane projects, so the Plane comment + state-transition block is
+      skipped entirely (``plane_action`` and
+      ``undo_recipe.plane_revert`` are both ``None``). The
+      dependency-signal fan-out across ``related_to`` is also skipped
+      for matters in this phase — the matter-context-edit cascade
+      (re-evaluate every task whose ``parent_matter`` points at this
+      matter) is its own subsystem and is parked as a TODO.
+
+    Despite the legacy parameter name, ``task_path`` carries the
+    target's vault path; with ``target_kind='matter'`` it's a matter
+    path (e.g. ``"matter/<slug>.md"``).
 
     Mode resolution
     ---------------
@@ -3021,19 +3221,35 @@ async def apply_state_change(
     evidence_raw = raw_decision.get("evidence") or []
     evidence: list[Any] = list(evidence_raw) if isinstance(evidence_raw, list) else []
 
-    # Normalise the task path. We always write the audit record using
-    # the canonical ``task/<slug>.md`` form so MCP queries can join
-    # back to the source task.
-    slug = _slug_from_task_path(task_path)
-    if not slug:
-        raise ValueError("apply_state_change: task_path is required")
-    canonical_task_path = f"task/{slug}.md"
+    # Normalise the target path. We always write the audit record using
+    # the canonical ``<kind>/<slug>.md`` form so MCP queries can join
+    # back to the source target. The ``canonical_task_path`` variable
+    # name is kept (it's referenced everywhere downstream) — for matter
+    # targets it carries a ``matter/<slug>.md`` value rather than a
+    # task path.
+    target_kind_normalized = (target_kind or "task").lower().strip()
+    if target_kind_normalized not in ("task", "matter"):
+        raise ValueError(
+            f"apply_state_change: unsupported target_kind={target_kind!r} "
+            f"(expected 'task' or 'matter')"
+        )
+
+    if target_kind_normalized == "matter":
+        slug = _slug_from_matter_path(task_path)
+        if not slug:
+            raise ValueError("apply_state_change: matter path is required")
+        canonical_task_path = f"matter/{slug}.md"
+    else:
+        slug = _slug_from_task_path(task_path)
+        if not slug:
+            raise ValueError("apply_state_change: task_path is required")
+        canonical_task_path = f"task/{slug}.md"
 
     now = datetime.now(timezone.utc)
     ts_iso = now.isoformat(timespec="seconds")
     expires_iso = (now + STEWARD_UNDO_WINDOW).isoformat(timespec="seconds")
     # Filename component: timestamp without colons (filesystem-safe) +
-    # the safe-slugified task name. Mirrors the issue spec example.
+    # the safe-slugified target name. Mirrors the issue spec example.
     ts_filename = ts_iso.replace(":", "-").replace("+00-00", "Z")
     audit_name = f"steward-action-{ts_filename}-{_safe_filename_slug(slug)}"
 
@@ -3117,7 +3333,11 @@ async def apply_state_change(
         plane_partial = False
         plane_partial_reason: Optional[str] = None
 
-        if will_act_on_plane and not task_missing:
+        # Matter targets are NOT Plane projects — skip the Plane fan-out
+        # entirely. ``plane_action_payload`` and ``plane_revert_recipe``
+        # remain ``None``, which the audit record + undo recipe handle
+        # downstream as "no Plane side-effect".
+        if will_act_on_plane and not task_missing and target_kind_normalized == "task":
             if not plane_issue_id:
                 plane_partial = True
                 plane_partial_reason = "task_has_no_plane_issue_id"
@@ -3363,7 +3583,20 @@ async def apply_state_change(
         # state change in their context. Skipped in shadow mode (we
         # didn't actually change anything).
         dep_signals_emitted = 0
-        if effective_mode == "live" and will_act_on_plane and related_to:
+        # Matter targets: the matter-context-edit cascade should
+        # re-evaluate every task with ``parent_matter == this_matter``,
+        # but that fan-out logic lives in its own subsystem (Phase 6.3
+        # spec). Park it as a TODO and emit zero dependency signals for
+        # matter targets in this minimal change.
+        # TODO(phase 6.3+): when target_kind == "matter", scan
+        # task/*.md for parent_matter == canonical_task_path and emit
+        # one steward:dependency_change signal per match.
+        if (
+            effective_mode == "live"
+            and will_act_on_plane
+            and related_to
+            and target_kind_normalized == "task"
+        ):
             dep_signals_emitted = _emit_steward_dependency_signals(
                 cfg,
                 source_task_path=canonical_task_path,

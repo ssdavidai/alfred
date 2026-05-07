@@ -99,6 +99,14 @@ const KNOWN_TYPES = [
   "observation", "instinct", "reflection",
   "matter", "ledger_entry",
   "chore",
+  // Phase 6 signal-layer record types (RFC #842):
+  //  - signal           : extracted from stream events; carries target +
+  //                       effect + mutation/action proposal.
+  //  - needs_attention  : Phase 6.4 — actions routed to Sir (low confidence
+  //                       OR no matching instinct).
+  //  - stream_event     : Phase 6.6 — unified replacement for event/ +
+  //                       conversation/ once the migration script runs.
+  "signal", "needs_attention", "stream_event",
 ];
 
 const STATUS_BY_TYPE: Record<string, string[]> = {

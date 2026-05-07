@@ -30,24 +30,143 @@ logger = logging.getLogger("alfred-learn")
 async def create_stream_vault_record(event: dict[str, Any]) -> str:
     """Create a vault record from a parsed stream event. Zero LLM calls.
 
-    Record type is chosen per-template — most streams land as `event`,
-    but voice transcripts (Omi / voice-call) land as `conversation` since
-    they're multi-speaker dialogue with its own semantic shape.
+    Phase 6.6 unifies all stream-event records under
+    ``vault/stream_event/<source_type>-<slug>.md``. The legacy split
+    (``event/`` for most templates, ``conversation/`` for OMI / voice
+    / openclaw-chat) was load-bearing only for the surveyor's old
+    ENTITY_RECORD_TYPES gate; that gate now treats stream_event as
+    non-entity uniformly. The ``source_type`` frontmatter field
+    disambiguates the origin so the signal extractor can route /
+    pre-filter without inspecting filename heuristics.
+
+    Record_type passed to ``write_record`` is always ``stream_event``.
+    The per-template ``record_type`` return (still kept on the legacy
+    return tuple for ``_build_vault_content`` to stamp the
+    frontmatter ``type:`` field) is now collapsed to ``stream_event``
+    in the same step. ``_build_vault_content`` also stamps a
+    ``source_type:`` field so the signal extractor's normalizer can
+    classify in O(1) without inspecting tags / filename.
+
+    Steward audit records (``steward-action-*``, ``signal-action-*``,
+    ``auto-task-created-*``, etc.) keep using ``record_type="event"``
+    via different code paths (see ``steward.apply_state_change``,
+    ``signal_actions._emit_signal_action_audit``,
+    ``task_creation._emit_audit``); this activity is only the entry
+    for genuine STREAM events.
     """
     config = load_config()
     client = VaultClient(config)
     try:
-        name, body, tags, record_type = _render_event(event)
-        content = _build_vault_content(name, event, body, tags, record_type)
-        slug = _event_slug(event)
-        path = await client.write_record(record_type, slug, content)
+        name, body, tags, _legacy_record_type = _render_event(event)
+        source_type = _resolve_source_type(event, _legacy_record_type)
+        content = _build_vault_content(
+            name, event, body, tags, "stream_event", source_type=source_type,
+        )
+        slug = _stream_event_slug(event, source_type)
+        path = await client.write_record("stream_event", slug, content)
         logger.info(
-            "stream_vault: created %s from %s", path,
+            "stream_vault: created %s from %s (source_type=%s)",
+            path,
             event.get("source_ref", "?")[:40],
+            source_type,
         )
         return path
     finally:
         await client.close()
+
+
+def _resolve_source_type(event: dict[str, Any], legacy_record_type: str) -> str:
+    """Pick the canonical Phase 6 source_type for ``event``.
+
+    Inspection order:
+      1. ``stream_type`` on the event payload — canonical and
+         already normalised by the upstream pull layer.
+      2. ``source_id`` / ``source_ref`` heuristics — match the
+         system-openclaw-* / agent: prefixes the openclaw chat
+         emitter writes.
+      3. ``metadata.event_type`` — pre-canonicalised stream_type
+         for older sources.
+      4. Legacy ``record_type`` from the template dispatch (only
+         "conversation" buys "omi" as a default).
+
+    The output is always one of the Phase 6 PRE_FILTER_ALLOWLIST
+    values OR "generic" for events that pre-date Phase 6 and don't
+    match a known source.
+    """
+    stream_type = str(event.get("stream_type") or "").strip().lower()
+    metadata = event.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    raw = event.get("raw") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    event_type = str(metadata.get("event_type") or "").strip().lower()
+
+    # Direct stream_type matches.
+    if stream_type in ("gmail", "email", "agentmail"):
+        return "gmail"
+    if stream_type.startswith("slack"):
+        return "slack"
+    if stream_type in ("omi-audio", "voice-call"):
+        return "omi"
+    if stream_type in ("vexa-transcript", "vexa-meeting", "vexa"):
+        return "vexa"
+    if stream_type in ("calendar", "google-calendar", "google_calendar", "scheduled"):
+        return "gcal"
+    if stream_type in ("plane-issue", "plane_issue", "plane-comment", "plane-event", "plane"):
+        return "plane"
+    if stream_type in ("vault-edit", "vault-record-edit", "vault_edit"):
+        return "vault_edit"
+    if stream_type.startswith("sure"):
+        return "sure"
+
+    # OpenClaw chat: stream_type=conversation with a system-openclaw
+    # source id, OR an agent: source_ref. Mirrors the dispatch in
+    # _render_event.
+    if stream_type == "conversation" and (
+        str(event.get("stream_id", "")).startswith("system-openclaw-")
+        or str(event.get("source_ref", "")).startswith("agent:")
+    ):
+        return "openclaw-chat"
+
+    # Calendar inferred from raw start/end fields.
+    if raw.get("start") and raw.get("end"):
+        return "gcal"
+
+    # Email via metadata.event_type.
+    if event_type in ("email", "gmail"):
+        return "gmail"
+
+    # Slack via metadata.event_type.
+    if "slack" in event_type:
+        return "slack"
+
+    # Voice call always lands as omi.
+    if event_type == "voice-call":
+        return "omi"
+
+    # Legacy "conversation" record_type → omi default.
+    if legacy_record_type == "conversation":
+        return "omi"
+
+    return "generic"
+
+
+def _stream_event_slug(event: dict[str, Any], source_type: str) -> str:
+    """Return ``<source_type>-<deterministic-slug>`` for a new stream event.
+
+    Re-uses ``_event_slug`` (sha256(source_ref) + date) for the unique
+    portion and adds the source_type prefix so a quick ls of
+    ``stream_event/`` is human-scannable. The prefix is ALSO what
+    distinguishes a freshly-minted stream_event from a migrator-output
+    record (the migrator names them the same way), so the migrator's
+    idempotent re-run can detect already-migrated records by content
+    hash without a separate marker file.
+    """
+    base = _event_slug(event)
+    if base.lower().startswith(f"{source_type.lower()}-"):
+        return base
+    return f"{source_type}-{base}"
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +214,19 @@ def _render_event(event: dict[str, Any]) -> tuple[str, str, list[str], str]:
 
     if event_type == "voice-call" or stream_type == "voice-call":
         return _template_voice_call(event, raw, metadata)
+
+    # OpenClaw chat sessions arrive with stream_type="conversation" and
+    # source_id="system-openclaw-sessions". Other conversation streams
+    # (omi-audio, voice-call) get matched above by their dedicated
+    # stream_type, so this branch is exclusively openclaw chat sessions.
+    # Critical for Phase 6 signal extraction — the LLM needs full
+    # turn-by-turn body, not just the bare summary _template_generic
+    # produces (which loses every Sir-said-X assertion).
+    if stream_type == "conversation" and (
+        str(event.get("stream_id", "")).startswith("system-openclaw-")
+        or str(event.get("source_ref", "")).startswith("agent:")
+    ):
+        return _template_openclaw_chat(event, raw, metadata)
 
     return _template_generic(event, raw, metadata)
 
@@ -374,6 +506,100 @@ def _template_voice_call(
     return name[:120], "\n".join(parts), tags, "conversation"
 
 
+def _template_openclaw_chat(
+    event: dict[str, Any], raw: dict, metadata: dict,
+) -> tuple[str, str, list[str], str]:
+    """OpenClaw chat session — render full turn-by-turn body.
+
+    Source: ``system-openclaw-sessions`` stream. Each event represents
+    one closed/idle session. ``raw.messages`` is the canonical list of
+    ``{role, content, at}`` dicts (NOTE: ``raw.turns`` is just a count,
+    NOT the array — caught at T6.1.2 implementation, would have been
+    silently empty if we'd trusted the spec field name).
+
+    The body must preserve every assertion verbatim — Phase 6 signal
+    extraction reads it for "Sir said X" corrections. Bare summary
+    (which is what ``_template_generic`` was producing) loses
+    everything past the first user turn.
+
+    Channel inference from ``source_ref``:
+      ``agent:main:dashboard:...`` → dashboard
+      ``agent:main:slack:...``     → slack (note: this is openclaw routing
+                                    Sir-via-slack-DM through the same agent;
+                                    distinct from the composio-slack-list
+                                    stream which captures non-DM channels)
+      ``agent:main:telegram:...``  → telegram
+      ``agent:main:cli:...``       → cli
+      ``agent:main:mcp:...``       → mcp
+    """
+    source_ref = str(event.get("source_ref") or "")
+    session_key = raw.get("session_key") or ""
+    messages = raw.get("messages") or []
+
+    # Channel from source_ref — second segment after "agent:main:".
+    channel = "openclaw-unknown"
+    if source_ref.startswith("agent:main:"):
+        rest = source_ref[len("agent:main:"):]
+        # Take everything up to the next colon — that's the channel.
+        ch = rest.split(":", 1)[0]
+        if ch:
+            channel = ch
+
+    # Build summary line (matches existing "Chat session — N turns: <first>" shape).
+    first_user_msg = next(
+        (str(m.get("content") or "").strip() for m in messages if isinstance(m, dict) and m.get("role") == "user"),
+        "",
+    )
+    turn_count = len(messages) if isinstance(messages, list) else int(raw.get("turns") or 0)
+    name_summary = first_user_msg[:80] if first_user_msg else f"({turn_count} turns)"
+    name = f"Chat session — {turn_count} turns: {name_summary}"[:120]
+
+    # Body: turn-by-turn, full content (no truncation per turn — Phase
+    # 6 needs to see every assertion). Cap individual turns at 4000
+    # chars to defend against accidental large dumps; that's still
+    # plenty for any real exchange.
+    parts: list[str] = []
+    parts.append(f"**Channel**: {channel}")
+    parts.append(f"**Session**: {session_key}")
+    parts.append(f"**Turns**: {turn_count}")
+    parts.append("")
+    parts.append("## Turns")
+    parts.append("")
+    for m in (messages if isinstance(messages, list) else []):
+        if not isinstance(m, dict):
+            continue
+        role_raw = str(m.get("role") or "?").lower()
+        # Normalize: human-readable label, but keep the raw role in
+        # the heading for accurate machine parsing later.
+        if role_raw == "user":
+            label = "Sir"
+        elif role_raw == "assistant":
+            label = "Alfred"
+        elif role_raw == "system":
+            label = "System"
+        elif role_raw == "tool":
+            label = "Tool"
+        else:
+            label = role_raw.capitalize()
+        when = str(m.get("at") or "")
+        ts_suffix = f" ({when})" if when else ""
+        content = str(m.get("content") or "").strip()
+        if not content:
+            continue
+        if len(content) > 4000:
+            content = content[:4000] + "…"
+        parts.append(f"### {label}{ts_suffix}")
+        parts.append("")
+        parts.append(content)
+        parts.append("")
+
+    body = "\n".join(parts)
+    tags = ["openclaw-chat", channel]
+    # record_type: "conversation" — matches OMI/voice-call convention.
+    # Phase 6.6 unifies all conversation/event records into stream_event/.
+    return name, body, tags, "conversation"
+
+
 def _template_generic(
     event: dict[str, Any], raw: dict, metadata: dict,
 ) -> tuple[str, str, list[str], str]:
@@ -464,6 +690,8 @@ def _build_vault_content(
     body: str,
     tags: list[str],
     record_type: str = "event",
+    *,
+    source_type: str | None = None,
 ) -> str:
     received_at = event.get("received_at", datetime.now(timezone.utc).isoformat())
     stream_id = event.get("stream_id", "")
@@ -522,6 +750,15 @@ def _build_vault_content(
 
     extra_fm = ("\n" + "\n".join(extra_fm_lines)) if extra_fm_lines else ""
 
+    # Phase 6.6: stamp source_type as a top-level frontmatter scalar
+    # so the signal extractor's normalizer can classify in O(1)
+    # without scanning tags or filename. We always emit the field
+    # (even when caller didn't pass source_type — the legacy
+    # non-stream callers still get a placeholder so the schema is
+    # uniform across all event/stream_event records).
+    source_type_value = source_type or "generic"
+    src_type_line = f"source_type: {source_type_value}"
+
     return f"""---
 type: {record_type}
 created: {received_at}
@@ -530,8 +767,10 @@ name: "{safe_name}"
 source: "{stream_id}"
 source_ref: "{source_ref}"
 stream_type: {stream_type}
+{src_type_line}
 tags: [{tag_str}]
-enrichment_status: pending{extra_fm}
+enrichment_status: pending
+signal_extracted_at: null{extra_fm}
 ---
 
 # {name}

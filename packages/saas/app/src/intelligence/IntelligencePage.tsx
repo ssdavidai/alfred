@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo as useMemoBoxed } from "react";
 import {
   useQuery,
   getTasks,
@@ -1759,6 +1759,228 @@ function CreateMatterForm() {
 /*  Activity tab                                                       */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/*  Calibration view (#160) — per-source-type rollup                    */
+/* ------------------------------------------------------------------ */
+//
+// Aggregates ``signal_sources`` blocks across every task in the
+// vault (the same blocks task_creation.py:create_task_from_signal
+// emits and steward.py reads). For now there's no backend endpoint
+// exposing the reversal-calibration cache directly, so we summarize
+// what's reachable through getTasks: number of tasks per source-type
+// and a confidence rollup pulled from each task's
+// last_steward_outcome (when present).
+//
+// Empty states: we render a "No calibration data yet" panel when no
+// task has a signal_sources block. Errors from getTasks bubble up to
+// the existing tasks-driven empty states already wired into
+// ActivityTab — this section just renders nothing extra in that case.
+type CalibrationRow = {
+  sourceType: string;
+  taskCount: number;
+  avgConfidence: number | null; // mean of last_steward_outcome.confidence
+  trend: "rising" | "falling" | "flat" | "n/a";
+};
+
+function buildCalibrationRows(tasks: any[]): CalibrationRow[] {
+  // Bucket tasks by every source-type that appears in their
+  // ``signal_sources`` block. A task can contribute to multiple
+  // buckets (Steward records each signal independently).
+  const buckets = new Map<
+    string,
+    { tasks: any[]; confidences: number[]; recentConfidences: number[] }
+  >();
+
+  // Sort tasks newest-first so "recent" means "most recent half".
+  const sorted = [...tasks].sort((a, b) => {
+    const ta =
+      Date.parse(String(a.frontmatter?.created ?? a.created ?? "")) || 0;
+    const tb =
+      Date.parse(String(b.frontmatter?.created ?? b.created ?? "")) || 0;
+    return tb - ta;
+  });
+
+  for (let i = 0; i < sorted.length; i += 1) {
+    const t = sorted[i];
+    const fm = t.frontmatter ?? t;
+    const sources: any[] = Array.isArray(fm.signal_sources)
+      ? fm.signal_sources
+      : [];
+    if (sources.length === 0) continue;
+    const outcome = fm.last_steward_outcome;
+    const conf =
+      outcome && typeof outcome.confidence === "number"
+        ? outcome.confidence
+        : null;
+    const isRecent = i < Math.max(1, Math.floor(sorted.length / 2));
+
+    const seen = new Set<string>();
+    for (const src of sources) {
+      const sourceType = String(src?.source_type ?? "").trim();
+      if (!sourceType || seen.has(sourceType)) continue;
+      seen.add(sourceType);
+      let bucket = buckets.get(sourceType);
+      if (!bucket) {
+        bucket = { tasks: [], confidences: [], recentConfidences: [] };
+        buckets.set(sourceType, bucket);
+      }
+      bucket.tasks.push(t);
+      if (conf != null) {
+        bucket.confidences.push(conf);
+        if (isRecent) bucket.recentConfidences.push(conf);
+      }
+    }
+  }
+
+  const rows: CalibrationRow[] = [];
+  for (const [sourceType, bucket] of buckets.entries()) {
+    const avg =
+      bucket.confidences.length > 0
+        ? bucket.confidences.reduce((s, x) => s + x, 0) /
+          bucket.confidences.length
+        : null;
+    let trend: CalibrationRow["trend"] = "n/a";
+    if (
+      bucket.recentConfidences.length >= 2 &&
+      bucket.confidences.length > bucket.recentConfidences.length
+    ) {
+      const olderCount =
+        bucket.confidences.length - bucket.recentConfidences.length;
+      const recentAvg =
+        bucket.recentConfidences.reduce((s, x) => s + x, 0) /
+        bucket.recentConfidences.length;
+      const olderAvg =
+        (bucket.confidences.reduce((s, x) => s + x, 0) -
+          bucket.recentConfidences.reduce((s, x) => s + x, 0)) /
+        olderCount;
+      const delta = recentAvg - olderAvg;
+      if (delta > 0.05) trend = "rising";
+      else if (delta < -0.05) trend = "falling";
+      else trend = "flat";
+    }
+    rows.push({
+      sourceType,
+      taskCount: bucket.tasks.length,
+      avgConfidence: avg,
+      trend,
+    });
+  }
+  rows.sort((a, b) => b.taskCount - a.taskCount);
+  return rows;
+}
+
+function CalibrationSection() {
+  const { data, isLoading } = useQuery(getTasks, undefined, {
+    refetchInterval: 60_000,
+    retry: false,
+  });
+  const tasks: any[] = data?.results ?? [];
+  const rows = useMemoCalibrationRows(tasks);
+
+  const trendBadge = (trend: CalibrationRow["trend"]) => {
+    if (trend === "rising") {
+      return (
+        <span className="rounded-sm border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider text-emerald-400">
+          rising
+        </span>
+      );
+    }
+    if (trend === "falling") {
+      return (
+        <span className="rounded-sm border border-red-500/30 bg-red-500/10 px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider text-red-400">
+          falling
+        </span>
+      );
+    }
+    if (trend === "flat") {
+      return (
+        <span className="rounded-sm border border-zinc-500/30 bg-zinc-500/10 px-1.5 py-0.5 font-mono text-[0.55rem] uppercase tracking-wider text-zinc-400">
+          flat
+        </span>
+      );
+    }
+    return (
+      <span className="font-mono text-[0.55rem] text-muted-foreground/40">
+        —
+      </span>
+    );
+  };
+
+  return (
+    <SpotlightCard
+      title="Source-type Calibration"
+      icon={<ShieldAlert className="h-4 w-4 text-gold" />}
+    >
+      {isLoading && rows.length === 0 ? (
+        <div className="flex items-center gap-2 py-4">
+          <Loader2 className="h-4 w-4 animate-spin text-gold" />
+          <span className="text-muted-foreground font-mono text-xs">
+            Loading calibration data...
+          </span>
+        </div>
+      ) : rows.length === 0 ? (
+        <p className="py-4 text-center font-mono text-xs text-muted-foreground/50">
+          No calibration data yet — Phase 6 signal-sourced tasks will appear
+          here once the Steward starts recording outcomes.
+        </p>
+      ) : (
+        <div className="overflow-hidden rounded-sm border border-gold-dim/20">
+          <table className="w-full">
+            <thead>
+              <tr className="border-b border-gold-dim/20 bg-black/20 text-left">
+                <th className="px-3 py-2 font-mono text-[0.55rem] font-light uppercase tracking-wider text-muted-foreground/60">
+                  Source-type
+                </th>
+                <th className="px-3 py-2 font-mono text-[0.55rem] font-light uppercase tracking-wider text-muted-foreground/60">
+                  Tasks
+                </th>
+                <th className="px-3 py-2 font-mono text-[0.55rem] font-light uppercase tracking-wider text-muted-foreground/60">
+                  Avg confidence
+                </th>
+                <th className="px-3 py-2 font-mono text-[0.55rem] font-light uppercase tracking-wider text-muted-foreground/60">
+                  Trend
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr
+                  key={row.sourceType}
+                  className="border-b border-gold-dim/10 last:border-b-0"
+                >
+                  <td className="px-3 py-2 font-mono text-xs text-cream/80">
+                    {row.sourceType}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs text-cream/60">
+                    {row.taskCount}
+                  </td>
+                  <td className="px-3 py-2 font-mono text-xs text-cream/60">
+                    {row.avgConfidence != null
+                      ? `${Math.round(row.avgConfidence * 100)}%`
+                      : "—"}
+                  </td>
+                  <td className="px-3 py-2">{trendBadge(row.trend)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </SpotlightCard>
+  );
+}
+
+// Tiny memo helper kept inline so we don't pull useMemo into the
+// already-crowded import list at the top of the file.
+function useMemoCalibrationRows(tasks: any[]): CalibrationRow[] {
+  // Recompute when the task list reference changes (getTasks gives a
+  // fresh array on every refetch). Order isn't deeply stable so a
+  // length+head check is enough to keep this cheap.
+  const length = tasks.length;
+  const headPath = tasks[0]?.path ?? "";
+  return useMemoBoxed(() => buildCalibrationRows(tasks), [length, headPath]);
+}
+
 function ActivityTab() {
   const { data: tasksData, isLoading: tasksLoading } = useQuery(getTasks, undefined, {
     refetchInterval: 30_000,
@@ -1786,6 +2008,7 @@ function ActivityTab() {
 
   return (
     <div className="space-y-4">
+      <CalibrationSection />
       <IntuitionActivityContent />
 
       {/* Recent Sessions */}

@@ -954,6 +954,49 @@ action submitFactCorrections {
   entities: [Instance, Stream]
 }
 
+// ============================================================
+// Phase 6 — NeedsAttention dashboard surface (#160)
+// ============================================================
+// Wraps ctrl-api /api/v1/admin/needs-attention* (attention.ts).
+// Empty/error responses degrade silently to an empty card on the
+// homepage — older tenants without the route shouldn't break.
+query getNeedsAttention {
+  fn: import { getNeedsAttention } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action resolveNeedsAttentionDone {
+  fn: import { resolveNeedsAttentionDone } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action resolveNeedsAttentionDispatch {
+  fn: import { resolveNeedsAttentionDispatch } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action resolveNeedsAttentionSkip {
+  fn: import { resolveNeedsAttentionSkip } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// ============================================================
+// Phase 6 — Steward feed page (#160)
+// ============================================================
+// Aggregates vault/event/ records — the page filters client-side
+// for steward-action-/signal-action-/auto-task-created-/
+// needs_attention_action- prefixes.
+query getStewardFeed {
+  fn: import { getStewardFeed } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+route StewardFeedRoute { path: "/dashboard/command-center/steward-feed", to: StewardFeedPage }
+page StewardFeedPage {
+  authRequired: true,
+  component: import StewardFeedPage from "@src/dashboard/StewardFeedPage"
+}
+
 action submitAccessRequest {
   // Keep landing page enquiry submissions public (no auth required)
   fn: import { submitAccessRequest } from "@src/landing-page/operations",

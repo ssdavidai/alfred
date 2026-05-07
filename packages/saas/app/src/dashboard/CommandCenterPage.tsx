@@ -117,6 +117,12 @@ export default function CommandCenterPage() {
         >
           Command Center
         </motion.h1>
+        <Link
+          to="/dashboard/command-center/steward-feed"
+          className="rounded-full border border-[#C9A84C]/30 bg-[#C9A84C]/10 px-3 py-1.5 font-mono text-[0.6rem] uppercase tracking-[0.2em] text-[#C9A84C] transition-colors hover:bg-[#C9A84C]/20"
+        >
+          Steward feed
+        </Link>
       </div>
 
       {showStaleBanner && (

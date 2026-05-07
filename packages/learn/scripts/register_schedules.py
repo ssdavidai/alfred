@@ -82,6 +82,48 @@ TRANSCRIPT_INTAKE_SCHEDULE_ID = "al-transcript-intake"
 TRANSCRIPT_INTAKE_WORKFLOW = "TranscriptIntakeWorkflow"
 TRANSCRIPT_INTAKE_INTERVAL = timedelta(seconds=60)
 
+# Steward Phase 6 (RFC #842) — signal extraction. Polls the stream
+# vault for unprocessed events, runs the LLM extractor, and persists
+# one ``signal/`` record per non-noise event. Gated on
+# ``STEWARD_SIGNAL_EXTRACT_ENABLED=true`` — david-only at T6.0.6,
+# fleet rollout at T6.fleet.3.
+SIGNAL_EXTRACT_SCHEDULE_ID = "al-signal-extract"
+SIGNAL_EXTRACT_WORKFLOW = "SignalExtractWorkflow"
+SIGNAL_EXTRACT_INTERVAL = timedelta(minutes=5)
+
+# Steward Phase 6 (RFC #842 / T6.3.3) — signal router. Reads
+# unrouted signal records every 2 minutes and dispatches each one
+# through apply_signal_mutation (effect=mutation) or marks it
+# action_pending / skipped (effect=action / none). Gated on
+# ``STEWARD_SIGNAL_ROUTER_ENABLED=true`` — david-only at T6.3.4,
+# fleet rollout at T6.fleet.3. Separate from the extract flag so a
+# tenant can soak signal generation in shadow before flipping the
+# router on.
+SIGNAL_ROUTER_SCHEDULE_ID = "al-signal-router"
+SIGNAL_ROUTER_WORKFLOW = "SignalRouterWorkflow"
+SIGNAL_ROUTER_INTERVAL = timedelta(minutes=2)
+
+# Steward Phase 6 (RFC #842 / T6.6.3) — stream-event purge. Daily
+# at 03:00 UTC; deletes ``stream_event/*`` records older than 7 days
+# whose signal_extracted_at is set. Gated on
+# ``STEWARD_STREAM_EVENT_PURGE_ENABLED=true`` — david-only at T6.6.4,
+# fleet rollout post-Phase-6.7. The ``raw_quote`` is preserved on the
+# resulting signal record so dropping the source event is non-lossy.
+STREAM_EVENT_PURGE_SCHEDULE_ID = "al-stream-event-purge"
+STREAM_EVENT_PURGE_WORKFLOW = "StreamEventPurgeWorkflow"
+
+# Steward Phase 6 (RFC #842 / T6.7.5) — reversal-driven negative
+# calibration. Polls the vault every 10 minutes for new
+# ``event/steward-action-reversed-*.md`` (and signal-action-reversed-)
+# records and applies a -0.1 confidence drop to each contributing
+# source-type. Gated on ``STEWARD_REVERSAL_CALIBRATION_ENABLED=true``
+# — david-only during soak, fleet rollout post-T6.7.5. The activity
+# also re-checks the env at invocation time so flipping the flag off
+# is fully safe even between schedule re-registration runs.
+REVERSAL_CALIBRATION_SCHEDULE_ID = "al-reversal-calibration"
+REVERSAL_CALIBRATION_WORKFLOW = "ReversalCalibrationWorkflow"
+REVERSAL_CALIBRATION_INTERVAL = timedelta(minutes=10)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("register-schedules")
 
@@ -552,6 +594,67 @@ def _vexa_enabled() -> bool:
     return os.environ.get("VEXA_ENABLED", "").strip().lower() == "true"
 
 
+def _signal_extract_enabled() -> bool:
+    """Feature flag for Phase 6 signal extraction (RFC #842).
+
+    Default OFF. Tenants opt in by setting
+    ``STEWARD_SIGNAL_EXTRACT_ENABLED=true``. On david this gets flipped
+    on at T6.0.6 deploy time. Fleet rollout is part of T6.fleet.3.
+
+    Same shape as ``_vexa_enabled`` — single-source registration-time
+    gate. Workflow itself does not re-check the env (would break
+    Temporal determinism), so flipping the flag off requires a deploy
+    that re-runs ``register_schedules`` to delete the schedule.
+    """
+    return os.environ.get(
+        "STEWARD_SIGNAL_EXTRACT_ENABLED", "",
+    ).strip().lower() in ("true", "1", "yes")
+
+
+def _signal_router_enabled() -> bool:
+    """Feature flag for Phase 6 signal router (T6.3.3 / T6.3.4).
+
+    Default OFF. Tenants opt in by setting
+    ``STEWARD_SIGNAL_ROUTER_ENABLED=true``. Independent from
+    ``STEWARD_SIGNAL_EXTRACT_ENABLED`` so a tenant can run signal
+    extraction (write-only) for a soak period before flipping the
+    router on. Same single-source registration-time gate as the rest of
+    the Phase 6 flags.
+    """
+    return os.environ.get(
+        "STEWARD_SIGNAL_ROUTER_ENABLED", "",
+    ).strip().lower() in ("true", "1", "yes")
+
+
+def _reversal_calibration_enabled() -> bool:
+    """Feature flag for Phase 6.7 reversal-driven calibration (T6.7.5).
+
+    Default OFF. Tenants opt in by setting
+    ``STEWARD_REVERSAL_CALIBRATION_ENABLED=true``. Same single-source
+    registration-time gate; the activity also re-checks the env on
+    each invocation so a stale schedule doesn't keep applying penalties
+    when an operator flips the flag off without re-running
+    register_schedules.
+    """
+    return os.environ.get(
+        "STEWARD_REVERSAL_CALIBRATION_ENABLED", "",
+    ).strip().lower() in ("true", "1", "yes")
+
+
+def _stream_event_purge_enabled() -> bool:
+    """Feature flag for Phase 6.6 stream-event purge (T6.6.3 / T6.6.4).
+
+    Default OFF. Tenants opt in by setting
+    ``STEWARD_STREAM_EVENT_PURGE_ENABLED=true``. Same single-source
+    registration-time gate; the activity also re-checks the env so a
+    stale schedule doesn't keep deleting records when an operator
+    flips the flag off without re-running register_schedules.
+    """
+    return os.environ.get(
+        "STEWARD_STREAM_EVENT_PURGE_ENABLED", "",
+    ).strip().lower() in ("true", "1", "yes")
+
+
 async def _register_or_delete_singleton_schedule(
     client: Client,
     schedule_id: str,
@@ -662,6 +765,198 @@ async def register_transcript_intake(client: Client, task_queue: str) -> None:
         _vexa_enabled(),
         label="transcript_intake",
     )
+
+
+async def register_signal_extract(client: Client, task_queue: str) -> None:
+    """Create-or-delete ``al-signal-extract`` based on the Phase 6 flag.
+
+    Gate: ``STEWARD_SIGNAL_EXTRACT_ENABLED=true``. T6.0.6 enables this
+    on david only; T6.fleet.3 rolls it out fleet-wide.
+
+    Uses a 25-minute execution timeout (not the 5-min singleton default)
+    because the workflow processes up to 100 events in 10 serial chunks
+    of 10 concurrent LLM calls. Worst-case: 10 chunks × 120s timeout =
+    1200s. 25 min gives comfortable headroom above that ceiling.
+    """
+    handle = client.get_schedule_handle(SIGNAL_EXTRACT_SCHEDULE_ID)
+    if not _signal_extract_enabled():
+        try:
+            await handle.describe()
+        except RPCError as e:
+            if e.status == RPCStatusCode.NOT_FOUND:
+                logger.info("signal_extract disabled — schedule skipped")
+                return
+            raise
+        await handle.delete()
+        logger.info(
+            "signal_extract disabled — existing schedule %s deleted",
+            SIGNAL_EXTRACT_SCHEDULE_ID,
+        )
+        return
+
+    action = ScheduleActionStartWorkflow(
+        SIGNAL_EXTRACT_WORKFLOW,
+        id=f"{SIGNAL_EXTRACT_SCHEDULE_ID}-run",
+        task_queue=task_queue,
+        # 25 min: 10 chunks × 120s activity timeout + safety margin.
+        execution_timeout=timedelta(minutes=25),
+        run_timeout=timedelta(minutes=25),
+    )
+    spec = ScheduleSpec(
+        intervals=[ScheduleIntervalSpec(every=SIGNAL_EXTRACT_INTERVAL)],
+    )
+    new_schedule = Schedule(
+        action=action,
+        spec=spec,
+        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
+    )
+
+    async def _updater(inp: ScheduleUpdateInput) -> ScheduleUpdate:
+        return ScheduleUpdate(schedule=new_schedule)
+
+    try:
+        await handle.describe()
+        await handle.update(_updater)
+        logger.info("signal_extract schedule updated (25-min timeout)")
+    except RPCError as e:
+        if e.status != RPCStatusCode.NOT_FOUND:
+            raise
+        await client.create_schedule(
+            SIGNAL_EXTRACT_SCHEDULE_ID,
+            new_schedule,
+        )
+        logger.info("signal_extract schedule created (25-min timeout)")
+
+
+async def register_reversal_calibration(
+    client: Client, task_queue: str,
+) -> None:
+    """Create-or-delete ``al-reversal-calibration`` based on T6.7.5 flag.
+
+    Gate: ``STEWARD_REVERSAL_CALIBRATION_ENABLED=true``. Default OFF
+    — flipping it on starts the 10-min reversal scan that drops
+    contributing-source confidence by 0.1 per reversal. Reuses the
+    same singleton helper as the Vexa / signal-extract / signal-router
+    schedules so flipping the flag off cleanly deletes the schedule
+    (no zombie 10-min ticks).
+    """
+    await _register_or_delete_singleton_schedule(
+        client,
+        REVERSAL_CALIBRATION_SCHEDULE_ID,
+        REVERSAL_CALIBRATION_WORKFLOW,
+        task_queue,
+        REVERSAL_CALIBRATION_INTERVAL,
+        _reversal_calibration_enabled(),
+        label="reversal_calibration",
+    )
+
+
+async def register_signal_router(client: Client, task_queue: str) -> None:
+    """Create-or-delete ``al-signal-router`` based on the Phase 6.3 flag.
+
+    Gate: ``STEWARD_SIGNAL_ROUTER_ENABLED=true``. Default OFF — flipping
+    it on triggers signal-mutation routing (and, after T6.4.x ships,
+    signal-action routing). The mode (shadow vs. live) is governed by
+    a SEPARATE env (``STEWARD_SIGNAL_ROUTER_LIVE_MODE``) which the
+    activity reads on each invocation; the registration-time flag here
+    only controls whether the schedule exists.
+    """
+    await _register_or_delete_singleton_schedule(
+        client,
+        SIGNAL_ROUTER_SCHEDULE_ID,
+        SIGNAL_ROUTER_WORKFLOW,
+        task_queue,
+        SIGNAL_ROUTER_INTERVAL,
+        _signal_router_enabled(),
+        label="signal_router",
+    )
+
+
+async def register_stream_event_purge(client: Client, task_queue: str) -> None:
+    """Create-or-delete ``al-stream-event-purge`` based on the Phase 6.6 flag.
+
+    Gate: ``STEWARD_STREAM_EVENT_PURGE_ENABLED=true``. Calendar
+    schedule at 03:00 UTC daily; SKIP overlap (the activity is
+    idempotent but a stuck run shouldn't pile on). Mirrors the
+    fleet-audit registration pattern — same on/off semantics.
+    """
+    handle = client.get_schedule_handle(STREAM_EVENT_PURGE_SCHEDULE_ID)
+
+    if not _stream_event_purge_enabled():
+        try:
+            await handle.describe()
+        except RPCError as e:
+            if e.status == RPCStatusCode.NOT_FOUND:
+                logger.info(
+                    "stream_event_purge disabled — schedule skipped"
+                )
+                return
+            raise
+        await handle.delete()
+        logger.info(
+            "stream_event_purge disabled — existing schedule %s deleted",
+            STREAM_EVENT_PURGE_SCHEDULE_ID,
+        )
+        return
+
+    action = ScheduleActionStartWorkflow(
+        STREAM_EVENT_PURGE_WORKFLOW,
+        id=f"{STREAM_EVENT_PURGE_SCHEDULE_ID}-run",
+        task_queue=task_queue,
+        # 5 min envelope — david's ~10K stream-event vault drains at
+        # roughly 100 records/sec through the ctrl-api delete loop, so
+        # a worst-case 7-day backlog finishes in under 2 min. The cap
+        # protects against a wedged ctrl-api blocking the schedule.
+        execution_timeout=timedelta(minutes=10),
+        run_timeout=timedelta(minutes=10),
+    )
+    spec = ScheduleSpec(
+        calendars=[
+            ScheduleCalendarSpec(
+                hour=[ScheduleRange(start=3)],
+                minute=[ScheduleRange(start=0)],
+            )
+        ],
+        # Pinned to UTC so retention math is consistent fleet-wide.
+        time_zone_name="UTC",
+    )
+    policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
+
+    try:
+        await client.create_schedule(
+            STREAM_EVENT_PURGE_SCHEDULE_ID,
+            Schedule(action=action, spec=spec, policy=policy),
+        )
+        logger.info(
+            "Created schedule: %s → %s (daily 03:00 UTC, SKIP overlap)",
+            STREAM_EVENT_PURGE_SCHEDULE_ID,
+            STREAM_EVENT_PURGE_WORKFLOW,
+        )
+    except RPCError as e:
+        if e.status == RPCStatusCode.ALREADY_EXISTS:
+            logger.info(
+                "Schedule already exists: %s (skipping)",
+                STREAM_EVENT_PURGE_SCHEDULE_ID,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s",
+            STREAM_EVENT_PURGE_SCHEDULE_ID, e,
+        )
+        raise
+    except Exception as e:  # noqa: BLE001 — parity with sibling helpers
+        err = str(e).lower()
+        if "already" in err or "exists" in err:
+            logger.info(
+                "Schedule already exists: %s (skipping)",
+                STREAM_EVENT_PURGE_SCHEDULE_ID,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s",
+            STREAM_EVENT_PURGE_SCHEDULE_ID, e,
+        )
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -957,6 +1252,36 @@ async def register_all() -> None:
     # relevant matter's next tick.
     await register_meeting_capture(client, config.task_queue)
     await register_transcript_intake(client, config.task_queue)
+    # Steward Phase 6 (RFC #842) — signal extraction. Polls the stream
+    # vault every 5 minutes for unprocessed events, runs the LLM
+    # extractor, and persists one ``signal/`` record per non-noise
+    # event. Gated on ``STEWARD_SIGNAL_EXTRACT_ENABLED=true`` —
+    # david-only at T6.0.6, fleet rollout at T6.fleet.3.
+    await register_signal_extract(client, config.task_queue)
+    # Steward Phase 6 (RFC #842 / T6.3.3) — signal router. Reads
+    # unrouted signal records every 2 minutes and dispatches each
+    # through apply_signal_mutation (effect=mutation) or marks them
+    # action_pending / skipped (effect=action / none). Gated on
+    # ``STEWARD_SIGNAL_ROUTER_ENABLED=true`` — david-only at T6.3.4.
+    # Mode (shadow vs. live) is a SEPARATE env
+    # (``STEWARD_SIGNAL_ROUTER_LIVE_MODE``) that the activity reads
+    # per-invocation; the registration flag here only controls
+    # schedule existence.
+    await register_signal_router(client, config.task_queue)
+    # Steward Phase 6 (RFC #842 / T6.6.3) — stream-event purge.
+    # Daily 03:00 UTC; deletes ``stream_event/*`` records older than
+    # 7 days whose ``signal_extracted_at`` is set. The signal record
+    # already preserves ``raw_quote`` so dropping the source is
+    # non-lossy. Gated on ``STEWARD_STREAM_EVENT_PURGE_ENABLED=true``
+    # — david-only at T6.6.4, fleet rollout post-Phase-6.7.
+    await register_stream_event_purge(client, config.task_queue)
+    # Steward Phase 6 (RFC #842 / T6.7.5) — reversal-driven negative
+    # calibration. 10-min sweep over ``event/steward-action-reversed-*``
+    # / ``event/signal-action-reversed-*`` records. Gated on
+    # ``STEWARD_REVERSAL_CALIBRATION_ENABLED=true`` — david-only during
+    # soak, fleet rollout once the per-source-type confidence shifts
+    # have been observed to track real reversal patterns.
+    await register_reversal_calibration(client, config.task_queue)
 
 
 def main() -> None:

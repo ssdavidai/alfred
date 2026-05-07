@@ -813,6 +813,103 @@ export const getOnboardingProgress: GetOnboardingProgress<void, any> = async (
   }
 };
 
+// ============================================================
+// Phase 6 — NeedsAttention surface (#160)
+// ============================================================
+//
+// All four endpoints proxy to ctrl-api /api/v1/admin/needs-attention*
+// (see packages/ctrl/src/api/routes/attention.ts). The list endpoint
+// must degrade gracefully — older tenants don't have the route yet,
+// so we silently return an empty list on any failure.
+
+export const getNeedsAttention = async (
+  _args: void,
+  context: any,
+): Promise<{ records: any[]; count: number }> => {
+  try {
+    const instance = await getUserInstance(context);
+    const data: any = await proxyToTenant(instance, {
+      path: "/api/v1/admin/needs-attention",
+    });
+    return {
+      records: Array.isArray(data?.records) ? data.records : [],
+      count: Number(data?.count ?? 0),
+    };
+  } catch {
+    // Tenants without the route (older ctrl-api), unreachable, etc.
+    // The dashboard should still render — just hide the card.
+    return { records: [], count: 0 };
+  }
+};
+
+export const resolveNeedsAttentionDone = async (
+  args: { id: string; note?: string },
+  context: any,
+): Promise<any> => {
+  if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/admin/needs-attention/${encodeURIComponent(args.id)}/done`,
+    body: { note: args.note ?? "" },
+  });
+};
+
+export const resolveNeedsAttentionDispatch = async (
+  args: { id: string; note?: string },
+  context: any,
+): Promise<any> => {
+  if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/admin/needs-attention/${encodeURIComponent(args.id)}/dispatch`,
+    body: { note: args.note ?? "" },
+  });
+};
+
+export const resolveNeedsAttentionSkip = async (
+  args: { id: string; note?: string },
+  context: any,
+): Promise<any> => {
+  if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/admin/needs-attention/${encodeURIComponent(args.id)}/skip`,
+    body: { note: args.note ?? "" },
+  });
+};
+
+// ============================================================
+// Phase 6 — Steward feed (#160)
+// ============================================================
+//
+// Pulls vault/event/ records and surfaces the Phase 6 audit
+// prefixes (steward-action-, signal-action-, auto-task-created-,
+// needs_attention_action-). The page does its own filtering — we
+// just hand it the raw list. Returns {results: []} on failure so
+// the page renders an empty feed without breaking the dashboard.
+
+export const getStewardFeed = async (
+  _args: void,
+  context: any,
+): Promise<{ results: any[]; count: number }> => {
+  try {
+    const instance = await getUserInstance(context);
+    const data: any = await proxyToTenant(instance, {
+      path: "/api/v1/vault/list/event",
+      query: { preview: "300" },
+    });
+    return {
+      results: Array.isArray(data?.results) ? data.results : [],
+      count: Number(data?.count ?? 0),
+    };
+  } catch {
+    return { results: [], count: 0 };
+  }
+};
+
 // Submit fact corrections and trigger brief generation
 export const submitFactCorrections: any = async (
   args: { corrections: Record<string, string> },

@@ -7,10 +7,22 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 from src.config import Config
+
+
+def _encode_path(path: str) -> str:
+    """URL-encode a vault path for use in a request URL.
+
+    Preserves ``/`` as a path separator but escapes everything else
+    (notably ``#``, which httpx otherwise interprets as a URL fragment
+    delimiter and silently drops, causing 500s on records like
+    ``omi-Anthropic receipt (PBC #2327-3261-2957).md``).
+    """
+    return quote(path, safe="/")
 
 
 class VaultClient:
@@ -49,14 +61,14 @@ class VaultClient:
 
     async def read_record(self, path: str) -> dict[str, Any]:
         """Read a vault record by path."""
-        resp = await self._client.get(f"/api/v1/vault/records/{path}")
+        resp = await self._client.get(f"/api/v1/vault/records/{_encode_path(path)}")
         resp.raise_for_status()
         return resp.json()
 
     async def update_record(self, path: str, content: str) -> None:
         """Update an existing vault record."""
         resp = await self._client.patch(
-            f"/api/v1/vault/records/{path}",
+            f"/api/v1/vault/records/{_encode_path(path)}",
             json={"body_append": content},
         )
         resp.raise_for_status()
@@ -84,7 +96,7 @@ class VaultClient:
             else:
                 set_map[k] = str(v)
         resp = await self._client.patch(
-            f"/api/v1/vault/records/{path}",
+            f"/api/v1/vault/records/{_encode_path(path)}",
             json={"set": set_map},
         )
         resp.raise_for_status()
@@ -126,7 +138,7 @@ class VaultClient:
         if not body:
             return
         resp = await self._client.patch(
-            f"/api/v1/vault/records/{path}",
+            f"/api/v1/vault/records/{_encode_path(path)}",
             json=body,
         )
         resp.raise_for_status()
@@ -140,7 +152,7 @@ class VaultClient:
         migrating from event/ to conversation/ leave the old event/
         file as an orphan that this method clears.
         """
-        resp = await self._client.delete(f"/api/v1/vault/records/{path}")
+        resp = await self._client.delete(f"/api/v1/vault/records/{_encode_path(path)}")
         if resp.status_code == 404:
             return False
         resp.raise_for_status()

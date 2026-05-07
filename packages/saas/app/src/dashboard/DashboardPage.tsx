@@ -14,6 +14,7 @@ import { useAuth } from "wasp/client/auth";
 import { motion, AnimatePresence } from "framer-motion";
 import DashboardLayout from "./DashboardLayout";
 import VaultNebula from "../components/nebula/VaultNebula";
+import NeedsAttentionCard from "./components/NeedsAttentionCard";
 
 // ---------------------------------------------------------------------------
 // Dashboard cache (preserved from original)
@@ -686,6 +687,10 @@ export default function DashboardPage() {
               </span>
             </div>
           )}
+
+          {/* Phase 6 — needs-attention surface (#160). Renders nothing
+              when the queue is empty or the route is unavailable. */}
+          <NeedsAttentionCard />
 
           {/* Installed apps grid — desktop-style tiles */}
           <AppGrid apps={installedAppsData?.apps ?? []} />

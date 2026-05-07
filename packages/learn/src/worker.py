@@ -36,6 +36,13 @@ from src.workflows.composio_reconnect_cleanup import (
 from src.workflows.steward import StewardWorkflow
 from src.workflows.meeting_capture import MeetingCaptureWorkflow
 from src.workflows.transcript_intake import TranscriptIntakeWorkflow
+from src.workflows.signals import SignalExtractWorkflow
+from src.workflows.signal_router import (
+    SignalRouterWorkflow,
+    mark_signal_status,
+)
+from src.workflows.stream_event_purge import StreamEventPurgeWorkflow
+from src.workflows.reversal_calibration import ReversalCalibrationWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -241,7 +248,11 @@ from src.activities.omi_audio import (
 
 # Activities — stream log
 from src.activities.stream_log import append_to_stream_log
-from src.activities.maintenance import run_janitor_scan_and_fix, run_distiller_batch
+from src.activities.maintenance import (
+    purge_old_stream_events,
+    run_distiller_batch,
+    run_janitor_scan_and_fix,
+)
 
 # Activities — behavioral profiler + packs (#283, #284)
 from src.activities.profiler import run_behavioral_profiler
@@ -417,6 +428,65 @@ from src.activities.transcript import (
     vexa_join_meeting,
 )
 
+# Steward Phase 6 (RFC #842 / T6.0.5) — signal extraction. Activities
+# back the SignalExtractWorkflow which runs every 5 minutes (registered
+# in scripts/register_schedules.py, gated on
+# STEWARD_SIGNAL_EXTRACT_ENABLED at registration time only). The four
+# activities cover: list unprocessed events, run the LLM extractor,
+# persist signal records, and mark the source event processed.
+from src.activities.signals import (
+    extract_signal_from_event,
+    list_unprocessed_stream_events,
+    mark_stream_event_processed,
+    write_signal_record,
+)
+
+# Steward Phase 6 (RFC #842 / T6.5.1) — auto-create tasks when a signal
+# has no resolvable target. The activity is invoked from inside
+# extract_signal_from_event when target resolution returns no match
+# AND the signal carries effect ∈ {"action", "mutation"} AND the
+# STEWARD_SIGNAL_AUTOCREATE_TASKS env var is "true". Idempotency cache
+# lives at /alfred-data/state/steward/signal-task-creation.json.
+from src.activities.task_creation import create_task_from_signal
+
+# Steward Phase 6 (RFC #842 / T6.3.2 + T6.3.3) — signal router.
+# Reads ``signal/`` records with ``effect=mutation`` and applies them
+# via Steward's ``apply_state_change`` (which T6.3.1 extended for
+# matter targets). Mode gate is ``STEWARD_SIGNAL_ROUTER_LIVE_MODE``,
+# read by the activity on each invocation; registration-time gate is
+# ``STEWARD_SIGNAL_ROUTER_ENABLED``.
+from src.activities.signal_mutations import (
+    apply_signal_mutation,
+    list_unrouted_signals,
+)
+
+# Steward Phase 6 (RFC #842 / T6.4.1–T6.4.4) — signal action router.
+# Routes ``signal/`` records with ``effect=action`` to either openclaw
+# main (HIGH path: matched instinct + above discretion threshold +
+# non-shadow effective mode) or to ``needs_attention/<ts>.md`` cards
+# the dashboard surfaces (HUMAN path: anything else). Mode gate is
+# ``STEWARD_SIGNAL_ACTION_LIVE_MODE``, read by the activity at
+# invocation time.
+from src.activities.signal_actions import (
+    dispatch_action_to_agent,
+    route_signal_action,
+    write_needs_attention_record,
+)
+
+# Steward Phase 6 (RFC #842 / T6.7.5) — reversal-driven negative-feedback
+# calibration. Runs in its own ReversalCalibrationWorkflow on a 10-min
+# schedule. Reads ``event/steward-action-reversed-*.md`` and
+# ``event/signal-action-reversed-*.md`` records, drops the contributing
+# source-types' confidence by 0.1 (immediate, not EMA — see
+# steward.NEGATIVE_FEEDBACK_PENALTY), persists the source-type
+# calibration block + processed-reversals cache at
+# ``/alfred-data/state/steward/reversal-calibration.json``. Gated on
+# ``STEWARD_REVERSAL_CALIBRATION_ENABLED`` at activity-invocation time
+# AND at registration time; safe to register the activity unconditionally.
+from src.activities.calibration_reversal import (
+    process_reversals_for_calibration,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -448,6 +518,10 @@ _STATIC_WORKFLOWS = [
     StewardWorkflow,
     MeetingCaptureWorkflow,
     TranscriptIntakeWorkflow,
+    SignalExtractWorkflow,
+    SignalRouterWorkflow,
+    StreamEventPurgeWorkflow,
+    ReversalCalibrationWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -573,6 +647,11 @@ ALL_ACTIVITIES = [
     # Nightly maintenance
     run_janitor_scan_and_fix,
     run_distiller_batch,
+    # Stream-event purge (Phase 6.6 / T6.6.3) — daily 03:00 UTC purge
+    # of stream_event/ records >7 days old that have signal_extracted_at
+    # set. Gated on STEWARD_STREAM_EVENT_PURGE_ENABLED at both
+    # registration time AND activity-invocation time.
+    purge_old_stream_events,
     # Behavioral profiler + packs
     run_behavioral_profiler,
     generate_stream_pack,
@@ -715,6 +794,50 @@ ALL_ACTIVITIES = [
     apply_transcript_action,
     list_unprocessed_transcript_events,
     mark_transcript_event_processed,
+    # Steward Phase 6 (RFC #842 / T6.0.5) — signal extraction. The
+    # SignalExtractWorkflow drives these; the schedule that triggers
+    # the workflow is gated on STEWARD_SIGNAL_EXTRACT_ENABLED at
+    # registration time so a tenant without the flag never invokes
+    # them. Registering them unconditionally here is safe (and
+    # required for the worker to handle the workflow's activity
+    # dispatches once the flag flips on).
+    list_unprocessed_stream_events,
+    extract_signal_from_event,
+    write_signal_record,
+    mark_stream_event_processed,
+    # Steward Phase 6 (T6.5.1) — auto-create tasks for no-target
+    # signals. Invoked from inside extract_signal_from_event; the env
+    # gate (STEWARD_SIGNAL_AUTOCREATE_TASKS) is read at activity
+    # invocation time so registering unconditionally here is safe.
+    create_task_from_signal,
+    # Steward Phase 6 (T6.3.2 + T6.3.3) — signal router. The
+    # SignalRouterWorkflow drives apply_signal_mutation on each
+    # unrouted ``effect=mutation`` signal; list_unrouted_signals scans
+    # vault/signal/ for records pending routing; mark_signal_status
+    # patches the action_pending / skipped statuses for the
+    # non-mutation branches. The router schedule is gated on
+    # STEWARD_SIGNAL_ROUTER_ENABLED at registration time and the
+    # apply-mode is gated on STEWARD_SIGNAL_ROUTER_LIVE_MODE at
+    # activity-invocation time.
+    list_unrouted_signals,
+    apply_signal_mutation,
+    mark_signal_status,
+    # Steward Phase 6 (T6.4.1–T6.4.4) — signal action router. The
+    # SignalRouterWorkflow now dispatches route_signal_action for
+    # effect=action signals (replacing the action_pending mark).
+    # dispatch_action_to_agent + write_needs_attention_record are
+    # exposed independently so smoke tests / future workflows can
+    # invoke them directly. The autonomous-dispatch path is gated on
+    # STEWARD_SIGNAL_ACTION_LIVE_MODE at activity-invocation time.
+    route_signal_action,
+    dispatch_action_to_agent,
+    write_needs_attention_record,
+    # Steward Phase 6 (T6.7.5) — reversal-driven negative-feedback
+    # calibration. Activity is gated on
+    # STEWARD_REVERSAL_CALIBRATION_ENABLED at invocation time so
+    # registering unconditionally is safe; the schedule that triggers
+    # ReversalCalibrationWorkflow is also registration-time-gated.
+    process_reversals_for_calibration,
 ]
 
 
