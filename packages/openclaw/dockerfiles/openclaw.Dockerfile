@@ -27,8 +27,19 @@ RUN corepack enable
 
 WORKDIR /app
 
-# Clone OpenClaw at known-good commit — v2026.5.3 (file-transfer plugin, lazy-load gateway perf, hardened plugin install/update, fail-closed invalid config)
-ARG OPENCLAW_SHA=06d46f7cf638a31c4852c068aeeaa76f5e949941
+# Clone OpenClaw at known-good commit — v2026.5.6 (598 commits since v2026.5.3,
+# critical: 92339752ea "fix(net): bound guarded fetch dispatcher cleanup". Pre-v5.6
+# closeDispatcher awaited dispatcher.close() unbounded — when a guarded fetch
+# timed out, close() could hang indefinitely waiting for sockets to drain. That
+# wedge cascaded through model dispatch, gateway WS handlers, and subagent
+# announce paths — surfaced on david as "All models failed: This operation was
+# aborted", "gateway timeout after 120000ms", and 1006 abnormal WS closures.
+# v5.6 caps close() at 100ms then forcibly destroys the dispatcher.
+# Also picks up: gateway responsiveness on reset/refresh, orphan terminal
+# session prevention, stale session route repair, gateway shutdown error
+# visibility, and the file-transfer plugin / fail-closed invalid config
+# carried over from v5.3.
+ARG OPENCLAW_SHA=c97b9f79ec43b531a3472c3219ca51efbf7695a3
 RUN git init /openclaw-src && \
     git -C /openclaw-src fetch --depth 1 https://github.com/openclaw/openclaw.git ${OPENCLAW_SHA} && \
     git -C /openclaw-src checkout FETCH_HEAD
