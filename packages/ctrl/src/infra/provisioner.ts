@@ -353,6 +353,39 @@ export async function provision(
     envLines.push(`TENANT_DOMAIN=${cfDomain}`);
     envLines.push(`TENANT_BASE_URL=https://${subdomain}.${cfDomain}`);
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Baseline service secrets. docker-compose.yaml.njk references these
+    // via env interpolation (POSTGRES_PASSWORD, AAS_API_KEY, …). If any
+    // are blank, the corresponding container won't pass its healthcheck
+    // (postgres refuses to start with empty password) and `bootstrap_openclaw`
+    // step crashes with "dependency failed to start: container … is unhealthy".
+    //
+    // Previously only generated lazily by setupPlane / setupSure /
+    // setupVaultwarden which run AFTER bootstrap_openclaw — so a brand-new
+    // tenant could never bootstrap. The post-bootstrap setup* functions all
+    // check `readTenantEnv(...)` first and skip if present, so seeding here
+    // is idempotent.
+    //
+    // AAS_API_KEY also gets persisted on the instance row so the SaaS proxy
+    // can authenticate against the tenant API.
+    // ─────────────────────────────────────────────────────────────────────
+    const aasApiKey = randomSecret(32);
+    envLines.push(`AAS_API_KEY=${aasApiKey}`);
+    envLines.push(`POSTGRES_PASSWORD=${randomSecret(32)}`);
+    envLines.push(`REDIS_PASSWORD=${randomSecret(32)}`);
+    envLines.push(`DJANGO_SECRET_KEY=${randomSecret(32)}`);
+    envLines.push(`MINIO_ROOT_PASSWORD=${randomSecret(32)}`);
+    envLines.push(`LIVE_SERVER_SECRET_KEY=${randomSecret(32)}`);
+    envLines.push(`MCP_APPROVAL_SECRET=${randomSecret(24)}`);
+    envLines.push(`VAULTWARDEN_ADMIN_TOKEN=${randomSecret(32)}`);
+    if (sureOnDefault) {
+      envLines.push(`SURE_POSTGRES_PASSWORD=${randomSecret(32)}`);
+      envLines.push(`SURE_REDIS_PASSWORD=${randomSecret(32)}`);
+      // Rails convention: 64 random bytes → 128 hex. Matches `rails secret`.
+      envLines.push(`SURE_SECRET_KEY_BASE=${randomSecret(64)}`);
+    }
+    updateInstance(instance.id, { api_key: aasApiKey });
+
     await ssh.exec(
       server.public_net.ipv4.ip,
       keyPair.privateKeyPath,
@@ -369,7 +402,7 @@ export async function provision(
       undefined,
       hostKeyOpts,
     );
-    log("Env uploaded");
+    log("Env uploaded (baseline secrets seeded)");
 
     // AgentMail fallback file — survives .env rewrites and can be read by
     // the init container even before docker compose loads env. Mirrors the
@@ -770,12 +803,14 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
     log("OpenClaw Workers configured");
 
     // --- Pre-deploy tenant API (must exist before bootstrap starts ctrl-api) ---
+    // AAS_API_KEY and MCP_APPROVAL_SECRET were already seeded into .env during
+    // the upload_env step above (see "Baseline service secrets" block) and the
+    // api_key persisted on the instance row. This block is now ONLY responsible
+    // for uploading the api.mjs binary.
     {
       const preApiMjsPath = path.join(process.cwd(), "dist", "api.mjs");
-      const preApiKey = crypto.randomBytes(32).toString("hex");
       try {
         log("Pre-deploying api.mjs for ctrl-api...");
-        // Ensure target directory exists (cloud-init creates it, but be defensive)
         await ssh.exec(
           server.public_net.ipv4.ip,
           keyPair.privateKeyPath,
@@ -792,7 +827,6 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
           undefined,
           hostKeyOpts,
         );
-        // Verify upload produced a file (not a directory)
         const verifyResult = await ssh.exec(
           server.public_net.ipv4.ip,
           keyPair.privateKeyPath,
@@ -801,31 +835,8 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
           hostKeyOpts,
         );
         log(`api.mjs uploaded (${verifyResult.stdout.trim()} bytes)`);
-        await ssh.exec(
-          server.public_net.ipv4.ip,
-          keyPair.privateKeyPath,
-          `echo 'AAS_API_KEY=${preApiKey}' >> ${DEFAULTS.dockerComposeDir}/.env`,
-          undefined,
-          hostKeyOpts,
-        );
-        updateInstance(instance.id, { api_key: preApiKey });
-        log("AAS_API_KEY ready");
-
-        // alfred-mcp-server pre-shared approval secret. Sir enters this
-        // once per Claude Custom Connector add. Generated here so it's
-        // available before mcp-server first boots (otherwise the container
-        // crashloops because MCP_APPROVAL_SECRET is required).
-        const mcpApprovalSecret = crypto.randomBytes(24).toString("hex");
-        await ssh.exec(
-          server.public_net.ipv4.ip,
-          keyPair.privateKeyPath,
-          `echo 'MCP_APPROVAL_SECRET=${mcpApprovalSecret}' >> ${DEFAULTS.dockerComposeDir}/.env`,
-          undefined,
-          hostKeyOpts,
-        );
-        log(`MCP_APPROVAL_SECRET written (${mcpApprovalSecret.length} chars)`);
       } catch (e) {
-        log(`Warning: pre-deploy api.mjs failed: ${e}`);
+        log(`Warning: pre-deploy api.mjs failed (non-fatal — bootstrap will retry): ${e}`);
       }
     }
 
