@@ -299,7 +299,11 @@ async def vexa_join_meeting(
 
     cfg = load_config()
     state = _read_meeting_schedule_state(cfg)
-    state_key = f"google_meet:{meeting_id}"
+    # Dedup must distinguish meeting INSTANCES, not just meet codes —
+    # recurring/back-to-back meetings reuse the same Google Meet link
+    # (native_meeting_id), so keying solely on the code makes the
+    # second instance get skipped as "already dispatched".
+    state_key = f"google_meet:{meeting_id}:{scheduled_start_iso}"
 
     # Local dedupe: if we've already POSTed this meeting and Vexa
     # accepted, skip the round-trip.

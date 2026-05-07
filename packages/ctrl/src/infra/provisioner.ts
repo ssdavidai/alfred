@@ -1831,6 +1831,117 @@ export async function repairTunnel(
     process.cwd() + "/"
   );
 
+  // Reconcile cloudflared ingress config with what's actually running on the
+  // tenant. Without this, tenants provisioned before a sidecar was enabled
+  // (Plane / Sure / Vault / Vexa) end up with a stale config.yml that's
+  // missing ingress for the live containers — symptom: HTTP 404 on
+  // <subdomain>-plane.alfred.black even though plane-* containers are
+  // healthy. This makes repair-tunnel idempotently self-heal that drift on
+  // every CI deploy.
+  if (instance.subdomain) {
+    try {
+      const probe = async (name: string): Promise<boolean> => {
+        try {
+          const r = await ssh.exec(
+            instance.ip_address!,
+            sshKeyPath,
+            `docker ps --format '{{.Names}}' | grep -qE '^compose-${name}-' && echo 1 || echo 0`,
+          );
+          return r.stdout.trim() === "1";
+        } catch {
+          return false;
+        }
+      };
+      const planeOn = await probe("plane-api");
+      const sureOn = await probe("sure-web");
+      const vaultwardenOn = await probe("vaultwarden");
+      const vexaOn = await probe("vexa-meeting-api") || await probe("vexa-api-gateway");
+
+      log(
+        `Detected sidecars: plane=${planeOn} sure=${sureOn} vaultwarden=${vaultwardenOn} vexa=${vexaOn}`,
+      );
+
+      const cfConfig = nunjucks.renderString(cloudflaredConfigTemplate, {
+        tunnel_id: instance.cf_tunnel_id,
+        subdomain: instance.subdomain,
+        domain: process.env.CLOUDFLARE_DOMAIN ?? DEFAULTS.cloudflareDomain,
+        plane_enabled: planeOn,
+        sure_enabled: sureOn,
+        vaultwarden_enabled: vaultwardenOn,
+        vexa_enabled: vexaOn,
+      });
+
+      // Compare with current config; only upload + restart if it differs.
+      // Uses md5sum (preinstalled) to avoid pulling the whole file back.
+      const expectedHash = crypto
+        .createHash("md5")
+        .update(cfConfig)
+        .digest("hex");
+      let currentHash = "";
+      try {
+        const hashRes = await ssh.exec(
+          instance.ip_address,
+          sshKeyPath,
+          `md5sum /etc/cloudflared/config.yml | awk '{print $1}'`,
+        );
+        currentHash = hashRes.stdout.trim();
+      } catch {
+        currentHash = "";
+      }
+
+      if (expectedHash !== currentHash) {
+        log("Cloudflared config drift detected — reconciling");
+
+        // Backup current config (deploy owns /etc/cloudflared so no sudo)
+        const backupPath = `/etc/cloudflared/config.yml.pre-reconcile-${Date.now()}`;
+        await ssh.exec(
+          instance.ip_address,
+          sshKeyPath,
+          `cp /etc/cloudflared/config.yml ${backupPath} 2>/dev/null || true`,
+        );
+
+        // Upload new config
+        await ssh.upload(
+          instance.ip_address,
+          sshKeyPath,
+          cfConfig,
+          `${DEFAULTS.cloudflaredDir}/config.yml`,
+          0o644,
+        );
+
+        // Validate before restarting — sudo cloudflared is NOPASSWD
+        const valid = await ssh.exec(
+          instance.ip_address,
+          sshKeyPath,
+          `sudo cloudflared tunnel --config /etc/cloudflared/config.yml ingress validate 2>&1`,
+        );
+
+        if (valid.code !== 0 || /error/i.test(valid.stdout)) {
+          log(`Cloudflared config validation FAILED — reverting:\n${valid.stdout}`);
+          await ssh.exec(
+            instance.ip_address,
+            sshKeyPath,
+            `cp ${backupPath} /etc/cloudflared/config.yml`,
+          );
+        } else {
+          log("Cloudflared config validated — restarting service");
+          await ssh.exec(
+            instance.ip_address,
+            sshKeyPath,
+            `sudo systemctl restart cloudflared`,
+          );
+        }
+      } else {
+        log("Cloudflared config already matches running state — no changes");
+      }
+    } catch (e) {
+      // Reconciliation is best-effort — never fail the whole repair-tunnel
+      // step on a probe error. The downstream service-health check still
+      // runs.
+      log(`Cloudflared config reconcile skipped (non-fatal): ${e}`);
+    }
+  }
+
   // Upload a fix script that runs as root (deploy can sudo bash /opt/alfred/*.sh)
   const fixScript = `#!/bin/bash
 set -euo pipefail
