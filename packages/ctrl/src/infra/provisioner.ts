@@ -811,10 +811,14 @@ os.makedirs('/mnt/encrypted/openclaw-workers/workspace', exist_ok=True)
       const preApiMjsPath = path.join(process.cwd(), "dist", "api.mjs");
       try {
         log("Pre-deploying api.mjs for ctrl-api...");
+        // Cloud-init creates /opt/alfred as root-owned. SFTP upload runs as
+        // `deploy` user and fails with cryptic "Error: Failure" if the target
+        // dir isn't writable. Both `mkdir -p /opt/alfred/*` and `chown *` are
+        // NOPASSWD in the cloud-init sudoers config.
         await ssh.exec(
           server.public_net.ipv4.ip,
           keyPair.privateKeyPath,
-          `sudo mkdir -p ${DEFAULTS.alfredBasePath}`,
+          `sudo mkdir -p ${DEFAULTS.alfredBasePath} && sudo chown deploy:deploy ${DEFAULTS.alfredBasePath}`,
           undefined,
           hostKeyOpts,
         );
