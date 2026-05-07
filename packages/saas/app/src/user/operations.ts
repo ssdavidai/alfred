@@ -210,6 +210,7 @@ export const deleteUserById: DeleteUserById<DeleteUserByIdInput, void> = async (
   await prisma.$transaction([
     prisma.streamEvent.deleteMany({ where: { userId: id } }),
     prisma.stream.deleteMany({ where: { userId: id } }),
+    prisma.composioConnection.deleteMany({ where: { userId: id } }),
     prisma.oAuthCredential.deleteMany({ where: { userId: id } }),
     context.entities.ApiKey.deleteMany({ where: { userId: id } }),
     context.entities.ContactFormMessage.deleteMany({ where: { userId: id } }),
