@@ -15,10 +15,45 @@
  * warning and returns — provisioning is NOT failed by a peer-list miss.
  * Prime's peer list can still be hand-edited.
  */
+import { existsSync } from "node:fs";
 import * as ssh from "./ssh.js";
 import type { SSHHostKeyOptions } from "./ssh.js";
 import { getInstanceByName } from "../db/queries.js";
 import { DEFAULTS } from "../data/constants.js";
+
+/**
+ * Resolve a stored ssh_key_path to a path that's actually readable in the
+ * current process. The DB stores HOST paths (`/opt/alfred-saas/alfred-ctrl/...`)
+ * but provisioning code runs INSIDE the alfred-saas-app-1 container where
+ * the same files are at `/app/alfred-ctrl/...` (bind mount). Conversely
+ * when running on the host directly (TUI / CLI / CI's deploy-api step)
+ * the host path is correct and `/app/alfred-ctrl/...` doesn't exist.
+ *
+ * Strategy: try the path as-is, then try the swapped form. Return whichever
+ * exists. If neither exists, return the original so the caller hits a clear
+ * ENOENT (rather than us silently substituting a non-existent path).
+ *
+ * Surfaced 2026-05-08: peer-registration ran from inside alfred-saas-app-1
+ * with prime.ssh_key_path = host path → ENOENT → "Prime registration
+ * failed (non-fatal)" on every fresh provision. deployApi already had its
+ * own remap (provisioner.ts:1610) but peer-registration was missed.
+ */
+function resolveSshKeyPath(stored: string): string {
+  if (existsSync(stored)) return stored;
+
+  // host path → container path
+  const containerPath = stored.replace(
+    /^\/opt\/alfred-saas\/alfred-ctrl\//,
+    "/app/alfred-ctrl/",
+  );
+  if (containerPath !== stored && existsSync(containerPath)) return containerPath;
+
+  // container path → cwd-relative (for host-side CLI runs)
+  const cwdPath = stored.replace(/^\/app\/alfred-ctrl\//, process.cwd() + "/");
+  if (cwdPath !== stored && existsSync(cwdPath)) return cwdPath;
+
+  return stored;
+}
 
 export interface PeerRegistration {
   id: string;
@@ -92,9 +127,10 @@ cd /opt/alfred/compose && docker compose up -d openclaw openclaw-workers ctrl-ap
     const hostKeyOpts: SSHHostKeyOptions | undefined = prime.ssh_host_key
       ? { knownHostKey: prime.ssh_host_key }
       : undefined;
+    const sshKeyPath = resolveSshKeyPath(prime.ssh_key_path);
     const result = await ssh.exec(
       prime.ip_address,
-      prime.ssh_key_path,
+      sshKeyPath,
       script,
       DEFAULTS.sshUser,
       hostKeyOpts,

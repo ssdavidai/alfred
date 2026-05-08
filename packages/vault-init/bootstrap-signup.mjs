@@ -160,28 +160,116 @@ const registerPayload = {
 // as a fallback in case we run against an old fork). Try identity first; on
 // 404 fall back to the legacy api path.
 const REGISTER_PATHS = ["/identity/accounts/register", "/api/accounts/register"];
+
+// Helper: POST register and return [resp, body]. Used twice — once on first
+// attempt, once after invitation-shadow recovery.
+async function postRegister() {
+  let r;
+  for (const path of REGISTER_PATHS) {
+    r = await fetch(`${serverUrl}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "device-type": "21" },
+      body: JSON.stringify(registerPayload),
+    });
+    if (r.status !== 404) {
+      console.error(`[bootstrap-signup] register hit at ${path} (HTTP ${r.status})`);
+      return { resp: r, path };
+    }
+    console.error(`[bootstrap-signup] ${path} returned 404, trying next path`);
+  }
+  return { resp: r, path: REGISTER_PATHS[REGISTER_PATHS.length - 1] };
+}
+
 console.error(
   `[bootstrap-signup] POSTing register (${JSON.stringify(registerPayload).length} bytes); trying ${REGISTER_PATHS.join(", ")}`,
 );
-let resp;
-for (const path of REGISTER_PATHS) {
-  resp = await fetch(`${serverUrl}${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "device-type": "21" /* SDK */ },
-    body: JSON.stringify(registerPayload),
-  });
-  if (resp.status !== 404) {
-    console.error(`[bootstrap-signup] register hit at ${path} (HTTP ${resp.status})`);
-    break;
-  }
-  console.error(`[bootstrap-signup] ${path} returned 404, trying next path`);
-}
-const respText = await resp.text();
+let { resp } = await postRegister();
+let respText = await resp.text();
+
 if (!resp.ok) {
-  // Vaultwarden returns 400 with a JSON body if the email is already
-  // registered — interpret as success-equivalent (idempotent run).
+  // Vaultwarden returns 400 "already exists" in TWO situations:
+  //
+  //   (a) Sir is fully registered already — idempotent re-run, bw login
+  //       will succeed with the same password. This is the happy case.
+  //
+  //   (b) The /admin/invite step earlier created a pending User row but
+  //       our register POST didn't carry the invitation token, so
+  //       Vaultwarden rejected the password update — User row exists
+  //       with no kdf/akey set. Subsequent bw login fails because the
+  //       password was never actually stored.
+  //
+  // We can't tell (a) from (b) at the API surface — the body is the
+  // same. The recovery path is: DELETE the user via /admin/users (using
+  // VAULTWARDEN_ADMIN_TOKEN) and re-POST register. If we were in case
+  // (a) we lose nothing — Sir's password stays the same since we use
+  // the same crypto on retry. If we were in case (b) the retry lands a
+  // fresh User row with the password actually set.
+  //
+  // Surfaced 2026-05-08: bootstrap-signup ALWAYS hit case (b) on fresh
+  // tenants because setupVaultwarden's /admin/invite step shadows the
+  // register call. Every fresh provision left bw login broken until
+  // this recovery was added.
   if (resp.status === 400 && /already (exists|registered)/i.test(respText)) {
-    console.error(`[bootstrap-signup] account already exists; treating as idempotent success`);
+    console.error(
+      `[bootstrap-signup] register returned 400 "already exists" — could be idempotent OR invitation-shadow; deleting pending user and retrying`,
+    );
+    const adminToken = process.env.VAULTWARDEN_ADMIN_TOKEN ?? "";
+    if (!adminToken) {
+      console.error(
+        `[bootstrap-signup] VAULTWARDEN_ADMIN_TOKEN unset — cannot recover from invitation shadow; proceeding with bw login (will fail if user is in invite-only state)`,
+      );
+    } else {
+      try {
+        // Find the user by email
+        const usersResp = await fetch(`${serverUrl}/admin/users`, {
+          headers: { Cookie: `VW_ADMIN=${adminToken}` },
+        });
+        if (usersResp.ok) {
+          const users = await usersResp.json();
+          const target = (Array.isArray(users) ? users : []).find(
+            (u) => (u?.email ?? "").toLowerCase() === email,
+          );
+          if (target?.id) {
+            const delResp = await fetch(
+              `${serverUrl}/admin/users/${target.id}/delete`,
+              {
+                method: "POST",
+                headers: { Cookie: `VW_ADMIN=${adminToken}` },
+              },
+            );
+            console.error(
+              `[bootstrap-signup] DELETE pending user ${target.id} → HTTP ${delResp.status}`,
+            );
+            // Retry register after delete
+            const retry = await postRegister();
+            resp = retry.resp;
+            respText = await resp.text();
+            if (resp.ok) {
+              console.error(
+                `[bootstrap-signup] register retry HTTP ${resp.status}: ${respText.slice(0, 200) || "ok"}`,
+              );
+            } else {
+              console.error(
+                `[bootstrap-signup] register retry HTTP ${resp.status}: ${respText.slice(0, 500)}`,
+              );
+              fatal(2, `register retry failed after invitation-shadow recovery`);
+            }
+          } else {
+            console.error(
+              `[bootstrap-signup] couldn't find user ${email} in /admin/users response — proceeding with bw login`,
+            );
+          }
+        } else {
+          console.error(
+            `[bootstrap-signup] /admin/users fetch HTTP ${usersResp.status} — admin token may be wrong; proceeding with bw login`,
+          );
+        }
+      } catch (e) {
+        console.error(
+          `[bootstrap-signup] invitation-shadow recovery threw: ${e?.message ?? e} — proceeding with bw login`,
+        );
+      }
+    }
   } else {
     console.error(`[bootstrap-signup] register HTTP ${resp.status}: ${respText.slice(0, 500)}`);
     fatal(2, `register failed`);
