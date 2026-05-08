@@ -148,44 +148,23 @@ export async function provisionInstanceJob(
       console.info(`[provision:${instance.customerName}] No golden snapshot, full cloud-init`);
     }
 
-    // Pre-check location availability to avoid wasting resources.
-    // Calls the ctrl CLI's check-location command which queries Hetzner API
-    // without creating any resources.
-    const availableLocations: string[] = [];
-    for (const loc of LOCATIONS) {
-      try {
-        const { stdout } = await execFileAsync(
-          process.execPath,
-          [
-            "--experimental-sqlite",
-            ALFRED_CTRL_PATH,
-            "check-location",
-            instance.serverType,
-            loc,
-          ],
-          {
-            timeout: 10_000,
-            env: { ...process.env, NODE_NO_WARNINGS: "1" },
-            cwd: process.env.ALFRED_CTRL_CWD || "/opt/alfred-saas/alfred-ctrl",
-          },
-        );
-        if (stdout.trim() === "available") {
-          availableLocations.push(loc);
-        } else {
-          logs.push(`Location ${loc}: unavailable for ${instance.serverType} (skipped)`);
-          console.info(`[provision:${instance.customerName}] Skipping ${loc} — unavailable`);
-        }
-      } catch {
-        // If check fails, include the location (let provisioner handle the error)
-        availableLocations.push(loc);
-      }
-    }
-
-    if (availableLocations.length === 0) {
-      throw new Error(`No Hetzner locations available for server type ${instance.serverType}`);
-    }
-
-    logs.push(`Available locations: ${availableLocations.join(", ")}`);
+    // Server-type fallback chain. When the requested type has zero capacity
+    // across all 3 EU DCs (cx5* line is regularly sold out for hours at a
+    // time), automatically fall through to ccx43 — Hetzner's dedicated-CPU
+    // instance with strictly-equivalent-or-better specs (16c / 64GB) that's
+    // consistently available even when the shared-CPU line is exhausted.
+    // Slightly higher cost (~2x), but unblocks signup deterministically.
+    //
+    // Surfaced 2026-05-07/08: daveszab re-register hit cx53 sold-out across
+    // all 3 EU DCs for 12+ hours straight; sin-dc1 / ash-dc1 / hil-dc1
+    // don't even SUPPORT cx53. ccx43 was available the entire time.
+    const TYPE_CHAIN: string[] = (() => {
+      const primary = instance.serverType;
+      if (primary === "ccx43") return [primary];
+      // For any cx5*/cx4*/cx3* primary, append ccx43 as the universal fallback.
+      return [primary, "ccx43"];
+    })();
+    logs.push(`Server-type chain: ${TYPE_CHAIN.join(" → ")}`);
 
     // Build the per-tenant env overlay ONCE, before the retry loop. Nothing
     // in here changes between location attempts — running `User.findUnique`
@@ -246,147 +225,246 @@ export async function provisionInstanceJob(
       // status === "skipped" → AGENTMAIL_ENABLED=false, nothing to log
     }
 
-    for (const location of availableLocations) {
-      logs.push(`Trying location: ${location}`);
-      console.info(
-        `[provision:${instance.customerName}] Trying location: ${location}`,
-      );
-      lastStderr = "";
-
-      // Per-instance country drives Twilio number provisioning (#535).
-      // When unset, the ctrl provisioner falls back to its own
-      // TWILIO_DEFAULT_COUNTRY → "US" chain so the behaviour is identical
-      // to before.
-      const countryArgs = instance.country
-        ? ["--country", instance.country]
-        : [];
-
-      // Use spawn instead of execFileAsync for streaming output
-      finalExitCode = await new Promise<number>((resolve, reject) => {
-        const child = spawn(
+    // Helper: destroy any partial state for `customerName`. Idempotent —
+    // alfred-ctrl's destroy() handles already-gone Hetzner resources
+    // gracefully (returns 404 → continues). Used between location/type
+    // attempts when placement fails, and as the safety net after the
+    // current type's last location fails before falling to next type.
+    const cleanupPartial = async (reason: string): Promise<void> => {
+      logs.push(`${reason} — cleaning up partial state...`);
+      console.info(`[provision:${instance.customerName}] ${reason} — cleaning up`);
+      try {
+        const destroyChild = spawn(
           process.execPath,
           [
             "--experimental-sqlite",
             ALFRED_CTRL_PATH,
-            "provision",
+            "destroy",
             instance.customerName,
-            "--type",
-            instance.serverType,
-            "--location",
-            location,
-            ...snapshotArgs,
-            ...countryArgs,
           ],
           {
-            timeout: 1_200_000, // 20 minutes
-            env: {
-              ...process.env,
-              ...agentmailEnv,
-              NODE_NO_WARNINGS: "1",
-            },
-            cwd:
-              process.env.ALFRED_CTRL_CWD || "/opt/alfred-saas/alfred-ctrl",
-            stdio: ["ignore", "pipe", "pipe"],
+            timeout: 60_000,
+            env: { ...process.env, NODE_NO_WARNINGS: "1" },
+            cwd: process.env.ALFRED_CTRL_CWD || "/opt/alfred-saas/alfred-ctrl",
+            stdio: ["pipe", "pipe", "pipe"],
           },
         );
-
-      let lineBuffer = "";
-
-      const processLine = async (line: string) => {
-        if (!line.trim()) return;
-        logs.push(line);
-        console.info(`[provision:${instance.customerName}] ${line}`);
-
-        const step = detectStep(line);
-        if (step && step !== currentStep) {
-          currentStep = step;
-          // Fire-and-forget DB update for live tracking
-          context.entities.ProvisioningJob.update({
-            where: { id: job.id },
-            data: { currentStep: step, logs: [...logs] },
-          }).catch((e: any) =>
-            console.error("Failed to update step:", e.message),
-          );
-        }
-      };
-
-      child.stdout.on("data", (chunk: Buffer) => {
-        lineBuffer += chunk.toString();
-        const lines = lineBuffer.split("\n");
-        lineBuffer = lines.pop() || "";
-        for (const line of lines) {
-          processLine(line);
-        }
-      });
-
-      child.stderr.on("data", (chunk: Buffer) => {
-        const text = chunk.toString().trim();
-        if (text) {
-          lastStderr += text;
-          logs.push(`[stderr] ${text}`);
-          console.error(`[provision:${instance.customerName}] ${text}`);
-        }
-      });
-
-      child.on("error", (err) => reject(err));
-
-      child.on("close", (code) => {
-        // Flush remaining buffer
-        if (lineBuffer.trim()) processLine(lineBuffer);
-        resolve(code ?? 1);
-      });
-    });
-
-      // If placement failed, destroy partial resources and try next location
-      if (
-        finalExitCode !== 0 &&
-        lastStderr.includes("resource_unavailable") &&
-        location !== LOCATIONS[LOCATIONS.length - 1]
-      ) {
-        logs.push(
-          `Location ${location} unavailable, cleaning up and trying next...`,
+        destroyChild.stdin?.write("y\n");
+        destroyChild.stdin?.end();
+        await new Promise<void>((res) =>
+          destroyChild.on("close", () => res()),
         );
+      } catch (e: any) {
+        console.error(
+          `[provision:${instance.customerName}] Cleanup failed: ${e.message}`,
+        );
+      }
+    };
+
+    let usedServerType: string | null = null;
+
+    typeLoop: for (let typeIdx = 0; typeIdx < TYPE_CHAIN.length; typeIdx++) {
+      const tryType = TYPE_CHAIN[typeIdx];
+      const isLastType = typeIdx === TYPE_CHAIN.length - 1;
+
+      if (typeIdx > 0) {
+        logs.push(`Falling back to server type: ${tryType}`);
         console.info(
-          `[provision:${instance.customerName}] ${location} unavailable, trying next location`,
+          `[provision:${instance.customerName}] Falling back to server type: ${tryType}`,
         );
+      }
+
+      // Pre-check location availability for THIS server type. ccx43
+      // (the dedicated-CPU fallback) is only supported in the 3 EU
+      // DCs anyway, same as cx53, so the location list is uniform.
+      const availableLocations: string[] = [];
+      for (const loc of LOCATIONS) {
         try {
-          // Pipe "y" to confirm destroy prompt
-          const destroyChild = spawn(
+          const { stdout } = await execFileAsync(
             process.execPath,
             [
               "--experimental-sqlite",
               ALFRED_CTRL_PATH,
-              "destroy",
-              instance.customerName,
+              "check-location",
+              tryType,
+              loc,
             ],
             {
-              timeout: 60_000,
+              timeout: 10_000,
               env: { ...process.env, NODE_NO_WARNINGS: "1" },
-              cwd:
-                process.env.ALFRED_CTRL_CWD || "/opt/alfred-saas/alfred-ctrl",
-              stdio: ["pipe", "pipe", "pipe"],
+              cwd: process.env.ALFRED_CTRL_CWD || "/opt/alfred-saas/alfred-ctrl",
             },
           );
-          destroyChild.stdin?.write("y\n");
-          destroyChild.stdin?.end();
-          await new Promise<void>((res) =>
-            destroyChild.on("close", () => res()),
-          );
-        } catch (e: any) {
-          console.error(
-            `[provision:${instance.customerName}] Cleanup failed: ${e.message}`,
-          );
+          if (stdout.trim() === "available") {
+            availableLocations.push(loc);
+          } else {
+            logs.push(`Location ${loc}: unavailable for ${tryType}`);
+          }
+        } catch {
+          // If check fails, include the location (let provisioner handle it)
+          availableLocations.push(loc);
         }
-        continue; // try next location
       }
 
-      break; // success or non-placement error — stop retrying
-    } // end LOCATIONS loop
+      if (availableLocations.length === 0) {
+        logs.push(`No locations available for ${tryType}`);
+        if (!isLastType) continue typeLoop;
+        // Last type with no available locations — fall through to throw below
+        finalExitCode = 1;
+        break typeLoop;
+      }
+
+      logs.push(`Available locations for ${tryType}: ${availableLocations.join(", ")}`);
+
+      for (let locIdx = 0; locIdx < availableLocations.length; locIdx++) {
+        const location = availableLocations[locIdx];
+        const isLastLocationForType = locIdx === availableLocations.length - 1;
+
+        logs.push(`Trying ${tryType} in ${location}`);
+        console.info(
+          `[provision:${instance.customerName}] Trying ${tryType} in ${location}`,
+        );
+        lastStderr = "";
+
+        // Per-instance country drives Twilio number provisioning (#535).
+        // When unset, the ctrl provisioner falls back to its own
+        // TWILIO_DEFAULT_COUNTRY → "US" chain so the behaviour is identical
+        // to before.
+        const countryArgs = instance.country
+          ? ["--country", instance.country]
+          : [];
+
+        // Use spawn instead of execFileAsync for streaming output
+        finalExitCode = await new Promise<number>((resolve, reject) => {
+          const child = spawn(
+            process.execPath,
+            [
+              "--experimental-sqlite",
+              ALFRED_CTRL_PATH,
+              "provision",
+              instance.customerName,
+              "--type",
+              tryType,
+              "--location",
+              location,
+              ...snapshotArgs,
+              ...countryArgs,
+            ],
+            {
+              timeout: 1_200_000, // 20 minutes
+              env: {
+                ...process.env,
+                ...agentmailEnv,
+                NODE_NO_WARNINGS: "1",
+              },
+              cwd:
+                process.env.ALFRED_CTRL_CWD || "/opt/alfred-saas/alfred-ctrl",
+              stdio: ["ignore", "pipe", "pipe"],
+            },
+          );
+
+          let lineBuffer = "";
+
+          const processLine = async (line: string) => {
+            if (!line.trim()) return;
+            logs.push(line);
+            console.info(`[provision:${instance.customerName}] ${line}`);
+
+            const step = detectStep(line);
+            if (step && step !== currentStep) {
+              currentStep = step;
+              // Fire-and-forget DB update for live tracking
+              context.entities.ProvisioningJob.update({
+                where: { id: job.id },
+                data: { currentStep: step, logs: [...logs] },
+              }).catch((e: any) =>
+                console.error("Failed to update step:", e.message),
+              );
+            }
+          };
+
+          child.stdout.on("data", (chunk: Buffer) => {
+            lineBuffer += chunk.toString();
+            const lines = lineBuffer.split("\n");
+            lineBuffer = lines.pop() || "";
+            for (const line of lines) {
+              processLine(line);
+            }
+          });
+
+          child.stderr.on("data", (chunk: Buffer) => {
+            const text = chunk.toString().trim();
+            if (text) {
+              lastStderr += text;
+              logs.push(`[stderr] ${text}`);
+              console.error(`[provision:${instance.customerName}] ${text}`);
+            }
+          });
+
+          child.on("error", (err) => reject(err));
+
+          child.on("close", (code) => {
+            // Flush remaining buffer
+            if (lineBuffer.trim()) processLine(lineBuffer);
+            resolve(code ?? 1);
+          });
+        });
+
+        const placementFailed =
+          finalExitCode !== 0 && lastStderr.includes("resource_unavailable");
+
+        // Real (non-placement) errors abort the whole chain — those are bugs,
+        // not capacity problems, and trying a different type/location won't help.
+        if (finalExitCode !== 0 && !placementFailed) {
+          break typeLoop;
+        }
+
+        // Placement failed but more locations OR more types remain to try.
+        // Always destroy first so the next attempt starts clean (without this,
+        // the customer_name would conflict).
+        if (placementFailed) {
+          const willTryAgain = !isLastLocationForType || !isLastType;
+          if (willTryAgain) {
+            await cleanupPartial(`${tryType}/${location} unavailable`);
+            if (isLastLocationForType) break; // exit location loop, try next type
+            continue; // try next location for this type
+          }
+          // Last location of last type also failed — give up
+          break typeLoop;
+        }
+
+        // Success
+        usedServerType = tryType;
+        break typeLoop;
+      } // end location loop
+    } // end type loop
 
     if (finalExitCode !== 0) {
       throw new Error(
         `Provisioning exited with code ${finalExitCode}. Last log: ${logs[logs.length - 1] || "no output"}`,
       );
+    }
+
+    // If we used a fallback type, persist that on the Instance row so the
+    // dashboard reflects what's actually running. Don't fail provisioning
+    // on a Prisma update error — the VM is up and the user can use it.
+    if (usedServerType && usedServerType !== instance.serverType) {
+      logs.push(
+        `Provisioned with fallback type: ${usedServerType} (requested ${instance.serverType})`,
+      );
+      console.info(
+        `[provision:${instance.customerName}] Used fallback type ${usedServerType} instead of ${instance.serverType}`,
+      );
+      try {
+        await context.entities.Instance.update({
+          where: { id: instance.id },
+          data: { serverType: usedServerType },
+        });
+      } catch (e: any) {
+        console.error(
+          `[provision:${instance.customerName}] Failed to update Instance.serverType to ${usedServerType}: ${e.message}`,
+        );
+      }
     }
 
     // Read instance data from alfred-ctrl SQLite to get API key and Tailscale hostname
