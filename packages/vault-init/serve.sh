@@ -28,9 +28,39 @@ PORT="${VAULT_CLI_PORT:-8087}"
 log() { echo "[vault-cli] $*" >&2; }
 fatal() { log "FATAL: $*"; exit 3; }
 
-[ -n "$BW_USER" ]       || fatal "BW_USER unset"
-[ -n "$BW_PASSWORD" ]   || fatal "BW_PASSWORD unset"
-[ -n "$BW_SERVER_URL" ] || fatal "BW_SERVER_URL unset"
+# Wait up to 5 minutes for the bootstrap creds to appear. setupVaultwarden
+# may write BW_USER / BW_PASSWORD AFTER vault-cli has already started, in
+# which case docker compose's `restart: unless-stopped` keeps relaunching
+# us until the values land. Without this grace window vault-cli hits
+# fatal immediately on the first launch (when .env doesn't yet have the
+# Vaultwarden block), gets restarted by Docker, fails again, and shows
+# up as "degraded" in the dashboard health check until the second
+# bootstrap.sh `docker compose up -d` propagates the new env.
+#
+# Surfaced 2026-05-08 on daveszab tenant: even after I shipped a fix
+# that seeds BW_USER/BW_PASSWORD/BW_SERVER_URL in upload_env BEFORE
+# bootstrap.sh runs, this defense-in-depth keeps us resilient against
+# any future provisioning ordering changes.
+GRACE_DEADLINE=$((SECONDS + 300))   # 5 minutes
+while [ -z "$BW_USER" ] || [ -z "$BW_PASSWORD" ] || [ -z "$BW_SERVER_URL" ]; do
+  if [ "$SECONDS" -ge "$GRACE_DEADLINE" ]; then
+    [ -n "$BW_USER" ]       || fatal "BW_USER unset (5min grace exhausted)"
+    [ -n "$BW_PASSWORD" ]   || fatal "BW_PASSWORD unset (5min grace exhausted)"
+    [ -n "$BW_SERVER_URL" ] || fatal "BW_SERVER_URL unset (5min grace exhausted)"
+  fi
+  log "Waiting for BW_USER/BW_PASSWORD/BW_SERVER_URL to appear in env (have: BW_USER=${BW_USER:+set} BW_PASSWORD=${BW_PASSWORD:+set} BW_SERVER_URL=${BW_SERVER_URL:+set})"
+  sleep 10
+  # Re-source .env if it's mounted into the container — covers the case
+  # where setupVaultwarden writes new vars but our process doesn't see
+  # them without a re-read. Docker compose's env_file injects at start
+  # only, so this is a host-bind-mount fallback. Most deployments don't
+  # mount .env into vault-cli, so this is a no-op there.
+  if [ -f /host/compose/.env ]; then
+    set -o allexport
+    . /host/compose/.env 2>/dev/null || true
+    set +o allexport
+  fi
+done
 
 log "Configuring bw → $BW_SERVER_URL"
 bw config server "$BW_SERVER_URL" >/dev/null

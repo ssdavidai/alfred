@@ -384,6 +384,22 @@ export async function provision(
       // Rails convention: 64 random bytes → 128 hex. Matches `rails secret`.
       envLines.push(`SURE_SECRET_KEY_BASE=${randomSecret(64)}`);
     }
+    // Vaultwarden bootstrap creds. The vault-cli sidecar (long-running
+    // bw-serve container) reads these at startup and crash-loops with
+    // `[vault-cli] FATAL: BW_USER unset` if they're missing. Previously
+    // only seeded by setupVaultwarden which runs LATE — meaning vault-cli
+    // crash-looped during bootstrap_openclaw and was reported as a
+    // "degraded" container in the SaaS dashboard health check.
+    // setupVaultwarden's existing `if (!existingBwPassword)` guards make
+    // this idempotent on re-runs.
+    if (vaultwardenOnDefault) {
+      const ownerEmail = process.env.TENANT_OWNER_EMAIL ?? "";
+      if (ownerEmail) {
+        envLines.push(`BW_USER=${ownerEmail}`);
+      }
+      envLines.push(`BW_PASSWORD=${randomPassword()}`);
+      envLines.push(`BW_SERVER_URL=http://vaultwarden:80`);
+    }
     updateInstance(instance.id, { api_key: aasApiKey });
 
     await ssh.exec(

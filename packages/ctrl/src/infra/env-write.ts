@@ -22,16 +22,55 @@
  */
 
 /**
+ * Characters that require the value to be quoted in the .env file.
+ * If a value contains none of these, we can write `KEY=VALUE` plain.
+ *
+ * Why care about avoiding quotes:
+ *   docker-compose's env_file parser handling of surrounding single/double
+ *   quotes is version-dependent — older docker compose strips them, newer
+ *   versions sometimes don't. Bash `source`-ing the file always strips.
+ *   If a downstream consumer (e.g. vault-cli's serve.sh checking
+ *   `[ -n "$BW_USER" ]` or `bw login "$BW_USER"`) reads the env from a
+ *   shell that DIDN'T strip, it gets a literal-quoted string — and any
+ *   crypto derived from it (e.g. PBKDF2 with email-as-salt) ends up
+ *   computed from the wrong value.
+ *
+ *   By only quoting when actually necessary, the common case of
+ *   alphanumeric secrets / UUIDs / emails / URLs is unambiguous: the
+ *   value is exactly the bytes between `=` and the newline, no
+ *   stripping decisions to make.
+ *
+ *   Surfaced 2026-05-08 on daveszab tenant: BW_USER='daveszab@gmail.com'
+ *   appeared in .env, vault-cli failed PBKDF2 verification because
+ *   different consumers disagreed on whether the quotes were part of
+ *   the value.
+ */
+const SHELL_SPECIAL_RE = /[\s$`"\\\n#=*?\[\](){}|&;<>!]/;
+
+function formatEnvLine(key: string, value: string): string {
+  if (value === "" || SHELL_SPECIAL_RE.test(value)) {
+    // Single-quote with the standard `'"'"'` escape for embedded quotes.
+    const escaped = value.replace(/'/g, `'"'"'`);
+    return `${key}='${escaped}'`;
+  }
+  // Plain — no quoting needed, value is unambiguous.
+  return `${key}=${value}`;
+}
+
+/**
  * Build the shell command that strips existing assignments for each key in
- * `entries`, then appends new KEY='VALUE' lines, each on its own physical
+ * `entries`, then appends new KEY=VALUE lines, each on its own physical
  * line. Returns `null` if `entries` is empty.
  *
  * Invariants the consumer can rely on:
- *   1. Every key gets its own `'KEY=VALUE'` printf argument — no joined
+ *   1. Every key gets its own `KEY=VALUE` printf argument — no joined
  *      strings with embedded backslash-n.
  *   2. The format string is `'%s\n'`, which printf interprets to insert a
  *      real newline after each argument.
- *   3. Single quotes inside values are escaped via the bash `'"'"'` idiom.
+ *   3. Values are written UNQUOTED when they contain no shell-special
+ *      characters; otherwise wrapped in single quotes with the
+ *      `'"'"'` escape for embedded quotes. This avoids the docker-compose
+ *      quote-stripping ambiguity (see formatEnvLine docs above).
  *   4. The write is atomic: sed-strip → tmp file → mv → chmod 600.
  */
 export function buildEnvWriteCommand(
@@ -49,12 +88,7 @@ export function buildEnvWriteCommand(
   // printf '%s' does not interpret escape sequences in arguments. See #552
   // and #681 for the bug pattern.
   const printfArgs = keys
-    .map((k) => {
-      // Shell-safe single-quoting for the value side. The only forbidden char
-      // is a literal single quote; we replace `'` with `'"'"'`.
-      const v = entries[k].replace(/'/g, `'"'"'`);
-      return JSON.stringify(`${k}='${v}'`);
-    })
+    .map((k) => JSON.stringify(formatEnvLine(k, entries[k])))
     .join(" ");
   // Use a tmp file + mv to keep the write atomic. sed -i on Ubuntu creates a
   // backup by default only with -i''; explicitly omit the backup suffix.

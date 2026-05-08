@@ -426,8 +426,21 @@ export default function DashboardPage() {
     if (hasInstance && onboardStage === "awaiting_verification") {
       return "awaiting_verification";
     }
-    // Brief ready and not yet dismissed — show it (highest priority)
-    if (hasInstance && hasBrief && !briefDismissed && !isOnboardingActive) {
+    // Brief ready and not yet dismissed — show it.
+    //
+    // Don't gate on `!isOnboardingActive`: stages 8-9 (packs, chores)
+    // run AFTER the brief is written and can take 5-15 minutes of
+    // background Opus calls. The brief is the user-visible milestone;
+    // packs/chores backfill the vault while the user reads it. If we
+    // gate on isOnboardingActive=false, the user stares at "preparing
+    // your alfred" for 10+ minutes after the brief is already on disk.
+    //
+    // Surfaced 2026-05-08 on daveszab onboarding: brief generated at
+    // stage="brief", workflow advanced to "packs" → "chores" → loops
+    // on chore-template generation, never marked "done". Dashboard
+    // showed "preparing your alfred" the entire time even though the
+    // brief was ready 10+ min in.
+    if (hasInstance && hasBrief && !briefDismissed) {
       return "brief_ready";
     }
     // Brief already seen/dismissed — normal dashboard
