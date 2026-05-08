@@ -67,55 +67,87 @@ async def scan_audio_buffer() -> list[dict[str, Any]]:
     """Walk the audio buffer directory, return list of unprocessed PCM file metadata.
 
     Returns list of {path, uid, timestamp, size, sample_rate, stream_id}.
+
+    Capped at OMI_SCAN_MAX files per call (default 500). Sorts by filename
+    timestamp ascending so the oldest backlog drains first. Without the cap,
+    this activity reads every .pcm file in the buffer to run a VAD/RMS
+    silence check (`_has_speech`), which is O(total_buffer_bytes) per scan
+    and can take many minutes when the backlog grows into thousands of
+    files. Surfaced 2026-05-08 on david: 37,480 files / 6.4 GB had
+    accumulated during a 25-day stall, every scan timed out at the
+    workflow's 30s budget, every retry timed out, the workflow wedged
+    permanently.
     """
     audio_dir = Path(OMI_AUDIO_DIR)
     if not audio_dir.exists():
         logger.info("[omi] Audio buffer directory does not exist: %s", OMI_AUDIO_DIR)
         return []
 
-    results: list[dict[str, Any]] = []
+    scan_max = int(os.environ.get("OMI_SCAN_MAX", "500"))
 
+    # First pass: gather (timestamp, uid_dir, pcm_file, meta_file) tuples
+    # cheaply (no .pcm reads, no .json parses). The cap is applied AFTER
+    # sorting so we always drain oldest-first across all uids, not just
+    # the first uid we happen to iterate.
+    candidates: list[tuple[int, str, Path, Path]] = []
     for uid_dir in audio_dir.iterdir():
         if not uid_dir.is_dir():
             continue
-        # Skip processed/ subdirectory
         if uid_dir.name == "processed":
             continue
-
         uid = uid_dir.name
-
-        for pcm_file in sorted(uid_dir.glob("*.pcm")):
-            # Check for corresponding metadata
-            meta_file = pcm_file.with_suffix(".meta.json")
-            meta: dict[str, Any] = {}
-            if meta_file.exists():
-                try:
-                    meta = json.loads(meta_file.read_text())
-                except Exception:
-                    pass
-
-            # Extract timestamp from filename (e.g. 1711612345678.pcm)
+        for pcm_file in uid_dir.glob("*.pcm"):
             try:
                 timestamp_ms = int(pcm_file.stem)
             except ValueError:
                 logger.warning("[omi] Skipping file with non-numeric name: %s", pcm_file)
                 continue
+            candidates.append((timestamp_ms, uid, pcm_file, pcm_file.with_suffix(".meta.json")))
 
-            results.append({
-                "path": str(pcm_file),
-                "meta_path": str(meta_file),
-                "uid": uid,
-                "timestamp": timestamp_ms,
-                "size": pcm_file.stat().st_size,
-                "sample_rate": meta.get("sample_rate", 16000),
-                "stream_id": meta.get("stream_id", ""),
-                "has_speech": _has_speech(str(pcm_file)),
-            })
+    total_unprocessed = len(candidates)
+    candidates.sort(key=lambda c: c[0])
+    capped = candidates[:scan_max]
+
+    if total_unprocessed > scan_max:
+        logger.info(
+            "[omi] %d unprocessed files; processing oldest %d this run (will drain on subsequent runs)",
+            total_unprocessed,
+            scan_max,
+        )
+
+    results: list[dict[str, Any]] = []
+    for timestamp_ms, uid, pcm_file, meta_file in capped:
+        meta: dict[str, Any] = {}
+        if meta_file.exists():
+            try:
+                meta = json.loads(meta_file.read_text())
+            except Exception:
+                pass
+
+        try:
+            size = pcm_file.stat().st_size
+        except FileNotFoundError:
+            # File disappeared between glob and stat — skip
+            continue
+
+        results.append({
+            "path": str(pcm_file),
+            "meta_path": str(meta_file),
+            "uid": uid,
+            "timestamp": timestamp_ms,
+            "size": size,
+            "sample_rate": meta.get("sample_rate", 16000),
+            "stream_id": meta.get("stream_id", ""),
+            "has_speech": _has_speech(str(pcm_file)),
+        })
 
     # Purge processed files older than retention period
     _purge_old_processed(audio_dir)
 
-    logger.info("[omi] Scanned audio buffer: %d unprocessed files", len(results))
+    logger.info(
+        "[omi] Scanned audio buffer: %d files returned (of %d unprocessed total)",
+        len(results), total_unprocessed,
+    )
     return results
 
 

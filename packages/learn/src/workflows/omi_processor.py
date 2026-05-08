@@ -40,10 +40,15 @@ class OmiAudioProcessorWorkflow:
     async def run(self) -> OmiProcessorResult:
         result = OmiProcessorResult()
 
-        # 1. Scan audio buffer for unprocessed PCM files
+        # 1. Scan audio buffer for unprocessed PCM files.
+        # 5-min budget because scan_audio_buffer reads every .pcm file's
+        # bytes for VAD silence check (`_has_speech`) — at OMI_SCAN_MAX=500
+        # default that's ~85MB of reads. The activity itself caps the
+        # file count, so this timeout is just defense; real-world scans
+        # complete in ~10-30s even on a slow disk.
         files: list[dict[str, Any]] = await workflow.execute_activity(
             scan_audio_buffer,
-            start_to_close_timeout=timedelta(seconds=30),
+            start_to_close_timeout=timedelta(minutes=5),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
         result.files_scanned = len(files)
