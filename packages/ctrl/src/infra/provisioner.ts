@@ -1871,22 +1871,31 @@ export async function repairTunnel(
   // every CI deploy.
   if (instance.subdomain) {
     try {
-      const probe = async (name: string): Promise<boolean> => {
+      // Probe by container-name regex. Most sidecars run in the main
+      // /opt/alfred/compose project so their containers are named
+      // `compose-<service>-1`. Vexa is the exception — it runs in a
+      // SEPARATE compose project at /opt/alfred/vexa/, so its containers
+      // are named `vexa-meeting-api` etc. with NO `compose-` prefix.
+      // Surfaced 2026-05-08 on rapali + david: my earlier reconcile
+      // probed `^compose-vexa-meeting-api-`, never matched, vexa_enabled
+      // stayed false, the ingress block for `<subdomain>-vexa.alfred.black`
+      // was never written → HTTP 404 from Cloudflare.
+      const probe = async (pattern: string): Promise<boolean> => {
         try {
           const r = await ssh.exec(
             instance.ip_address!,
             sshKeyPath,
-            `docker ps --format '{{.Names}}' | grep -qE '^compose-${name}-' && echo 1 || echo 0`,
+            `docker ps --format '{{.Names}}' | grep -qE ${JSON.stringify(pattern)} && echo 1 || echo 0`,
           );
           return r.stdout.trim() === "1";
         } catch {
           return false;
         }
       };
-      const planeOn = await probe("plane-api");
-      const sureOn = await probe("sure-web");
-      const vaultwardenOn = await probe("vaultwarden");
-      const vexaOn = await probe("vexa-meeting-api") || await probe("vexa-api-gateway");
+      const planeOn = await probe("^compose-plane-api-");
+      const sureOn = await probe("^compose-sure-web-");
+      const vaultwardenOn = await probe("^compose-vaultwarden-");
+      const vexaOn = await probe("^vexa-(meeting-api|api-gateway)$");
 
       log(
         `Detected sidecars: plane=${planeOn} sure=${sureOn} vaultwarden=${vaultwardenOn} vexa=${vexaOn}`,
