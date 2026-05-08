@@ -271,21 +271,59 @@ async def group_audio_segments(files: list[dict[str, Any]]) -> list[list[dict[st
 
     groups = chunked_groups
 
-    # Ready check: last speech chunk must be old enough (conversation ended)
+    # Ready check: groups with enough speech chunks AND a "conversation
+    # ended" gap (last chunk old enough) are ready to transcribe.
+    #
+    # Stale-group escape hatch: if the last chunk is older than
+    # OMI_STALE_AFTER_SECONDS (default 1h), no new chunks will ever arrive
+    # to grow the group, so we bypass the MIN_SPEECH_CHUNKS gate as long
+    # as there's at least 1 speech chunk. Without this, single-chunk
+    # groups in stale audio backlogs jam the queue forever — the cap-500
+    # oldest-first scan keeps re-encountering them every run, never
+    # makes progress.
+    #
+    # Surfaced 2026-05-08 on david: 37,480-file backlog included 337
+    # speech chunks scattered into 269 single/double-chunk groups
+    # (likely OMI was put on for short bursts then taken off). With
+    # MIN_SPEECH_CHUNKS=3, all 269 were rejected, none moved to
+    # processed/, and they permanently sat at the head of the
+    # oldest-first scan queue blocking forward progress.
     now_ms = int(time.time() * 1000)
+    stale_threshold_ms = (
+        int(os.environ.get("OMI_STALE_AFTER_SECONDS", "3600")) * 1000
+    )
     ready_groups: list[list[dict[str, Any]]] = []
 
     for group in groups:
-        if len(group) < MIN_SPEECH_CHUNKS:
+        if not group:
             continue
         latest_speech_ts = max(f["timestamp"] for f in group)
         age_ms = now_ms - latest_speech_ts
-        if age_ms >= READY_AGE_SECONDS * 1000:
-            ready_groups.append(group)
-        else:
+
+        # Below the chunk-count gate AND fresh enough that new chunks
+        # might still arrive: defer.
+        if len(group) < MIN_SPEECH_CHUNKS and age_ms < stale_threshold_ms:
             logger.info(
-                "[omi] Group not ready: uid=%s, %d speech chunks, last speech %ds ago",
+                "[omi] Group not ready (waiting for more chunks): uid=%s, %d speech chunks, last speech %ds ago",
                 group[0]["uid"], len(group), age_ms // 1000,
+            )
+            continue
+
+        # Conversation-ended gate: last chunk must be old enough.
+        if age_ms < READY_AGE_SECONDS * 1000:
+            logger.info(
+                "[omi] Group not ready (still active): uid=%s, %d speech chunks, last speech %ds ago",
+                group[0]["uid"], len(group), age_ms // 1000,
+            )
+            continue
+
+        # Ready: either ≥MIN_SPEECH_CHUNKS or stale enough that we
+        # accept a smaller group as final.
+        ready_groups.append(group)
+        if len(group) < MIN_SPEECH_CHUNKS:
+            logger.info(
+                "[omi] Stale group accepted with only %d chunks (last speech %ds ago > %ds threshold)",
+                len(group), age_ms // 1000, stale_threshold_ms // 1000,
             )
 
     logger.info(
