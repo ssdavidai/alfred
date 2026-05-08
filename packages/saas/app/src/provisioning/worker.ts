@@ -149,20 +149,34 @@ export async function provisionInstanceJob(
     }
 
     // Server-type fallback chain. When the requested type has zero capacity
-    // across all 3 EU DCs (cx5* line is regularly sold out for hours at a
-    // time), automatically fall through to ccx43 — Hetzner's dedicated-CPU
-    // instance with strictly-equivalent-or-better specs (16c / 64GB) that's
-    // consistently available even when the shared-CPU line is exhausted.
-    // Slightly higher cost (~2x), but unblocks signup deterministically.
+    // across all 3 EU DCs (the Intel cx5*/cx4*/cx3* line is regularly sold
+    // out for hours at a time), automatically fall through to the AMD
+    // cpx-equivalent — same shared-CPU class, equivalent specs, separate
+    // physical inventory pool from Intel cx, so almost always available
+    // when its Intel counterpart is exhausted. cpx62 = 16c/32GB AMD,
+    // direct match for cx53's 16c/32GB Intel.
     //
-    // Surfaced 2026-05-07/08: daveszab re-register hit cx53 sold-out across
-    // all 3 EU DCs for 12+ hours straight; sin-dc1 / ash-dc1 / hil-dc1
-    // don't even SUPPORT cx53. ccx43 was available the entire time.
+    // ccx43 (dedicated-CPU, 16c/64GB) was tried as a fallback originally
+    // but the SaaS Hetzner project's dedicated_core_limit was already
+    // exhausted (resource_limit_exceeded → 403), so it can't even be
+    // requested. Stick with shared-CPU fallbacks until that quota is
+    // raised.
+    //
+    // Surfaced 2026-05-07/08: daveszab re-register hit cx53 sold-out
+    // across all 3 EU DCs for 12+ hours straight. cpx62 was available
+    // the entire time.
+    const CPX_FALLBACK: Record<string, string> = {
+      cx53: "cpx62", // 16c / 32GB
+      cx43: "cpx52", // ~12c / 24GB
+      cx33: "cpx42", // 8c / 16GB
+      cx23: "cpx32", // 4c / 8GB
+      cx22: "cpx22", // 2c / 4GB
+    };
     const TYPE_CHAIN: string[] = (() => {
       const primary = instance.serverType;
-      if (primary === "ccx43") return [primary];
-      // For any cx5*/cx4*/cx3* primary, append ccx43 as the universal fallback.
-      return [primary, "ccx43"];
+      const fallback = CPX_FALLBACK[primary];
+      if (!fallback || fallback === primary) return [primary];
+      return [primary, fallback];
     })();
     logs.push(`Server-type chain: ${TYPE_CHAIN.join(" → ")}`);
 
