@@ -654,13 +654,26 @@ export const startOnboarding: StartOnboarding<
   const instance = await getUserInstance(context);
   const userId = context.user.id;
 
-  // Step 1: Check if Gmail stream already exists
+  // Track per-step outcomes so the dashboard can see which sub-steps
+  // failed even if startOnboarding returns successfully overall (the
+  // function intentionally returns "started" once the SaaS-side stream
+  // exists, because the tenant-side reconcile is best-effort: a flaky
+  // tunnel shouldn't block the user from progressing).
+  const stepResults: Record<string, { ok: boolean; error?: string }> = {};
+  const recordStep = (name: string, ok: boolean, error?: string) => {
+    stepResults[name] = error ? { ok, error } : { ok };
+    if (!ok) {
+      console.error(`[startOnboarding] step=${name} failed: ${error}`);
+    }
+  };
+
+  // Step 1: SaaS-DB Stream row (lazy-create on first call, idempotent).
   let gmailStream = await context.entities.Stream.findFirst({
     where: { userId, source: "gmail" },
   });
 
   if (!gmailStream) {
-    // Step 2: Check if Google OAuth credential exists
+    // Step 1a: Need Google credential to even attempt the rest.
     const credential = await context.entities.OAuthCredential.findFirst({
       where: { userId, provider: "google" },
     });
@@ -668,7 +681,11 @@ export const startOnboarding: StartOnboarding<
       return { status: "no_credential", message: "No Google credential found" };
     }
 
-    // Step 3: Create Gmail stream in SaaS DB
+    // Step 1b: Create the SaaS-DB Stream row. The tenant-side reconcile
+    // below ALWAYS runs, regardless of whether we just created the row
+    // or it pre-existed — that's the fix for the silent-fail bug where
+    // a partial first run left the SaaS row but never finished tenant
+    // setup, blocking every subsequent call from re-trying.
     const crypto = await import("crypto");
     gmailStream = await context.entities.Stream.create({
       data: {
@@ -690,83 +707,129 @@ export const startOnboarding: StartOnboarding<
         webhookToken: crypto.randomBytes(24).toString("hex"),
       },
     });
+    recordStep("saas_stream_created", true);
+  } else {
+    recordStep("saas_stream_existing", true);
+  }
 
-    // Step 4: Create stream on tenant
-    try {
-      await proxyToTenant(instance, {
-        method: "POST",
-        path: "/api/v1/streams",
-        body: {
-          id: gmailStream.id,
-          name: "Gmail",
-          type: "scheduled",
-          source: "gmail",
-          config: gmailStream.config,
-          enabled: true,
-        },
-      });
-    } catch (e: any) {
-      console.error("[startOnboarding] Failed to create stream on tenant:", e?.message);
-    }
+  // ─────────────────────────────────────────────────────────────────────
+  // Tenant-side reconcile — ALWAYS runs, regardless of whether SaaS row
+  // existed before this call. Each step is idempotent server-side, and
+  // a failure in one doesn't block the rest. Surfaced via `stepResults`
+  // so the dashboard can show meaningful diagnostics if onboarding stalls.
+  //
+  // Surfaced 2026-05-08 on daveszab: prior version of this function
+  // gated steps 2-5 below on `if (!gmailStream)`. When step 2 succeeded
+  // but step 3 (PATCH config) and step 4 (POST schedule) failed silently
+  // on the very first call, every subsequent call hit the existing
+  // SaaS-DB row and skipped the entire reconcile — leaving the tenant
+  // permanently stuck with an idle stream and no puller schedule.
+  // ─────────────────────────────────────────────────────────────────────
 
-    // Step 5: Create stream config on tenant (for pull engine)
-    try {
-      await proxyToTenant(instance, {
-        method: "PATCH",
-        path: `/api/v1/streams/${gmailStream.id}`,
-        body: {
-          pull_endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
-          pull_method: "GET",
-          detail_endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=full",
-          detail_id_field: "id",
-          parser: "gmail",
-          auth_type: "oauth2",
-          auth_config: { provider: "google", user_id: userId },
-          schedule_interval_seconds: 300,
-        },
-      });
-    } catch (e: any) {
-      console.error("[startOnboarding] Failed to create stream config:", e?.message);
-    }
+  // Step 2: Ensure stream record exists on tenant (POST /api/v1/streams
+  // is idempotent — re-posting the same id is a no-op).
+  try {
+    await proxyToTenant(instance, {
+      method: "POST",
+      path: "/api/v1/streams",
+      body: {
+        id: gmailStream.id,
+        name: "Gmail",
+        type: "scheduled",
+        source: "gmail",
+        config: gmailStream.config,
+        enabled: true,
+      },
+    });
+    recordStep("tenant_stream_post", true);
+  } catch (e: any) {
+    recordStep("tenant_stream_post", false, e?.message ?? String(e));
+  }
 
-    // Step 6: Create Temporal schedule for Gmail pull
-    try {
-      await proxyToTenant(instance, {
-        method: "POST",
-        path: "/api/v1/schedules",
-        body: {
-          schedule_id: "al-stream-pull-gmail",
-          workflow_type: "StreamPullerWorkflow",
-          task_queue: "alfred-learn",
-          cron: "*/5 * * * *",
-          input: { stream_id: gmailStream.id },
-          overlap_policy: "Skip",
-        },
-      });
-    } catch (e: any) {
-      console.error("[startOnboarding] Failed to create pull schedule:", e?.message);
-    }
+  // Step 3: Patch pull config + auth_config (the critical step that was
+  // silently failing). PATCH is idempotent. user_id MUST be the SaaS
+  // User.id — alfred-learn's resolve_auth_header activity calls back to
+  // /api/internal/oauth2/token with that exact id to fetch a fresh
+  // access token from the encrypted refresh token in the SaaS DB.
+  try {
+    await proxyToTenant(instance, {
+      method: "PATCH",
+      path: `/api/v1/streams/${gmailStream.id}`,
+      body: {
+        pull_endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
+        pull_method: "GET",
+        detail_endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=full",
+        detail_id_field: "id",
+        parser: "gmail",
+        auth_type: "oauth2",
+        auth_config: { provider: "google", user_id: userId },
+        schedule_interval_seconds: 300,
+      },
+    });
+    recordStep("tenant_stream_patch", true);
+  } catch (e: any) {
+    recordStep("tenant_stream_patch", false, e?.message ?? String(e));
+  }
 
-    // Step 7: Trigger immediate first pull
-    try {
-      await proxyToTenant(instance, {
-        method: "POST",
-        path: "/api/v1/schedules/al-stream-pull-gmail/trigger",
-      });
-    } catch (e: any) {
-      console.error("[startOnboarding] Failed to trigger first pull:", e?.message);
+  // Step 4: Create the al-stream-pull-gmail Temporal schedule. ctrl-api
+  // returns 201 on first create and a 409/200 on idempotent re-create —
+  // we accept both. A failure here means the puller will never fire
+  // automatically (manual triggers via step 5 still work, but stop after
+  // a single pull).
+  try {
+    await proxyToTenant(instance, {
+      method: "POST",
+      path: "/api/v1/schedules",
+      body: {
+        schedule_id: "al-stream-pull-gmail",
+        workflow_type: "StreamPullerWorkflow",
+        task_queue: "alfred-learn",
+        cron: "*/5 * * * *",
+        input: { stream_id: gmailStream.id },
+        overlap_policy: "Skip",
+      },
+    });
+    recordStep("tenant_schedule_post", true);
+  } catch (e: any) {
+    // 409 from create-schedule means it already exists — that's fine.
+    const msg = e?.message ?? String(e);
+    if (/409|already exists|conflict/i.test(msg)) {
+      recordStep("tenant_schedule_post", true, "already exists (idempotent)");
+    } else {
+      recordStep("tenant_schedule_post", false, msg);
     }
   }
 
-  // Step 8: Trigger onboarding workflow ONLY if not already running
+  // Step 5: Trigger immediate first pull so the user sees fresh data
+  // without waiting for the next 5-min cron tick. Best-effort — failures
+  // here are non-blocking because the schedule will fire on its own.
+  try {
+    await proxyToTenant(instance, {
+      method: "POST",
+      path: "/api/v1/schedules/al-stream-pull-gmail/trigger",
+    });
+    recordStep("tenant_schedule_trigger", true);
+  } catch (e: any) {
+    recordStep("tenant_schedule_trigger", false, e?.message ?? String(e));
+  }
+
+  // Step 6: Trigger the onboarding workflow ONLY if not already running.
+  // Skip if the tenant reports an in-flight stage already.
   try {
     const progress = await proxyToTenant(instance, {
       path: "/api/v1/onboarding/progress",
     });
     const stage = progress?.stage;
     if (stage && stage !== "not_started" && stage !== "unknown") {
-      console.info(`[startOnboarding] Onboarding already at stage=${stage}, skipping workflow trigger`);
-      return { status: "already_running", stage, streamId: gmailStream.id };
+      console.info(
+        `[startOnboarding] Onboarding already at stage=${stage}, skipping workflow trigger`,
+      );
+      return {
+        status: "already_running",
+        stage,
+        streamId: gmailStream.id,
+        steps: stepResults,
+      };
     }
   } catch {
     // Progress endpoint not available — proceed with trigger
@@ -779,11 +842,12 @@ export const startOnboarding: StartOnboarding<
       body: { user_id: userId, stream_id: gmailStream.id },
       timeoutMs: 30_000,
     });
+    recordStep("onboarding_workflow_start", true);
   } catch (e: any) {
-    console.error("[startOnboarding] Failed to trigger onboarding workflow:", e?.message);
+    recordStep("onboarding_workflow_start", false, e?.message ?? String(e));
   }
 
-  return { status: "started", streamId: gmailStream.id };
+  return { status: "started", streamId: gmailStream.id, steps: stepResults };
 };
 
 // ============================================================
