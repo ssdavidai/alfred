@@ -15,7 +15,9 @@ dashboard via Tailscale proxy. All routes under `/api/v1/` prefix.
 
 | Route Module | Key Endpoints |
 |-------------|---------------|
-| `vault` | `POST /records`, `GET /records/{path}`, `PATCH /records/{path}`, `GET /list/{type}`, `GET /search`, `GET /inbox`, `POST /inbox` |
+| `vault` | `POST /records`, `GET /records/{path}`, `PATCH /records/{path}`, `GET /list/{type}`, `GET /search`, `GET /inbox`, `POST /inbox`, `GET /vault/index` (60s tenant cache, #873) |
+| `matters` | `GET /matters`, `GET /matters/:id` (aggregator for the SaaS `/matters` page, #859) |
+| `brief` | `GET /brief/today` (today's letterpress brief for the SaaS `/brief` page, #857) |
 | `streams` | `GET /events`, `POST /events/{id}/processed`, `POST /events/{id}/quarantine` |
 | `learning` | `GET /queue` |
 | `workers` | Start/stop/restart Docker containers |
