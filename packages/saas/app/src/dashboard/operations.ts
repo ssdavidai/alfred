@@ -1125,7 +1125,7 @@ export const getMatterDetail = async (
     const cleanId = String(args.id).replace(/^matter\//, "").replace(/\.md$/, "");
     const recordPath = `matter/${cleanId}.md`;
     const rec: any = await proxyToTenant(instance, {
-      path: `/api/v1/vault/record/${encodeURIComponent(recordPath)}`,
+      path: `/api/v1/vault/records/${encodeURIComponent(recordPath)}`,
     });
     if (!rec || (rec.error && !rec.body && !rec.frontmatter)) {
       return { matter: null };
