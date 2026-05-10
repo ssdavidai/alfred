@@ -353,6 +353,13 @@ page HouseholdPage {
 // ============================================================
 // Dashboard
 // ============================================================
+// /desk — canonical home (M3 #855). Decision queue + audit ledger.
+route DeskRoute { path: "/desk", to: DeskPage }
+page DeskPage {
+  authRequired: true,
+  component: import DeskPage from "@src/dashboard/DeskPage"
+}
+
 route DashboardRoute { path: "/dashboard", to: DashboardPage }
 page DashboardPage {
   authRequired: true,
