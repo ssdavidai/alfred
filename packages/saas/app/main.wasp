@@ -318,6 +318,13 @@ page VerifyPage {
   component: import VerifyPage from "@src/onboarding/VerifyPage"
 }
 
+// SOUL preset chooser (#853) — sits between /verify and /composing.
+route SoulPresetRoute { path: "/soul", to: SoulPresetPage }
+page SoulPresetPage {
+  authRequired: true,
+  component: import SoulPresetPage from "@src/onboarding/SoulPresetPage"
+}
+
 route ComposingRoute { path: "/composing", to: ComposingPage }
 page ComposingPage {
   authRequired: true,

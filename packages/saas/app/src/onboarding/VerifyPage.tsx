@@ -95,7 +95,7 @@ export default function VerifyPage() {
         corrections["Anything else"] = extra.trim();
       }
       await submitFactCorrections({ corrections });
-      navigate("/composing");
+      navigate("/soul");
     } catch (err) {
       console.error("submitFactCorrections failed:", err);
       setSubmitting(false);
