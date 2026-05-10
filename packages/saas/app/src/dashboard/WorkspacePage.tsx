@@ -4,7 +4,7 @@ import {
   getWorkspaceFile,
   updateWorkspaceFile,
 } from "wasp/client/operations";
-import { Navigate } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { Button } from "../client/components/ui/button";
 import { cn } from "../client/utils";
 import { useToast } from "../client/hooks/use-toast";
@@ -77,8 +77,19 @@ export function WorkspaceContent() {
       <h2 className="font-serif mb-2 text-2xl font-light text-cream">
         Workspace
       </h2>
-      <p className="text-muted-foreground mb-6 text-sm">
+      <p className="text-muted-foreground mb-2 text-sm">
         Edit the files that define how Alfred thinks and behaves.
+      </p>
+      <p className="text-muted-foreground mb-6 text-sm">
+        For standing rules, chores, and matters, use the{" "}
+        <Link
+          to="/household"
+          className="underline-offset-4 hover:underline"
+          style={{ color: "var(--brass)" }}
+        >
+          household editor
+        </Link>
+        .
       </p>
 
       {/* File tabs */}

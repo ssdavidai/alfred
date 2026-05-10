@@ -343,6 +343,13 @@ page FirstBriefPage {
   component: import FirstBriefPage from "@src/onboarding/FirstBriefPage"
 }
 
+// Household editor — sits at the seam between /first-brief and /desk (#854).
+route HouseholdRoute { path: "/household", to: HouseholdPage }
+page HouseholdPage {
+  authRequired: true,
+  component: import HouseholdPage from "@src/onboarding/HouseholdPage"
+}
+
 // ============================================================
 // Dashboard
 // ============================================================
