@@ -19,12 +19,13 @@ export function PasswordResetPage() {
   return (
     <AuthPageLayout title="New password" subtitle="Choose a new password">
       <ResetPasswordForm appearance={appearance} />
-      <div className="mt-6 text-center">
-        <p className="font-sans text-sm font-light text-[#8A8680]">
+      <div className="mt-8 text-center font-body text-[15px]" style={{ color: "var(--marginalia)" }}>
+        <p>
           If everything is okay,{" "}
           <WaspRouterLink
             to={routes.LoginRoute.to}
-            className="text-[#8A8680] transition-colors hover:text-gold"
+            className="underline-offset-4 hover:underline"
+            style={{ color: "var(--brass)" }}
           >
             go to login
           </WaspRouterLink>
