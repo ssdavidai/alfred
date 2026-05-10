@@ -210,7 +210,7 @@
 
 /* Form container */
 [class*="form_"] {
-  font-family: 'DM Sans', -apple-system, sans-serif !important;
+  font-family: 'EB Garamond', Garamond, Georgia, serif !important;
 }
 
 /* Text inputs — double selector for specificity over Wasp's auth CSS modules */
@@ -228,7 +228,7 @@ form input[type="text"] {
   -webkit-text-fill-color: #E8E4DE !important;
   caret-color: #E8E4DE !important;
   color-scheme: dark !important;
-  font-family: 'DM Sans', -apple-system, sans-serif !important;
+  font-family: 'EB Garamond', Garamond, Georgia, serif !important;
   font-weight: 300 !important;
   padding: 0.75rem 0 !important;
   font-size: 0.875rem !important;
@@ -291,7 +291,7 @@ form input[type="text"] {
   color: #fa3838 !important;
   border: 1px solid rgba(184, 151, 106, 0.15) !important;
   border-radius: 2px !important;
-  font-family: 'DM Sans', -apple-system, sans-serif !important;
+  font-family: 'EB Garamond', Garamond, Georgia, serif !important;
   font-weight: 300 !important;
   font-size: 0.875rem !important;
 }
@@ -302,7 +302,7 @@ form input[type="text"] {
   color: #6BA8B8 !important;
   border: 1px solid rgba(184, 151, 106, 0.15) !important;
   border-radius: 2px !important;
-  font-family: 'DM Sans', -apple-system, sans-serif !important;
+  font-family: 'EB Garamond', Garamond, Georgia, serif !important;
   font-weight: 300 !important;
   font-size: 0.875rem !important;
 }
@@ -310,7 +310,7 @@ form input[type="text"] {
 /* Inline form validation errors */
 [class*="formError"] {
   color: #fa3838 !important;
-  font-family: 'DM Sans', -apple-system, sans-serif !important;
+  font-family: 'EB Garamond', Garamond, Georgia, serif !important;
   font-weight: 300 !important;
   font-size: 0.75rem !important;
 }

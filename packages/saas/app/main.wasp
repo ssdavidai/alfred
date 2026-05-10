@@ -22,7 +22,7 @@ app AlfredSaaS {
 
     "<link rel='preconnect' href='https://fonts.googleapis.com' />",
     "<link rel='preconnect' href='https://fonts.gstatic.com' crossorigin />",
-    "<link href='https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=DM+Sans:wght@300;400;500&family=JetBrains+Mono:wght@300;400&display=swap' rel='stylesheet' />",
+    "<link href='https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400&family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=JetBrains+Mono:wght@400;500;700;800&display=swap' rel='stylesheet' />",
 
     "<script defer data-domain='alfred.black' src='https://plausible.alfred.black/js/script.js'></script>",
   ],

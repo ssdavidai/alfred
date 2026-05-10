@@ -13,9 +13,14 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        serif: ["'EB Garamond'", "Georgia", "serif"],
-        sans: ["'DM Sans'", "-apple-system", "BlinkMacSystemFont", "sans-serif"],
-        mono: ["'JetBrains Mono'", "monospace"],
+        // Alfred Black type stack — three families, no sans.
+        display: ['"Playfair Display"', '"Didot"', '"Bodoni 72"', "serif"],
+        body: ['"EB Garamond"', "Garamond", "Georgia", "serif"],
+        serif: ['"EB Garamond"', "Garamond", "Georgia", "serif"],
+        // sans is aliased to body so any legacy `font-sans` utilities still
+        // resolve to a real on-brand serif (we don't ship a sans).
+        sans: ['"EB Garamond"', "Garamond", "Georgia", "serif"],
+        mono: ['"JetBrains Mono"', "ui-monospace", '"SF Mono"', "monospace"],
       },
       colors: {
         current: "currentColor",
