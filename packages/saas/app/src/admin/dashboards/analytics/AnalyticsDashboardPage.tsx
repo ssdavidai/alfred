@@ -42,19 +42,27 @@ const Dashboard = () => {
   if (!user) return null;
   if (!user.isAdmin) return <Navigate to="/" replace />;
 
+  // M7 #869 — admin tokens pass. Paper surface, Playfair headings, brass
+  // accents on key states. No IA / logic changes; the existing Card / Switch
+  // primitives have already been re-skinned in M0 (#845).
   return (
     <DashboardLayout>
       {error ? (
-        <div className="flex h-full items-center justify-center">
-          <div className="bg-card rounded-lg p-8 shadow-lg">
-            <p className="text-2xl font-bold text-red-500">Error</p>
-            <p className="text-muted-foreground mt-2 text-sm">
+        <div className="flex h-full items-center justify-center paper">
+          <div className="border border-rule p-8">
+            <p className="font-display text-2xl" style={{ color: "var(--brass)" }}>
+              Error
+            </p>
+            <p
+              className="font-body italic mt-2 text-sm"
+              style={{ color: "var(--marginalia)" }}
+            >
               {error.message || "Something went wrong while fetching stats."}
             </p>
           </div>
         </div>
       ) : (
-        <div className="relative">
+        <div className="relative paper">
           <div
             className={cn({
               "opacity-25": !stats,
@@ -65,17 +73,25 @@ const Dashboard = () => {
                 <CardContent className="flex items-center justify-between p-4">
                   <div className="flex items-center gap-3">
                     <div
-                      className={cn(
-                        "h-2 w-2 rounded-full",
-                        isClosedBeta ? "bg-amber-500" : "bg-emerald-500",
-                      )}
+                      className={cn("h-2 w-2 rounded-full")}
+                      style={{
+                        background: isClosedBeta
+                          ? "var(--brass)"
+                          : "color-mix(in oklab, var(--brass) 60%, var(--ink))",
+                      }}
                     />
-                    <Label className="font-mono text-xs font-light uppercase tracking-[0.35em] text-muted-foreground">
+                    <Label
+                      className="font-mono text-xs font-light uppercase tracking-[0.35em]"
+                      style={{ color: "var(--marginalia)" }}
+                    >
                       Closed Beta Gate
                     </Label>
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="font-mono text-[0.62rem] font-light uppercase tracking-[0.35em] text-muted-foreground">
+                    <span
+                      className="font-mono text-[0.62rem] font-light uppercase tracking-[0.35em]"
+                      style={{ color: "var(--marginalia)" }}
+                    >
                       {isClosedBeta ? "ON" : "OFF"}
                     </span>
                     <Switch
@@ -122,12 +138,16 @@ const Dashboard = () => {
           </div>
 
           {!stats && !isLoading && (
-            <div className="bg-background/50 absolute inset-0 flex items-start justify-center">
-              <div className="bg-card rounded-lg p-8 shadow-lg">
-                <p className="text-foreground text-2xl font-bold">
-                  No analytics data yet
-                </p>
-                <p className="text-muted-foreground mt-2 max-w-md text-sm">
+            <div
+              className="absolute inset-0 flex items-start justify-center"
+              style={{ background: "color-mix(in oklab, var(--paper) 50%, transparent)" }}
+            >
+              <div className="border border-rule p-8 paper">
+                <p className="font-display text-2xl">No analytics data yet.</p>
+                <p
+                  className="font-body italic mt-2 max-w-md text-sm"
+                  style={{ color: "var(--marginalia)" }}
+                >
                   Plausible tracking has been enabled. Data will appear here
                   once the hourly stats job has collected page views from your
                   Plausible instance.
@@ -137,11 +157,12 @@ const Dashboard = () => {
           )}
 
           {isLoading && !stats && (
-            <div className="bg-background/50 absolute inset-0 flex items-start justify-center">
-              <div className="bg-card rounded-lg p-8 shadow-lg">
-                <p className="text-foreground text-2xl font-bold">
-                  Loading...
-                </p>
+            <div
+              className="absolute inset-0 flex items-start justify-center"
+              style={{ background: "color-mix(in oklab, var(--paper) 50%, transparent)" }}
+            >
+              <div className="border border-rule p-8 paper">
+                <p className="font-display italic text-2xl">Composing…</p>
               </div>
             </div>
           )}

@@ -126,19 +126,26 @@ export default function InstanceDetailPage() {
 
   return (
     <DashboardLayout>
-      <div className="p-6">
-        {/* Header */}
-        <div className="mb-6 flex items-center gap-4">
-          <Link to="/admin/instances" className="text-muted-foreground hover:text-foreground">
-            <ArrowLeft className="size-5" />
+      <div className="p-6 paper">
+        {/* M7 #869 — admin tokens pass on the header. */}
+        <div className="mb-6 flex items-baseline gap-4">
+          <Link
+            to="/admin/instances"
+            className="font-mono text-[10px] uppercase tracking-[0.22em]"
+            style={{ color: "var(--brass)" }}
+          >
+            ← Instances
           </Link>
           <div className="flex-1">
-            <h1 className="text-foreground text-2xl font-bold">
-              {isLoading ? "Loading..." : instance?.customerName || "Instance"}
+            <h1 className="font-display text-4xl tracking-tight">
+              {isLoading ? "…" : instance?.customerName || "Instance"}
             </h1>
             {instance && (
-              <p className="text-muted-foreground text-sm">
-                {instance.user?.email} &middot; {instance.tier?.toLowerCase()} &middot; {instance.serverType}
+              <p
+                className="font-body italic mt-1"
+                style={{ color: "var(--marginalia)" }}
+              >
+                {instance.user?.email} · {instance.tier?.toLowerCase()} · {instance.serverType}
               </p>
             )}
           </div>

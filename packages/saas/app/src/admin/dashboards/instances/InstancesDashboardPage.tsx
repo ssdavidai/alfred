@@ -27,26 +27,43 @@ export default function InstancesDashboardPage() {
   if (!user) return null;
   if (!user.isAdmin) return <Navigate to="/" replace />;
 
+  // M7 #869 — admin tokens pass.
   return (
     <DashboardLayout>
-      <div className="p-6">
-        <div className="mb-6 flex items-center justify-between">
-          <h1 className="text-foreground text-2xl font-bold">
-            All Instances
-          </h1>
+      <div className="p-6 paper">
+        <div className="mb-6 flex items-baseline justify-between">
+          <div>
+            <div
+              className="font-mono text-[10px] uppercase tracking-[0.28em] mb-2"
+              style={{ color: "var(--brass)" }}
+            >
+              Admin
+            </div>
+            <h1 className="font-display text-5xl tracking-tight">All instances.</h1>
+          </div>
           <Link
             to="/admin/provisioning"
-            className="text-muted-foreground hover:text-foreground rounded-md border border-border px-3 py-2 text-sm transition-colors"
+            className="font-mono text-[10px] uppercase tracking-[0.22em] border border-rule px-3 py-2"
+            style={{ color: "var(--brass)" }}
           >
-            Provisioning Jobs
+            Provisioning jobs →
           </Link>
         </div>
 
-        {isLoading && <p className="text-muted-foreground">Loading...</p>}
+        {isLoading && (
+          <p
+            className="font-body italic"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Composing the inventory…
+          </p>
+        )}
 
         {error && (
-          <div className="bg-destructive/10 text-destructive rounded-lg p-4">
-            <p>{error.message}</p>
+          <div className="border border-rule p-4" style={{ borderColor: "var(--brass)" }}>
+            <p className="font-body" style={{ color: "var(--brass)" }}>
+              {error.message}
+            </p>
           </div>
         )}
 
