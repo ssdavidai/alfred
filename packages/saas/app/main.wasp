@@ -367,6 +367,19 @@ page BriefPage {
   component: import BriefPage from "@src/dashboard/BriefPage"
 }
 
+// /chores + /chores/:slug — recurring workflows (M4 #862).
+route ChoresRoute { path: "/chores", to: ChoresPage }
+page ChoresPage {
+  authRequired: true,
+  component: import ChoresPage from "@src/intelligence/ChoresPage"
+}
+
+route ChoreDetailRoute2 { path: "/chores/:slug", to: ChoreDetailPage2 }
+page ChoreDetailPage2 {
+  authRequired: true,
+  component: import ChoreDetailPage2 from "@src/intelligence/ChoreDetailPage2"
+}
+
 // /decisions — audit feed of every decision Alfred has made (M4 #861).
 route DecisionsRoute { path: "/decisions", to: DecisionsPage }
 page DecisionsPage {

@@ -9,7 +9,7 @@
  * Route: /dashboard/chores/:slug (registered in main.wasp)
  */
 import { useState } from "react";
-import { useParams, Link as RouterLink } from "react-router-dom";
+import { useParams, Link as RouterLink, Navigate } from "react-router-dom";
 import {
   useQuery,
   getChore,
@@ -98,7 +98,20 @@ function parseRunLog(body: string): Array<{ timestamp: string; message: string; 
   return entries.reverse();
 }
 
+// M4 #862 — /dashboard/chores/:slug redirects to /chores/:slug. The
+// legacy implementation is preserved as LegacyChoreDetailPage.
 export default function ChoreDetailPage() {
+  const params = useParams<{ slug: string }>();
+  const slug = params?.slug ?? "";
+  return (
+    <Navigate
+      to={slug ? `/chores/${encodeURIComponent(slug)}` : "/chores"}
+      replace
+    />
+  );
+}
+
+function LegacyChoreDetailPage() {
   const params = useParams<{ slug: string }>();
   const slug = params?.slug ?? "";
   const [actioning, setActioning] = useState<string | null>(null);
