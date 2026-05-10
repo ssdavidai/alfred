@@ -284,7 +284,9 @@ job destroyInstance {
 }
 
 // ============================================================
-// Onboarding
+// Onboarding — ritual (#852). The legacy /onboarding and /onboarding/orb
+// pages now redirect to /awaken; their wasp routes stay so post-signup
+// hooks and old emails still resolve.
 // ============================================================
 route OnboardingRoute { path: "/onboarding", to: OnboardingPage }
 page OnboardingPage {
@@ -296,6 +298,42 @@ route OnboardingOrbRoute { path: "/onboarding/orb", to: OnboardingOrbPage }
 page OnboardingOrbPage {
   authRequired: true,
   component: import OnboardingOrbPage from "@src/onboarding/OnboardingOrbPage"
+}
+
+route AwakenRoute { path: "/awaken", to: AwakenPage }
+page AwakenPage {
+  authRequired: true,
+  component: import AwakenPage from "@src/onboarding/AwakenPage"
+}
+
+route ReadingTheRoomRoute { path: "/reading-the-room", to: ReadingTheRoomPage }
+page ReadingTheRoomPage {
+  authRequired: true,
+  component: import ReadingTheRoomPage from "@src/onboarding/ReadingTheRoomPage"
+}
+
+route VerifyRoute { path: "/verify", to: VerifyPage }
+page VerifyPage {
+  authRequired: true,
+  component: import VerifyPage from "@src/onboarding/VerifyPage"
+}
+
+route ComposingRoute { path: "/composing", to: ComposingPage }
+page ComposingPage {
+  authRequired: true,
+  component: import ComposingPage from "@src/onboarding/ComposingPage"
+}
+
+route PreparingRoute { path: "/preparing", to: PreparingPage }
+page PreparingPage {
+  authRequired: true,
+  component: import PreparingPage from "@src/onboarding/PreparingPage"
+}
+
+route FirstBriefRoute { path: "/first-brief", to: FirstBriefPage }
+page FirstBriefPage {
+  authRequired: true,
+  component: import FirstBriefPage from "@src/onboarding/FirstBriefPage"
 }
 
 // ============================================================
