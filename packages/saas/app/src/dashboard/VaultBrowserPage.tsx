@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { useQuery, getVaultRecords, getInboxItems } from "wasp/client/operations";
 import DashboardLayout from "./DashboardLayout";
 
@@ -40,7 +40,14 @@ function ensureMdExtension(p: string): string {
 
 type RecordsByType = Record<string, Array<{ path: string; name: string; status?: string }>>;
 
+// M4 #858 — /dashboard/vault redirects to /vault. The legacy browser
+// implementation is preserved verbatim as `LegacyVaultBrowserPage` so
+// the cutover can be reverted with one line if needed.
 export default function VaultBrowserPage() {
+  return <Navigate to="/vault" replace />;
+}
+
+function LegacyVaultBrowserPage() {
   const [selectedFolder, setSelectedFolder] = useState<string | null>(null);
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [searchQuery, setSearchQuery] = useState("");
