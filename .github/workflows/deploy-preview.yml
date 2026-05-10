@@ -1,0 +1,187 @@
+name: Deploy Preview (feat/alfred-black-1.0)
+on:
+  push:
+    branches: [feat/alfred-black-1.0]
+    paths:
+      - 'packages/saas/**'
+      - 'packages/ctrl/**'
+      - 'deploy/**'
+      - '.github/workflows/deploy-preview.yml'
+  workflow_dispatch:
+concurrency:
+  group: deploy-preview
+  cancel-in-progress: false
+
+# Preview deployment for the Alfred Black 1.0 cutover branch. Mirrors
+# deploy-saas.yml but targets preview.alfred.black with two safety belts
+# baked into the Wasp .env.server:
+#   WASP_DISABLE_JOBS=true            → all PgBoss workers short-circuit
+#   WRITE_BLOCK_TENANT_OPS_DENYLIST=… → refuses non-GET proxyToTenant
+#                                       calls for the four prod tenants
+# These are removed at cutover (see deploy/CUTOVER.md).
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Wasp CLI
+        run: curl -sSL https://get.wasp.sh/installer.sh | sh -s -- -v 0.19.1
+        env:
+          WASP_TELEMETRY_DISABLED: 1
+
+      - name: Build Wasp app
+        run: cd packages/saas/app && ~/.local/bin/wasp build
+
+      - name: Patch npm overrides into Wasp build
+        run: |
+          cd packages/saas/app/.wasp/build
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.overrides = { ...pkg.overrides, 'three': '0.175.0' };
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Install build dependencies
+        run: cd packages/saas/app/.wasp/build && npm install
+
+      - name: Patch Prisma to use db push (no migration files in this project)
+        run: |
+          cd packages/saas/app/.wasp/build/server
+          sed -i 's/"db-migrate-prod": "prisma migrate deploy --schema=..\/db\/schema.prisma"/"db-migrate-prod": "prisma db push --schema=..\/db\/schema.prisma --skip-generate --accept-data-loss"/' package.json
+
+      - name: Build web-app client
+        run: cd packages/saas/app/.wasp/build/web-app && REACT_APP_API_URL=https://preview.alfred.black npx vite build
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.PREVIEW_SSH_KEY }}" > ~/.ssh/preview_key
+          chmod 600 ~/.ssh/preview_key
+          ssh-keyscan -H ${{ secrets.PREVIEW_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Patch Dockerfile for provisioning deps
+        run: |
+          sed -i 's/RUN apk add --no-cache python3$/RUN apk add --no-cache python3 openssh-keygen openssh-client sqlite util-linux/' packages/saas/app/.wasp/build/Dockerfile
+
+      - name: Deploy server build to preview VM
+        run: |
+          rsync -azP --delete \
+            --exclude='web-app/' \
+            --exclude='node_modules/' \
+            --exclude='.waspchecksums' \
+            -e "ssh -i ~/.ssh/preview_key" \
+            packages/saas/app/.wasp/build/ \
+            deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/wasp-build/
+
+      - name: Deploy client to preview VM
+        run: |
+          rsync -azP --delete \
+            -e "ssh -i ~/.ssh/preview_key" \
+            packages/saas/app/.wasp/build/web-app/build/ \
+            deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/client/
+
+      - name: Deploy Plausible config to preview VM
+        run: |
+          rsync -azP \
+            -e "ssh -i ~/.ssh/preview_key" \
+            deploy/clickhouse/ \
+            deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/clickhouse/
+          rsync -azP \
+            -e "ssh -i ~/.ssh/preview_key" \
+            deploy/docker-compose.yaml \
+            deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/docker-compose.yaml
+
+      - name: Set preview-mode env vars on Wasp service
+        run: |
+          ssh -i ~/.ssh/preview_key deploy@${{ secrets.PREVIEW_HOST }} '
+            ENV_FILE="/opt/alfred-saas/.env.server"
+            touch "$ENV_FILE"
+
+            # WASP_DISABLE_JOBS — short-circuit every PgBoss worker.
+            if grep -q "^WASP_DISABLE_JOBS=" "$ENV_FILE" 2>/dev/null; then
+              sed -i "s|^WASP_DISABLE_JOBS=.*|WASP_DISABLE_JOBS=true|" "$ENV_FILE"
+            else
+              echo "WASP_DISABLE_JOBS=true" >> "$ENV_FILE"
+            fi
+
+            # WRITE_BLOCK_TENANT_OPS_DENYLIST — refuse non-GET proxyToTenant
+            # calls for the four prod tenant tailscale hostnames.
+            DENYLIST="alfred-alfred-david-mnbqn4jg,alfred-alfred-rapali-zsolt-mnczdq7a,alfred-alfred-miguel-mnd9thwe,alfred-alfred-raj313-mogta4ad"
+            if grep -q "^WRITE_BLOCK_TENANT_OPS_DENYLIST=" "$ENV_FILE" 2>/dev/null; then
+              sed -i "s|^WRITE_BLOCK_TENANT_OPS_DENYLIST=.*|WRITE_BLOCK_TENANT_OPS_DENYLIST=$DENYLIST|" "$ENV_FILE"
+            else
+              echo "WRITE_BLOCK_TENANT_OPS_DENYLIST=$DENYLIST" >> "$ENV_FILE"
+            fi
+
+            # WASP_WEB_CLIENT_URL / WASP_SERVER_URL for the preview domain.
+            if grep -q "^WASP_WEB_CLIENT_URL=" "$ENV_FILE" 2>/dev/null; then
+              sed -i "s|^WASP_WEB_CLIENT_URL=.*|WASP_WEB_CLIENT_URL=https://preview.alfred.black|" "$ENV_FILE"
+            else
+              echo "WASP_WEB_CLIENT_URL=https://preview.alfred.black" >> "$ENV_FILE"
+            fi
+            if grep -q "^WASP_SERVER_URL=" "$ENV_FILE" 2>/dev/null; then
+              sed -i "s|^WASP_SERVER_URL=.*|WASP_SERVER_URL=https://preview.alfred.black|" "$ENV_FILE"
+            else
+              echo "WASP_SERVER_URL=https://preview.alfred.black" >> "$ENV_FILE"
+            fi
+
+            echo "Preview env applied:"
+            grep -E "^(WASP_DISABLE_JOBS|WRITE_BLOCK_TENANT_OPS_DENYLIST|WASP_WEB_CLIENT_URL|WASP_SERVER_URL)=" "$ENV_FILE"
+          '
+
+      - name: Build Docker image and restart preview Wasp
+        run: |
+          ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=60 \
+              -i ~/.ssh/preview_key deploy@${{ secrets.PREVIEW_HOST }} '
+            set -e
+            cd /opt/alfred-saas/wasp-build
+            docker build -t alfred-saas:latest .
+            cd /opt/alfred-saas
+
+            # Clean up stale app containers from a previous failed deploy.
+            docker ps -a --filter "name=alfred-saas-app-1" -q | xargs -r docker rm -f
+
+            # Stop the old app container BEFORE pushing schema.
+            docker compose stop app || true
+            docker compose rm -f app || true
+
+            # Push the new schema using a one-shot container from the new image.
+            for attempt in 1 2 3; do
+              if docker compose run --rm --no-deps --entrypoint "" app \
+                   npx prisma db push --schema="../db/schema.prisma" --skip-generate --accept-data-loss; then
+                echo "prisma db push succeeded (attempt $attempt)"
+                break
+              fi
+              if [ $attempt -eq 3 ]; then
+                echo "prisma db push failed after 3 attempts"
+                exit 1
+              fi
+              echo "prisma db push failed (attempt $attempt), retrying in 10s..."
+              sleep 10
+            done
+
+            # Start the app with the schema in place. systemd-managed Caddy
+            # in front handles TLS for preview.alfred.black.
+            docker compose up -d --force-recreate app
+            echo "Preview Wasp app restarted"
+          '
+
+      - name: Update Caddy on preview host
+        run: |
+          scp -i ~/.ssh/preview_key deploy/Caddyfile deploy@${{ secrets.PREVIEW_HOST }}:/tmp/Caddyfile
+          ssh -i ~/.ssh/preview_key deploy@${{ secrets.PREVIEW_HOST }} 'sudo cp /tmp/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy && rm /tmp/Caddyfile && echo "Caddy reloaded"'
+
+      - name: Verify preview deployment
+        run: |
+          sleep 5
+          STATUS=$(ssh -i ~/.ssh/preview_key deploy@${{ secrets.PREVIEW_HOST }} \
+            'curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/auth/me')
+          echo "Preview health check status: $STATUS"
+          [ "$STATUS" = "200" ] || [ "$STATUS" = "401" ]
