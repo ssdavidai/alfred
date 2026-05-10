@@ -4,6 +4,10 @@ export async function healthMonitorJob(
   _args: unknown,
   context: any,
 ): Promise<void> {
+  if (process.env.WASP_DISABLE_JOBS === 'true') {
+    console.log('[WASP_DISABLE_JOBS] skipping healthMonitorJob');
+    return;
+  }
   const instances = await context.entities.Instance.findMany({
     where: { status: "running" },
   });

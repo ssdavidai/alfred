@@ -57,6 +57,10 @@ export async function reconcileComposioAutoConfigJob(
   errored: number;
   skipped: number;
 }> {
+  if (process.env.WASP_DISABLE_JOBS === 'true') {
+    console.log('[WASP_DISABLE_JOBS] skipping reconcileComposioAutoConfigJob');
+    return { attempted: 0, configured: 0, errored: 0, skipped: 0 };
+  }
   // Pull ACTIVE rows that need auto-config. Errored rows wait out the
   // ERROR_BACKOFF_MS window via lastSyncedAt; pending rows go through
   // immediately.
