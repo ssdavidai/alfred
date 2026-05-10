@@ -367,6 +367,13 @@ page BriefPage {
   component: import BriefPage from "@src/dashboard/BriefPage"
 }
 
+// /decisions — audit feed of every decision Alfred has made (M4 #861).
+route DecisionsRoute { path: "/decisions", to: DecisionsPage }
+page DecisionsPage {
+  authRequired: true,
+  component: import DecisionsPage from "@src/dashboard/DecisionsPage"
+}
+
 // /instincts — patterns Alfred has learned (M4 #860).
 route InstinctsRoute { path: "/instincts", to: InstinctsPage }
 page InstinctsPage {
