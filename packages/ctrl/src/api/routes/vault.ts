@@ -91,6 +91,18 @@ async function _withVaultPathLock<T>(relPath: string, fn: () => Promise<T>): Pro
 
 export const IGNORE_DIRS = new Set(["_templates", "_bases", "_docs", ".obsidian", "view", "dashboard"]);
 
+// ---------------------------------------------------------------------------
+// Title-index cache (#873).
+//
+// Per-tenant in-memory cache for GET /api/v1/vault/index. ctrl-api runs
+// one process per tenant, so the cache cardinality is 1; the Map keying
+// is preserved per the contract so the route stays trivially extendable
+// if a multi-tenant control-plane ctrl-api ever shares this code.
+// ---------------------------------------------------------------------------
+const VAULT_INDEX_TTL_MS = 60_000;
+const VAULT_INDEX_CACHE_KEY = "_self";
+const _vaultIndexCache = new Map<string, { at: number; body: unknown }>();
+
 const KNOWN_TYPES = [
   "person", "org", "project", "task", "event", "note", "location",
   "process", "account", "asset", "conversation", "input", "run",
@@ -468,6 +480,51 @@ export function registerVaultRoutes(): void {
   // --- READ OPERATIONS: direct filesystem (fast, no docker overhead) ---
 
   // Vault context — returns all records grouped by type
+  // ---------------------------------------------------------------------------
+  // Vault title-index (#873)
+  //
+  // Lightweight enumeration of every record's display title + slug + type so
+  // the SaaS Markdown renderer can resolve [[wikilinks]] without one HTTP
+  // call per link. Walks the same .md set as /context, but emits only what
+  // the live wikilink resolver needs:
+  //
+  //   { titles: [{ title, slug, type }, ...] }
+  //
+  // The response is cached in-memory for 60s. ctrl-api runs per-tenant so
+  // the cache cardinality is effectively 1; we still key the Map (per the
+  // #873 contract) so the shape can extend later if a control-plane
+  // ctrl-api ever proxies multiple tenants from a single process.
+  // ---------------------------------------------------------------------------
+  addRoute("GET", "/api/v1/vault/index", async ({ res }) => {
+    const cached = _vaultIndexCache.get(VAULT_INDEX_CACHE_KEY);
+    const now = Date.now();
+    if (cached && now - cached.at < VAULT_INDEX_TTL_MS) {
+      sendJson(res, 200, cached.body);
+      return;
+    }
+
+    const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+    const titles: Array<{ title: string; slug: string; type: string }> = [];
+    for (const relPath of files) {
+      const rec = readRecord(relPath);
+      if (!rec) continue;
+      // slug = path under vault root, no .md, forward-slash normalized
+      const slug = relPath.replace(/\\/g, "/").replace(/\.md$/, "");
+      // Prefer frontmatter title; fall back to name/subject; then stem.
+      const title = String(
+        rec.fm.title ?? rec.fm.name ?? rec.fm.subject ?? rec.stem,
+      );
+      const type = String(rec.fm.type ?? "");
+      if (!title) continue;
+      titles.push({ title, slug, type });
+    }
+    titles.sort((a, b) => a.title.localeCompare(b.title));
+
+    const body = { titles };
+    _vaultIndexCache.set(VAULT_INDEX_CACHE_KEY, { at: now, body });
+    sendJson(res, 200, body);
+  });
+
   addRoute("GET", "/api/v1/vault/context", async ({ res }) => {
     const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
     const byType: Record<string, Array<{ path: string; name: string; status: string }>> = {};
