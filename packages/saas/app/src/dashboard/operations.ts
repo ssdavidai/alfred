@@ -1054,14 +1054,45 @@ export const getMattersIndex = async (
   count: number;
 }> => {
   if (!context.user) throw new HttpError(401, "Not authenticated");
+  const instance = await getUserInstance(context);
+  // Prefer the rich /api/v1/matters aggregator if the tenant ctrl-api has it.
   try {
-    const instance = await getUserInstance(context);
     const data: any = await proxyToTenant(instance, { path: "/api/v1/matters" });
     const matters = Array.isArray(data?.matters) ? data.matters : [];
-    return { matters, count: Number(data?.count ?? matters.length) };
+    if (matters.length > 0 || data?.matters !== undefined) {
+      return { matters, count: Number(data?.count ?? matters.length) };
+    }
+  } catch (err) {
+    // 404 from older ctrl-api builds → fall through to vault list shim
+    console.warn(
+      "[getMattersIndex] /api/v1/matters not available, falling back to /vault/list/matter:",
+      (err as Error)?.message,
+    );
+  }
+  // Fallback: list raw matter/* records from the existing vault endpoint.
+  // Counts are unknown (0) until the tenant runs a ctrl-api with the aggregator.
+  try {
+    const list: any = await proxyToTenant(instance, {
+      path: "/api/v1/vault/list/matter",
+    });
+    const results: any[] = Array.isArray(list?.results) ? list.results : [];
+    const matters = results.map((r) => {
+      const fm = r?.frontmatter ?? {};
+      const stem = String(r?.path ?? "").replace(/^matter\//, "").replace(/\.md$/, "");
+      return {
+        id: stem,
+        path: r?.path ?? "",
+        name: r?.name || stem,
+        summary: String(fm.description ?? fm.summary ?? ""),
+        last: String(fm.updated ?? fm.modified ?? fm.created ?? ""),
+        next: String(fm.next ?? fm.next_action ?? ""),
+        counts: { conversations: 0, decisions: 0, tasks: 0, drafts: 0 },
+      };
+    });
+    return { matters, count: matters.length };
   } catch (err) {
     console.warn(
-      "[getMattersIndex] proxyToTenant failed:",
+      "[getMattersIndex] vault/list/matter fallback failed:",
       (err as Error)?.message,
     );
     return { matters: [], count: 0 };
