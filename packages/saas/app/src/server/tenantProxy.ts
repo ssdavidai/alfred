@@ -34,6 +34,37 @@ export async function proxyToTenant(
     );
   }
 
+  // Preview-mode write blocker. Two modes:
+  //   WRITE_BLOCK_TENANT_OPS=true                    → block ALL non-GET writes
+  //   WRITE_BLOCK_TENANT_OPS_DENYLIST=host1,host2    → block writes only for
+  //                                                    listed tailscale hostnames
+  // The blanket switch takes precedence over the denylist.
+  const method = (options.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') {
+    if (process.env.WRITE_BLOCK_TENANT_OPS === 'true') {
+      throw new HttpError(
+        503,
+        `Preview-mode write blocker — refusing ${method} ${options.path}`,
+      );
+    }
+    const denylist = process.env.WRITE_BLOCK_TENANT_OPS_DENYLIST;
+    if (denylist) {
+      const blocked = denylist
+        .split(',')
+        .map((h) => h.trim())
+        .filter(Boolean);
+      if (
+        instance.tailscaleHostname &&
+        blocked.includes(instance.tailscaleHostname)
+      ) {
+        throw new HttpError(
+          503,
+          `Preview-mode write blocker — refusing ${method} ${options.path}`,
+        );
+      }
+    }
+  }
+
   const apiKey = decryptApiKey(instance.apiKey);
   // Route through Cloudflare tunnel (subdomainUrl) since the Wasp
   // container runs on a Docker bridge network without Tailscale access.
