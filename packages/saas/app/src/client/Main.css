@@ -65,54 +65,130 @@
   @apply !border-b-muted;
 }
 
-@layer base {
-  :root {
-    /* Dark-only mode: Alfred Black */
-    --background: 0 0% 4%;           /* #0A0A0A */
-    --foreground: 30 18% 90%;        /* #E8E4DE */
-    --card: 0 0% 10%;                /* #1A1A1A */
-    --card-foreground: 30 18% 90%;
-    --card-accent: 0 0% 12%;
-    --card-accent-foreground: 30 18% 90%;
-    --card-subtle: 0 0% 8%;
-    --card-subtle-foreground: 30 18% 90%;
-    --popover: 0 0% 10%;
-    --popover-foreground: 30 18% 90%;
-    --primary: 32 29% 55%;           /* #B8976A gold */
-    --primary-foreground: 0 0% 4%;
-    --secondary: 32 29% 55%;
-    --secondary-foreground: 0 0% 4%;
-    --secondary-muted: 32 20% 40%;
-    --secondary-muted-foreground: 30 18% 90%;
-    --muted: 0 0% 14%;
-    --muted-foreground: 30 4% 53%;   /* #8A8680 */
-    --accent: 32 29% 55%;
-    --accent-foreground: 0 0% 4%;
-    --destructive: 0 62.8% 63%;
-    --destructive-foreground: 0 0% 98%;
-    --success: 141 71% 48%;
-    --success-foreground: 0 0% 98%;
-    --warning: 36 100% 50%;
-    --warning-foreground: 0 0% 98%;
-    --border: 32 29% 55% / 0.15;
-    --input: 32 29% 55% / 0.15;
-    --ring: 32 29% 55%;
-    --radius: 0.125rem;
-  }
+/*
+ * Alfred Black — design tokens.
+ * Wool black, ivory paper, ink, a single brass accent. No second accent. Ever.
+ * Type: Playfair Display (Didone-adjacent), EB Garamond (body), JetBrains Mono (marginalia).
+ */
+
+:root {
+  --radius: 0px;
+
+  /* Material */
+  --paper: oklch(0.953 0.018 80);          /* #F4EFE6 ivory */
+  --wool: oklch(0.16 0.005 60);            /* #0B0B0B wool black */
+  --ink: oklch(0.22 0.004 60);             /* #1A1A1A */
+  --brass: oklch(0.62 0.09 75);            /* #A8843A — used once per screen */
+  --rule: oklch(0.22 0.004 60 / 0.55);
+  --marginalia: oklch(0.40 0.005 60);
+
+  /* Semantic — light/paper mode is default */
+  --background: var(--paper);
+  --foreground: var(--ink);
+  --card: var(--paper);
+  --card-foreground: var(--ink);
+  --card-accent: var(--paper);
+  --card-accent-foreground: var(--ink);
+  --card-subtle: var(--paper);
+  --card-subtle-foreground: var(--ink);
+  --popover: var(--paper);
+  --popover-foreground: var(--ink);
+  --primary: var(--ink);
+  --primary-foreground: var(--paper);
+  --secondary: oklch(0.92 0.014 80);
+  --secondary-foreground: var(--ink);
+  --secondary-muted: oklch(0.85 0.012 80);
+  --secondary-muted-foreground: var(--ink);
+  --muted: oklch(0.92 0.014 80);
+  --muted-foreground: var(--marginalia);
+  --accent: var(--brass);
+  --accent-foreground: var(--paper);
+  --destructive: oklch(0.42 0.12 30);
+  --destructive-foreground: var(--paper);
+  --success: oklch(0.55 0.13 150);
+  --success-foreground: var(--paper);
+  --warning: oklch(0.72 0.14 75);
+  --warning-foreground: var(--paper);
+  --border: oklch(0.22 0.004 60 / 0.18);
+  --input: oklch(0.22 0.004 60 / 0.25);
+  --ring: var(--brass);
+  --sidebar: var(--paper);
+  --sidebar-foreground: var(--ink);
+  --sidebar-primary: var(--ink);
+  --sidebar-primary-foreground: var(--paper);
+  --sidebar-accent: oklch(0.92 0.014 80);
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: oklch(0.22 0.004 60 / 0.18);
+  --sidebar-ring: var(--brass);
+  --chart-1: var(--ink);
+  --chart-2: var(--marginalia);
+  --chart-3: var(--brass);
+  --chart-4: oklch(0.5 0.005 60);
+  --chart-5: oklch(0.7 0.005 60);
+}
+
+.dark {
+  /* Re-tune material so ink/paper invert but brass stays the same */
+  --paper: oklch(0.16 0.005 60);          /* wool becomes the page */
+  --ink: oklch(0.94 0.012 80);            /* ivory becomes the type */
+  /* --wool stays the same dark wool — .wool surfaces are always dark by design */
+  --rule: oklch(0.94 0.012 80 / 0.22);
+  --marginalia: oklch(0.70 0.008 80);
+
+  --background: var(--paper);
+  --foreground: var(--ink);
+  --card: oklch(0.20 0.005 60);
+  --card-foreground: var(--ink);
+  --card-accent: oklch(0.22 0.005 60);
+  --card-accent-foreground: var(--ink);
+  --card-subtle: oklch(0.18 0.005 60);
+  --card-subtle-foreground: var(--ink);
+  --popover: oklch(0.20 0.005 60);
+  --popover-foreground: var(--ink);
+  --primary: var(--ink);
+  --primary-foreground: var(--paper);
+  --secondary: oklch(0.22 0.005 60);
+  --secondary-foreground: var(--ink);
+  --secondary-muted: oklch(0.28 0.005 60);
+  --secondary-muted-foreground: var(--ink);
+  --muted: oklch(0.22 0.005 60);
+  --muted-foreground: var(--marginalia);
+  --border: oklch(0.94 0.012 80 / 0.18);
+  --input: oklch(0.94 0.012 80 / 0.25);
+  --sidebar: var(--paper);
+  --sidebar-foreground: var(--ink);
+  --sidebar-accent: oklch(0.22 0.005 60);
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: oklch(0.94 0.012 80 / 0.18);
+}
+
+/* Re-grain paper for dark — lighter speckle on dark surface */
+.dark .paper {
+  background-color: var(--paper);
+  background-image:
+    radial-gradient(oklch(0.94 0.012 80 / 0.04) 1px, transparent 1px),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' seed='3'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0 0.06 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  background-size: 4px 4px, 240px 240px;
 }
 
 @layer base {
   * {
-    @apply border-border;
+    border-color: var(--border);
+  }
+  html, body {
+    background-color: var(--background);
+    color: var(--foreground);
   }
   body {
-    @apply bg-background text-foreground font-sans font-light antialiased;
+    font-family: var(--font-body, "EB Garamond", Georgia, serif);
+    font-feature-settings: "kern", "liga", "onum";
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
   ::selection {
-    background: rgba(184, 151, 106, 0.3);
-    color: #F5F1EB;
+    background: var(--brass);
+    color: var(--paper);
   }
 }
 
