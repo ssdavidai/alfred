@@ -107,6 +107,27 @@ page StaffPage {
   component: import StaffPage from "@src/landing-page/StaffPage"
 }
 
+// Public marketing — companion / voice / sms / voice-and-tone (#849). No authRequired.
+route CompanionRoute { path: "/companion", to: CompanionPage }
+page CompanionPage {
+  component: import CompanionPage from "@src/landing-page/CompanionPage"
+}
+
+route VoiceRoute { path: "/voice", to: VoicePage }
+page VoicePage {
+  component: import VoicePage from "@src/landing-page/VoicePage"
+}
+
+route SmsRoute { path: "/sms", to: SmsPage }
+page SmsPage {
+  component: import SmsPage from "@src/landing-page/SmsPage"
+}
+
+route VoiceAndToneRoute { path: "/voice-and-tone", to: VoiceAndTonePage }
+page VoiceAndTonePage {
+  component: import VoiceAndTonePage from "@src/landing-page/VoiceAndTonePage"
+}
+
 // ============================================================
 // Auth Pages
 // ============================================================
