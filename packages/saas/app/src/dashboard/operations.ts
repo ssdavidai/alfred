@@ -569,7 +569,15 @@ export const updateAgentModel: UpdateAgentModel<
 // ============================================================
 // Workspace Files
 // ============================================================
-const WORKSPACE_FILES = ["SOUL.md", "USER.md", "MEMORY.md", "AGENTS.md", "TOOLS.md"];
+const WORKSPACE_FILES = [
+  "SOUL.md",
+  "USER.md",
+  "MEMORY.md",
+  "AGENTS.md",
+  "TOOLS.md",
+  // M2-D #854 — household editor + M6 #867 standing-rules editor in /study.
+  "RULES.md",
+];
 
 export const getWorkspaceFile: GetWorkspaceFile<
   { filename: string },

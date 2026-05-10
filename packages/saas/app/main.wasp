@@ -367,6 +367,20 @@ page BriefPage {
   component: import BriefPage from "@src/dashboard/BriefPage"
 }
 
+// /study — unified back office (M6 #867 + #868).
+route StudyRoute { path: "/study", to: StudyPage }
+page StudyPage {
+  authRequired: true,
+  component: import StudyPage from "@src/dashboard/StudyPage"
+}
+
+// Legacy /back-office redirect (CommandCenterPage no longer canonical).
+route BackOfficeRoute { path: "/back-office", to: BackOfficePage }
+page BackOfficePage {
+  authRequired: true,
+  component: import BackOfficePage from "@src/dashboard/BackOfficeRedirect"
+}
+
 // /claude — Claude Setup, restyled (M5 #866).
 route ClaudeRoute { path: "/claude", to: ClaudePage }
 page ClaudePage {

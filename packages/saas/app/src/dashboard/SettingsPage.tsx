@@ -1,6 +1,6 @@
 import { useState, useEffect, Suspense } from "react";
 import { useAuth } from "wasp/client/auth";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, Navigate } from "react-router-dom";
 import {
   useQuery,
   getCustomerPortalUrl,
@@ -71,7 +71,13 @@ const VALID_TAB_IDS = new Set(SETTINGS_TABS.map((t) => t.id));
 /*  Unified Settings Page                                               */
 /* ------------------------------------------------------------------ */
 
+// M6 #867 — /dashboard/settings redirects to /study#settings. The legacy
+// implementation is preserved as LegacySettingsPage.
 export default function SettingsPage() {
+  return <Navigate to="/study#settings" replace />;
+}
+
+function LegacySettingsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get("tab") || "services";
   const activeTab = VALID_TAB_IDS.has(tabParam) ? tabParam : "services";
