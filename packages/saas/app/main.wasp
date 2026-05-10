@@ -367,6 +367,13 @@ page BriefPage {
   component: import BriefPage from "@src/dashboard/BriefPage"
 }
 
+// /claude — Claude Setup, restyled (M5 #866).
+route ClaudeRoute { path: "/claude", to: ClaudePage }
+page ClaudePage {
+  authRequired: true,
+  component: import ClaudePage from "@src/dashboard/ClaudePage"
+}
+
 // /channels — live channels (M5 #864).
 route ChannelsRoute { path: "/channels", to: ChannelsPage }
 page ChannelsPage {
