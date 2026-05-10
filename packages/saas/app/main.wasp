@@ -503,6 +503,14 @@ query getVaultRecord {
   entities: [Instance]
 }
 
+// XC #873 — title-index for live wikilink resolution in the Markdown
+// component. Wraps tenant ctrl-api GET /api/v1/vault/index (60s in-memory
+// cached on the tenant side).
+query getVaultTitleIndex {
+  fn: import { getVaultTitleIndex } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
 query getVaultGraph {
   fn: import { getVaultGraph } from "@src/dashboard/operations",
   entities: [Instance]

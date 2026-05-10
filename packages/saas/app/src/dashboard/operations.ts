@@ -1008,3 +1008,33 @@ export const submitFactCorrections: any = async (
 
   return { status: "brief_generating" };
 };
+
+// ============================================================
+// Vault title-index (#873) — wraps GET /api/v1/vault/index on the
+// tenant-side ctrl-api. Consumed by client/components/ab/Markdown.tsx
+// for live wikilink resolution.
+// ============================================================
+
+export const getVaultTitleIndex = async (
+  _args: void,
+  context: any,
+): Promise<{ titles: Array<{ title: string; slug: string; type: string }> }> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  try {
+    const instance = await getUserInstance(context);
+    const data: any = await proxyToTenant(instance, {
+      path: "/api/v1/vault/index",
+    });
+    const titles = Array.isArray(data?.titles) ? data.titles : [];
+    return { titles };
+  } catch (err) {
+    // Older ctrl-api builds may not have the route yet; degrade quietly so
+    // the Markdown renderer simply doesn't get a resolver and falls back
+    // to its existing "no-prop" behaviour. The caller is fine without it.
+    console.warn(
+      "[getVaultTitleIndex] proxyToTenant failed:",
+      (err as Error)?.message,
+    );
+    return { titles: [] };
+  }
+};

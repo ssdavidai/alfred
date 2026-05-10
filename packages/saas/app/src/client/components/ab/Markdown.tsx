@@ -2,20 +2,33 @@
 //
 // Wikilink resolution is deliberately decoupled here. Two optional props:
 //   onLink(title)        — fires when the user clicks a wikilink button.
-//   resolveTitle(title)  — placeholder hook for the live title-index lookup
-//                          (XC #873). When supplied, the resolved value is
-//                          surfaced via the button's `data-resolved` attr so
-//                          callers can later style "exists" vs "broken" links.
-//                          Until #873 lands, callers should not pass this prop;
-//                          the API is here so it can be wired in without a
-//                          breaking change.
+//   resolveTitle(title)  — title → slug lookup. When supplied, the resolved
+//                          value is surfaced via the button's `data-resolved`
+//                          attr so callers can later style "exists" vs
+//                          "broken" links.
+//
+// Default resolver: when neither prop is supplied, Markdown auto-wires a
+// resolver against the live `getVaultTitleIndex` Wasp query (XC #873) so
+// any rendered tenant content gets working wikilinks for free. Static
+// contexts (marketing pages, tests, anywhere outside the SaaS app) can
+// pass `resolveTitle={undefined}` explicitly OR set `useLiveResolver={false}`
+// to opt out.
 
 import type { ReactNode } from "react";
+import { useMemo } from "react";
+import { useNavigate } from "react-router-dom";
+import { useQuery, getVaultTitleIndex } from "wasp/client/operations";
 
 export type MarkdownProps = {
   source: string;
   onLink?: (title: string) => void;
   resolveTitle?: (title: string) => string | undefined;
+  /**
+   * Opt out of the default getVaultTitleIndex-backed resolver. Set this to
+   * false in any context that doesn't run inside an authenticated Wasp
+   * client (e.g., a static marketing preview).
+   */
+  useLiveResolver?: boolean;
 };
 
 function inline(
@@ -71,7 +84,101 @@ function inline(
   return out;
 }
 
-export function Markdown({ source, onLink, resolveTitle }: MarkdownProps) {
+// ---------------------------------------------------------------------------
+// Default live resolver
+//
+// Wraps useQuery(getVaultTitleIndex) into the same (title) => slug | undefined
+// shape Markdown's resolveTitle prop expects. Lookup is case-insensitive on
+// the title; the slug is what we'd navigate to (`/dashboard/vault/<slug>`)
+// when the wikilink is clicked.
+// ---------------------------------------------------------------------------
+
+function useLiveTitleIndex(): {
+  resolve: (title: string) => string | undefined;
+  navigateToSlug: (slug: string) => void;
+} {
+  const navigate = useNavigate();
+  // Marketing pages still mount this hook because Markdown is also used by
+  // FirstBriefPage (auth) and would-be future static contexts. The Wasp
+  // query short-circuits to 401 on unauth — we swallow it via getVaultTitleIndex's
+  // try/catch, which returns { titles: [] } so this hook degrades gracefully.
+  const { data } = useQuery(getVaultTitleIndex, undefined, {
+    refetchInterval: false,
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  const lookup = useMemo(() => {
+    const titles = (data?.titles ?? []) as Array<{
+      title: string;
+      slug: string;
+    }>;
+    const map = new Map<string, string>();
+    for (const t of titles) {
+      if (t?.title) map.set(t.title.toLowerCase().trim(), t.slug);
+    }
+    return map;
+  }, [data]);
+
+  const resolve = (title: string): string | undefined => {
+    if (!title) return undefined;
+    return lookup.get(title.toLowerCase().trim());
+  };
+
+  const navigateToSlug = (slug: string) => {
+    navigate(`/dashboard/vault/${slug}`);
+  };
+
+  return { resolve, navigateToSlug };
+}
+
+// Static (no-resolver) variant for contexts that don't run inside a
+// router + Wasp auth client. Callers explicitly opt in by setting
+// `useLiveResolver={false}`.
+function MarkdownStatic({
+  source,
+  onLink,
+  resolveTitle,
+}: Omit<MarkdownProps, "useLiveResolver">) {
+  return renderBlocks(source, onLink, resolveTitle);
+}
+
+// Live variant — auto-resolves wikilinks against getVaultTitleIndex.
+function MarkdownLive({
+  source,
+  onLink,
+  resolveTitle,
+}: Omit<MarkdownProps, "useLiveResolver">) {
+  const live = useLiveTitleIndex();
+  // Caller-supplied resolveTitle wins; fall back to the live one. When
+  // neither resolveTitle nor onLink is supplied, we auto-wire onLink so
+  // [[wikilink]] clicks navigate to /dashboard/vault/<slug> when known.
+  const effectiveResolve = resolveTitle ?? live.resolve;
+  const effectiveOnLink =
+    onLink ??
+    ((title: string) => {
+      const slug = live.resolve(title);
+      if (slug) live.navigateToSlug(slug);
+    });
+  return renderBlocks(source, effectiveOnLink, effectiveResolve);
+}
+
+export function Markdown(props: MarkdownProps) {
+  // Hooks must run unconditionally — branch on the prop and pick a variant.
+  // The two variants have identical render output; only the resolver hook
+  // call differs.
+  if (props.useLiveResolver === false) {
+    return <MarkdownStatic source={props.source} onLink={props.onLink} resolveTitle={props.resolveTitle} />;
+  }
+  return <MarkdownLive source={props.source} onLink={props.onLink} resolveTitle={props.resolveTitle} />;
+}
+
+function renderBlocks(
+  source: string,
+  effectiveOnLink: ((title: string) => void) | undefined,
+  effectiveResolve: ((title: string) => string | undefined) | undefined,
+): ReactNode {
+
   const lines = source.replace(/\r\n/g, "\n").split("\n");
   const blocks: ReactNode[] = [];
   let i = 0;
@@ -89,20 +196,20 @@ export function Markdown({ source, onLink, resolveTitle }: MarkdownProps) {
       if (lvl === 1) {
         blocks.push(
           <h1 key={key++} className="font-display text-4xl tracking-tight leading-[1.05] mb-4">
-            {inline(text, onLink, resolveTitle)}
+            {inline(text, effectiveOnLink, effectiveResolve)}
           </h1>,
         );
       } else if (lvl === 2) {
         blocks.push(
           <h2 key={key++} className="font-mono text-[10px] uppercase tracking-[0.22em] mt-8 mb-3"
               style={{ color: "var(--brass)" }}>
-            {inline(text, onLink, resolveTitle)}
+            {inline(text, effectiveOnLink, effectiveResolve)}
           </h2>,
         );
       } else {
         blocks.push(
           <h3 key={key++} className="font-display italic text-xl mt-6 mb-2">
-            {inline(text, onLink, resolveTitle)}
+            {inline(text, effectiveOnLink, effectiveResolve)}
           </h3>,
         );
       }
@@ -123,7 +230,7 @@ export function Markdown({ source, onLink, resolveTitle }: MarkdownProps) {
         <blockquote key={key++}
           className="border-l pl-5 my-5 font-display italic text-[19px] leading-snug"
           style={{ borderColor: "var(--brass)", color: "var(--ink)" }}>
-          {inline(buf.join(" "), onLink, resolveTitle)}
+          {inline(buf.join(" "), effectiveOnLink, effectiveResolve)}
         </blockquote>,
       );
       continue;
@@ -149,7 +256,7 @@ export function Markdown({ source, onLink, resolveTitle }: MarkdownProps) {
             {rows.map((r, ri) => (
               <tr key={ri} className="border-b border-rule">
                 {r.map((c, ci) => (
-                  <td key={ci} className="py-3 pr-4 text-[15px] align-top">{inline(c, onLink, resolveTitle)}</td>
+                  <td key={ci} className="py-3 pr-4 text-[15px] align-top">{inline(c, effectiveOnLink, effectiveResolve)}</td>
                 ))}
               </tr>
             ))}
@@ -169,7 +276,7 @@ export function Markdown({ source, onLink, resolveTitle }: MarkdownProps) {
           {items.map((it, j) => (
             <li key={j} className="grid grid-cols-[14px_1fr] gap-3 font-body text-[16px] leading-snug">
               <span style={{ color: "var(--brass)" }}>·</span>
-              <span>{inline(it, onLink, resolveTitle)}</span>
+              <span>{inline(it, effectiveOnLink, effectiveResolve)}</span>
             </li>
           ))}
         </ul>,
@@ -183,7 +290,7 @@ export function Markdown({ source, onLink, resolveTitle }: MarkdownProps) {
     }
     blocks.push(
       <p key={key++} className="font-body text-[17px] leading-[1.6] my-3">
-        {inline(buf.join(" "), onLink, resolveTitle)}
+        {inline(buf.join(" "), effectiveOnLink, effectiveResolve)}
       </p>,
     );
   }
