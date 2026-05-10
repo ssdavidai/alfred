@@ -1014,6 +1014,14 @@ job reconcileComposioAutoConfig {
 // ============================================================
 // Tools (Gateway Allowlist Inspector)
 // ============================================================
+// /tools — restyled in the AB design language (M5 #865). The legacy
+// /dashboard/tools page redirects here.
+route ToolsRoute2 { path: "/tools", to: ToolsPage2 }
+page ToolsPage2 {
+  authRequired: true,
+  component: import ToolsPage2 from "@src/tools/ToolsPage2"
+}
+
 route ToolsRoute { path: "/dashboard/tools", to: ToolsPage }
 page ToolsPage {
   authRequired: true,

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { useQuery, getAllowedTools } from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
 import SpotlightCard from "../components/ui/SpotlightCard";
@@ -127,7 +127,13 @@ function appStatusLabel(app: AppEntry): string {
 // Main page
 // ---------------------------------------------------------------------------
 
+// M5 #865 — /dashboard/tools redirects to /tools. The legacy
+// implementation is preserved as LegacyToolsPage.
 export default function ToolsPage() {
+  return <Navigate to="/tools" replace />;
+}
+
+function LegacyToolsPage() {
   const { data, isLoading, error, refetch } = useQuery(getAllowedTools);
   const resp = data as ToolsResponse | undefined;
   const [search, setSearch] = useState("");
