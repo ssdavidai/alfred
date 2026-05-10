@@ -1016,6 +1016,74 @@ export const submitFactCorrections: any = async (
 // ============================================================
 
 // ============================================================
+// Matters aggregator (#859) — GET /api/v1/matters[/:id] on tenant
+// ctrl-api. The aggregator walks the vault once and surfaces a per-
+// matter tally (counts of conversations/decisions/tasks/drafts) plus
+// — for the detail endpoint — a recent-decisions list and a
+// per-category vault link list. Both endpoints degrade to empty
+// payloads on tenant errors so older ctrl-api builds don't break the
+// page.
+// ============================================================
+
+export const getMattersIndex = async (
+  _args: void,
+  context: any,
+): Promise<{
+  matters: Array<{
+    id: string;
+    path: string;
+    name: string;
+    summary: string;
+    last: string;
+    next: string;
+    counts: {
+      conversations: number;
+      decisions: number;
+      tasks: number;
+      drafts: number;
+    };
+  }>;
+  count: number;
+}> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  try {
+    const instance = await getUserInstance(context);
+    const data: any = await proxyToTenant(instance, { path: "/api/v1/matters" });
+    const matters = Array.isArray(data?.matters) ? data.matters : [];
+    return { matters, count: Number(data?.count ?? matters.length) };
+  } catch (err) {
+    console.warn(
+      "[getMattersIndex] proxyToTenant failed:",
+      (err as Error)?.message,
+    );
+    return { matters: [], count: 0 };
+  }
+};
+
+export const getMatterDetail = async (
+  args: { id: string },
+  context: any,
+): Promise<{
+  matter: any | null;
+}> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  if (!args?.id) throw new HttpError(400, "id required");
+  try {
+    const instance = await getUserInstance(context);
+    const data: any = await proxyToTenant(instance, {
+      path: `/api/v1/matters/${encodeURIComponent(args.id)}`,
+    });
+    return { matter: data?.matter ?? null };
+  } catch (err) {
+    console.warn(
+      "[getMatterDetail] proxyToTenant failed:",
+      (err as Error)?.message,
+    );
+    return { matter: null };
+  }
+};
+
+// ============================================================
 // Daily brief (#857) — proxies GET /api/v1/brief/today on the tenant-
 // side ctrl-api. The endpoint reads today's most-recent vault digest
 // record (DailyDigestWorkflow output) and returns sections + small_matter

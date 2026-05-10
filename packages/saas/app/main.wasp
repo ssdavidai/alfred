@@ -367,6 +367,19 @@ page BriefPage {
   component: import BriefPage from "@src/dashboard/BriefPage"
 }
 
+// /matters + /matters/:id — long-running concerns (M4 #859).
+route MattersRoute { path: "/matters", to: MattersPage }
+page MattersPage {
+  authRequired: true,
+  component: import MattersPage from "@src/dashboard/MattersPage"
+}
+
+route MatterDetailRoute { path: "/matters/:id", to: MatterDetailPage }
+page MatterDetailPage {
+  authRequired: true,
+  component: import MatterDetailPage from "@src/dashboard/MatterDetailPage"
+}
+
 route DashboardRoute { path: "/dashboard", to: DashboardPage }
 page DashboardPage {
   authRequired: true,
@@ -530,6 +543,24 @@ query getVaultTitleIndex {
 // (DailyDigestWorkflow output) into sections + small_matter.
 query getDailyBrief {
   fn: import { getDailyBrief } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// M4 #859 — matters aggregator. The /matters index + /matters/:id
+// detail surfaces, plus the /household placeholder backfill. Both
+// queries proxy to the new GET /api/v1/matters[/<id>] endpoints in
+// ctrl-api. Note: the existing tasks/operations.ts already exports
+// a `getMatters` wrapping a triage-style endpoint — we use a distinct
+// dashboard.getMatters here that hits the new /api/v1/matters route.
+// To avoid Wasp name collision, this query is named `getMattersIndex`
+// and the detail is `getMatterDetail`.
+query getMattersIndex {
+  fn: import { getMattersIndex } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getMatterDetail {
+  fn: import { getMatterDetail } from "@src/dashboard/operations",
   entities: [Instance]
 }
 

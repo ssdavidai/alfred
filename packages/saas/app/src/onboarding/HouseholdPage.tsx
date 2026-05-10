@@ -6,10 +6,10 @@
 //
 //   • Standing rules ← getWorkspaceFile("RULES.md") + updateWorkspaceFile
 //   • Chores ← getChores / pauseChore / resumeChore / deleteChore
-//   • Matters ← TODO #859 (placeholder until getMatters lands)
+//   • Matters ← getMattersIndex (M4 #859)
 
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import {
   useQuery,
   getWorkspaceFile,
@@ -18,6 +18,7 @@ import {
   pauseChore,
   resumeChore,
   deleteChore,
+  getMattersIndex,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 
@@ -389,19 +390,65 @@ function ChoresSection() {
 }
 
 // ---------------------------------------------------------------------------
-// Matters — placeholder until #859 lands a getMatters query.
+// Matters — live, sourced from getMattersIndex (#859).
 // ---------------------------------------------------------------------------
 
 function MattersSection() {
+  const { data, isLoading } = useQuery(getMattersIndex);
+  const matters = data?.matters ?? [];
+
   return (
     <Section title="Matters">
-      {/* TODO(#859): replace with live getMatters once the M4 backfill ships. */}
-      <p
-        className="font-body italic text-[15px]"
-        style={{ color: "var(--marginalia)" }}
-      >
-        Loading… (Alfred's matters editor lands with #859.)
-      </p>
+      {isLoading ? (
+        <p
+          className="font-body italic text-[15px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Reading the file…
+        </p>
+      ) : matters.length === 0 ? (
+        <p
+          className="font-body italic text-[15px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Nothing yet. Every long-running concern you ask me to keep will
+          gather here.
+        </p>
+      ) : (
+        <ul className="space-y-3">
+          {matters.map((m) => (
+            <li
+              key={m.id}
+              className="grid grid-cols-[1fr_auto] gap-4 py-3 border-b border-rule items-baseline"
+            >
+              <div>
+                <Link
+                  to={`/matters/${encodeURIComponent(m.id)}`}
+                  className="font-body text-[16px]"
+                  style={{ color: "var(--ink)" }}
+                >
+                  {m.name}
+                </Link>
+                {m.summary && (
+                  <p
+                    className="font-body text-[14px] mt-1"
+                    style={{ color: "var(--marginalia)" }}
+                  >
+                    {m.summary}
+                  </p>
+                )}
+              </div>
+              <span
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--brass)" }}
+              >
+                {m.counts.conversations + m.counts.decisions + m.counts.tasks + m.counts.drafts}{" "}
+                items
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </Section>
   );
 }
