@@ -20,6 +20,12 @@ app AlfredSaaS {
     "<meta property='og:description' content='Agentic butler for people who have too many tabs open in their head.' />",
     "<meta property='og:image' content='/images/alfred-logo-512.png' />",
 
+    // Alfred Black theme boot — sets the `dark` class on <html> before paint,
+    // avoiding a flash of incorrect theme. Source of truth for the body lives
+    // in src/client/lib/theme.tsx (export `themeBootScript`); keep these two
+    // copies in sync.
+    "<script>(function(){try{var t=localStorage.getItem('ab-theme');if(!t){t=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}var r=document.documentElement;if(t==='dark')r.classList.add('dark');r.style.colorScheme=t;}catch(e){}})();</script>",
+
     "<link rel='preconnect' href='https://fonts.googleapis.com' />",
     "<link rel='preconnect' href='https://fonts.gstatic.com' crossorigin />",
     "<link href='https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400&family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=JetBrains+Mono:wght@400;500;700;800&display=swap' rel='stylesheet' />",
