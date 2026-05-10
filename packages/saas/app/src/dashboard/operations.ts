@@ -1107,15 +1107,78 @@ export const getMatterDetail = async (
 }> => {
   if (!context.user) throw new HttpError(401, "Not authenticated");
   if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  // Prefer the rich aggregator endpoint when available.
   try {
-    const instance = await getUserInstance(context);
     const data: any = await proxyToTenant(instance, {
       path: `/api/v1/matters/${encodeURIComponent(args.id)}`,
     });
-    return { matter: data?.matter ?? null };
+    if (data?.matter) return { matter: data.matter };
   } catch (err) {
     console.warn(
-      "[getMatterDetail] proxyToTenant failed:",
+      "[getMatterDetail] /api/v1/matters not available, falling back to /vault/record:",
+      (err as Error)?.message,
+    );
+  }
+  // Fallback: read the raw matter record + its backlinks via existing endpoints.
+  try {
+    const cleanId = String(args.id).replace(/^matter\//, "").replace(/\.md$/, "");
+    const recordPath = `matter/${cleanId}.md`;
+    const rec: any = await proxyToTenant(instance, {
+      path: `/api/v1/vault/record/${encodeURIComponent(recordPath)}`,
+    });
+    if (!rec || (rec.error && !rec.body && !rec.frontmatter)) {
+      return { matter: null };
+    }
+    const fm = rec.frontmatter ?? {};
+    const body: string = String(rec.body ?? rec.content ?? "");
+    // Strip the YAML frontmatter from the body if it's included
+    const about = body.replace(/^---[\s\S]*?---\s*/, "").trim();
+    // Best-effort backlinks via the graph endpoint
+    let backlinks: any[] = [];
+    try {
+      const graph: any = await proxyToTenant(instance, {
+        path: `/api/v1/vault/graph?focus=${encodeURIComponent(recordPath)}`,
+      });
+      backlinks = Array.isArray(graph?.backlinks) ? graph.backlinks : [];
+    } catch {
+      /* ignore — graph is optional for fallback */
+    }
+    const bin = (type: string) =>
+      backlinks
+        .filter((b) => String(b?.type ?? b?.path ?? "").toLowerCase().includes(type))
+        .map((b) => ({ title: b.title ?? b.name ?? b.path, path: b.path, date: b.updated ?? b.created ?? "" }));
+    const conversations = bin("conversation");
+    const decisions = bin("decision");
+    const tasks = bin("task");
+    const drafts = bin("draft");
+    return {
+      matter: {
+        id: cleanId,
+        path: recordPath,
+        name: rec.name || fm.title || cleanId,
+        summary: String(fm.description ?? fm.summary ?? ""),
+        last: String(fm.updated ?? fm.modified ?? fm.created ?? ""),
+        next: String(fm.next ?? fm.next_action ?? ""),
+        about,
+        counts: {
+          conversations: conversations.length,
+          decisions: decisions.length,
+          tasks: tasks.length,
+          drafts: drafts.length,
+        },
+        recent_decisions: decisions.slice(0, 10).map((d: any) => ({
+          date: d.date ?? "",
+          label: d.title,
+          outcome: "Handled",
+          path: d.path,
+        })),
+        vault_by_category: { conversations, decisions, tasks, drafts },
+      },
+    };
+  } catch (err) {
+    console.warn(
+      "[getMatterDetail] vault/record fallback failed:",
       (err as Error)?.message,
     );
     return { matter: null };
