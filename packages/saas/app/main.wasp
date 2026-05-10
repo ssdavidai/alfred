@@ -360,6 +360,13 @@ page DeskPage {
   component: import DeskPage from "@src/dashboard/DeskPage"
 }
 
+// /brief — letterpress daily missive (M3 #857).
+route BriefRoute { path: "/brief", to: BriefPage }
+page BriefPage {
+  authRequired: true,
+  component: import BriefPage from "@src/dashboard/BriefPage"
+}
+
 route DashboardRoute { path: "/dashboard", to: DashboardPage }
 page DashboardPage {
   authRequired: true,
@@ -515,6 +522,14 @@ query getVaultRecord {
 // cached on the tenant side).
 query getVaultTitleIndex {
   fn: import { getVaultTitleIndex } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// M3 #857 — letterpress /brief page. Wraps tenant ctrl-api
+// GET /api/v1/brief/today which renders today's digest record
+// (DailyDigestWorkflow output) into sections + small_matter.
+query getDailyBrief {
+  fn: import { getDailyBrief } from "@src/dashboard/operations",
   entities: [Instance]
 }
 

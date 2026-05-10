@@ -39,6 +39,7 @@ import { registerContextRoutes } from "./routes/context.js";
 import { registerStewardRoutes } from "./routes/steward.js";
 import { registerVexaRoutes } from "./routes/vexa.js";
 import { registerAttentionRoutes } from "./routes/attention.js";
+import { registerBriefRoutes } from "./routes/brief.js";
 import { registerPlaneStewardWebhookRoute } from "./routes/webhooks/plane.js";
 import { registerVexaWebhookRoute } from "./routes/webhooks/vexa.js";
 
@@ -136,6 +137,7 @@ export function createApiServer(): http.Server {
   registerStewardRoutes();
   registerVexaRoutes();
   registerAttentionRoutes();
+  registerBriefRoutes();
   registerPlaneStewardWebhookRoute();
   registerVexaWebhookRoute();
 
