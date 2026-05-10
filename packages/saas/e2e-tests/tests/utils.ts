@@ -32,7 +32,12 @@ export const logUserIn = async ({ page, user }: { page: Page; user: User }) => {
     clickLogin,
   ]);
 
-  await page.waitForURL("**/demo-app");
+  // After auth Wasp redirects to /post-signup; PostSignupPage decides where
+  // to send the user next based on subscription state. For e2e we just wait
+  // until the redirect chain settles on a non-/login URL.
+  await page.waitForURL((url) => !url.pathname.endsWith("/login"), {
+    timeout: 15000,
+  });
 };
 
 export const signUserUp = async ({

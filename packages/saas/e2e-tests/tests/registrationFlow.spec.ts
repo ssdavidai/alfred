@@ -215,31 +215,22 @@ test("5. Checkout result page redirects to /setup, simulate Polar webhook", asyn
   ).toBeVisible({ timeout: 10000 });
 });
 
-test("6. Provisioning completes and user is redirected to dashboard", async () => {
+test("6. Provisioning completes and user is redirected to canonical home /desk", async () => {
   // The SetupPage polls getProvisioningStatus every 3s.
-  // After our mock returns status="running", it redirects to /dashboard after 2s delay.
-  // Total wait: ~3 polls * 3s + 2s redirect = ~11s max
+  // After our mock returns status="running", it redirects to /dashboard after a 2s delay.
+  // /dashboard is now a thin redirect to the canonical home /desk (M3 #856).
+  // Total wait: ~3 polls * 3s + 2s redirect + redirect hop = ~12s max
 
-  await page.waitForURL("**/dashboard", { timeout: 20000 });
-  expect(page.url()).toContain("/dashboard");
+  // Either the legacy /dashboard or the canonical /desk is acceptable as the
+  // first observed URL — but the page must settle on /desk.
+  await page.waitForURL(/\/(dashboard|desk)\b/, { timeout: 20000 });
+  await page.waitForURL("**/desk", { timeout: 10000 });
+  expect(page.url()).toContain("/desk");
 });
 
-test("7. Dashboard loads with correct content", async () => {
-  // Mock getDashboardData to avoid needing a real tenant instance
-  await clearRoute("**/operations/get-dashboard-data");
-  await page.route("**/operations/get-dashboard-data", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        containers: [],
-        vault: { total_records: 0, types: {} },
-        stats: {},
-      }),
-    });
-  });
-
+test("7. /dashboard redirects to /desk and renders the Desk page", async () => {
   // Ensure provisioning status continues to show "running"
+  await clearRoute("**/operations/get-provisioning-status");
   await page.route(
     "**/operations/get-provisioning-status",
     async (route) => {
@@ -267,52 +258,85 @@ test("7. Dashboard loads with correct content", async () => {
     },
   );
 
+  // Mock the queries DeskPage uses — empty queue + no activity
+  for (const op of [
+    "get-needs-attention",
+    "get-pending-approvals",
+    "get-recent-judgments",
+    "get-activity-feed",
+    "get-recent-steward-actions",
+  ]) {
+    await clearRoute(`**/operations/${op}`);
+    await page.route(`**/operations/${op}`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([]),
+      });
+    });
+  }
+
+  // Visit the legacy URL — DashboardPage renders <Navigate to="/desk" replace />.
   await page.goto("/dashboard");
-  await page.waitForURL("**/dashboard");
+  await page.waitForURL("**/desk", { timeout: 10000 });
+  expect(page.url()).toContain("/desk");
 
-  // Verify the Command Center heading is visible
-  await expect(
-    page.getByRole("heading", { name: "Command Center" }),
-  ).toBeVisible({ timeout: 10000 });
-
-  // Verify sidebar navigation items are present
-  await expect(page.getByRole("link", { name: "Home" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Vault" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Services" })).toBeVisible();
+  // The Desk eyebrow + empty-state copy is the canonical signature of /desk.
+  await expect(page.getByText("The Desk")).toBeVisible({ timeout: 10000 });
+  await expect(page.getByText(/Your desk is clear\./)).toBeVisible();
 });
 
-test("7b. Dashboard avoids misleading zero-state summary values while data is unavailable", async () => {
-  await clearRoute("**/operations/get-dashboard-data");
-  await page.route("**/operations/get-dashboard-data", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        health: null,
-        vault: null,
-        inbox: null,
-        devices: null,
-        containers: null,
-        instance: {
-          status: "running",
-          tier: "PREMIUM",
-          tailscaleHostname: null,
-          subdomainUrl: null,
-        },
-        gatewayToken: null,
-      }),
+test("7b. Legacy /dashboard sub-routes redirect to their canonical paths", async () => {
+  // Mock the queries each canonical landing page might issue so the redirect
+  // hop completes cleanly even without a real tenant.
+  for (const op of [
+    "get-needs-attention",
+    "get-pending-approvals",
+    "get-recent-judgments",
+    "get-activity-feed",
+    "get-recent-steward-actions",
+    "get-vault-title-index",
+    "get-vault-records",
+    "get-intuition-instincts",
+    "get-intuition-queue",
+    "get-chores",
+    "get-integration-catalog",
+    "get-connected-integrations",
+    "get-allowed-tools",
+    "get-tasks",
+    "get-ledger-entries",
+  ]) {
+    await clearRoute(`**/operations/${op}`);
+    await page.route(`**/operations/${op}`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([]),
+      });
     });
-  });
+  }
 
-  await page.goto("/dashboard");
-  await page.waitForURL("**/dashboard");
+  // Map: legacy URL  →  expected canonical URL after redirect.
+  const canonicalRedirects: Array<[string, string | RegExp]> = [
+    ["/dashboard", "**/desk"],
+    ["/dashboard/vault", "**/vault"],
+    ["/dashboard/integrations", "**/connections"],
+    ["/dashboard/intuition", "**/instincts"],
+    ["/dashboard/tasks", "**/chores"],
+    ["/dashboard/tools", "**/tools"],
+    ["/dashboard/command-center/steward-feed", "**/decisions"],
+    ["/back-office", "**/study"],
+    ["/onboarding", "**/awaken"],
+    // Hash-anchored redirects under /study
+    ["/dashboard/settings", /\/study(?:\?|#|$)/],
+    ["/dashboard/credentials", /\/study(?:\?|#|$)/],
+    ["/dashboard/api-docs", /\/study(?:\?|#|$)/],
+  ];
 
-  await expect(page.getByText("Loading records...")).toBeVisible();
-  await expect(page.getByText("Loading services...")).toBeVisible();
-  await expect(page.getByText("Loading devices...")).toBeVisible();
-  await expect(page.getByText("0 records")).not.toBeVisible();
-  await expect(page.getByText("0 paired")).not.toBeVisible();
-  await expect(page.getByText("UNKNOWN")).not.toBeVisible();
+  for (const [legacy, canonical] of canonicalRedirects) {
+    await page.goto(legacy);
+    await page.waitForURL(canonical as any, { timeout: 10000 });
+  }
 });
 
 test("8. Account page shows active subscription status", async () => {

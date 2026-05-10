@@ -58,7 +58,7 @@ To exit the local e2e tests, go back to the terminal were you started your tests
 ## Registration Flow E2E Tests
 
 The `registrationFlow.spec.ts` test covers the full happy-path registration flow:
-signup → payment → provisioning → dashboard access.
+signup → payment → provisioning → /desk (canonical home).
 
 ### What it tests
 
@@ -69,8 +69,13 @@ signup → payment → provisioning → dashboard access.
 5. Clicks "Hire Alfred" (checkout is mocked — no real Polar payment needed)
 6. Checkout success page redirects to setup
 7. Provisioning progress is shown (mocked to complete quickly)
-8. Dashboard loads with "Command Center" heading
-9. Account page shows "Alfred Premium" subscription status
+8. After provisioning, the legacy `/dashboard` route redirects to the
+   canonical `/desk` page (M3 #856) and the Desk page renders
+9. The full `/dashboard/*` → canonical URL map is verified
+   (`/vault`, `/connections`, `/instincts`, `/chores`, `/decisions`,
+   `/study#settings`, `/study#credentials`, `/study#api-keys`, `/study`,
+   `/awaken`, `/tools`)
+10. Account page shows "Alfred Premium" subscription status
 
 ### How to run
 
@@ -96,7 +101,7 @@ cd e2e-tests && npm run test:e2e:ui
 
 - **Polar checkout**: The `generateCheckoutSession` API call is intercepted via `page.route()` and returns a mock session URL pointing to `/checkout?status=success`
 - **Provisioning**: The `getProvisioningStatus` API is intercepted to simulate provisioning progress and completion without needing a real Hetzner instance
-- **Dashboard data**: The `getDashboardData` API is mocked to return empty data so the dashboard renders without a real tenant
+- **Desk queries**: `getNeedsAttention`, `getPendingApprovals`, `getRecentJudgments`, `getActivityFeed`, and `getRecentStewardActions` are mocked to empty arrays so `/desk` renders without a real tenant
 - **Subscription status**: The `auth/me` endpoint is augmented to include subscription fields for the account page test
 
 No Stripe CLI, Polar SDK, or real payment credentials are required.
