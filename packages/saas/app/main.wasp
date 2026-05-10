@@ -367,6 +367,15 @@ page BriefPage {
   component: import BriefPage from "@src/dashboard/BriefPage"
 }
 
+// /connections + /connect — Composio catalogue, restyled (M5 #863).
+route ConnectionsRoute { path: "/connections", to: ConnectionsPage }
+page ConnectionsPage {
+  authRequired: true,
+  component: import ConnectionsPage from "@src/integrations/ConnectionsPage"
+}
+
+route ConnectRedirectRoute { path: "/connect", to: ConnectionsPage }
+
 // /chores + /chores/:slug — recurring workflows (M4 #862).
 route ChoresRoute { path: "/chores", to: ChoresPage }
 page ChoresPage {
