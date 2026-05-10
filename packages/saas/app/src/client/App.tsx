@@ -23,6 +23,20 @@ export default function App() {
     );
   }, [location]);
 
+  // Pages that bring their own Frame (header + footer) — App-level
+  // NavBar/Footer must be suppressed to avoid double chrome.
+  const isFramedPage = useMemo(() => {
+    const p = location.pathname;
+    if (p === "/") return true;
+    return (
+      p === "/staff" ||
+      p === "/companion" ||
+      p === "/voice" ||
+      p === "/sms" ||
+      p === "/voice-and-tone"
+    );
+  }, [location]);
+
   const isDashboard = useMemo(() => {
     return location.pathname.startsWith("/dashboard");
   }, [location]);
@@ -44,13 +58,15 @@ export default function App() {
       !isDashboard &&
       !isAdminDashboard &&
       !isSetup &&
+      !isFramedPage &&
       location.pathname !== routes.LoginRoute.build() &&
       location.pathname !== routes.SignupRoute.build()
     );
-  }, [location, isDashboard, isAdminDashboard, isSetup]);
+  }, [location, isDashboard, isAdminDashboard, isSetup, isFramedPage]);
 
-  // Landing page already renders its own Footer — skip it there to avoid duplication
-  const isLandingPage = location.pathname === "/";
+  // Framed pages render their own Frame footer — skip the App-level Footer
+  // to avoid duplication. (Was previously hardcoded to just `/`.)
+  const isLandingPage = isFramedPage;
 
   useEffect(() => {
     if (location.hash) {
