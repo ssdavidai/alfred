@@ -34,6 +34,7 @@ from src.workflows.composio_reconnect_cleanup import (
     ComposioReconnectCleanupWorkflow,
 )
 from src.workflows.steward import StewardWorkflow
+from src.workflows.nightly_narrative import NightlyNarrativeWorkflow
 from src.workflows.meeting_capture import MeetingCaptureWorkflow
 from src.workflows.transcript_intake import TranscriptIntakeWorkflow
 from src.workflows.signals import SignalExtractWorkflow
@@ -487,6 +488,19 @@ from src.activities.calibration_reversal import (
     process_reversals_for_calibration,
 )
 
+# Nightly narrative (RFC #884) — model-written matter status paragraphs.
+# Activities back NightlyNarrativeWorkflow; the schedule lives in
+# scripts/register_schedules.py as ``al-nightly-narrative`` (cron 0 2 * * *).
+from src.activities.nightly_narrative import (
+    generate_matter_narrative as narrative_generate,
+    list_active_matters as narrative_list_active_matters,
+    load_matter_signals_24h as narrative_load_matter_signals_24h,
+    load_source_events as narrative_load_source_events,
+    load_task_transitions_24h as narrative_load_task_transitions_24h,
+    patch_matter_narrative as narrative_patch_matter_narrative,
+    read_matter_summary as narrative_read_matter_summary,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -516,6 +530,7 @@ _STATIC_WORKFLOWS = [
     FleetAuditWorkflow,
     ComposioReconnectCleanupWorkflow,
     StewardWorkflow,
+    NightlyNarrativeWorkflow,
     MeetingCaptureWorkflow,
     TranscriptIntakeWorkflow,
     SignalExtractWorkflow,
@@ -838,6 +853,18 @@ ALL_ACTIVITIES = [
     # registering unconditionally is safe; the schedule that triggers
     # ReversalCalibrationWorkflow is also registration-time-gated.
     process_reversals_for_calibration,
+    # Nightly narrative (RFC #884) — Workflow 7. One clerk call per
+    # matter to refresh ``current_state`` + ``as_of``. Schedule:
+    # ``al-nightly-narrative``, cron ``0 2 * * *``. Workflow is
+    # idempotent: matters with zero signals AND zero task transitions
+    # in the lookback window are skipped (no LLM, no patch).
+    narrative_list_active_matters,
+    narrative_read_matter_summary,
+    narrative_load_matter_signals_24h,
+    narrative_load_task_transitions_24h,
+    narrative_load_source_events,
+    narrative_generate,
+    narrative_patch_matter_narrative,
 ]
 
 
