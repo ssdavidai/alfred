@@ -40,9 +40,12 @@ import {
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { useTheme } from "../client/lib/theme";
+import { useAuth } from "wasp/client/auth";
+import { getCustomerPortalUrl } from "wasp/client/operations";
 
 const SECTIONS = [
   "settings",
+  "account",
   "credentials",
   "api-keys",
   "audit",
@@ -52,6 +55,7 @@ const SECTIONS = [
 type Section = (typeof SECTIONS)[number];
 const SECTION_LABEL: Record<Section, string> = {
   settings: "Settings",
+  account: "Account",
   credentials: "Credentials",
   "api-keys": "API keys",
   audit: "Audit",
@@ -143,6 +147,7 @@ export default function StudyPage() {
 
         <article>
           {section === "settings" && <SettingsSection />}
+          {section === "account" && <AccountSection />}
           {section === "credentials" && <CredentialsSection />}
           {section === "api-keys" && <ApiKeysSection />}
           {section === "audit" && <AuditSection />}
@@ -711,6 +716,102 @@ function LedgerSection() {
           </tbody>
         </table>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Account
+// ---------------------------------------------------------------------------
+
+function AccountSection() {
+  const { data: user } = useAuth();
+  const [portalUrl, setPortalUrl] = useState<string | null>(null);
+  const [loadingPortal, setLoadingPortal] = useState(false);
+
+  const openCustomerPortal = async () => {
+    setLoadingPortal(true);
+    try {
+      const url = await getCustomerPortalUrl();
+      if (typeof url === "string" && url) {
+        setPortalUrl(url);
+        window.open(url, "_blank");
+      }
+    } finally {
+      setLoadingPortal(false);
+    }
+  };
+
+  if (!user) return null;
+  const planLabel = (user as any).subscriptionPlan
+    ? String((user as any).subscriptionPlan).replace(/_/g, " ")
+    : "—";
+  const status = (user as any).subscriptionStatus
+    ? String((user as any).subscriptionStatus)
+    : "none";
+  const credits = (user as any).credits ?? 0;
+
+  return (
+    <div>
+      <H>Your account</H>
+      <Sub>The standing details — email, plan, credits. Manage billing in your customer portal.</Sub>
+
+      <dl className="grid grid-cols-[140px_1fr] gap-y-4 font-body text-[15px] max-w-[560px]">
+        <dt className="font-mono text-[10px] uppercase tracking-[0.22em] pt-1" style={{ color: "var(--marginalia)" }}>
+          Email
+        </dt>
+        <dd>{user.email ?? "—"}</dd>
+
+        {(user as any).username && (
+          <>
+            <dt className="font-mono text-[10px] uppercase tracking-[0.22em] pt-1" style={{ color: "var(--marginalia)" }}>
+              Username
+            </dt>
+            <dd>{(user as any).username}</dd>
+          </>
+        )}
+
+        <dt className="font-mono text-[10px] uppercase tracking-[0.22em] pt-1" style={{ color: "var(--marginalia)" }}>
+          Plan
+        </dt>
+        <dd>
+          <span className="capitalize">{planLabel}</span>
+          <span className="ml-2 font-mono text-[10px] uppercase tracking-[0.22em]" style={{ color: "var(--marginalia)" }}>
+            · {status}
+          </span>
+        </dd>
+
+        <dt className="font-mono text-[10px] uppercase tracking-[0.22em] pt-1" style={{ color: "var(--marginalia)" }}>
+          Credits
+        </dt>
+        <dd>{credits}</dd>
+      </dl>
+
+      <hr className="rule my-8" />
+
+      <div className="flex flex-wrap items-baseline gap-x-6 gap-y-3">
+        <button
+          onClick={openCustomerPortal}
+          disabled={loadingPortal}
+          className="btn-brass disabled:opacity-50"
+        >
+          {loadingPortal ? "Opening…" : "Manage billing →"}
+        </button>
+        {portalUrl && (
+          <a
+            href={portalUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="btn-link"
+          >
+            Re-open portal
+          </a>
+        )}
+      </div>
     </div>
   );
 }

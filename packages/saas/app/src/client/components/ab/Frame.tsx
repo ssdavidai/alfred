@@ -131,13 +131,6 @@ export function Frame({ children, dark = false }: { children: ReactNode; dark?: 
                   </DropdownMenuItem>
                 ))}
                 <DropdownMenuSeparator />
-                <DropdownMenuLabel style={{ color: "var(--brass)" }}>Account</DropdownMenuLabel>
-                <DropdownMenuItem asChild>
-                  <Link to="/account" className="flex items-center gap-2">
-                    <Icon name="calling_card" size={12} />
-                    Account
-                  </Link>
-                </DropdownMenuItem>
                 <DropdownMenuItem
                   onSelect={() => { logout(); }}
                   className="flex items-center gap-2 cursor-pointer"
