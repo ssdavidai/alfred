@@ -2,6 +2,21 @@
 
 After writing the digest to vault, sends an interactive EOD prompt to the main
 Alfred agent via the OpenClaw gateway.
+
+RFC #884 refactor (Living Brief): the composer now reads pre-written
+matter narratives instead of re-walking events. Each active matter
+already carries a ``current_state`` + ``as_of`` written nightly by the
+NightlyNarrativeWorkflow; the brief slots one sentence per matter
+under "The Day" plus three more sections ("Awaiting You", "Drafts I
+am Holding", "Quiet Notes") assembled by
+``collect_living_brief_data``. When a matter's ``as_of`` is missing
+or >36h stale the data activity falls back to walking that matter's
+recent events inline — the brief stays usable while the narrative
+layer is still warming.
+
+The order change is gated on ``workflow.patched("daily-digest-living-brief")``
+so workflows started under the legacy code path (pre-RFC-#884) still
+replay deterministically.
 """
 
 from __future__ import annotations
@@ -15,7 +30,12 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from src.activities.clerk import clerk_daily_digest
     from src.activities.notify import notify_digest_ready, notify_eod_prompt
-    from src.activities.vault import collect_daily_activity, fetch_stream_log, write_digest_record
+    from src.activities.vault import (
+        collect_daily_activity,
+        collect_living_brief_data,
+        fetch_stream_log,
+        write_digest_record,
+    )
 
 
 @dataclass
@@ -28,11 +48,22 @@ class DigestResult:
 class DailyDigestWorkflow:
     @workflow.run
     async def run(self) -> DigestResult:
-        # 1. Collect today's vault activity
-        activity_data = await workflow.execute_activity(
-            collect_daily_activity,
-            start_to_close_timeout=timedelta(seconds=30),
-        )
+        # 1. Collect today's vault activity.
+        # RFC #884: living brief data (matter narratives + four
+        # sections) replaces the legacy re-walk. Gated on
+        # ``workflow.patched()`` so in-flight workflows started under
+        # the old path replay deterministically.
+        if workflow.patched("daily-digest-living-brief"):
+            activity_data = await workflow.execute_activity(
+                collect_living_brief_data,
+                start_to_close_timeout=timedelta(seconds=120),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+        else:
+            activity_data = await workflow.execute_activity(
+                collect_daily_activity,
+                start_to_close_timeout=timedelta(seconds=30),
+            )
 
         # 1b. Fetch today's stream log (tier 2 events)
         stream_log: str = await workflow.execute_activity(
