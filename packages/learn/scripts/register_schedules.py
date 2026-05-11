@@ -220,6 +220,22 @@ CALENDAR_SCHEDULES = [
             minute=[ScheduleRange(start=0)],
         ),
     },
+    {
+        # RFC #884: nightly_narrative — Workflow 7 of the Living
+        # Narratives layer. Walks every active matter and asks the
+        # clerk to draft a fresh ``current_state`` paragraph from the
+        # last 24h of signals + task transitions. Runs at 02:00 local
+        # (cron 0 2 * * *) so it lands between the 23:00 reflection /
+        # 03:00 stream-event purge windows. The workflow itself is
+        # idempotent: matters with zero activity are skipped without
+        # invoking the clerk.
+        "id": "al-nightly-narrative",
+        "workflow": "NightlyNarrativeWorkflow",
+        "calendar": ScheduleCalendarSpec(
+            hour=[ScheduleRange(start=2)],
+            minute=[ScheduleRange(start=0)],
+        ),
+    },
 ]
 
 
