@@ -2880,6 +2880,124 @@ def _safe_filename_slug(s: str) -> str:
     return s or "task"
 
 
+# ---------------------------------------------------------------------------
+# RFC #884 — task.current_state composer
+# ---------------------------------------------------------------------------
+
+# Hard cap on the deterministic one-sentence ``current_state`` string
+# stamped onto a task when Steward transitions its state. Matches the
+# spec's 200-char limit; sliced AFTER composition so a chatty reasoning
+# field doesn't blow out the frontmatter line.
+CURRENT_STATE_CHAR_CAP = 200
+
+# Pretty label for each terminal state. Keyed off the value Steward
+# writes to ``state`` after a transition. Anything else falls back to
+# the raw state string.
+_STATE_LABEL: dict[str, str] = {
+    "pending": "Pending",
+    "in_progress": "In progress",
+    "in-progress": "In progress",
+    "done": "Done",
+    "archived": "Archived",
+    "open": "Open",
+}
+
+
+def _first_n_words(text: str, n: int = 12) -> str:
+    """Return the first ``n`` whitespace-delimited words of ``text``.
+
+    Newlines collapse to single spaces. Empty input returns an empty
+    string so the caller can short-circuit gracefully.
+    """
+    if not text:
+        return ""
+    words = text.split()
+    if not words:
+        return ""
+    return " ".join(words[:n])
+
+
+def _compose_task_current_state(
+    *,
+    new_state: str,
+    decision: dict[str, Any] | None,
+    now_iso: str,
+) -> str:
+    """Compose the one-sentence ``task.current_state`` write.
+
+    Deterministic — no LLM. Format examples (per RFC #884):
+
+      * "In progress — Alfred picked up the Carter sprint deck from your
+        inbox at 2026-05-11 09:14."
+      * "Done — Smythson invoice settled on 2026-05-11."
+      * "Pending — awaiting your nod on the unusual-route Bolt charge."
+
+    We compose from:
+      * the new task state (the label),
+      * the triggering signal's ``action_proposal.what`` when present
+        on the decision evidence,
+      * else the first 12 words of ``decision.reasoning``,
+      * the current date (YYYY-MM-DD) from ``now_iso``.
+
+    Capped at 200 chars. The function never raises — missing inputs
+    fall through to ``"<Label> — state updated on <date>."`` so the
+    writeback can always proceed.
+    """
+    label = _STATE_LABEL.get((new_state or "").strip().lower(), str(new_state or "").strip().title() or "Updated")
+
+    # Try the signal's action_proposal.what first — the cleanest source
+    # when the upstream Steward orchestration handed us a structured
+    # evidence list.
+    what = ""
+    if isinstance(decision, dict):
+        evidence_list = decision.get("evidence")
+        if isinstance(evidence_list, list):
+            for item in evidence_list:
+                if not isinstance(item, dict):
+                    continue
+                proposal = item.get("action_proposal")
+                if isinstance(proposal, dict):
+                    raw = proposal.get("what")
+                    if isinstance(raw, str) and raw.strip():
+                        what = raw.strip()
+                        break
+
+    if not what and isinstance(decision, dict):
+        reasoning = decision.get("reasoning")
+        if isinstance(reasoning, str) and reasoning.strip():
+            what = _first_n_words(reasoning, 12)
+
+    # Date slice: YYYY-MM-DD prefix of the ISO timestamp. Falling back
+    # to "today" keeps the sentence well-formed when ``now_iso`` is
+    # malformed (defensive — we always pass a parseable value).
+    date_part = ""
+    if isinstance(now_iso, str) and len(now_iso) >= 10:
+        date_part = now_iso[:10]
+
+    if what:
+        # Strip trailing punctuation so the composed sentence doesn't
+        # read ``today. on 2026-05-11`` when the reasoning already ended
+        # with a period.
+        what = what.rstrip(" .,;:")
+        sentence = f"{label} — {what} on {date_part}." if date_part else f"{label} — {what}."
+    elif date_part:
+        sentence = f"{label} — state updated on {date_part}."
+    else:
+        sentence = f"{label} — state updated."
+
+    # Hard cap. Slice at a word boundary when possible to avoid
+    # mid-word truncation, falling back to a hard slice + ellipsis when
+    # there's no clean break.
+    if len(sentence) > CURRENT_STATE_CHAR_CAP:
+        cut = sentence[:CURRENT_STATE_CHAR_CAP - 1]
+        last_space = cut.rfind(" ")
+        if last_space > CURRENT_STATE_CHAR_CAP // 2:
+            sentence = cut[:last_space].rstrip(",;-") + "…"
+        else:
+            sentence = cut.rstrip(",;-") + "…"
+    return sentence
+
+
 def _yaml_scalar(v: Any) -> str:
     """Render ``v`` as a YAML 1.2 scalar suitable for inline use.
 
@@ -3467,6 +3585,25 @@ async def apply_state_change(
                     scalar_updates["state"] = "done"
                 elif decision_label == "stale_archive_candidate":
                     scalar_updates["state"] = "archived"
+            # RFC #884: when the patch actually shifts the task's
+            # ``state`` field, also stamp a one-sentence
+            # ``current_state`` + ``as_of``. Only fires for task
+            # targets (matters get their narrative from
+            # nightly_narrative) and only when a state value is being
+            # written this tick — "still_active" / "needs_input" /
+            # pending-confirmation paths leave the prior current_state
+            # alone so a meaningful narrative from a real transition
+            # isn't overwritten by a no-op tick.
+            if (
+                target_kind_normalized == "task"
+                and "state" in scalar_updates
+            ):
+                scalar_updates["current_state"] = _compose_task_current_state(
+                    new_state=scalar_updates["state"],
+                    decision=raw_decision,
+                    now_iso=ts_iso,
+                )
+                scalar_updates["as_of"] = ts_iso
             json_updates: dict[str, Any] = {
                 "last_steward_outcome": new_outcome,
             }
