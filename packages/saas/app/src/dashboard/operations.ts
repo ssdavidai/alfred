@@ -1133,7 +1133,12 @@ export const getMatterDetail = async (
     const fm = rec.frontmatter ?? {};
     const body: string = String(rec.body ?? rec.content ?? "");
     // Strip the YAML frontmatter from the body if it's included
-    const about = body.replace(/^---[\s\S]*?---\s*/, "").trim();
+    const stripped = body.replace(/^---[\s\S]*?---\s*/, "").trim();
+    // Extract the first H1 as the human name (records endpoint doesn't return name/title)
+    const h1 = stripped.match(/^\s*#\s+(.+?)\s*$/m);
+    const extractedName = h1 ? h1[1].trim() : "";
+    // Drop the H1 line from the about body so the page doesn't show the title twice
+    const about = h1 ? stripped.replace(h1[0], "").trim() : stripped;
     // Best-effort backlinks via the graph endpoint
     let backlinks: any[] = [];
     try {
@@ -1156,7 +1161,7 @@ export const getMatterDetail = async (
       matter: {
         id: cleanId,
         path: recordPath,
-        name: rec.name || fm.title || cleanId,
+        name: rec.name || fm.title || extractedName || cleanId,
         summary: String(fm.description ?? fm.summary ?? ""),
         last: String(fm.updated ?? fm.modified ?? fm.created ?? ""),
         next: String(fm.next ?? fm.next_action ?? ""),

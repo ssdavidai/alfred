@@ -171,7 +171,7 @@ export default function MatterDetailPage() {
                 >
                   What this is
                 </div>
-                <div className="max-w-[64ch]">
+                <div className="max-w-[78ch]">
                   <Markdown source={matter.about} useLiveResolver={false} />
                 </div>
               </section>
