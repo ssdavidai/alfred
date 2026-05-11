@@ -1,4 +1,4 @@
-// /api/v1/matters — long-running concerns aggregator (#859).
+// /api/v1/matters — long-running concerns aggregator (#859, #884).
 //
 // Matters in Alfred Black's vocabulary map to vault `project` records.
 // Each Project has connected Conversation / Decision / Task / Note records
@@ -6,9 +6,19 @@
 // `references`, etc.). This route walks the vault once, builds a per-matter
 // tally, and surfaces the data the /matters index + detail pages need.
 //
+// RFC #884 ("Living matters & tasks") extends the detail aggregator with:
+//   - matter.current_state / as_of / signal_count_24h (written by the
+//     `nightly_narrative` workflow in alfred-learn)
+//   - matter.timeline — chronological signal/action/task-transition feed
+//     targeting this matter
+//   - matter.tasks — tasks linked to this matter with state/current_state/as_of
+// and the list endpoint with:
+//   - state (derived from linked tasks: done/active/waiting)
+//   - current_state (the matter's own frontmatter current_state)
+//
 // Endpoints:
 //   GET /api/v1/matters
-//     → { matters: [{ id, name, summary, last, next, counts: {...} }] }
+//     → { matters: [{ id, name, summary, last, next, counts, state, current_state }] }
 //
 //   GET /api/v1/matters/:id
 //     → {
@@ -17,18 +27,27 @@
 //           about,
 //           counts: { conversations, decisions, tasks, drafts },
 //           recent_decisions: [{ date, label, outcome, path }],
-//           vault_by_category: { conversations: [{title, path}], decisions, tasks, drafts },
+//           vault_by_category: { conversations, decisions, tasks, drafts },
+//           current_state, as_of, signal_count_24h,
+//           timeline: [{ when, kind, headline, path }],
+//           tasks: [{ id, path, name, state, current_state, as_of }],
 //         }
 //       }
 //
 // Path conventions (`matter/<slug>.md` is the file). The detail route
 // accepts both `<slug>` and `matter/<slug>` for ergonomics.
-import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, NotFoundError } from "../errors.js";
 import { VAULT_PATH, walkMd, readRecord } from "./vault.js";
 
 const IGNORE_DIRS = new Set([".git", ".obsidian", "node_modules", ".trash"]);
+
+interface MatterCounts {
+  conversations: number;
+  decisions: number;
+  tasks: number;
+  drafts: number;
+}
 
 interface MatterIndexRow {
   id: string;
@@ -37,12 +56,9 @@ interface MatterIndexRow {
   summary: string;
   last: string;
   next: string;
-  counts: {
-    conversations: number;
-    decisions: number;
-    tasks: number;
-    drafts: number;
-  };
+  counts: MatterCounts;
+  state: "done" | "active" | "waiting";
+  current_state: string | null;
 }
 
 interface VaultLink {
@@ -58,7 +74,27 @@ interface RecentDecision {
   path: string;
 }
 
-interface MatterDetail extends MatterIndexRow {
+type TimelineKind = "signal" | "task_transition" | "action";
+
+interface TimelineEntry {
+  when: string;
+  kind: TimelineKind;
+  headline: string;
+  path: string;
+}
+
+type TaskState = "pending" | "in_progress" | "done" | "archived";
+
+interface MatterTask {
+  id: string;
+  path: string;
+  name: string;
+  state: TaskState;
+  current_state: string | null;
+  as_of: string | null;
+}
+
+interface MatterDetail extends Omit<MatterIndexRow, "state"> {
   about: string;
   recent_decisions: RecentDecision[];
   vault_by_category: {
@@ -67,7 +103,28 @@ interface MatterDetail extends MatterIndexRow {
     tasks: VaultLink[];
     drafts: VaultLink[];
   };
+  // RFC #884 — Living Narratives layer.
+  current_state: string | null;
+  as_of: string | null;
+  signal_count_24h: number;
+  timeline: TimelineEntry[];
+  tasks: MatterTask[];
+  state: "done" | "active" | "waiting";
 }
+
+const TIMELINE_CAP = 100;
+
+// ---------------------------------------------------------------------------
+// Per-matter detail cache (#884).
+//
+// Mirrors the /api/v1/vault/index pattern from #873: 60s TTL, keyed by
+// matter id. ctrl-api runs one process per tenant, so cache cardinality
+// is the active set of matters. We cache the full response body so all
+// the timeline/tasks composition only runs at most once per minute per
+// matter.
+// ---------------------------------------------------------------------------
+const MATTER_DETAIL_TTL_MS = 60_000;
+const _matterDetailCache = new Map<string, { at: number; body: { matter: MatterDetail } }>();
 
 /** Resolve a matter id (slug or `matter/<slug>` or full path) to its
  *  filename stem. Returns null if it doesn't look like a matter id. */
@@ -93,11 +150,114 @@ function extractMatterRef(value: unknown): string | null {
   return s;
 }
 
-/** Walk all records once and group by matter id. */
-function buildMatterIndex(): {
+/** Pull a task ref shaped like `[[task/foo]]`, `task/foo`, `task/foo.md`,
+ *  or bare `foo` out of a frontmatter scalar. Returns the stem only. */
+function extractTaskRef(value: unknown): string | null {
+  if (!value) return null;
+  let s = String(value).trim();
+  const wl = /^\[\[([^\]|]+)(?:\|[^\]]+)?\]\]$/.exec(s);
+  if (wl) s = wl[1];
+  s = s.replace(/^task\//, "").replace(/\.md$/, "");
+  if (!s || s.includes("/")) return null;
+  return s;
+}
+
+/** First sentence cap at `cap` chars. Falls back to first `cap` chars. */
+function firstSentence(text: string, cap = 100): string {
+  if (!text) return "";
+  const trimmed = String(text).replace(/\s+/g, " ").trim();
+  if (!trimmed) return "";
+  // Match through the first ., !, or ? followed by whitespace or EOL.
+  const m = trimmed.match(/^[^.!?]*[.!?](?=\s|$)/);
+  const candidate = m ? m[0] : trimmed;
+  if (candidate.length <= cap) return candidate.trim();
+  return candidate.slice(0, cap).trim();
+}
+
+/** Read frontmatter of an event/signal-action-*.md record, returning
+ *  the action's `created`/`timestamp` and a one-line headline derived
+ *  from the body (which leads with `# signal-action: <chosen_path>` then
+ *  a bulleted summary). Returns null if the record can't be read. */
+function summarizeSignalAction(
+  relPath: string,
+): { when: string; headline: string } | null {
+  const rec = readRecord(relPath);
+  if (!rec) return null;
+  // Signal-action audit records use `timestamp` (signal_actions.py); the
+  // older steward-action audit records use `created`. Cover both.
+  const when = String(
+    rec.fm.timestamp ?? rec.fm.created ?? rec.fm.created_at ?? "",
+  );
+  // Headline preference:
+  //   1. explicit `summary` frontmatter field (matches the contract spec)
+  //   2. first non-heading sentence from the body
+  //   3. first 100 chars of the body
+  let headline = "";
+  if (typeof rec.fm.summary === "string" && rec.fm.summary.trim()) {
+    headline = firstSentence(rec.fm.summary, 100);
+  }
+  if (!headline) {
+    // Strip leading `# ...` heading; pull the first prose line.
+    const bodyLines = rec.body.split("\n").map((l) => l.trim()).filter(Boolean);
+    const proseLine = bodyLines.find((l) => !l.startsWith("#"));
+    if (proseLine) {
+      // Strip bullet markers and bold markers so the headline reads as prose.
+      const cleaned = proseLine
+        .replace(/^[-*]\s+/, "")
+        .replace(/\*\*/g, "")
+        .replace(/^_+|_+$/g, "");
+      headline = firstSentence(cleaned, 100) || cleaned.slice(0, 100);
+    }
+    if (!headline) headline = rec.body.replace(/\s+/g, " ").trim().slice(0, 100);
+  }
+  return { when, headline };
+}
+
+/** Coerce a frontmatter task state to one of the four canonical values.
+ *  Defaults to "pending" when missing/unknown. */
+function normalizeTaskState(raw: unknown): TaskState {
+  const s = String(raw ?? "").toLowerCase().trim();
+  if (s === "in_progress" || s === "in-progress" || s === "active") return "in_progress";
+  if (s === "done" || s === "completed" || s === "complete") return "done";
+  if (s === "archived" || s === "cancelled" || s === "canceled") return "archived";
+  // Any other value (todo, snoozed, blocked, open, ...) collapses to pending.
+  return "pending";
+}
+
+/** Derive the matter's roll-up state from its linked tasks. */
+function deriveMatterState(tasks: MatterTask[]): "done" | "active" | "waiting" {
+  if (tasks.length === 0) return "waiting";
+  let anyOpen = false;
+  let anyInProgress = false;
+  for (const t of tasks) {
+    if (t.state === "in_progress") anyInProgress = true;
+    if (t.state !== "done" && t.state !== "archived") anyOpen = true;
+  }
+  if (!anyOpen) return "done";
+  if (anyInProgress) return "active";
+  return "waiting";
+}
+
+/** Resolve a task's display name: frontmatter title/name, then first H1, then stem. */
+function resolveTaskName(
+  fm: Record<string, unknown>,
+  body: string,
+  stem: string,
+): string {
+  const fmName = fm.name ?? fm.title ?? fm.subject;
+  if (typeof fmName === "string" && fmName.trim()) return fmName.trim();
+  const h1 = body.match(/^\s*#\s+(.+?)\s*$/m);
+  if (h1) return h1[1].trim();
+  return stem;
+}
+
+interface MatterIndexResult {
   byId: Map<string, MatterDetail>;
   ordered: MatterDetail[];
-} {
+}
+
+/** Walk all records once and group by matter id. */
+function buildMatterIndex(): MatterIndexResult {
   const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
   const byId = new Map<string, MatterDetail>();
   const childrenByMatter = new Map<
@@ -105,7 +265,12 @@ function buildMatterIndex(): {
     { type: string; rec: { fm: Record<string, unknown>; body: string; stem: string }; relPath: string }[]
   >();
 
-  // First pass — pull every project record into the index.
+  // -------------------------------------------------------------------------
+  // Pass 1 — Build the per-matter detail skeleton + parse explicit
+  // `tasks:` arrays from each matter's frontmatter (forward reference
+  // from matter → task; the reverse direction is handled in pass 2).
+  // -------------------------------------------------------------------------
+  const tasksDeclaredByMatter = new Map<string, Set<string>>();
   for (const relPath of files) {
     const display = relPath.replace(/\\/g, "/");
     if (!display.startsWith("matter/")) continue;
@@ -120,6 +285,22 @@ function buildMatterIndex(): {
     const name = String(rec.fm.name ?? rec.fm.title ?? id);
     const summary = String(rec.fm.summary ?? rec.fm.description ?? "");
     const next = String(rec.fm.next_action ?? rec.fm.next ?? "");
+    const currentState =
+      typeof rec.fm.current_state === "string" && rec.fm.current_state.trim()
+        ? (rec.fm.current_state as string)
+        : null;
+    const asOf =
+      typeof rec.fm.as_of === "string" && rec.fm.as_of.trim()
+        ? (rec.fm.as_of as string)
+        : null;
+    let signalCount24h = 0;
+    const rawCount = rec.fm.signal_count_24h;
+    if (typeof rawCount === "number" && Number.isFinite(rawCount)) {
+      signalCount24h = Math.max(0, Math.trunc(rawCount));
+    } else if (typeof rawCount === "string" && rawCount.trim()) {
+      const n = Number.parseInt(rawCount, 10);
+      if (Number.isFinite(n)) signalCount24h = Math.max(0, n);
+    }
     byId.set(id, {
       id,
       path: display,
@@ -136,19 +317,116 @@ function buildMatterIndex(): {
         tasks: [],
         drafts: [],
       },
+      current_state: currentState,
+      as_of: asOf,
+      signal_count_24h: signalCount24h,
+      timeline: [],
+      tasks: [],
+      state: "waiting",
     });
+    // Forward-declared tasks: `tasks: [[[task/foo]], task/bar, baz]`
+    const declared = rec.fm.tasks;
+    if (declared) {
+      const items = Array.isArray(declared) ? declared : [declared];
+      const set = new Set<string>();
+      for (const v of items) {
+        const ref = extractTaskRef(v);
+        if (ref) set.add(ref);
+      }
+      if (set.size > 0) tasksDeclaredByMatter.set(id, set);
+    }
   }
 
-  // Second pass — bin every other record by which matter it touches.
+  // -------------------------------------------------------------------------
+  // Pass 2 — Walk every non-matter record once and bin against each
+  // matter it references. Also build the reverse task→matter index used
+  // for the per-matter `tasks` array and the task-transition timeline.
+  // -------------------------------------------------------------------------
+  // task stem → MatterTask (for cross-matter lookup in pass 3)
+  const tasksByStem = new Map<
+    string,
+    { task: MatterTask; matterRefs: Set<string>; created: string }
+  >();
+  // signal path → { fm, body }; we use this when expanding the timeline
+  // so we don't have to re-read the file.
+  type SignalRecord = { fm: Record<string, unknown>; body: string; stem: string };
+  const signalsByPath = new Map<string, SignalRecord>();
+  // Per-matter signal collector (passes to timeline composition).
+  const signalsByMatter = new Map<string, string[]>();
+
   for (const relPath of files) {
     const display = relPath.replace(/\\/g, "/");
     if (display.startsWith("matter/")) continue;
     const rec = readRecord(relPath);
     if (!rec) continue;
     const recType = String(rec.fm.type ?? "");
+
+    // ---- Signal records (#884 timeline source 1) ----
+    if (recType === "signal" || display.startsWith("signal/")) {
+      signalsByPath.set(display, rec);
+      const candidates = rec.fm.target_candidates;
+      if (Array.isArray(candidates)) {
+        const matched = new Set<string>();
+        for (const c of candidates) {
+          if (!c || typeof c !== "object") continue;
+          const tp = String(
+            (c as { path?: unknown }).path ?? "",
+          );
+          if (!tp.startsWith("matter/")) continue;
+          const id = extractMatterRef(tp);
+          if (id && byId.has(id)) matched.add(id);
+        }
+        for (const matterId of matched) {
+          let bucket = signalsByMatter.get(matterId);
+          if (!bucket) {
+            bucket = [];
+            signalsByMatter.set(matterId, bucket);
+          }
+          bucket.push(display);
+        }
+      }
+      // Signals don't participate in the legacy by-category buckets;
+      // fall through past the category folding.
+    }
+
     if (!recType) continue;
 
-    // Collect all candidate matter refs from this record.
+    // ---- Task records: build the task index for the new tasks[] array. ----
+    if (recType === "task") {
+      const stem = rec.stem;
+      const taskRelPath = display;
+      const taskFm = rec.fm;
+      const matterRefs = new Set<string>();
+      // Direct refs first.
+      for (const k of ["matter", "parent_matter", "project"]) {
+        const v = taskFm[k];
+        if (!v) continue;
+        const items = Array.isArray(v) ? v : [v];
+        for (const it of items) {
+          const id = extractMatterRef(it);
+          if (id) matterRefs.add(id);
+        }
+      }
+      const currentStateRaw = taskFm.current_state;
+      const asOfRaw = taskFm.as_of;
+      const task: MatterTask = {
+        id: stem,
+        path: taskRelPath,
+        name: resolveTaskName(taskFm, rec.body, stem),
+        state: normalizeTaskState(taskFm.state),
+        current_state:
+          typeof currentStateRaw === "string" && currentStateRaw.trim()
+            ? currentStateRaw
+            : null,
+        as_of:
+          typeof asOfRaw === "string" && asOfRaw.trim() ? asOfRaw : null,
+      };
+      const created = String(taskFm.created ?? taskFm.updated ?? "");
+      tasksByStem.set(stem, { task, matterRefs, created });
+    }
+
+    // Collect all candidate matter refs from this record (for the
+    // existing per-category aggregation).
     const refs = new Set<string>();
     const candidates: unknown[] = [
       rec.fm.parent_matter,
@@ -185,7 +463,10 @@ function buildMatterIndex(): {
     }
   }
 
-  // Third pass — fold children into matter detail.
+  // -------------------------------------------------------------------------
+  // Pass 3 — Fold the existing per-category aggregation, compose the
+  // tasks[] array per matter, and build the timeline.
+  // -------------------------------------------------------------------------
   for (const [matterId, kids] of childrenByMatter) {
     const matter = byId.get(matterId);
     if (!matter) continue;
@@ -258,6 +539,115 @@ function buildMatterIndex(): {
     matter.recent_decisions = matter.recent_decisions.slice(0, 10);
   }
 
+  // -------------------------------------------------------------------------
+  // Compose per-matter tasks[] from (a) task→matter refs and (b) the
+  // matter's own `tasks:` frontmatter array.
+  // -------------------------------------------------------------------------
+  for (const [stem, entry] of tasksByStem) {
+    // From task→matter refs.
+    for (const matterId of entry.matterRefs) {
+      const matter = byId.get(matterId);
+      if (matter) matter.tasks.push(entry.task);
+    }
+    // From matter.tasks[] forward refs (a task may be listed even if
+    // it has no `matter:` field back-pointing).
+    for (const [matterId, declared] of tasksDeclaredByMatter) {
+      if (!declared.has(stem)) continue;
+      const matter = byId.get(matterId);
+      if (!matter) continue;
+      if (entry.matterRefs.has(matterId)) continue; // already added
+      matter.tasks.push(entry.task);
+    }
+  }
+
+  // Deduplicate per-matter tasks (a task can both back-ref and be
+  // forward-listed) and sort newest-first by as_of when present.
+  for (const matter of byId.values()) {
+    if (matter.tasks.length === 0) continue;
+    const seen = new Set<string>();
+    matter.tasks = matter.tasks.filter((t) => {
+      if (seen.has(t.id)) return false;
+      seen.add(t.id);
+      return true;
+    });
+    matter.tasks.sort((a, b) => {
+      const aw = a.as_of ?? "";
+      const bw = b.as_of ?? "";
+      if (aw === bw) return a.name.localeCompare(b.name);
+      return aw < bw ? 1 : -1;
+    });
+    matter.state = deriveMatterState(matter.tasks);
+  }
+
+  // -------------------------------------------------------------------------
+  // Timeline composition (#884) — three sources merged, newest-first,
+  // capped at 100.
+  // -------------------------------------------------------------------------
+  for (const [matterId, signalPaths] of signalsByMatter) {
+    const matter = byId.get(matterId);
+    if (!matter) continue;
+    for (const sp of signalPaths) {
+      const rec = signalsByPath.get(sp);
+      if (!rec) continue;
+      // 1. Signal entry.
+      const when = String(rec.fm.created ?? rec.fm.applied_at ?? "");
+      let headline = "";
+      const proposal = rec.fm.action_proposal;
+      if (proposal && typeof proposal === "object" && !Array.isArray(proposal)) {
+        const what = (proposal as { what?: unknown }).what;
+        if (typeof what === "string" && what.trim()) {
+          headline = firstSentence(what, 100);
+        }
+      }
+      if (!headline && typeof rec.fm.reasoning === "string") {
+        headline = firstSentence(rec.fm.reasoning, 100);
+      }
+      if (!headline) headline = rec.stem;
+      matter.timeline.push({
+        when,
+        kind: "signal",
+        headline,
+        path: sp,
+      });
+      // 2. Linked signal-action audit entry.
+      const auditPath = rec.fm.audit_record_path;
+      if (typeof auditPath === "string" && auditPath.trim()) {
+        const summary = summarizeSignalAction(auditPath.trim());
+        if (summary) {
+          matter.timeline.push({
+            when: summary.when,
+            kind: "action",
+            headline: summary.headline,
+            path: auditPath.trim(),
+          });
+        }
+      }
+    }
+  }
+
+  // 3. Task-transition entries — one per linked task with both state + as_of set.
+  for (const matter of byId.values()) {
+    for (const t of matter.tasks) {
+      if (!t.as_of) continue;
+      matter.timeline.push({
+        when: t.as_of,
+        kind: "task_transition",
+        headline: `Task '${t.name}' → ${t.state}`,
+        path: t.path,
+      });
+    }
+  }
+
+  // Sort newest-first, cap at 100.
+  for (const matter of byId.values()) {
+    matter.timeline.sort((a, b) =>
+      a.when < b.when ? 1 : a.when > b.when ? -1 : 0,
+    );
+    if (matter.timeline.length > TIMELINE_CAP) {
+      matter.timeline = matter.timeline.slice(0, TIMELINE_CAP);
+    }
+  }
+
   // Final ordering — most recently active first.
   const ordered = [...byId.values()].sort((a, b) =>
     a.last < b.last ? 1 : a.last > b.last ? -1 : 0,
@@ -276,6 +666,8 @@ export function registerMatterRoutes(): void {
       last: m.last,
       next: m.next,
       counts: m.counts,
+      state: m.state,
+      current_state: m.current_state,
     }));
     sendJson(res, 200, { matters, count: matters.length });
   });
@@ -283,12 +675,26 @@ export function registerMatterRoutes(): void {
   addRoute("GET", "/api/v1/matters/:id", async ({ res, params }) => {
     const id = normalizeMatterId(params.id);
     if (!id) throw new NotFoundError("Matter not found");
+    const now = Date.now();
+    const cached = _matterDetailCache.get(id);
+    if (cached && now - cached.at < MATTER_DETAIL_TTL_MS) {
+      sendJson(res, 200, cached.body);
+      return;
+    }
     const { byId } = buildMatterIndex();
     const matter = byId.get(id);
     if (!matter) throw new NotFoundError("Matter not found");
-    sendJson(res, 200, { matter });
+    const body = { matter };
+    _matterDetailCache.set(id, { at: now, body });
+    sendJson(res, 200, body);
   });
 }
 
 // Re-exported for tests / future tooling.
-export const _internal = { buildMatterIndex, normalizeMatterId };
+export const _internal = {
+  buildMatterIndex,
+  normalizeMatterId,
+  normalizeTaskState,
+  deriveMatterState,
+  firstSentence,
+};
