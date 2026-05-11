@@ -25,16 +25,54 @@ export default function App() {
 
   // Pages that bring their own Frame (header + footer) — App-level
   // NavBar/Footer must be suppressed to avoid double chrome.
+  // All Alfred Black 1.0 canonical surfaces are framed; legacy /dashboard/*
+  // and /admin/* still use the App-level chrome until they're migrated.
   const isFramedPage = useMemo(() => {
     const p = location.pathname;
     if (p === "/") return true;
-    return (
+    // Marketing
+    if (
       p === "/staff" ||
       p === "/companion" ||
       p === "/voice" ||
       p === "/sms" ||
       p === "/voice-and-tone"
-    );
+    ) return true;
+    // Onboarding ritual (M2 #852/#853)
+    if (
+      p === "/awaken" ||
+      p === "/reading-the-room" ||
+      p === "/composing" ||
+      p === "/preparing" ||
+      p === "/verify" ||
+      p === "/soul" ||
+      p === "/first-brief"
+    ) return true;
+    // Household editor (M2 #854)
+    if (p === "/household") return true;
+    // Daily core (M3)
+    if (p === "/desk" || p === "/brief") return true;
+    // Knowledge surfaces (M4)
+    if (
+      p === "/vault" ||
+      p === "/matters" ||
+      p.startsWith("/matters/") ||
+      p === "/instincts" ||
+      p === "/decisions" ||
+      p === "/chores" ||
+      p.startsWith("/chores/")
+    ) return true;
+    // Operating surfaces (M5)
+    if (
+      p === "/connections" ||
+      p === "/connect" ||
+      p === "/channels" ||
+      p === "/tools" ||
+      p === "/claude"
+    ) return true;
+    // The Study (M6)
+    if (p === "/study") return true;
+    return false;
   }, [location]);
 
   const isDashboard = useMemo(() => {
