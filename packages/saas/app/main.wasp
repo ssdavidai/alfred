@@ -635,6 +635,14 @@ query getMatterDetail {
   entities: [Instance]
 }
 
+// RFC #884 — living-narrative per-chore detail. Distinct from `getChoreSource`
+// (which returns generated Python). Returns current_state + as_of + timeline
+// keyed off a task vault record.
+query getChoreDetail2 {
+  fn: import { getChoreDetail2 } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
 query getVaultGraph {
   fn: import { getVaultGraph } from "@src/dashboard/operations",
   entities: [Instance]

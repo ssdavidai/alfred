@@ -1099,6 +1099,43 @@ export const getMattersIndex = async (
   }
 };
 
+// RFC #884 — Living narratives. matters and tasks gain `current_state`,
+// `as_of` (last-rewrite ISO-8601 datetime), and matters also carry a
+// `signal_count_24h` bookkeeping counter. The aggregator endpoint is the
+// canonical source; the fallback path here maps frontmatter directly so the
+// UI stays renderable against older ctrl-api builds that don't yet emit the
+// new shape.
+type TaskState = "pending" | "in_progress" | "done" | "archived";
+
+interface MatterTimelineEntry {
+  when: string;
+  kind: "signal" | "task_transition" | "action";
+  headline: string;
+  path: string;
+}
+
+interface MatterTaskRow {
+  id: string;
+  name: string;
+  state: TaskState;
+  current_state: string | null;
+  as_of: string | null;
+}
+
+function normalizeTaskState(value: unknown): TaskState {
+  const s = String(value ?? "").toLowerCase();
+  if (s === "in_progress" || s === "in-progress" || s === "active") return "in_progress";
+  if (s === "done" || s === "complete" || s === "completed") return "done";
+  if (s === "archived" || s === "cancelled" || s === "canceled") return "archived";
+  return "pending";
+}
+
+function nullableString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  return s ? s : null;
+}
+
 export const getMatterDetail = async (
   args: { id: string },
   context: any,
@@ -1113,7 +1150,24 @@ export const getMatterDetail = async (
     const data: any = await proxyToTenant(instance, {
       path: `/api/v1/matters/${encodeURIComponent(args.id)}`,
     });
-    if (data?.matter) return { matter: data.matter };
+    if (data?.matter) {
+      // Aggregator path: trust the server shape but defensively fill in the
+      // RFC-884 fields if an older ctrl-api forgot them so the UI never sees
+      // `undefined`.
+      const m = data.matter;
+      return {
+        matter: {
+          ...m,
+          current_state:
+            m.current_state === undefined ? null : m.current_state,
+          as_of: m.as_of === undefined ? null : m.as_of,
+          signal_count_24h:
+            typeof m.signal_count_24h === "number" ? m.signal_count_24h : 0,
+          timeline: Array.isArray(m.timeline) ? m.timeline : [],
+          tasks: Array.isArray(m.tasks) ? m.tasks : [],
+        },
+      };
+    }
   } catch (err) {
     console.warn(
       "[getMatterDetail] /api/v1/matters not available, falling back to /vault/record:",
@@ -1157,6 +1211,12 @@ export const getMatterDetail = async (
     const decisions = bin("decision");
     const tasks = bin("task");
     const drafts = bin("draft");
+    // RFC #884 fallback fields. Older ctrl-api builds won't have written
+    // `current_state`/`as_of` into the matter frontmatter yet, so leave them
+    // null and let the UI render an empty-state. `timeline` and `tasks` are
+    // empty — the aggregator endpoint is the only place that joins those.
+    const fallbackTimeline: MatterTimelineEntry[] = [];
+    const fallbackTasks: MatterTaskRow[] = [];
     return {
       matter: {
         id: cleanId,
@@ -1179,6 +1239,15 @@ export const getMatterDetail = async (
           path: d.path,
         })),
         vault_by_category: { conversations, decisions, tasks, drafts },
+        // Living narrative fields (RFC #884) — fallback maps directly off
+        // raw frontmatter; absent values become null so the UI surfaces an
+        // empty-state copy rather than crashing.
+        current_state: nullableString(fm.current_state),
+        as_of: nullableString(fm.as_of),
+        signal_count_24h:
+          typeof fm.signal_count_24h === "number" ? fm.signal_count_24h : 0,
+        timeline: fallbackTimeline,
+        tasks: fallbackTasks,
       },
     };
   } catch (err) {
@@ -1187,6 +1256,91 @@ export const getMatterDetail = async (
       (err as Error)?.message,
     );
     return { matter: null };
+  }
+};
+
+// RFC #884 — per-chore living-narrative detail. Separate from the existing
+// `getChoreSource` so we don't disturb the M4 source-audit endpoint. Reads
+// the chore vault record + its (optional) per-record timeline via the same
+// graph endpoint used by the matter fallback. When the ctrl-api ships a
+// dedicated `/api/v1/chores/:slug/detail` route this can short-circuit on
+// that; until then we synthesise from frontmatter.
+export const getChoreDetail2 = async (
+  args: { id: string },
+  context: any,
+): Promise<{
+  chore: {
+    id: string;
+    path: string;
+    name: string;
+    state: TaskState;
+    current_state: string | null;
+    as_of: string | null;
+    timeline: MatterTimelineEntry[];
+  } | null;
+}> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  const cleanId = String(args.id).replace(/^task\//, "").replace(/\.md$/, "");
+  // Try the dedicated detail endpoint first (will appear in a later ctrl-api).
+  try {
+    const data: any = await proxyToTenant(instance, {
+      path: `/api/v1/chores/${encodeURIComponent(cleanId)}/detail`,
+    });
+    if (data?.chore) {
+      const c = data.chore;
+      return {
+        chore: {
+          id: String(c.id ?? cleanId),
+          path: String(c.path ?? `task/${cleanId}.md`),
+          name: String(c.name ?? cleanId),
+          state: normalizeTaskState(c.state),
+          current_state:
+            c.current_state === undefined ? null : nullableString(c.current_state),
+          as_of: c.as_of === undefined ? null : nullableString(c.as_of),
+          timeline: Array.isArray(c.timeline) ? c.timeline : [],
+        },
+      };
+    }
+  } catch (err) {
+    // Endpoint may not exist yet — fall through to the vault-record path.
+    console.warn(
+      "[getChoreDetail2] /api/v1/chores/:id/detail not available, falling back to /vault/record:",
+      (err as Error)?.message,
+    );
+  }
+  // Fallback: synthesise from the task vault record.
+  try {
+    const recordPath = `task/${cleanId}.md`;
+    const rec: any = await proxyToTenant(instance, {
+      path: `/api/v1/vault/records/${encodeURIComponent(recordPath)}`,
+    });
+    if (!rec || (rec.error && !rec.body && !rec.frontmatter)) {
+      return { chore: null };
+    }
+    const fm = rec.frontmatter ?? {};
+    const body: string = String(rec.body ?? rec.content ?? "");
+    const stripped = body.replace(/^---[\s\S]*?---\s*/, "").trim();
+    const h1 = stripped.match(/^\s*#\s+(.+?)\s*$/m);
+    const extractedName = h1 ? h1[1].trim() : "";
+    return {
+      chore: {
+        id: cleanId,
+        path: recordPath,
+        name: rec.name || fm.title || fm.name || extractedName || cleanId,
+        state: normalizeTaskState(fm.state),
+        current_state: nullableString(fm.current_state),
+        as_of: nullableString(fm.as_of),
+        timeline: [],
+      },
+    };
+  } catch (err) {
+    console.warn(
+      "[getChoreDetail2] vault/record fallback failed:",
+      (err as Error)?.message,
+    );
+    return { chore: null };
   }
 };
 
