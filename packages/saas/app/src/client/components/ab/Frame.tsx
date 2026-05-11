@@ -1,4 +1,5 @@
 import { Link, useLocation } from "react-router-dom";
+import { logout } from "wasp/client/auth";
 import type { ReactNode } from "react";
 import { Icon, type IconName } from "./Icon";
 import {
@@ -129,6 +130,21 @@ export function Frame({ children, dark = false }: { children: ReactNode; dark?: 
                     </Link>
                   </DropdownMenuItem>
                 ))}
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel style={{ color: "var(--brass)" }}>Account</DropdownMenuLabel>
+                <DropdownMenuItem asChild>
+                  <Link to="/account" className="flex items-center gap-2">
+                    <Icon name="calling_card" size={12} />
+                    Account
+                  </Link>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() => { logout(); }}
+                  className="flex items-center gap-2 cursor-pointer"
+                >
+                  <Icon name="skeleton_key" size={12} />
+                  Log out
+                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           </nav>
