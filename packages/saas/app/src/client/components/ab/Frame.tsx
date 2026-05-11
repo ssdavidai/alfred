@@ -1,5 +1,5 @@
 import { Link, useLocation } from "react-router-dom";
-import { logout } from "wasp/client/auth";
+import { logout, useAuth } from "wasp/client/auth";
 import type { ReactNode } from "react";
 import { Icon, type IconName } from "./Icon";
 import {
@@ -37,13 +37,20 @@ const MORE: NavItem[] = [
   { to: "/claude", label: "Claude Setup", icon: "skeleton_key" },
 ];
 
-// First-run sequence — onboarding only. Skips Staff and Apps; Google sign-in already covers email & calendar.
-const SETUP: NavItem[] = [
-  { to: "/awaken", label: "Setup", icon: "skeleton_key" },
-  { to: "/reading-the-room", label: "Scan", icon: "monocle" },
-  { to: "/verify", label: "Confirm", icon: "approval" },
-  { to: "/first-brief", label: "First email", icon: "envelope" },
+// Logged-out marketing nav: the only entry points an anonymous visitor sees.
+const LOGGED_OUT_PRIMARY: NavItem[] = [
+  { to: "/", label: "Home", icon: "calling_card" },
+  { to: "/staff", label: "Staff", icon: "bow_tie" },
+  { to: "/companion", label: "Mobile", icon: "top_hat" },
 ];
+
+// Demo link points at the static redesign at demo.alfred.black.
+const DEMO_URL = "https://demo.alfred.black";
+
+// Onboarding ritual pages live at /awaken → /first-brief but are NEVER shown
+// in the main menu — they are only reachable while the ritual is in progress.
+// Kept here as a comment so a future contributor doesn't try to add them back.
+// const SETUP_PAGES = ["/awaken", "/reading-the-room", "/verify", "/soul", "/composing", "/preparing", "/first-brief"];
 
 function NavLink({ item, active }: { item: NavItem; active: boolean }) {
   return (
@@ -89,8 +96,10 @@ function Wordmark({ dark }: { dark: boolean }) {
 export function Frame({ children, dark = false }: { children: ReactNode; dark?: boolean }) {
   const location = useLocation();
   const { theme } = useTheme();
+  const { data: user } = useAuth();
   const isActive = (to: string) => location.pathname === to;
   const onDark = dark || theme === "dark";
+  const isLoggedIn = !!user;
 
   return (
     <div className={`${dark ? "wool" : "paper"} min-h-screen`}>
@@ -99,47 +108,64 @@ export function Frame({ children, dark = false }: { children: ReactNode; dark?: 
           <Wordmark dark={onDark} />
 
           <nav className="font-mono text-[10px] uppercase tracking-[0.18em] font-extrabold flex items-center gap-5">
-            {PRIMARY.map((r) => (
-              <NavLink key={r.to} item={r} active={isActive(r.to)} />
-            ))}
+            {isLoggedIn ? (
+              <>
+                {PRIMARY.map((r) => (
+                  <NavLink key={r.to} item={r} active={isActive(r.to)} />
+                ))}
 
-            <DropdownMenu>
-              <DropdownMenuTrigger
-                className="inline-flex items-center gap-1.5 hover:opacity-100 transition-opacity outline-none"
-                style={{ opacity: MORE.some((m) => isActive(m.to)) ? 1 : 0.6 }}
-              >
-                More <span style={{ color: "var(--brass)" }}>+</span>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="font-mono text-[10px] uppercase tracking-[0.18em]">
-                <DropdownMenuLabel style={{ color: "var(--brass)" }}>Use</DropdownMenuLabel>
-                {MORE.map((r) => (
-                  <DropdownMenuItem key={r.to} asChild>
-                    <Link to={r.to} className="flex items-center gap-2">
-                      <Icon name={r.icon} size={12} />
-                      {r.label}
-                    </Link>
-                  </DropdownMenuItem>
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    className="inline-flex items-center gap-1.5 hover:opacity-100 transition-opacity outline-none"
+                    style={{ opacity: MORE.some((m) => isActive(m.to)) ? 1 : 0.6 }}
+                  >
+                    More <span style={{ color: "var(--brass)" }}>+</span>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="font-mono text-[10px] uppercase tracking-[0.18em]">
+                    <DropdownMenuLabel style={{ color: "var(--brass)" }}>Use</DropdownMenuLabel>
+                    {MORE.map((r) => (
+                      <DropdownMenuItem key={r.to} asChild>
+                        <Link to={r.to} className="flex items-center gap-2">
+                          <Icon name={r.icon} size={12} />
+                          {r.label}
+                        </Link>
+                      </DropdownMenuItem>
+                    ))}
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onSelect={() => { logout(); }}
+                      className="flex items-center gap-2 cursor-pointer"
+                    >
+                      <Icon name="skeleton_key" size={12} />
+                      Log out
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </>
+            ) : (
+              <>
+                {LOGGED_OUT_PRIMARY.map((r) => (
+                  <NavLink key={r.to} item={r} active={isActive(r.to)} />
                 ))}
-                <DropdownMenuSeparator />
-                <DropdownMenuLabel style={{ color: "var(--brass)" }}>Setup</DropdownMenuLabel>
-                {SETUP.map((r) => (
-                  <DropdownMenuItem key={"s-" + r.to} asChild>
-                    <Link to={r.to} className="flex items-center gap-2">
-                      <Icon name={r.icon} size={12} />
-                      {r.label}
-                    </Link>
-                  </DropdownMenuItem>
-                ))}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onSelect={() => { logout(); }}
-                  className="flex items-center gap-2 cursor-pointer"
+                <a
+                  href={DEMO_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hover:opacity-100 transition-opacity inline-flex items-center gap-1.5"
+                  style={{ opacity: 0.6, paddingBottom: 2 }}
                 >
-                  <Icon name="skeleton_key" size={12} />
-                  Log out
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  <Icon name="monocle" size={12} />
+                  Demo
+                </a>
+                <Link
+                  to="/login"
+                  className="btn-brass"
+                  style={{ fontSize: "0.7rem", padding: "0.4rem 0.9rem" }}
+                >
+                  Sign in →
+                </Link>
+              </>
+            )}
           </nav>
         </div>
       </header>
