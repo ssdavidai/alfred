@@ -399,6 +399,255 @@ async def collect_daily_activity() -> dict[str, Any]:
         await client.close()
 
 
+# ---------------------------------------------------------------------------
+# RFC #884 — Living Brief data layer
+# ---------------------------------------------------------------------------
+
+# Narrative staleness threshold. When a matter's ``as_of`` is older
+# than this (or missing), the composer falls back to walking the
+# matter's recent events inline — keeps the brief usable while the
+# nightly narrative layer is still warming.
+_NARRATIVE_STALENESS = 36 * 60 * 60  # 36 hours, in seconds
+
+# Cap on how many event records the inline fallback walks per stale
+# matter. Anything past this gets dropped — a chatty matter would
+# otherwise blow out the daily-digest prompt budget.
+_FALLBACK_EVENT_LIMIT = 20
+
+
+def _parse_iso_utc(ts: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 string to a UTC-aware datetime; ``None`` on fail."""
+    from datetime import timezone as _tz
+    if ts is None:
+        return None
+    if isinstance(ts, datetime):
+        return ts if ts.tzinfo else ts.replace(tzinfo=_tz.utc)
+    if not isinstance(ts, str):
+        return None
+    s = ts.strip()
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_tz.utc)
+    return dt
+
+
+def _first_sentence(text: str, cap: int = 240) -> str:
+    """Return the first sentence-ish slice of ``text`` (period / ellipsis)."""
+    if not text:
+        return ""
+    s = text.strip()
+    # Find the first period that isn't an abbreviation. Heuristic: take
+    # everything up to the first ". " or "! " / "? ".
+    for marker in (". ", "! ", "? "):
+        idx = s.find(marker)
+        if idx > 20:  # ignore tiny prefixes like "Dr."
+            s = s[: idx + 1]
+            break
+    if len(s) > cap:
+        s = s[: cap - 1].rstrip() + "…"
+    return s
+
+
+@activity.defn
+async def collect_living_brief_data() -> dict[str, Any]:
+    """Assemble the four daily-brief sections from the narrative layer.
+
+    RFC #884 reshapes the daily digest into a thin composer that reads
+    pre-written matter narratives instead of re-walking events. The
+    sections returned here mirror the brief's structure:
+
+      * ``the_day``        — one bullet per active matter (current_state
+                              first sentence, with stale-as_of fallback
+                              to a recent-event walk for that matter
+                              only).
+      * ``awaiting_you``   — needs_attention/*.md cards with
+                              ``status == "pending"``.
+      * ``drafts``         — tasks pending approval (state == "pending"
+                              and pending_confirmation true OR signal
+                              cards still awaiting Sir's nod).
+      * ``quiet_notes``    — unchanged: observations from the intuition
+                              layer surface here for the clerk to weave
+                              in lightly.
+
+    Each entry carries enough metadata for the clerk to compose a brief
+    without re-fetching anything. The clerk still applies Alfred's
+    voice — this activity is pure data.
+    """
+    from datetime import timezone as _tz
+
+    config = load_config()
+    client = VaultClient(config)
+    try:
+        # 1. Active matters → "The Day"
+        matters_raw = await client.list_records("matter", limit=5000)
+        now = datetime.now(_tz.utc)
+        the_day: list[dict[str, Any]] = []
+
+        for rec in matters_raw:
+            if not isinstance(rec, dict):
+                continue
+            fm = rec.get("frontmatter") or {}
+            if not isinstance(fm, dict):
+                fm = {}
+            state = str(fm.get("state") or "").strip().lower()
+            if state == "done":
+                continue
+            path = str(rec.get("path") or "").strip()
+            if not path.startswith("matter/") or not path.endswith(".md"):
+                continue
+
+            current_state = str(fm.get("current_state") or "").strip()
+            as_of_raw = fm.get("as_of")
+            as_of_dt = _parse_iso_utc(as_of_raw)
+            stale = (
+                as_of_dt is None
+                or (now - as_of_dt).total_seconds() > _NARRATIVE_STALENESS
+            )
+
+            entry: dict[str, Any] = {
+                "path": path,
+                "name": str(fm.get("name") or path.removeprefix("matter/").removesuffix(".md")),
+                "as_of": str(as_of_raw or "").strip(),
+                "narrative_stale": stale,
+            }
+
+            if current_state and not stale:
+                entry["source"] = "narrative"
+                entry["excerpt"] = _first_sentence(current_state)
+            else:
+                # Fallback: walk recent events for this matter. We pull
+                # events whose ``parent_matter`` or ``related_matters``
+                # link to this path. The list endpoint can't filter by
+                # frontmatter so we slice the prefix and filter in
+                # Python; capped at _FALLBACK_EVENT_LIMIT per matter to
+                # keep the prompt budget sane.
+                entry["source"] = "fallback_events"
+                entry["excerpt"] = current_state or ""
+                try:
+                    all_events = await client.list_records("event", limit=200)
+                except Exception:
+                    all_events = []
+                matter_events: list[dict[str, Any]] = []
+                for ev in all_events:
+                    if not isinstance(ev, dict):
+                        continue
+                    efm = ev.get("frontmatter") or {}
+                    if not isinstance(efm, dict):
+                        continue
+                    parent = str(efm.get("parent_matter") or efm.get("matter") or "").strip()
+                    related = efm.get("related_matters")
+                    matched = parent == path
+                    if not matched and isinstance(related, list):
+                        for r in related:
+                            if isinstance(r, str) and r.strip() == path:
+                                matched = True
+                                break
+                    if not matched:
+                        continue
+                    matter_events.append({
+                        "path": str(ev.get("path") or ""),
+                        "name": str(efm.get("name") or "")[:120],
+                        "summary": str(efm.get("summary") or "")[:240],
+                        "created": str(ev.get("created") or efm.get("created") or ""),
+                    })
+                # Newest first by string compare on ISO timestamps —
+                # malformed entries sort to the end harmlessly.
+                matter_events.sort(key=lambda e: e["created"], reverse=True)
+                entry["fallback_events"] = matter_events[:_FALLBACK_EVENT_LIMIT]
+
+            the_day.append(entry)
+
+        # Keep ``The Day`` short — clerk consumes up to ~30 matters
+        # before the prompt becomes unwieldy. Sort by stale-first so
+        # matters with no narrative still get attention.
+        the_day.sort(key=lambda e: (not e.get("narrative_stale"), e["path"]))
+
+        # 2. Awaiting You — needs_attention/*.md with status=pending
+        awaiting: list[dict[str, Any]] = []
+        try:
+            needs_attention = await client.list_records("needs_attention", limit=200)
+        except Exception:
+            needs_attention = []
+        for rec in needs_attention:
+            if not isinstance(rec, dict):
+                continue
+            fm = rec.get("frontmatter") or {}
+            if not isinstance(fm, dict):
+                continue
+            status = str(fm.get("status") or "").strip().lower()
+            if status != "pending":
+                continue
+            awaiting.append({
+                "path": str(rec.get("path") or ""),
+                "name": str(fm.get("name") or fm.get("summary") or "")[:160],
+                "reason": str(fm.get("reason") or fm.get("reasoning") or "")[:240],
+                "created": str(rec.get("created") or fm.get("created") or ""),
+            })
+
+        # 3. Drafts I am Holding — tasks marked pending_confirmation
+        drafts: list[dict[str, Any]] = []
+        try:
+            task_records = await client.list_records("task", limit=2000)
+        except Exception:
+            task_records = []
+        for rec in task_records:
+            if not isinstance(rec, dict):
+                continue
+            fm = rec.get("frontmatter") or {}
+            if not isinstance(fm, dict):
+                continue
+            pending = fm.get("pending_confirmation")
+            if not (pending is True or str(pending).strip().lower() == "true"):
+                continue
+            drafts.append({
+                "path": str(rec.get("path") or ""),
+                "name": str(fm.get("name") or fm.get("title") or "")[:160],
+                "current_state": str(fm.get("current_state") or "")[:240],
+                "parent_matter": str(fm.get("parent_matter") or fm.get("matter") or ""),
+            })
+
+        # 4. Quiet Notes — observations the intuition layer surfaced
+        # since the last brief. Kept unchanged from the prior behaviour
+        # except for the size cap so the prompt stays compact.
+        try:
+            observations = await client.list_records("observation", limit=20)
+        except Exception:
+            observations = []
+        quiet_notes: list[dict[str, Any]] = []
+        for rec in observations[:10]:
+            if not isinstance(rec, dict):
+                continue
+            fm = rec.get("frontmatter") or {}
+            if not isinstance(fm, dict):
+                continue
+            quiet_notes.append({
+                "path": str(rec.get("path") or ""),
+                "reasoning": str(fm.get("reasoning") or "")[:240],
+                "input_type": str(fm.get("input_type") or ""),
+            })
+
+        return {
+            "the_day": the_day,
+            "awaiting_you": awaiting,
+            "drafts": drafts,
+            "quiet_notes": quiet_notes,
+            "matter_count": len(the_day),
+            "awaiting_count": len(awaiting),
+            "draft_count": len(drafts),
+            "quiet_note_count": len(quiet_notes),
+            "narrative_stale_count": sum(1 for e in the_day if e.get("narrative_stale")),
+        }
+    finally:
+        await client.close()
+
+
 @activity.defn
 async def write_digest_record(digest: dict[str, Any]) -> str:
     """Write the daily digest as an event record."""
