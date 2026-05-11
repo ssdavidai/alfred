@@ -13,6 +13,7 @@ import {
   createVaultRecord,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
+import { Markdown } from "../client/components/ab/Markdown";
 
 interface VaultLink {
   title: string;
@@ -170,9 +171,9 @@ export default function MatterDetailPage() {
                 >
                   What this is
                 </div>
-                <p className="font-body text-[17px] leading-[1.6] max-w-[64ch] whitespace-pre-wrap">
-                  {matter.about}
-                </p>
+                <div className="max-w-[64ch]">
+                  <Markdown source={matter.about} useLiveResolver={false} />
+                </div>
               </section>
             )}
 
