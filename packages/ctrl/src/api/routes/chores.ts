@@ -3,7 +3,7 @@ import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError, ConflictError } from "../errors.js";
 import { dockerExec, dockerComposeCmd } from "../helpers.js";
-import { VAULT_PATH } from "./vault.js";
+import { VAULT_PATH, walkMd, readRecord, IGNORE_DIRS } from "./vault.js";
 import { CHORE_ACTION_MANIFEST, lookupChoreActions, type ChoreActionSpec } from "./chore_manifest_data.js";
 
 const USER_CHORES_DIR = "/mnt/encrypted/alfred/user-chores";
@@ -28,6 +28,210 @@ const WORKFLOW_CLASS_RE = /^[A-Z][a-zA-Z0-9]*Workflow$/;
  */
 
 const CHORE_DIR = path.join(VAULT_PATH, "chore");
+
+// ---------------------------------------------------------------------------
+// RFC #884 — Living Narratives detail composition for a single chore.
+//
+// `GET /api/v1/chores/:slug` returns the legacy `{slug, frontmatter, body}`
+// shape AND a new `chore` block describing the chore's living state +
+// chronological timeline of signals / signal-actions / state transitions
+// targeting it. The dashboard consumes the `chore` block; existing
+// callers reading slug/frontmatter/body continue to work.
+//
+// Chores live at `chore/<slug>.md` (type: chore). Signals may target a
+// chore via `target_candidates[].path == "chore/<slug>.md"`. We also
+// match `task/<slug>.md` defensively in case alfred-learn ever routes
+// task-shaped completion signals at a chore-shaped target (the existing
+// curator path can sometimes mistype the directory).
+// ---------------------------------------------------------------------------
+
+type ChoreTimelineKind = "signal" | "task_transition" | "action";
+
+interface ChoreTimelineEntry {
+  when: string;
+  kind: ChoreTimelineKind;
+  headline: string;
+  path: string;
+}
+
+type ChoreState = "pending" | "in_progress" | "done" | "archived";
+
+interface ChoreDetail {
+  id: string;
+  path: string;
+  name: string;
+  state: ChoreState;
+  current_state: string | null;
+  as_of: string | null;
+  timeline: ChoreTimelineEntry[];
+}
+
+const CHORE_TIMELINE_CAP = 100;
+const CHORE_DETAIL_TTL_MS = 60_000;
+const _choreDetailCache = new Map<
+  string,
+  { at: number; body: { slug: string; frontmatter: Record<string, unknown>; body: string; chore: ChoreDetail } }
+>();
+
+/** Coerce a frontmatter chore/task state to one of the four canonical
+ *  values. Defaults to "pending" when missing/unknown so a chore record
+ *  that pre-dates the Living Narratives migration still renders. */
+function normalizeChoreState(raw: unknown): ChoreState {
+  const s = String(raw ?? "").toLowerCase().trim();
+  if (s === "in_progress" || s === "in-progress" || s === "active") return "in_progress";
+  if (s === "done" || s === "completed" || s === "complete") return "done";
+  if (s === "archived" || s === "paused" || s === "cancelled" || s === "canceled") return "archived";
+  return "pending";
+}
+
+/** First sentence cap at `cap` chars. Falls back to first `cap` chars. */
+function firstSentence(text: string, cap = 100): string {
+  if (!text) return "";
+  const trimmed = String(text).replace(/\s+/g, " ").trim();
+  if (!trimmed) return "";
+  const m = trimmed.match(/^[^.!?]*[.!?](?=\s|$)/);
+  const candidate = m ? m[0] : trimmed;
+  if (candidate.length <= cap) return candidate.trim();
+  return candidate.slice(0, cap).trim();
+}
+
+/** Summarise an event/signal-action-*.md audit record into a timeline
+ *  entry's when+headline. Returns null if the record can't be read. */
+function summarizeSignalActionForChore(
+  relPath: string,
+): { when: string; headline: string } | null {
+  const rec = readRecord(relPath);
+  if (!rec) return null;
+  // Signal-action audits use `timestamp`; older steward-action audits
+  // use `created`. Cover both.
+  const when = String(rec.fm.timestamp ?? rec.fm.created ?? rec.fm.created_at ?? "");
+  let headline = "";
+  if (typeof rec.fm.summary === "string" && rec.fm.summary.trim()) {
+    headline = firstSentence(rec.fm.summary, 100);
+  }
+  if (!headline) {
+    const bodyLines = rec.body.split("\n").map((l) => l.trim()).filter(Boolean);
+    const proseLine = bodyLines.find((l) => !l.startsWith("#"));
+    if (proseLine) {
+      const cleaned = proseLine
+        .replace(/^[-*]\s+/, "")
+        .replace(/\*\*/g, "")
+        .replace(/^_+|_+$/g, "");
+      headline = firstSentence(cleaned, 100) || cleaned.slice(0, 100);
+    }
+    if (!headline) headline = rec.body.replace(/\s+/g, " ").trim().slice(0, 100);
+  }
+  return { when, headline };
+}
+
+/** Compose the timeline + Living Narratives block for a single chore.
+ *  Walks the vault once for signals; bounded by TIMELINE_CAP. */
+function composeChoreDetail(
+  slug: string,
+  fm: Record<string, unknown>,
+  body: string,
+): ChoreDetail {
+  const choreVaultPath = `chore/${slug}.md`;
+  const taskShapedPath = `task/${slug}.md`;
+  const currentStateRaw = fm.current_state;
+  const asOfRaw = fm.as_of;
+  // Display name: frontmatter name/title, then first H1, then slug.
+  let name = "";
+  if (typeof fm.name === "string" && fm.name.trim()) name = fm.name.trim();
+  else if (typeof fm.title === "string" && fm.title.trim()) name = fm.title.trim();
+  if (!name) {
+    const h1 = body.match(/^\s*#\s+(.+?)\s*$/m);
+    if (h1) name = h1[1].trim();
+  }
+  if (!name) name = slug;
+
+  const timeline: ChoreTimelineEntry[] = [];
+  const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+  for (const relPath of files) {
+    const display = relPath.replace(/\\/g, "/");
+    if (!display.startsWith("signal/")) continue;
+    const rec = readRecord(relPath);
+    if (!rec) continue;
+    if (rec.fm.type && String(rec.fm.type) !== "signal") continue;
+    const candidates = rec.fm.target_candidates;
+    if (!Array.isArray(candidates)) continue;
+    let hit = false;
+    for (const c of candidates) {
+      if (!c || typeof c !== "object") continue;
+      const tp = String((c as { path?: unknown }).path ?? "");
+      if (tp === choreVaultPath || tp === taskShapedPath) {
+        hit = true;
+        break;
+      }
+    }
+    if (!hit) continue;
+    // 1. Signal entry.
+    const when = String(rec.fm.created ?? rec.fm.applied_at ?? "");
+    let headline = "";
+    const proposal = rec.fm.action_proposal;
+    if (proposal && typeof proposal === "object" && !Array.isArray(proposal)) {
+      const what = (proposal as { what?: unknown }).what;
+      if (typeof what === "string" && what.trim()) {
+        headline = firstSentence(what, 100);
+      }
+    }
+    if (!headline && typeof rec.fm.reasoning === "string") {
+      headline = firstSentence(rec.fm.reasoning, 100);
+    }
+    if (!headline) headline = rec.stem;
+    timeline.push({
+      when,
+      kind: "signal",
+      headline,
+      path: display,
+    });
+    // 2. Linked signal-action audit entry.
+    const auditPath = rec.fm.audit_record_path;
+    if (typeof auditPath === "string" && auditPath.trim()) {
+      const summary = summarizeSignalActionForChore(auditPath.trim());
+      if (summary) {
+        timeline.push({
+          when: summary.when,
+          kind: "action",
+          headline: summary.headline,
+          path: auditPath.trim(),
+        });
+      }
+    }
+  }
+
+  // 3. State-transition entry for the chore itself (if as_of is set,
+  //    the steward/nightly-narrative rewrote state recently).
+  const asOfStr =
+    typeof asOfRaw === "string" && asOfRaw.trim() ? asOfRaw : null;
+  const state = normalizeChoreState(fm.state ?? fm.status);
+  if (asOfStr) {
+    timeline.push({
+      when: asOfStr,
+      kind: "task_transition",
+      headline: `Chore '${name}' → ${state}`,
+      path: choreVaultPath,
+    });
+  }
+
+  // Sort newest-first, cap.
+  timeline.sort((a, b) => (a.when < b.when ? 1 : a.when > b.when ? -1 : 0));
+  const capped =
+    timeline.length > CHORE_TIMELINE_CAP ? timeline.slice(0, CHORE_TIMELINE_CAP) : timeline;
+
+  return {
+    id: slug,
+    path: choreVaultPath,
+    name,
+    state,
+    current_state:
+      typeof currentStateRaw === "string" && currentStateRaw.trim()
+        ? currentStateRaw
+        : null,
+    as_of: asOfStr,
+    timeline: capped,
+  };
+}
 
 /**
  * Chore templates that have been promoted from per-tenant generated
@@ -651,20 +855,38 @@ export function registerChoreRoutes(): void {
     });
   });
 
-  // Get one chore's details (frontmatter + body)
+  // Get one chore's details (frontmatter + body) PLUS the RFC #884
+  // Living Narratives block:
+  //   chore: { id, path, name, state, current_state, as_of, timeline }
+  //
+  // The legacy `{slug, frontmatter, body}` fields stay at the top level
+  // so existing callers keep working. New consumers should read `chore`.
+  // Response cached in-memory for 60s, keyed by slug — same TTL +
+  // Map<string, {at, body}> pattern as /api/v1/vault/index (#873) and
+  // /api/v1/matters/:id (#884).
   addRoute("GET", "/api/v1/chores/:slug", async ({ res, params }) => {
     const slug = params?.slug;
     if (!slug) throw new ValidationError("slug is required");
+    const now = Date.now();
+    const cached = _choreDetailCache.get(slug);
+    if (cached && now - cached.at < CHORE_DETAIL_TTL_MS) {
+      sendJson(res, 200, cached.body);
+      return;
+    }
     const parsed = readChoreFile(slug);
     if (!parsed) throw new NotFoundError(`chore ${slug} not found`);
     if ((parsed.frontmatter.type ?? "") !== "chore") {
       throw new NotFoundError(`chore ${slug} not found`);
     }
-    sendJson(res, 200, {
+    const chore = composeChoreDetail(slug, parsed.frontmatter, parsed.body);
+    const body = {
       slug,
       frontmatter: parsed.frontmatter,
       body: parsed.body,
-    });
+      chore,
+    };
+    _choreDetailCache.set(slug, { at: now, body });
+    sendJson(res, 200, body);
   });
 
   // Pause — sets status=paused and pauses the Temporal schedule
