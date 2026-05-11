@@ -1260,40 +1260,39 @@ export const getMatterDetail = async (
 };
 
 // RFC #884 — per-chore living-narrative detail. Separate from the existing
-// `getChoreSource` so we don't disturb the M4 source-audit endpoint. Reads
-// the chore vault record + its (optional) per-record timeline via the same
-// graph endpoint used by the matter fallback. When the ctrl-api ships a
-// dedicated `/api/v1/chores/:slug/detail` route this can short-circuit on
-// that; until then we synthesise from frontmatter.
+// `getChoreSource` so we don't disturb the M4 source-audit endpoint.
+//
+// The ctrl-api `/api/v1/chores/:slug` endpoint (cf20192) embeds the new
+// RFC-884 `chore` block alongside the legacy `{slug, frontmatter, body}`
+// payload, so we pull that and pass it through. Older ctrl-api builds that
+// only return `frontmatter` are handled by mapping raw frontmatter; a final
+// fallback reads the chore vault record directly.
+//
+// Return type is intentionally `any | null` to satisfy Wasp's SuperJSON
+// serialisation constraint (which rejects strict interface types without an
+// index signature) — the client narrows the shape locally.
 export const getChoreDetail2 = async (
   args: { id: string },
   context: any,
-): Promise<{
-  chore: {
-    id: string;
-    path: string;
-    name: string;
-    state: TaskState;
-    current_state: string | null;
-    as_of: string | null;
-    timeline: MatterTimelineEntry[];
-  } | null;
-}> => {
+): Promise<{ chore: any | null }> => {
   if (!context.user) throw new HttpError(401, "Not authenticated");
   if (!args?.id) throw new HttpError(400, "id required");
   const instance = await getUserInstance(context);
-  const cleanId = String(args.id).replace(/^task\//, "").replace(/\.md$/, "");
-  // Try the dedicated detail endpoint first (will appear in a later ctrl-api).
+  const cleanId = String(args.id)
+    .replace(/^chore\//, "")
+    .replace(/^task\//, "")
+    .replace(/\.md$/, "");
+  // Try the chore detail endpoint — embeds RFC-884 fields when available.
   try {
     const data: any = await proxyToTenant(instance, {
-      path: `/api/v1/chores/${encodeURIComponent(cleanId)}/detail`,
+      path: `/api/v1/chores/${encodeURIComponent(cleanId)}`,
     });
     if (data?.chore) {
       const c = data.chore;
       return {
         chore: {
           id: String(c.id ?? cleanId),
-          path: String(c.path ?? `task/${cleanId}.md`),
+          path: String(c.path ?? `chore/${cleanId}.md`),
           name: String(c.name ?? cleanId),
           state: normalizeTaskState(c.state),
           current_state:
@@ -1303,45 +1302,61 @@ export const getChoreDetail2 = async (
         },
       };
     }
-  } catch (err) {
-    // Endpoint may not exist yet — fall through to the vault-record path.
-    console.warn(
-      "[getChoreDetail2] /api/v1/chores/:id/detail not available, falling back to /vault/record:",
-      (err as Error)?.message,
-    );
-  }
-  // Fallback: synthesise from the task vault record.
-  try {
-    const recordPath = `task/${cleanId}.md`;
-    const rec: any = await proxyToTenant(instance, {
-      path: `/api/v1/vault/records/${encodeURIComponent(recordPath)}`,
-    });
-    if (!rec || (rec.error && !rec.body && !rec.frontmatter)) {
-      return { chore: null };
+    // Older ctrl-api: only `frontmatter` is present, no `chore` block. Map
+    // the raw frontmatter into the new shape so the UI degrades gracefully.
+    if (data?.frontmatter) {
+      const fm = data.frontmatter ?? {};
+      return {
+        chore: {
+          id: cleanId,
+          path: String(data.path ?? `chore/${cleanId}.md`),
+          name: String(fm.name ?? data.slug ?? cleanId),
+          state: normalizeTaskState(fm.state),
+          current_state: nullableString(fm.current_state),
+          as_of: nullableString(fm.as_of),
+          timeline: [],
+        },
+      };
     }
-    const fm = rec.frontmatter ?? {};
-    const body: string = String(rec.body ?? rec.content ?? "");
-    const stripped = body.replace(/^---[\s\S]*?---\s*/, "").trim();
-    const h1 = stripped.match(/^\s*#\s+(.+?)\s*$/m);
-    const extractedName = h1 ? h1[1].trim() : "";
-    return {
-      chore: {
-        id: cleanId,
-        path: recordPath,
-        name: rec.name || fm.title || fm.name || extractedName || cleanId,
-        state: normalizeTaskState(fm.state),
-        current_state: nullableString(fm.current_state),
-        as_of: nullableString(fm.as_of),
-        timeline: [],
-      },
-    };
   } catch (err) {
     console.warn(
-      "[getChoreDetail2] vault/record fallback failed:",
+      "[getChoreDetail2] /api/v1/chores/:slug not available, falling back to /vault/record:",
       (err as Error)?.message,
     );
-    return { chore: null };
   }
+  // Final fallback: read the chore vault record directly. Tries `chore/`
+  // first (spec-canonical location), then `task/` (legacy).
+  for (const folder of ["chore", "task"]) {
+    try {
+      const recordPath = `${folder}/${cleanId}.md`;
+      const rec: any = await proxyToTenant(instance, {
+        path: `/api/v1/vault/records/${encodeURIComponent(recordPath)}`,
+      });
+      if (!rec || (rec.error && !rec.body && !rec.frontmatter)) continue;
+      const fm = rec.frontmatter ?? {};
+      const body: string = String(rec.body ?? rec.content ?? "");
+      const stripped = body.replace(/^---[\s\S]*?---\s*/, "").trim();
+      const h1 = stripped.match(/^\s*#\s+(.+?)\s*$/m);
+      const extractedName = h1 ? h1[1].trim() : "";
+      return {
+        chore: {
+          id: cleanId,
+          path: recordPath,
+          name: rec.name || fm.title || fm.name || extractedName || cleanId,
+          state: normalizeTaskState(fm.state),
+          current_state: nullableString(fm.current_state),
+          as_of: nullableString(fm.as_of),
+          timeline: [],
+        },
+      };
+    } catch (err) {
+      console.warn(
+        `[getChoreDetail2] vault/${folder} fallback failed:`,
+        (err as Error)?.message,
+      );
+    }
+  }
+  return { chore: null };
 };
 
 // ============================================================
