@@ -1199,3 +1199,53 @@ Use the explicit two-step (`/_cluster` then `/_cluster/apply`) when you need to 
 53. Instinct detail view (observation sources, match history)
 54. `README.md` with setup instructions
 55. alfred-documentation: feature doc for Intuition
+
+---
+
+## Layer 4: Living Narratives (RFC #884, Alfred Black 1.0)
+
+The Steward already classifies signals and applies state transitions on tasks. What's missing is the **narrative layer** that turns matters and tasks into living documents — model-written paragraphs describing the current state, refreshed every night.
+
+### Schema additions
+
+**Matter frontmatter (`matter/*.md`)** — three new fields, all written by `nightly_narrative`:
+
+| Field | Type | Source |
+|---|---|---|
+| `current_state` | `str \| null` | LLM-synthesised 2–4 sentence paragraph describing where the matter stands today |
+| `as_of` | ISO-8601 datetime string `\| null` | When `current_state` was last rewritten |
+| `signal_count_24h` | `int` | Count of signals routed to this matter in the last 24h (bookkeeping for the nightly run) |
+
+**Task frontmatter (`task/*.md`)** — two new fields, written by Steward at every state transition:
+
+| Field | Type | Source |
+|---|---|---|
+| `state` | `"pending" \| "in_progress" \| "done" \| "archived"` | Steward-owned. Promoted from the existing implicit `last_steward_outcome.decision` so the renderer doesn't have to peek inside that nested object. |
+| `current_state` | `str \| null` | Single sentence describing the task's situation — e.g. *"Done — Alfred filed the Smythson receipt on 2026-05-11."* |
+| `as_of` | ISO-8601 datetime string `\| null` | When `current_state` was last rewritten |
+
+### Workflow 7: Nightly Narrative
+
+**File:** `src/workflows/nightly_narrative.py`
+**Schedule:** Temporal cron `0 2 * * *` (02:00 local, per tenant)
+**Activities:**
+- `load_matter_signals_24h(matter_path)` — `signal/*.md` where any `target_candidates[].path == matter/<x>.md` AND `applied_at` within 24h
+- `load_task_transitions_24h(matter_path)` — tasks linked to this matter whose `state` changed in 24h
+- `load_source_events(signal_paths)` — back-pointer expand for context
+- `generate_matter_narrative(matter, signals, transitions, events)` — single clerk call via OpenClaw gateway, prompted for a 2–4 sentence current_state paragraph in Alfred's voice
+- `patch_matter_narrative(matter_path, current_state, as_of, signal_count_24h)` — atomic vault_client write
+
+**Idempotency:** If no signals AND no transitions in the last 24h, leave `current_state` alone and just refresh `as_of` (or skip — TBD on whether `as_of` should mean "last successfully rewrote" or "last attempted").
+
+### Steward inline task writebacks (extension to Workflow 6)
+
+Every time `StewardWorkflow` mutates a task's `state` field (via `apply_state_change`), it also writes `task.current_state` (one sentence describing what just happened) and `task.as_of` (now). Composed deterministically from the triggering signal — no extra LLM call.
+
+### Daily Digest reads narratives (refactor of Workflow 3)
+
+`daily_digest.py` becomes a thin composer: for each active matter (where `state != "done"`), read its `current_state` + `as_of`. The brief is a tight one-paragraph-per-matter readout pulled directly from the narrative layer. Fallback: if `as_of` is > 36h stale, re-walk recent events for that matter inline.
+
+### Why this closes the loop
+
+When a task gets completed because the Steward picked up the completion signal (e.g. a payment-confirmation email), sir doesn't get asked. The Steward writes `task.state = "done"` + `task.current_state = "Done — Alfred filed the confirmation on …"`. The nightly narrative folds that into the matter's `current_state`. The next morning's brief reads "Smythson invoice: settled" without sir ever being prompted.
+
