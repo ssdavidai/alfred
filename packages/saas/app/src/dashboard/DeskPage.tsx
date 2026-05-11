@@ -21,6 +21,7 @@
 //   judgment         → tray-only — these are passive observations, no actions
 //                      back on the source record beyond local triage.
 import { useMemo, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
   useQuery,
@@ -29,6 +30,7 @@ import {
   getRecentJudgments,
   getActivityFeed,
   getRecentStewardActions,
+  getMatterDetail,
   resolveNeedsAttentionDispatch,
   resolveNeedsAttentionSkip,
   resolveNeedsAttentionDone,
@@ -56,6 +58,27 @@ interface Decision {
   why: string;
   arrived: string;   // ISO or relative
   conf?: number;
+  // RFC #884 — when the source record's frontmatter carries a back-reference
+  // to a matter, surface the matter id so the featured card can render a
+  // contextual callout. Stored as the bare matter id (e.g. "smythson-invoice")
+  // — the wikilink / vault-path prefix is stripped.
+  matterRef?: string | null;
+}
+
+/** Extract a matter id from a frontmatter value. Accepts wikilinks
+ *  (`[[matter/foo]]`), bare paths (`matter/foo.md`), or just the stem
+ *  (`foo`). Returns null if nothing usable is present. */
+function extractMatterId(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  // [[matter/foo]] or [[matter/foo|alias]] → matter/foo
+  const wiki = s.match(/^\[\[\s*([^|\]]+?)\s*(?:\|[^\]]*)?\]\]$/);
+  const stripped = (wiki ? wiki[1] : s)
+    .replace(/^matter\//, "")
+    .replace(/\.md$/, "")
+    .trim();
+  return stripped || null;
 }
 
 function fmtArrived(value: unknown): string {
@@ -130,6 +153,7 @@ export default function DeskPage() {
         why: String(fm.decision_reason ?? fm.reason ?? r?.body ?? ""),
         arrived: String(fm.created ?? ""),
         conf: typeof fm.confidence === "number" ? fm.confidence : undefined,
+        matterRef: extractMatterId(fm.matter ?? fm.parent_matter),
       });
     }
     const apps = Array.isArray(approvals?.results)
@@ -150,6 +174,7 @@ export default function DeskPage() {
         ),
         why: String(fm.reason ?? fm.description ?? r?.body_preview ?? ""),
         arrived: String(fm.created ?? ""),
+        matterRef: extractMatterId(fm.matter ?? fm.parent_matter),
       });
     }
     const ju = Array.isArray(judgments?.results) ? judgments?.results : [];
@@ -167,6 +192,7 @@ export default function DeskPage() {
         headline: String(fm.observation ?? fm.summary ?? r?.name ?? shortenPath(path)),
         why: String(fm.reflection ?? fm.reasoning ?? r?.body_preview ?? ""),
         arrived: String(fm.created ?? ""),
+        matterRef: extractMatterId(fm.matter ?? fm.parent_matter),
       });
     }
     // Newest first.
@@ -594,6 +620,7 @@ function DecisionCard({
             {d.why}
           </p>
         )}
+        {d.matterRef && <MatterContextCallout matterId={d.matterRef} />}
         {Buttons}
         {Form}
         {arrived && (
@@ -670,5 +697,57 @@ function DecisionCard({
         </div>
       )}
     </article>
+  );
+}
+
+// RFC #884 — Matter-context callout for the featured decision card. Fetches
+// the matter's living-narrative via getMatterDetail and renders a small
+// "FROM MATTER" block: the matter name (linked to /matters/:id) plus the
+// first sentence of current_state. Suspends gracefully — if the matter
+// isn't found or current_state isn't set yet, nothing renders.
+function MatterContextCallout({ matterId }: { matterId: string }) {
+  const { data, error } = useQuery(
+    getMatterDetail,
+    { id: matterId },
+    { enabled: Boolean(matterId), retry: false },
+  );
+  const matter = data?.matter ?? null;
+  if (error || !matter) return null;
+  const name = String(matter.name ?? matterId);
+  const currentState =
+    matter.current_state === null || matter.current_state === undefined
+      ? ""
+      : String(matter.current_state);
+  // First sentence — split on .!? followed by whitespace, fall back to full
+  // text if no sentence boundary is found.
+  const firstSentence = (() => {
+    if (!currentState.trim()) return "";
+    const m = currentState.match(/^[\s\S]*?[.!?](?=\s|$)/);
+    return (m ? m[0] : currentState).trim();
+  })();
+  return (
+    <div className="mt-8 max-w-[64ch]">
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+        style={{ color: "var(--brass)" }}
+      >
+        From matter
+      </div>
+      <Link
+        to={`/matters/${encodeURIComponent(matterId)}`}
+        className="font-display italic"
+        style={{ fontSize: 16, color: "var(--ink)" }}
+      >
+        {name}
+      </Link>
+      {firstSentence && (
+        <p
+          className="font-body italic mt-1"
+          style={{ fontSize: 15, color: "var(--marginalia)" }}
+        >
+          {firstSentence}
+        </p>
+      )}
+    </div>
   );
 }
