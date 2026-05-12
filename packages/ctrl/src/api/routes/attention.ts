@@ -280,6 +280,11 @@ export function registerAttentionRoutes(): void {
         display_headline: rec.frontmatter.display_headline ?? null,
         display_body: rec.frontmatter.display_body ?? null,
         raw_quote: rec.frontmatter.raw_quote,
+        // Decay band stamped by DecayWatcherWorkflow — fresh/aging/stale.
+        // The Desk groups the queue under these bands so the principal
+        // sees aging cards under the fold without losing them entirely.
+        decay_band: rec.frontmatter.decay_band ?? null,
+        decay_score: rec.frontmatter.decay_score ?? null,
         body_preview: rec.body.slice(0, 500),
       });
     }

@@ -39,6 +39,7 @@ from src.workflows.decision_router import DecisionRouterWorkflow
 from src.workflows.decision_patterns import DecisionPatternsWorkflow
 from src.workflows.defer_resurface import DeferResurfaceWorkflow
 from src.workflows.scheduled_dispatch import ScheduledDispatchWorkflow
+from src.workflows.decay_watcher import DecayWatcherWorkflow
 from src.workflows.meeting_capture import MeetingCaptureWorkflow
 from src.workflows.transcript_intake import TranscriptIntakeWorkflow
 from src.workflows.signals import SignalExtractWorkflow
@@ -546,6 +547,11 @@ from src.activities.noise_patterns import (
     write_noise_pattern as np_write,
 )
 
+# Decay watcher — six-hourly sweep that stamps freshness bands on
+# pending needs_attention cards and auto-flips deeply stale ones to
+# status=stale, keeping the Desk free of origin-old residue.
+from src.activities.decay_watcher import watch_decay as dw_watch
+
 # Decisions → observations + pattern-proposal lifecycle. Every click
 # distills into an observation the intuition engine consumes; pattern
 # proposals materialize as instinct records when adopted.
@@ -589,6 +595,7 @@ _STATIC_WORKFLOWS = [
     DecisionPatternsWorkflow,
     DeferResurfaceWorkflow,
     ScheduledDispatchWorkflow,
+    DecayWatcherWorkflow,
     MeetingCaptureWorkflow,
     TranscriptIntakeWorkflow,
     SignalExtractWorkflow,
@@ -945,6 +952,8 @@ ALL_ACTIVITIES = [
     sd_fire_due,
     # Noise pattern materialisation — runs after intent=noise click.
     np_write,
+    # Decay watcher — stamps freshness bands, auto-flips deeply stale.
+    dw_watch,
 ]
 
 

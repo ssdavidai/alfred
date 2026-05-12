@@ -211,6 +211,18 @@ INTERVAL_SCHEDULES = [
         "workflow": "ScheduledDispatchWorkflow",
         "interval": timedelta(minutes=15),
     },
+    {
+        # Decay watcher — six-hourly sweep that scores every pending
+        # needs_attention card against a per-source half-life and stamps
+        # decay_band ∈ {fresh, aging, stale}. Cards below the auto-flip
+        # threshold (freshness < 0.05) are status-flipped to stale so
+        # the Desk doesn't silt up with origin-old residue. The Desk UI
+        # reads decay_band off needs_attention frontmatter to group the
+        # queue into bands.
+        "id": "al-decay-watcher",
+        "workflow": "DecayWatcherWorkflow",
+        "interval": timedelta(hours=6),
+    },
 ]
 
 CALENDAR_SCHEDULES = [

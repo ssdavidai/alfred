@@ -75,6 +75,10 @@ interface Decision {
   // contextual callout. Stored as the bare matter id (e.g. "smythson-invoice")
   // — the wikilink / vault-path prefix is stripped.
   matterRef?: string | null;
+  // Freshness band stamped by DecayWatcherWorkflow — used to group the
+  // queue under "Fresh / Aging / Stale" so origin-old cards drift below
+  // the fold instead of clogging the active surface.
+  decayBand?: "fresh" | "aging" | "stale" | null;
 }
 
 /** Extract a matter id from a frontmatter value. Accepts wikilinks
@@ -244,6 +248,11 @@ export default function DeskPage() {
         String(r?.target_kind ?? "") === "matter"
           ? extractMatterId(r?.target_path)
           : extractMatterId(fm.matter ?? fm.parent_matter);
+      const decayBandRaw = String(r?.decay_band ?? fm.decay_band ?? "").toLowerCase();
+      const decayBand =
+        decayBandRaw === "fresh" || decayBandRaw === "aging" || decayBandRaw === "stale"
+          ? (decayBandRaw as "fresh" | "aging" | "stale")
+          : null;
       out.push({
         id: `na:${id}`,
         source: "needs_attention",
@@ -262,6 +271,7 @@ export default function DeskPage() {
         ),
         conf: typeof r?.confidence === "number" ? r.confidence : undefined,
         matterRef,
+        decayBand,
       });
     }
     const apps = Array.isArray(approvals?.results)
@@ -403,8 +413,18 @@ export default function DeskPage() {
   // ------------------------------------------------------------------------
 
   const remaining = decisions.filter((d) => !handled.includes(d.id));
-  const top = remaining[0];
-  const rest = remaining.slice(1);
+  // The featured card is the freshest unhandled decision. We bias the top
+  // slot to "fresh" so an aging card never crowns the Desk; if there are
+  // no fresh decisions, the freshest aging one takes the slot.
+  const remainingFresh = remaining.filter((d) => d.decayBand !== "aging" && d.decayBand !== "stale");
+  const top = (remainingFresh[0] ?? remaining[0]) as Decision | undefined;
+  const restAll = remaining.filter((d) => d !== top);
+  const restFresh = restAll.filter((d) => d.decayBand !== "aging" && d.decayBand !== "stale");
+  const restAging = restAll.filter((d) => d.decayBand === "aging");
+  const restStale = restAll.filter((d) => d.decayBand === "stale");
+  // Combined "Also in the queue" stays the fresh list for the main band;
+  // aging + stale are rendered under their own headings below.
+  const rest = restFresh;
 
   function markHandled(id: string) {
     setHandled((h) => [...h, id]);
@@ -641,6 +661,60 @@ export default function DeskPage() {
               <SectionHead title="Also in the queue" />
               <div className="space-y-4">
                 {rest.map((d) => (
+                  <DecisionCard
+                    key={d.id}
+                    d={d}
+                    busy={pending === d.id}
+                    open={open?.id === d.id ? open.mode : null}
+                    draft={draft}
+                    setDraft={setDraft}
+                    onOpen={(mode) => { setOpen({ id: d.id, mode }); setDraft(""); }}
+                    onCancel={() => { setOpen(null); setDraft(""); }}
+                    onSubmit={(mode) => {
+                      if (mode === "delegate") return onDelegate(d, draft);
+                      if (mode === "defer")    return onDefer(d, draft);
+                      if (mode === "done")     return onDelete(d, draft);
+                      if (mode === "take_mine")return onDo(d, draft);
+                    }}
+                    onNoise={() => onNoise(d)}
+                  />
+                ))}
+              </div>
+            </motion.div>
+          )}
+
+          {restAging.length > 0 && (
+            <motion.div variants={fadeUp} className="mb-20" style={{ opacity: 0.78 }}>
+              <SectionHead title="Aging" sub="Past their half-life" />
+              <div className="space-y-4">
+                {restAging.map((d) => (
+                  <DecisionCard
+                    key={d.id}
+                    d={d}
+                    busy={pending === d.id}
+                    open={open?.id === d.id ? open.mode : null}
+                    draft={draft}
+                    setDraft={setDraft}
+                    onOpen={(mode) => { setOpen({ id: d.id, mode }); setDraft(""); }}
+                    onCancel={() => { setOpen(null); setDraft(""); }}
+                    onSubmit={(mode) => {
+                      if (mode === "delegate") return onDelegate(d, draft);
+                      if (mode === "defer")    return onDefer(d, draft);
+                      if (mode === "done")     return onDelete(d, draft);
+                      if (mode === "take_mine")return onDo(d, draft);
+                    }}
+                    onNoise={() => onNoise(d)}
+                  />
+                ))}
+              </div>
+            </motion.div>
+          )}
+
+          {restStale.length > 0 && (
+            <motion.div variants={fadeUp} className="mb-20" style={{ opacity: 0.55 }}>
+              <SectionHead title="Stale" sub="About to fade. Sweep or noise." />
+              <div className="space-y-4">
+                {restStale.map((d) => (
                   <DecisionCard
                     key={d.id}
                     d={d}
