@@ -2,7 +2,14 @@ import { HttpError } from "wasp/server";
 import { Instance } from "wasp/entities";
 import { encryptApiKey, decryptApiKey } from "./columnCrypto";
 
-const TENANT_API_TIMEOUT = 15_000;
+// 60s, not 15s. Several ctrl-api endpoints (admin/activity, vault/list/*,
+// matters aggregator) scan thousands of vault files synchronously and
+// regularly take 2-4 s under no load; under burst load from the Desk's
+// ~12 parallel queries plus alfred-learn's background workers, individual
+// requests serialise on the single Node event loop and routinely cross
+// 15 s. The old ceiling caused 504 storms on every Desk action because
+// the post-mutation invalidateQueries re-fires the whole fan-out at once.
+const TENANT_API_TIMEOUT = 60_000;
 
 interface ProxyOptions {
   method?: string;
