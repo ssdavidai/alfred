@@ -1012,6 +1012,8 @@ def _validate_llm_classification(
             "target_hint": "",
             "mutation_proposal": None,
             "action_proposal": None,
+            "display_headline": None,
+            "display_body": None,
         }
 
     target_hint = str(raw.get("target_hint") or "").strip()
@@ -1042,6 +1044,18 @@ def _validate_llm_classification(
     if effect == "action" and action_proposal is None:
         return None
 
+    # Surface-voice fields — added to the prompt schema so signals
+    # carry display_headline + display_body that read like Alfred,
+    # not like a router. Optional + bounded for safety:
+    # - None when the LLM omits them (e.g. older replay paths)
+    # - Trimmed strings up to a hard cap so a verbose LLM run can't
+    #   blow up the YAML frontmatter on a needs-attention card.
+    def _coerce_voice(value: Any, cap: int) -> str | None:
+        if not isinstance(value, str):
+            return None
+        s = value.strip()
+        return s[:cap] if s else None
+
     return {
         "effect": effect,
         "effect_confidence": _coerce_float(
@@ -1052,6 +1066,8 @@ def _validate_llm_classification(
         "target_hint": target_hint,
         "mutation_proposal": mutation_proposal,
         "action_proposal": action_proposal,
+        "display_headline": _coerce_voice(raw.get("display_headline"), 200),
+        "display_body": _coerce_voice(raw.get("display_body"), 600),
     }
 
 
@@ -1150,6 +1166,40 @@ async def extract_signal_from_event(
                 stream_event_path, reason,
             )
             return None
+
+        # 2b. Noise-pattern filter — upstream of the LLM call. If the
+        # principal has flagged a previous event with this signature
+        # as noise, suppress the signal entirely. The mark_processed
+        # call downstream still runs (in the workflow) so we don't
+        # re-LLM next tick. Cost of this filter: cached vault read +
+        # one signature derive per event. The pattern cache is shared
+        # across all events in a tick (TTL 60s).
+        try:
+            from src.activities.noise_patterns import (
+                load_active_noise_patterns,
+                event_matches_noise,
+            )
+            patterns = await load_active_noise_patterns()
+            if patterns:
+                event_fm_for_match = event.get("frontmatter") or {}
+                if isinstance(event_fm_for_match, dict):
+                    matched = event_matches_noise(event_fm_for_match, patterns)
+                    if matched is not None:
+                        logger.info(
+                            "signals.extract_signal_from_event: NOISE-FILTERED "
+                            "path=%s sig=%s/%s pattern=%s",
+                            stream_event_path,
+                            matched.get("kind"),
+                            matched.get("value"),
+                            matched.get("path"),
+                        )
+                        return None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "signals.extract_signal_from_event: noise check failed "
+                "(continuing to extract) path=%s err=%s",
+                stream_event_path, exc,
+            )
 
         source_type = _infer_source_type(event)
         raw_quote = _extract_raw_quote(event)
@@ -1325,10 +1375,42 @@ async def extract_signal_from_event(
         )
 
         # 8. Assemble signal dict.
+        # origin_at = when the underlying real-world thing happened
+        # (email arrival, calendar event time, voice note recorded).
+        # NOT when Alfred extracted it. The principal cares about the
+        # event's date, not Alfred's processing time — a card surfaced
+        # today about an email from May 1st should display May 1st.
+        # Falls through: event.created → event.enriched_at → now.
+        event_fm = (event.get("frontmatter") if isinstance(event, dict) else {}) or {}
+        if not isinstance(event_fm, dict):
+            event_fm = {}
+        origin_raw = (
+            event_fm.get("created")
+            or event_fm.get("enriched_at")
+            or _now_utc_iso()
+        )
+        # Coerce to string, then to a canonical ISO if possible.
+        try:
+            from datetime import datetime as _dt
+            origin_dt = _dt.fromisoformat(
+                str(origin_raw).strip().replace("Z", "+00:00")
+            )
+            origin_at = origin_dt.isoformat()
+        except (ValueError, TypeError):
+            # gcal events use RFC-822 strings like "Wed, 8 Apr 2026 11:36:55 +0200".
+            try:
+                from email.utils import parsedate_to_datetime
+                origin_at = parsedate_to_datetime(str(origin_raw)).isoformat()
+            except Exception:  # noqa: BLE001
+                # Unparseable — keep the raw string; consumer can still
+                # surface it even if it can't sort.
+                origin_at = str(origin_raw) if origin_raw else _now_utc_iso()
+
         signal: dict[str, Any] = {
             "source_event_path": stream_event_path,
             "source_type": source_type,
             "raw_quote": raw_quote,
+            "origin_at": origin_at,
             "target_kind": resolved["target_kind"],
             "target_path": resolved["target_path"],
             "target_confidence": resolved["target_confidence"],
@@ -1341,6 +1423,11 @@ async def extract_signal_from_event(
             "effect_confidence_raw": raw_conf,
             "effect_confidence_prior_key": prior_key,
             "reasoning": classification["reasoning"],
+            # Voiced surface fields — surfaced on /desk when this
+            # signal becomes a needs-attention card. Optional; older
+            # signals from before the prompt extension just have None.
+            "display_headline": classification.get("display_headline"),
+            "display_body": classification.get("display_body"),
             "created_at": _now_utc_iso(),
         }
 
@@ -1550,6 +1637,14 @@ def _build_signal_frontmatter(signal: dict[str, Any]) -> str:
         "source_event_path: "
         f"{_yaml_inline_str(str(signal.get('source_event_path') or ''))}"
     )
+    # origin_at: when the underlying real-world thing happened (email
+    # arrival, calendar event, voice note). Distinct from `created`
+    # (= signal extraction time, i.e. Alfred's clock). Cards and audit
+    # surfaces should show origin_at for "arrived" — the principal
+    # cares about the source's date, not Alfred's processing latency.
+    origin_at_v = signal.get("origin_at")
+    if isinstance(origin_at_v, str) and origin_at_v.strip():
+        lines.append(f"origin_at: {_yaml_inline_str(origin_at_v.strip())}")
     lines.append(
         "source_type: "
         f"{_yaml_inline_str(str(signal.get('source_type') or ''))}"
@@ -1599,6 +1694,17 @@ def _build_signal_frontmatter(signal: dict[str, Any]) -> str:
         )
     lines.append("reasoning: |")
     lines.append(_yaml_block_scalar(reasoning, indent=2))
+    # Voiced surface fields — only emitted when the LLM actually
+    # produced them (skipped silently on legacy / replay paths so
+    # old signal YAMLs don't drift).
+    display_headline = signal.get("display_headline")
+    display_body = signal.get("display_body")
+    if isinstance(display_headline, str) and display_headline.strip():
+        lines.append("display_headline: |")
+        lines.append(_yaml_block_scalar(display_headline, indent=2))
+    if isinstance(display_body, str) and display_body.strip():
+        lines.append("display_body: |")
+        lines.append(_yaml_block_scalar(display_body, indent=2))
     # Router-managed status fields, stamped to known initial state so
     # ``signal_router`` can locate them via a frontmatter filter.
     lines.append("status: unrouted")

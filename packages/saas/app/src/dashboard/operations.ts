@@ -953,6 +953,207 @@ export const resolveNeedsAttentionSkip = async (
   });
 };
 
+// Every Desk-card click writes an audit event regardless of source.
+// The per-source endpoints (resolveNeedsAttentionDispatch etc., or the
+// approvals endpoints) still mutate the underlying record; this is
+// additive and guarantees the action lands in the activity ledger.
+// "Do" is the only action with no per-source endpoint — this becomes
+// its only server call.
+export const recordDeskAction = async (
+  args: {
+    source: "needs_attention" | "approval" | "judgment" | "pattern_proposal";
+    sourceId: string;
+    action: "delegate" | "defer" | "delete" | "do" | "noise";
+    note?: string;
+  },
+  context: any,
+): Promise<any> => {
+  if (!args?.source) throw new HttpError(400, "source required");
+  if (!args?.sourceId) throw new HttpError(400, "sourceId required");
+  if (!args?.action) throw new HttpError(400, "action required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/admin/desk-action",
+    body: {
+      source: args.source,
+      source_id: args.sourceId,
+      action: args.action,
+      note: args.note ?? "",
+    },
+  });
+};
+
+// ============================================================
+// Decisions — first-class records of every Desk click.
+// ============================================================
+//
+// recordDecision writes a decision/<ts>.md record. The
+// DecisionRouterWorkflow on alfred-learn picks it up within ~60s and
+// fans out the side effects (status flips, signal re-arm, to_do spawn).
+// Every click on the Desk now goes through this; the older
+// recordDeskAction remains as a parallel audit format for backwards
+// compat with the /decisions page.
+
+export const recordDecision = async (
+  args: {
+    source:
+      | "needs_attention"
+      | "approval"
+      | "judgment"
+      | "to_do"
+      | "desk_originated"
+      | "pattern_proposal";
+    sourceRecord: string;
+    intent: "delegate" | "defer" | "done" | "take_mine" | "noise";
+    note?: string;
+    matterRef?: string;
+    taskRef?: string;
+    sourceHeadline?: string;
+    timeToDecisionMs?: number;
+  },
+  context: any,
+): Promise<any> => {
+  if (!args?.source) throw new HttpError(400, "source required");
+  if (!args?.sourceRecord) throw new HttpError(400, "sourceRecord required");
+  if (!args?.intent) throw new HttpError(400, "intent required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/decisions",
+    body: {
+      source: args.source,
+      source_record: args.sourceRecord,
+      intent: args.intent,
+      note: args.note ?? "",
+      matter_ref: args.matterRef ?? "",
+      task_ref: args.taskRef ?? "",
+      source_headline: args.sourceHeadline ?? "",
+      time_to_decision_ms: args.timeToDecisionMs ?? null,
+    },
+  });
+};
+
+export const getRecentDecisions = async (
+  args: { state?: string; source?: string; limit?: number } | void,
+  context: any,
+): Promise<any> => {
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args && typeof args === "object") {
+    if (args.state) query.state = args.state;
+    if (args.source) query.source = args.source;
+    if (typeof args.limit === "number") query.limit = String(args.limit);
+  }
+  try {
+    return await proxyToTenant(instance, {
+      method: "GET",
+      path: "/api/v1/decisions",
+      query: Object.keys(query).length ? query : undefined,
+    });
+  } catch {
+    // Older ctrl-api without the route → empty list so the page renders.
+    return { decisions: [], count: 0 };
+  }
+};
+
+export const reverseDecision = async (
+  args: { id: string },
+  context: any,
+): Promise<any> => {
+  if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/decisions/${encodeURIComponent(args.id)}/reverse`,
+  });
+};
+
+// ============================================================
+// to_do — persistent personal queue (replaces the in-React Backstage).
+// ============================================================
+
+export const getMyTodos = async (
+  args: { state?: string; limit?: number } | void,
+  context: any,
+): Promise<any> => {
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args && typeof args === "object") {
+    if (args.state) query.state = args.state;
+    if (typeof args.limit === "number") query.limit = String(args.limit);
+  }
+  try {
+    return await proxyToTenant(instance, {
+      method: "GET",
+      path: "/api/v1/todos",
+      query: Object.keys(query).length ? query : undefined,
+    });
+  } catch {
+    return { todos: [], count: 0 };
+  }
+};
+
+export const completeMyTodo = async (
+  args: { id: string },
+  context: any,
+): Promise<any> => {
+  if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PATCH",
+    path: `/api/v1/todos/${encodeURIComponent(args.id)}`,
+    body: { state: "completed" },
+  });
+};
+
+// In-flight decisions — the live activity feed. Returns decisions
+// whose work hasn't fully settled yet (state=open / scheduled /
+// executing). The Desk strip polls this every ~10s so the principal
+// can watch Alfred work through a batch they just delegated.
+export const getInFlightDecisions = async (
+  args: { limit?: number } | void,
+  context: any,
+): Promise<any> => {
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args && typeof args === "object" && typeof args.limit === "number") {
+    query.limit = String(args.limit);
+  }
+  try {
+    return await proxyToTenant(instance, {
+      method: "GET",
+      path: "/api/v1/decisions/in-flight",
+      query: Object.keys(query).length ? query : undefined,
+    });
+  } catch {
+    return { decisions: [], count: 0 };
+  }
+};
+
+// Pattern proposals — proposed standing rules. The principal's
+// Delegate click on one of these adopts it as an active instinct;
+// Delete rejects it. Surfaced on /desk alongside needs_attention etc.
+export const getPatternProposals = async (
+  args: { limit?: number } | void,
+  context: any,
+): Promise<any> => {
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args && typeof args === "object" && typeof args.limit === "number") {
+    query.limit = String(args.limit);
+  }
+  try {
+    return await proxyToTenant(instance, {
+      method: "GET",
+      path: "/api/v1/admin/pattern-proposals",
+      query: Object.keys(query).length ? query : undefined,
+    });
+  } catch {
+    return { proposals: [], count: 0 };
+  }
+};
+
 // ============================================================
 // Phase 6 — Steward feed (#160)
 // ============================================================

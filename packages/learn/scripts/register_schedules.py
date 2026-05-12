@@ -181,6 +181,36 @@ INTERVAL_SCHEDULES = [
         "workflow": "ComposioReconnectCleanupWorkflow",
         "interval": timedelta(minutes=15),
     },
+    {
+        # Decision router — every Desk click writes a decision/<ts>.md
+        # record; this workflow reads them, runs side effects (status
+        # flips on source records, signal re-arms + agent dispatches
+        # for delegate, to_do spawns for take_mine, outcome polling for
+        # executing delegates) and flips the decision state. 60-second
+        # cadence is the click→side-effect latency budget.
+        "id": "al-decision-router",
+        "workflow": "DecisionRouterWorkflow",
+        "interval": timedelta(seconds=60),
+    },
+    {
+        # Defer resurface — hourly scan for skipped needs_attention
+        # cards whose resurface_at has fallen due. Flips status back to
+        # pending so they reappear on /desk. The "when" parsing itself
+        # happens inline in the DecisionRouterWorkflow when the click
+        # lands, not here — this is just the sweep that re-surfaces.
+        "id": "al-defer-resurface",
+        "workflow": "DeferResurfaceWorkflow",
+        "interval": timedelta(minutes=15),
+    },
+    {
+        # Scheduled dispatch — fires delegate-with-when decisions when
+        # their execute_at has fallen due. The decision lands in
+        # state=scheduled with execute_at stamped by clerk; this sweep
+        # picks it up at the right time and triggers the real dispatch.
+        "id": "al-scheduled-dispatch",
+        "workflow": "ScheduledDispatchWorkflow",
+        "interval": timedelta(minutes=15),
+    },
 ]
 
 CALENDAR_SCHEDULES = [
@@ -233,6 +263,19 @@ CALENDAR_SCHEDULES = [
         "workflow": "NightlyNarrativeWorkflow",
         "calendar": ScheduleCalendarSpec(
             hour=[ScheduleRange(start=2)],
+            minute=[ScheduleRange(start=0)],
+        ),
+    },
+    {
+        # Decision patterns — daily extraction of recurring reasoning
+        # from the principal's recent decisions. Writes proposed
+        # decision_pattern records the principal can promote on /study.
+        # Runs at 03:00 after the nightly_narrative so matter state is
+        # already refreshed for the day.
+        "id": "al-decision-patterns",
+        "workflow": "DecisionPatternsWorkflow",
+        "calendar": ScheduleCalendarSpec(
+            hour=[ScheduleRange(start=3)],
             minute=[ScheduleRange(start=0)],
         ),
     },

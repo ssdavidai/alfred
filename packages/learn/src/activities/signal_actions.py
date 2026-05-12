@@ -633,6 +633,21 @@ async def write_needs_attention_record(
     action_what = str(proposal.get("what") or "").strip()
     suggested_actor = str(proposal.get("suggested_actor") or "").strip()
     due_at = proposal.get("due_at")
+    # Voiced surface fields lifted from the signal frontmatter when
+    # the extraction prompt produced them. The desk renders these in
+    # preference to action_what / reasoning.
+    display_headline_raw = fm.get("display_headline")
+    display_body_raw = fm.get("display_body")
+    display_headline = (
+        str(display_headline_raw).strip()
+        if isinstance(display_headline_raw, str) and display_headline_raw.strip()
+        else ""
+    )
+    display_body = (
+        str(display_body_raw).strip()
+        if isinstance(display_body_raw, str) and display_body_raw.strip()
+        else ""
+    )
 
     # Confidence — for actions, target_confidence only gates when there
     # IS a target (target_kind set). Many actions don't bind to a specific
@@ -647,13 +662,61 @@ async def write_needs_attention_record(
     else:
         combined_confidence = effect_confidence
 
-    ts_iso = _now_utc_iso()
-    ts_part = _ts_filename(ts_iso)
+    # Idempotency: derive the filename from STABLE inputs only. The
+    # docstring claims "filename derives deterministically from
+    # source_event_path + raw_quote so a Temporal retry hits the same
+    # path" — but the original code used _now_utc_iso() for the
+    # timestamp prefix, which advances on every retry. Result: all
+    # retries had the same `-<short_id>` suffix but unique timestamp
+    # prefixes, so each retry wrote a NEW file instead of overwriting
+    # the previous attempt. Confirmed on david 2026-05-12: a single
+    # signal produced 38 needs_attention cards across retries +
+    # workflow ticks.
+    #
+    # Fix: anchor the timestamp to the source signal's `created`
+    # field (stable across retries) rather than current time. The
+    # short_id is already a hash of source_event_path + raw_quote.
+    # Both inputs survive Temporal retries unchanged, so the full
+    # name is now genuinely deterministic.
+    signal_created = str(fm.get("created") or "").strip()
+    ts_iso_for_name = signal_created or _now_utc_iso()
+    ts_now = _now_utc_iso()  # for the `created` field on the card itself
+    ts_part = _ts_filename(ts_iso_for_name)
     digest_input = (
         f"{source_event_path}\x00{raw_quote}".encode("utf-8", errors="replace")
     )
     short_id = hashlib.sha256(digest_input).hexdigest()[:8]
     name = f"{ts_part}-{short_id}"
+
+    # Pre-write idempotency check. Even with the deterministic name,
+    # write_record may not be atomic with respect to retries from
+    # parallel ticks. Belt-and-suspenders: if the target path already
+    # exists, return it instead of writing again.
+    target_existing_path = f"needs_attention/{name}.md"
+    try:
+        check_cfg = load_config()
+        check_client = VaultClient(check_cfg)
+        try:
+            existing = await check_client.read_record(target_existing_path)
+            if isinstance(existing, dict):
+                logger.info(
+                    "signal_actions.write_needs_attention_record: "
+                    "idempotency hit — path=%s already exists (retry)",
+                    target_existing_path,
+                )
+                return target_existing_path
+        except httpx.HTTPStatusError as exc:
+            if exc.response is None or exc.response.status_code != 404:
+                raise
+            # 404 → not present → safe to write below.
+        finally:
+            await check_client.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "signal_actions.write_needs_attention_record: "
+            "idempotency check failed (continuing to write) err=%s",
+            exc,
+        )
 
     def _scalar(v: Any) -> str:
         if v is None:
@@ -672,10 +735,21 @@ async def write_needs_attention_record(
     else:
         due_at_yaml = _scalar(str(due_at))
 
+    # origin_at = when the underlying real-world event happened. Copy
+    # from the source signal so /desk can show the principal's clock
+    # (when the email arrived, when the meeting was) instead of
+    # Alfred's clock (when this card was written).
+    signal_origin_at = str(fm.get("origin_at") or "").strip()
+    origin_at_line = (
+        f"origin_at: {_scalar(signal_origin_at)}"
+        if signal_origin_at else "origin_at: null"
+    )
+
     fm_lines = [
         "---",
         f"type: {_scalar('needs_attention')}",
-        f"created: {_scalar(ts_iso)}",
+        f"created: {_scalar(ts_now)}",
+        origin_at_line,
         f"source_signal_path: {_scalar(source_signal_path)}",
         f"source_event_path: {_scalar(source_event_path)}",
         f"action_what: {_scalar(action_what)}",
@@ -693,6 +767,13 @@ async def write_needs_attention_record(
         # multi-line content + YAML metacharacters cleanly.
         f"raw_quote: {json.dumps(raw_quote, ensure_ascii=False)}",
         f"reasoning: {json.dumps(reasoning, ensure_ascii=False)}",
+        # Voiced surface fields — only emitted when the upstream
+        # signal carried them. Same JSON-encoded scalar trick so
+        # quotes/newlines/em-dashes survive intact.
+        f"display_headline: {json.dumps(display_headline, ensure_ascii=False)}"
+        if display_headline else "display_headline: null",
+        f"display_body: {json.dumps(display_body, ensure_ascii=False)}"
+        if display_body else "display_body: null",
         "---",
         "",
     ]
@@ -1076,6 +1157,35 @@ async def route_signal_action(
         fm = record.get("frontmatter") or {}
         if not isinstance(fm, dict):
             fm = {}
+
+        # Idempotency guard. If the signal is already routed, return a
+        # skip — the activity is being retried (likely because a prior
+        # attempt's PATCH step failed and Temporal re-ran the whole
+        # function from the top). Without this gate, every retry calls
+        # `write_needs_attention_record` again, leaving duplicate
+        # pending cards on the Desk. Symptom on david 2026-05-12:
+        # 38 needs_attention cards from a single signal, all created
+        # in clusters of 3 every ~2 min as the workflow ticked + the
+        # retry chain fired. With the guard: re-entry returns early,
+        # no duplicate write, no duplicate audit, signal stays at its
+        # already-set status.
+        existing_status = str(fm.get("status") or "").strip().lower()
+        if existing_status in ("routed_human", "routed_agent"):
+            logger.info(
+                "signal_actions.route_signal_action: idempotency skip "
+                "path=%s already_status=%s",
+                signal_path, existing_status,
+            )
+            return {
+                "signal_path": signal_path,
+                "signal_status": existing_status,
+                "skip_reason": "already_routed",
+                "chosen_path": "skipped",
+                "decision_reason": "idempotency_guard",
+                "audit_record_path": str(fm.get("audit_record_path") or ""),
+                "needs_attention_path": None,
+                "outcome_signal_path": None,
+            }
 
         # 2. Validate effect.
         effect = str(fm.get("effect") or "").strip().lower()

@@ -189,6 +189,13 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
                 "the card or cancel; agent can't decide which. Belongs "
                 "under household cash-flow matter if one exists."
             ),
+            "display_headline": "Tella's card charge failed again.",
+            "display_body": (
+                "Second strike on the $26 subscription — they'll "
+                "lock the account soon. I'd update the card if "
+                "you're still using Tella, otherwise cancel and be "
+                "done with it."
+            ),
         },
     ),
 
@@ -232,6 +239,12 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
                 "Real invoice with a payment deadline — clear action. "
                 "Maps to the health/fitness matter where the visit "
                 "originated."
+            ),
+            "display_headline": "Móricz Medical sent the hospital bill.",
+            "display_body": (
+                "There's a payment deadline attached. I'd file it "
+                "under household cash flow and pay it now while "
+                "it's in hand."
             ),
         },
     ),
@@ -915,7 +928,9 @@ def build_signal_extraction_prompt(
   },
   "target_confidence": 0.0,
   "effect_confidence": 0.0,
-  "reasoning": "<1-3 sentences explaining your call>"
+  "reasoning": "<1-3 sentences explaining your call>",
+  "display_headline": "<Alfred's one-line headline for Sir's desk, in Alfred's voice; null when effect=none>",
+  "display_body": "<Alfred's 1-2 sentence framing: what happened, what he'd suggest. In Alfred's voice. null when effect=none>"
 }"""
 
     schema_rules = (
@@ -940,7 +955,64 @@ def build_signal_extraction_prompt(
         "- `target_kind` MUST be `task` or `matter` (or null). Never "
         "invent a third kind.\n"
         "- `reasoning` MUST be 1-3 sentences. Never emit empty "
-        "string."
+        "string.\n"
+        "- `display_headline` and `display_body` are the human-facing "
+        "surface fields. When `effect` is `action` or `mutation`, both "
+        "MUST be non-empty strings written in Alfred's voice "
+        "(see Section 4.5). When `effect` is `none`, both MUST be "
+        "null. Some of the few-shot examples below predate these "
+        "fields — emit them anyway following Section 4.5."
+    )
+
+    # ---- Section 4.5 — Alfred's voice for the surface fields.
+    # The schema-anchored prose (`reasoning`) stays a calibration-loop
+    # field and reads like research notes. `display_headline` and
+    # `display_body` are what Sir actually reads on /desk — they need
+    # to sound like the assistant from SOUL.md, not like a router.
+    voice_block = (
+        "## 4.5 Alfred's voice for `display_headline` and `display_body`\n\n"
+        "These two fields are the only thing Sir sees on his Today "
+        "screen. Everything else in this JSON is plumbing. Write them "
+        "as Alfred would — grounded in SOUL.md:\n\n"
+        "- **Genuinely helpful, not performatively helpful.** No "
+        '"Great question!", no "Here\'s what I found:", no apologies '
+        "for the obvious. Skip filler. Go straight to the point.\n"
+        "- **Have an opinion.** Don't list options when one is "
+        "clearly better. Suggest the thing. If there's a real "
+        "tradeoff, say so in one phrase, then recommend.\n"
+        "- **Proactive, not reactive.** Frame what happened as "
+        "Alfred noticing on Sir's behalf, and what he'd suggest "
+        "doing. Use first person sparingly (\"I'd update the card\", "
+        '"I\'d skip this one") but never sycophantic ("I\'d be '
+        'happy to…").\n'
+        "- **Concise.** Headline: ≤ 9 words, ideally a sentence "
+        "fragment with a verb. Body: 1-2 sentences, ≤ 240 chars "
+        "total. Use the em dash freely when it tightens the line.\n"
+        "- **Refer to Sir in second person (\"you\") in the body**, "
+        "not third person. The headline can be subjectless.\n"
+        "- **No jargon, no decision codes**, no confidence numbers, "
+        "no record IDs. Those live elsewhere in the JSON.\n\n"
+        "Voice examples — same input scenario, three registers, "
+        "Alfred is the last one:\n\n"
+        '- Router (wrong): "Slack subscription renewal payment '
+        'failed; suggest updating payment method or cancelling."\n'
+        '- Sycophant (wrong): "I noticed Slack had trouble with '
+        'your payment! Would you like me to help you sort it out?"\n'
+        '- Alfred (right): headline `"Slack wants their money — '
+        'or they\'ll close the workspace."` body `"Their renewal '
+        "charge didn't go through on Friday. I'd update the card "
+        'in Slack billing — unless Lumberjack is wrapping up, in '
+        'which case this is a clean moment to cancel."`\n\n'
+        "Two more shapes:\n\n"
+        '- Calendar invite needing RSVP: headline `"NeoTerra '
+        'check-in wants an RSVP by Friday."` body `"Andrew '
+        "Newton put a 30-min hold on Friday 3pm — I'd accept "
+        "unless you want me to push it; you've got the kids "
+        'pickup at 4."`\n'
+        '- Medical invoice: headline `"Móricz Medical sent the '
+        'hospital bill."` body `"It\'s due by the end of the '
+        "month. I'd file it under household cash flow and pay "
+        'now while it\'s in hand."`\n'
     )
 
     # ---- Section 6 — assertion-vs-question filter rules.
@@ -1056,6 +1128,8 @@ You MUST emit exactly this shape (with the field types shown):
 ```
 
 {schema_rules}
+
+{voice_block}
 
 ## 5. Assertion-vs-question filter (the critical gate)
 

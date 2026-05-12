@@ -3,19 +3,20 @@ app AlfredSaaS {
     version: "^0.19.0"
   },
 
-  title: "Alfred - Your Personal Agentic Butler",
+  title: "Alfred Black — Agentic Butler",
 
   head: [
+    "<link rel='icon' type='image/svg+xml' href='/favicon.svg' />",
     "<link rel='icon' href='/favicon.ico' />",
     "<link rel='apple-touch-icon' href='/images/alfred-logo-192.png' />",
     "<meta charset='utf-8' />",
-    "<meta name='description' content='Alfred is an agentic butler for people who have too many tabs open in their head. Calendar, email, finances, health data, family logistics — Alfred manages it all.' />",
-    "<meta name='author' content='Alfred' />",
-    "<meta name='keywords' content='alfred, agentic butler, ai assistant, personal ai, life management, automation' />",
+    "<meta name='description' content='Alfred Black is an agentic butler for people who have too many tabs open in their head. Calendar, email, finances, health data, family logistics — Alfred manages it all.' />",
+    "<meta name='author' content='Alfred Black' />",
+    "<meta name='keywords' content='alfred black, agentic butler, ai assistant, personal ai, life management, automation' />",
 
     "<meta property='og:type' content='website' />",
-    "<meta property='og:title' content='Alfred - Your Personal Agentic Butler' />",
-    "<meta property='og:site_name' content='Alfred' />",
+    "<meta property='og:title' content='Alfred Black — Agentic Butler' />",
+    "<meta property='og:site_name' content='Alfred Black' />",
     "<meta property='og:url' content='https://alfred.black' />",
     "<meta property='og:description' content='Agentic butler for people who have too many tabs open in their head.' />",
     "<meta property='og:image' content='/images/alfred-logo-512.png' />",
@@ -1210,6 +1211,62 @@ action resolveNeedsAttentionDispatch {
 
 action resolveNeedsAttentionSkip {
   fn: import { resolveNeedsAttentionSkip } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// Generic Desk-card audit. Every click on Delegate / Defer / Delete /
+// Do — across all source types — writes a permanent audit event via
+// ctrl-api so the activity ledger never loses an action. Additive to
+// the per-source endpoints; the only server call for "Do".
+action recordDeskAction {
+  fn: import { recordDeskAction } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// Decisions — first-class records of every Desk click. Every click
+// writes one; the DecisionRouterWorkflow (alfred-learn, 60s cadence)
+// fans out the side effects. See packages/ctrl/src/api/routes/decisions.ts.
+action recordDecision {
+  fn: import { recordDecision } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getRecentDecisions {
+  fn: import { getRecentDecisions } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action reverseDecision {
+  fn: import { reverseDecision } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// to_do — the principal's persistent personal queue. Spawned by the
+// DecisionRouterWorkflow when intent=take_mine. Replaces the
+// in-React Backstage tray.
+query getMyTodos {
+  fn: import { getMyTodos } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action completeMyTodo {
+  fn: import { completeMyTodo } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// Pattern proposals — proposed standing rules extracted from the
+// principal's recent decisions. Surfaced on /desk as a new card type
+// so adopting / rejecting a rule is itself a Decision.
+// In-flight decisions — for the "What Alfred is doing now" Desk strip.
+// Returns decisions in state=open/scheduled/executing so the page can
+// poll every ~10s and show live progress.
+query getInFlightDecisions {
+  fn: import { getInFlightDecisions } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getPatternProposals {
+  fn: import { getPatternProposals } from "@src/dashboard/operations",
   entities: [Instance]
 }
 

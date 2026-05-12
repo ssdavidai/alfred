@@ -41,6 +41,8 @@ import { registerVexaRoutes } from "./routes/vexa.js";
 import { registerAttentionRoutes } from "./routes/attention.js";
 import { registerBriefRoutes } from "./routes/brief.js";
 import { registerMatterRoutes } from "./routes/matters.js";
+import { registerDecisionRoutes } from "./routes/decisions.js";
+import { registerTodoRoutes } from "./routes/todos.js";
 import { registerPlaneStewardWebhookRoute } from "./routes/webhooks/plane.js";
 import { registerVexaWebhookRoute } from "./routes/webhooks/vexa.js";
 
@@ -140,6 +142,8 @@ export function createApiServer(): http.Server {
   registerAttentionRoutes();
   registerBriefRoutes();
   registerMatterRoutes();
+  registerDecisionRoutes();
+  registerTodoRoutes();
   registerPlaneStewardWebhookRoute();
   registerVexaWebhookRoute();
 

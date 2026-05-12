@@ -12,11 +12,24 @@
 //
 // Filter pills toggle visibility per outcome. "All" is the default.
 import { useMemo, useState } from "react";
-import { useQuery, getRecentJudgments, getStewardFeed } from "wasp/client/operations";
+import {
+  useQuery,
+  getRecentJudgments,
+  getStewardFeed,
+  getRecentDecisions,
+} from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 
 type Outcome = "Handled" | "Held" | "Asked";
 type FilterPill = "All" | Outcome;
+// Decision lifecycle states — surfaced as small badges so the principal
+// can scan what's settled vs in-flight in the ledger.
+type DecisionState =
+  | "open"
+  | "scheduled"
+  | "executing"
+  | "completed"
+  | "reversed";
 
 interface Row {
   key: string;
@@ -26,6 +39,9 @@ interface Row {
   conf: number | null;
   path: string;       // HANDLED / HELD / ASKED
   outcome: Outcome;
+  state?: DecisionState;
+  intent?: string;
+  executeAt?: string;
 }
 
 function classifyOutcome(item: any): Outcome {
@@ -88,6 +104,17 @@ export default function DecisionsPage() {
     refetchInterval: 60_000,
     retry: false,
   });
+  // New decision records — every Desk click since the cascade went
+  // live. Polled faster than the others so the ledger reflects
+  // in-flight work in close to real time.
+  const { data: decisions } = useQuery(
+    getRecentDecisions,
+    { limit: 200 },
+    {
+      refetchInterval: 15_000,
+      retry: false,
+    },
+  );
 
   const [filter, setFilter] = useState<FilterPill>("All");
 
@@ -140,9 +167,42 @@ export default function DecisionsPage() {
         outcome,
       });
     }
+    // Decision records — every Desk click. We classify the outcome by
+    // intent ↦ outcome pill so they integrate with the existing
+    // HANDLED/HELD/ASKED filters: done & take_mine → Handled, defer →
+    // Held, delegate → Asked.
+    const ds = Array.isArray(decisions?.decisions) ? decisions?.decisions : [];
+    for (const d of ds ?? []) {
+      const when = String(d?.created ?? "");
+      const intent = String(d?.intent ?? "").toLowerCase();
+      const state = String(d?.state ?? "open").toLowerCase() as DecisionState;
+      const headline =
+        String(d?.source_headline ?? "").trim() ||
+        String(d?.source_record ?? "").replace(/\.md$/, "").split("/").pop() ||
+        `decision ${intent}`;
+      const outcome: Outcome =
+        intent === "delegate"
+          ? "Asked"
+          : intent === "defer"
+            ? "Held"
+            : "Handled";
+      const executeAt = String(d?.execute_at ?? "").trim();
+      out.push({
+        key: `d:${d?.id ?? when}`,
+        when,
+        whenDisplay: fmtWhen(when),
+        input: `${intentVerb(intent)} ${headline}`,
+        conf: null,
+        path: outcome.toUpperCase(),
+        outcome,
+        state,
+        intent,
+        executeAt: executeAt || undefined,
+      });
+    }
     out.sort((a, b) => (a.when < b.when ? 1 : a.when > b.when ? -1 : 0));
     return out;
-  }, [judgments, steward]);
+  }, [judgments, steward, decisions]);
 
   const filtered = useMemo(
     () => (filter === "All" ? rows : rows.filter((r) => r.outcome === filter)),
@@ -323,6 +383,9 @@ export default function DecisionsPage() {
                 <th className="text-left py-3 pl-6 uppercase tracking-[0.2em] text-[10px] font-normal">
                   Path
                 </th>
+                <th className="text-left py-3 pl-4 uppercase tracking-[0.2em] text-[10px] font-normal">
+                  Status
+                </th>
                 <th className="text-right py-3 uppercase tracking-[0.2em] text-[10px] font-normal">
                   Outcome
                 </th>
@@ -334,7 +397,17 @@ export default function DecisionsPage() {
                   <td className="py-3" style={{ color: "var(--marginalia)" }}>
                     {r.whenDisplay}
                   </td>
-                  <td className="py-3 font-body text-[15px]">{r.input}</td>
+                  <td className="py-3 font-body text-[15px]">
+                    {r.input}
+                    {r.executeAt && (
+                      <span
+                        className="block font-mono text-[11px] italic"
+                        style={{ color: "var(--marginalia)", marginTop: 2 }}
+                      >
+                        Fires {fmtWhen(r.executeAt)}
+                      </span>
+                    )}
+                  </td>
                   <td className="py-3 text-right">
                     {r.conf != null ? r.conf.toFixed(2) : "—"}
                   </td>
@@ -351,6 +424,11 @@ export default function DecisionsPage() {
                   >
                     {r.path}
                   </td>
+                  <td className="py-3 pl-4">
+                    {r.state ? <StateBadge state={r.state} /> : (
+                      <span style={{ color: "var(--marginalia)" }}>—</span>
+                    )}
+                  </td>
                   <td className="py-3 text-right" style={{ color: "var(--brass)" }}>
                     {r.outcome === "Handled"
                       ? "✓"
@@ -365,5 +443,55 @@ export default function DecisionsPage() {
         )}
       </section>
     </Frame>
+  );
+}
+
+/** Verb the principal sees in the ledger for each decision intent. */
+function intentVerb(intent: string): string {
+  if (intent === "delegate") return "Delegated:";
+  if (intent === "defer") return "Deferred:";
+  if (intent === "done") return "Closed:";
+  if (intent === "take_mine") return "Took on:";
+  return "Acted on:";
+}
+
+/** Status badge — small monospace pill colored by lifecycle state. */
+function StateBadge({ state }: { state: DecisionState }) {
+  const palette: Record<
+    DecisionState,
+    { bg: string; fg: string; label: string }
+  > = {
+    open: { bg: "var(--paper-2)", fg: "var(--marginalia)", label: "ROUTING" },
+    scheduled: {
+      bg: "var(--brass-faint)",
+      fg: "var(--brass)",
+      label: "SCHEDULED",
+    },
+    executing: { bg: "var(--ink)", fg: "var(--paper)", label: "ACTIVE" },
+    completed: {
+      bg: "transparent",
+      fg: "var(--marginalia)",
+      label: "DONE",
+    },
+    reversed: {
+      bg: "transparent",
+      fg: "var(--brass)",
+      label: "REVERSED",
+    },
+  };
+  const p = palette[state] ?? palette.open;
+  return (
+    <span
+      className="font-mono text-[10px] tracking-[0.22em]"
+      style={{
+        background: p.bg,
+        color: p.fg,
+        padding: "3px 8px",
+        display: "inline-block",
+        textAlign: "center",
+      }}
+    >
+      {p.label}
+    </span>
   );
 }

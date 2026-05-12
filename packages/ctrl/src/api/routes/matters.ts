@@ -74,7 +74,11 @@ interface RecentDecision {
   path: string;
 }
 
-type TimelineKind = "signal" | "task_transition" | "action";
+type TimelineKind =
+  | "signal"
+  | "task_transition"
+  | "action"
+  | "decision";
 
 interface TimelineEntry {
   when: string;
@@ -387,6 +391,49 @@ function buildMatterIndex(): MatterIndexResult {
       }
       // Signals don't participate in the legacy by-category buckets;
       // fall through past the category folding.
+    }
+
+    // ---- Decision records (RFC: clicks on the Desk surface as
+    // first-class records with their own timeline contribution). ----
+    if (recType === "decision" || display.startsWith("decision/")) {
+      // `matter_ref` is a path like "matter/<id>.md" or just an id.
+      const matterRefRaw = rec.fm.matter_ref;
+      if (
+        typeof matterRefRaw === "string" &&
+        matterRefRaw.trim() &&
+        matterRefRaw !== "null"
+      ) {
+        const matterId = extractMatterRef(matterRefRaw);
+        if (matterId && byId.has(matterId)) {
+          const matter = byId.get(matterId)!;
+          const when = String(rec.fm.created ?? "");
+          const intent = String(rec.fm.intent ?? "");
+          const sourceHeadline = String(rec.fm.source_headline ?? "");
+          const state = String(rec.fm.state ?? "open");
+          // Headline maps the click into a one-line ledger entry.
+          const verb =
+            intent === "delegate"
+              ? "Delegated to Alfred"
+              : intent === "defer"
+                ? "Deferred"
+                : intent === "done"
+                  ? "Closed"
+                  : intent === "take_mine"
+                    ? "Took it personally"
+                    : "Decided";
+          const headline = sourceHeadline
+            ? `${verb}: ${firstSentence(sourceHeadline, 80)}`
+            : verb;
+          matter.timeline.push({
+            when,
+            kind: "decision",
+            headline:
+              state === "reversed" ? `[undone] ${headline}` : headline,
+            path: display,
+          });
+        }
+      }
+      continue;
     }
 
     if (!recType) continue;

@@ -37,6 +37,14 @@ import {
   approveAction,
   rejectAction,
   undoStewardAction,
+  recordDeskAction,
+  recordDecision,
+  getRecentDecisions,
+  reverseDecision,
+  getMyTodos,
+  completeMyTodo,
+  getPatternProposals,
+  getInFlightDecisions,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { Seal } from "../client/components/ab/Seal";
@@ -47,8 +55,12 @@ import { fadeUp, stagger } from "../client/lib/motion";
 // Decision row — unified shape across the three source queries.
 // --------------------------------------------------------------------------
 
-type Source = "needs_attention" | "approval" | "judgment";
-type Action = "delegate" | "defer";
+type Source = "needs_attention" | "approval" | "judgment" | "pattern_proposal";
+// All four primary verbs now accept a note via the same inline panel.
+// Noise is a separate one-tap action (no note required, no panel —
+// the gesture itself is the explanation; the workflow materialises a
+// signal_noise_pattern that filters future events of the same kind).
+type Action = "delegate" | "defer" | "done" | "take_mine";
 
 interface Decision {
   id: string;        // stable client key
@@ -104,6 +116,26 @@ function shortenPath(p: string): string {
   return stem;
 }
 
+/** Render a steward-action row into a human-readable line.
+ *  Prefers `summary` when the steward wrote one; otherwise composes
+ *  `<verb> — <target stem>` from action/decision + target_path. The
+ *  `still_active` heartbeat case is filtered upstream. */
+function formatStewardAct(s: any): string {
+  if (typeof s?.summary === "string" && s.summary.trim()) return s.summary.trim();
+  const action = String(s?.action ?? "").trim();
+  const decision = String(s?.decision ?? "").trim();
+  const verb = action || decision.replace(/_/g, " ") || "Steward action";
+  const target = String(s?.target ?? "").trim();
+  if (!target) return verb;
+  // task/<uuid8>-<slug>.md → <slug>; event/2026/05/10/foo.md → foo.
+  const stem = target
+    .replace(/^[a-z_]+\//, "")
+    .replace(/\.md$/, "")
+    .replace(/^[a-f0-9]{8}-/, "")
+    .replace(/^\d{4}\/\d{2}\/\d{2}\//, "");
+  return `${verb} — ${stem}`;
+}
+
 // --------------------------------------------------------------------------
 // Audit row — unified shape across activity + steward actions.
 // --------------------------------------------------------------------------
@@ -122,15 +154,52 @@ interface AuditRow {
 // --------------------------------------------------------------------------
 
 export default function DeskPage() {
-  const { data: needs } = useQuery(getNeedsAttention);
-  const { data: approvals } = useQuery(getPendingApprovals);
-  const { data: judgments } = useQuery(getRecentJudgments);
+  const { data: needs, isLoading: needsLoading } = useQuery(getNeedsAttention);
+  const { data: approvals, isLoading: approvalsLoading } = useQuery(getPendingApprovals);
+  const { data: judgments, isLoading: judgmentsLoading } = useQuery(getRecentJudgments);
+  // Pattern proposals — proposed standing rules extracted nightly from
+  // the principal's decisions. Surfaced as cards alongside the rest of
+  // the queue so adopting a rule is itself a Decision.
+  const { data: patternProposals, isLoading: patternsLoading } = useQuery(
+    getPatternProposals,
+    { limit: 50 },
+  );
   const { data: activity } = useQuery(getActivityFeed);
   const { data: steward } = useQuery(getRecentStewardActions);
+  // Persistent personal queue — replaces the in-React Backstage tray.
+  // The DecisionRouterWorkflow spawns to_do/<ts>.md records when the
+  // principal clicks Do; this query reads them so they survive reloads.
+  const { data: myTodos, refetch: refetchTodos } = useQuery(
+    getMyTodos,
+    { state: "open", limit: 50 },
+  );
+  // Recent decisions — surfaced in The Record alongside steward actions.
+  // Every Desk click since the rollout writes a decision record; the
+  // Undo button below reverses them.
+  const { data: recentDecisions, refetch: refetchDecisions } = useQuery(
+    getRecentDecisions,
+    { limit: 100 },
+  );
+  // What Alfred is doing right now — decisions in state=open / scheduled
+  // / executing. Polled ~every 10s so the principal can watch a batch
+  // they just delegated move through the pipeline.
+  const { data: inFlight, refetch: refetchInFlight } = useQuery(
+    getInFlightDecisions,
+    { limit: 50 },
+    { refetchInterval: 10000, refetchIntervalInBackground: false },
+  );
+  // Only show the "Your desk is clear" empty-state once *all four*
+  // decision-queue sources have actually resolved. Without this gate the
+  // page renders "clear" for the first ~10s while queries are still in
+  // flight, then snaps to a featured card — which reads as a bug.
+  const queueLoading =
+    needsLoading || approvalsLoading || judgmentsLoading || patternsLoading;
 
-  // Local UI state.
+  // Local UI state. (No "tray" state — Backstage now reads from the
+  // persisted to_do records via getMyTodos. The DecisionRouterWorkflow
+  // spawns them on intent=take_mine within ~60s of a Do click; an
+  // optimistic refetch right after the click closes the visible gap.)
   const [handled, setHandled] = useState<string[]>([]);
-  const [tray, setTray] = useState<{ id: string; headline: string }[]>([]);
   const [open, setOpen] = useState<{ id: string; mode: Action } | null>(null);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<string | null>(null);
@@ -140,20 +209,59 @@ export default function DeskPage() {
     const out: Decision[] = [];
     const na = Array.isArray(needs?.records) ? needs?.records : [];
     for (const r of na ?? []) {
+      // Needs-attention records expose their meaningful fields at the top
+      // level of the payload (action_what, decision_reason, created,
+      // target_path, target_kind, confidence, raw_quote, status, id).
+      // `frontmatter` is empty on the current ctrl-api shape — read top-
+      // level first and fall back to fm.* for older / future payloads.
       const fm = (r?.frontmatter ?? {}) as Record<string, unknown>;
-      const status = String(fm.status ?? "pending");
+      const status = String(r?.status ?? fm.status ?? "pending");
       if (status !== "pending") continue;
       const id = String(r?.id ?? "");
       if (!id) continue;
+      // Voiced surface fields land here when the upstream signal
+      // extractor produced them (in Alfred's voice, grounded in
+      // SOUL.md). Prefer those; fall back to action_what / reasoning
+      // for older records that predate the prompt extension.
+      const voicedHeadline =
+        typeof r?.display_headline === "string" && r.display_headline.trim()
+          ? r.display_headline.trim()
+          : "";
+      const voicedBody =
+        typeof r?.display_body === "string" && r.display_body.trim()
+          ? r.display_body.trim()
+          : "";
+      const headline =
+        voicedHeadline ||
+        String(r?.action_what ?? fm.headline ?? fm.subject ?? fm.summary ?? id);
+      const reasoning =
+        typeof r?.reasoning === "string" ? r.reasoning.trim() : "";
+      const rawQuote =
+        typeof r?.raw_quote === "string" ? r.raw_quote.trim() : "";
+      const why = voicedBody || reasoning || rawQuote || String(r?.body ?? "");
+      // When target_kind === "matter", target_path *is* the matter ref.
+      const matterRef =
+        String(r?.target_kind ?? "") === "matter"
+          ? extractMatterId(r?.target_path)
+          : extractMatterId(fm.matter ?? fm.parent_matter);
       out.push({
         id: `na:${id}`,
         source: "needs_attention",
         recordId: id,
-        headline: String(fm.headline ?? fm.subject ?? fm.summary ?? id),
-        why: String(fm.decision_reason ?? fm.reason ?? r?.body ?? ""),
-        arrived: String(fm.created ?? ""),
-        conf: typeof fm.confidence === "number" ? fm.confidence : undefined,
-        matterRef: extractMatterId(fm.matter ?? fm.parent_matter),
+        headline,
+        why,
+        // "arrived" = when the underlying real-world event happened
+        // (email landed, meeting was scheduled, voice note recorded).
+        // The signal pipeline stamps `origin_at` for this. Falls back
+        // to `created` (Alfred's clock) for records written before
+        // origin_at was added. The principal cares about the event's
+        // date, not Alfred's processing time — a card surfaced today
+        // about an email from May 1st must show May 1st.
+        arrived: String(
+          r?.origin_at ?? fm.origin_at ?? r?.created ?? fm.created ?? "",
+        ),
+        conf: typeof r?.confidence === "number" ? r.confidence : undefined,
+        matterRef,
       });
     }
     const apps = Array.isArray(approvals?.results)
@@ -173,7 +281,7 @@ export default function DeskPage() {
           fm.headline ?? fm.summary ?? fm.action ?? r?.name ?? shortenPath(path),
         ),
         why: String(fm.reason ?? fm.description ?? r?.body_preview ?? ""),
-        arrived: String(fm.created ?? ""),
+        arrived: String(fm.origin_at ?? fm.created ?? ""),
         matterRef: extractMatterId(fm.matter ?? fm.parent_matter),
       });
     }
@@ -191,14 +299,43 @@ export default function DeskPage() {
         recordId: path,
         headline: String(fm.observation ?? fm.summary ?? r?.name ?? shortenPath(path)),
         why: String(fm.reflection ?? fm.reasoning ?? r?.body_preview ?? ""),
-        arrived: String(fm.created ?? ""),
+        arrived: String(fm.origin_at ?? fm.created ?? ""),
         matterRef: extractMatterId(fm.matter ?? fm.parent_matter),
+      });
+    }
+    // Pattern proposals — rules Alfred has spotted in the principal's
+    // recent decisions. Adopting / deferring / rejecting one is itself a
+    // Decision routed through the standard cascade. Headline is the
+    // proposed rule; body is the evidence + the action it would take.
+    const pps = Array.isArray(patternProposals?.proposals)
+      ? patternProposals?.proposals
+      : [];
+    for (const p of pps ?? []) {
+      const path = String(p?.path ?? "");
+      if (!path) continue;
+      const rule = String(p?.rule ?? "").trim();
+      const evidence = String(p?.evidence ?? "").trim();
+      const proposedAction = String(p?.proposed_action ?? "").trim();
+      const headline = rule
+        ? `Rule proposal: ${rule}`
+        : `Rule proposal: ${shortenPath(path)}`;
+      const why = [evidence, proposedAction && `If adopted: ${proposedAction}`]
+        .filter(Boolean)
+        .join("\n\n");
+      out.push({
+        id: `pp:${path}`,
+        source: "pattern_proposal",
+        recordId: path,
+        headline,
+        why,
+        arrived: String(p?.created ?? ""),
+        matterRef: extractMatterId(p?.matter_ref),
       });
     }
     // Newest first.
     out.sort((a, b) => (a.arrived < b.arrived ? 1 : a.arrived > b.arrived ? -1 : 0));
     return out;
-  }, [needs, approvals, judgments]);
+  }, [needs, approvals, judgments, patternProposals]);
 
   const ledger: AuditRow[] = useMemo(() => {
     const out: AuditRow[] = [];
@@ -235,6 +372,13 @@ export default function DeskPage() {
           ? steward
           : [];
     for (const s of sw ?? []) {
+      // Filter out still_active steward heartbeats — the StewardWorkflow
+      // emits one per task per cycle saying "I looked, nothing changed."
+      // Those are audit truth but pure noise on the human's desk. We only
+      // surface actions where something actually moved.
+      const decision = String(s?.decision ?? "");
+      const actionStr = String(s?.action ?? "");
+      if (decision === "still_active" && !actionStr) continue;
       const at = String(s?.timestamp ?? s?.created ?? s?.created_at ?? "");
       const actionId = String(s?.id ?? s?.action_id ?? "");
       const reversible =
@@ -245,9 +389,7 @@ export default function DeskPage() {
         key: `sw:${actionId || at}`,
         at,
         atDisplay: fmtArrived(at),
-        act: String(
-          s?.summary ?? s?.decision ?? s?.target ?? s?.action ?? "Steward action",
-        ),
+        act: formatStewardAct(s),
         actionId: actionId || undefined,
         reversible,
       });
@@ -271,62 +413,151 @@ export default function DeskPage() {
     setPending(null);
   }
 
-  async function onDelegate(d: Decision, instructions: string) {
-    setPending(d.id);
-    try {
-      if (d.source === "needs_attention") {
-        await resolveNeedsAttentionDispatch({ id: d.recordId, note: instructions });
-      } else if (d.source === "approval") {
-        await approveAction({ path: d.recordId });
-      } else {
-        // judgment — no server-side handoff yet, just close it.
-      }
-      markHandled(d.id);
-    } catch (e) {
-      console.error("delegate failed", e);
-      setPending(null);
-    }
+  // Every Desk-card click writes:
+  //
+  //   1. A `decision/<ts>.md` record (the new first-class artefact —
+  //      DecisionRouterWorkflow picks it up within ~60s and fans out
+  //      side effects: source-record status flip, signal re-arm, to_do
+  //      spawn, matter-timeline entry, outcome polling).
+  //   2. A legacy `event/desk-action-*.md` (kept for backwards compat
+  //      with the existing /decisions feed that reads the event/ dir).
+  //
+  // Both fire in parallel best-effort. A failure of either MUST NOT
+  // block the source-specific call.
+  async function auditDeskAction(
+    d: Decision,
+    action: "delegate" | "defer" | "delete" | "do" | "noise",
+    note: string,
+  ): Promise<void> {
+    // Map UI verb → canonical decision intent.
+    const intent =
+      action === "delete"
+        ? "done"
+        : action === "do"
+          ? "take_mine"
+          : action; // delegate, defer, noise
+    // Decision record (primary).
+    recordDecision({
+      source: d.source,
+      sourceRecord:
+        d.source === "needs_attention"
+          ? `needs_attention/${d.recordId}.md`
+          : d.recordId,
+      intent: intent as
+        | "delegate"
+        | "defer"
+        | "done"
+        | "take_mine"
+        | "noise",
+      note: note || undefined,
+      matterRef: d.matterRef
+        ? `matter/${d.matterRef}.md`
+        : undefined,
+      sourceHeadline: d.headline || undefined,
+    }).catch((e) => {
+      console.error("recordDecision failed", action, d.id, e);
+    });
+    // Legacy desk-action audit (kept for the existing decisions feed).
+    recordDeskAction({
+      source: d.source,
+      sourceId: d.recordId,
+      action,
+      note: note || undefined,
+    }).catch((e) => {
+      console.error("recordDeskAction failed", action, d.id, e);
+    });
   }
 
-  async function onDefer(d: Decision, when: string) {
-    setPending(d.id);
-    try {
-      if (d.source === "needs_attention") {
-        await resolveNeedsAttentionSkip({ id: d.recordId, note: when });
-      }
-      // Approvals + judgments: defer is local-only — clear the row from the
-      // queue and let it re-appear on next refresh if still pending.
-      markHandled(d.id);
-    } catch (e) {
-      console.error("defer failed", e);
-      setPending(null);
-    }
+  // Optimistic UI for all four buttons: clear the card from the queue
+  // immediately, fire the audit + source-specific server calls in the
+  // background. The two server calls run in parallel (they don't depend
+  // on each other). On mutation failure, revert by removing the id
+  // from `handled` so the card pops back into the queue. The audit call
+  // already swallows its own errors (best-effort) — a transient ledger
+  // miss must not block the user, and the source record's own status
+  // field is the durable truth of what happened to the underlying item.
+  function revertHandled(id: string): void {
+    setHandled((h) => h.filter((x) => x !== id));
   }
 
-  async function onDelete(d: Decision) {
-    setPending(d.id);
-    try {
-      if (d.source === "needs_attention") {
-        await resolveNeedsAttentionDone({ id: d.recordId });
-      } else if (d.source === "approval") {
-        await rejectAction({ path: d.recordId });
-      }
-      markHandled(d.id);
-    } catch (e) {
-      console.error("delete failed", e);
-      setPending(null);
-    }
-  }
-
-  function onDo(d: Decision) {
-    setTray((t) =>
-      t.find((x) => x.id === d.id) ? t : [...t, { id: d.id, headline: d.headline }],
-    );
+  function onDelegate(d: Decision, instructions: string): void {
     markHandled(d.id);
+    auditDeskAction(d, "delegate", instructions);
+    let mutation: Promise<unknown> = Promise.resolve();
+    if (d.source === "needs_attention") {
+      mutation = resolveNeedsAttentionDispatch({
+        id: d.recordId,
+        note: instructions,
+      });
+    } else if (d.source === "approval") {
+      mutation = approveAction({ path: d.recordId });
+    }
+    mutation.catch((e) => {
+      console.error("delegate failed; reverting", d.id, e);
+      revertHandled(d.id);
+    });
   }
 
-  function removeTray(id: string) {
-    setTray((t) => t.filter((x) => x.id !== id));
+  function onDefer(d: Decision, when: string): void {
+    markHandled(d.id);
+    auditDeskAction(d, "defer", when);
+    let mutation: Promise<unknown> = Promise.resolve();
+    if (d.source === "needs_attention") {
+      mutation = resolveNeedsAttentionSkip({ id: d.recordId, note: when });
+    }
+    // Approvals + judgments have no native defer endpoint — the audit
+    // event captures intent; the underlying record stays pending.
+    mutation.catch((e) => {
+      console.error("defer failed; reverting", d.id, e);
+      revertHandled(d.id);
+    });
+  }
+
+  function onDelete(d: Decision, context: string): void {
+    // "Done" — close the item. Optional context becomes part of the
+    // observation extracted from the decision (richer learning signal).
+    markHandled(d.id);
+    auditDeskAction(d, "delete", context);
+    let mutation: Promise<unknown> = Promise.resolve();
+    if (d.source === "needs_attention") {
+      mutation = resolveNeedsAttentionDone({
+        id: d.recordId,
+        note: context || undefined,
+      });
+    } else if (d.source === "approval") {
+      mutation = rejectAction({ path: d.recordId });
+    }
+    mutation.catch((e) => {
+      console.error("done failed; reverting", d.id, e);
+      revertHandled(d.id);
+    });
+  }
+
+  function onDo(d: Decision, context: string): void {
+    // "Do" writes a Decision (intent=take_mine) — the
+    // DecisionRouterWorkflow then spawns a to_do/<ts>.md record within
+    // ~60s, which surfaces in the Backstage section via getMyTodos.
+    // Context becomes the to_do's note + the observation's training
+    // signal. We refetch the todos list a few seconds later to close
+    // the gap.
+    markHandled(d.id);
+    auditDeskAction(d, "do", context);
+    setTimeout(() => {
+      refetchTodos().catch(() => {});
+    }, 5000);
+  }
+
+  function onNoise(d: Decision): void {
+    // "Noise" — the principal says this category of signal should
+    // never have surfaced. Synchronous flip stamps status=noise;
+    // DecisionRouterWorkflow then materialises a signal_noise_pattern
+    // that signal_extract consults BEFORE the LLM call on future
+    // events. No note required — the gesture is the explanation.
+    markHandled(d.id);
+    auditDeskAction(d, "noise", "");
+    // No source-specific mutation needed — the synchronous flip in
+    // ctrl-api's POST /api/v1/decisions already set the source
+    // record's status to "noise", which drops it from the queue.
   }
 
   async function onUndo(actionId: string) {
@@ -358,7 +589,7 @@ export default function DeskPage() {
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          transition={{ delay: 1.0, duration: 0.6 }}
+          transition={{ duration: 0.4 }}
           className="mb-24 mx-auto max-w-[760px]"
         >
           {top ? (
@@ -372,12 +603,21 @@ export default function DeskPage() {
               setDraft={setDraft}
               onOpen={(mode) => { setOpen({ id: top.id, mode }); setDraft(""); }}
               onCancel={() => { setOpen(null); setDraft(""); }}
-              onSubmit={(mode) =>
-                mode === "delegate" ? onDelegate(top, draft) : onDefer(top, draft)
-              }
-              onDelete={() => onDelete(top)}
-              onDo={() => onDo(top)}
+              onSubmit={(mode) => {
+                if (mode === "delegate") return onDelegate(top, draft);
+                if (mode === "defer")    return onDefer(top, draft);
+                if (mode === "done")     return onDelete(top, draft);
+                if (mode === "take_mine")return onDo(top, draft);
+              }}
+              onNoise={() => onNoise(top)}
             />
+          ) : queueLoading ? (
+            <p
+              className="font-body italic text-[18px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Reading the room…
+            </p>
           ) : (
             <h2
               className="font-display tracking-[-0.02em] leading-[1.04]"
@@ -393,8 +633,7 @@ export default function DeskPage() {
 
         <motion.div
           initial="hidden"
-          whileInView="show"
-          viewport={{ once: true, margin: "-10%" }}
+          animate="show"
           variants={stagger(0.05, 0.08)}
         >
           {rest.length > 0 && (
@@ -411,35 +650,71 @@ export default function DeskPage() {
                     setDraft={setDraft}
                     onOpen={(mode) => { setOpen({ id: d.id, mode }); setDraft(""); }}
                     onCancel={() => { setOpen(null); setDraft(""); }}
-                    onSubmit={(mode) =>
-                      mode === "delegate" ? onDelegate(d, draft) : onDefer(d, draft)
-                    }
-                    onDelete={() => onDelete(d)}
-                    onDo={() => onDo(d)}
+                    onSubmit={(mode) => {
+                      if (mode === "delegate") return onDelegate(d, draft);
+                      if (mode === "defer")    return onDefer(d, draft);
+                      if (mode === "done")     return onDelete(d, draft);
+                      if (mode === "take_mine")return onDo(d, draft);
+                    }}
+                    onNoise={() => onNoise(d)}
                   />
                 ))}
               </div>
             </motion.div>
           )}
 
-          {tray.length > 0 && (
-            <motion.div variants={fadeUp} className="mb-20">
-              <SectionHead title="Backstage" sub="Yours to do" />
-              <ul>
-                {tray.map((t) => (
-                  <li
-                    key={t.id}
-                    className="grid grid-cols-[1fr_auto] gap-4 py-3 border-b border-rule items-baseline"
-                  >
-                    <span className="font-body text-[16px]">{t.headline}</span>
-                    <button onClick={() => removeTray(t.id)} className="btn-link">
-                      Done
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </motion.div>
-          )}
+          {Array.isArray((myTodos as any)?.todos) &&
+            (myTodos as any).todos.length > 0 && (
+              <motion.div variants={fadeUp} className="mb-20">
+                <SectionHead title="Backstage" sub="Yours to do" />
+                <ul>
+                  {((myTodos as any).todos as any[]).map((t) => (
+                    <li
+                      key={t.id}
+                      className="grid grid-cols-[1fr_auto] gap-4 py-3 border-b border-rule items-baseline"
+                    >
+                      <span className="font-body text-[16px]">
+                        {String(t.headline ?? t.id)}
+                      </span>
+                      <button
+                        onClick={() => {
+                          // Optimistic: write a Decision (intent=done on
+                          // a to_do source) and clear the row. The
+                          // DecisionRouterWorkflow flips the to_do
+                          // record to state=completed within ~60s; the
+                          // direct completeMyTodo call below mutates it
+                          // immediately for the impatient cache.
+                          const todoPath =
+                            typeof t.path === "string"
+                              ? t.path
+                              : `to_do/${t.id}.md`;
+                          recordDecision({
+                            source: "to_do",
+                            sourceRecord: todoPath,
+                            intent: "done",
+                            sourceHeadline: String(t.headline ?? ""),
+                          }).catch((e) =>
+                            console.error("to_do decision failed", e),
+                          );
+                          completeMyTodo({ id: String(t.id) })
+                            .then(() => refetchTodos())
+                            .catch((e) =>
+                              console.error("completeMyTodo failed", e),
+                            );
+                        }}
+                        className="btn-link"
+                      >
+                        Done
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </motion.div>
+            )}
+
+          <InFlightStrip
+            decisions={Array.isArray(inFlight?.decisions) ? inFlight.decisions : []}
+          />
 
           <motion.div variants={fadeUp}>
             <SectionHead title="The Record" sub="Activity ledger" />
@@ -514,9 +789,136 @@ function SectionHead({ title, sub }: { title: string; sub?: string }) {
   );
 }
 
+/** Map a decision's source to the small label Sir reads next to
+ *  "arrived" so it's obvious what *kind* of thing the card is. */
+function sourceLabel(source: Source): string {
+  if (source === "needs_attention") return "Attention Needed";
+  if (source === "approval") return "Proposed Action";
+  if (source === "pattern_proposal") return "Rule Proposal";
+  return "Judgment Needed";
+}
+
+/** Live activity strip — "What Alfred is doing right now". Renders
+ *  decisions in state=open / scheduled / executing, polled every ~10s
+ *  by the parent. Hidden when there's nothing in flight so a quiet
+ *  desk stays quiet. */
+function InFlightStrip({ decisions }: { decisions: any[] }) {
+  if (!decisions || decisions.length === 0) return null;
+  return (
+    <motion.div variants={fadeUp} style={{ marginTop: 24, marginBottom: 32 }}>
+      <SectionHead
+        title="Alfred is working"
+        sub={`${decisions.length} in flight`}
+      />
+      <ul className="font-mono text-[12px]">
+        {decisions.map((d) => {
+          const state = String(d?.state ?? "open").toLowerCase();
+          const intent = String(d?.intent ?? "");
+          const headline =
+            String(d?.source_headline ?? "").trim() ||
+            String(d?.source_record ?? "").replace(/\.md$/, "").split("/").pop() ||
+            "(no headline)";
+          const note = String(d?.note ?? "").trim();
+          const executeAt = String(d?.execute_at ?? "").trim();
+          const arrived = String(d?.created ?? "");
+          return (
+            <li
+              key={d?.id}
+              className="grid grid-cols-[110px_1fr_140px] gap-3 py-3 border-b border-rule items-baseline"
+            >
+              <InFlightBadge state={state} />
+              <div>
+                <div
+                  className="font-body text-[15px]"
+                  style={{ color: "var(--ink)" }}
+                >
+                  {inFlightVerb(intent, state)} {headline}
+                </div>
+                {(note || executeAt) && (
+                  <div
+                    className="font-body italic text-[13px]"
+                    style={{ color: "var(--marginalia)", marginTop: 4 }}
+                  >
+                    {executeAt ? `Will fire ${fmtArrived(executeAt)}` : note}
+                  </div>
+                )}
+              </div>
+              <span
+                className="text-right tabular"
+                style={{ color: "var(--marginalia)" }}
+              >
+                {fmtArrived(arrived)}
+              </span>
+            </li>
+          );
+        })}
+      </ul>
+    </motion.div>
+  );
+}
+
+function inFlightVerb(intent: string, state: string): string {
+  if (state === "scheduled") return "Scheduled to delegate:";
+  if (state === "executing") {
+    if (intent === "delegate") return "Delegating:";
+    if (intent === "take_mine") return "Taking on:";
+    return "Working on:";
+  }
+  // state=open — just landed, workflow hasn't picked up yet
+  return "Routing:";
+}
+
+function InFlightBadge({ state }: { state: string }) {
+  const palette: Record<string, { bg: string; fg: string; label: string }> = {
+    open: { bg: "var(--paper-2)", fg: "var(--marginalia)", label: "ROUTING" },
+    scheduled: { bg: "var(--brass-faint)", fg: "var(--brass)", label: "SCHEDULED" },
+    executing: { bg: "var(--ink)", fg: "var(--paper)", label: "ACTIVE" },
+  };
+  const p = palette[state] ?? palette.open;
+  return (
+    <span
+      className="font-mono text-[10px] tracking-[0.22em]"
+      style={{
+        background: p.bg,
+        color: p.fg,
+        padding: "3px 8px",
+        display: "inline-block",
+        textAlign: "center",
+      }}
+    >
+      {p.label}
+    </span>
+  );
+}
+
+function actionLabel(a: Action): string {
+  switch (a) {
+    case "delegate": return "Instructions for me";
+    case "defer":    return "When shall I resurface this?";
+    case "done":     return "Anything noteworthy? (optional)";
+    case "take_mine":return "Anything noteworthy? (optional)";
+  }
+}
+function actionPlaceholder(a: Action): string {
+  switch (a) {
+    case "delegate": return "Settle it, then file the receipt under May expenses…";
+    case "defer":    return "Tomorrow morning, or after the Carter meeting…";
+    case "done":     return "Already replied · already paid · resolved on call…";
+    case "take_mine":return "I'll send a note tonight · I'll handle in the morning…";
+  }
+}
+function actionSubmitText(a: Action): string {
+  switch (a) {
+    case "delegate": return "Hand it to Alfred";
+    case "defer":    return "Defer";
+    case "done":     return "Mark done";
+    case "take_mine":return "I'll handle it";
+  }
+}
+
 function DecisionCard({
   d, featured = false, busy, open, draft, setDraft,
-  onOpen, onCancel, onSubmit, onDelete, onDo,
+  onOpen, onCancel, onSubmit, onNoise,
 }: {
   d: Decision;
   featured?: boolean;
@@ -527,8 +929,7 @@ function DecisionCard({
   onOpen: (m: Action) => void;
   onCancel: () => void;
   onSubmit: (m: Action) => void;
-  onDelete: () => void;
-  onDo: () => void;
+  onNoise: () => void;
 }) {
   const arrived = fmtArrived(d.arrived);
   const labelKicker = featured ? "For your decision" : null;
@@ -542,9 +943,19 @@ function DecisionCard({
       <span style={{ color: "var(--marginalia)" }}>·</span>
       <button onClick={() => onOpen("defer")} className="btn-instruction" disabled={busy}>Defer</button>
       <span style={{ color: "var(--marginalia)" }}>·</span>
-      <button onClick={onDelete} className="btn-instruction" disabled={busy}>Delete</button>
+      <button onClick={() => onOpen("done")} className="btn-instruction" disabled={busy}>Done</button>
       <span style={{ color: "var(--marginalia)" }}>·</span>
-      <button onClick={onDo} className="btn-instruction" disabled={busy}>Do</button>
+      <button onClick={() => onOpen("take_mine")} className="btn-instruction" disabled={busy}>Do</button>
+      <span style={{ flex: 1 }} />
+      <button
+        onClick={onNoise}
+        className="btn-link"
+        style={{ fontSize: "0.85em", color: "var(--marginalia)" }}
+        disabled={busy}
+        title="Don't surface things like this again"
+      >
+        Noise
+      </button>
     </div>
   );
 
@@ -554,17 +965,13 @@ function DecisionCard({
         className="block font-mono text-[10px] uppercase tracking-[0.28em] mb-3"
         style={{ color: "var(--brass)" }}
       >
-        {open === "delegate" ? "Instructions for me" : "When shall I resurface this?"}
+        {actionLabel(open)}
       </label>
       <textarea
         autoFocus
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        placeholder={
-          open === "delegate"
-            ? "Settle it, then file the receipt under May expenses…"
-            : "Tomorrow morning, or after the Carter meeting…"
-        }
+        placeholder={actionPlaceholder(open)}
         className="w-full bg-transparent border border-rule p-3 font-body text-[16px] outline-none"
         style={{ minHeight: 96 }}
       />
@@ -575,7 +982,7 @@ function DecisionCard({
           style={{ fontSize: "1rem" }}
           disabled={busy}
         >
-          {busy ? "…" : open === "delegate" ? "Hand it to Alfred" : "Defer"}
+          {busy ? "…" : actionSubmitText(open)}
         </button>
         <button onClick={onCancel} className="btn-link" disabled={busy}>Cancel</button>
       </div>
@@ -623,14 +1030,18 @@ function DecisionCard({
         {d.matterRef && <MatterContextCallout matterId={d.matterRef} />}
         {Buttons}
         {Form}
-        {arrived && (
-          <div
-            className="mt-10 font-mono text-[10px] uppercase tracking-[0.28em]"
-            style={{ color: "var(--marginalia)" }}
-          >
-            arrived {arrived}
-          </div>
-        )}
+        <div
+          className="mt-10 font-mono text-[10px] uppercase tracking-[0.28em] flex flex-wrap items-center"
+          style={{ color: "var(--marginalia)", gap: "0 14px" }}
+        >
+          <span style={{ color: "var(--brass)" }}>{sourceLabel(d.source)}</span>
+          {arrived && (
+            <>
+              <span style={{ opacity: 0.5 }}>·</span>
+              <span>arrived {arrived}</span>
+            </>
+          )}
+        </div>
       </article>
     );
   }
@@ -656,9 +1067,19 @@ function DecisionCard({
         <span style={{ color: "var(--marginalia)" }}>·</span>
         <button onClick={() => onOpen("defer")} className="btn-instruction" style={{ fontSize: 20 }} disabled={busy}>Defer</button>
         <span style={{ color: "var(--marginalia)" }}>·</span>
-        <button onClick={onDelete} className="btn-instruction" style={{ fontSize: 20 }} disabled={busy}>Delete</button>
+        <button onClick={() => onOpen("done")} className="btn-instruction" style={{ fontSize: 20 }} disabled={busy}>Done</button>
         <span style={{ color: "var(--marginalia)" }}>·</span>
-        <button onClick={onDo} className="btn-instruction" style={{ fontSize: 20 }} disabled={busy}>Do</button>
+        <button onClick={() => onOpen("take_mine")} className="btn-instruction" style={{ fontSize: 20 }} disabled={busy}>Do</button>
+        <span style={{ flex: 1 }} />
+        <button
+          onClick={onNoise}
+          className="btn-link"
+          style={{ fontSize: "0.8em", color: "var(--marginalia)" }}
+          disabled={busy}
+          title="Don't surface things like this again"
+        >
+          Noise
+        </button>
       </div>
       {open && (
         <div className="mt-4 border-t border-rule pt-4">
@@ -666,12 +1087,13 @@ function DecisionCard({
             className="block font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
             style={{ color: "var(--brass)" }}
           >
-            {open === "delegate" ? "Instructions for me" : "When shall I resurface this?"}
+            {actionLabel(open)}
           </label>
           <textarea
             autoFocus
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            placeholder={actionPlaceholder(open)}
             className="w-full bg-transparent border border-rule p-3 font-body text-[15px] outline-none"
             style={{ minHeight: 80 }}
           />
@@ -682,20 +1104,24 @@ function DecisionCard({
               style={{ fontSize: "1rem" }}
               disabled={busy}
             >
-              {busy ? "…" : open === "delegate" ? "Hand it to Alfred" : "Defer"}
+              {busy ? "…" : actionSubmitText(open)}
             </button>
             <button onClick={onCancel} className="btn-link" disabled={busy}>Cancel</button>
           </div>
         </div>
       )}
-      {arrived && (
-        <div
-          className="mt-3 font-mono text-[10px] uppercase tracking-[0.22em]"
-          style={{ color: "var(--marginalia)" }}
-        >
-          arrived {arrived}
-        </div>
-      )}
+      <div
+        className="mt-3 font-mono text-[10px] uppercase tracking-[0.22em] flex flex-wrap items-center"
+        style={{ color: "var(--marginalia)", gap: "0 12px" }}
+      >
+        <span style={{ color: "var(--brass)" }}>{sourceLabel(d.source)}</span>
+        {arrived && (
+          <>
+            <span style={{ opacity: 0.5 }}>·</span>
+            <span>arrived {arrived}</span>
+          </>
+        )}
+      </div>
     </article>
   );
 }
