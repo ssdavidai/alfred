@@ -120,6 +120,23 @@ function shortenPath(p: string): string {
   return stem;
 }
 
+/** Decision-row verb shown in the Record ledger. Mirrors the in-flight
+ *  strip's wording so a card moving from "Alfred is working" down into
+ *  "The Record" keeps the same shape. */
+function decisionVerb(intent: string, state: string): string {
+  if (state === "scheduled") return "Scheduled";
+  if (state === "executing") return "Working";
+  if (state === "reversed") return "Reversed";
+  switch (intent) {
+    case "delegate":   return "Delegated";
+    case "defer":      return "Deferred";
+    case "done":       return "Done";
+    case "take_mine":  return "Mine";
+    case "noise":      return "Noise";
+    default:           return intent || "Decided";
+  }
+}
+
 /** Render a steward-action row into a human-readable line.
  *  Prefers `summary` when the steward wrote one; otherwise composes
  *  `<verb> — <target stem>` from action/decision + target_path. The
@@ -339,6 +356,46 @@ export default function DeskPage() {
 
   const ledger: AuditRow[] = useMemo(() => {
     const out: AuditRow[] = [];
+
+    // Decisions — every Desk click (Delegate / Defer / Done / Do / Noise)
+    // writes a decision record. The Record on /desk needs to mirror what
+    // /decisions shows, so the principal's actions land where they expect.
+    // Previously this ledger only read getActivityFeed (docker logs from
+    // the `alfred` container — irrelevant to Desk clicks) and
+    // getRecentStewardActions (event/steward-action-*.md files, written
+    // only by the background steward workflow, never by /desk clicks),
+    // so Sir's clicks never appeared here even though they showed on
+    // /decisions. Fixed by pulling decisions into the same merged feed.
+    const decs = Array.isArray(recentDecisions?.decisions)
+      ? recentDecisions?.decisions
+      : Array.isArray((recentDecisions as any)?.results)
+        ? (recentDecisions as any)?.results
+        : [];
+    for (const d of decs ?? []) {
+      const at = String(d?.completed_at ?? d?.created ?? "");
+      if (!at) continue;
+      const intent = String(d?.intent ?? "").trim();
+      const state = String(d?.state ?? "").trim();
+      const headline =
+        String(d?.source_headline ?? "").trim() ||
+        String(d?.source_record ?? "").replace(/\.md$/, "").split("/").pop() ||
+        "(no headline)";
+      const verb = decisionVerb(intent, state);
+      const decisionId = String(d?.id ?? "");
+      out.push({
+        key: `dec:${decisionId || at}`,
+        at,
+        atDisplay: fmtArrived(at),
+        act: `${verb} — ${headline}`,
+        actionId: decisionId || undefined,
+        // Decisions are reversible until they have an outcome, but the
+        // Undo path here goes through reverseDecision, not
+        // undoStewardAction — different wire. Surface as informational
+        // for now; the dedicated reverse button lives on /decisions.
+        reversible: false,
+      });
+    }
+
     const acts = Array.isArray(activity?.results)
       ? activity?.results
       : Array.isArray(activity?.events)
@@ -396,7 +453,7 @@ export default function DeskPage() {
     }
     out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
     return out.slice(0, 80);
-  }, [activity, steward]);
+  }, [recentDecisions, activity, steward]);
 
   // ------------------------------------------------------------------------
   // Action dispatch — maps the UI's four buttons to the right tenant op.

@@ -855,6 +855,7 @@ async def dispatch_action_to_agent(
     action_proposal: dict[str, Any],
     target_path: str | None,
     matched_instinct_path: str,
+    source_signal_path: str = "",
 ) -> dict[str, Any]:
     """Dispatch an autonomous action to openclaw main via clerk subagent.
 
@@ -1000,6 +1001,12 @@ async def dispatch_action_to_agent(
         f"created: {_scalar(ts_iso)}",
         f"source_type: {_scalar('agent_outcome')}",
         f"source_event_path: {_scalar('')}",
+        # source_signal_path is the upstream signal this outcome is FOR.
+        # check_decision_outcomes uses this field to match outcomes back
+        # to the originating decision (decision.side_effects.re_routed_signal
+        # == outcome.source_signal_path). Without this the executing →
+        # completed transition never fires and decisions stay stuck.
+        f"source_signal_path: {_scalar(source_signal_path)}",
         f"matched_instinct: {_scalar(matched_instinct_path)}",
         f"matched_instinct_name: {_scalar(instinct_name)}",
         f"target_path: {_scalar(target_path) if target_path else 'null'}",
@@ -1242,15 +1249,58 @@ async def route_signal_action(
         agent_outcome: dict[str, Any] | None = None
         needs_attention_path: str | None = None
 
-        if matched is None or matched_path is None:
+        # Principal-override: if the signal carries a ``decision_origin``
+        # pointing at a delegate-intent decision, the principal has
+        # already made the call from /desk. Bypass tier classification
+        # and dispatch to the agent regardless of confidence. Without
+        # this gate, re-armed signals fall back into HUMAN_HIGH (because
+        # that's the tier that put them in needs_attention to begin
+        # with), get marked ``routed_human``, and the originating
+        # decision stays state=executing forever because no outcome
+        # signal ever lands. Symptom on david 2026-05-12: 6 ghost
+        # "Alfred is working" cards over 4-17 hours old, all with
+        # dispatched_at=null. Shadow mode still wins — we don't want
+        # principal-delegate to side-step the live-mode safety belt.
+        decision_origin = fm.get("decision_origin")
+        principal_delegate_override = False
+        principal_note: str = ""
+        if isinstance(decision_origin, str) and decision_origin.strip():
+            try:
+                origin_rec = await client.read_record(decision_origin)
+                origin_fm = (origin_rec or {}).get("frontmatter") or {}
+                if str(origin_fm.get("intent") or "").strip() == "delegate":
+                    principal_delegate_override = True
+                    principal_note = str(
+                        origin_fm.get("note") or ""
+                    ).strip()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "signal_actions.route_signal_action: could not read "
+                    "decision_origin=%s err=%s — falling back to tier",
+                    decision_origin, exc,
+                )
+
+        # Precedence:
+        #   1. principal-delegate override beats everything, including
+        #      shadow mode. The shadow gate exists to block *autonomous*
+        #      agent dispatch (signals routing to the agent without
+        #      principal involvement); when the principal explicitly
+        #      clicked Delegate from /desk that's the opposite case and
+        #      shadow shouldn't apply.
+        #   2. shadow mode for autonomous signals → human.
+        #   3. confidence / instinct-match tier gates.
+        if principal_delegate_override:
+            chosen_path = "agent"
+            decision_reason = "principal_delegated"
+        elif effective_mode == "shadow":
+            chosen_path = "human"
+            decision_reason = "shadow_mode"
+        elif matched is None or matched_path is None:
             chosen_path = "human"
             decision_reason = "no_matching_instinct"
         elif combined_confidence < threshold:
             chosen_path = "human"
             decision_reason = "low_confidence"
-        elif effective_mode == "shadow":
-            chosen_path = "human"
-            decision_reason = "shadow_mode"
         else:
             chosen_path = "agent"
             decision_reason = "high_confidence_match"
@@ -1262,11 +1312,29 @@ async def route_signal_action(
 
         if chosen_path == "agent":
             # We've passed all gates — dispatch.
+            #
+            # For principal-delegated signals, fold the principal's note
+            # into ``action_proposal.what`` so the agent prompt sees the
+            # actual decision content (not just the original auto-
+            # extracted proposal). Otherwise the agent acts on what the
+            # signal extractor *thought* the action should be, ignoring
+            # what the principal actually said.
+            dispatch_proposal = proposal
+            if principal_delegate_override and principal_note:
+                dispatch_proposal = dict(proposal)
+                original_what = str(
+                    dispatch_proposal.get("what") or ""
+                ).strip()
+                dispatch_proposal["what"] = (
+                    f"{original_what}\n\n"
+                    f"Principal's instruction: {principal_note}"
+                ).strip()
             try:
                 agent_outcome = await dispatch_action_to_agent(
-                    proposal,
+                    dispatch_proposal,
                     target_path,
                     matched_path or "",
+                    source_signal_path=signal_path,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
