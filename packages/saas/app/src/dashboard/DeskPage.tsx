@@ -50,6 +50,7 @@ import { Frame } from "../client/components/ab/Frame";
 import { Seal } from "../client/components/ab/Seal";
 import { PageOverture } from "../client/components/ab/PageOverture";
 import { fadeUp, stagger } from "../client/lib/motion";
+import { enqueueDeskAction } from "./desk-action-queue";
 
 // --------------------------------------------------------------------------
 // Decision row — unified shape across the three source queries.
@@ -496,43 +497,44 @@ export default function DeskPage() {
     action: "delegate" | "defer" | "delete" | "do" | "noise",
     note: string,
   ): Promise<void> {
-    // Map UI verb → canonical decision intent.
     const intent =
       action === "delete"
         ? "done"
         : action === "do"
           ? "take_mine"
-          : action; // delegate, defer, noise
-    // Decision record (primary).
-    recordDecision({
-      source: d.source,
-      sourceRecord:
-        d.source === "needs_attention"
-          ? `needs_attention/${d.recordId}.md`
-          : d.recordId,
-      intent: intent as
-        | "delegate"
-        | "defer"
-        | "done"
-        | "take_mine"
-        | "noise",
-      note: note || undefined,
-      matterRef: d.matterRef
-        ? `matter/${d.matterRef}.md`
-        : undefined,
-      sourceHeadline: d.headline || undefined,
-    }).catch((e) => {
-      console.error("recordDecision failed", action, d.id, e);
-    });
-    // Legacy desk-action audit (kept for the existing decisions feed).
-    recordDeskAction({
-      source: d.source,
-      sourceId: d.recordId,
-      action,
-      note: note || undefined,
-    }).catch((e) => {
-      console.error("recordDeskAction failed", action, d.id, e);
-    });
+          : action;
+    // Awaited so the caller knows the audit cycle is fully done before
+    // releasing the desk-action queue to the next click. Each write is
+    // best-effort — a ledger miss must not block the user — but the
+    // queue gate waits on both regardless of outcome.
+    await Promise.all([
+      recordDecision({
+        source: d.source,
+        sourceRecord:
+          d.source === "needs_attention"
+            ? `needs_attention/${d.recordId}.md`
+            : d.recordId,
+        intent: intent as
+          | "delegate"
+          | "defer"
+          | "done"
+          | "take_mine"
+          | "noise",
+        note: note || undefined,
+        matterRef: d.matterRef ? `matter/${d.matterRef}.md` : undefined,
+        sourceHeadline: d.headline || undefined,
+      }).catch((e) => {
+        console.error("recordDecision failed", action, d.id, e);
+      }),
+      recordDeskAction({
+        source: d.source,
+        sourceId: d.recordId,
+        action,
+        note: note || undefined,
+      }).catch((e) => {
+        console.error("recordDeskAction failed", action, d.id, e);
+      }),
+    ]);
   }
 
   // Optimistic UI for all four buttons: clear the card from the queue
@@ -547,19 +549,23 @@ export default function DeskPage() {
     setHandled((h) => h.filter((x) => x !== id));
   }
 
+  // Every click goes through `enqueueDeskAction` so that 10 mash-clicks
+  // produce a single in-flight server cycle at a time. Optimistic UI
+  // (markHandled) still runs synchronously; only the audit + source
+  // mutation are serialised. See desk-action-queue.ts for rationale.
   function onDelegate(d: Decision, instructions: string): void {
     markHandled(d.id);
-    auditDeskAction(d, "delegate", instructions);
-    let mutation: Promise<unknown> = Promise.resolve();
-    if (d.source === "needs_attention") {
-      mutation = resolveNeedsAttentionDispatch({
-        id: d.recordId,
-        note: instructions,
-      });
-    } else if (d.source === "approval") {
-      mutation = approveAction({ path: d.recordId });
-    }
-    mutation.catch((e) => {
+    enqueueDeskAction(async () => {
+      await auditDeskAction(d, "delegate", instructions);
+      if (d.source === "needs_attention") {
+        await resolveNeedsAttentionDispatch({
+          id: d.recordId,
+          note: instructions,
+        });
+      } else if (d.source === "approval") {
+        await approveAction({ path: d.recordId });
+      }
+    }).catch((e) => {
       console.error("delegate failed; reverting", d.id, e);
       revertHandled(d.id);
     });
@@ -567,14 +573,14 @@ export default function DeskPage() {
 
   function onDefer(d: Decision, when: string): void {
     markHandled(d.id);
-    auditDeskAction(d, "defer", when);
-    let mutation: Promise<unknown> = Promise.resolve();
-    if (d.source === "needs_attention") {
-      mutation = resolveNeedsAttentionSkip({ id: d.recordId, note: when });
-    }
-    // Approvals + judgments have no native defer endpoint — the audit
-    // event captures intent; the underlying record stays pending.
-    mutation.catch((e) => {
+    enqueueDeskAction(async () => {
+      await auditDeskAction(d, "defer", when);
+      if (d.source === "needs_attention") {
+        await resolveNeedsAttentionSkip({ id: d.recordId, note: when });
+      }
+      // Approvals + judgments have no native defer endpoint — the audit
+      // event captures intent; the underlying record stays pending.
+    }).catch((e) => {
       console.error("defer failed; reverting", d.id, e);
       revertHandled(d.id);
     });
@@ -584,17 +590,17 @@ export default function DeskPage() {
     // "Done" — close the item. Optional context becomes part of the
     // observation extracted from the decision (richer learning signal).
     markHandled(d.id);
-    auditDeskAction(d, "delete", context);
-    let mutation: Promise<unknown> = Promise.resolve();
-    if (d.source === "needs_attention") {
-      mutation = resolveNeedsAttentionDone({
-        id: d.recordId,
-        note: context || undefined,
-      });
-    } else if (d.source === "approval") {
-      mutation = rejectAction({ path: d.recordId });
-    }
-    mutation.catch((e) => {
+    enqueueDeskAction(async () => {
+      await auditDeskAction(d, "delete", context);
+      if (d.source === "needs_attention") {
+        await resolveNeedsAttentionDone({
+          id: d.recordId,
+          note: context || undefined,
+        });
+      } else if (d.source === "approval") {
+        await rejectAction({ path: d.recordId });
+      }
+    }).catch((e) => {
       console.error("done failed; reverting", d.id, e);
       revertHandled(d.id);
     });
@@ -608,7 +614,7 @@ export default function DeskPage() {
     // signal. We refetch the todos list a few seconds later to close
     // the gap.
     markHandled(d.id);
-    auditDeskAction(d, "do", context);
+    enqueueDeskAction(() => auditDeskAction(d, "do", context));
     setTimeout(() => {
       refetchTodos().catch(() => {});
     }, 5000);
@@ -621,7 +627,7 @@ export default function DeskPage() {
     // that signal_extract consults BEFORE the LLM call on future
     // events. No note required — the gesture is the explanation.
     markHandled(d.id);
-    auditDeskAction(d, "noise", "");
+    enqueueDeskAction(() => auditDeskAction(d, "noise", ""));
     // No source-specific mutation needed — the synchronous flip in
     // ctrl-api's POST /api/v1/decisions already set the source
     // record's status to "noise", which drops it from the queue.
@@ -804,24 +810,30 @@ export default function DeskPage() {
                           // DecisionRouterWorkflow flips the to_do
                           // record to state=completed within ~60s; the
                           // direct completeMyTodo call below mutates it
-                          // immediately for the impatient cache.
+                          // immediately for the impatient cache. Both
+                          // server calls go through the shared queue so
+                          // they don't dogpile ctrl-api alongside the
+                          // bigger Delegate/Defer/Done cycles.
                           const todoPath =
                             typeof t.path === "string"
                               ? t.path
                               : `to_do/${t.id}.md`;
-                          recordDecision({
-                            source: "to_do",
-                            sourceRecord: todoPath,
-                            intent: "done",
-                            sourceHeadline: String(t.headline ?? ""),
-                          }).catch((e) =>
-                            console.error("to_do decision failed", e),
-                          );
-                          completeMyTodo({ id: String(t.id) })
-                            .then(() => refetchTodos())
-                            .catch((e) =>
-                              console.error("completeMyTodo failed", e),
-                            );
+                          enqueueDeskAction(async () => {
+                            await Promise.all([
+                              recordDecision({
+                                source: "to_do",
+                                sourceRecord: todoPath,
+                                intent: "done",
+                                sourceHeadline: String(t.headline ?? ""),
+                              }).catch((e) =>
+                                console.error("to_do decision failed", e),
+                              ),
+                              completeMyTodo({ id: String(t.id) }).catch(
+                                (e) =>
+                                  console.error("completeMyTodo failed", e),
+                              ),
+                            ]);
+                          }).then(() => refetchTodos().catch(() => {}));
                         }}
                         className="btn-link"
                       >
