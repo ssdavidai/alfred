@@ -6,7 +6,11 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError, ExecError } from "../errors.js";
 import { dockerExec, ALFRED_CMD } from "../helpers.js";
 import { emitStreamEvent } from "./streams.js";
-import { vaultListCache, invalidateAllVaultCaches } from "../vaultCache.js";
+import {
+  vaultListCache,
+  invalidateAllVaultCaches,
+  invalidateVaultCachesForType,
+} from "../vaultCache.js";
 import {
   triggerPlaneSyncNudge,
   slugFromVaultPath,
@@ -40,9 +44,13 @@ const STEWARD_SIGNALS_FILE = "/alfred-data/streams/steward-signals.jsonl";
 export function emitVaultEditSignal(relPath: string, kind: "create" | "edit" | "delete" = "edit"): void {
   if (!relPath) return;
   // Every vault mutation flows through here — also the single chokepoint
-  // for busting the read-side caches so the next /vault/list/* or
-  // /admin/needs-attention call reflects the write immediately.
-  invalidateAllVaultCaches();
+  // for busting the read-side caches so the next /vault/list/<type> or
+  // /admin/needs-attention call reflects the write immediately. Only
+  // the same-type caches are invalidated; an alfred-learn task writeback
+  // must not nuke the signal/matter/event caches the Desk reads from
+  // every poll.
+  const type = relPath.split("/")[0] ?? "";
+  invalidateVaultCachesForType(type);
   setImmediate(() => {
     try {
       fs.mkdirSync(path.dirname(STEWARD_SIGNALS_FILE), { recursive: true });

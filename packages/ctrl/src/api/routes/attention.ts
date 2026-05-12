@@ -31,7 +31,7 @@ import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { VAULT_PATH } from "./vault.js";
-import { attentionCache, invalidateAllVaultCaches } from "../vaultCache.js";
+import { attentionCache, invalidateVaultCachesForType } from "../vaultCache.js";
 
 const NEEDS_ATTENTION_DIR = path.join(VAULT_PATH, "needs_attention");
 const EVENTS_DIR = path.join(VAULT_PATH, "event");
@@ -127,9 +127,9 @@ export function writeFrontmatterPatch(
   }
   const next = `---\n${out.join("\n")}\n---${rest}`;
   fs.writeFileSync(fullPath, next, "utf-8");
-  // Bust read-side caches so the next /admin/needs-attention,
-  // /vault/list/* or /approvals/pending call reflects this write.
-  invalidateAllVaultCaches();
+  // Bust the needs_attention-specific read caches; do not touch the
+  // signal/matter/event caches that the Desk reads from every poll.
+  invalidateVaultCachesForType("needs_attention");
 }
 
 export function emitResolutionEvent(

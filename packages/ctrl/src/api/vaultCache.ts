@@ -38,3 +38,28 @@ export function invalidateAllVaultCaches(): void {
   vaultWalkCache.invalidate();
   attentionCache.invalidate();
 }
+
+// Type-aware invalidation. A write to `task/<id>.md` should only bust
+// caches keyed by `task:*`, not by `signal:*` or `matter:*`. Background
+// writers (alfred-learn task writebacks every few seconds) used to nuke
+// every cache on every write, which meant /list/signal etc. were always
+// cold and the synchronous walk re-ran on every Desk fetch — pinning
+// ctrl-api's event loop at 100% CPU and 502'ing the preview proxy.
+//
+// `vaultListCache` is keyed `<type>:<previewLen>` so the prefix match
+// is exact. `attentionCache` is only populated by `needs_attention`
+// reads, so we only bust it when needs_attention writes happen.
+// `vaultWalkCache` is for cross-type endpoints (steward feed, approvals
+// pending); we still bust the whole thing because re-narrowing isn't
+// worth the complexity at the call sites today.
+export function invalidateVaultCachesForType(type: string): void {
+  if (!type) {
+    invalidateAllVaultCaches();
+    return;
+  }
+  vaultListCache.invalidatePrefix(`${type}:`);
+  vaultWalkCache.invalidate();
+  if (type === "needs_attention") {
+    attentionCache.invalidate();
+  }
+}

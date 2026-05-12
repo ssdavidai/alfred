@@ -31,6 +31,8 @@ export interface TtlCache<T> {
   get(key: string, computeFn: () => Promise<T> | T): Promise<T>;
   /** Bust a specific key, or all keys if no key is given. */
   invalidate(key?: string): void;
+  /** Bust every key whose name starts with `prefix`. */
+  invalidatePrefix(prefix: string): void;
 }
 
 export function ttlCache<T>(opts: { ttlMs: number }): TtlCache<T> {
@@ -78,6 +80,12 @@ export function ttlCache<T>(opts: { ttlMs: number }): TtlCache<T> {
         store.clear();
       } else {
         store.delete(key);
+      }
+    },
+
+    invalidatePrefix(prefix) {
+      for (const k of store.keys()) {
+        if (k.startsWith(prefix)) store.delete(k);
       }
     },
   };
