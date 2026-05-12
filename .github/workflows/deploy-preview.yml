@@ -64,7 +64,10 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.PREVIEW_SSH_KEY }}" > ~/.ssh/preview_key
           chmod 600 ~/.ssh/preview_key
-          ssh-keyscan -H ${{ secrets.PREVIEW_HOST }} >> ~/.ssh/known_hosts
+          # Best-effort: if PREVIEW_HOST is Tailscale-only or
+          # otherwise unresolvable from the GH runner, skip the
+          # keyscan and rely on accept-new in the rsync step below.
+          ssh-keyscan -H ${{ secrets.PREVIEW_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Patch Dockerfile for provisioning deps
         run: |
@@ -76,25 +79,25 @@ jobs:
             --exclude='web-app/' \
             --exclude='node_modules/' \
             --exclude='.waspchecksums' \
-            -e "ssh -i ~/.ssh/preview_key" \
+            -e "ssh -i ~/.ssh/preview_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
             packages/saas/app/.wasp/build/ \
             deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/wasp-build/
 
       - name: Deploy client to preview VM
         run: |
           rsync -azP --delete \
-            -e "ssh -i ~/.ssh/preview_key" \
+            -e "ssh -i ~/.ssh/preview_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
             packages/saas/app/.wasp/build/web-app/build/ \
             deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/client/
 
       - name: Deploy Plausible config to preview VM
         run: |
           rsync -azP \
-            -e "ssh -i ~/.ssh/preview_key" \
+            -e "ssh -i ~/.ssh/preview_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
             deploy/clickhouse/ \
             deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/clickhouse/
           rsync -azP \
-            -e "ssh -i ~/.ssh/preview_key" \
+            -e "ssh -i ~/.ssh/preview_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
             deploy/docker-compose.yaml \
             deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/docker-compose.yaml
 
