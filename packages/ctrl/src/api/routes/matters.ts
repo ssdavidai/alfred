@@ -431,6 +431,34 @@ function buildMatterIndex(): MatterIndexResult {
               state === "reversed" ? `[undone] ${headline}` : headline,
             path: display,
           });
+          // Also bump the matter's roll-up counters and the
+          // per-category bucket so /matters and /matters/:id reflect
+          // the Desk clicks. Decisions don't fall through to the
+          // general childrenByMatter pass below (we `continue` after
+          // this block, since decisions use `matter_ref` not the
+          // generic refs collection), so the count has to land here.
+          matter.counts.decisions += 1;
+          matter.vault_by_category.decisions.push({
+            title: headline,
+            path: display,
+            date: when,
+          });
+          // Roll into recent_decisions too — a Desk click IS a
+          // decision-of-record.
+          const outcomeStatus = String(rec.fm.state ?? "").toLowerCase();
+          const outcome: RecentDecision["outcome"] =
+            outcomeStatus === "open" || outcomeStatus === "scheduled"
+              ? "Held"
+              : outcomeStatus === "reversed"
+                ? "Asked"
+                : "Handled";
+          matter.recent_decisions.push({
+            date: when.slice(0, 10),
+            label: headline,
+            outcome,
+            path: display,
+          });
+          if (when > (matter.last ?? "")) matter.last = when;
         }
       }
       continue;
