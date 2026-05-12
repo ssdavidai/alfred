@@ -31,6 +31,7 @@ import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { VAULT_PATH } from "./vault.js";
+import { attentionCache, invalidateAllVaultCaches } from "../vaultCache.js";
 
 const NEEDS_ATTENTION_DIR = path.join(VAULT_PATH, "needs_attention");
 const EVENTS_DIR = path.join(VAULT_PATH, "event");
@@ -126,6 +127,9 @@ export function writeFrontmatterPatch(
   }
   const next = `---\n${out.join("\n")}\n---${rest}`;
   fs.writeFileSync(fullPath, next, "utf-8");
+  // Bust read-side caches so the next /admin/needs-attention,
+  // /vault/list/* or /approvals/pending call reflects this write.
+  invalidateAllVaultCaches();
 }
 
 export function emitResolutionEvent(
@@ -238,14 +242,15 @@ export function registerAttentionRoutes(): void {
       Math.min(500, parseInt(url.searchParams.get("limit") ?? "100", 10) || 100),
     );
 
-    if (!fs.existsSync(NEEDS_ATTENTION_DIR)) {
-      sendJson(res, 200, { records: [], count: 0 });
-      return;
-    }
-    const files = fs
-      .readdirSync(NEEDS_ATTENTION_DIR)
-      .filter((f) => f.endsWith(".md"));
-    const records: any[] = [];
+    const cacheKey = `${includeAll ? "all" : "pending"}:${limit}`;
+    const payload = await attentionCache.get(cacheKey, () => {
+      if (!fs.existsSync(NEEDS_ATTENTION_DIR)) {
+        return { records: [], count: 0 };
+      }
+      const files = fs
+        .readdirSync(NEEDS_ATTENTION_DIR)
+        .filter((f) => f.endsWith(".md"));
+      const records: any[] = [];
     for (const f of files) {
       const id = f.replace(/\.md$/, "");
       const rec = readNeedsAttention(id);
@@ -288,12 +293,14 @@ export function registerAttentionRoutes(): void {
         body_preview: rec.body.slice(0, 500),
       });
     }
-    // Newest pending first; for /include=all show by created desc as well.
-    records.sort((a, b) => String(b.created ?? "").localeCompare(String(a.created ?? "")));
-    sendJson(res, 200, {
-      records: records.slice(0, limit),
-      count: records.length,
+      // Newest pending first; for /include=all show by created desc as well.
+      records.sort((a, b) => String(b.created ?? "").localeCompare(String(a.created ?? "")));
+      return {
+        records: records.slice(0, limit),
+        count: records.length,
+      };
     });
+    sendJson(res, 200, payload);
   });
 
   // POST /api/v1/admin/needs-attention/:id/done — Sir handled it

@@ -4,6 +4,7 @@ import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, NotFoundError } from "../errors.js";
 import { VAULT_PATH, IGNORE_DIRS, walkMd, readRecord } from "./vault.js";
+import { vaultWalkCache } from "../vaultCache.js";
 
 /**
  * Patch frontmatter fields in a vault record by reading the file,
@@ -41,41 +42,44 @@ function patchFrontmatter(
 export function registerApprovalRoutes(): void {
   // List pending approvals — tasks where requires_approval=true and status is queued or todo
   addRoute("GET", "/api/v1/approvals/pending", async ({ res }) => {
-    const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
-    const results: Array<{
-      path: string;
-      name: string;
-      description: string;
-      status: string;
-      created: string;
-      tier: number | null;
-      source_instinct: string;
-      confidence_score: string;
-    }> = [];
+    const payload = await vaultWalkCache.get("approvals:pending", () => {
+      const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+      const results: Array<{
+        path: string;
+        name: string;
+        description: string;
+        status: string;
+        created: string;
+        tier: number | null;
+        source_instinct: string;
+        confidence_score: string;
+      }> = [];
 
-    for (const relPath of files) {
-      const rec = readRecord(relPath);
-      if (!rec) continue;
-      if (rec.fm.type !== "task") continue;
+      for (const relPath of files) {
+        const rec = readRecord(relPath);
+        if (!rec) continue;
+        if (rec.fm.type !== "task") continue;
 
-      const requiresApproval = rec.fm.requires_approval === "true" || rec.fm.requires_approval === true;
-      const status = String(rec.fm.status || "");
-      if (!requiresApproval || (status !== "queued" && status !== "todo")) continue;
+        const requiresApproval = rec.fm.requires_approval === "true" || rec.fm.requires_approval === true;
+        const status = String(rec.fm.status || "");
+        if (!requiresApproval || (status !== "queued" && status !== "todo")) continue;
 
-      results.push({
-        path: relPath.replace(/\\/g, "/"),
-        name: String(rec.fm.name || rec.fm.title || rec.stem),
-        description: String(rec.fm.description || ""),
-        status,
-        created: String(rec.fm.created || ""),
-        tier: rec.fm.tier ? Number(rec.fm.tier) : null,
-        source_instinct: String(rec.fm.source_instinct || ""),
-        confidence_score: String(rec.fm.confidence_score || ""),
-      });
-    }
+        results.push({
+          path: relPath.replace(/\\/g, "/"),
+          name: String(rec.fm.name || rec.fm.title || rec.stem),
+          description: String(rec.fm.description || ""),
+          status,
+          created: String(rec.fm.created || ""),
+          tier: rec.fm.tier ? Number(rec.fm.tier) : null,
+          source_instinct: String(rec.fm.source_instinct || ""),
+          confidence_score: String(rec.fm.confidence_score || ""),
+        });
+      }
 
-    results.sort((a, b) => b.created.localeCompare(a.created));
-    sendJson(res, 200, { results, count: results.length });
+      results.sort((a, b) => b.created.localeCompare(a.created));
+      return { results, count: results.length };
+    });
+    sendJson(res, 200, payload);
   });
 
   // Approve — set approved=true so TaskRunner's check_task_prerequisites passes.

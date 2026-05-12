@@ -6,6 +6,7 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError, ExecError } from "../errors.js";
 import { dockerExec, ALFRED_CMD } from "../helpers.js";
 import { emitStreamEvent } from "./streams.js";
+import { vaultListCache, invalidateAllVaultCaches } from "../vaultCache.js";
 import {
   triggerPlaneSyncNudge,
   slugFromVaultPath,
@@ -38,6 +39,10 @@ const STEWARD_SIGNALS_FILE = "/alfred-data/streams/steward-signals.jsonl";
  */
 export function emitVaultEditSignal(relPath: string, kind: "create" | "edit" | "delete" = "edit"): void {
   if (!relPath) return;
+  // Every vault mutation flows through here — also the single chokepoint
+  // for busting the read-side caches so the next /vault/list/* or
+  // /admin/needs-attention call reflects the write immediately.
+  invalidateAllVaultCaches();
   setImmediate(() => {
     try {
       fs.mkdirSync(path.dirname(STEWARD_SIGNALS_FILE), { recursive: true });
@@ -637,37 +642,41 @@ export function registerVaultRoutes(): void {
       2000,
     );
 
-    const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
-    const results: Array<{
-      path: string;
-      name: string;
-      status: string;
-      frontmatter: Record<string, unknown>;
-      body_preview: string;
-      created: string;
-    }> = [];
-    for (const relPath of files) {
-      const rec = readRecord(relPath);
-      if (!rec) continue;
-      if (rec.fm.type !== type) continue;
+    const cacheKey = `${type}:${previewLen}`;
+    const payload = await vaultListCache.get(cacheKey, () => {
+      const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+      const results: Array<{
+        path: string;
+        name: string;
+        status: string;
+        frontmatter: Record<string, unknown>;
+        body_preview: string;
+        created: string;
+      }> = [];
+      for (const relPath of files) {
+        const rec = readRecord(relPath);
+        if (!rec) continue;
+        if (rec.fm.type !== type) continue;
 
-      // Truncate body to preview length for list rendering — the full
-      // body is available via GET /api/v1/vault/records/:path
-      const bodyPreview = rec.body.length > previewLen
-        ? rec.body.slice(0, previewLen) + "…"
-        : rec.body;
+        // Truncate body to preview length for list rendering — the full
+        // body is available via GET /api/v1/vault/records/:path
+        const bodyPreview = rec.body.length > previewLen
+          ? rec.body.slice(0, previewLen) + "…"
+          : rec.body;
 
-      results.push({
-        path: relPath.replace(/\\/g, "/"),
-        name: String(rec.fm.name || rec.fm.subject || rec.stem),
-        status: String(rec.fm.status || ""),
-        frontmatter: rec.fm,
-        body_preview: bodyPreview,
-        created: String(rec.fm.created || ""),
-      });
-    }
-    results.sort((a, b) => a.name.localeCompare(b.name));
-    sendJson(res, 200, { results, count: results.length });
+        results.push({
+          path: relPath.replace(/\\/g, "/"),
+          name: String(rec.fm.name || rec.fm.subject || rec.stem),
+          status: String(rec.fm.status || ""),
+          frontmatter: rec.fm,
+          body_preview: bodyPreview,
+          created: String(rec.fm.created || ""),
+        });
+      }
+      results.sort((a, b) => a.name.localeCompare(b.name));
+      return { results, count: results.length };
+    });
+    sendJson(res, 200, payload);
   });
 
   // Read vault record

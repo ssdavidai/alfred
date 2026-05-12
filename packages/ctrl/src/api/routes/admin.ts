@@ -4,6 +4,13 @@ import { sendJson, ValidationError } from "../errors.js";
 import { dockerComposeCmd, dockerExec, execAsync, sudoExec, parseJsonLines, validateServiceName, COMPOSE_DIR, OPENCLAW_CMD } from "../helpers.js";
 import { getVaultContextData, getInboxFiles, VAULT_PATH } from "./vault.js";
 import { parseActivityFeed } from "../activity.js";
+import { ttlCache } from "../cache.js";
+
+// Activity feed is the most expensive read on the Desk page — it spawns
+// `docker compose logs --tail=N alfred` which forks a process per call.
+// Coalesce repeat reads (every Desk page-load fires this once, and
+// every click invalidates+refetches) onto a single subprocess invocation.
+const activityFeedCache = ttlCache<{ items: any[] }>({ ttlMs: 3_000 });
 
 // Host paths for alfred-data and chore directory.
 // The ctrl-api container mounts /mnt/encrypted/alfred to the SAME path
@@ -406,11 +413,13 @@ export function registerAdminRoutes(): void {
   addRoute("GET", "/api/v1/admin/activity", async ({ res, query }) => {
     const limit = parseInt(query.get("limit") ?? "50", 10);
     if (isNaN(limit) || limit < 1) throw new ValidationError("limit must be a positive number");
-    // Fetch 3x more raw lines to account for noise filtering
-    const rawTail = Math.min(limit * 3, 1000).toString();
-    const stdout = await dockerComposeCmd(["logs", "--no-color", "--tail", rawTail, "alfred"]);
-    const items = parseActivityFeed(stdout, limit);
-    sendJson(res, 200, { items });
+    const payload = await activityFeedCache.get(`activity:${limit}`, async () => {
+      // Fetch 3x more raw lines to account for noise filtering
+      const rawTail = Math.min(limit * 3, 1000).toString();
+      const stdout = await dockerComposeCmd(["logs", "--no-color", "--tail", rawTail, "alfred"]);
+      return { items: parseActivityFeed(stdout, limit) };
+    });
+    sendJson(res, 200, payload);
   });
 
   // --- Config ---
