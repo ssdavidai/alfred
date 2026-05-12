@@ -228,6 +228,29 @@ function normalizeTaskState(raw: unknown): TaskState {
   return "pending";
 }
 
+/** True if any of the archive conventions mark this task terminal-archived.
+ *
+ *  Three conventions live in the vault for historical reasons:
+ *    - `archived: true` (boolean flag, set by archive_orphan_tasks.py)
+ *    - `state: archived` (canonical, used by the matters aggregator)
+ *    - `status: cancelled` (legacy alias from the same orphan archiver)
+ *  Any of them is enough; the new cold-archival writer sets all three so
+ *  consumers don't have to know which convention won. */
+function isArchivedTaskFm(fm: Record<string, unknown>): boolean {
+  const archivedRaw = fm.archived;
+  if (archivedRaw === true) return true;
+  if (typeof archivedRaw === "string" && archivedRaw.toLowerCase() === "true") {
+    return true;
+  }
+  const state = String(fm.state ?? "").toLowerCase().trim();
+  if (state === "archived") return true;
+  const status = String(fm.status ?? "").toLowerCase().trim();
+  if (status === "archived" || status === "cancelled" || status === "canceled") {
+    return true;
+  }
+  return false;
+}
+
 /** Derive the matter's roll-up state from its linked tasks. */
 function deriveMatterState(tasks: MatterTask[]): "done" | "active" | "waiting" {
   if (tasks.length === 0) return "waiting";
@@ -579,10 +602,18 @@ function buildMatterIndex(): MatterIndexResult {
           });
           break;
         }
-        case "task":
-          matter.counts.tasks += 1;
+        case "task": {
+          // Counter-aware filter: skip tasks that any of the archive
+          // conventions mark terminal. `vault_by_category.tasks` still
+          // gets the link so the record stays browseable from the
+          // matter detail page; only the headline count drops.
+          const taskArchived = isArchivedTaskFm(k.rec.fm);
+          if (!taskArchived) {
+            matter.counts.tasks += 1;
+          }
           matter.vault_by_category.tasks.push(link);
           break;
+        }
         case "note":
         case "synthesis": {
           const status = String(k.rec.fm.status ?? "").toLowerCase();
