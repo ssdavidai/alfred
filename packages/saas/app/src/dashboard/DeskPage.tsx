@@ -160,7 +160,12 @@ interface AuditRow {
 export default function DeskPage() {
   const { data: needs, isLoading: needsLoading } = useQuery(getNeedsAttention);
   const { data: approvals, isLoading: approvalsLoading } = useQuery(getPendingApprovals);
-  const { data: judgments, isLoading: judgmentsLoading } = useQuery(getRecentJudgments);
+  // NB: `getRecentJudgments` is a misnamed query — it actually proxies
+  // /api/v1/vault/list/observation. Observations are learning-layer
+  // artifacts (what the principal *did*, distilled for the intuition
+  // engine) — they are NOT actionable decisions and must not crowd /desk.
+  // The Desk reads only needs_attention + approvals + pattern_proposals.
+  const judgmentsLoading = false;
   // Pattern proposals — proposed standing rules extracted nightly from
   // the principal's decisions. Surfaced as cards alongside the rest of
   // the queue so adopting a rule is itself a Decision.
@@ -295,24 +300,9 @@ export default function DeskPage() {
         matterRef: extractMatterId(fm.matter ?? fm.parent_matter),
       });
     }
-    const ju = Array.isArray(judgments?.results) ? judgments?.results : [];
-    for (const r of ju ?? []) {
-      const fm = (r?.frontmatter ?? {}) as Record<string, unknown>;
-      const path = String(r?.path ?? "");
-      if (!path) continue;
-      // Only surface judgments that explicitly request attention.
-      const status = String(fm.status ?? "");
-      if (status && status !== "pending" && status !== "open") continue;
-      out.push({
-        id: `ju:${path}`,
-        source: "judgment",
-        recordId: path,
-        headline: String(fm.observation ?? fm.summary ?? r?.name ?? shortenPath(path)),
-        why: String(fm.reflection ?? fm.reasoning ?? r?.body_preview ?? ""),
-        arrived: String(fm.origin_at ?? fm.created ?? ""),
-        matterRef: extractMatterId(fm.matter ?? fm.parent_matter),
-      });
-    }
+    // Observations are NOT surfaced on /desk — they're internal learning
+    // artifacts for the intuition engine, not decisions for the principal.
+    // (See note on getRecentJudgments at the top of the component.)
     // Pattern proposals — rules Alfred has spotted in the principal's
     // recent decisions. Adopting / deferring / rejecting one is itself a
     // Decision routed through the standard cascade. Headline is the
@@ -345,7 +335,7 @@ export default function DeskPage() {
     // Newest first.
     out.sort((a, b) => (a.arrived < b.arrived ? 1 : a.arrived > b.arrived ? -1 : 0));
     return out;
-  }, [needs, approvals, judgments, patternProposals]);
+  }, [needs, approvals, patternProposals]);
 
   const ledger: AuditRow[] = useMemo(() => {
     const out: AuditRow[] = [];
