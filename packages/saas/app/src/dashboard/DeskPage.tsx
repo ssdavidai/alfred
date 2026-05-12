@@ -231,6 +231,9 @@ export default function DeskPage() {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<string | null>(null);
   const [undoing, setUndoing] = useState<string | null>(null);
+  // Ledger pagination — Sir's request: don't unspool the entire activity
+  // history at once. Reveal in 20-row pages with a "Show more" cue.
+  const [ledgerVisible, setLedgerVisible] = useState(20);
 
   const decisions: Decision[] = useMemo(() => {
     const out: Decision[] = [];
@@ -850,7 +853,14 @@ export default function DeskPage() {
           />
 
           <motion.div variants={fadeUp}>
-            <SectionHead title="The Record" sub="Activity ledger" />
+            <SectionHead
+              title="Ledger"
+              sub={
+                ledger.length === 0
+                  ? "Activity ledger"
+                  : `${Math.min(ledgerVisible, ledger.length)} of ${ledger.length}`
+              }
+            />
             {ledger.length === 0 ? (
               <p
                 className="font-body italic text-[15px]"
@@ -859,39 +869,51 @@ export default function DeskPage() {
                 Nothing has happened yet today.
               </p>
             ) : (
-              <ul className="font-mono text-[12px] tabular">
-                {ledger.map((a) => (
-                  <li
-                    key={a.key}
-                    className="grid grid-cols-[140px_1fr_80px] gap-3 py-3 border-b border-rule items-baseline"
-                  >
-                    <span style={{ color: "var(--marginalia)" }}>{a.atDisplay}</span>
-                    <span
-                      className="font-body text-[15px]"
-                      style={{ color: "var(--ink)" }}
+              <>
+                <ul className="font-mono text-[12px] tabular">
+                  {ledger.slice(0, ledgerVisible).map((a) => (
+                    <li
+                      key={a.key}
+                      className="grid grid-cols-[140px_1fr_80px] gap-3 py-3 border-b border-rule items-baseline"
                     >
-                      {a.act}
-                    </span>
-                    {a.reversible && a.actionId ? (
-                      <button
-                        onClick={() => a.actionId && onUndo(a.actionId)}
-                        disabled={undoing === a.actionId}
-                        className="btn-link text-right"
-                        style={{ marginRight: 0 }}
-                      >
-                        {undoing === a.actionId ? "…" : "Undo"}
-                      </button>
-                    ) : (
+                      <span style={{ color: "var(--marginalia)" }}>{a.atDisplay}</span>
                       <span
-                        className="text-right uppercase tracking-[0.22em] text-[10px]"
-                        style={{ color: "var(--marginalia)" }}
+                        className="font-body text-[15px]"
+                        style={{ color: "var(--ink)" }}
                       >
-                        permanent
+                        {a.act}
                       </span>
-                    )}
-                  </li>
-                ))}
-              </ul>
+                      {a.reversible && a.actionId ? (
+                        <button
+                          onClick={() => a.actionId && onUndo(a.actionId)}
+                          disabled={undoing === a.actionId}
+                          className="btn-link text-right"
+                          style={{ marginRight: 0 }}
+                        >
+                          {undoing === a.actionId ? "…" : "Undo"}
+                        </button>
+                      ) : (
+                        <span
+                          className="text-right uppercase tracking-[0.22em] text-[10px]"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          permanent
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+                {ledger.length > ledgerVisible && (
+                  <div className="pt-4 flex justify-center">
+                    <button
+                      onClick={() => setLedgerVisible((n) => n + 20)}
+                      className="btn-link font-mono uppercase tracking-[0.22em] text-[11px]"
+                    >
+                      Show more — {ledger.length - ledgerVisible} remaining
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </motion.div>
         </motion.div>
