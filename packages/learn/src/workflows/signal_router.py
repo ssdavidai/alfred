@@ -352,12 +352,14 @@ class SignalRouterWorkflow:
                     action_outcome = await workflow.execute_activity(
                         route_signal_action,
                         args=[path, ROUTER_INTENT_MODE],
-                        # 600s envelope: covers list-instincts +
-                        # match + (HIGH path only) clerk subagent
-                        # spawn + poll (≤580s in _call_clerk) + outcome
-                        # signal write + audit emission + signal status
-                        # PATCH. HUMAN path completes in ≤2s typically.
-                        start_to_close_timeout=timedelta(seconds=600),
+                        # 1000s envelope: covers list-instincts +
+                        # match + (AGENT path) ephemeral lifecycle +
+                        # clerk-style spawn/poll (≤900s in _call_clerk)
+                        # + outcome signal write + audit + queue wait.
+                        # Sized to comfortably absorb the 900s agent
+                        # ceiling plus ~100s for pre/post work. HUMAN
+                        # path still completes in ≤2s typically.
+                        start_to_close_timeout=timedelta(seconds=1000),
                         retry_policy=retry,
                     )
                     if isinstance(action_outcome, dict):

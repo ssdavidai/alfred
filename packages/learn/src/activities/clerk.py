@@ -531,12 +531,22 @@ Return JSON only:
     return await _call_clerk(prompt)
 
 
-async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
-    """Spawn a Clerk subagent via OpenClaw sessions_spawn, poll for result.
+async def _call_clerk(
+    prompt: str,
+    raw: bool = False,
+    agent_id: str | None = None,
+) -> dict[str, Any] | str:
+    """Spawn a subagent on the workers gateway via sessions_spawn, poll
+    for the assistant response.
 
-    The subagent has full tool access (read, pdf, exec, etc.) so it can
-    actually inspect files in the vault.  Uses sessions_history polling
-    with cleanup=keep so the response is available after completion.
+    By default targets ``learn-clerk`` (the reasoning subagent with
+    vault tools). Pass ``agent_id="exec-<id>"`` to dispatch to an
+    ephemeral executor created via ``create_ephemeral_agent``; the
+    same workers gateway hosts both.
+
+    The subagent has tool access scoped by its per-agent ``tools.allow``
+    in openclaw.json. Uses sessions_history polling with cleanup=keep
+    so the response is available after completion.
 
     If raw=True, returns the raw text response without JSON extraction.
     """
@@ -544,10 +554,12 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
 
     config = load_config()
     token = config.gateway_token()
-    # Clerk is a WORKERS-gateway subagent (agentId=learn-clerk). The main
-    # gateway rejects non-main spawns when strictly configured and the
-    # workers gateway is the one with the clerk's tool/skill scoping.
+    # Both learn-clerk and ephemeral exec-* agents live on the WORKERS
+    # gateway. The main gateway is reserved for agentId=main (Sir's
+    # live chat); we deliberately do NOT route autonomous traffic to it
+    # so the human surface stays uncongested.
     base = config.openclaw_workers_gateway_url
+    target_agent_id = agent_id or config.clerk_agent_id
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -559,11 +571,17 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
                 "tool": "sessions_spawn",
                 "args": {
                     "task": prompt,
-                    "agentId": config.clerk_agent_id,
+                    "agentId": target_agent_id,
                     "mode": "run",
                     "cleanup": "auto",
                     "sandbox": "inherit",
-                    "runTimeoutSeconds": 240,
+                    # 15 min ceiling. Autonomous agents that actually do
+                    # work (RSVP to a calendar invite, send a reply, file
+                    # a receipt) routinely need to read context + call
+                    # 1-3 Composio actions; 4 min was cutting them off
+                    # mid-plan. The whole point of the workers gateway
+                    # is that it's async — there's no human watching.
+                    "runTimeoutSeconds": 900,
                 },
             },
         )
@@ -588,13 +606,14 @@ async def _call_clerk(prompt: str, raw: bool = False) -> dict[str, Any] | str:
     # 2. Poll sessions_history until assistant response appears
     # Use a fresh client with longer timeout for polling phase
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # 58 × 10s = 580s, just under the 600s outer activity timeout set
-        # for batch_enrich_events (#705). Lets the clerk raise a clean
-        # TimeoutError before Temporal kills the activity with a less
-        # informative "task timed out" message. Live evidence: David,
-        # Miguel, Rapali all hit Rapali-class enrichment batches that
-        # exceeded 480s on grok-fast pre-PR-#705.
-        for attempt in range(58):  # 58 × 10s = 580s max
+        # 90 × 10s = 900s, matched to the 900s runTimeoutSeconds above.
+        # Background executor agents that actually do work (Composio
+        # calls + vault reads + multi-step reasoning) routinely need
+        # 4-10 minutes. The whole point of the workers gateway is that
+        # it's asynchronous — there's no human waiting on the response,
+        # so the timeout should be generous enough that an agent
+        # genuinely working never gets cut off mid-step.
+        for attempt in range(90):  # 90 × 10s = 900s max
             await asyncio.sleep(10)
             try:
                 hist_resp = await client.post(

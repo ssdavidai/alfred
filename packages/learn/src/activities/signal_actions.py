@@ -43,10 +43,33 @@ while mutations already run live). Default ``shadow``. Same shape as
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from temporalio import activity
+
+# Serial-execution gate for autonomous agent dispatches.
+#
+# Sir's call: every delegate (principal-explicit OR autonomous
+# instinct-confident) gets a fresh ephemeral subagent. Those agents
+# do real work — Composio calls that take 20-60 s, vault reads,
+# multi-step reasoning. Running them in parallel piles concurrent
+# write-heavy work on ctrl-api at the same moment the principal might
+# be clicking on /desk, causing the desk to 504 under load.
+#
+# Solution: serialize. ONE dispatch runs at a time per tenant (alfred-
+# learn is single-worker per tenant, so a module-level asyncio.Lock
+# is the entire fence). When a second dispatch wants to run, it
+# queues here until the first completes. With a 900 s agent ceiling
+# this means worst-case queue wait of 15 min for a batch — acceptable
+# because nothing the agent does is real-time-visible to Sir; the
+# Desk just shows "Alfred is working" until each one completes.
+#
+# Belongs at module level (not per-call) so the lock is shared across
+# every concurrent Temporal activity invocation in the same worker
+# process.
+_AGENT_DISPATCH_LOCK = asyncio.Lock()
 
 # Module-level logger — same name everything else in alfred-learn uses.
 logger = logging.getLogger("alfred-learn")
@@ -941,7 +964,7 @@ async def dispatch_action_to_agent(
     due_clause = str(due_at) if due_at else "none"
     guidance_clause = instinct_description or "(no guidance text on record)"
 
-    prompt = (
+    legacy_prompt = (
         "You are Alfred. Sir has an item that needs handling automatically "
         f"per his instinct '{instinct_name}'.\n\n"
         f"Action: {what}\n"
@@ -952,18 +975,143 @@ async def dispatch_action_to_agent(
         "Do the action and report what you did in 1-2 sentences."
     )
 
-    # Call clerk with raw=True — we want natural-language response, not
-    # JSON. The clerk subagent has full tool access (Plane, vault, etc.)
-    # so it can actually carry out the action.
-    try:
-        agent_raw = await _call_clerk(prompt, raw=True)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "signal_actions.dispatch_action_to_agent: clerk call failed "
-            "what=%r instinct=%s err=%s",
-            what[:100], matched_instinct_path, exc,
+    # ---- New ephemeral-executor path (env-gated) ----
+    # When DISPATCH_USE_EPHEMERAL_EXECUTOR is set, spawn a fresh
+    # exec-<id> subagent on the workers gateway with a tool surface
+    # tailored to this task, run the dispatch against it, then clean
+    # up. This isolates each delegate dispatch from learn-clerk's
+    # shared background context and gives us a deliberate audit
+    # boundary per task.
+    import os as _os
+    use_ephemeral = (
+        _os.environ.get("DISPATCH_USE_EPHEMERAL_EXECUTOR", "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+
+    agent_raw: str | dict[str, Any] = ""
+
+    # Serial gate — at most one autonomous agent dispatch in flight per
+    # alfred-learn worker. See module-level _AGENT_DISPATCH_LOCK for
+    # the rationale.
+    logger.info(
+        "signal_actions.dispatch_action_to_agent: acquiring dispatch lock "
+        "(use_ephemeral=%s, source=%s)",
+        use_ephemeral, source_signal_path or "?",
+    )
+    async with _AGENT_DISPATCH_LOCK:
+      logger.info(
+          "signal_actions.dispatch_action_to_agent: dispatch lock acquired",
+      )
+      if use_ephemeral:
+        # Infer Composio slug hints from the source signal's source_type.
+        source_type = ""
+        if source_signal_path:
+            try:
+                sig_client = VaultClient(cfg)
+                try:
+                    sig_rec = await sig_client.read_record(source_signal_path)
+                    sig_fm = (sig_rec or {}).get("frontmatter") or {}
+                    source_type = str(
+                        sig_fm.get("source_type") or ""
+                    ).strip().lower()
+                finally:
+                    await sig_client.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "dispatch_action_to_agent: source signal read failed "
+                    "path=%s err=%s — proceeding without hints",
+                    source_signal_path, exc,
+                )
+
+        from src.activities.tool_inference import infer_required_tools
+        try:
+            hint_payload = await infer_required_tools({"source_type": source_type})
+        except Exception:  # noqa: BLE001
+            hint_payload = {"hints": [], "source_type": source_type}
+        hints: list[str] = list(hint_payload.get("hints") or [])
+
+        hint_block = ""
+        if hints:
+            hint_block = (
+                "\n\nFor this task, consider these Composio actions "
+                "(call them via `composio_execute({action, arguments})`):\n"
+                + "\n".join(f"  - {h}" for h in hints)
+                + "\n\nIf none of these fit, call the `self` tool to discover "
+                "more: `self({endpoint: \"/api/v1/integrations/<toolkit>/actions\"})`.\n"
+            )
+
+        executor_prompt = (
+            "You are Alfred's executor subagent. The principal explicitly "
+            "delegated this task to you from /desk. Execute it concretely. "
+            "You are NOT Sir-facing — do not ask clarifying questions; do "
+            "your best with what you have and report honestly when blocked.\n\n"
+            f"Task: {what}\n"
+            f"Source signal: `{source_signal_path or 'unknown'}`\n"
+            f"Target: {target_clause}\n"
+            f"Due: {due_clause}\n"
+            f"Guidance from instinct (if any): {guidance_clause}\n\n"
+            "Tools available:\n"
+            "  - `composio_execute({action, arguments})` — invoke a Composio "
+            "action by slug. Most third-party work (Gmail, Calendar, Slack, "
+            "Notion, GitHub, …) goes through here.\n"
+            "  - `self({endpoint, method?, body?, query?})` — call this "
+            "tenant's ctrl-api. Useful for reading vault records, listing "
+            "available Composio actions, etc.\n"
+            "  - Read / Write / Edit / Grep / LS / Glob — workspace primitives.\n"
+            f"{hint_block}\n"
+            "Workflow: read the source signal record for context, then call "
+            "composio_execute. Report what you did in 1-2 sentences in your "
+            "final message."
         )
-        raise
+
+        from src.activities.ephemeral_agent import (
+            create_ephemeral_agent,
+            wait_for_agent_ready,
+            delete_ephemeral_agent,
+        )
+        # Derive an agent_id from the source signal path or a digest of
+        # the action so retries land on the same name (idempotent for
+        # the ctrl-api POST, which replaces same-id entries).
+        if source_signal_path:
+            task_seed = source_signal_path.split("/")[-1].replace(".md", "")
+        else:
+            task_seed = hashlib.sha256(
+                f"{what}\x00{matched_instinct_path}".encode("utf-8")
+            ).hexdigest()[:12]
+        exec_agent_id = await create_ephemeral_agent(task_seed, hints)
+        try:
+            await wait_for_agent_ready(exec_agent_id)
+            try:
+                agent_raw = await _call_clerk(
+                    executor_prompt, raw=True, agent_id=exec_agent_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "dispatch_action_to_agent: ephemeral dispatch failed "
+                    "agent=%s err=%s",
+                    exec_agent_id, exc,
+                )
+                raise
+        finally:
+            try:
+                await delete_ephemeral_agent(exec_agent_id)
+            except Exception as cleanup_exc:  # noqa: BLE001
+                logger.warning(
+                    "dispatch_action_to_agent: ephemeral cleanup failed "
+                    "agent=%s err=%s",
+                    exec_agent_id, cleanup_exc,
+                )
+      else:
+        # ---- Legacy path: shared learn-clerk subagent ----
+        try:
+            agent_raw = await _call_clerk(legacy_prompt, raw=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "signal_actions.dispatch_action_to_agent: clerk call failed "
+                "what=%r instinct=%s err=%s",
+                what[:100], matched_instinct_path, exc,
+            )
+            raise
 
     # _call_clerk(raw=True) returns str | dict — defensively coerce.
     if isinstance(agent_raw, dict):

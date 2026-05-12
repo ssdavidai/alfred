@@ -22,6 +22,7 @@ const PROMOTION_DRAFTS_DIR = "/mnt/encrypted/alfred/promotion-drafts";
 
 const ENV_PATH = `${COMPOSE_DIR}/.env`;
 const OPENCLAW_JSON_PATH = "/mnt/encrypted/openclaw/openclaw.json";
+const OPENCLAW_WORKERS_JSON_PATH = "/mnt/encrypted/openclaw-workers/openclaw.json";
 
 // In-memory rate limit for the chore-specific learn restart route. Prevents
 // thrashing when an onboarding generates multiple templates and each tries
@@ -555,6 +556,127 @@ export function registerAdminRoutes(): void {
     fs.writeFileSync(OPENCLAW_JSON_PATH, JSON.stringify(merged, null, 2) + "\n", "utf-8");
     sendJson(res, 200, { message: "OpenClaw config updated", backup: backupPath });
   });
+
+  // --- Workers ephemeral agents (per-task scoped subagents) ---
+  //
+  // alfred-learn manages openclaw-workers/openclaw.json indirectly through
+  // these endpoints because the alfred-learn container runs with all Linux
+  // capabilities dropped (CapEff=0) — it can't traverse the mode-700
+  // encrypted volume even as root. ctrl-api has CAP_DAC_OVERRIDE and the
+  // same bind-mount, so it owns the writes.
+  //
+  // Each ephemeral entry is one scoped subagent for one delegated task.
+  // ``meta.lastTouchedAt`` is bumped on every write so the openclaw-workers
+  // gateway hot-reloads (~10-15s) and the new agent becomes invokable.
+
+  // GET /api/v1/admin/openclaw-workers/agents — list current agent IDs.
+  addRoute("GET", "/api/v1/admin/openclaw-workers/agents", async ({ res }) => {
+    let cfg: Record<string, unknown> = {};
+    try {
+      cfg = JSON.parse(fs.readFileSync(OPENCLAW_WORKERS_JSON_PATH, "utf-8"));
+    } catch {
+      sendJson(res, 404, { error: "workers config not found" });
+      return;
+    }
+    const agents = (cfg.agents as Record<string, unknown> | undefined)?.list;
+    const list = Array.isArray(agents) ? agents : [];
+    const summary = list.map((a: any) => ({
+      id: String(a?.id ?? ""),
+      name: String(a?.name ?? ""),
+      model: a?.model?.primary ?? null,
+      tools_allow_count: Array.isArray(a?.tools?.allow) ? a.tools.allow.length : null,
+    }));
+    sendJson(res, 200, { agents: summary, count: summary.length });
+  });
+
+  // POST /api/v1/admin/openclaw-workers/agents — append (or replace) an
+  // agent entry. Body: { id, name?, tools_allow?, model? }.
+  addRoute("POST", "/api/v1/admin/openclaw-workers/agents", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b !== "object") {
+      throw new ValidationError("Request body must be an object");
+    }
+    const id = String(b.id ?? "").trim();
+    if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) {
+      throw new ValidationError("id must be alphanumeric (with - _ allowed)");
+    }
+    const name = String(b.name ?? `Ephemeral ${id}`);
+    const toolsAllow = Array.isArray(b.tools_allow)
+      ? (b.tools_allow as unknown[]).map(String)
+      : null;
+    const model = typeof b.model === "string" && b.model.trim() ? b.model.trim() : null;
+
+    let cfg: Record<string, any> = {};
+    try {
+      cfg = JSON.parse(fs.readFileSync(OPENCLAW_WORKERS_JSON_PATH, "utf-8"));
+    } catch (err) {
+      sendJson(res, 500, { error: `workers config not readable: ${(err as Error).message}` });
+      return;
+    }
+
+    cfg.agents = cfg.agents || {};
+    const list: any[] = Array.isArray(cfg.agents.list) ? cfg.agents.list : [];
+    // Replace existing entry with same id (defensive — should never happen,
+    // but if the cleanup-after-dispatch failed we don't want orphans
+    // accumulating duplicates).
+    const filtered = list.filter((a) => String(a?.id) !== id);
+    const entry: Record<string, any> = {
+      id,
+      name,
+      workspace: "/home/node/.openclaw/workspace",
+    };
+    if (toolsAllow) entry.tools = { allow: toolsAllow };
+    if (model) entry.model = { primary: model };
+    entry.subagents = { allowAgents: [] };
+    filtered.push(entry);
+    cfg.agents.list = filtered;
+
+    cfg.meta = cfg.meta || {};
+    cfg.meta.lastTouchedAt = new Date().toISOString().replace(/\.\d+Z$/, ".000Z");
+
+    fs.writeFileSync(
+      OPENCLAW_WORKERS_JSON_PATH,
+      JSON.stringify(cfg, null, 2) + "\n",
+      "utf-8",
+    );
+    sendJson(res, 201, { id, agent: entry });
+  });
+
+  // DELETE /api/v1/admin/openclaw-workers/agents/:id — remove an entry.
+  // Idempotent — returns 200 even if the id wasn't there (cleanup ran twice).
+  addRoute(
+    "DELETE",
+    "/api/v1/admin/openclaw-workers/agents/:id",
+    async ({ res, params }) => {
+      const id = String(params.id ?? "").trim();
+      if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) {
+        throw new ValidationError("id must be alphanumeric (with - _ allowed)");
+      }
+      let cfg: Record<string, any> = {};
+      try {
+        cfg = JSON.parse(fs.readFileSync(OPENCLAW_WORKERS_JSON_PATH, "utf-8"));
+      } catch {
+        sendJson(res, 200, { id, removed: false, reason: "config_not_found" });
+        return;
+      }
+      const list: any[] = Array.isArray(cfg.agents?.list) ? cfg.agents.list : [];
+      const before = list.length;
+      const filtered = list.filter((a) => String(a?.id) !== id);
+      if (filtered.length === before) {
+        sendJson(res, 200, { id, removed: false, reason: "not_found" });
+        return;
+      }
+      cfg.agents.list = filtered;
+      cfg.meta = cfg.meta || {};
+      cfg.meta.lastTouchedAt = new Date().toISOString().replace(/\.\d+Z$/, ".000Z");
+      fs.writeFileSync(
+        OPENCLAW_WORKERS_JSON_PATH,
+        JSON.stringify(cfg, null, 2) + "\n",
+        "utf-8",
+      );
+      sendJson(res, 200, { id, removed: true });
+    },
+  );
 
   // --- Tailscale ---
 

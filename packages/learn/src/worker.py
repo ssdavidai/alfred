@@ -316,6 +316,12 @@ from src.activities.ephemeral_agent import (
     wait_for_agent_ready,
 )
 
+# Tool inference for delegate dispatch — maps source_type → Composio
+# action slug hints injected into the executor's prompt.
+from src.activities.tool_inference import (
+    infer_required_tools,
+)
+
 # Plane sync (#536 B4) — vault → Plane one-way sync activities
 from src.activities.plane_sync import (
     ensure_inbox_project,
@@ -802,6 +808,8 @@ ALL_ACTIVITIES = [
     create_ephemeral_agent,
     delete_ephemeral_agent,
     wait_for_agent_ready,
+    # Tool inference for delegate dispatch
+    infer_required_tools,
     # Plane sync (#536 B4)
     plane_sync_is_enabled,
     load_plane_sync_state,
