@@ -16,6 +16,10 @@ import {
   slugFromVaultPath,
   type PlaneNudgeRecordType,
 } from "./plane.js";
+import {
+  classifyTarget,
+  stateFieldsFor,
+} from "../stateFields.js";
 
 export const VAULT_PATH = "/mnt/encrypted/vault";
 const INBOX_PATH = `${VAULT_PATH}/inbox`;
@@ -146,6 +150,13 @@ const KNOWN_TYPES = [
   //                       extracts only from decisions.
   "signal", "needs_attention", "stream_event", "signal_noise_pattern",
   "pattern_proposal",
+  // State-mutation contract (#889 spec §8.2):
+  //  - briefing : morning + evening composer output. Frontmatter shape
+  //               validated by alfred-learn (validators/briefing.py).
+  //               ctrl-api just allowlists the type; the BriefingWorkflow
+  //               writes through POST /api/v1/vault/records with the
+  //               structured `content` body.
+  "briefing",
 ];
 
 const STATUS_BY_TYPE: Record<string, string[]> = {
@@ -211,6 +222,7 @@ const TYPE_DIRECTORY: Record<string, string> = {
   ledger_entry: "ledger_entry",
   chore: "chore",
   pattern_proposal: "pattern_proposal",
+  briefing: "briefing",
 };
 
 const LIST_FIELDS = [
@@ -317,7 +329,7 @@ function scheduleNudgeForRecord(
 // ---------------------------------------------------------------------------
 
 /** Resolve a relative vault path to an absolute path, rejecting traversal. */
-function resolveVaultPath(relPath: string): string {
+export function resolveVaultPath(relPath: string): string {
   if (relPath.includes("\0")) throw new ValidationError("Invalid path");
   const normalized = path.normalize(relPath);
   if (path.isAbsolute(normalized)) throw new ValidationError("Absolute paths not allowed");
@@ -810,10 +822,63 @@ export function registerVaultRoutes(): void {
   //                                     Python repr strings; `json_set` preserves shape end-to-end
   //                                     so Steward signal_sources, undo_recipe.evidence, etc.
   //                                     stay structured all the way through the PATCH cycle.
-  addRoute("PATCH", "/api/v1/vault/records/*", async ({ res, params, body }) => {
+  addRoute("PATCH", "/api/v1/vault/records/*", async ({ req, res, params, body }) => {
     const recordPath = params.path;
     const b = body as Record<string, unknown> | undefined;
     if (!b) throw new ValidationError("Request body required");
+
+    // State-mutation contract enforcement (#889 spec §5.2).
+    //
+    // If the target is a matter or task record AND any of the patch
+    // operations would touch a declared state field, gate on
+    // STATE_CHANGE_ENFORCEMENT:
+    //   * unset OR `warn` (default) — log a warning, proceed.
+    //   * `reject`                  — return 403 with the offending field.
+    // Manual edits via the SaaS editor (Phase F) will route through
+    // POST /api/v1/state-changes instead.
+    const targetKind = classifyTarget(recordPath);
+    if (targetKind) {
+      const touched: string[] = [];
+      const allow = new Set(stateFieldsFor(targetKind));
+      const setMap =
+        b.set && typeof b.set === "object" && !Array.isArray(b.set)
+          ? (b.set as Record<string, unknown>)
+          : null;
+      const jsonSetMap =
+        b.json_set && typeof b.json_set === "object" && !Array.isArray(b.json_set)
+          ? (b.json_set as Record<string, unknown>)
+          : null;
+      const appendMap =
+        b.append && typeof b.append === "object" && !Array.isArray(b.append)
+          ? (b.append as Record<string, unknown>)
+          : null;
+      for (const m of [setMap, jsonSetMap, appendMap]) {
+        if (!m) continue;
+        for (const k of Object.keys(m)) {
+          if (allow.has(k) && !touched.includes(k)) touched.push(k);
+        }
+      }
+      if (touched.length > 0) {
+        const mode = (process.env.STATE_CHANGE_ENFORCEMENT ?? "warn").toLowerCase();
+        if (mode === "reject") {
+          sendJson(res, 403, {
+            error: {
+              code: "STATE_CHANGE_REQUIRED",
+              message: "state field requires POST /state-changes",
+              target: recordPath,
+              field: touched[0],
+              fields: touched,
+            },
+          });
+          return;
+        }
+        const ua = String(req.headers["user-agent"] ?? "");
+        console.warn(
+          `[vault.state_change_warn] direct PATCH touches state field(s) on ${recordPath} ` +
+            `fields=${touched.join(",")} user-agent=${ua}`,
+        );
+      }
+    }
 
     const args = [...ALFRED_CMD, "vault", "edit", recordPath];
     if (b.set && typeof b.set === "object") {

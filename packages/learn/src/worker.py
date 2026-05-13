@@ -445,6 +445,19 @@ from src.activities.briefing_cache import (
     stamp_brief_completed as briefing_stamp_brief_completed,
 )
 
+# State-mutation Phase A (#889) — universal state-mutator primitive.
+# ``apply_state_change_v2`` is the read-reason-write-log entry point
+# every state writer routes through. ``read_target`` + ``gather_observed``
+# are helper activities for Pattern A workflows (spec §6.1) that don't
+# already have the prior state + observed window in hand. The legacy
+# Steward ``apply_state_change`` (v1) is untouched in Phase A and will
+# become a backwards-compat shim around v2 in Phase B.
+from src.activities.state_mutator import (
+    apply_state_change_v2,
+    gather_observed as state_mutator_gather_observed,
+    read_target as state_mutator_read_target,
+)
+
 # Steward Phase 4 (#840) — Vexa transcript intake. Activities back the
 # MeetingCaptureWorkflow + TranscriptIntakeWorkflow. NO direct Plane
 # writes from these — every action becomes a Steward signal of kind
@@ -908,6 +921,10 @@ ALL_ACTIVITIES = [
     steward_gather_signals_ctrl_api_stream,
     steward_evaluate_state,
     steward_update_matter_cadence,
+    # State-mutation Phase A (#889) — universal mutator + helpers.
+    apply_state_change_v2,
+    state_mutator_read_target,
+    state_mutator_gather_observed,
     # Steward Phase 5 (#841): briefing-cache activities used by the
     # daily morning briefing chore for Steward-aware filtering.
     briefing_compute_briefing_context,
