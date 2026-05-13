@@ -47,6 +47,30 @@ SAFETY RULES
    only, no human-facing role).
 5. ``--dry-run`` is supported and recommended for first execution per
    tenant.
+
+SM-D-W5 — STATE-MUTATOR V2 RETROFIT
+-----------------------------------
+
+Per ``docs/STATE-MUTATION.md`` §7 W5, the archival sweep is a state
+writer: every successful archive bumps ``status`` from open to
+``archived``. The retrofit layers a universal v2 audit on top of the
+legacy PATCH so /decisions and the task detail timeline see
+``source="archival_sweep"`` entries alongside the lifecycle move. The
+deterministic propose function ``archival_sweep.cold`` lives in
+``src/activities/archival_sweep.py`` (registered via
+``@propose_fn("archival_sweep.cold")``); it returns
+``ProposedMutation({"status": "archived"}, confidence=1.0)`` for tasks
+whose current vault status is not yet terminal.
+
+The retrofit is env-gated rather than gated via ``workflow.patched`` —
+the archival sweep is a standalone asyncio script, not a Temporal
+workflow, so Temporal replay-determinism rules in
+``packages/learn/CLAUDE.md`` don't apply here. Flip
+``ARCHIVAL_SWEEP_STATE_MUTATOR_V1=true`` in the env to enable v2 audit
+emission; the legacy PATCH path keeps the ``archived``, ``state``,
+``archived_at``, and ``archived_reason`` writes load-bearing on its own
+so a failed v2 audit never blocks the actual archival. Defaults off so
+existing behaviour is unchanged.
 """
 
 from __future__ import annotations
@@ -64,6 +88,19 @@ import httpx
 
 
 logger = logging.getLogger("cold_task_archival")
+
+
+# SM-D-W5 — env gate for the state-mutator v2 audit emission. Default
+# off so this script continues to behave exactly as before for tenants
+# still on the un-retrofitted path; flip to "true" once Phase D rollout
+# has reached the tenant. See module docstring for the rationale on
+# preferring an env flag to ``workflow.patched`` (no workflow here).
+_STATE_MUTATOR_ENV = "ARCHIVAL_SWEEP_STATE_MUTATOR_V1"
+
+
+def _state_mutator_enabled() -> bool:
+    raw = (os.environ.get(_STATE_MUTATOR_ENV) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 # -----------------------------------------------------------------------------
@@ -224,6 +261,12 @@ class Stats:
     skipped_race: int = 0
     errors: int = 0
     error_messages: list[str] = field(default_factory=list)
+    # SM-D-W5 — v2 audit counters. ``v2_emitted`` increments per
+    # successful state-change audit; ``v2_failed`` increments when the
+    # legacy PATCH landed but the v2 emit raised (audit is best-effort
+    # so the script does NOT roll back the archive).
+    v2_emitted: int = 0
+    v2_failed: int = 0
 
     @property
     def cold(self) -> int:
@@ -326,9 +369,97 @@ async def _run(args: argparse.Namespace) -> Stats:
         except httpx.HTTPError as exc:
             stats.errors += 1
             stats.error_messages.append(f"patch {path}: {exc}"[:500])
+            continue
+
+        # SM-D-W5 — env-gated v2 audit emission. The legacy PATCH above
+        # owns the archived/state/archived_at/archived_reason writes;
+        # this call layers a ``state_change`` audit + timeline entry on
+        # top so /decisions and the task detail page see
+        # ``source=archival_sweep`` alongside the lifecycle move.
+        # Best-effort: any failure here is recorded on stats but never
+        # rolls back the archive (the PATCH already landed; rolling
+        # back would mean undoing the de-clutter the sweep just did).
+        if _state_mutator_enabled():
+            try:
+                await _emit_state_change_v2(
+                    path=path,
+                    prior_fm=current_fm,
+                    reason=reason,
+                    when=now,
+                )
+                stats.v2_emitted += 1
+            except Exception as exc:  # noqa: BLE001 — audit is best effort
+                stats.v2_failed += 1
+                logger.warning(
+                    "v2 audit emit failed task=%s err=%s", path, exc,
+                )
 
     await ctrl.close()
     return stats
+
+
+# -----------------------------------------------------------------------------
+# SM-D-W5 — state-mutator v2 audit emission
+# -----------------------------------------------------------------------------
+
+
+async def _emit_state_change_v2(
+    *,
+    path: str,
+    prior_fm: dict[str, Any],
+    reason: str,
+    when: datetime,
+) -> None:
+    """Layer a v2 ``state_change`` audit on a successful cold-task archive.
+
+    Calls ``apply_state_change_v2`` in-process (Pattern B per
+    ``docs/STATE-MUTATION.md`` §6.2) — the script is not running inside
+    a Temporal workflow so there's no ``workflow.execute_activity``
+    available. The propose function ``archival_sweep.cold`` is
+    registered by ``src.activities.archival_sweep`` at import time;
+    importing the module here is enough to populate the registry.
+
+    The propose function returns ``None`` when the target's current
+    status is already ``archived`` (idempotent — re-running the sweep
+    over an already-archived task never lands a duplicate audit).
+    """
+    # Local imports keep this script standalone: the script can still
+    # be exercised on a workstation that doesn't have all alfred-learn
+    # runtime deps if the v2 flag is off.
+    from src.activities import archival_sweep as _archival_sweep  # noqa: F401 — register propose_fn
+    from src.activities.state_mutator import (
+        ObservedWindow,
+        apply_state_change_v2,
+    )
+
+    prior_as_of = prior_fm.get("as_of") if isinstance(prior_fm, dict) else None
+    prior_as_of_str = (
+        str(prior_as_of).strip()
+        if isinstance(prior_as_of, str) and prior_as_of
+        else None
+    )
+    end = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+    start = _parse_iso(prior_as_of_str) if prior_as_of_str else None
+    observed = ObservedWindow(
+        start=start or end,
+        end=end,
+        signal_paths=[],
+        decision_paths=[],
+        other_refs=[],
+    )
+    await apply_state_change_v2(
+        target_path=path,
+        source="archival_sweep",
+        observed=observed,
+        propose_fn_name="archival_sweep.cold",
+        propose_fn_args={
+            "reason": reason,
+            "prior_status": prior_fm.get("status") if isinstance(prior_fm, dict) else None,
+            "prior_state": prior_fm.get("state") if isinstance(prior_fm, dict) else None,
+        },
+        mode="live",
+        expected_as_of=prior_as_of_str,
+    )
 
 
 def _print_summary(stats: Stats, args: argparse.Namespace) -> None:
@@ -343,6 +474,9 @@ def _print_summary(stats: Stats, args: argparse.Namespace) -> None:
     print(f"archived_now:      {stats.archived_now}")
     print(f"skipped_race:      {stats.skipped_race}")
     print(f"errors:            {stats.errors}")
+    if _state_mutator_enabled():
+        print(f"v2_audits_emitted: {stats.v2_emitted}")
+        print(f"v2_audits_failed:  {stats.v2_failed}")
     if stats.error_messages:
         print("first errors:")
         for m in stats.error_messages[:5]:

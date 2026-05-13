@@ -46,6 +46,12 @@ import httpx
 from temporalio import activity
 
 from src.activities.clerk import _call_clerk
+from src.activities.state_mutator import (
+    ObservedWindow,
+    ProposedMutation,
+    apply_state_change_v2,
+    propose_fn,
+)
 from src.config import load_config
 
 
@@ -550,3 +556,162 @@ async def write_closure_decision(
             logger.warning("write_closure_decision failed: %s body=%s", exc, resp.text[:300])
             return {"ok": False, "error": str(exc)[:200]}
     return {"ok": True, "decision": resp.json().get("decision", {})}
+
+
+# ---------------------------------------------------------------------------
+# SM-D-W4 — state-mutator v2 propose function + activity wrapper.
+# ---------------------------------------------------------------------------
+#
+# The legacy ``write_closure_decision`` writes a ``decision/<ts>.md``
+# record (intent=done, source=task, evidence=signal). That record is
+# the audit trail and feeds OBS-1's observation extraction. It does
+# NOT, however, flip the task's frontmatter — the universal contract
+# (STATE-MUTATION.md §7 W4) is what actually closes the task by
+# routing the ``status="closed" + outcome="..."`` mutation through
+# ``state_mutator.apply_state_change_v2``. The decision record stays
+# alongside the v2 write so existing consumers (observation pool,
+# /decisions feed) keep working unchanged.
+#
+# The propose function is keyed on the matcher's verdict — predicate
+# hit or clerk assessment, both shapes are ``{closes, confidence,
+# reasoning}``. ``confidence`` flows directly into the v2 envelope so
+# the mode-resolution gate in ``apply_state_change_v2`` can still
+# treat sub-threshold writes as ``pending_confirmation`` even though
+# the workflow already gated on ``HIGH_CONFIDENCE_THRESHOLD`` (which
+# is stricter — keeping the v2 default gate on as a safety belt).
+
+
+@propose_fn("task_closure.match")
+async def propose_task_closure(
+    *,
+    target: dict[str, Any],
+    observed: ObservedWindow,
+    args: dict[str, Any],
+) -> ProposedMutation | None:
+    """Translate a matched (task, signal, assessment) into a closure mutation.
+
+    ``args`` carries:
+      * ``signal_path`` (str) — the inbound signal that satisfied the task
+      * ``signal_stem`` (str) — short id for the outcome string
+      * ``assessment`` (dict) — ``{closes, confidence, reasoning}``
+
+    Returns ``None`` when the assessment doesn't actually close the
+    task (defensive — the workflow already filters on ``closes=True``
+    + ``confidence >= HIGH_CONFIDENCE_THRESHOLD``, but the propose
+    function re-asserts so it's safe to call out-of-band). Otherwise
+    proposes ``status="closed"`` + ``outcome=<one-line summary>`` with
+    the assessment's confidence; the mode-resolution gate inside
+    ``apply_state_change_v2`` handles sub-threshold downgrades.
+
+    The propose function is deliberately read-light — it does not
+    re-read the task frontmatter. ``apply_state_change_v2`` already
+    runs ``read_target`` immediately before invoking us; that snapshot
+    is what ``target`` carries. We short-circuit when the task is
+    already ``closed`` so a duplicate signal in the lookback window
+    doesn't re-emit an identical state_change audit on the next tick.
+    """
+    assessment = args.get("assessment") or {}
+    if not isinstance(assessment, dict):
+        return None
+    if not bool(assessment.get("closes")):
+        return None
+
+    confidence_raw = assessment.get("confidence", 0.0)
+    try:
+        confidence = float(confidence_raw or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if confidence <= 0.0:
+        return None
+
+    # If the task is already closed/archived, skip — duplicate inbound
+    # signals during the lookback window shouldn't re-stamp the audit.
+    fm = target.get("frontmatter") or {}
+    if isinstance(fm, dict):
+        current_status = str(fm.get("status") or "").strip().lower()
+        if current_status in ("closed", "archived", "cancelled", "canceled", "done"):
+            return None
+
+    signal_stem = str(args.get("signal_stem") or "").strip()
+    signal_path = str(args.get("signal_path") or "").strip()
+    reasoning = str(assessment.get("reasoning") or "").strip()
+
+    outcome = (
+        f"auto-closed by signal {signal_stem}: {reasoning}"
+        if signal_stem else f"auto-closed: {reasoning}"
+    )[:500]
+
+    reason = (
+        f"TaskClosureWatcher matched signal {signal_path!r} against open "
+        f"task; assessment closes=true confidence={confidence:.2f}: "
+        f"{reasoning}"
+    )[:500]
+
+    return ProposedMutation(
+        fields={"status": "closed", "outcome": outcome},
+        reason=reason,
+        confidence=confidence,
+        fan_out=(),
+    )
+
+
+@activity.defn
+async def apply_task_closure_v2(
+    task_path: str,
+    signal_path: str,
+    signal_stem: str,
+    assessment: dict[str, Any],
+    mode: str = "live",
+) -> dict[str, Any]:
+    """Workflow-callable wrapper around ``apply_state_change_v2`` for closure.
+
+    Returns a small dict (``applied``, ``audit_record_path``,
+    ``timeline_entry_id``, ``new_as_of``, ``effective_mode``,
+    ``pending_confirmation``) so the workflow can log + count without
+    having to deserialise the full ``MutationResult`` dataclass.
+
+    Failures from the underlying v2 call are caught and surfaced as
+    ``{applied: False, error: <str>}`` so a transient ctrl-api blip on
+    one task in the pair list doesn't break the rest of the tick.
+    """
+    if mode not in ("shadow", "live"):
+        mode = "live"
+
+    now = datetime.now(timezone.utc)
+    observed = ObservedWindow(
+        start=now,
+        end=now,
+        signal_paths=[signal_path] if signal_path else [],
+        decision_paths=[],
+        other_refs=[],
+    )
+
+    try:
+        result = await apply_state_change_v2(
+            target_path=task_path,
+            source="task_closure.match",
+            observed=observed,
+            propose_fn_name="task_closure.match",
+            propose_fn_args={
+                "signal_path": signal_path,
+                "signal_stem": signal_stem,
+                "assessment": dict(assessment) if isinstance(assessment, dict) else {},
+            },
+            mode=mode,  # type: ignore[arg-type]
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "task_closure.apply_task_closure_v2: v2 call failed task=%s "
+            "signal=%s err=%s",
+            task_path, signal_path, exc,
+        )
+        return {"applied": False, "error": str(exc)[:300]}
+
+    return {
+        "applied": bool(result.applied),
+        "audit_record_path": result.audit_record_path,
+        "timeline_entry_id": result.timeline_entry_id,
+        "new_as_of": result.new_as_of,
+        "effective_mode": result.effective_mode,
+        "pending_confirmation": result.pending_confirmation,
+    }

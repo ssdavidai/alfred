@@ -37,12 +37,26 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from src.activities.task_closure import (
         HIGH_CONFIDENCE_THRESHOLD,
+        apply_task_closure_v2,
         assess_closure,
         assess_closure_predicate,
         list_open_tasks,
         list_recent_signals,
         write_closure_decision,
     )
+
+
+# SM-D-W4: patched gate for the universal state-mutator (v2) audit
+# path. New code routes the actual task closure (status="closed" +
+# outcome=...) through ``apply_state_change_v2`` so the matter/task
+# timeline gets a ``state_change`` entry with source=task_closure.match
+# alongside the legacy ``decision/<ts>.md`` record the workflow
+# already writes. The decision record stays put — it's the OBS-1
+# observation feed and the /decisions audit. In-flight workflow
+# histories started before this gate replay through the unpatched
+# branch and skip the v2 call entirely, preserving deterministic
+# replay per packages/learn/CLAUDE.md.
+TASK_CLOSURE_STATE_MUTATOR_PATCH = "task_closure_state_mutator_v1"
 
 
 MAX_PAIRS_PER_TICK = 40
@@ -198,6 +212,46 @@ class TaskClosureWatcherWorkflow:
                     "task_closure: closed task=%s by signal=%s conf=%.2f",
                     t.get("stem"), s.get("stem"), confidence,
                 )
+
+                # SM-D-W4 — state-mutator v2 audit emission. The legacy
+                # decision record above is OBS-1 / /decisions audit and
+                # remains the load-bearing write for those consumers.
+                # The v2 call below is what actually flips the task's
+                # status to "closed" and stamps the outcome on the task
+                # frontmatter, with a state_change audit + timeline
+                # entry. Best-effort: a v2 failure logs + continues so
+                # the rest of the pair list still gets processed.
+                if workflow.patched(TASK_CLOSURE_STATE_MUTATOR_PATCH):
+                    try:
+                        v2_result = await workflow.execute_activity(
+                            apply_task_closure_v2,
+                            args=[
+                                t.get("path", ""),
+                                s.get("path", ""),
+                                s.get("stem", ""),
+                                assessment,
+                                "live",
+                            ],
+                            start_to_close_timeout=timedelta(seconds=60),
+                            retry_policy=retry,
+                        )
+                        if isinstance(v2_result, dict):
+                            if v2_result.get("applied"):
+                                workflow.logger.info(
+                                    "task_closure.v2: state_change emitted "
+                                    "task=%s audit=%s",
+                                    t.get("stem"),
+                                    v2_result.get("audit_record_path"),
+                                )
+                            elif v2_result.get("error"):
+                                workflow.logger.warning(
+                                    "task_closure.v2: skipped task=%s err=%s",
+                                    t.get("stem"), v2_result.get("error"),
+                                )
+                    except Exception as exc:  # noqa: BLE001
+                        result.errors.append(
+                            f"apply_task_closure_v2 {t.get('stem')}: {exc}"[:300]
+                        )
 
         workflow.logger.info(
             "task_closure.run: open=%d signals=%d pairs=%d assessed=%d closed=%d errors=%d",

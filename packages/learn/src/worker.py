@@ -328,6 +328,7 @@ from src.activities.tool_inference import (
 # Inbound signals get checked against open tasks; high-confidence
 # matches auto-close the task via a decision(intent=done) record.
 from src.activities.task_closure import (
+    apply_task_closure_v2,
     list_open_tasks,
     list_recent_signals,
     assess_closure,
@@ -458,6 +459,14 @@ from src.activities.state_mutator import (
     read_target as state_mutator_read_target,
 )
 
+# State-mutation Phase D writers — propose functions register
+# themselves with the propose-fn registry on import. They are NOT
+# Temporal activities (the universal mutator dispatches them
+# in-process), but the worker imports them so the registry is
+# populated before any workflow asks the mutator for a propose function
+# by name. See ``docs/STATE-MUTATION.md`` §6.1+§6.2.
+import src.activities.archival_sweep  # noqa: F401 — register archival_sweep.cold
+
 # Steward Phase 4 (#840) — Vexa transcript intake. Activities back the
 # MeetingCaptureWorkflow + TranscriptIntakeWorkflow. NO direct Plane
 # writes from these — every action becomes a Steward signal of kind
@@ -551,6 +560,7 @@ from src.activities.nightly_narrative import (
 # flips, signal re-arms, to_do spawns, outcome polling) and flips the
 # decision state. Schedule registered as ``al-decision-router``.
 from src.activities.decision_router import (
+    apply_decision_outcome_link_v2 as dr_apply_outcome_link_v2,
     check_decision_outcomes as dr_check_outcomes,
     list_decisions_by_state as dr_list_decisions,
     reverse_decision as dr_reverse_decision,
@@ -597,7 +607,20 @@ from src.activities.noise_patterns import (
 # Decay watcher — six-hourly sweep that stamps freshness bands on
 # pending needs_attention cards and auto-flips deeply stale ones to
 # status=stale, keeping the Desk free of origin-old residue.
-from src.activities.decay_watcher import watch_decay as dw_watch
+#
+# SM-D-W8 (#892) — the workflow's patched branch additionally adjusts
+# matter ``surface_class`` based on activity-decay bands through the
+# universal state-mutator. The propose function
+# ``decay_watcher.adjust`` is registered at module import time (the
+# decay_watcher activity module declares it via @propose_fn). Two new
+# activities back the patched branch:
+#   * ``list_active_matters_for_decay`` — matter enumerator.
+#   * ``adjust_matter_surface_class_v2`` — per-matter v2 wrapper.
+from src.activities.decay_watcher import (
+    adjust_matter_surface_class_v2 as dw_adjust_v2,
+    list_active_matters_for_decay as dw_list_matters,
+    watch_decay as dw_watch,
+)
 
 # Decisions → observations + pattern-proposal lifecycle. Every click
 # distills into an observation the intuition engine consumes; pattern
@@ -859,6 +882,9 @@ ALL_ACTIVITIES = [
     assess_closure,
     assess_closure_predicate,
     write_closure_decision,
+    # SM-D-W4: v2 wrapper that emits state_change audit + flips task
+    # status="closed" + outcome=... on the matched task.
+    apply_task_closure_v2,
     # OBS-2 — signal → observation extractor
     extract_observation_from_signal,
     # Plane sync (#536 B4)
@@ -1006,6 +1032,10 @@ ALL_ACTIVITIES = [
     dr_route_decision,
     dr_reverse_decision,
     dr_check_outcomes,
+    # SM-D-W7: per-match task-side outcome linkage through
+    # state_mutator v2. Workflow gates the fan-out behind
+    # ``decision_router_outcome_state_mutator_v1`` patched gate.
+    dr_apply_outcome_link_v2,
     # Decision pattern extraction (daily) — extracts recurring rules
     # from the principal's recent decisions per matter.
     dp_extract,
@@ -1025,7 +1055,13 @@ ALL_ACTIVITIES = [
     # Noise pattern materialisation — runs after intent=noise click.
     np_write,
     # Decay watcher — stamps freshness bands, auto-flips deeply stale.
+    # SM-D-W8 (#892) adds the matter surface_class adjustment pass —
+    # ``list_active_matters_for_decay`` enumerates, ``adjust_matter_surface_class_v2``
+    # routes each matter through the universal state-mutator behind
+    # the ``decay_watcher_state_mutator_v1`` patched gate.
     dw_watch,
+    dw_list_matters,
+    dw_adjust_v2,
 ]
 
 

@@ -16,6 +16,7 @@ Phase A scope: build v2 fresh. The legacy ``steward.apply_state_change``
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -474,6 +475,16 @@ def _build_envelope(
     return envelope
 
 
+def _json_default(obj: Any) -> Any:
+    """Best-effort serializer for envelope values that slipped through with
+    a non-JSON-native type. Most common case: a prior-frontmatter value that
+    Temporal's data converter restored as a datetime, or a payload field
+    from an upstream API that retains the parsed datetime."""
+    if isinstance(obj, datetime):
+        return _iso(obj)
+    raise TypeError(f"state-mutator: not JSON-serializable: {type(obj).__name__}")
+
+
 async def _post_state_change(envelope: dict[str, Any]) -> httpx.Response:
     """POST the envelope to ctrl-api. Returns the raw response.
 
@@ -485,11 +496,17 @@ async def _post_state_change(envelope: dict[str, Any]) -> httpx.Response:
     """
     config = load_config()
     api_key = os.environ.get("AAS_API_KEY", "")
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    } if api_key else {"Content-Type": "application/json"}
+    # Pre-serialize so stray datetime values are coerced to ISO strings via
+    # our _json_default; httpx's default JSON encoder would raise on them.
+    body = json.dumps(envelope, default=_json_default)
     async with httpx.AsyncClient(
         base_url=config.alfred_ctrl_url, timeout=30.0, headers=headers
     ) as client:
-        return await client.post("/api/v1/state-changes", json=envelope)
+        return await client.post("/api/v1/state-changes", content=body)
 
 
 async def _trigger_fan_out(
