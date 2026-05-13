@@ -368,6 +368,15 @@ page BriefPage {
   component: import BriefPage from "@src/dashboard/BriefPage"
 }
 
+// /briefings — chronological feed of every briefing the composer has
+// written (STATE-MUTATION Phase E, #893). Expandable rows reveal the
+// full body; pill filters by slot (Morning / Evening / All).
+route BriefingsRoute { path: "/briefings", to: BriefingsPage }
+page BriefingsPage {
+  authRequired: true,
+  component: import BriefingsPage from "@src/briefings/BriefingsPage"
+}
+
 // /study — unified back office (M6 #867 + #868).
 route StudyRoute { path: "/study", to: StudyPage }
 page StudyPage {
@@ -613,8 +622,26 @@ query getVaultTitleIndex {
 // M3 #857 — letterpress /brief page. Wraps tenant ctrl-api
 // GET /api/v1/brief/today which renders today's digest record
 // (DailyDigestWorkflow output) into sections + small_matter.
+//
+// As of STATE-MUTATION Phase E (#893), /brief reads the most-recent
+// briefing record via getBriefings({limit:1}) and only falls back to
+// getDailyBrief when no briefing/* records exist on the tenant yet.
+// Phase H retires DailyDigestWorkflow and removes the fallback.
 query getDailyBrief {
   fn: import { getDailyBrief } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// STATE-MUTATION Phase E (#893) — briefings index + single. Wraps the
+// ctrl-api endpoints written by the alfred-learn BriefingWorkflow.
+// Powers /brief (most-recent) and /briefings (chronological list).
+query getBriefings {
+  fn: import { getBriefings } from "@src/briefings/operations",
+  entities: [Instance]
+}
+
+query getBriefing {
+  fn: import { getBriefing } from "@src/briefings/operations",
   entities: [Instance]
 }
 

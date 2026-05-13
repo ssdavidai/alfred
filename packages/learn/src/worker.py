@@ -51,6 +51,7 @@ from src.workflows.signal_router import (
 )
 from src.workflows.stream_event_purge import StreamEventPurgeWorkflow
 from src.workflows.reversal_calibration import ReversalCalibrationWorkflow
+from src.workflows.briefing import BriefingWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -631,6 +632,19 @@ from src.activities.decision_observations import (
     reject_pattern_proposal as do_reject_pattern,
 )
 
+# State-mutation Phase E (#893) — BriefingWorkflow + activities.
+# Morning + evening briefings are two writers under the universal
+# contract. ``briefing.propose_matter_update`` registers itself with
+# the propose-fn registry on import (the universal mutator dispatches
+# it in-process by name); the four activities below are dispatched by
+# ``BriefingWorkflow.run`` directly.
+from src.activities.briefing import (
+    briefing_visit_matter,
+    compose_and_write_briefing,
+    get_prior_briefing,
+    list_active_matters_for_briefing,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -674,6 +688,7 @@ _STATIC_WORKFLOWS = [
     SignalRouterWorkflow,
     StreamEventPurgeWorkflow,
     ReversalCalibrationWorkflow,
+    BriefingWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -1062,6 +1077,15 @@ ALL_ACTIVITIES = [
     dw_watch,
     dw_list_matters,
     dw_adjust_v2,
+    # State-mutation Phase E (#893) — BriefingWorkflow activities. The
+    # propose function ``briefing.propose_matter_update`` is registered
+    # on import of ``src.activities.briefing``; the four activities
+    # below back the morning + evening briefing slots through
+    # ``BriefingWorkflow.run``.
+    list_active_matters_for_briefing,
+    get_prior_briefing,
+    briefing_visit_matter,
+    compose_and_write_briefing,
 ]
 
 

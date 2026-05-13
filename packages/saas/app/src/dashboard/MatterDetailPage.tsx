@@ -20,11 +20,47 @@ import { PageOverture } from "../client/components/ab/PageOverture";
 
 type TaskState = "pending" | "in_progress" | "done" | "archived";
 
+// STATE-MUTATION Phase E (#893): `state_change` is a first-class
+// timeline kind. The matter's timeline composer in ctrl-api unions
+// state-change entries from the matter's `timeline` frontmatter and
+// emits them with `kind: "state_change"`. The Phase-E render path
+// only recognises briefing-sourced entries (source startsWith
+// "briefing."); Phase I adds the deeper render for other sources
+// (steward, nightly_narrative, task_closure, etc.).
+type TimelineKind =
+  | "signal"
+  | "task_transition"
+  | "action"
+  | "state_change";
+
+// ctrl-api shape for kind=state_change rows. Nested under `state_change`
+// alongside the flat row fields (when/kind/headline/path) — see
+// packages/ctrl/src/api/routes/matters.ts (StateChangeTimelineDetail).
+interface StateChangeDetail {
+  id?: string;
+  source?: string;
+  prior_as_of?: string | null;
+  observed_window?: {
+    start?: string;
+    end?: string;
+    signals?: number;
+    decisions?: number;
+    other?: string[];
+  };
+  changes?: Record<string, unknown>;
+  reason?: string;
+  confidence?: number;
+  mode?: "shadow" | "live";
+  audit_record?: string;
+}
+
 interface TimelineEntry {
   when: string;
-  kind: "signal" | "task_transition" | "action";
+  kind: TimelineKind;
   headline: string;
   path: string;
+  // Phase E: populated only for kind=state_change.
+  state_change?: StateChangeDetail;
 }
 
 interface MatterTask {
@@ -79,6 +115,37 @@ function fmtTimelineWhen(value: string): string {
   } catch {
     return value;
   }
+}
+
+// Phase E: parse the briefing slug-date out of a state_change entry's
+// observed_window.other refs (first entry that starts with `briefing/`).
+// Returns null when the entry is from a non-briefing source or the ref
+// shape doesn't match. The slug-date matches the convention in
+// packages/ctrl/src/api/routes/briefings.ts (`<YYYY-MM-DD>-<slot>`).
+function parseBriefingSlugDate(entry: TimelineEntry): {
+  slugDate: string;
+  slot: "morning" | "evening";
+} | null {
+  const src = entry.state_change?.source ?? "";
+  if (!src.startsWith("briefing.")) return null;
+  const refs = entry.state_change?.observed_window?.other ?? [];
+  for (const raw of refs) {
+    if (typeof raw !== "string" || !raw.startsWith("briefing/")) continue;
+    const stem = raw.slice("briefing/".length).replace(/\.md$/, "");
+    const m = /^(\d{4}-\d{2}-\d{2})-(morning|evening)$/.exec(stem);
+    if (m) {
+      return { slugDate: stem, slot: m[2] as "morning" | "evening" };
+    }
+  }
+  return null;
+}
+
+function briefingEyebrow(entry: TimelineEntry): string | null {
+  const src = entry.state_change?.source ?? "";
+  if (src === "briefing.morning") return "Briefing · Morning";
+  if (src === "briefing.evening") return "Briefing · Evening";
+  if (src.startsWith("briefing.")) return "Briefing";
+  return null;
 }
 
 function deriveStatusPill(tasks: MatterTask[]): {
@@ -270,37 +337,73 @@ export default function MatterDetailPage() {
           ) : (
             <>
               <ul>
-                {visibleTimeline.map((row, i) => (
-                  <li
-                    key={`${row.path}-${row.when}-${i}`}
-                    className="grid grid-cols-[110px_1fr_80px] gap-4 py-3 border-b border-rule items-baseline"
-                  >
-                    <span
-                      className="font-mono text-[11px]"
-                      style={{ color: "var(--marginalia)" }}
+                {visibleTimeline.map((row, i) => {
+                  const isStateChange = row.kind === "state_change";
+                  const briefingRef = isStateChange
+                    ? parseBriefingSlugDate(row)
+                    : null;
+                  const eyebrow = isStateChange ? briefingEyebrow(row) : null;
+                  const kindLabel =
+                    row.kind === "task_transition"
+                      ? "task"
+                      : row.kind === "state_change"
+                        ? "state"
+                        : row.kind;
+                  return (
+                    <li
+                      key={`${row.path}-${row.when}-${i}`}
+                      className="grid grid-cols-[110px_1fr_80px] gap-4 py-3 border-b border-rule items-baseline"
                     >
-                      {fmtTimelineWhen(row.when)}
-                    </span>
-                    <span className="font-body text-[16px] leading-[1.5]">
-                      {row.path ? (
-                        <Link
-                          to={`/vault?slug=${encodeURIComponent(row.path.replace(/\.md$/, ""))}`}
-                          style={{ color: "var(--ink)" }}
-                        >
-                          {row.headline}
-                        </Link>
-                      ) : (
-                        row.headline
-                      )}
-                    </span>
-                    <span
-                      className="font-mono text-[10px] uppercase tracking-[0.22em] text-right"
-                      style={{ color: "var(--brass)" }}
-                    >
-                      {row.kind === "task_transition" ? "task" : row.kind}
-                    </span>
-                  </li>
-                ))}
+                      <span
+                        className="font-mono text-[11px]"
+                        style={{ color: "var(--marginalia)" }}
+                      >
+                        {fmtTimelineWhen(row.when)}
+                      </span>
+                      <span className="font-body text-[16px] leading-[1.5]">
+                        {/* Phase E: briefing-sourced state changes carry
+                            a slot eyebrow + click-through to the
+                            briefing feed. Other state_change sources
+                            (steward, nightly_narrative, …) get the
+                            generic "state" tag on the right; Phase I
+                            renders them in full. */}
+                        {eyebrow && (
+                          <div
+                            className="font-mono text-[9px] uppercase tracking-[0.22em] mb-1"
+                            style={{ color: "var(--brass)" }}
+                          >
+                            {briefingRef ? (
+                              <Link
+                                to={`/briefings#${briefingRef.slugDate}`}
+                                style={{ color: "var(--brass)" }}
+                              >
+                                {eyebrow} →
+                              </Link>
+                            ) : (
+                              eyebrow
+                            )}
+                          </div>
+                        )}
+                        {row.path ? (
+                          <Link
+                            to={`/vault?slug=${encodeURIComponent(row.path.replace(/\.md$/, ""))}`}
+                            style={{ color: "var(--ink)" }}
+                          >
+                            {row.headline}
+                          </Link>
+                        ) : (
+                          row.headline
+                        )}
+                      </span>
+                      <span
+                        className="font-mono text-[10px] uppercase tracking-[0.22em] text-right"
+                        style={{ color: "var(--brass)" }}
+                      >
+                        {kindLabel}
+                      </span>
+                    </li>
+                  );
+                })}
               </ul>
               {moreToShow && (
                 <button
