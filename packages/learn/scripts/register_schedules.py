@@ -193,6 +193,17 @@ INTERVAL_SCHEDULES = [
         "interval": timedelta(seconds=60),
     },
     {
+        # Task closure watcher (LIFECYCLE-2) — every 5 min scan the open
+        # task population against recent signals. High-confidence matches
+        # auto-write a decision(intent=done) that the DecisionRouter
+        # picks up to close the task. Backward arrow of the signal-task
+        # loop; the forward arrow has been the Desk-click path since
+        # ARCH-11.
+        "id": "al-task-closure-watcher",
+        "workflow": "TaskClosureWatcherWorkflow",
+        "interval": timedelta(minutes=5),
+    },
+    {
         # Defer resurface — hourly scan for skipped needs_attention
         # cards whose resurface_at has fallen due. Flips status back to
         # pending so they reappear on /desk. The "when" parsing itself

@@ -38,6 +38,7 @@ from src.workflows.nightly_narrative import NightlyNarrativeWorkflow
 from src.workflows.decision_router import DecisionRouterWorkflow
 from src.workflows.decision_patterns import DecisionPatternsWorkflow
 from src.workflows.defer_resurface import DeferResurfaceWorkflow
+from src.workflows.task_closure import TaskClosureWatcherWorkflow
 from src.workflows.scheduled_dispatch import ScheduledDispatchWorkflow
 from src.workflows.decay_watcher import DecayWatcherWorkflow
 from src.workflows.meeting_capture import MeetingCaptureWorkflow
@@ -322,6 +323,16 @@ from src.activities.tool_inference import (
     infer_required_tools,
 )
 
+# Task closure watcher — backward arrow of the signal-task loop.
+# Inbound signals get checked against open tasks; high-confidence
+# matches auto-close the task via a decision(intent=done) record.
+from src.activities.task_closure import (
+    list_open_tasks,
+    list_recent_signals,
+    assess_closure,
+    write_closure_decision,
+)
+
 # Plane sync (#536 B4) — vault → Plane one-way sync activities
 from src.activities.plane_sync import (
     ensure_inbox_project,
@@ -600,6 +611,7 @@ _STATIC_WORKFLOWS = [
     DecisionRouterWorkflow,
     DecisionPatternsWorkflow,
     DeferResurfaceWorkflow,
+    TaskClosureWatcherWorkflow,
     ScheduledDispatchWorkflow,
     DecayWatcherWorkflow,
     MeetingCaptureWorkflow,
@@ -810,6 +822,11 @@ ALL_ACTIVITIES = [
     wait_for_agent_ready,
     # Tool inference for delegate dispatch
     infer_required_tools,
+    # Task closure watcher — signal-closes-task backward arrow
+    list_open_tasks,
+    list_recent_signals,
+    assess_closure,
+    write_closure_decision,
     # Plane sync (#536 B4)
     plane_sync_is_enabled,
     load_plane_sync_state,
