@@ -37,6 +37,7 @@ from src.workflows.steward import StewardWorkflow
 from src.workflows.nightly_narrative import NightlyNarrativeWorkflow
 from src.workflows.decision_router import DecisionRouterWorkflow
 from src.workflows.decision_patterns import DecisionPatternsWorkflow
+from src.workflows.pattern_detection import PatternDetectionWorkflow
 from src.workflows.defer_resurface import DeferResurfaceWorkflow
 from src.workflows.task_closure import TaskClosureWatcherWorkflow
 from src.workflows.scheduled_dispatch import ScheduledDispatchWorkflow
@@ -549,6 +550,14 @@ from src.activities.decision_patterns import (
     extract_decision_patterns as dp_extract,
 )
 
+# Pattern detection (OBS-4, hourly) — deterministic clustering over
+# the unified observation pool. Writes pattern_proposal records that
+# OBS-5's acceptor materialises into instincts once the principal
+# clicks Delegate on the /desk card.
+from src.activities.pattern_detection import (
+    detect_pattern_proposals as pd_detect,
+)
+
 # Defer resurface — parses "when shall I resurface this?" notes into
 # concrete datetimes and re-flips skipped needs_attention back to
 # pending when their resurface_at falls due.
@@ -617,6 +626,7 @@ _STATIC_WORKFLOWS = [
     NightlyNarrativeWorkflow,
     DecisionRouterWorkflow,
     DecisionPatternsWorkflow,
+    PatternDetectionWorkflow,
     DeferResurfaceWorkflow,
     TaskClosureWatcherWorkflow,
     ScheduledDispatchWorkflow,
@@ -975,6 +985,9 @@ ALL_ACTIVITIES = [
     # Decision pattern extraction (daily) — extracts recurring rules
     # from the principal's recent decisions per matter.
     dp_extract,
+    # Pattern detection (hourly, OBS-4) — deterministic clustering
+    # over the unified observation pool.
+    pd_detect,
     # Defer resurface (hourly + on-defer parse).
     dr_parse_resurface,
     dr_stamp_resurface,

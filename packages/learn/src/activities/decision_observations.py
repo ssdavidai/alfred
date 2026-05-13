@@ -30,6 +30,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -103,15 +104,21 @@ def _derive_topic(source: str, intent: str, headline: str) -> str:
 async def _resolve_sender_for_needs_attention(
     client: httpx.AsyncClient, source_record: str,
 ) -> str:
-    """Best-effort: follow needs_attention → source_signal → sender.
+    """Best-effort: chase decision → needs_attention → signal →
+    stream_event and run the same sender extractor the signal-side
+    observations use.
 
-    The decision's source_record is a path like
-    ``needs_attention/<id>.md``. The NA frontmatter carries
-    ``source_signal_path`` pointing at the underlying signal whose
-    frontmatter carries the sender. Two cheap GETs against ctrl-api
-    (both cached by the in-process mtime cache after the first read).
-    Returns "" if any step fails — sender is optional on the
-    observation, not required.
+    The signal record's frontmatter is LLM-extracted and does NOT
+    carry a structured ``raw.from`` — it stores the rendered email
+    headers inside ``raw_quote`` (a string) plus a
+    ``source_event_path`` pointing at the upstream stream_event. The
+    stream_event frontmatter is where the structured sender info
+    actually lives, and where we already have a battle-tested
+    extractor (signal_observations._extract_sender_from_event).
+    Reuse it here so OBS-1 + OBS-2 stay in lockstep.
+
+    Cheap and cached by the in-process mtime cache. Returns "" if any
+    step fails — sender is optional on the observation.
     """
     if not source_record.startswith("needs_attention/"):
         return ""
@@ -132,6 +139,9 @@ async def _resolve_sender_for_needs_attention(
         sig_fm = (sig_resp.json().get("frontmatter") or {})
     except Exception:  # noqa: BLE001
         return ""
+
+    # First try the (rare) structured fields on the signal itself, in
+    # case a future signal writer emits them — cheap and harmless.
     raw = sig_fm.get("raw") or {}
     if isinstance(raw, dict):
         for k in ("from", "From", "sender", "from_email", "organizer", "organiser"):
@@ -142,7 +152,65 @@ async def _resolve_sender_for_needs_attention(
         v = sig_fm.get(k)
         if isinstance(v, str) and v.strip():
             return v.strip()
-    return ""
+
+    # Preferred source of truth: the upstream stream_event the signal
+    # was extracted from. Read its frontmatter and apply the canonical
+    # sender extractor.
+    event_path = str(sig_fm.get("source_event_path") or "").strip()
+    if event_path:
+        try:
+            evt_resp = await client.get(f"/api/v1/vault/records/{event_path}")
+            if evt_resp.status_code < 400:
+                evt_fm = (evt_resp.json().get("frontmatter") or {})
+                if isinstance(evt_fm, dict):
+                    from src.activities.signal_observations import (
+                        _extract_sender_from_event,
+                    )
+                    sender = _extract_sender_from_event(evt_fm)
+                    if sender:
+                        return sender
+        except Exception:  # noqa: BLE001
+            pass  # fall through to raw_quote fallback
+
+    # Fallback: parse the signal's own ``raw_quote`` string. The
+    # signal-extract activity stores the rendered email/event preview
+    # there (e.g. `**From**: "Acme" <a@example.com> **To**: ...`). Stream
+    # events get purged after extraction (StreamEventPurgeWorkflow), so
+    # for older decisions the stream_event lookup above 404s and this
+    # fallback is the only way to recover the sender.
+    return _sender_from_raw_quote(str(sig_fm.get("raw_quote") or ""))
+
+
+# Matches the gmail-style "**From**: <stuff>" header that signal_extract
+# embeds in raw_quote. Captures everything up to the next **Label** or
+# the end of the line.
+_RAW_QUOTE_FROM_RE = re.compile(
+    r"\*\*From\*\*\s*:\s*(.+?)(?:\*\*To\*\*|\*\*Subject\*\*|\*\*Date\*\*|\n|$)",
+    re.IGNORECASE,
+)
+
+
+def _sender_from_raw_quote(quote: str) -> str:
+    """Extract the sender string from a signal_extract ``raw_quote``.
+
+    The quote starts with template-emitted headers like
+    ``**From**: "Acme HQ" <a@example.com> **To**: ...``. We pull the
+    From: clause as a string. We deliberately do NOT canonicalise to
+    ``org/...`` / ``person/...`` here — the clusterer normalises by
+    casefold + namespace strip, so a raw "Acme HQ <a@example.com>"
+    will bucket with an entity-resolved "org/Acme HQ" via
+    ``_normalise_sender_key``.
+    """
+    if not quote:
+        return ""
+    m = _RAW_QUOTE_FROM_RE.search(quote)
+    if not m:
+        return ""
+    val = m.group(1).strip().strip('"').strip()
+    # Strip a trailing email-in-angle-brackets if present so the cluster
+    # key collapses senders that show with and without a display name.
+    val = re.sub(r"\s*<[^>]+>$", "", val).strip().strip('"').strip()
+    return val[:120]
 
 
 @activity.defn

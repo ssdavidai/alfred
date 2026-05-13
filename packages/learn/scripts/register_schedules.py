@@ -162,6 +162,17 @@ INTERVAL_SCHEDULES = [
         "interval": timedelta(hours=1),
     },
     {
+        # Pattern detection (OBS-4) — hourly deterministic scan of the
+        # unified observation pool. Clusters by (sender, intent) and
+        # writes pattern_proposal records for surviving clusters. The
+        # detector is cheap (one ctrl-api list call + in-memory work)
+        # but uses overlap=SKIP via the default schedule policy so two
+        # ticks can't race on the skip-set.
+        "id": "al-pattern-detection",
+        "workflow": "PatternDetectionWorkflow",
+        "interval": timedelta(hours=1),
+    },
+    {
         "id": "al-omi-processor",
         "workflow": "OmiAudioProcessorWorkflow",
         "interval": timedelta(minutes=10),

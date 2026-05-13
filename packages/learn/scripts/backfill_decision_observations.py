@@ -89,36 +89,15 @@ def _auth() -> dict[str, str]:
 async def _resolve_sender(
     client: httpx.AsyncClient, source_record: str,
 ) -> str:
-    if not source_record.startswith("needs_attention/"):
-        return ""
-    try:
-        resp = await client.get(f"/api/v1/vault/records/{source_record}")
-        if resp.status_code >= 400:
-            return ""
-        na_fm = (resp.json().get("frontmatter") or {})
-    except Exception:  # noqa: BLE001
-        return ""
-    sig_path = str(na_fm.get("source_signal_path") or "").strip()
-    if not sig_path:
-        return ""
-    try:
-        sig_resp = await client.get(f"/api/v1/vault/records/{sig_path}")
-        if sig_resp.status_code >= 400:
-            return ""
-        sig_fm = (sig_resp.json().get("frontmatter") or {})
-    except Exception:  # noqa: BLE001
-        return ""
-    raw = sig_fm.get("raw") or {}
-    if isinstance(raw, dict):
-        for k in ("from", "From", "sender", "from_email", "organizer", "organiser"):
-            v = raw.get(k)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-    for k in ("from", "sender", "organizer", "organiser"):
-        v = sig_fm.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return ""
+    """Sender resolution — delegate to the activity so the backfill
+    schema stays in lockstep with the live writer. Imports here at
+    call time rather than module top so the script can still load when
+    the temporalio runtime isn't on path (activity decorator imports
+    temporalio)."""
+    from src.activities.decision_observations import (
+        _resolve_sender_for_needs_attention,
+    )
+    return await _resolve_sender_for_needs_attention(client, source_record)
 
 
 @dataclass
