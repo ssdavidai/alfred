@@ -68,6 +68,9 @@ with workflow.unsafe.imports_passed_through():
         mark_stream_event_processed,
         write_signal_record,
     )
+    from src.activities.signal_observations import (
+        extract_observation_from_signal,
+    )
 
 
 # Max events processed per tick. Sized so the worst-case run (every
@@ -251,6 +254,27 @@ class SignalExtractWorkflow:
 
                     if signal_path:
                         result.written += 1
+                        # OBS-2: every signal that survives the
+                        # noise filter becomes a passive observation
+                        # in the same canonical schema as decision-
+                        # observations. Deterministic — no second
+                        # clerk call, since signal_extract already
+                        # paid for the LLM judgement when it wrote
+                        # the signal record. Failure is non-fatal:
+                        # the signal write is the source of truth;
+                        # observation can be backfilled.
+                        try:
+                            await workflow.execute_activity(
+                                extract_observation_from_signal,
+                                args=[signal_path],
+                                start_to_close_timeout=timedelta(seconds=30),
+                                retry_policy=retry,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            workflow.logger.warning(
+                                "signal_extract.obs_failed path=%s err=%s",
+                                signal_path, exc,
+                            )
 
                 # Mark processed — even for noise — so we don't re-LLM
                 # the same event next tick. Idempotent slug on

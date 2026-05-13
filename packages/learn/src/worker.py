@@ -334,6 +334,12 @@ from src.activities.task_closure import (
     write_closure_decision,
 )
 
+# Signal → observation extractor (OBS-2). Fires per signal write
+# inside SignalExtractWorkflow.
+from src.activities.signal_observations import (
+    extract_observation_from_signal,
+)
+
 # Plane sync (#536 B4) — vault → Plane one-way sync activities
 from src.activities.plane_sync import (
     ensure_inbox_project,
@@ -829,6 +835,8 @@ ALL_ACTIVITIES = [
     assess_closure,
     assess_closure_predicate,
     write_closure_decision,
+    # OBS-2 — signal → observation extractor
+    extract_observation_from_signal,
     # Plane sync (#536 B4)
     plane_sync_is_enabled,
     load_plane_sync_state,
