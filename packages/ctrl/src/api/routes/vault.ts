@@ -137,7 +137,15 @@ const KNOWN_TYPES = [
   //                       known-noise events at source. Missing this
   //                       allowlist entry meant both the writer and the
   //                       loader got 400 from /vault/list and /vault/records.
+  //  - pattern_proposal  : OBS-3 — clustered proposals from the unified
+  //                       observation pool (decisions + signals).
+  //                       PatternDetectionWorkflow (OBS-4) writes
+  //                       status=proposed; the principal accepts on /desk
+  //                       and OBS-5's acceptor materialises an instinct.
+  //                       Distinct from legacy decision_pattern/ which
+  //                       extracts only from decisions.
   "signal", "needs_attention", "stream_event", "signal_noise_pattern",
+  "pattern_proposal",
 ];
 
 const STATUS_BY_TYPE: Record<string, string[]> = {
@@ -164,6 +172,19 @@ const STATUS_BY_TYPE: Record<string, string[]> = {
   matter: ["active", "resolved", "abandoned"],
   ledger_entry: ["active"],
   chore: ["active", "paused", "completed"],
+  // pattern_proposal lifecycle (OBS-3..OBS-5):
+  //  - proposed  : freshly written by PatternDetectionWorkflow,
+  //                awaiting principal review on /desk
+  //  - adopted   : principal clicked delegate; OBS-5 acceptor wrote
+  //                the instinct (the loop closure step)
+  //  - rejected  : principal clicked delete; the next detection run
+  //                avoids re-proposing this rule
+  //  - deferred  : principal clicked defer; will resurface later
+  //  - superseded: replaced by a refined cluster in a later run
+  // Status verbs match the existing decision_pattern flow so the
+  // DecisionRouterWorkflow's pattern handler can stay uniform across
+  // both legacy and OBS-era proposals.
+  pattern_proposal: ["proposed", "adopted", "rejected", "deferred", "superseded"],
 };
 
 const TYPE_DIRECTORY: Record<string, string> = {
@@ -189,6 +210,7 @@ const TYPE_DIRECTORY: Record<string, string> = {
   matter: "matter",
   ledger_entry: "ledger_entry",
   chore: "chore",
+  pattern_proposal: "pattern_proposal",
 };
 
 const LIST_FIELDS = [

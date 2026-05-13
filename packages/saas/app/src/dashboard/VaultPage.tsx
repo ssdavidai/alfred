@@ -59,6 +59,7 @@ const FAMILY_OF: Record<string, "Standing" | "Activity" | "Learning" | "Intuitio
   observation: "Intuition",
   instinct: "Intuition",
   reflection: "Intuition",
+  pattern_proposal: "Intuition",
 };
 
 const FAMILY_ORDER = ["Standing", "Activity", "Learning", "Intuition"] as const;

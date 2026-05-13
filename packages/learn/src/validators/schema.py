@@ -24,6 +24,19 @@ VALID_OBSERVATION_STATUSES = frozenset({"unprocessed", "processed", "invalid"})
 # Valid instinct statuses
 VALID_INSTINCT_STATUSES = frozenset({"active", "proposed", "deprecated", "merged"})
 
+# Valid pattern_proposal statuses (OBS-3..OBS-5 lifecycle).
+# Must stay in sync with ctrl-api STATUS_BY_TYPE.pattern_proposal in
+# packages/ctrl/src/api/routes/vault.ts.
+VALID_PATTERN_PROPOSAL_STATUSES = frozenset({
+    "proposed", "adopted", "rejected", "deferred", "superseded",
+})
+
+# Minimum number of observation_refs required to write a new pattern
+# proposal. Mirrors the "instincts require 3 observations" rule in
+# validate_instinct_proposal — three points of evidence is the
+# smallest pattern that can survive a single coincidence.
+MIN_PATTERN_PROPOSAL_EVIDENCE = 3
+
 # Valid routing destination types (for instinct routing_rule)
 VALID_ROUTING_DESTINATION_TYPES = frozenset({"project", "person", "process", "hold"})
 
