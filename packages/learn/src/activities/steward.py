@@ -56,6 +56,21 @@ from temporalio import activity
 from src.config import load_config
 from src.utils.vault_client import VaultClient
 
+# State-mutation Phase B (#890): Steward retrofitted onto the universal
+# ``apply_state_change_v2`` primitive. We import the v2 call + the
+# decorator and dataclasses needed to register Steward's propose
+# function. Steward's v1 ``apply_state_change`` becomes a backwards-compat
+# shim that delegates the core state-field write to v2 while keeping
+# Plane fan-out, the legacy ``event/steward-action-*.md`` audit shape,
+# and the dependency-signal cascade Steward-specific.
+from src.activities.state_mutator import (
+    MutatorContentionError,
+    ObservedWindow,
+    ProposedMutation,
+    apply_state_change_v2,
+    propose_fn,
+)
+
 logger = logging.getLogger("alfred-learn")
 
 
@@ -2833,6 +2848,15 @@ DECISION_TO_PLANE_ARCHIVE: set[str] = {"stale_archive_candidate"}
 # Dispatch signal kind emitted on related_to tasks after a live action.
 STEWARD_DEPENDENCY_SIGNAL_KIND = "steward:dependency_change"
 
+# Phase B (#890) — matter-context cascade. When a matter's state mutates
+# we fan a signal out to every task whose ``parent_matter`` points at
+# this matter so the next Steward tick re-evaluates them in light of the
+# matter's new context. Kind is parallel to ``steward:dependency_change``
+# (related_to peer-task fan-out) but the fan-out target list is computed
+# from ``parent_matter`` pointers at call time, not from a static
+# ``related_to`` list.
+STEWARD_MATTER_CONTEXT_SIGNAL_KIND = "steward:matter_context_changed"
+
 
 def _slug_from_task_path(task_path: str) -> str:
     """Extract the bare slug from a ``task/<slug>.md`` path.
@@ -3227,6 +3251,222 @@ def _emit_steward_dependency_signals(
     return written
 
 
+async def _emit_matter_context_signals(
+    cfg, matter_path: str, decision_label: str, client: "VaultClient",
+) -> int:
+    """W2 matter-context cascade — append ``steward:matter_context_changed``
+    records to the steward-signals JSONL stream, one per child task whose
+    ``parent_matter`` points at ``matter_path``.
+
+    Resolves children by listing ``task/*`` records via ctrl-api and
+    filtering on ``parent_matter``. Failure to enumerate (list_records
+    HTTP error) returns 0 — the next Steward tick will pick up the
+    matter's state change anyway via ``vault:edit`` signals.
+
+    Symmetric with ``_emit_steward_dependency_signals`` (related_to
+    peer-task fan-out) so downstream consumers (signal_router,
+    StewardWorkflow tick) can treat both signal kinds uniformly.
+    """
+    if not matter_path:
+        return 0
+
+    # Enumerate child tasks whose parent_matter points at this matter.
+    # Best-effort: any failure (HTTP, OS, missing method on a stub
+    # client) downgrades to "no cascade this tick" — the next Steward
+    # tick will pick up the matter's state change via vault:edit signals
+    # anyway, so this is a latency optimisation, not a correctness lever.
+    try:
+        task_records = await client.list_records("task", limit=10_000)
+    except (httpx.HTTPError, OSError, AttributeError) as exc:
+        logger.warning(
+            "steward.apply_state_change: matter-cascade list failed matter=%s err=%s",
+            matter_path, exc,
+        )
+        return 0
+
+    child_task_paths: list[str] = []
+    for rec in task_records:
+        if not isinstance(rec, dict):
+            continue
+        fm = rec.get("frontmatter") or rec
+        if not isinstance(fm, dict):
+            fm = {}
+        parent = _resolve_parent_matter(fm)
+        if not parent:
+            continue
+        # Normalise both ends to canonical ``matter/<slug>.md``.
+        parent_canon = parent if parent.startswith("matter/") else f"matter/{parent}"
+        if not parent_canon.endswith(".md"):
+            parent_canon = f"{parent_canon}.md"
+        if parent_canon != matter_path:
+            continue
+        path = str(rec.get("path") or fm.get("path") or "").strip()
+        if not path:
+            slug = str(rec.get("slug") or fm.get("slug") or "").strip()
+            if slug:
+                path = f"task/{slug}.md"
+        if path:
+            if not path.startswith("task/"):
+                path = f"task/{path.lstrip('/')}"
+            if not path.endswith(".md"):
+                path = f"{path}.md"
+            child_task_paths.append(path)
+
+    if not child_task_paths:
+        return 0
+
+    streams_path = os.path.join(cfg.streams_dir, "steward-signals.jsonl")
+    try:
+        os.makedirs(os.path.dirname(streams_path), exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "steward.apply_state_change: matter-cascade cannot create streams dir "
+            "path=%s err=%s",
+            streams_path, exc,
+        )
+        return 0
+
+    written = 0
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        with open(streams_path, "a", encoding="utf-8") as f:
+            for child in child_task_paths:
+                record = {
+                    "id": (
+                        f"evt_steward_matter_ctx_"
+                        f"{int(time.time() * 1_000_000)}_{written}"
+                    ),
+                    "ts": now_iso,
+                    "kind": STEWARD_MATTER_CONTEXT_SIGNAL_KIND,
+                    "ref": f"vault:{child}",
+                    "note": (
+                        f"parent matter changed: {matter_path} -> {decision_label}"
+                    ),
+                    "source_matter": matter_path,
+                }
+                f.write(json.dumps(record) + "\n")
+                written += 1
+    except OSError as exc:
+        logger.warning(
+            "steward.apply_state_change: matter-cascade write failed path=%s err=%s",
+            streams_path, exc,
+        )
+        return 0
+
+    if written:
+        logger.info(
+            "steward.apply_state_change: emitted %d matter-context-changed signals "
+            "from %s",
+            written, matter_path,
+        )
+    return written
+
+
+# ---------------------------------------------------------------------------
+# Phase B propose function — Steward decision → universal ProposedMutation
+# ---------------------------------------------------------------------------
+
+
+@propose_fn("steward.propose_state_change")
+async def _propose_steward_state_change(
+    *,
+    target: dict[str, Any],
+    observed: ObservedWindow,
+    args: dict[str, Any],
+) -> ProposedMutation | None:
+    """Translate Steward's decision shape into a universal ProposedMutation.
+
+    ``args`` carries the precomputed Steward decision: ``decision``,
+    ``confidence``, ``reasoning``, ``effective_mode``, ``target_kind``,
+    plus the resolved write intent (``new_lifecycle_state``,
+    ``current_state_str``, ``pending_confirmation``, ``last_steward_outcome``,
+    ``ts_iso``). Steward computes all of these in
+    ``apply_state_change`` before delegating; we don't re-derive them
+    inside the propose function so the universal audit and the legacy
+    audit see byte-identical decision metadata.
+
+    Returns ``None`` when there are no universal state fields to mutate
+    — e.g. shadow mode without a current_state composition, or
+    ``still_active`` / ``needs_input`` decisions whose only effect is
+    clearing ``last_steward_check_at`` (NOT a state field).
+    """
+    decision_label = str(args.get("decision") or "noop")
+    target_kind = str(args.get("target_kind") or "task")
+    effective_mode = str(args.get("effective_mode") or "shadow")
+    pending_confirmation = bool(args.get("pending_confirmation", False))
+    new_lifecycle_state = args.get("new_lifecycle_state")  # str or None
+    current_state_str = args.get("current_state_str")  # str or None
+    last_steward_outcome = args.get("last_steward_outcome")  # dict or None
+    ts_iso = str(args.get("ts_iso") or "")
+    will_act = bool(args.get("will_act_on_plane", False))
+    reasoning = str(args.get("reasoning") or "")
+
+    fields: dict[str, Any] = {}
+
+    # Universal state-field set Steward actually mutates per tick:
+    # current_state, as_of, pending_confirmation, outcome,
+    # last_steward_outcome, status (lifecycle). The legacy lifecycle
+    # field ``state`` (and ``last_steward_check_at``) are NOT in the
+    # universal contract — they continue to ride the legacy PATCH
+    # path. Status mapping surfaces the lifecycle as ``status`` on the
+    # universal envelope so downstream consumers (Desk timeline,
+    # /decisions feed) see the transition without learning about
+    # Steward's idiosyncratic ``state`` field name.
+    #
+    # Shadow mode emits NO state-field write — Steward's shadow
+    # contract is "audit only, no mutation" and the universal v2
+    # audit semantics under shadow are identical (ctrl-api skips the
+    # frontmatter patch). For shadow ticks we return None so v2's
+    # ctrl-api round-trip is skipped entirely; the legacy
+    # ``event/steward-action-*.md`` audit lands by itself, which
+    # already gives reviewers the proposed-but-not-applied view.
+    if effective_mode != "live":
+        return None
+
+    if will_act and target_kind == "task":
+        if new_lifecycle_state == "done":
+            fields["status"] = "closed"
+        elif new_lifecycle_state == "archived":
+            fields["status"] = "archived"
+    if current_state_str:
+        fields["current_state"] = current_state_str
+    # ``pending_confirmation: True`` IS a state transition (Steward is
+    # flagging that Sir's review is needed). ``pending_confirmation:
+    # False`` ALONE — i.e. without an accompanying lifecycle or
+    # current_state shift — is a no-op stale-flag clear that we don't
+    # surface on the universal timeline. The legacy
+    # ``patch_frontmatter_structured`` path still clears the flag
+    # via direct PATCH for those ticks.
+    if pending_confirmation or "status" in fields or "current_state" in fields:
+        fields["pending_confirmation"] = pending_confirmation
+    if (
+        target_kind == "task"
+        and isinstance(last_steward_outcome, dict)
+        and ("status" in fields or "current_state" in fields or pending_confirmation)
+    ):
+        fields["last_steward_outcome"] = last_steward_outcome
+    # Only stamp ``as_of`` if there's a substantive state-field change
+    # to anchor it to. Stamping as_of by itself moves the timeline
+    # forward without any state actually changing — confuses readers
+    # of the matter detail page who expect every as_of bump to
+    # correspond to a real transition.
+    if fields and ts_iso:
+        fields["as_of"] = ts_iso
+
+    # If there's nothing universal to write, return None so v2 skips
+    # the ctrl-api round-trip entirely.
+    if not fields:
+        return None
+
+    confidence = float(args.get("confidence") or 0.0)
+    return ProposedMutation(
+        fields=fields,
+        reason=reasoning or f"Steward decision: {decision_label}",
+        confidence=confidence,
+        fan_out=tuple(args.get("fan_out") or ()),
+    )
+
+
 @activity.defn
 async def apply_state_change(
     task_path: str,
@@ -3307,6 +3547,39 @@ async def apply_state_change(
     surfaced via ``plane_action.partially_applied = true`` per the
     Phase 3 atomicity rule (don't roll back the vault — Plane is the
     lagging leaf, the dashboard surfaces partials for manual review).
+
+    Phase B (#890) — state-mutation contract retrofit
+    -------------------------------------------------
+    The core state-field write (``current_state``, ``as_of``,
+    ``pending_confirmation``, ``last_steward_outcome``, and — when the
+    decision implies a lifecycle transition — ``status``) is delegated
+    to ``state_mutator.apply_state_change_v2`` with
+    ``source="steward.evaluate_task"``. v2 emits the universal
+    ``event/state-change-*.md`` audit record AND appends a
+    ``state_change`` entry to the target's ``timeline``.
+
+    The legacy ``event/steward-action-*.md`` audit + the legacy
+    frontmatter PATCH continue to fire alongside v2. Choice (a) from
+    spec §12 Phase B: most-conservative path that preserves the many
+    existing consumers of the Steward-specific audit shape
+    (``ctrl-api/routes/steward.ts`` undo/confirm/dismiss flow,
+    ``calibration_reversal.py``, ``briefing_cache.py``,
+    ``migrate_to_stream_event.py``). When Phase G flips
+    ``STATE_CHANGE_ENFORCEMENT=reject``, the legacy direct PATCH will
+    have to be removed; until then the duplicate writes are intentional
+    and harmless.
+
+    v2 errors (network failure, optimistic-concurrency contention,
+    unexpected exceptions) are caught and downgraded to a warning —
+    the legacy code path always runs so a v2 outage never starves
+    Steward of Plane fan-out or audit. ``state_change_audit_partial``
+    is stamped onto the legacy audit when v2 fails so reviewers see the
+    universal artefact is missing for that tick.
+
+    Matter targets additionally fan out a
+    ``steward:matter_context_changed`` signal to every child task with
+    ``parent_matter == this_matter`` (W2 cascade — previously a parked
+    TODO).
     """
     if mode not in ("shadow", "live"):
         raise ValueError(f"unsupported steward mode: {mode!r}")
@@ -3568,7 +3841,130 @@ async def apply_state_change(
             new_outcome["partially_applied"] = True
             new_outcome["partially_applied_reason"] = plane_partial_reason
 
+        # ── 4b. Resolve the Steward write intent up-front ──────────────
+        # We compute the new lifecycle ``state`` and (RFC #884) the
+        # one-sentence ``current_state`` BEFORE both v2 and the legacy
+        # PATCH so both writers observe identical decision metadata.
+        # Matches the existing legacy semantics: pending-confirmation
+        # ticks leave the prior current_state alone; only high-confidence
+        # transitions ("likely_done" / "stale_archive_candidate") on task
+        # targets compose a new ``current_state`` + stamp ``as_of``.
+        new_lifecycle_state: str | None = None
+        new_current_state: str | None = None
+        new_as_of_stamp: str | None = None
+        if effective_mode == "live" and not task_missing:
+            if not pending_confirmation:
+                if decision_label == "likely_done":
+                    new_lifecycle_state = "done"
+                elif decision_label == "stale_archive_candidate":
+                    new_lifecycle_state = "archived"
+            if (
+                target_kind_normalized == "task"
+                and new_lifecycle_state is not None
+            ):
+                new_current_state = _compose_task_current_state(
+                    new_state=new_lifecycle_state,
+                    decision=raw_decision,
+                    now_iso=ts_iso,
+                )
+                new_as_of_stamp = ts_iso
+
+        # ── 4c. Universal state-mutator (Phase B) ──────────────────────
+        # The "core" state-field write per the universal contract: emit
+        # the ``event/state-change-*.md`` audit + ``state_change``
+        # timeline entry through ``apply_state_change_v2``. v2 runs
+        # alongside the legacy frontmatter PATCH (step 5) — under
+        # ``STATE_CHANGE_ENFORCEMENT=warn`` ctrl-api accepts both; under
+        # ``=reject`` only the v2 write will land (Phase G work).
+        #
+        # v2 errors (network, optimistic-concurrency contention,
+        # unexpected exceptions) are caught and logged. The legacy code
+        # path continues unconditionally so a v2 outage never deprives
+        # Steward of Plane fan-out or the legacy audit.
+        v2_result = None
+        v2_audit_partial = False
+        v2_audit_partial_reason: Optional[str] = None
+        observed_start_dt = _parse_iso(prior_fm.get("as_of")) or _parse_iso(
+            prior_fm.get("last_steward_check_at")
+        ) or now
+        observed_window = ObservedWindow(
+            start=observed_start_dt,
+            end=now,
+            signal_paths=[],
+            decision_paths=[],
+            other_refs=[],
+        )
+        propose_args: dict[str, Any] = {
+            "decision": decision_label,
+            "confidence": confidence,
+            "reasoning": reasoning,
+            "effective_mode": effective_mode,
+            "target_kind": target_kind_normalized,
+            "pending_confirmation": pending_confirmation,
+            "new_lifecycle_state": new_lifecycle_state,
+            "current_state_str": new_current_state,
+            "last_steward_outcome": new_outcome,
+            "ts_iso": ts_iso,
+            "will_act_on_plane": will_act_on_plane,
+        }
+        expected_as_of = prior_fm.get("as_of")
+        try:
+            v2_result = await apply_state_change_v2(
+                target_path=canonical_task_path,
+                source="steward.evaluate_task",
+                observed=observed_window,
+                propose_fn_name="steward.propose_state_change",
+                propose_fn_args=propose_args,
+                mode=effective_mode,
+                expected_as_of=expected_as_of if isinstance(expected_as_of, str) else None,
+            )
+            if v2_result is not None and v2_result.applied:
+                logger.info(
+                    "steward.apply_state_change: v2 universal audit landed "
+                    "target=%s source=steward.evaluate_task audit=%s "
+                    "retries=%d",
+                    canonical_task_path,
+                    v2_result.audit_record_path,
+                    v2_result.retried_count,
+                )
+        except MutatorContentionError as exc:
+            v2_audit_partial = True
+            v2_audit_partial_reason = f"v2_contention_exhausted: {exc}"[:300]
+            logger.warning(
+                "steward.apply_state_change: v2 contention exhausted "
+                "target=%s err=%s — universal audit missing for this tick; "
+                "legacy audit still lands",
+                canonical_task_path, exc,
+            )
+        except httpx.HTTPError as exc:
+            v2_audit_partial = True
+            v2_audit_partial_reason = f"v2_http_failed: {exc}"[:300]
+            logger.warning(
+                "steward.apply_state_change: v2 POST failed target=%s err=%s "
+                "— universal audit missing for this tick; legacy audit "
+                "still lands",
+                canonical_task_path, exc,
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive last-resort
+            v2_audit_partial = True
+            v2_audit_partial_reason = f"v2_unexpected: {type(exc).__name__}: {exc}"[:300]
+            logger.warning(
+                "steward.apply_state_change: v2 raised unexpected target=%s "
+                "err=%r — universal audit missing for this tick; legacy "
+                "audit still lands",
+                canonical_task_path, exc,
+            )
+
         # ── 5. Patch the task frontmatter (live mode only) ──────────────
+        # Phase B note: under STATE_CHANGE_ENFORCEMENT=warn ctrl-api
+        # accepts the legacy PATCH of state fields (state, current_state,
+        # as_of, pending_confirmation, last_steward_outcome) alongside
+        # the v2 envelope's frontmatter merge. This is deliberate during
+        # Phase B → Phase G — keeps the test contract intact and keeps
+        # Steward's lifecycle ``state`` field writable (``state`` is not
+        # in the universal allowlist; ``status`` is). When Phase G flips
+        # enforcement to ``reject`` we'll need to either drop the state-
+        # field subset of scalar_updates or remap ``state`` → ``status``.
         vault_patch_applied = False
         if effective_mode == "live" and not task_missing:
             scalar_updates: dict[str, Any] = {
@@ -3581,29 +3977,14 @@ async def apply_state_change(
                 # tick set it AND, if the decision implies a state
                 # change, write the new state.
                 scalar_updates["pending_confirmation"] = False
-                if decision_label == "likely_done":
-                    scalar_updates["state"] = "done"
-                elif decision_label == "stale_archive_candidate":
-                    scalar_updates["state"] = "archived"
+                if new_lifecycle_state is not None:
+                    scalar_updates["state"] = new_lifecycle_state
             # RFC #884: when the patch actually shifts the task's
             # ``state`` field, also stamp a one-sentence
-            # ``current_state`` + ``as_of``. Only fires for task
-            # targets (matters get their narrative from
-            # nightly_narrative) and only when a state value is being
-            # written this tick — "still_active" / "needs_input" /
-            # pending-confirmation paths leave the prior current_state
-            # alone so a meaningful narrative from a real transition
-            # isn't overwritten by a no-op tick.
-            if (
-                target_kind_normalized == "task"
-                and "state" in scalar_updates
-            ):
-                scalar_updates["current_state"] = _compose_task_current_state(
-                    new_state=scalar_updates["state"],
-                    decision=raw_decision,
-                    now_iso=ts_iso,
-                )
-                scalar_updates["as_of"] = ts_iso
+            # ``current_state`` + ``as_of``. Computed in step 4b above.
+            if new_current_state is not None and new_as_of_stamp is not None:
+                scalar_updates["current_state"] = new_current_state
+                scalar_updates["as_of"] = new_as_of_stamp
             json_updates: dict[str, Any] = {
                 "last_steward_outcome": new_outcome,
             }
@@ -3664,6 +4045,16 @@ async def apply_state_change(
         if plane_partial:
             payload["partially_applied"] = True
             payload["partially_applied_reason"] = plane_partial_reason
+        # Phase B cross-reference: link the legacy audit to v2's
+        # universal audit (when v2 wrote one). When v2 failed, surface
+        # the partial so reviewers know the universal artefact is
+        # missing for this tick.
+        if v2_result is not None and v2_result.applied:
+            payload["state_change_audit"] = v2_result.audit_record_path
+            payload["state_change_timeline_id"] = v2_result.timeline_entry_id
+        if v2_audit_partial:
+            payload["state_change_audit_partial"] = True
+            payload["state_change_audit_partial_reason"] = v2_audit_partial_reason
 
         yaml_block = _render_audit_yaml(payload)
 
@@ -3719,15 +4110,19 @@ async def apply_state_change(
         # next Steward tick re-evaluates them with the just-applied
         # state change in their context. Skipped in shadow mode (we
         # didn't actually change anything).
+        #
+        # Phase B (W2) — matter-context cascade
+        # -------------------------------------
+        # Previously a parked TODO: "when a matter's state mutates,
+        # re-evaluate every task whose ``parent_matter`` points at this
+        # matter." Implemented here via
+        # ``_emit_matter_context_signals`` — enumerates child tasks via
+        # ctrl-api ``list_records("task")`` and appends one
+        # ``steward:matter_context_changed`` record per match to the
+        # same ``streams/steward-signals.jsonl`` ledger the related_to
+        # cascade writes to. Symmetric with the related_to fan-out so
+        # consumers can treat both signal kinds uniformly.
         dep_signals_emitted = 0
-        # Matter targets: the matter-context-edit cascade should
-        # re-evaluate every task with ``parent_matter == this_matter``,
-        # but that fan-out logic lives in its own subsystem (Phase 6.3
-        # spec). Park it as a TODO and emit zero dependency signals for
-        # matter targets in this minimal change.
-        # TODO(phase 6.3+): when target_kind == "matter", scan
-        # task/*.md for parent_matter == canonical_task_path and emit
-        # one steward:dependency_change signal per match.
         if (
             effective_mode == "live"
             and will_act_on_plane
@@ -3739,6 +4134,20 @@ async def apply_state_change(
                 source_task_path=canonical_task_path,
                 related_to=related_to,
                 decision_label=decision_label,
+            )
+        elif (
+            effective_mode == "live"
+            and target_kind_normalized == "matter"
+            and not task_missing
+        ):
+            # Matter writes always fan out to child tasks (no
+            # will_act_on_plane gate — matters don't have a Plane
+            # action; the cascade IS the actionable downstream effect).
+            dep_signals_emitted = await _emit_matter_context_signals(
+                cfg,
+                matter_path=canonical_task_path,
+                decision_label=decision_label,
+                client=client,
             )
 
         logger.info(

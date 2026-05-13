@@ -632,3 +632,356 @@ async def test_unknown_mode_raises():
 async def test_empty_task_path_raises():
     with pytest.raises(ValueError):
         await apply_state_change("", _decision(), {}, mode="shadow")
+
+
+# ---------------------------------------------------------------------------
+# Phase B (#890) — state_mutator v2 retrofit
+# ---------------------------------------------------------------------------
+#
+# These cases verify that ``apply_state_change`` (v1) now delegates the
+# core state-field write through ``state_mutator.apply_state_change_v2``
+# while preserving the v1 return shape + the legacy
+# ``event/steward-action-*.md`` audit + Plane fan-out (choice (a) from
+# the Phase B audit-shape decision: keep both audits, since
+# ctrl-api/routes/steward.ts and several alfred-learn consumers read
+# the legacy ``steward-action-*`` shape directly).
+
+
+import httpx as _httpx
+from unittest.mock import patch as _patch
+
+from src.activities import state_mutator as _state_mutator
+
+
+class _StubV2Transport(_httpx.AsyncBaseTransport):
+    """Replay a list of canned ctrl-api responses for the v2 POST."""
+
+    def __init__(self, script: list) -> None:
+        self.script = list(script)
+        self.requests: list[_httpx.Request] = []
+
+    async def handle_async_request(self, request: _httpx.Request) -> _httpx.Response:
+        self.requests.append(request)
+        if not self.script:
+            raise AssertionError(
+                f"_StubV2Transport: no more responses; request was "
+                f"{request.method} {request.url}"
+            )
+        entry = self.script.pop(0)
+        if callable(entry):
+            return entry(request)
+        return entry
+
+
+class _FakeV2VaultClient:
+    """Stub for ``state_mutator.read_target``'s VaultClient.
+
+    We capture the constructor kwargs from a FakeVaultClient and reuse
+    its task/matter frontmatter so v2's read_target returns the same
+    data the legacy code path observes.
+    """
+
+    def __init__(self, frontmatter: dict[str, Any]) -> None:
+        self._fm = frontmatter
+
+    async def close(self) -> None:
+        pass
+
+    async def read_record(self, path: str) -> dict[str, Any]:
+        return {"frontmatter": dict(self._fm), "body": ""}
+
+
+def _install_v2_mocks(
+    target_fm: dict[str, Any],
+    script: list,
+) -> tuple[_StubV2Transport, list]:
+    """Patch ``state_mutator.VaultClient`` + ``httpx.AsyncClient`` so v2
+    talks to an in-memory transport instead of a real ctrl-api.
+
+    Returns the transport (for asserting on the captured envelope) plus
+    the list of started patches the caller must stop in a finally.
+    """
+    fake_client = _FakeV2VaultClient(target_fm)
+    transport = _StubV2Transport(script)
+    real_async_client = _httpx.AsyncClient
+
+    def _factory(*args: Any, **kwargs: Any) -> _httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    p1 = _patch(
+        "src.activities.state_mutator.VaultClient", return_value=fake_client
+    )
+    p2 = _patch("src.activities.state_mutator.httpx.AsyncClient", _factory)
+    p1.start()
+    p2.start()
+    return transport, [p1, p2]
+
+
+def _ok_v2_response(
+    *,
+    audit_record_path: str = "event/state-change-2026-05-13T0700-steward.evaluate_task-foo.md",
+    timeline_entry_id: str = "01HXYZABC",
+    new_as_of: str = "2026-05-13T07:00:14Z",
+) -> _httpx.Response:
+    return _httpx.Response(
+        200,
+        json={
+            "audit_record_path": audit_record_path,
+            "timeline_entry_id": timeline_entry_id,
+            "new_as_of": new_as_of,
+        },
+    )
+
+
+def _v2_conflict_response(current_as_of: str = "2026-05-13T07:01:00Z") -> _httpx.Response:
+    return _httpx.Response(
+        409,
+        json={"error": "as_of_mismatch", "current_as_of": current_as_of},
+    )
+
+
+@pytest.mark.asyncio
+async def test_phase_b_shadow_audit_emitted_no_plane_no_patch(
+    fake_vault_factory, monkeypatch
+):
+    """Shadow mode: v2 propose returns None (no state-field mutation
+    warranted under shadow on a task whose decision is ``likely_done``
+    but effective_mode is shadow), and the legacy audit lands.
+
+    Verifies the Phase B contract under shadow:
+      * Legacy ``event/steward-action-*.md`` audit lands (1 write_record).
+      * No Plane writes.
+      * No legacy ``patch_frontmatter_structured`` (frontmatter
+        unchanged on disk).
+      * The propose function decides ``None`` under shadow (no state-
+        field write needed) → no v2 POST attempted at all.
+    """
+    monkeypatch.setenv("STEWARD_LIVE_MODE", "shadow")
+    task_fm = {
+        "state": "open",
+        "plane_issue_id": "issue-1",
+        "as_of": "2026-05-12T18:00:02Z",
+    }
+    fake, ctx = fake_vault_factory(task_fm=task_fm)
+    transport, patches = _install_v2_mocks(task_fm, script=[])
+    try:
+        result = await apply_state_change(
+            "task/foo.md",
+            _decision(decision="likely_done", confidence=0.95),
+            {"count": 0},
+            mode="shadow",
+        )
+    finally:
+        for p in patches:
+            p.stop()
+        ctx.stop()
+
+    # Legacy contract holds.
+    assert result["mode"] == "shadow"
+    assert result["live_action_taken"] is False
+    assert fake.patch_structured_calls == []
+    assert fake.plane_post_calls == []
+    # Steward-action legacy audit lands.
+    assert len(fake.write_record_calls) == 1
+    rec_type, name, content = fake.write_record_calls[0]
+    assert rec_type == "event"
+    assert name.startswith("steward-action-")
+    # Shadow mode + no current_state composition → propose returns None
+    # → no v2 envelope POSTed.
+    assert transport.requests == []
+
+
+@pytest.mark.asyncio
+async def test_phase_b_matter_write_fans_out_to_child_tasks(
+    fake_vault_factory, monkeypatch, tmp_path
+):
+    """Matter-context cascade (W2): when a matter's state mutates, one
+    ``steward:matter_context_changed`` signal fires per child task whose
+    ``parent_matter`` points at the matter.
+
+    Verifies:
+      * Live-mode matter write enumerates child tasks via ctrl-api.
+      * One signal per child lands in steward-signals.jsonl.
+      * Each signal carries the canonical task path + the matter ref.
+      * Non-child tasks (parent_matter pointing elsewhere) are filtered.
+    """
+    import json as _json
+    monkeypatch.setenv("STEWARD_LIVE_MODE", "live")
+    monkeypatch.setenv("ALFRED_DATA_DIR", str(tmp_path))
+    matter_fm = {
+        "status": "active",
+        "as_of": "2026-05-12T18:00:02Z",
+    }
+    fake, ctx = fake_vault_factory(matter_fm=matter_fm)
+
+    # Override list_records on the fake to return three task records:
+    # two children of matter/client-x.md and one with a different parent.
+    async def _list_records(record_type: str, *args, **kwargs):
+        if record_type != "task":
+            return []
+        return [
+            {
+                "path": "task/alpha.md",
+                "frontmatter": {"parent_matter": "matter/client-x.md"},
+            },
+            {
+                "path": "task/beta.md",
+                "frontmatter": {"parent_matter": "matter/client-x"},
+            },
+            {
+                "path": "task/gamma.md",
+                "frontmatter": {"parent_matter": "matter/other.md"},
+            },
+        ]
+
+    fake.list_records = _list_records  # type: ignore[attr-defined]
+
+    # v2 propose returns None for matter under matter_context-only path
+    # (this Phase B propose function only writes universal fields when
+    # there's a current_state or pending_confirmation to write — the
+    # matter cascade fan-out is gated separately on target_kind=matter +
+    # live mode, regardless of v2 outcome).
+    transport, patches = _install_v2_mocks(matter_fm, script=[])
+    try:
+        result = await apply_state_change(
+            "matter/client-x.md",
+            _decision(decision="needs_input", confidence=0.95),
+            {"count": 0},
+            mode="live",
+            target_kind="matter",
+        )
+    finally:
+        for p in patches:
+            p.stop()
+        ctx.stop()
+
+    assert result["mode"] == "live"
+    # Two child tasks → two signals.
+    assert result["dependency_signals_emitted"] == 2
+    streams_path = tmp_path / "streams" / "steward-signals.jsonl"
+    assert streams_path.exists()
+    lines = [
+        _json.loads(line)
+        for line in streams_path.read_text().splitlines()
+        if line
+    ]
+    assert len(lines) == 2
+    refs = {l["ref"] for l in lines}
+    assert refs == {"vault:task/alpha.md", "vault:task/beta.md"}
+    for line in lines:
+        assert line["kind"] == "steward:matter_context_changed"
+        assert line["source_matter"] == "matter/client-x.md"
+
+
+@pytest.mark.asyncio
+async def test_phase_b_v1_shim_returns_legacy_dict_shape(
+    fake_vault_factory, monkeypatch
+):
+    """The v1 ``apply_state_change`` signature + return shape remains
+    backwards-compatible after the Phase B retrofit. Steward callers
+    expect exactly these keys; v2's ``MutationResult`` is internal."""
+    monkeypatch.setenv("STEWARD_LIVE_MODE", "live")
+    fake, ctx = fake_vault_factory(
+        task_fm={
+            "state": "open",
+            "plane_issue_id": "issue-1",
+            "parent_matter": "matter/client-x.md",
+            "as_of": "2026-05-12T18:00:02Z",
+        },
+        matter_fm={"plane_project_id": "project-uuid"},
+    )
+    transport, patches = _install_v2_mocks(
+        {
+            "state": "open",
+            "plane_issue_id": "issue-1",
+            "as_of": "2026-05-12T18:00:02Z",
+        },
+        script=[_ok_v2_response()],
+    )
+    try:
+        result = await apply_state_change(
+            "task/foo.md",
+            _decision(decision="likely_done", confidence=0.95),
+            {"count": 1},
+            mode="live",
+        )
+    finally:
+        for p in patches:
+            p.stop()
+        ctx.stop()
+
+    # Keys per the v1 docstring + existing test contract — all present,
+    # no v2-internal fields leaked into the v1 return shape.
+    expected_keys = {
+        "path",
+        "mode",
+        "timestamp",
+        "live_action_taken",
+        "pending_confirmation",
+        "vault_patch_applied",
+        "plane_action",
+        "partially_applied",
+        "dependency_signals_emitted",
+    }
+    assert expected_keys <= set(result.keys())
+    # No leakage of v2 audit pointers into the v1 return.
+    assert "audit_record_path" not in result
+    assert "timeline_entry_id" not in result
+    # Legacy fields carry sane values.
+    assert result["mode"] == "live"
+    assert isinstance(result["timestamp"], str) and result["timestamp"]
+    assert isinstance(result["live_action_taken"], bool)
+    assert result["path"].startswith("event/steward-action-")
+
+
+@pytest.mark.asyncio
+async def test_phase_b_v2_409_retry_then_succeeds(
+    fake_vault_factory, monkeypatch
+):
+    """A 409 inside v2 (optimistic-concurrency mismatch) is transparently
+    retried by ``apply_state_change_v2``. From Steward's perspective the
+    call succeeds on the retry; the legacy code path still runs and the
+    v1 return shape is unaffected."""
+    monkeypatch.setenv("STEWARD_LIVE_MODE", "live")
+    task_fm = {
+        "state": "open",
+        "plane_issue_id": "issue-1",
+        "parent_matter": "matter/client-x.md",
+        "as_of": "2026-05-12T18:00:02Z",
+    }
+    fake, ctx = fake_vault_factory(
+        task_fm=task_fm,
+        matter_fm={"plane_project_id": "project-uuid"},
+    )
+    transport, patches = _install_v2_mocks(
+        task_fm,
+        script=[
+            _v2_conflict_response("2026-05-13T07:01:00Z"),
+            _ok_v2_response(new_as_of="2026-05-13T07:02:00Z"),
+        ],
+    )
+    try:
+        result = await apply_state_change(
+            "task/foo.md",
+            _decision(decision="likely_done", confidence=0.95),
+            {"count": 1},
+            mode="live",
+        )
+    finally:
+        for p in patches:
+            p.stop()
+        ctx.stop()
+
+    # v2 made two HTTP attempts (409 then 200).
+    assert len(transport.requests) == 2
+    # Legacy contract still holds end-to-end despite the retry.
+    assert result["mode"] == "live"
+    assert result["live_action_taken"] is True
+    # Steward-action legacy audit still lands.
+    assert len(fake.write_record_calls) == 1
+    rec_type, name, _content = fake.write_record_calls[0]
+    assert rec_type == "event"
+    assert name.startswith("steward-action-")
+    # Plane fan-out still fired.
+    assert len(fake.plane_post_calls) == 1
