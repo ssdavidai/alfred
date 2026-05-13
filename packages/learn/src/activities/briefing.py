@@ -408,18 +408,54 @@ async def _gather_observed_for_matter(
 # ---------------------------------------------------------------------------
 
 
+_CLERK_FAILURE_PATTERNS = (
+    "assistant turn failed",
+    "tool use failed",
+    "no response",
+    "error:",
+    "[error",
+    "[empty",
+    "[failed",
+    "rate limit",
+    "timeout",
+)
+
+
+def _is_clerk_failure(raw: str) -> bool:
+    """True when clerk returned an obvious failure sentinel rather than prose.
+
+    Catches the openclaw-workers '[assistant turn failed before producing
+    content]' pattern + adjacent bracketed error markers + short bracketed
+    strings of any kind. Treat these as failures, NOT as valid bare-paragraph
+    narratives (which would otherwise leak straight into matter current_state).
+    """
+    text = (raw or "").strip()
+    if not text:
+        return True
+    low = text.lower()
+    for pat in _CLERK_FAILURE_PATTERNS:
+        if pat in low:
+            return True
+    # Short bracketed sentinel: a clerk response that's just `[something]` and
+    # under 120 chars is almost certainly an error envelope, not a narrative.
+    if text.startswith("[") and text.endswith("]") and len(text) < 120:
+        return True
+    return False
+
+
 def _extract_propose_response(raw: str) -> tuple[str | None, float | None]:
     """Parse the clerk's response into ``(narrative, confidence_or_None)``.
 
     Mirrors nightly_narrative's parser so the two writers share an
     interface contract with the clerk:
 
+      * Clerk failure sentinel (e.g. ``[assistant turn failed]``) → (None, None).
       * ``NO_CHANGE`` (case-insensitive) → (None, None) → no mutation.
       * ``{"narrative": "...", "confidence": 0.0-1.0}`` → JSON path.
       * Bare paragraph → fallback (legacy clerk path).
     """
     text = (raw or "").strip()
-    if not text:
+    if _is_clerk_failure(text):
         return None, None
     if text.upper().startswith("NO_CHANGE") or text.upper() == "NO CHANGE":
         return None, None
@@ -437,7 +473,11 @@ def _extract_propose_response(raw: str) -> tuple[str | None, float | None]:
         if isinstance(obj, dict):
             raw_narrative = obj.get("narrative")
             raw_conf = obj.get("confidence")
-            if isinstance(raw_narrative, str) and raw_narrative.strip():
+            if (
+                isinstance(raw_narrative, str)
+                and raw_narrative.strip()
+                and not _is_clerk_failure(raw_narrative)
+            ):
                 conf: float | None = None
                 if isinstance(raw_conf, (int, float)) and 0.0 <= float(raw_conf) <= 1.0:
                     conf = float(raw_conf)
@@ -976,6 +1016,21 @@ async def compose_and_write_briefing(
     if not isinstance(body_text, str):
         body_text = str(body_text)
     body_text = body_text.strip()
+    # If clerk returned a failure sentinel ('[assistant turn failed...]' or
+    # similar), don't let it become the brief body — replace with a stub that
+    # makes the failure visible without polluting the snapshot with garbage.
+    if _is_clerk_failure(body_text):
+        logger.warning(
+            "compose_and_write_briefing: clerk returned failure sentinel "
+            "slot=%s body=%r — writing a stub body so the brief record is "
+            "salvageable", slot_norm, body_text[:200],
+        )
+        body_text = (
+            "Sir — the brief composer received an empty turn from the "
+            "clerk and could not compose prose for this slot. Matter state "
+            "snapshots below are current; please regenerate when the gateway "
+            "is healthy."
+        )
     if len(body_text) > BRIEF_BODY_CHAR_CAP:
         body_text = body_text[:BRIEF_BODY_CHAR_CAP].rstrip() + "..."
 

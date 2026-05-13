@@ -639,6 +639,18 @@ def _extract_confidence_and_narrative(
     text = (raw or "").strip()
     if not text:
         return None, None
+    # Reject clerk-failure sentinels so the failure text doesn't become
+    # the matter's current_state. Mirror briefing.py:_is_clerk_failure.
+    low = text.lower()
+    if (
+        "assistant turn failed" in low
+        or "tool use failed" in low
+        or low.startswith("[error")
+        or low.startswith("[failed")
+        or low.startswith("[empty")
+        or (text.startswith("[") and text.endswith("]") and len(text) < 120)
+    ):
+        return None, None
     if text.upper().startswith("NO_CHANGE") or text.upper() == "NO CHANGE":
         return None, None
     # Strip a fenced ``` json ``` envelope if the clerk wrapped its JSON.
