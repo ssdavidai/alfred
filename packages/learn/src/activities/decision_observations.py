@@ -213,6 +213,68 @@ def _sender_from_raw_quote(quote: str) -> str:
     return val[:120]
 
 
+# ---------------------------------------------------------------------------
+# OBS-5: helpers for materialising a pattern_proposal as an instinct
+# ---------------------------------------------------------------------------
+
+def _sender_key_to_domain_patterns(sender_key: str) -> list[str]:
+    """Build the fnmatch glob patterns the deterministic scorer reads.
+
+    The clusterer's ``sender_key`` is a casefold-normalised, namespace-
+    stripped label like ``digitalocean`` or ``digitalocean support``.
+    The scorer matches against ``metadata.domains`` (a list of email
+    domain strings like ``digitalocean.com``) AND
+    ``metadata.attachment_patterns``. To catch both forms we emit:
+
+      * the bare key (matches e.g. ``digitalocean`` exactly)
+      * ``*key*`` (matches any domain string containing the key)
+      * if the key contains spaces, ALSO the first token alone so
+        ``"digitalocean support"`` still catches ``digitalocean.com``
+
+    The scorer is case-insensitive via fnmatch, so we don't need to
+    fold here.
+    """
+    key = (sender_key or "").strip()
+    if not key:
+        return []
+    patterns: list[str] = [key, f"*{key}*"]
+    head = key.split(" ", 1)[0]
+    if head and head != key:
+        patterns.append(head)
+        patterns.append(f"*{head}*")
+    # Dedup preserving order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in patterns:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def _intent_to_routing_rule(intent_key: str) -> dict[str, str] | None:
+    """Map a cluster's dominant intent to an instinct routing rule.
+
+    Mirrors VALID_ROUTING_DESTINATION_TYPES = {project, person,
+    process, hold}. The ``destination`` is a short stable token the
+    downstream router can dispatch on without re-parsing the rule.
+
+    Returned None means "no routing rule" — caller should fall back
+    to the rule + action prose and let the LearningWorkflow refine
+    the routing later.
+    """
+    key = (intent_key or "").strip().lower()
+    if key == "noise":
+        return {"destination_type": "hold", "destination": "auto-noise"}
+    if key == "delegate":
+        return {"destination_type": "person", "destination": "alfred"}
+    if key == "defer":
+        return {"destination_type": "hold", "destination": "auto-defer"}
+    if key == "done":
+        return {"destination_type": "hold", "destination": "auto-archive"}
+    return None
+
+
 @activity.defn
 async def extract_observation_from_decision(
     decision: dict[str, Any],
@@ -328,21 +390,37 @@ async def extract_observation_from_decision(
 async def adopt_instinct_from_pattern(
     pattern_path: str,
 ) -> dict[str, Any]:
-    """Materialize a proposed decision_pattern as an active instinct.
+    """Materialize a proposed pattern as an active instinct (OBS-5).
 
     Called by the DecisionRouterWorkflow when the principal clicks
     Delegate on a pattern-proposal card on /desk. Writes an
     ``instinct/<ts>-<short>.md`` record with status=active, then
-    PATCHes the originating decision_pattern to status=adopted so it
-    drops out of future /api/v1/admin/pattern-proposals lists.
+    PATCHes the originating proposal to status=adopted so it drops
+    off subsequent /desk lists.
+
+    Handles BOTH path families:
+      * ``decision_pattern/<id>.md`` — legacy daily clerk-extracted
+        proposals from DecisionPatternsWorkflow. Minimal schema:
+        rule + proposed_action + evidence + matter_ref. The instinct
+        we mint has no sender_domains because the legacy detector
+        didn't capture them — the LearningWorkflow's enrichment pass
+        is expected to fill those in over time.
+      * ``pattern_proposal/<id>.md`` — OBS-4 cluster outputs. Carries
+        sender_key + intent_key + observation_refs + cluster_size +
+        confidence. We translate these into the rich instinct schema
+        (input_patterns.sender_domains + routing_rule) so the
+        deterministic scorer in src.matching can fire the instinct
+        the moment a matching inbound arrives.
     """
-    if not pattern_path or not pattern_path.startswith("decision_pattern/"):
+    if not pattern_path or not (
+        pattern_path.startswith("decision_pattern/")
+        or pattern_path.startswith("pattern_proposal/")
+    ):
         return {"ok": False, "reason": "bad pattern path"}
+    is_obs4 = pattern_path.startswith("pattern_proposal/")
+
     async with _http() as client:
-        # Read the pattern proposal.
-        resp = await client.get(
-            f"/api/v1/vault/records/{pattern_path}",
-        )
+        resp = await client.get(f"/api/v1/vault/records/{pattern_path}")
         if resp.status_code >= 400:
             return {"ok": False, "reason": f"pattern read {resp.status_code}"}
         pattern = resp.json()
@@ -351,43 +429,111 @@ async def adopt_instinct_from_pattern(
         evidence = str(fm.get("evidence") or "").strip()
         proposed_action = str(fm.get("proposed_action") or "").strip()
         matter_ref = str(fm.get("matter_ref") or "").strip()
+        # OBS-4 enrichment fields. Legacy decision_pattern records
+        # don't carry these → keys will be empty / 0 and the
+        # downstream rich-shape stamping degrades to the minimal
+        # legacy shape.
+        sender_key = str(fm.get("sender_key") or "").strip()
+        intent_key = str(fm.get("intent_key") or "").strip()
+        cluster_size_raw = fm.get("cluster_size") or 0
+        try:
+            cluster_size = int(cluster_size_raw) if cluster_size_raw else 0
+        except (TypeError, ValueError):
+            cluster_size = 0
+        confidence_raw = fm.get("confidence")
+        try:
+            confidence = (
+                float(confidence_raw) if confidence_raw is not None else 0.0
+            )
+        except (TypeError, ValueError):
+            confidence = 0.0
+        obs_refs = fm.get("observation_refs") or []
+        if not isinstance(obs_refs, list):
+            obs_refs = []
+        else:
+            obs_refs = [str(r) for r in obs_refs if isinstance(r, str)]
 
         if not rule:
             return {"ok": False, "reason": "pattern has no rule"}
 
-        # Build the instinct record. Existing instinct records use a
-        # natural-language `trigger` + `action` shape with status=active
-        # for the matcher to pick them up. We keep the schema minimal
-        # and let the intuition engine refine the trigger via its
-        # normal LearningWorkflow pass.
         now_iso = datetime.now(timezone.utc).isoformat()
         ts = now_iso.replace(":", "-").replace(".", "-")[:19] + "Z"
         short = hashlib.sha256(
             f"{pattern_path}\x00{rule}".encode("utf-8")
         ).hexdigest()[:8]
         name = f"{ts}-{short}"
+
+        # ---- Rich instinct fields (OBS-4 path only). For legacy
+        # decision_pattern records sender_key + intent_key are empty
+        # → we fall through to the minimal schema the legacy adopter
+        # used, preserving its behaviour.
+        sender_domains = (
+            _sender_key_to_domain_patterns(sender_key) if sender_key else []
+        )
+        routing_rule = _intent_to_routing_rule(intent_key) if intent_key else None
+
         fm_lines = [
             "---",
             'type: "instinct"',
+            f"name: {json.dumps(name)}",
             f'created: "{now_iso}"',
+            'status: "active"',
             f'rule: {json.dumps(rule)}',
             f'trigger: {json.dumps(rule)}',
             f'action: {json.dumps(proposed_action)}' if proposed_action else 'action: null',
             f'matter_ref: {json.dumps(matter_ref) if matter_ref else "null"}',
-            'status: "active"',
-            'source_kind: "pattern_adoption"',
+            f'source_kind: "{"pattern_proposal_adoption" if is_obs4 else "pattern_adoption"}"',
             f'source_path: "{pattern_path}"',
-            "---",
-            "",
-            f"# Instinct: {rule}",
-            "",
-            f"Adopted from pattern `{pattern_path}` at {now_iso}.",
-            "",
-            f"**When**: {rule}",
-            f"**Then**: {proposed_action}" if proposed_action else "",
-            "",
-            f"*Evidence at adoption*: {evidence}" if evidence else "",
+            f"adopted_at: {json.dumps(now_iso)}",
         ]
+        if is_obs4 and sender_domains:
+            # Rich schema — what the deterministic scorer reads.
+            fm_lines.extend([
+                "input_patterns:",
+                "  sender_domains:",
+                *[f"    - {json.dumps(d)}" for d in sender_domains],
+                "  subject_keywords: []",
+                "  attachment_types: []",
+                "  input_types: []",
+                # Legacy mirror — older code paths read `signals` first.
+                # Keeping both populated avoids a regression for any
+                # consumer that doesn't know about input_patterns yet.
+                "signals:",
+                "  domain_patterns:",
+                *[f"    - {json.dumps(d)}" for d in sender_domains],
+                "  keyword_patterns: []",
+                "  input_types: []",
+                "  attachment_patterns: []",
+            ])
+        if is_obs4 and routing_rule:
+            fm_lines.extend([
+                "routing_rule:",
+                f'  destination_type: "{routing_rule["destination_type"]}"',
+                f'  destination: {json.dumps(routing_rule["destination"])}',
+            ])
+        if is_obs4 and obs_refs:
+            fm_lines.extend([
+                f"observation_count: {cluster_size or len(obs_refs)}",
+                f"confidence_score: {confidence:.4f}",
+                "based_on:",
+                *[f"  - {json.dumps(r)}" for r in obs_refs[:20]],
+            ])
+        if is_obs4 and intent_key:
+            fm_lines.append(f"intent_key: {json.dumps(intent_key)}")
+        if is_obs4 and sender_key:
+            fm_lines.append(f"sender_key: {json.dumps(sender_key)}")
+        fm_lines.append("---")
+        fm_lines.append("")
+        fm_lines.append(f"# Instinct: {rule}")
+        fm_lines.append("")
+        fm_lines.append(f"Adopted from `{pattern_path}` at {now_iso}.")
+        fm_lines.append("")
+        fm_lines.append(f"**When**: {rule}")
+        if proposed_action:
+            fm_lines.append(f"**Then**: {proposed_action}")
+        fm_lines.append("")
+        if evidence:
+            fm_lines.append(f"*Evidence at adoption*: {evidence}")
         content = "\n".join([line for line in fm_lines if line != ""]) + "\n"
 
     from src.utils.vault_client import VaultClient
@@ -425,15 +571,20 @@ async def adopt_instinct_from_pattern(
 
 @activity.defn
 async def reject_pattern_proposal(pattern_path: str) -> dict[str, Any]:
-    """Mark a pattern proposal as rejected.
+    """Mark a pattern proposal as rejected (OBS-5).
 
     Called when the principal clicks Delete on a pattern-proposal
-    card. Flips status=rejected so it stops surfacing on /desk and the
-    next DecisionPatternsWorkflow run doesn't re-propose the same rule
-    (the extraction prompt sees recently-rejected rules and avoids
-    them).
+    card. Flips status=rejected so it stops surfacing on /desk and
+    the next detector run sees a recently-rejected rule in its
+    skip-set.
+
+    Handles both ``decision_pattern/`` (legacy) and
+    ``pattern_proposal/`` (OBS-4) path prefixes.
     """
-    if not pattern_path or not pattern_path.startswith("decision_pattern/"):
+    if not pattern_path or not (
+        pattern_path.startswith("decision_pattern/")
+        or pattern_path.startswith("pattern_proposal/")
+    ):
         return {"ok": False, "reason": "bad pattern path"}
     async with _http() as client:
         resp = await client.patch(
