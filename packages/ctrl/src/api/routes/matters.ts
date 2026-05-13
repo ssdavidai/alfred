@@ -103,6 +103,13 @@ interface MatterTask {
    *    - "" (or null) when the task pre-dates the stamp and the backfill
    *      hasn't run yet — surfaced as "unknown" by the UI. */
   decision_origin: string | null;
+  /** Owner — who is on the hook for this task.
+   *    - `principal`      Sir clicked Delegate/Do
+   *    - `alfred`         autonomous fire from an instinct
+   *    - `<email>`        the sender of the source signal (inbound mail)
+   *    - `external`       signal-sourced but no resolvable sender
+   *    - `unknown`        pre-stamp grandfather / unrouted */
+  owner: string | null;
 }
 
 interface MatterDetail extends Omit<MatterIndexRow, "state"> {
@@ -515,6 +522,7 @@ function buildMatterIndex(): MatterIndexResult {
       const currentStateRaw = taskFm.current_state;
       const asOfRaw = taskFm.as_of;
       const decisionOriginRaw = taskFm.decision_origin;
+      const ownerRaw = taskFm.owner;
       const task: MatterTask = {
         id: stem,
         path: taskRelPath,
@@ -529,6 +537,10 @@ function buildMatterIndex(): MatterIndexResult {
         decision_origin:
           typeof decisionOriginRaw === "string" && decisionOriginRaw.trim() && decisionOriginRaw !== "null"
             ? decisionOriginRaw
+            : null,
+        owner:
+          typeof ownerRaw === "string" && ownerRaw.trim() && ownerRaw !== "null"
+            ? ownerRaw
             : null,
       };
       const created = String(taskFm.created ?? taskFm.updated ?? "");
