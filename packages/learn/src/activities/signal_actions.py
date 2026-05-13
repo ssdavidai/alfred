@@ -1151,6 +1151,16 @@ async def dispatch_action_to_agent(
                 "more: `self({endpoint: \"/api/v1/integrations/<toolkit>/actions\"})`.\n"
             )
 
+        # MCP-5: the executor prompt no longer inlines a hardcoded
+        # tool list. Each openclaw runtime now bundles all 5 stdio MCP
+        # servers (alfred, sure, plane, vaultwarden, execute) + the
+        # canonical AGENTS.md instructions file at
+        # /home/node/.openclaw/AGENTS.md — sourced from the SAME
+        # packages/mcp-server/ tree the claude.ai HTTP Custom
+        # Connector reads, so the surface stays single-source-of-truth.
+        # Tools auto-discover via MCP tools/list at session start;
+        # all we have to do here is tell the agent where the doc is
+        # and which namespaces it'll see.
         executor_prompt = (
             "You are Alfred's executor subagent. The principal explicitly "
             "delegated this task to you from /desk. Execute it concretely. "
@@ -1161,18 +1171,31 @@ async def dispatch_action_to_agent(
             f"Target: {target_clause}\n"
             f"Due: {due_clause}\n"
             f"Guidance from instinct (if any): {guidance_clause}\n\n"
-            "Tools available:\n"
-            "  - `composio_execute({action, arguments})` — invoke a Composio "
-            "action by slug. Most third-party work (Gmail, Calendar, Slack, "
-            "Notion, GitHub, …) goes through here.\n"
-            "  - `self({endpoint, method?, body?, query?})` — call this "
-            "tenant's ctrl-api. Useful for reading vault records, listing "
-            "available Composio actions, etc.\n"
-            "  - Read / Write / Edit / Grep / LS / Glob — workspace primitives.\n"
+            "Your tool surface is the canonical 5-app MCP catalog (same "
+            "tools claude.ai's Custom Connectors see). Namespaces:\n"
+            "  - `alfred__*`      — this tenant's ctrl-api: vault, workflows, "
+            "matters, chores, agents, devices, openclaw config, etc.\n"
+            "  - `plane__*`       — Plane project management (issues, "
+            "comments, cycles, projects, states, labels).\n"
+            "  - `sure__*`        — Sure (Maybe Finance): transactions, "
+            "accounts, categories, budgets, rules.\n"
+            "  - `vaultwarden__*` — Vaultwarden secrets vault (items, "
+            "folders, collections, generation).\n"
+            "  - `execute__*`     — Composio dispatcher for any third-party "
+            "action (Gmail, Calendar, Slack, Notion, GitHub, …).\n"
+            "  - Plus workspace primitives: Read, Write, Edit, Glob, Grep, "
+            "LS, Bash.\n\n"
+            "Full instructions including per-tool usage patterns: read "
+            "`/home/node/.openclaw/AGENTS.md` (the canonical instructions "
+            "doc — same file the claude.ai client loads). Each MCP server "
+            "also exposes its skill markdown as a `resources/read` entry "
+            "(`alfred://skills/<app>-mcp-skill.md`) — use the resources "
+            "list when you need a deeper recipe for that app.\n"
             f"{hint_block}\n"
-            "Workflow: read the source signal record for context, then call "
-            "composio_execute. Report what you did in 1-2 sentences in your "
-            "final message."
+            "Workflow: read the source signal record for context (use the "
+            "appropriate `alfred__*` tool, e.g. `alfred__get_vault_record`), "
+            "pick the right namespaced tool, call it, report what you did in "
+            "1-2 sentences."
         )
 
         from src.activities.ephemeral_agent import (
