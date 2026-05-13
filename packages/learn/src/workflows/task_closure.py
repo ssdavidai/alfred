@@ -38,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
     from src.activities.task_closure import (
         HIGH_CONFIDENCE_THRESHOLD,
         assess_closure,
+        assess_closure_predicate,
         list_open_tasks,
         list_recent_signals,
         write_closure_decision,
@@ -53,6 +54,7 @@ class TaskClosureResult:
     recent_signals: int = 0
     pairs_considered: int = 0
     pairs_assessed: int = 0
+    pairs_predicate_matched: int = 0
     closures_written: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -127,19 +129,46 @@ class TaskClosureWatcherWorkflow:
             pairs = pairs[:MAX_PAIRS_PER_TICK]
 
         for t, s in pairs:
-            try:
-                assessment = await workflow.execute_activity(
-                    assess_closure,
-                    args=[t, s],
-                    start_to_close_timeout=timedelta(seconds=120),
-                    retry_policy=retry,
-                )
-            except Exception as exc:  # noqa: BLE001
-                result.errors.append(
-                    f"assess_closure {t.get('stem')} × {s.get('stem')}: {exc}"[:300]
-                )
-                continue
-            result.pairs_assessed += 1
+            # LIFECYCLE-4 fast path: if the task carries a structured
+            # closure_predicate, try the deterministic match first. A
+            # predicate hit skips the LLM call entirely; a miss falls
+            # through to the clerk-backed assessor below.
+            assessment: dict[str, Any] | None = None
+            if t.get("closure_predicate") is not None:
+                try:
+                    assessment = await workflow.execute_activity(
+                        assess_closure_predicate,
+                        args=[t, s],
+                        start_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=retry,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    result.errors.append(
+                        f"assess_closure_predicate {t.get('stem')} × {s.get('stem')}: {exc}"[:300]
+                    )
+                    assessment = None
+                if assessment is not None:
+                    result.pairs_predicate_matched += 1
+                    workflow.logger.info(
+                        "task_closure: predicate %s task=%s signal=%s",
+                        "match" if assessment.get("closes") else "miss",
+                        t.get("stem"), s.get("stem"),
+                    )
+
+            if assessment is None:
+                try:
+                    assessment = await workflow.execute_activity(
+                        assess_closure,
+                        args=[t, s],
+                        start_to_close_timeout=timedelta(seconds=120),
+                        retry_policy=retry,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    result.errors.append(
+                        f"assess_closure {t.get('stem')} × {s.get('stem')}: {exc}"[:300]
+                    )
+                    continue
+                result.pairs_assessed += 1
 
             if not assessment.get("closes"):
                 continue

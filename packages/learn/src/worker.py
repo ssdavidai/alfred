@@ -330,6 +330,7 @@ from src.activities.task_closure import (
     list_open_tasks,
     list_recent_signals,
     assess_closure,
+    assess_closure_predicate,
     write_closure_decision,
 )
 
@@ -826,6 +827,7 @@ ALL_ACTIVITIES = [
     list_open_tasks,
     list_recent_signals,
     assess_closure,
+    assess_closure_predicate,
     write_closure_decision,
     # Plane sync (#536 B4)
     plane_sync_is_enabled,

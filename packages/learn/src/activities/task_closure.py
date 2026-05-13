@@ -57,6 +57,182 @@ DEFAULT_SIGNAL_LOOKBACK_MIN = 30
 
 
 # ---------------------------------------------------------------------------
+# Closure predicates (LIFECYCLE-4) — deterministic fast-path.
+# ---------------------------------------------------------------------------
+#
+# A task may carry a structured ``closure_predicate`` in its frontmatter,
+# emitted at task-creation time by signal_extract / curator when the task
+# has a natural completion event. The predicate is matched against
+# inbound signals before the LLM clerk is asked — saves a clerk call,
+# and a predicate match is auditable (deterministic + traceable).
+#
+# Predicate shape (frontmatter YAML):
+#
+#   closure_predicate:
+#     kind: <one of the recognised kinds below>
+#     fields:
+#       <kind-specific match fields>
+#
+# Recognised kinds:
+#
+#   * gmail_thread_reply
+#       fields: { thread_id: <str> }
+#       matches a signal with source_type=composio-gmail-* whose
+#       ``thread_id`` or raw.thread_id equals the given value.
+#
+#   * gmail_from_subject
+#       fields: { from: <str email>, subject_contains: <str> }
+#       matches a gmail signal whose ``from`` matches and whose subject
+#       contains the substring (case-insensitive).
+#
+#   * calendar_event_accepted
+#       fields: { event_id: <str> }
+#       matches a googlecalendar signal with status=accepted on the
+#       given event_id.
+#
+#   * payment_to_merchant
+#       fields: { merchant: <str>, amount_min: <number?> }
+#       matches a Sure / payments signal whose merchant contains the
+#       string and (optionally) whose amount >= amount_min.
+#
+# Unrecognised predicate kinds are NOT auto-closed — they fall through
+# to the LLM matcher. Same for missing predicates.
+
+
+def _str_eq_ci(a: Any, b: Any) -> bool:
+    return str(a or "").strip().lower() == str(b or "").strip().lower()
+
+
+def _str_contains_ci(haystack: Any, needle: Any) -> bool:
+    if not needle:
+        return False
+    return str(needle).strip().lower() in str(haystack or "").lower()
+
+
+def _gmail_thread_match(predicate_fields: dict[str, Any], signal_fm: dict[str, Any]) -> bool:
+    expected = str(predicate_fields.get("thread_id", "")).strip()
+    if not expected:
+        return False
+    raw = signal_fm.get("raw") or {}
+    if isinstance(raw, dict):
+        for k in ("thread_id", "threadId"):
+            if _str_eq_ci(raw.get(k), expected):
+                return True
+    for k in ("thread_id", "threadId"):
+        if _str_eq_ci(signal_fm.get(k), expected):
+            return True
+    return False
+
+
+def _gmail_from_subject_match(predicate_fields: dict[str, Any], signal_fm: dict[str, Any]) -> bool:
+    expected_from = str(predicate_fields.get("from", "")).strip()
+    expected_subject_sub = str(predicate_fields.get("subject_contains", "")).strip()
+    if not expected_from or not expected_subject_sub:
+        return False
+    raw = signal_fm.get("raw") or {}
+    sender = ""
+    subject = ""
+    if isinstance(raw, dict):
+        sender = str(raw.get("from") or raw.get("sender") or "")
+        subject = str(raw.get("subject") or "")
+    sender = sender or str(signal_fm.get("from") or "")
+    subject = subject or str(signal_fm.get("subject") or signal_fm.get("display_headline") or "")
+    return _str_eq_ci(sender, expected_from) and _str_contains_ci(subject, expected_subject_sub)
+
+
+def _calendar_accept_match(predicate_fields: dict[str, Any], signal_fm: dict[str, Any]) -> bool:
+    expected = str(predicate_fields.get("event_id", "")).strip()
+    if not expected:
+        return False
+    raw = signal_fm.get("raw") or {}
+    event_id = ""
+    status = ""
+    if isinstance(raw, dict):
+        event_id = str(raw.get("event_id") or raw.get("id") or "")
+        status = str(raw.get("response_status") or raw.get("status") or "")
+    if not _str_eq_ci(event_id, expected):
+        return False
+    return status.lower() in ("accepted", "yes")
+
+
+def _payment_match(predicate_fields: dict[str, Any], signal_fm: dict[str, Any]) -> bool:
+    expected_merchant = str(predicate_fields.get("merchant", "")).strip()
+    if not expected_merchant:
+        return False
+    raw = signal_fm.get("raw") or {}
+    merchant = ""
+    amount = None
+    if isinstance(raw, dict):
+        merchant = str(raw.get("merchant") or raw.get("payee") or raw.get("description") or "")
+        amount_raw = raw.get("amount")
+        try:
+            amount = float(amount_raw) if amount_raw is not None else None
+        except (TypeError, ValueError):
+            amount = None
+    if not _str_contains_ci(merchant, expected_merchant):
+        return False
+    amount_min = predicate_fields.get("amount_min")
+    if amount_min is not None and amount is not None:
+        try:
+            if amount < float(amount_min):
+                return False
+        except (TypeError, ValueError):
+            pass
+    return True
+
+
+_PREDICATE_KINDS: dict[str, Any] = {
+    "gmail_thread_reply": _gmail_thread_match,
+    "gmail_from_subject": _gmail_from_subject_match,
+    "calendar_event_accepted": _calendar_accept_match,
+    "payment_to_merchant": _payment_match,
+}
+
+
+def evaluate_predicate(
+    predicate: Any, signal_fm: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Run a closure predicate against a signal's frontmatter.
+
+    Returns ``{"closes": bool, "confidence": float, "reasoning": str}``
+    on a recognised match, or ``None`` to indicate the predicate
+    didn't apply and the caller should fall back to the LLM matcher.
+
+    A predicate match returns confidence=1.0 — the predicate is
+    structured and deterministic, so we trust it. ``reasoning`` is
+    ``"predicate:<kind>"`` so the closure decision body records which
+    rule fired.
+    """
+    if not isinstance(predicate, dict):
+        return None
+    kind = str(predicate.get("kind", "")).strip()
+    if not kind:
+        return None
+    fn = _PREDICATE_KINDS.get(kind)
+    if fn is None:
+        return None
+    fields = predicate.get("fields") or {}
+    if not isinstance(fields, dict):
+        return None
+    try:
+        matched = bool(fn(fields, signal_fm))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("evaluate_predicate(%s) raised: %s", kind, exc)
+        return None
+    if not matched:
+        return {
+            "closes": False,
+            "confidence": 1.0,
+            "reasoning": f"predicate:{kind}:no_match",
+        }
+    return {
+        "closes": True,
+        "confidence": 1.0,
+        "reasoning": f"predicate:{kind}",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Data shapes (kept module-local; Temporal serialises plain dicts/lists).
 # ---------------------------------------------------------------------------
 
@@ -173,6 +349,7 @@ async def list_open_tasks() -> list[dict[str, Any]]:
             "matter_ref": matter_ref,
             "current_state": str(fm.get("current_state") or "").strip(),
             "as_of": str(fm.get("as_of") or "").strip(),
+            "closure_predicate": fm.get("closure_predicate"),
         })
     logger.info("list_open_tasks: %d open tasks", len(out))
     return out
@@ -232,11 +409,40 @@ async def list_recent_signals(lookback_min: int = DEFAULT_SIGNAL_LOOKBACK_MIN) -
             "kind": str(fm.get("source_type") or "").strip(),
             "created": created_raw,
             "matter_refs": matters,
+            # Surface the full frontmatter for predicate matching. Limit
+            # to a slim set of fields to keep the workflow payload small —
+            # this is what the predicate evaluator actually reads.
+            "fm": {
+                "raw": fm.get("raw"),
+                "thread_id": fm.get("thread_id"),
+                "from": fm.get("from"),
+                "subject": fm.get("subject"),
+                "source_type": fm.get("source_type"),
+                "display_headline": fm.get("display_headline"),
+            },
         })
     logger.info(
         "list_recent_signals: %d signals in last %d min", len(out), lookback_min,
     )
     return out
+
+
+@activity.defn
+async def assess_closure_predicate(
+    task: dict[str, Any],
+    signal: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Activity wrapper around ``evaluate_predicate`` for the workflow.
+
+    Returns the same shape as ``assess_closure`` (closes/confidence/
+    reasoning) on a recognised match, or ``None`` if no predicate
+    applies — caller falls back to the LLM matcher in that case.
+    """
+    predicate = task.get("closure_predicate")
+    if predicate is None:
+        return None
+    signal_fm = signal.get("fm") or {}
+    return evaluate_predicate(predicate, signal_fm)
 
 
 @activity.defn
