@@ -131,7 +131,13 @@ const KNOWN_TYPES = [
   //                       OR no matching instinct).
   //  - stream_event     : Phase 6.6 — unified replacement for event/ +
   //                       conversation/ once the migration script runs.
-  "signal", "needs_attention", "stream_event",
+  //  - signal_noise_pattern : ARCH-12 — materialised when the principal
+  //                       clicks Noise on /desk. signal_extract consults
+  //                       these before the LLM call to filter
+  //                       known-noise events at source. Missing this
+  //                       allowlist entry meant both the writer and the
+  //                       loader got 400 from /vault/list and /vault/records.
+  "signal", "needs_attention", "stream_event", "signal_noise_pattern",
 ];
 
 const STATUS_BY_TYPE: Record<string, string[]> = {
