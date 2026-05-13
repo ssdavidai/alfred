@@ -73,18 +73,37 @@ def _normalize_sender(raw: str) -> str:
     return raw.strip().lower()
 
 
-def derive_signature(event_fm: dict[str, Any]) -> dict[str, Any]:
+# Body-scrape regex for the "**From**: ..." line that
+# ``stream_vault._template_email`` writes when the gmail stream_event's
+# frontmatter omits the sender. Matches the same shape
+# ``decision_observations._sender_from_raw_quote`` consumes.
+_BODY_FROM_RE = re.compile(
+    r"\*\*From\*\*\s*:\s*(.+?)(?:\*\*To\*\*|\*\*Subject\*\*|\*\*Date\*\*|\n|$)",
+    re.IGNORECASE,
+)
+
+
+def derive_signature(
+    event_fm: dict[str, Any],
+    event_body: str | None = None,
+) -> dict[str, Any]:
     """Build a stable signature dict from a stream_event's frontmatter.
 
-    The signature shape depends on source_type. For gmail we anchor
-    on the sender; for gcal, the organiser + title keywords; for omi,
-    the speaker if known. Anything we can't anchor falls back to a
-    source_type + topic_tags signature, which is broader but better
-    than nothing.
+    The signature shape depends on source_type. For gmail we anchor on
+    the sender; for gcal, the organiser + title keywords. When neither
+    anchor fires we return ``kind: "unknown"`` so the legacy
+    ``event_matches_noise`` matcher skips the event entirely — a
+    single Noise click must never end up filtering a whole source_type.
+
+    ``event_body`` (optional) is the rendered markdown body of the
+    stream_event. The composio-gmail curator stamps the sender into
+    the body's ``**From**: ...`` line but NOT into frontmatter, so
+    without this argument every gmail event derived a broad
+    fallback signature. Callers that have the body should pass it.
 
     Returns ``{"kind": "...", "value": "...", "label": "..."}`` where
     ``label`` is a human-readable description for the noise_pattern's
-    name field.
+    name field. ``kind == "unknown"`` means "do not match anything".
     """
     source_type = str(event_fm.get("source_type") or event_fm.get("source") or "").lower()
     if source_type.startswith("composio-gmail") or source_type == "gmail":
@@ -100,6 +119,14 @@ def derive_signature(event_fm: dict[str, Any]) -> dict[str, Any]:
             or event_fm.get("From")
         )
         sender_norm = _normalize_sender(str(sender_raw or ""))
+        if not sender_norm and event_body:
+            # Frontmatter doesn't carry the sender — fall back to the
+            # ``**From**: ...`` line the email template writes into the
+            # body. Same shape ``_gmail_sender_domain`` in signals.py
+            # scrapes for the newsletter blocklist.
+            m = _BODY_FROM_RE.search(event_body)
+            if m:
+                sender_norm = _normalize_sender(m.group(1))
         if sender_norm:
             return {
                 "kind": "gmail_sender",
@@ -125,16 +152,17 @@ def derive_signature(event_fm: dict[str, Any]) -> dict[str, Any]:
                 "label": f"Calendar: {organiser or 'unknown'} / {title_keywords or 'unknown'}",
             }
 
-    # ----- Fallback: source_type + first topic tag -----
-    tags = event_fm.get("alfred_tags") or event_fm.get("topic_tags") or []
-    first_tag = ""
-    if isinstance(tags, list) and tags:
-        first_tag = str(tags[0]).strip().lower()
-    value = f"{source_type}|{first_tag}".strip("|")
+    # ----- Unanchored: refuse to filter. -----
+    # Previously this branch returned a broad ``source_type_topic``
+    # signature, which meant one Noise click on an unanchorable event
+    # could suppress an entire source_type's downstream events. The
+    # legacy ``event_matches_noise`` matcher requires exact ``kind``
+    # equality, so returning ``"unknown"`` keeps existing patterns
+    # inert against an event we can't anchor.
     return {
-        "kind": "source_type_topic",
-        "value": value or source_type or "unknown",
-        "label": f"{source_type or 'unknown'} / {first_tag or 'no-topic'}",
+        "kind": "unknown",
+        "value": "",
+        "label": f"{source_type or 'unknown'} / unanchored",
     }
 
 
@@ -324,16 +352,31 @@ async def load_active_noise_patterns() -> list[dict[str, Any]]:
 def event_matches_noise(
     event_fm: dict[str, Any],
     patterns: list[dict[str, Any]],
+    event_body: str | None = None,
 ) -> dict[str, Any] | None:
     """Return the matching pattern (or None) for an incoming event.
 
     Computes the event's signature using ``derive_signature`` and then
     looks for a pattern with matching kind + value. Same idea as the
     filter table: stable signature → stable lookup.
+
+    ``event_body`` is forwarded to ``derive_signature`` so the gmail
+    branch can recover the sender from the template-emitted
+    ``**From**: ...`` body line when frontmatter doesn't carry it.
+    Without this the gmail signature collapsed to the broad fallback
+    and a single Noise click filtered every gmail event (#262).
+    Patterns with ``signature_kind == "unknown"`` never match anything
+    because ``derive_signature`` no longer produces that kind for any
+    anchorable event.
     """
     if not patterns:
         return None
-    event_sig = derive_signature(event_fm)
+    event_sig = derive_signature(event_fm, event_body=event_body)
+    if event_sig["kind"] == "unknown":
+        # Refuse to match unanchored events even if some legacy
+        # pattern was stamped with ``unknown`` (we don't write that
+        # value, but be defensive).
+        return None
     for p in patterns:
         if p["kind"] == event_sig["kind"] and p["value"] == event_sig["value"]:
             return p

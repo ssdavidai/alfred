@@ -1195,9 +1195,19 @@ async def extract_signal_from_event(
             # date OBS-8. New Noise clicks no longer write these
             # (see decision_router.py); existing records keep filtering
             # until Sir disables them or they age out.
+            # We pass the event body so derive_signature can recover the
+            # gmail sender from the template-emitted ``**From**: ...``
+            # body line when frontmatter doesn't carry it (#262 — the
+            # composio-gmail curator never stamps `from` in frontmatter,
+            # so without the body every gmail event collapsed to the
+            # broad fallback signature).
             patterns = await load_active_noise_patterns()
             if patterns and event_fm_for_match:
-                matched = event_matches_noise(event_fm_for_match, patterns)
+                matched = event_matches_noise(
+                    event_fm_for_match,
+                    patterns,
+                    event_body=_event_body(event),
+                )
                 if matched is not None:
                     logger.info(
                         "signals.extract_signal_from_event: NOISE-FILTERED "
