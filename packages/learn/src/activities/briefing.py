@@ -1067,42 +1067,14 @@ async def compose_and_write_briefing(
         "---",
     ]
     fm_block = "\n".join(fm_lines)
-    title_line = f"# {slot_norm.title()} brief — {date_str}"
-    structured_block_lines = [
-        "<!--",
-        "  Structured shape (spec §8.2). The flat YAML above mirrors the",
-        "  load-bearing scalars; this block carries the nested join keys",
-        "  for the briefings index page.",
-        "",
-        f"  prior_briefing: {prior_briefing_path or 'null'}",
-        "  window:",
-        f"    start: {window_start_iso_norm}",
-        f"    end: {window_end_iso_norm}",
-        "  observed:",
-        "    matters:",
-    ]
-    for m in observed_matters:
-        audit = m.get("state_change_audit") or "null"
-        structured_block_lines.append(f"      - path: {m['path']}")
-        structured_block_lines.append(
-            f"        state_changed: {'true' if m['state_changed'] else 'false'}"
-        )
-        structured_block_lines.append(f"        state_change_audit: {audit}")
-    structured_block_lines.extend([
-        f"    signals_count: {signals_count_total}",
-        f"    decisions_count: {decisions_count_total}",
-        "-->",
-    ])
-    structured_block = "\n".join(structured_block_lines)
-
+    # The brief body is just the letterpress prose. No embedded HTML-comment
+    # structured-shape block — the structured join data lives in frontmatter
+    # via observed_matters_count + observed_matters_paths (below) so the body
+    # stays clean letterpress, not a YAML dump leaking into the page.
     content = "\n".join([
         fm_block,
         "",
-        title_line,
-        "",
         body_text,
-        "",
-        structured_block,
         "",
     ])
 
