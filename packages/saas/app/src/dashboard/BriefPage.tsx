@@ -290,7 +290,7 @@ function LegacyDigestEnvelope({
                                 ? setOpen(isOpen ? null : it.id)
                                 : undefined
                             }
-                            className="text-left font-body text-[19px] leading-[1.5] hover:opacity-80"
+                            className="text-left font-body text-[19px] leading-[1.5] hover:opacity-80 [&_p]:inline [&_strong]:font-bold [&_em]:italic"
                             style={{
                               borderBottom: isOpen
                                 ? "1px dotted var(--brass)"
@@ -299,11 +299,11 @@ function LegacyDigestEnvelope({
                             }}
                             aria-expanded={isOpen}
                           >
-                            {it.line}
+                            <Markdown source={it.line} useLiveResolver={false} />
                           </button>
                           {isOpen && hasReasoning && (
                             <div
-                              className="mt-3 marginalia border-l pl-4"
+                              className="mt-3 marginalia border-l pl-4 [&_strong]:font-bold [&_em]:italic"
                               style={{ borderColor: "var(--brass)" }}
                             >
                               <span
@@ -312,7 +312,7 @@ function LegacyDigestEnvelope({
                               >
                                 note
                               </span>
-                              {it.reasoning}
+                              <Markdown source={it.reasoning} useLiveResolver={false} />
                             </div>
                           )}
                         </div>

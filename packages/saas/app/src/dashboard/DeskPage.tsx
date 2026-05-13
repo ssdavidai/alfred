@@ -45,10 +45,13 @@ import {
   completeMyTodo,
   getPatternProposals,
   getInFlightDecisions,
+  getBriefings,
+  getBriefing,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { Seal } from "../client/components/ab/Seal";
 import { PageOverture } from "../client/components/ab/PageOverture";
+import { Markdown } from "../client/components/ab/Markdown";
 import { fadeUp, stagger } from "../client/lib/motion";
 import { enqueueDeskAction } from "./desk-action-queue";
 
@@ -234,6 +237,25 @@ export default function DeskPage() {
   // Ledger pagination — Sir's request: don't unspool the entire activity
   // history at once. Reveal in 20-row pages with a "Show more" cue.
   const [ledgerVisible, setLedgerVisible] = useState(20);
+
+  // Today's brief — most recent briefing snapshot, surfaced inline on the
+  // Desk so sir reads the morning letter before scanning the queue.
+  const { data: latestBriefings } = useQuery(
+    getBriefings,
+    { limit: 1 },
+    { refetchInterval: 5 * 60_000, retry: false },
+  );
+  const latestBriefSummary =
+    latestBriefings && Array.isArray(latestBriefings.briefings) && latestBriefings.briefings.length > 0
+      ? latestBriefings.briefings[0]
+      : null;
+  const latestBriefSlugDate = latestBriefSummary?.slug_date ?? null;
+  const { data: latestBriefFull } = useQuery(
+    getBriefing,
+    { slugDate: latestBriefSlugDate ?? "" },
+    { enabled: !!latestBriefSlugDate, retry: false },
+  );
+  const [briefExpanded, setBriefExpanded] = useState(false);
 
   const decisions: Decision[] = useMemo(() => {
     const out: Decision[] = [];
@@ -660,6 +682,66 @@ export default function DeskPage() {
             year: "numeric",
           })}
         />
+
+        {/* Today's brief — most recent BriefingWorkflow snapshot. Surfaces
+            the letter sir would otherwise have to navigate to /briefings for.
+            Hidden when no briefing exists (no fallback to legacy DailyDigest
+            here — that's /brief's job). */}
+        {latestBriefSummary && (
+          <section className="mb-16 mx-auto max-w-[760px] border-l-2 pl-6"
+                   style={{ borderColor: "var(--brass)" }}>
+            <div className="flex items-baseline justify-between gap-4 mb-3">
+              <div className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                   style={{ color: "var(--brass)" }}>
+                {latestBriefSummary.slot === "evening" ? "Evening Brief" : "Morning Brief"}
+                {latestBriefSummary.composed_at && (
+                  <span style={{ color: "var(--marginalia)", marginLeft: 12 }}>
+                    {new Date(String(latestBriefSummary.composed_at)).toLocaleString(undefined, {
+                      weekday: "short", day: "numeric", month: "short",
+                      hour: "2-digit", minute: "2-digit",
+                    })}
+                  </span>
+                )}
+              </div>
+              <Link to="/briefings"
+                    className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                    style={{ color: "var(--brass)" }}>
+                All briefings →
+              </Link>
+            </div>
+            {latestBriefFull?.body ? (
+              <div className="font-body text-[16px] leading-[1.65] max-w-[64ch]"
+                   style={{
+                     maxHeight: briefExpanded ? undefined : 220,
+                     overflow: briefExpanded ? "visible" : "hidden",
+                     position: "relative",
+                   }}>
+                <Markdown source={String(latestBriefFull.body)} useLiveResolver={false} />
+                {!briefExpanded && (
+                  <div style={{
+                    position: "absolute", bottom: 0, left: 0, right: 0, height: 60,
+                    background: "linear-gradient(to bottom, transparent, var(--paper))",
+                    pointerEvents: "none",
+                  }} />
+                )}
+              </div>
+            ) : (
+              <p className="font-body italic text-[15px]" style={{ color: "var(--marginalia)" }}>
+                Brief composer didn't produce prose for this slot.{" "}
+                <Link to="/briefings" style={{ color: "var(--brass)" }}>
+                  View matter snapshots →
+                </Link>
+              </p>
+            )}
+            {latestBriefFull?.body && String(latestBriefFull.body).length > 400 && (
+              <button onClick={() => setBriefExpanded((b) => !b)}
+                      className="font-mono text-[10px] uppercase tracking-[0.22em] mt-3"
+                      style={{ color: "var(--brass)" }}>
+                {briefExpanded ? "Collapse ↑" : "Read in full ↓"}
+              </button>
+            )}
+          </section>
+        )}
 
         {/* Featured decision */}
         <motion.div

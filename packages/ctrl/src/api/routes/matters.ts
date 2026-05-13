@@ -507,24 +507,33 @@ function buildMatterIndex(): MatterIndexResult {
     if (recType === "signal" || display.startsWith("signal/")) {
       signalsByPath.set(display, rec);
       const candidates = rec.fm.target_candidates;
-      if (Array.isArray(candidates)) {
-        const matched = new Set<string>();
+      // A signal carries an embedding-similarity ranking across all matters.
+      // Originally we attached it to EVERY candidate path, which polluted
+      // matter timelines with tangentially-related signals (e.g. a Miro
+      // password reset showed up on /matters/erste-agentic-coding-makerspace
+      // because Erste was its #2 candidate with score 0.19). Fix: only the
+      // top candidate, and only if its score clears MIN_SIGNAL_SCORE.
+      const MIN_SIGNAL_SCORE = 0.4;
+      if (Array.isArray(candidates) && candidates.length > 0) {
+        let top: { path: string; score: number } | null = null;
         for (const c of candidates) {
           if (!c || typeof c !== "object") continue;
-          const tp = String(
-            (c as { path?: unknown }).path ?? "",
-          );
+          const tp = String((c as { path?: unknown }).path ?? "");
+          const sc = Number((c as { score?: unknown }).score ?? 0);
           if (!tp.startsWith("matter/")) continue;
-          const id = extractMatterRef(tp);
-          if (id && byId.has(id)) matched.add(id);
+          if (Number.isNaN(sc)) continue;
+          if (top === null || sc > top.score) top = { path: tp, score: sc };
         }
-        for (const matterId of matched) {
-          let bucket = signalsByMatter.get(matterId);
-          if (!bucket) {
-            bucket = [];
-            signalsByMatter.set(matterId, bucket);
+        if (top !== null && top.score >= MIN_SIGNAL_SCORE) {
+          const id = extractMatterRef(top.path);
+          if (id && byId.has(id)) {
+            let bucket = signalsByMatter.get(id);
+            if (!bucket) {
+              bucket = [];
+              signalsByMatter.set(id, bucket);
+            }
+            bucket.push(display);
           }
-          bucket.push(display);
         }
       }
       // Signals don't participate in the legacy by-category buckets;
