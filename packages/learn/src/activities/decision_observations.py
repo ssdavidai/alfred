@@ -1,29 +1,28 @@
-"""Extract observations from decisions, materialize instincts from
-pattern proposals — the two activities that close the principal's
-training loop.
+"""Extract observations from decisions — close the training loop.
 
-The Desk is supposed to shrink. To make that happen, every click has
-to be more than a one-off side effect — it has to leave training data
-behind. Two activities here do that:
+Sir's Progressive Autonomy thesis: every Desk click is data. The
+former implementation (clerk-gated extractor) rejected ~97% of
+decisions as "not an observable fact" — 247 decisions on david
+produced 7 observations. That defeats the loop: the intuition engine
+has almost nothing to learn from.
 
-1. ``extract_observation_from_decision`` — runs after every Desk
-   click (inside the DecisionRouterWorkflow's route_decision). Asks
-   the clerk to distill the decision into a single ``fact about the
-   principal'' and writes it as ``observation/<ts>.md`` so the
-   existing intuition engine consumes it alongside observations from
-   chat / voice / curator-processed events. The decision is the atom;
-   the observation is the lesson.
+This module now produces **one observation per decision,
+deterministically.** No LLM gate. The decision IS the lesson:
+* the gesture itself (intent)
+* on a known source (source_kind)
+* about a specific thing (source_headline)
+* with optional context (note)
+* tied to a matter (matter_ref)
+* and, when traceable through needs_attention → signal, an underlying
+  ``sender`` for clustering.
 
-2. ``adopt_instinct_from_pattern`` — runs when the principal clicks
-   Delegate on a pattern-proposal card. Materializes the proposed
-   rule as a real ``instinct/<ts>.md`` record (status=active) so the
-   SignalRouterWorkflow's existing instinct matcher picks it up the
-   next time a similar signal arrives. The pattern proposal itself
-   gets flipped to status=adopted for the audit trail.
+The observation schema matches the canonical Option A shape: type,
+name, created, subject, fact, topic, source_kind, source_path,
+matter_ref, sender, intent, confidence, status.
 
-Both activities use httpx + ctrl-api routes; no new endpoints needed
-on the ctrl-api side — the vault POST + PATCH routes already
-exist.
+The pattern-proposal acceptor (formerly ``adopt_instinct_from_pattern``
+in this file) lives in decision_router.py now as a side-effect on
+intent=delegate when source=pattern_proposal — see OBS-5.
 """
 from __future__ import annotations
 
@@ -54,57 +53,118 @@ def _http() -> httpx.AsyncClient:
     )
 
 
-_OBSERVATION_PROMPT = """You are Alfred, the principal's agentic butler.
+# The old clerk-gated observation prompt lived here. Removed because
+# every decision now becomes an observation deterministically — the
+# clerk gate was filtering out 97% of decisions and starving the
+# intuition engine. See the new ``extract_observation_from_decision``
+# below for the deterministic builder.
 
-The principal just made a decision on their Desk. Look at it and tell
-me, in one sentence, what *fact about the principal* this decision
-implies. The goal is to surface implicit preferences and rules so the
-intuition engine can cluster them into instincts over time.
 
-Decision details:
+# Verb labels used in the deterministic fact sentence. Stable, human-
+# readable, and what the clusterer keys on when it later groups
+# observations by intent — keep the values short and predictable, not
+# user-facing prose.
+_INTENT_VERBS = {
+    "delegate": "Delegated to Alfred",
+    "defer": "Deferred",
+    "done": "Closed",
+    "take_mine": "Took personally",
+    "noise": "Marked as noise",
+    "approve": "Approved",
+    "auto_dispatch": "Acted autonomously",
+}
 
-- intent: {intent}
-- source type: {source}
-- card headline: {headline}
-- principal's note: {note}
-- matter: {matter_ref}
 
-Examples of good observations:
+# Topic heuristic — keep it short and stable so observations of the
+# same source-kind/intent combination cluster. The PatternDetection
+# clusterer uses (subject, topic, sender) as its primary signature.
+def _derive_topic(source: str, intent: str, headline: str) -> str:
+    if source == "needs_attention":
+        if intent == "noise":
+            return "inbound-noise"
+        if intent == "delegate":
+            return "delegate-to-alfred"
+        if intent == "defer":
+            return "defer-attention"
+        if intent in ("done", "take_mine"):
+            return "handle-attention"
+        return "attention-decision"
+    if source == "approval":
+        return "approval-response"
+    if source == "pattern_proposal":
+        return "pattern-approval" if intent in ("delegate", "approve") else "pattern-rejection"
+    if source == "to_do":
+        return "todo-followthrough"
+    if source == "judgment":
+        return "judgment-acknowledgement"
+    return f"{source or 'unknown'}-{intent or 'decision'}"
 
-- "Principal categorizes recurring software subscriptions under the
-  household cash-flow matter, not under marketing."
-- "Principal defers calendar invites from sales prospects that arrive
-  without a clear agenda."
-- "Principal closes Zoom storage warnings without action until they
-  reach 90% capacity."
 
-Examples of BAD observations (skip these — emit null):
+async def _resolve_sender_for_needs_attention(
+    client: httpx.AsyncClient, source_record: str,
+) -> str:
+    """Best-effort: follow needs_attention → source_signal → sender.
 
-- "Principal clicked delete." (no rule, just behaviour)
-- "Principal acted on the card." (vacuous)
-
-If the decision is too thin (no note, generic source) to support a
-real observation, emit `{{"fact": null}}` and don't strain.
-
-Emit STRICT JSON, no preamble:
-
-{{
-  "fact": "<one sentence stating the implicit rule, or null>",
-  "topic": "<2-5 word topic tag, like 'expense categorization', 'meeting filters', 'subscription noise'>"
-}}
-"""
+    The decision's source_record is a path like
+    ``needs_attention/<id>.md``. The NA frontmatter carries
+    ``source_signal_path`` pointing at the underlying signal whose
+    frontmatter carries the sender. Two cheap GETs against ctrl-api
+    (both cached by the in-process mtime cache after the first read).
+    Returns "" if any step fails — sender is optional on the
+    observation, not required.
+    """
+    if not source_record.startswith("needs_attention/"):
+        return ""
+    try:
+        resp = await client.get(f"/api/v1/vault/records/{source_record}")
+        if resp.status_code >= 400:
+            return ""
+        na_fm = (resp.json().get("frontmatter") or {})
+    except Exception:  # noqa: BLE001
+        return ""
+    sig_path = str(na_fm.get("source_signal_path") or "").strip()
+    if not sig_path:
+        return ""
+    try:
+        sig_resp = await client.get(f"/api/v1/vault/records/{sig_path}")
+        if sig_resp.status_code >= 400:
+            return ""
+        sig_fm = (sig_resp.json().get("frontmatter") or {})
+    except Exception:  # noqa: BLE001
+        return ""
+    raw = sig_fm.get("raw") or {}
+    if isinstance(raw, dict):
+        for k in ("from", "From", "sender", "from_email", "organizer", "organiser"):
+            v = raw.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    for k in ("from", "sender", "organizer", "organiser"):
+        v = sig_fm.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
 
 
 @activity.defn
 async def extract_observation_from_decision(
     decision: dict[str, Any],
 ) -> dict[str, Any]:
-    """Turn a decision into an observation record consumable by the
-    existing intuition engine.
+    """Deterministically derive an observation from a decision.
 
-    Returns ``{"observation_path": "observation/<ts>-<short>.md"}`` on
-    write or ``{"observation_path": None, "reason": "..."}`` when the
-    decision was too thin to support an observation.
+    Every decision becomes an observation. No LLM gate; the gesture
+    itself is the lesson. The returned shape is unchanged from the
+    legacy clerk-gated version so the single caller in
+    decision_router.py (route_decision) continues to stamp
+    ``side_effects["observation_path"]`` correctly:
+
+      success → {"observation_path": "<path>", "fact": <str>, "topic": <str>}
+      vault-write failure → {"observation_path": None, "reason": "<...>"}
+
+    There is no longer a "thin decision" return path — every decision
+    produces a record. The fact sentence is deterministic from
+    (intent, source, headline, note). If the decision's source is a
+    needs_attention card, we follow the back-pointer to the underlying
+    signal to enrich the ``sender`` field for clustering.
     """
     intent = str(decision.get("intent") or "").strip()
     source = str(decision.get("source") or "").strip()
@@ -112,78 +172,69 @@ async def extract_observation_from_decision(
     headline = str(decision.get("source_headline") or "").strip()
     matter_ref = str(decision.get("matter_ref") or "").strip()
     decision_id = str(decision.get("id") or "")
+    source_record = str(decision.get("source_record") or "").strip()
+    principal_actor = str(decision.get("principal") or "principal").strip().lower() or "principal"
 
-    # Skip totally thin decisions — no note, generic delete on a
-    # source that doesn't carry headline context.
-    if not note and not headline and source != "pattern_proposal":
-        return {"observation_path": None, "reason": "no signal to extract"}
+    # Build the fact sentence deterministically. Schema:
+    #   "<verb> on <source_kind> '<headline>' [note: <note>]"
+    verb = _INTENT_VERBS.get(intent, f"Decided ({intent})") if intent else "Decided"
+    src_label = source or "unknown"
+    fact_parts = [f"{verb} on {src_label}"]
+    if headline:
+        fact_parts.append(f"'{headline}'")
+    if note:
+        fact_parts.append(f"[note: {note}]")
+    fact_clean = " ".join(fact_parts)
 
-    prompt = _OBSERVATION_PROMPT.format(
-        intent=intent or "(none)",
-        source=source or "(none)",
-        headline=headline or "(none)",
-        note=note or "(none)",
-        matter_ref=matter_ref or "(none)",
+    topic = _derive_topic(source, intent, headline)
+
+    # Enrich with sender when traceable. Cheap and cached.
+    sender = ""
+    try:
+        async with _http() as client:
+            sender = await _resolve_sender_for_needs_attention(client, source_record)
+    except Exception as exc:  # noqa: BLE001
+        # Sender is optional; an enrichment failure must not block
+        # the observation write.
+        logger.debug("extract_observation: sender enrichment skipped: %s", exc)
+
+    # The subject says "who is the observation about". Autonomous
+    # instinct-fired decisions carry principal=alfred (set by
+    # signal_router in OBS-6); record that distinction so the clusterer
+    # can separate "what Sir does" from "what Alfred did on Sir's
+    # behalf" — both feed learning, but in different ways.
+    subject = (
+        "principal_via_alfred" if principal_actor in ("alfred", "agent") else "principal"
     )
 
-    try:
-        from src.activities.clerk import _call_clerk
-        result = await _call_clerk(prompt)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("extract_observation: clerk failed: %s", exc)
-        return {"observation_path": None, "reason": f"clerk error: {exc}"}
-
-    if not isinstance(result, dict):
-        return {"observation_path": None, "reason": "non-dict response"}
-
-    fact = result.get("fact")
-    if not isinstance(fact, str) or not fact.strip():
-        return {"observation_path": None, "reason": "no observable fact"}
-    topic = str(result.get("topic") or "").strip()
-    fact_clean = fact.strip()
-
-    # Write the observation record. The on-disk filename keeps the
-    # canonical `<ts>-<short>` shape so chronological ordering works,
-    # but the human-readable `name` field is the fact itself (truncated
-    # to a sane vault-tree label). Without this, vault tree views show
-    # the timestamp and the reader has to open the body to learn what
-    # the observation says.
     now_iso = datetime.now(timezone.utc).isoformat()
     ts = now_iso.replace(":", "-").replace(".", "-")[:19] + "Z"
     short = hashlib.sha256(
         f"{decision_id}\x00{fact_clean}".encode("utf-8")
     ).hexdigest()[:8]
     name = f"{ts}-{short}"
-    # Truncate fact for the name field — vault tree truncates anyway,
-    # this just makes the on-disk frontmatter clean.
     name_label = fact_clean if len(fact_clean) <= 90 else fact_clean[:87] + "..."
+
     fm_lines = [
         "---",
         'type: "observation"',
-        f'name: {json.dumps(name_label)}',
+        f"name: {json.dumps(name_label)}",
         f'created: "{now_iso}"',
-        'subject: "principal"',
-        f'fact: {json.dumps(fact_clean)}',
-        f'topic: {json.dumps(topic)}',
-        f'source_kind: "decision"',
+        f"subject: {json.dumps(subject)}",
+        f"fact: {json.dumps(fact_clean)}",
+        f"topic: {json.dumps(topic)}",
+        'source_kind: "decision"',
         f'source_path: "decision/{decision_id}.md"',
-        f'matter_ref: {json.dumps(matter_ref) if matter_ref else "null"}',
+        f"matter_ref: {json.dumps(matter_ref) if matter_ref else 'null'}",
+        f"intent: {json.dumps(intent) if intent else 'null'}",
+        f"sender: {json.dumps(sender) if sender else 'null'}",
+        "confidence: 1.0",
         'status: "open"',
         "---",
         "",
-        # Body lists the source decision context. No redundant heading
-        # repeating the fact — the frontmatter already carries it.
         f"Extracted from decision `decision/{decision_id}.md` at {now_iso}.",
-        f"Topic: **{topic}**" if topic else "",
-        "",
-        "*Source decision details:*",
-        f"- intent: {intent}",
-        f"- source: {source}",
-        f"- headline: {headline}" if headline else "",
-        f"- note: {note}" if note else "",
-        f"- matter: {matter_ref}" if matter_ref else "",
     ]
-    content = "\n".join([line for line in fm_lines if line != ""]) + "\n"
+    content = "\n".join(line for line in fm_lines if line != "") + "\n"
 
     from src.utils.vault_client import VaultClient
     cfg = load_config()
@@ -199,8 +250,8 @@ async def extract_observation_from_decision(
         await client.close()
 
     logger.info(
-        "extract_observation: decision=%s -> %s (%s)",
-        decision_id, path, topic or fact_clean[:40],
+        "extract_observation: decision=%s -> %s (intent=%s sender=%s)",
+        decision_id, path, intent, sender or "-",
     )
     return {"observation_path": path, "fact": fact_clean, "topic": topic}
 
