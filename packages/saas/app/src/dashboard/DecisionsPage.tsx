@@ -12,16 +12,22 @@
 //
 // Filter pills toggle visibility per outcome. "All" is the default.
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   useQuery,
   getRecentJudgments,
   getStewardFeed,
   getRecentDecisions,
+  getStateChanges,
+  getStateChangeSources,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 
 type Outcome = "Handled" | "Held" | "Asked";
 type FilterPill = "All" | Outcome;
+// Phase I (#897 §11.2): top-level tab — Decisions ledger (legacy) vs
+// the new cross-target State Changes feed shipped by Phase A (#889).
+type TopTab = "decisions" | "state_changes";
 // Decision lifecycle states — surfaced as small badges so the principal
 // can scan what's settled vs in-flight in the ledger.
 type DecisionState =
@@ -117,6 +123,9 @@ export default function DecisionsPage() {
   );
 
   const [filter, setFilter] = useState<FilterPill>("All");
+  // Phase I top-level tab. "decisions" = legacy HANDLED/HELD/ASKED ledger;
+  // "state_changes" = cross-target state_change feed.
+  const [topTab, setTopTab] = useState<TopTab>("decisions");
 
   const rows: Row[] = useMemo(() => {
     const out: Row[] = [];
@@ -263,8 +272,77 @@ export default function DecisionsPage() {
         >
           The ledger
         </div>
-        <h1 className="font-display text-6xl italic mb-12">Decisions</h1>
+        <h1 className="font-display text-6xl italic mb-8">Decisions</h1>
 
+        {/* Phase I top-level tabs */}
+        <div className="flex items-baseline gap-8 mb-10 border-b border-rule pb-2">
+          {(
+            [
+              ["decisions", "Decisions"],
+              ["state_changes", "State Changes"],
+            ] as Array<[TopTab, string]>
+          ).map(([id, label]) => {
+            const active = topTab === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setTopTab(id)}
+                className="font-mono text-[11px] uppercase tracking-[0.28em] pb-2"
+                style={{
+                  color: active ? "var(--brass)" : "var(--marginalia)",
+                  borderBottom: active
+                    ? "1px solid var(--brass)"
+                    : "1px solid transparent",
+                  marginBottom: -9,
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        {topTab === "state_changes" ? <StateChangesTab /> : null}
+        {topTab === "decisions" ? <DecisionsLedger
+          rows={rows}
+          filtered={filtered}
+          filter={filter}
+          setFilter={setFilter}
+          days={days}
+          totals={totals}
+          max={max}
+        /> : null}
+      </section>
+    </Frame>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Decisions ledger — the legacy HANDLED/HELD/ASKED feed + 30-day chart.
+// Extracted from the page body so the State Changes tab can render
+// independently without duplicating the existing layout.
+// ---------------------------------------------------------------------------
+
+function DecisionsLedger({
+  rows,
+  filtered,
+  filter,
+  setFilter,
+  days,
+  totals,
+  max,
+}: {
+  rows: Row[];
+  filtered: Row[];
+  filter: FilterPill;
+  setFilter: (f: FilterPill) => void;
+  days: { handled: number; held: number; asked: number }[];
+  totals: { handled: number; held: number; asked: number };
+  max: number;
+}) {
+  return (
+    <>
         <div className="border border-rule p-6 mb-10">
           <div
             className="font-mono text-[10px] uppercase tracking-[0.28em] mb-4"
@@ -441,9 +519,235 @@ export default function DecisionsPage() {
             </tbody>
           </table>
         )}
-      </section>
-    </Frame>
+    </>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Phase I (#897 §11.2): State Changes tab.
+//
+// Cross-target chronological feed of every state_change timeline entry on
+// matter/* and task/* records. Wraps getStateChanges + getStateChangeSources
+// (state/operations.ts). Filter pills are derived live from the sources
+// histogram; counts come straight from the ctrl-api response.
+//
+// Pagination: 50 per fetch, "Load more" extends the page. The ctrl-api
+// endpoint caps `limit` at 200; we hold at 50 and let the user step.
+// ---------------------------------------------------------------------------
+
+interface StateChangeRow {
+  target_path: string;
+  when: string;
+  id: string;
+  source: string;
+  reason: string;
+  confidence: number;
+  mode: "shadow" | "live";
+  audit_record: string;
+}
+
+function StateChangesTab() {
+  const [sourceFilter, setSourceFilter] = useState<string | null>(null);
+  const [limit, setLimit] = useState<number>(50);
+
+  const { data: sourcesData } = useQuery(
+    getStateChangeSources,
+    undefined,
+    { refetchInterval: false, staleTime: 5 * 60_000, retry: false },
+  );
+  const sources: Array<{ source: string; count: number; last_seen: string }> =
+    Array.isArray((sourcesData as any)?.sources)
+      ? (sourcesData as any).sources
+      : [];
+
+  const { data: entriesData, isLoading } = useQuery(
+    getStateChanges,
+    { source: sourceFilter ?? undefined, limit },
+    { refetchInterval: 60_000, retry: false },
+  );
+  const entries: StateChangeRow[] = Array.isArray(
+    (entriesData as any)?.entries,
+  )
+    ? (entriesData as any).entries
+    : [];
+  const total = Number((entriesData as any)?.total ?? entries.length);
+
+  return (
+    <>
+      {/* Filter pills — live from the sources histogram */}
+      <div className="flex items-baseline gap-x-5 gap-y-2 mb-6 flex-wrap">
+        <button
+          type="button"
+          onClick={() => setSourceFilter(null)}
+          className="font-mono text-[10px] uppercase tracking-[0.22em] pb-0.5"
+          style={{
+            color: sourceFilter === null ? "var(--brass)" : "var(--marginalia)",
+            borderBottom:
+              sourceFilter === null
+                ? "1px solid var(--brass)"
+                : "1px solid transparent",
+          }}
+        >
+          All
+        </button>
+        {sources.length === 0 ? (
+          <span
+            className="font-body italic text-[14px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            No state-change sources seen in the last 30 days.
+          </span>
+        ) : (
+          sources.map((s) => {
+            const active = sourceFilter === s.source;
+            return (
+              <button
+                key={s.source}
+                type="button"
+                onClick={() => setSourceFilter(active ? null : s.source)}
+                className="font-mono text-[10px] uppercase tracking-[0.22em] pb-0.5"
+                style={{
+                  color: active ? "var(--brass)" : "var(--marginalia)",
+                  borderBottom: active
+                    ? "1px solid var(--brass)"
+                    : "1px solid transparent",
+                }}
+              >
+                {s.source} · {s.count}
+              </button>
+            );
+          })
+        )}
+      </div>
+
+      {/* Entries table */}
+      {isLoading && entries.length === 0 ? (
+        <p
+          className="font-body italic text-[16px] py-8"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Reading state changes…
+        </p>
+      ) : entries.length === 0 ? (
+        <p
+          className="font-body italic text-[16px] py-8"
+          style={{ color: "var(--marginalia)" }}
+        >
+          {sourceFilter
+            ? `No state changes from ${sourceFilter}.`
+            : "No state changes recorded yet."}
+        </p>
+      ) : (
+        <>
+          <table className="w-full font-mono text-[12px]">
+            <thead>
+              <tr
+                className="border-y border-rule"
+                style={{ color: "var(--marginalia)" }}
+              >
+                <th className="text-left py-3 uppercase tracking-[0.2em] text-[10px] font-normal w-[110px]">
+                  When
+                </th>
+                <th className="text-left py-3 uppercase tracking-[0.2em] text-[10px] font-normal w-[180px]">
+                  Source
+                </th>
+                <th className="text-left py-3 uppercase tracking-[0.2em] text-[10px] font-normal">
+                  Target
+                </th>
+                <th className="text-left py-3 uppercase tracking-[0.2em] text-[10px] font-normal">
+                  Reason
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((e) => {
+                const targetSlug = e.target_path
+                  .replace(/^matter\//, "")
+                  .replace(/^task\//, "")
+                  .replace(/\.md$/, "");
+                const isMatter = e.target_path.startsWith("matter/");
+                const targetHref = isMatter
+                  ? `/matters/${encodeURIComponent(targetSlug)}`
+                  : `/vault?slug=${encodeURIComponent(e.target_path.replace(/\.md$/, ""))}`;
+                return (
+                  <tr
+                    key={e.id || `${e.target_path}-${e.when}`}
+                    className="border-b border-rule"
+                  >
+                    <td className="py-3" style={{ color: "var(--marginalia)" }}>
+                      {fmtRelativeWhen(e.when)}
+                    </td>
+                    <td className="py-3" style={{ color: "var(--brass)" }}>
+                      {e.source}
+                      {e.mode === "shadow" && (
+                        <span
+                          className="ml-2 font-mono text-[9px] uppercase tracking-[0.2em]"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          shadow
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-3">
+                      <Link to={targetHref} style={{ color: "var(--ink)" }}>
+                        {targetSlug}
+                      </Link>
+                    </td>
+                    <td className="py-3 font-body text-[14px]">
+                      {truncateLineLocal(e.reason, 100)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div className="mt-4 flex items-baseline justify-between">
+            <span
+              className="font-mono text-[10px] uppercase tracking-[0.22em]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {entries.length} of {total}
+            </span>
+            {entries.length < total && (
+              <button
+                type="button"
+                onClick={() => setLimit((l) => Math.min(l + 50, 200))}
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--brass)" }}
+              >
+                Load more →
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+function fmtRelativeWhen(value: string): string {
+  if (!value) return "";
+  try {
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return value;
+    const diffMs = Date.now() - d.getTime();
+    if (diffMs < 60_000) return "just now";
+    const mins = Math.floor(diffMs / 60_000);
+    if (mins < 60) return `${mins} min ago`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 48) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 14) return `${days}d ago`;
+    return d.toLocaleDateString(undefined, { day: "2-digit", month: "short" });
+  } catch {
+    return value;
+  }
+}
+
+function truncateLineLocal(s: string, limit = 100): string {
+  const flat = (s || "").replace(/\s+/g, " ").trim();
+  if (flat.length <= limit) return flat;
+  return flat.slice(0, limit - 1).trimEnd() + "…";
 }
 
 /** Verb the principal sees in the ledger for each decision intent. */

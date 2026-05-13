@@ -14,7 +14,7 @@
 // Stage tier (`chore.state`) is intentionally NOT shown — chores are
 // recurring schedules, not lifecycle objects. The visible status comes
 // from frontmatter.status (active / paused / completed).
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   useQuery,
@@ -22,10 +22,12 @@ import {
   getChoreDetail2,
   getChoreSource,
   getChoreRuns,
+  getChoreScheduleFires,
   pauseChore,
   resumeChore,
   deleteChore,
   triggerChore,
+  patchChore,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { Markdown } from "../client/components/ab/Markdown";
@@ -810,6 +812,13 @@ export default function ChoreDetailPage2() {
           </section>
         )}
 
+        {/* Schedule editor (Phase I — #897) */}
+        <ScheduleEditorSection
+          slug={safeSlug}
+          currentCron={schedule}
+          onSaved={refetchChore}
+        />
+
         {/* Capabilities — activities, external tools, LLM */}
         <CapabilitiesPanel fm={fm} />
 
@@ -1024,6 +1033,328 @@ export default function ChoreDetailPage2() {
         </section>
       </section>
     </Frame>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Schedule editor (STATE-MUTATION Phase I — #897, spec §8.4)
+// ---------------------------------------------------------------------------
+//
+// 5-field cron input, three preset buttons, a humanised description, and a
+// next-5-fires preview from the cron/preview ctrl-api endpoint. Save fires
+// `patchChore({ slug, schedule })` against the legacy PATCH; this is fine
+// because `schedule` is NOT a declared state field on chore records
+// (spec §2 — chore mutations record via record_chore_run, not the
+// state-mutator contract).
+
+const SCHEDULE_PRESETS: { label: string; cron: string }[] = [
+  { label: "Daily at 7am UTC", cron: "0 7 * * *" },
+  { label: "Twice daily 7am + 6pm", cron: "0 7,18 * * *" },
+  { label: "Weekdays only at 9am", cron: "0 9 * * 1-5" },
+];
+
+function fmtFireTime(iso: string): { abs: string; rel: string } {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return { abs: iso, rel: "" };
+    const abs = d.toLocaleString("en-GB", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZone: "UTC",
+    });
+    const diffMs = d.getTime() - Date.now();
+    let rel = "";
+    if (diffMs <= 0) {
+      rel = "imminent";
+    } else {
+      const mins = Math.floor(diffMs / 60_000);
+      if (mins < 60) rel = `in ${mins} min`;
+      else {
+        const hours = Math.floor(mins / 60);
+        if (hours < 48) rel = `in ${hours}h`;
+        else rel = `in ${Math.floor(hours / 24)}d`;
+      }
+    }
+    return { abs: `${abs} UTC`, rel };
+  } catch {
+    return { abs: iso, rel: "" };
+  }
+}
+
+function ScheduleEditorSection({
+  slug,
+  currentCron,
+  onSaved,
+}: {
+  slug: string;
+  currentCron: string;
+  onSaved: () => Promise<unknown> | unknown;
+}) {
+  const [draft, setDraft] = useState<string>(currentCron || "");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const cronInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Resync the draft when the upstream record refreshes.
+  useEffect(() => {
+    setDraft(currentCron || "");
+  }, [currentCron]);
+
+  const trimmedDraft = draft.trim();
+  const dirty = trimmedDraft !== (currentCron || "").trim();
+
+  // Live cron-preview query. We always ask the server — its parser is the
+  // canonical one (cron.ts on the tenant). Empty drafts skip the call;
+  // invalid drafts surface the error inline below the input.
+  const {
+    data: firesData,
+    isLoading: firesLoading,
+  } = useQuery(
+    getChoreScheduleFires,
+    { slug, cron: trimmedDraft, count: 5 },
+    {
+      enabled: Boolean(trimmedDraft),
+      // 30s — the cron preview is purely a function of `expr`, so we
+      // don't need fresher than that.
+      staleTime: 30_000,
+      refetchInterval: false,
+      retry: false,
+    },
+  );
+
+  const fires: string[] = Array.isArray((firesData as any)?.fires)
+    ? (firesData as any).fires
+    : [];
+  const validationError: string | null =
+    typeof (firesData as any)?.error === "string" && (firesData as any).error
+      ? (firesData as any).error
+      : null;
+  const cronValid = Boolean(trimmedDraft) && fires.length > 0 && !validationError;
+
+  function applyPreset(cron: string) {
+    setDraft(cron);
+    setSaveError(null);
+    setSavedFlash(false);
+  }
+
+  function focusCustom() {
+    setSaveError(null);
+    setSavedFlash(false);
+    cronInputRef.current?.focus();
+    cronInputRef.current?.select();
+  }
+
+  async function save() {
+    if (!cronValid || !dirty) return;
+    setSaving(true);
+    setSaveError(null);
+    setSavedFlash(false);
+    try {
+      await patchChore({ slug, schedule: trimmedDraft });
+      setSavedFlash(true);
+      await Promise.resolve(onSaved());
+      // Clear the flash after a brief moment so it's a confirmation, not
+      // a sticky banner.
+      setTimeout(() => setSavedFlash(false), 2500);
+    } catch (e: any) {
+      setSaveError(e?.message ?? "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="mb-12">
+      <h2
+        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-4 pb-2 border-b border-rule"
+        style={{ color: "var(--brass)" }}
+      >
+        Schedule
+      </h2>
+
+      {/* Preset buttons */}
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-3"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Presets
+      </div>
+      <div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 mb-6">
+        {SCHEDULE_PRESETS.map((p) => {
+          const active = trimmedDraft === p.cron;
+          return (
+            <button
+              key={p.cron}
+              type="button"
+              onClick={() => applyPreset(p.cron)}
+              className="font-mono text-[11px] uppercase tracking-[0.22em] pb-0.5"
+              style={{
+                color: active ? "var(--brass)" : "var(--marginalia)",
+                borderBottom: active
+                  ? "1px solid var(--brass)"
+                  : "1px solid transparent",
+              }}
+            >
+              {p.label}
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          onClick={focusCustom}
+          className="font-mono text-[11px] uppercase tracking-[0.22em] pb-0.5"
+          style={{
+            color: "var(--marginalia)",
+            borderBottom: "1px solid transparent",
+          }}
+        >
+          Custom →
+        </button>
+      </div>
+
+      {/* Cron input + humanised description */}
+      <label
+        className="block font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Cron expression (5 fields, UTC)
+      </label>
+      <input
+        ref={cronInputRef}
+        type="text"
+        value={draft}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          setSaveError(null);
+          setSavedFlash(false);
+        }}
+        placeholder="e.g. 0 7 * * *"
+        spellCheck={false}
+        className="w-full bg-transparent outline-none border px-3 py-2 font-mono text-[14px]"
+        style={{
+          borderColor:
+            trimmedDraft && validationError
+              ? "#c4504a"
+              : "var(--brass)",
+          color: "var(--ink)",
+        }}
+      />
+      {trimmedDraft && validationError ? (
+        <p
+          className="font-body text-[13px] mt-2"
+          style={{ color: "#c4504a" }}
+        >
+          {validationError}
+        </p>
+      ) : trimmedDraft ? (
+        <p
+          className="font-body italic text-[14px] mt-2"
+          style={{ color: "var(--marginalia)" }}
+        >
+          {describeCron(trimmedDraft)}
+        </p>
+      ) : null}
+
+      {/* Next-5 fires preview */}
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em] mt-6 mb-2"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Next 5 fires
+      </div>
+      {!trimmedDraft ? (
+        <p
+          className="font-body italic text-[14px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Enter a cron expression to see when it will fire.
+        </p>
+      ) : firesLoading && fires.length === 0 ? (
+        <p
+          className="font-body italic text-[14px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Computing…
+        </p>
+      ) : fires.length === 0 ? (
+        <p
+          className="font-body italic text-[14px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          No upcoming fires within 5 years — the expression may never match.
+        </p>
+      ) : (
+        <ul className="divide-y divide-rule">
+          {fires.map((iso, i) => {
+            const f = fmtFireTime(iso);
+            return (
+              <li
+                key={`${iso}-${i}`}
+                className="py-2 grid grid-cols-[1fr_auto] gap-3 items-baseline"
+              >
+                <span className="font-mono text-[12px]" style={{ color: "var(--ink)" }}>
+                  {f.abs}
+                </span>
+                <span
+                  className="font-mono text-[10px] uppercase tracking-[0.18em]"
+                  style={{ color: "var(--brass)" }}
+                >
+                  {f.rel}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      {/* Save row */}
+      <div className="mt-6 flex items-baseline gap-4">
+        <button
+          type="button"
+          onClick={save}
+          disabled={!dirty || !cronValid || saving}
+          className="btn-instruction"
+          style={{ fontSize: 18 }}
+        >
+          {saving ? "Saving…" : "Save schedule"}
+        </button>
+        {dirty && (
+          <button
+            type="button"
+            onClick={() => {
+              setDraft(currentCron || "");
+              setSaveError(null);
+              setSavedFlash(false);
+            }}
+            disabled={saving}
+            className="font-mono text-[10px] uppercase tracking-[0.22em]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Revert
+          </button>
+        )}
+        {savedFlash && (
+          <span
+            className="font-mono text-[10px] uppercase tracking-[0.22em]"
+            style={{ color: "var(--brass)" }}
+          >
+            Saved.
+          </span>
+        )}
+        {saveError && (
+          <span
+            className="font-body text-[13px]"
+            style={{ color: "#c4504a" }}
+          >
+            {saveError}
+          </span>
+        )}
+      </div>
+    </section>
   );
 }
 

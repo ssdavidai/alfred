@@ -49,19 +49,33 @@ import {
 // Dotted identifier: lowercase letter start, lowercase/digit/underscore
 // segments separated by dots, at least one dot required. Forces a
 // namespace.action shape so the /sources histogram is meaningful.
+//
+// Segments AFTER the first dot may also contain ASCII hyphens — this is
+// the minimal widening required by Phase F (#894) to admit
+// `manual.<wasp-user-id>` where Wasp's `User.id` is a lowercase UUID v4
+// (e.g. `8a3c1d2e-4b5f-49a7-9c10-7d8e2c1f0a4b`). Hyphens are still
+// path-injection-safe: they can't introduce `/`, `\`, `.`, or `..` into
+// the file path because the slug builder in `slugForSource` replaces
+// dots with hyphens and otherwise only retains `[a-z0-9_-]`. Hyphens
+// remain disallowed in the namespace prefix to keep identifiers like
+// `briefing.morning` canonical (no `brief-ing.morning`).
+//
 // Examples that match:
 //   briefing.morning
 //   steward.evaluate_task
 //   decision_router.promote
 //   manual.user123
+//   manual.8a3c1d2e-4b5f-49a7-9c10-7d8e2c1f0a4b
 //   chore_actions.recompute_health
 // Examples that reject:
 //   STEWARD              (uppercase + no dot)
 //   foo                  (no dot)
 //   .foo                 (leading dot)
 //   foo.                 (trailing dot)
+//   manual.UPPER         (uppercase segment)
+//   foo-bar.baz          (hyphen in the prefix segment)
 // ---------------------------------------------------------------------------
-const SOURCE_RE = /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/;
+const SOURCE_RE = /^[a-z][a-z0-9_]*(\.[a-z0-9_-]+)+$/;
 
 // Per-target ulid id length (Crockford-base32, 26 chars). Same encoding
 // as the canonical `ulid` package — first 10 chars are the millisecond
