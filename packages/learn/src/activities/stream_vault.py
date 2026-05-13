@@ -79,14 +79,23 @@ def _resolve_source_type(event: dict[str, Any], legacy_record_type: str) -> str:
     """Pick the canonical Phase 6 source_type for ``event``.
 
     Inspection order:
-      1. ``stream_type`` on the event payload — canonical and
-         already normalised by the upstream pull layer.
-      2. ``source_id`` / ``source_ref`` heuristics — match the
+      1. ``source_ref`` prefix — authoritative content classifier
+         set by the puller from the upstream API contract (e.g.
+         ``gmail:<id>`` for a Gmail message). Trusted over
+         ``stream_type`` because ``stream_type`` carries the stream's
+         transport marker for pull-mode (``scheduled``), not its
+         content. See historic bug: 359 gmail records on david
+         were typed as ``gcal`` because the puller passes
+         ``Stream.type`` (= ``scheduled`` for every pull stream)
+         as ``stream_type``, and ``scheduled`` used to be in the
+         calendar allowlist below.
+      2. ``stream_type`` on the event payload.
+      3. ``source_id`` / ``source_ref`` heuristics — match the
          system-openclaw-* / agent: prefixes the openclaw chat
          emitter writes.
-      3. ``metadata.event_type`` — pre-canonicalised stream_type
+      4. ``metadata.event_type`` — pre-canonicalised stream_type
          for older sources.
-      4. Legacy ``record_type`` from the template dispatch (only
+      5. Legacy ``record_type`` from the template dispatch (only
          "conversation" buys "omi" as a default).
 
     The output is always one of the Phase 6 PRE_FILTER_ALLOWLIST
@@ -101,8 +110,29 @@ def _resolve_source_type(event: dict[str, Any], legacy_record_type: str) -> str:
     if not isinstance(raw, dict):
         raw = {}
     event_type = str(metadata.get("event_type") or "").strip().lower()
+    source_ref = str(event.get("source_ref") or "").strip().lower()
 
-    # Direct stream_type matches.
+    # 1. source_ref prefix — authoritative content classifier from
+    #    the upstream API contract. The puller passes Stream.type
+    #    (which is the *transport* marker — "scheduled" for every
+    #    pull-mode stream, regardless of content) as stream_type,
+    #    so we can't trust stream_type alone to distinguish a gmail
+    #    pull from a gcal pull. source_ref always carries the real
+    #    toolkit prefix.
+    if source_ref.startswith("gmail:"):
+        return "gmail"
+    if source_ref.startswith("gcal:") or source_ref.startswith("googlecalendar:"):
+        return "gcal"
+    if source_ref.startswith("slack:"):
+        return "slack"
+    if source_ref.startswith("github:"):
+        return "github"
+    if source_ref.startswith("notion:"):
+        return "notion"
+    if source_ref.startswith("linear:"):
+        return "linear"
+
+    # 2. Direct stream_type matches.
     if stream_type in ("gmail", "email", "agentmail"):
         return "gmail"
     if stream_type.startswith("slack"):
@@ -111,7 +141,10 @@ def _resolve_source_type(event: dict[str, Any], legacy_record_type: str) -> str:
         return "omi"
     if stream_type in ("vexa-transcript", "vexa-meeting", "vexa"):
         return "vexa"
-    if stream_type in ("calendar", "google-calendar", "google_calendar", "scheduled"):
+    # "scheduled" deliberately NOT in this list — it's the puller's
+    # transport marker for any pull-mode stream (gmail, gcal, etc.).
+    # Real gcal events fall through to the raw.start/end check below.
+    if stream_type in ("calendar", "google-calendar", "google_calendar"):
         return "gcal"
     if stream_type in ("plane-issue", "plane_issue", "plane-comment", "plane-event", "plane"):
         return "plane"

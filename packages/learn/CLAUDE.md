@@ -62,3 +62,18 @@ Before merging any PR that touches `packages/learn/src/workflows/**` or `package
 - Tested locally with a workflow started under old code + replayed under new code, if the change is non-additive
 
 Worked example: PR #628 (paginate `plane_sync.fetch_changed_tasks`) renamed activities and rewrote workflow logic without `workflow.patched()`. In-flight workflows hit `NonDeterministicError` post-deploy on David + Rapali, stalled for 12+ minutes, and required manual termination.
+
+### Adding NEW activity calls is just as load-bearing as renames
+
+Adding a new `workflow.execute_activity()` inside an existing `@workflow.run` is the SAME class of non-additive change as renaming — replay of pre-deploy history will diverge (old history has no record of the new activity, new code expects it). Use `workflow.patched()` even when the change "feels" additive:
+
+```python
+if workflow.patched("signal_extract_obs_v1"):
+    await workflow.execute_activity(extract_observation_from_signal, ...)
+```
+
+Near-miss example: commit `289d6e2` (OBS-2) added `extract_observation_from_signal` to `SignalExtractWorkflow.run` unconditionally. No production incident because the schedule uses `overlap=SKIP` and each run completes in seconds, so no in-flight workflow spanned the deploy boundary — but the contract was violated. Future modifications to `signals.py:SignalExtractWorkflow.run` must use `workflow.patched()` for any new activity calls. See the in-file warning comment near the OBS-2 hook.
+
+### Retroactively wrapping deployed unconditional code is unsafe
+
+Once a non-gated change ships, adding a `workflow.patched("foo")` around it in a later commit *also* breaks replay: old history has the unconditional activity call but no patch marker, and the new code will skip the call on replay because `patched()` returns `False` for histories without the marker. The only safe options after the fact are (a) leave the contract violation in place and document it, or (b) terminate-and-restart all in-flight runs of the affected workflow before deploy. Never silently re-wrap.

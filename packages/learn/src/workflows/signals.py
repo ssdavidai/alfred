@@ -263,6 +263,21 @@ class SignalExtractWorkflow:
                         # the signal record. Failure is non-fatal:
                         # the signal write is the source of truth;
                         # observation can be backfilled.
+                        #
+                        # WARNING — DETERMINISM CONTRACT: this call
+                        # was added unconditionally in 289d6e2 without
+                        # a workflow.patched() gate. We got away with
+                        # it because SignalExtractWorkflow's schedule
+                        # uses overlap=SKIP and each run completes
+                        # inside a few seconds, so no in-flight runs
+                        # spanned the deploy boundary. **Any further
+                        # logic added in this branch or anywhere else
+                        # in @run MUST be wrapped in
+                        # workflow.patched("<name>")** so history
+                        # replay of pre-patch runs deterministically
+                        # skips the new code path. See the "Temporal
+                        # workflow rewrites" section of
+                        # packages/learn/CLAUDE.md for the full rule.
                         try:
                             await workflow.execute_activity(
                                 extract_observation_from_signal,

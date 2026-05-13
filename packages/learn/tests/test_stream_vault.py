@@ -21,6 +21,7 @@ sys.path.insert(0, str(ROOT))
 from src.activities.stream_vault import (  # noqa: E402
     _build_vault_content,
     _compute_omi_speaker_attribution,
+    _resolve_source_type,
     apply_two_strike_promotion,
 )
 from src.utils.entity_promotion import (  # noqa: E402
@@ -355,3 +356,71 @@ def test_location_entity_follows_same_two_strike_rule() -> None:
     )
     assert delta["status"] == "provisional"
     assert delta["mentioned_by_streams"] == ["calendar-stream-1"]
+
+
+# ---------------------------------------------------------------------------
+# _resolve_source_type — content vs transport classification
+# ---------------------------------------------------------------------------
+# Regression coverage for the david-tenant bug where 359 gmail records were
+# typed as ``gcal`` because the puller passes ``Stream.type`` (== "scheduled"
+# for every pull-mode stream) as ``stream_type``, and "scheduled" used to
+# be in the calendar allowlist. Fix: trust ``source_ref`` prefix first.
+
+def test_gmail_pull_with_scheduled_stream_type_classifies_as_gmail() -> None:
+    event = {
+        "stream_type": "scheduled",
+        "source_ref": "gmail:19d5455a67ffb649",
+        "raw": {"from": "rj@example.com", "subject": "Fwd: Specs"},
+        "metadata": {"event_type": "email"},
+    }
+    assert _resolve_source_type(event, legacy_record_type="event") == "gmail"
+
+
+def test_gcal_pull_with_scheduled_stream_type_classifies_as_gcal() -> None:
+    event = {
+        "stream_type": "scheduled",
+        "source_ref": "gcal:abc123",
+        "raw": {"start": {"dateTime": "2026-05-13T10:00:00Z"},
+                "end": {"dateTime": "2026-05-13T11:00:00Z"}},
+    }
+    assert _resolve_source_type(event, legacy_record_type="event") == "gcal"
+
+
+def test_gcal_pull_without_source_ref_falls_back_to_start_end_heuristic() -> None:
+    # No source_ref prefix; rely on raw.start + raw.end to classify.
+    event = {
+        "stream_type": "scheduled",
+        "source_ref": "",
+        "raw": {"start": {"dateTime": "2026-05-13T10:00:00Z"},
+                "end": {"dateTime": "2026-05-13T11:00:00Z"}},
+    }
+    assert _resolve_source_type(event, legacy_record_type="event") == "gcal"
+
+
+def test_scheduled_stream_type_alone_does_not_mean_gcal() -> None:
+    # Bare "scheduled" with no other signal → falls through to "generic",
+    # NOT "gcal" (that was the old bug).
+    event = {
+        "stream_type": "scheduled",
+        "source_ref": "",
+        "raw": {},
+        "metadata": {},
+    }
+    assert _resolve_source_type(event, legacy_record_type="event") == "generic"
+
+
+def test_slack_pull_with_source_ref_classifies_as_slack() -> None:
+    event = {
+        "stream_type": "scheduled",
+        "source_ref": "slack:C123:msg-456",
+        "raw": {"text": "hi"},
+    }
+    assert _resolve_source_type(event, legacy_record_type="event") == "slack"
+
+
+def test_legitimate_calendar_stream_type_still_classifies_as_gcal() -> None:
+    # The non-"scheduled" calendar aliases must still work.
+    event = {"stream_type": "google-calendar", "raw": {}}
+    assert _resolve_source_type(event, legacy_record_type="event") == "gcal"
+    event = {"stream_type": "calendar", "raw": {}}
+    assert _resolve_source_type(event, legacy_record_type="event") == "gcal"
