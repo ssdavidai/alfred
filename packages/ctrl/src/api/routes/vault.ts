@@ -712,6 +712,19 @@ export function registerVaultRoutes(): void {
       results.sort((a, b) => a.name.localeCompare(b.name));
       return { results, count: results.length };
     });
+    // For instincts only: enrich each record with the live observation
+    // count (decision-sourced only). signal_actions._instinct_threshold
+    // reads this field to apply the obs-count discretion formula
+    // instead of a flat default. Done outside the cache so the count
+    // can refresh independently when observations are written.
+    if (type === "instinct") {
+      const { getInstinctCounts } = await import("../instinctCounts.js");
+      const counts = await getInstinctCounts();
+      for (const r of payload.results) {
+        const live = counts.get(r.path) ?? 0;
+        (r.frontmatter as Record<string, unknown>).live_observation_count = live;
+      }
+    }
     sendJson(res, 200, payload);
   });
 

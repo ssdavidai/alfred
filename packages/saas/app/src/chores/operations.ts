@@ -13,6 +13,7 @@ import type {
   GetChores,
   GetChore,
   GetChoreSource,
+  GetChoreRuns,
   PauseChore,
   ResumeChore,
   DeleteChore,
@@ -77,6 +78,32 @@ export const getChoreSource: GetChoreSource<{ slug: string }, any> = async (
   return proxyToTenant(instance, {
     method: "GET",
     path: `/api/v1/chores/${encodeURIComponent(args.slug)}/source`,
+  });
+};
+
+/**
+ * GET /api/v1/chores/:slug/runs
+ *
+ * Paginated structured run history from chore-run-history.jsonl. Newer
+ * + richer than the body-log scrape the detail page used in Phase 1 —
+ * each entry has a real timestamp, dry-run flag, and age. Returns
+ * { runs: [...], total }.
+ */
+export const getChoreRuns: GetChoreRuns<
+  { slug: string; limit?: number; offset?: number },
+  any
+> = async (args, context) => {
+  if (!args?.slug || typeof args.slug !== "string") {
+    throw new Error("slug is required");
+  }
+  const instance = await getUserInstance(context);
+  const q: Record<string, string> = {};
+  if (typeof args.limit === "number") q.limit = String(args.limit);
+  if (typeof args.offset === "number") q.offset = String(args.offset);
+  return proxyToTenant(instance, {
+    method: "GET",
+    path: `/api/v1/chores/${encodeURIComponent(args.slug)}/runs`,
+    query: q,
   });
 };
 

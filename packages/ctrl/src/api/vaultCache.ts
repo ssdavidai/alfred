@@ -20,6 +20,7 @@
 // write lands here.
 
 import { ttlCache } from "./cache.js";
+import { invalidateInstinctCounts } from "./instinctCounts.js";
 
 export const vaultListCache = ttlCache<{
   results: any[];
@@ -37,6 +38,7 @@ export function invalidateAllVaultCaches(): void {
   vaultListCache.invalidate();
   vaultWalkCache.invalidate();
   attentionCache.invalidate();
+  invalidateInstinctCounts();
 }
 
 // Type-aware invalidation. A write to `task/<id>.md` should only bust

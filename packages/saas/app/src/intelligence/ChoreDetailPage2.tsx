@@ -1,16 +1,27 @@
-// ChoreDetailPage2 — living-chore detail view (RFC #884).
+// ChoreDetailPage2 — per-chore detail (Phase 1 rebuild).
 //
-// Rebuilt around current_state + as_of + timeline from `getChoreDetail2`.
-// The existing pause/resume/trigger/delete actions are preserved below the
-// timeline; cadence + last-run/next-run metadata is sourced from the
-// existing `getChore` query (those fields aren't part of the new
-// living-narrative shape).
+// Sections, top to bottom:
+//   1. Header — name, status pill, schedule line, action buttons
+//   2. What this chore does — frontmatter.display_body (Phase 2) or
+//      the user_facing_description/body fallback
+//   3. Readiness / audit — anti-hallucination view from getChoreSource:
+//      verdict, unknown activities warning, per-activity cards
+//   4. Run history — parsed `## Run log` entries + last_run + last_result
+//   5. Living state (when populated by future workflows) — current_state
+//      + as_of + timeline. Hidden when empty rather than lying about
+//      future composition.
+//
+// Stage tier (`chore.state`) is intentionally NOT shown — chores are
+// recurring schedules, not lifecycle objects. The visible status comes
+// from frontmatter.status (active / paused / completed).
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
   useQuery,
   getChore,
   getChoreDetail2,
+  getChoreSource,
+  getChoreRuns,
   pauseChore,
   resumeChore,
   deleteChore,
@@ -20,7 +31,9 @@ import { Frame } from "../client/components/ab/Frame";
 import { Markdown } from "../client/components/ab/Markdown";
 import { PageOverture } from "../client/components/ab/PageOverture";
 
-type TaskState = "pending" | "in_progress" | "done" | "archived";
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 
 interface TimelineEntry {
   when: string;
@@ -33,53 +46,52 @@ interface ChoreDetail {
   id: string;
   path: string;
   name: string;
-  state: TaskState;
+  state: string;
   current_state: string | null;
   as_of: string | null;
   timeline: TimelineEntry[];
 }
 
-function fmtAsOf(value: string | null): string {
-  if (!value) return "";
-  try {
-    const d = new Date(value);
-    if (Number.isNaN(d.getTime())) return value;
-    return d.toLocaleString(undefined, {
-      day: "numeric",
-      month: "long",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return value;
-  }
+interface ReadinessCheck {
+  kind: string;
+  resource: string;
+  status: "ok" | "empty" | "missing" | "untested";
+  detail: string;
 }
 
-function fmtTimelineWhen(value: string): string {
-  if (!value) return "";
-  try {
-    const d = new Date(value);
-    if (Number.isNaN(d.getTime())) return value;
-    return d.toLocaleString(undefined, {
-      day: "2-digit",
-      month: "short",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return value;
-  }
+interface ManifestEntry {
+  activity: string;
+  description?: string;
+  reads?: Array<{ kind: string; resource: string }>;
+  writes?: Array<{ kind: string; resource: string }>;
+  llm?: boolean;
+  readiness_checks?: ReadinessCheck[];
+  required_data?: string[];
 }
 
-function fmtTime(value: unknown): string {
+interface ChoreSource {
+  generated?: boolean;
+  source?: string | null;
+  manifest?: ManifestEntry[];
+  unknown_activities?: string[];
+  activity_calls?: Array<{ name: string; line: number; snippet: string }>;
+  template?: string | null;
+  message?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Formatting helpers
+// ---------------------------------------------------------------------------
+
+function fmtAbsoluteTime(value: unknown): string {
   if (!value) return "—";
-  const s = String(value);
+  const s = String(value).trim();
+  if (!s) return "—";
   try {
     const d = new Date(s);
     if (Number.isNaN(d.getTime())) return s;
-    return d.toLocaleString(undefined, {
-      day: "2-digit",
+    return d.toLocaleString("en-GB", {
+      day: "numeric",
       month: "short",
       hour: "2-digit",
       minute: "2-digit",
@@ -89,23 +101,85 @@ function fmtTime(value: unknown): string {
   }
 }
 
-function deriveStatusPill(state: TaskState): {
-  label: "Active" | "Waiting" | "Done" | "Archived";
-  color: string;
-} {
-  if (state === "in_progress") return { label: "Active", color: "var(--brass)" };
-  if (state === "done") return { label: "Done", color: "var(--marginalia)" };
-  if (state === "archived") return { label: "Archived", color: "var(--marginalia)" };
-  return { label: "Waiting", color: "var(--marginalia)" };
+function fmtRelativeFuture(value: unknown): string {
+  if (!value) return "—";
+  const d = new Date(String(value));
+  if (Number.isNaN(d.getTime())) return String(value);
+  const diffMs = d.getTime() - Date.now();
+  if (diffMs <= 0) return "imminent";
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 60) return `in ${mins} min`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `in ${hours}h ${mins % 60}m`;
+  const days = Math.floor(hours / 24);
+  if (days < 14) return `in ${days}d`;
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
 }
 
-function StatusPill({
-  label,
-  color,
-}: {
-  label: string;
-  color: string;
-}) {
+function fmtRelativePast(value: unknown): string {
+  if (!value) return "—";
+  const d = new Date(String(value));
+  if (Number.isNaN(d.getTime())) return String(value);
+  const diffMs = Date.now() - d.getTime();
+  if (diffMs < 0) return fmtAbsoluteTime(value);
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 14) return `${days}d ago`;
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
+function describeCron(cron: string): string {
+  // Light-touch humaniser — not exhaustive but covers the common shapes
+  // generated by chore_generation and the standard library templates.
+  const trimmed = (cron || "").trim();
+  if (!trimmed) return "no schedule";
+  const parts = trimmed.split(/\s+/);
+  if (parts.length !== 5) return trimmed;
+  const [min, hour, dom, mon, dow] = parts;
+  const dayMap: Record<string, string> = {
+    "0": "Sunday", "1": "Monday", "2": "Tuesday", "3": "Wednesday",
+    "4": "Thursday", "5": "Friday", "6": "Saturday", "7": "Sunday",
+  };
+  if (dom === "*" && mon === "*" && /^\d+$/.test(min) && /^\d+$/.test(hour)) {
+    const time = `${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
+    if (dow === "*") return `Daily at ${time} UTC`;
+    if (/^\d$/.test(dow) && dayMap[dow]) return `Weekly on ${dayMap[dow]} at ${time} UTC`;
+  }
+  return trimmed;
+}
+
+// ---------------------------------------------------------------------------
+// Run history (structured feed from chore-run-history.jsonl)
+// ---------------------------------------------------------------------------
+
+interface RunEntry {
+  timestamp: string;
+  result_summary: string;
+  was_dry_run: boolean;
+  age_seconds?: number;
+}
+
+interface RunsPayload {
+  runs: RunEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+// ---------------------------------------------------------------------------
+// Small UI primitives
+// ---------------------------------------------------------------------------
+
+function StatusPill({ status }: { status: string }) {
+  const s = status.toLowerCase();
+  let label = "Active";
+  let color = "var(--brass)";
+  if (s === "paused") { label = "Paused"; color = "var(--marginalia)"; }
+  else if (s === "completed" || s === "deleted") { label = "Completed"; color = "var(--marginalia)"; }
   return (
     <span
       className="inline-block font-mono text-[10px] uppercase tracking-[0.22em] py-1 px-3 border"
@@ -116,11 +190,477 @@ function StatusPill({
   );
 }
 
+function ReadinessDot({ status }: { status: ReadinessCheck["status"] }) {
+  const colour =
+    status === "ok" ? "var(--brass)"
+      : status === "missing" ? "#c4504a"
+      : status === "empty" ? "#b48a3c"
+      : "var(--marginalia)";
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        width: 8,
+        height: 8,
+        borderRadius: 0,
+        background: colour,
+        marginRight: 8,
+        marginBottom: 1,
+      }}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Capabilities panel — activities, external tools, LLM
+// ---------------------------------------------------------------------------
+
+function toToolkitLabel(slug: string): string {
+  // "composio.gmail" → "Gmail", "composio.googlecalendar" → "Google Calendar"
+  const base = slug.replace(/^composio\./, "");
+  const map: Record<string, string> = {
+    gmail: "Gmail",
+    googlecalendar: "Google Calendar",
+    googledrive: "Google Drive",
+    slack: "Slack",
+    telegram: "Telegram",
+    notion: "Notion",
+    linear: "Linear",
+    github: "GitHub",
+    plane: "Plane",
+    asana: "Asana",
+    airtable: "Airtable",
+    dropbox: "Dropbox",
+    onedrive: "OneDrive",
+    outlook: "Outlook",
+    stripe: "Stripe",
+    typeform: "Typeform",
+    twitter: "Twitter",
+    zoom: "Zoom",
+  };
+  return map[base] ?? base.replace(/^\w/, (c) => c.toUpperCase());
+}
+
+function CapabilitiesPanel({ fm }: { fm: Record<string, unknown> }) {
+  const activities = Array.isArray(fm.activities_used)
+    ? (fm.activities_used as string[])
+    : [];
+  const tools = Array.isArray(fm.tools_used) ? (fm.tools_used as string[]) : [];
+  const usesLlm = Boolean(fm.uses_llm);
+  const llmAgent = String(fm.llm_agent_id ?? "").trim();
+  const vaultWrites = Array.isArray(fm.vault_writes)
+    ? (fm.vault_writes as string[])
+    : [];
+  const vaultReads = Array.isArray(fm.vault_reads)
+    ? (fm.vault_reads as string[])
+    : [];
+  // If nothing's been populated yet (chore hasn't been backfilled),
+  // skip the section entirely rather than render an empty grid.
+  if (
+    activities.length === 0 &&
+    tools.length === 0 &&
+    !usesLlm &&
+    vaultWrites.length === 0 &&
+    vaultReads.length === 0
+  ) {
+    return null;
+  }
+
+  return (
+    <section className="mb-12">
+      <h2
+        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-4 pb-2 border-b border-rule"
+        style={{ color: "var(--brass)" }}
+      >
+        Capabilities
+      </h2>
+      <div className="grid md:grid-cols-3 gap-8">
+        {/* Activities */}
+        <div>
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-3"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Activities · {activities.length}
+          </div>
+          {activities.length === 0 ? (
+            <p
+              className="font-body italic text-[14px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              No activities recorded yet.
+            </p>
+          ) : (
+            <ul className="space-y-1">
+              {activities.map((a) => (
+                <li
+                  key={a}
+                  className="font-mono text-[12px]"
+                  style={{ color: "var(--brass)" }}
+                >
+                  {a}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {/* External tools */}
+        <div>
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-3"
+            style={{ color: "var(--marginalia)" }}
+          >
+            External tools · {tools.length}
+          </div>
+          {tools.length === 0 ? (
+            <p
+              className="font-body italic text-[14px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              None — deterministic only.
+            </p>
+          ) : (
+            <ul className="flex flex-wrap gap-2">
+              {tools.map((slug) => {
+                const toolkit = slug.replace(/^composio\./, "");
+                return (
+                  <li key={slug}>
+                    <Link
+                      to={`/connections?toolkit=${encodeURIComponent(toolkit)}`}
+                      className="inline-block font-mono text-[10px] uppercase tracking-[0.18em] py-1 px-2 border"
+                      style={{ color: "var(--brass)", borderColor: "var(--brass)" }}
+                    >
+                      {toToolkitLabel(slug)}
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        {/* LLM */}
+        <div>
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-3"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Reasoning
+          </div>
+          {usesLlm ? (
+            <div className="font-body text-[14px] leading-[1.5]">
+              Uses an LLM
+              {llmAgent ? (
+                <>
+                  {" via "}
+                  <code className="font-mono text-[12px]" style={{ color: "var(--brass)" }}>
+                    {llmAgent}
+                  </code>
+                </>
+              ) : (
+                ""
+              )}
+              .
+            </div>
+          ) : (
+            <p
+              className="font-body italic text-[14px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Deterministic — no LLM.
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* Vault I/O — a single muted row below the columns */}
+      {(vaultReads.length > 0 || vaultWrites.length > 0) && (
+        <div
+          className="mt-6 font-mono text-[10px] uppercase tracking-[0.22em] flex flex-wrap gap-x-6 gap-y-2"
+          style={{ color: "var(--marginalia)" }}
+        >
+          {vaultReads.length > 0 && (
+            <span>
+              Reads vault:{" "}
+              <span style={{ color: "var(--ink)" }}>{vaultReads.join(", ")}</span>
+            </span>
+          )}
+          {vaultWrites.length > 0 && (
+            <span>
+              Writes vault:{" "}
+              <span style={{ color: "var(--ink)" }}>{vaultWrites.join(", ")}</span>
+            </span>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Readiness / audit section
+// ---------------------------------------------------------------------------
+
+function ReadinessSection({ slug }: { slug: string }) {
+  const { data, isLoading, error } = useQuery(
+    getChoreSource,
+    { slug },
+    { retry: false, enabled: !!slug },
+  );
+
+  if (isLoading) {
+    return (
+      <section className="mb-12">
+        <h2
+          className="font-mono text-[10px] uppercase tracking-[0.22em] mb-4 pb-2 border-b border-rule"
+          style={{ color: "var(--brass)" }}
+        >
+          What this chore actually does
+        </h2>
+        <p className="font-body italic text-[15px]" style={{ color: "var(--marginalia)" }}>
+          Auditing dependencies…
+        </p>
+      </section>
+    );
+  }
+  if (error || !data) return null;
+
+  const src = data as ChoreSource;
+  const manifest = src.manifest ?? [];
+  const unknown = src.unknown_activities ?? [];
+  const allChecks = manifest.flatMap((m) => m.readiness_checks ?? []);
+  const hasMissing = allChecks.some((c) => c.status === "missing");
+  const hasEmpty = allChecks.some((c) => c.status === "empty");
+  const hasUnknown = unknown.length > 0;
+  const overallOk = !hasMissing && !hasEmpty && !hasUnknown;
+
+  // For standard-library chores, source is null — still render any manifest
+  // we have, but skip the verdict header (it's not really an audit).
+  const isGenerated = Boolean(src.generated);
+
+  return (
+    <section className="mb-12">
+      <h2
+        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-4 pb-2 border-b border-rule"
+        style={{ color: "var(--brass)" }}
+      >
+        What this chore actually does
+      </h2>
+
+      {/* Verdict (generated chores only — standard-library chores are
+          maintained in source control and don't need an audit). */}
+      {isGenerated && (
+        <div
+          className="mb-6 p-4 border-l"
+          style={{
+            borderColor: overallOk ? "var(--brass)" : "#c4504a",
+            background: "transparent",
+          }}
+        >
+          {overallOk ? (
+            <p className="font-body text-[15px]">
+              <span style={{ color: "var(--brass)" }}>Audit passed.</span>{" "}
+              {manifest.length} activit{manifest.length === 1 ? "y" : "ies"}{" "}
+              referenced; all data sources resolved.
+            </p>
+          ) : (
+            <>
+              <p className="font-body text-[15px] mb-2" style={{ color: "#c4504a" }}>
+                <strong>This chore may not have what it needs to run.</strong>
+              </p>
+              <ul
+                className="font-body text-[14px] pl-5 leading-[1.6]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                {hasUnknown && (
+                  <li>
+                    References {unknown.length} activit
+                    {unknown.length === 1 ? "y" : "ies"} that don't exist in
+                    the library (hallucination).
+                  </li>
+                )}
+                {hasMissing && <li>Reads from vault directories that don't exist on this tenant.</li>}
+                {hasEmpty && <li>Reads from vault directories that exist but are empty.</li>}
+              </ul>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Unknown activities (red panel) */}
+      {unknown.length > 0 && (
+        <div
+          className="mb-6 p-4 border-l"
+          style={{ borderColor: "#c4504a" }}
+        >
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+            style={{ color: "#c4504a" }}
+          >
+            Unknown activities (hallucination)
+          </div>
+          <p className="font-body text-[14px] mb-2" style={{ color: "var(--marginalia)" }}>
+            The workflow imports these activity names, but they don't exist in
+            the <code>chore_actions</code> library. The chore cannot run as-is.
+          </p>
+          <ul className="font-mono text-[12px]" style={{ color: "#c4504a" }}>
+            {unknown.map((n) => (
+              <li key={n}>· {n}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Per-activity cards */}
+      {manifest.length > 0 && (
+        <>
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-3"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Activities used ({manifest.length})
+          </div>
+          <ul className="divide-y divide-rule">
+            {manifest.map((entry) => (
+              <ActivityRow key={entry.activity} entry={entry} />
+            ))}
+          </ul>
+        </>
+      )}
+    </section>
+  );
+}
+
+function ActivityRow({ entry }: { entry: ManifestEntry }) {
+  const [expanded, setExpanded] = useState(false);
+  const reads = entry.reads ?? [];
+  const writes = entry.writes ?? [];
+  const checks = entry.readiness_checks ?? [];
+  const hasProblem = checks.some((c) => c.status === "missing" || c.status === "empty");
+  const overallStatus: ReadinessCheck["status"] =
+    hasProblem ? (checks.some((c) => c.status === "missing") ? "missing" : "empty") : "ok";
+
+  return (
+    <li className="py-3">
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        className="w-full text-left flex items-baseline gap-2"
+      >
+        <ReadinessDot status={overallStatus} />
+        <code className="font-mono text-[13px]" style={{ color: "var(--brass)" }}>
+          {entry.activity}
+        </code>
+        {entry.llm && (
+          <span
+            className="font-mono text-[9px] uppercase tracking-[0.22em] ml-1 px-1.5 py-0.5 border"
+            style={{ color: "var(--brass)", borderColor: "var(--brass)" }}
+          >
+            LLM
+          </span>
+        )}
+        <span
+          className="ml-auto font-mono text-[10px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          {expanded ? "▾" : "▸"}
+        </span>
+      </button>
+      {entry.description && (
+        <p className="mt-1 ml-5 font-body text-[14px] leading-[1.5]">
+          {entry.description}
+        </p>
+      )}
+      {expanded && (
+        <div className="mt-3 ml-5 pl-3 border-l border-rule space-y-3">
+          {reads.length > 0 && (
+            <div>
+              <div
+                className="font-mono text-[9px] uppercase tracking-[0.22em] mb-1"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Reads
+              </div>
+              <ul className="font-mono text-[11px] space-y-0.5">
+                {reads.map((r, i) => (
+                  <li key={i} style={{ color: "var(--marginalia)" }}>
+                    [{r.kind}] {r.resource}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {writes.length > 0 && (
+            <div>
+              <div
+                className="font-mono text-[9px] uppercase tracking-[0.22em] mb-1"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Writes
+              </div>
+              <ul className="font-mono text-[11px] space-y-0.5">
+                {writes.map((w, i) => (
+                  <li key={i} style={{ color: "var(--marginalia)" }}>
+                    [{w.kind}] {w.resource}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {checks.length > 0 && (
+            <div>
+              <div
+                className="font-mono text-[9px] uppercase tracking-[0.22em] mb-1"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Live data readiness
+              </div>
+              <ul className="space-y-1">
+                {checks.map((c, i) => (
+                  <li key={i} className="flex items-baseline gap-1">
+                    <ReadinessDot status={c.status} />
+                    <span className="font-mono text-[11px]">{c.resource}</span>
+                    <span
+                      className="font-body text-[12px] ml-2"
+                      style={{ color: "var(--marginalia)" }}
+                    >
+                      {c.detail}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {(entry.required_data ?? []).length > 0 && (
+            <div>
+              <div
+                className="font-mono text-[9px] uppercase tracking-[0.22em] mb-1"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Prerequisites
+              </div>
+              <ul className="font-body text-[13px] space-y-0.5 pl-3">
+                {(entry.required_data ?? []).map((r, i) => (
+                  <li key={i} style={{ color: "var(--marginalia)" }}>· {r}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main page
+// ---------------------------------------------------------------------------
+
 export default function ChoreDetailPage2() {
   const { slug } = useParams<{ slug: string }>();
   const safeSlug = slug ?? "";
 
-  // Primary: the new living-narrative shape (current_state / as_of / timeline).
   const {
     data: detailData,
     isLoading: detailLoading,
@@ -129,9 +669,6 @@ export default function ChoreDetailPage2() {
     { id: safeSlug },
     { enabled: Boolean(safeSlug), refetchInterval: 30_000, retry: false },
   );
-  // Secondary: existing chore query for cadence + last/next run + paused state.
-  // Those fields aren't covered by the new narrative endpoint, so the existing
-  // route remains the source of truth for scheduling metadata.
   const { data: choreData, refetch: refetchChore } = useQuery(
     getChore,
     { slug: safeSlug },
@@ -139,7 +676,33 @@ export default function ChoreDetailPage2() {
   );
 
   const [pending, setPending] = useState<string | null>(null);
+  const [showSource, setShowSource] = useState(false);
   const [timelineCap, setTimelineCap] = useState(50);
+  const [runsLimit, setRunsLimit] = useState(25);
+
+  const chore = (detailData?.chore ?? null) as ChoreDetail | null;
+  const fm = (choreData?.frontmatter ?? {}) as Record<string, unknown>;
+
+  const status = String(fm.status ?? "active").toLowerCase();
+  const paused = status === "paused";
+  const schedule = String(fm.schedule ?? "");
+  const cadence = describeCron(schedule);
+  const lastRun = String(fm.last_run ?? fm.last_run_at ?? "");
+  const nextRunIso = String(fm.next_run_at ?? "");
+  const lastResult = String(fm.last_result ?? "");
+  const displayBody = String(fm.display_body ?? fm.user_facing_description ?? "");
+
+  const { data: runsData, isLoading: runsLoading } = useQuery(
+    getChoreRuns,
+    { slug: safeSlug, limit: runsLimit },
+    { enabled: Boolean(safeSlug), refetchInterval: 60_000, retry: false },
+  );
+  const runs = (runsData as RunsPayload | undefined) ?? {
+    runs: [],
+    total: 0,
+    limit: runsLimit,
+    offset: 0,
+  };
 
   if (!safeSlug) {
     return (
@@ -157,33 +720,18 @@ export default function ChoreDetailPage2() {
       </Frame>
     );
   }
-
-  const chore = (detailData?.chore ?? null) as ChoreDetail | null;
-  const fm = (choreData?.frontmatter ?? {}) as Record<string, unknown>;
-  const cadence = String(
-    fm.schedule_human ?? fm.schedule_cron_human ?? fm.schedule_cron ?? "—",
-  );
-  const status = String(fm.status ?? "active").toLowerCase();
-  const paused = status === "paused";
-  const lastRun = fmtTime(fm.last_run_at);
-  const nextRun = fmtTime(fm.next_run_at);
-
   if (detailLoading && !chore) {
     return (
       <Frame>
         <section className="mx-auto max-w-[860px] px-8 pt-12">
-          <p
-            className="font-body italic text-[16px]"
-            style={{ color: "var(--marginalia)" }}
-          >
+          <p className="font-body italic text-[16px]" style={{ color: "var(--marginalia)" }}>
             Reading the chore…
           </p>
         </section>
       </Frame>
     );
   }
-
-  if (!chore) {
+  if (!chore && !choreData) {
     return (
       <Frame>
         <section className="mx-auto max-w-[860px] px-8 pt-12 text-center">
@@ -200,12 +748,7 @@ export default function ChoreDetailPage2() {
     );
   }
 
-  const statusPill = deriveStatusPill(chore.state);
-  const sortedTimeline = [...(chore.timeline ?? [])].sort((a, b) =>
-    a.when < b.when ? 1 : a.when > b.when ? -1 : 0,
-  );
-  const visibleTimeline = sortedTimeline.slice(0, timelineCap);
-  const moreToShow = sortedTimeline.length > timelineCap;
+  const name = String(fm.name ?? chore?.name ?? safeSlug);
 
   async function withPending(action: string, fn: () => Promise<unknown>) {
     setPending(action);
@@ -231,86 +774,175 @@ export default function ChoreDetailPage2() {
         </Link>
 
         <div className="mt-4">
-          <PageOverture
-            eyebrow="Chore"
-            title={chore.name}
-            meta={paused ? "Paused" : statusPill.label}
-          />
+          <PageOverture eyebrow="Chore" title={name} meta={paused ? "Paused" : "Active"} />
         </div>
 
-        {/* current_state paragraph + as_of byline */}
+        {/* Header band: status + schedule + last/next run */}
         <section className="-mt-6 mb-10">
-          <div className="mb-4 flex items-baseline gap-3">
-            <StatusPill label={statusPill.label} color={statusPill.color} />
-            {paused && (
+          <div className="mb-3 flex items-baseline gap-3 flex-wrap">
+            <StatusPill status={status} />
+            <span className="font-body text-[16px]" style={{ color: "var(--marginalia)" }}>
+              {cadence}
+            </span>
+          </div>
+          <div
+            className="font-mono text-[11px] uppercase tracking-[0.22em] mt-2"
+            style={{ color: "var(--marginalia)" }}
+          >
+            {lastRun ? `Last ran ${fmtRelativePast(lastRun)}` : "Never run"}
+            {paused
+              ? null
+              : nextRunIso
+                ? ` · next ${fmtRelativeFuture(nextRunIso)}`
+                : null}
+          </div>
+        </section>
+
+        {/* What this chore does */}
+        {displayBody && (
+          <section className="mb-10">
+            <div
+              className="font-body text-[16px] leading-[1.65] border-l pl-5"
+              style={{ borderColor: "var(--brass)" }}
+            >
+              <Markdown source={displayBody} useLiveResolver={false} />
+            </div>
+          </section>
+        )}
+
+        {/* Capabilities — activities, external tools, LLM */}
+        <CapabilitiesPanel fm={fm} />
+
+        {/* Readiness / audit — anti-hallucination view */}
+        <ReadinessSection slug={safeSlug} />
+
+        {/* Run history — structured feed from chore-run-history.jsonl */}
+        <section className="mb-12">
+          <h2
+            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-4 pb-2 border-b border-rule"
+            style={{ color: "var(--brass)" }}
+          >
+            Run history
+            {runs.total > 0 && (
               <span
-                className="font-display italic text-[18px]"
+                className="ml-3 font-mono text-[10px]"
                 style={{ color: "var(--marginalia)" }}
               >
-                (paused)
+                · {runs.total} total
               </span>
             )}
-          </div>
-          {chore.current_state ? (
-            <>
-              <div className="max-w-[64ch] font-body text-[18px] leading-[1.6]">
-                <Markdown
-                  source={chore.current_state}
-                  useLiveResolver={false}
-                />
+          </h2>
+          {lastResult && (
+            <div className="mb-4">
+              <div
+                className="font-mono text-[9px] uppercase tracking-[0.22em] mb-1"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Last result
               </div>
-              {chore.as_of && (
-                <div
+              <p className="font-body text-[15px] leading-[1.5]">{lastResult}</p>
+            </div>
+          )}
+          {runsLoading && runs.runs.length === 0 ? (
+            <p className="font-body italic text-[15px]" style={{ color: "var(--marginalia)" }}>
+              Reading run log…
+            </p>
+          ) : runs.runs.length === 0 ? (
+            <p className="font-body italic text-[15px]" style={{ color: "var(--marginalia)" }}>
+              {lastRun
+                ? "No structured run entries on file. The next scheduled fire will record one."
+                : "Not yet run. The next scheduled fire will populate this section."}
+            </p>
+          ) : (
+            <>
+              <ul className="divide-y divide-rule">
+                {runs.runs.map((e, i) => (
+                  <li
+                    key={`${e.timestamp}-${i}`}
+                    className="py-3 grid grid-cols-[110px_1fr_70px] gap-3 items-baseline"
+                  >
+                    <span
+                      className="font-mono text-[11px] uppercase tracking-[0.18em]"
+                      style={{ color: "var(--marginalia)" }}
+                      title={fmtAbsoluteTime(e.timestamp)}
+                    >
+                      {fmtRelativePast(e.timestamp)}
+                    </span>
+                    <span className="font-body text-[14px] leading-[1.45]">
+                      {e.result_summary}
+                    </span>
+                    {e.was_dry_run && (
+                      <span
+                        className="font-mono text-[10px] uppercase tracking-[0.22em] text-right"
+                        style={{ color: "var(--brass)" }}
+                      >
+                        dry-run
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              {runs.total > runs.runs.length && (
+                <button
+                  onClick={() => setRunsLimit((l) => Math.min(l + 25, 200))}
                   className="font-mono text-[10px] uppercase tracking-[0.22em] mt-4"
                   style={{ color: "var(--brass)" }}
                 >
-                  As of {fmtAsOf(chore.as_of)}
-                </div>
+                  Show older →
+                </button>
               )}
             </>
-          ) : (
-            <p
-              className="font-display italic text-[18px] max-w-[64ch]"
-              style={{ color: "var(--marginalia)" }}
-            >
-              Alfred has not yet composed a current view for this chore. The
-              next nightly run will.
-            </p>
           )}
         </section>
 
-        <hr className="gilt mb-12" />
-
-        {/* Timeline */}
-        <section className="mb-14">
-          <h2
-            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-6"
-            style={{ color: "var(--brass)" }}
-          >
-            Timeline
-          </h2>
-          {sortedTimeline.length === 0 ? (
-            <p
-              className="font-display italic text-[16px]"
-              style={{ color: "var(--marginalia)" }}
+        {/* Living state — only show when populated. No more "next nightly
+            run will compose this" lies. */}
+        {chore?.current_state && (
+          <section className="mb-12">
+            <h2
+              className="font-mono text-[10px] uppercase tracking-[0.22em] mb-4 pb-2 border-b border-rule"
+              style={{ color: "var(--brass)" }}
             >
-              No signals routed to this chore yet.
-            </p>
-          ) : (
-            <>
-              <ul>
-                {visibleTimeline.map((row, i) => (
+              Current view
+            </h2>
+            <div className="max-w-[64ch] font-body text-[17px] leading-[1.6]">
+              <Markdown source={chore.current_state} useLiveResolver={false} />
+            </div>
+            {chore.as_of && (
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em] mt-3"
+                style={{ color: "var(--brass)" }}
+              >
+                As of {fmtAbsoluteTime(chore.as_of)}
+              </div>
+            )}
+          </section>
+        )}
+
+        {chore && chore.timeline && chore.timeline.length > 0 && (
+          <section className="mb-12">
+            <h2
+              className="font-mono text-[10px] uppercase tracking-[0.22em] mb-4 pb-2 border-b border-rule"
+              style={{ color: "var(--brass)" }}
+            >
+              Signals routed here
+            </h2>
+            <ul className="divide-y divide-rule">
+              {[...chore.timeline]
+                .sort((a, b) => (a.when < b.when ? 1 : -1))
+                .slice(0, timelineCap)
+                .map((row, i) => (
                   <li
                     key={`${row.path}-${row.when}-${i}`}
-                    className="grid grid-cols-[110px_1fr_80px] gap-4 py-3 border-b border-rule items-baseline"
+                    className="py-3 grid grid-cols-[110px_1fr_80px] gap-3 items-baseline"
                   >
                     <span
                       className="font-mono text-[11px]"
                       style={{ color: "var(--marginalia)" }}
                     >
-                      {fmtTimelineWhen(row.when)}
+                      {fmtAbsoluteTime(row.when)}
                     </span>
-                    <span className="font-body text-[16px] leading-[1.5]">
+                    <span className="font-body text-[15px] leading-[1.5]">
                       {row.path ? (
                         <Link
                           to={`/vault?slug=${encodeURIComponent(row.path.replace(/\.md$/, ""))}`}
@@ -330,35 +962,24 @@ export default function ChoreDetailPage2() {
                     </span>
                   </li>
                 ))}
-              </ul>
-              {moreToShow && (
-                <button
-                  onClick={() => setTimelineCap((c) => c * 2)}
-                  className="font-mono text-[10px] uppercase tracking-[0.22em] mt-4"
-                  style={{ color: "var(--brass)" }}
-                >
-                  Show older →
-                </button>
-              )}
-            </>
-          )}
-        </section>
+            </ul>
+            {chore.timeline.length > timelineCap && (
+              <button
+                onClick={() => setTimelineCap((c) => c * 2)}
+                className="font-mono text-[10px] uppercase tracking-[0.22em] mt-4"
+                style={{ color: "var(--brass)" }}
+              >
+                Show older →
+              </button>
+            )}
+          </section>
+        )}
 
-        {/* Actions panel — preserved from the previous layout */}
-        <section className="border-t border-rule pt-8">
-          <div
-            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-4"
-            style={{ color: "var(--brass)" }}
-          >
-            Schedule
-          </div>
-          <div
-            className="font-mono text-[12px] mb-6"
-            style={{ color: "var(--marginalia)" }}
-          >
-            {cadence} · last {lastRun} · next {nextRun}
-          </div>
+        {/* Source (collapsed) */}
+        <ChoreSourceCollapse slug={safeSlug} showSource={showSource} setShowSource={setShowSource} />
 
+        {/* Actions */}
+        <section className="border-t border-rule pt-8 mt-8">
           <div
             className="font-mono text-[10px] uppercase tracking-[0.22em] mb-4"
             style={{ color: "var(--brass)" }}
@@ -368,29 +989,19 @@ export default function ChoreDetailPage2() {
           <div className="flex flex-wrap items-baseline" style={{ gap: "0 24px" }}>
             <button
               onClick={() =>
-                withPending(
-                  paused ? "resume" : "pause",
-                  () =>
-                    paused
-                      ? resumeChore({ slug: safeSlug })
-                      : pauseChore({ slug: safeSlug }),
+                withPending(paused ? "resume" : "pause", () =>
+                  paused ? resumeChore({ slug: safeSlug }) : pauseChore({ slug: safeSlug }),
                 )
               }
               disabled={pending !== null}
               className="btn-instruction"
               style={{ fontSize: 20 }}
             >
-              {pending === "pause" || pending === "resume"
-                ? "…"
-                : paused
-                  ? "Resume"
-                  : "Pause"}
+              {pending === "pause" || pending === "resume" ? "…" : paused ? "Resume" : "Pause"}
             </button>
             <span style={{ color: "var(--marginalia)" }}>·</span>
             <button
-              onClick={() =>
-                withPending("trigger", () => triggerChore({ slug: safeSlug }))
-              }
+              onClick={() => withPending("trigger", () => triggerChore({ slug: safeSlug }))}
               disabled={pending !== null}
               className="btn-instruction"
               style={{ fontSize: 20 }}
@@ -400,7 +1011,7 @@ export default function ChoreDetailPage2() {
             <span style={{ color: "var(--marginalia)" }}>·</span>
             <button
               onClick={() => {
-                if (!confirm(`Delete chore "${chore.name}"?`)) return;
+                if (!confirm(`Delete chore "${name}"?`)) return;
                 withPending("delete", () => deleteChore({ slug: safeSlug }));
               }}
               disabled={pending !== null}
@@ -413,5 +1024,49 @@ export default function ChoreDetailPage2() {
         </section>
       </section>
     </Frame>
+  );
+}
+
+function ChoreSourceCollapse({
+  slug,
+  showSource,
+  setShowSource,
+}: {
+  slug: string;
+  showSource: boolean;
+  setShowSource: (v: boolean) => void;
+}) {
+  const { data } = useQuery(getChoreSource, { slug }, { retry: false, enabled: !!slug });
+  const src = (data ?? {}) as ChoreSource;
+  const source = src.source ?? null;
+  return (
+    <section className="mb-4">
+      <button
+        type="button"
+        onClick={() => setShowSource(!showSource)}
+        className="font-mono text-[10px] uppercase tracking-[0.22em]"
+        style={{ color: "var(--brass)" }}
+      >
+        {showSource ? "▾" : "▸"}  Workflow source
+      </button>
+      {showSource && (
+        <div className="mt-3 border border-rule p-4">
+          {source ? (
+            <pre
+              className="font-mono text-[11px] leading-[1.5] overflow-x-auto max-h-[500px]"
+              style={{ color: "var(--ink)" }}
+            >
+              {source}
+            </pre>
+          ) : (
+            <p className="font-body text-[14px]" style={{ color: "var(--marginalia)" }}>
+              {src.message ??
+                "Standard-library chore. Source is at packages/learn/src/workflows/chores/" +
+                  (src.template ?? "<template>") + ".py"}
+            </p>
+          )}
+        </div>
+      )}
+    </section>
   );
 }

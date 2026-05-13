@@ -10,6 +10,7 @@ import type {
   GetDevices,
   GetContainerLogs,
   GetActivityFeed,
+  GetAuditFeed,
   GetCredentials,
   GetAgentConfig,
   GetModelCatalog,
@@ -440,6 +441,18 @@ export const getActivityFeed: GetActivityFeed<void, any> = async (
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, {
     path: "/api/v1/admin/activity",
+    query: { limit: "50" },
+  });
+};
+
+// Audit feed — reads vault/event/ records (durable trail of every act
+// Alfred has taken on the principal's behalf). Distinct from
+// getActivityFeed, which scrapes the alfred container's docker-compose
+// logs (debug-ops surface).
+export const getAuditFeed: GetAuditFeed<void, any> = async (_args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/admin/audit",
     query: { limit: "50" },
   });
 };

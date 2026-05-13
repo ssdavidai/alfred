@@ -365,6 +365,25 @@ async def extract_observation_from_signal(signal_path: str) -> dict[str, Any]:
     name = f"{ts}-{short}"
     name_label = fact_clean if len(fact_clean) <= 90 else fact_clean[:87] + "..."
 
+    # Match observation → instinct so /instincts can list the
+    # observations that taught each pattern. See _match_instinct_for_observation
+    # in decision_observations.py; we reuse that helper through a thin
+    # import to keep the matcher in one place.
+    from src.activities.decision_observations import (
+        _match_instinct_for_observation,
+    )
+    instinct_path = await _match_instinct_for_observation(
+        fact_clean=fact_clean,
+        sender=sender,
+        topic=topic,
+        name_label=name_label,
+        source_kind="signal",
+        source_type=norm_source,
+        event_kind=event_kind,
+        signal_fm=signal_fm,
+        event_fm=event_fm,
+    )
+
     fm_lines = [
         "---",
         'type: "observation"',
@@ -380,6 +399,7 @@ async def extract_observation_from_signal(signal_path: str) -> dict[str, Any]:
         f"sender: {json.dumps(sender) if sender else 'null'}",
         f"event_kind: {json.dumps(event_kind)}",
         f"source_type: {json.dumps(norm_source)}",
+        f"instinct: {json.dumps(instinct_path) if instinct_path else 'null'}",
         "confidence: 1.0",
         'status: "open"',
         "---",

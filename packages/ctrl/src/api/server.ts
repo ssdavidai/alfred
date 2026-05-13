@@ -20,6 +20,7 @@ import { registerWorkspaceRoutes } from "./routes/workspace.js";
 import { registerToolRoutes } from "./routes/tools.js";
 import { registerApprovalRoutes } from "./routes/approvals.js";
 import { registerIntegrationRoutes } from "./routes/integrations.js";
+import { registerInboundWebhookRoutes } from "./routes/webhooksInbound.js";
 import { registerOmiRoutes } from "./routes/omi.js";
 import { registerCrossTenantRoutes } from "./routes/crossTenant.js";
 import { registerChoreRoutes } from "./routes/chores.js";
@@ -121,6 +122,7 @@ export function createApiServer(): http.Server {
   registerToolRoutes();
   registerApprovalRoutes();
   registerIntegrationRoutes();
+  registerInboundWebhookRoutes();
   registerOmiRoutes();
   registerCrossTenantRoutes();
   registerChoreRoutes();
@@ -170,7 +172,8 @@ export function createApiServer(): http.Server {
         pathname.startsWith("/api/v1/streams/omi/") ||
         pathname === "/api/v1/plane/webhook" ||
         pathname === "/api/v1/webhooks/plane/steward" ||
-        pathname === "/api/v1/webhooks/vexa";
+        pathname === "/api/v1/webhooks/vexa" ||
+        pathname.startsWith("/api/v1/webhooks/in/");
       if (!isPublic) {
         authenticate(req);
       }

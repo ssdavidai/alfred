@@ -19,29 +19,62 @@ import { Frame } from "../client/components/ab/Frame";
 
 interface ChoreRow {
   slug: string;
-  name: string;
+  displayName: string;
   cadence: string;
-  last: string;
-  next: string;
+  lastRelative: string;
+  nextRelative: string;
   description: string;
   paused: boolean;
+  category: string;
 }
 
-function fmtTime(value: unknown): string {
+function fmtRelativePast(value: unknown): string {
+  if (!value) return "never";
+  const d = new Date(String(value));
+  if (Number.isNaN(d.getTime())) return String(value);
+  const diff = Date.now() - d.getTime();
+  if (diff < 0) return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 14) return `${days}d ago`;
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
+function fmtRelativeFuture(value: unknown): string {
   if (!value) return "—";
-  const s = String(value);
-  try {
-    const d = new Date(s);
-    if (Number.isNaN(d.getTime())) return s;
-    return d.toLocaleString(undefined, {
-      day: "2-digit",
-      month: "short",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return s;
+  const d = new Date(String(value));
+  if (Number.isNaN(d.getTime())) return String(value);
+  const diff = d.getTime() - Date.now();
+  if (diff <= 0) return "imminent";
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 60) return `in ${mins}m`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 48) return `in ${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 14) return `in ${days}d`;
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+}
+
+function describeCron(cron: string): string {
+  const trimmed = (cron || "").trim();
+  if (!trimmed) return "no schedule";
+  const parts = trimmed.split(/\s+/);
+  if (parts.length !== 5) return trimmed;
+  const [min, hour, dom, mon, dow] = parts;
+  const dayMap: Record<string, string> = {
+    "0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed",
+    "4": "Thu", "5": "Fri", "6": "Sat", "7": "Sun",
+  };
+  if (dom === "*" && mon === "*" && /^\d+$/.test(min) && /^\d+$/.test(hour)) {
+    const time = `${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
+    if (dow === "*") return `Daily ${time} UTC`;
+    if (/^\d$/.test(dow) && dayMap[dow]) return `${dayMap[dow]} ${time} UTC`;
   }
+  return trimmed;
 }
 
 function pickRows(data: any): ChoreRow[] {
@@ -51,31 +84,63 @@ function pickRows(data: any): ChoreRow[] {
   return arr.map((c) => {
     const fm = c?.frontmatter ?? c ?? {};
     const slug = String(c?.slug ?? c?.id ?? fm?.slug ?? fm?.name ?? "");
-    const name = String(c?.name ?? fm?.name ?? slug);
-    const cadence = String(
-      c?.schedule_cron_human ??
-        c?.schedule_human ??
-        fm?.schedule_human ??
-        c?.cadence ??
-        fm?.schedule_cron ??
-        c?.schedule_cron ??
-        "—",
+    const displayName = String(
+      c?.display_name ?? fm?.display_name ?? c?.name ?? fm?.name ?? slug,
     );
-    const last = fmtTime(c?.last_run ?? c?.last_run_at ?? fm?.last_run_at);
-    const next = fmtTime(
-      c?.next_run ?? c?.next_run_at ?? fm?.next_run_at ?? "",
+    const cadence = describeCron(
+      String(c?.schedule ?? fm?.schedule ?? c?.schedule_cron ?? ""),
+    );
+    const lastRelative = fmtRelativePast(
+      c?.last_run ?? c?.last_run_at ?? fm?.last_run_at ?? fm?.last_run,
+    );
+    const nextRelative = fmtRelativeFuture(
+      c?.next_run_at ?? fm?.next_run_at ?? "",
     );
     const description = String(
-      c?.user_facing_description ??
-        c?.description ??
+      c?.display_body ??
+        fm?.display_body ??
+        c?.user_facing_description ??
         fm?.user_facing_description ??
+        c?.description ??
         fm?.description ??
         "",
     );
     const paused =
       String(c?.status ?? fm?.status ?? "").toLowerCase() === "paused";
-    return { slug, name, cadence, last, next, description, paused };
+    const category = String(c?.category ?? fm?.category ?? "").toLowerCase();
+    return {
+      slug,
+      displayName,
+      cadence,
+      lastRelative,
+      nextRelative,
+      description,
+      paused,
+      category,
+    };
   });
+}
+
+const CATEGORY_LABELS: Record<string, string> = {
+  briefing: "Briefing",
+  digest: "Digest",
+  watch: "Watch",
+  "context-build": "Context",
+  prefetch: "Prefetch",
+  maintenance: "Maintenance",
+};
+
+function CategoryChip({ category }: { category: string }) {
+  if (!category) return null;
+  const label = CATEGORY_LABELS[category] ?? category;
+  return (
+    <span
+      className="inline-block font-mono text-[9px] uppercase tracking-[0.22em] py-0.5 px-1.5 border mr-2"
+      style={{ color: "var(--marginalia)", borderColor: "var(--marginalia)" }}
+    >
+      {label}
+    </span>
+  );
 }
 
 export default function ChoresPage() {
@@ -89,6 +154,16 @@ export default function ChoresPage() {
   const [adding, setAdding] = useState(false);
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<string | null>(null);
+  const [categoryFilter, setCategoryFilter] = useState<string>("");
+
+  // Derive the category facets from the loaded chores so the filter
+  // bar only shows categories that actually exist on this tenant.
+  const categoriesPresent = Array.from(
+    new Set(chores.map((c) => c.category).filter(Boolean)),
+  ).sort();
+  const filteredChores = categoryFilter
+    ? chores.filter((c) => c.category === categoryFilter)
+    : chores;
 
   async function togglePause(c: ChoreRow) {
     setPending(c.slug);
@@ -116,7 +191,7 @@ export default function ChoresPage() {
   }
 
   async function remove(c: ChoreRow) {
-    if (!confirm(`Delete chore "${c.name}"? Its schedule stops; the run history is preserved.`)) {
+    if (!confirm(`Delete chore "${c.displayName}"? Its schedule stops; the run history is preserved.`)) {
       return;
     }
     setPending(c.slug);
@@ -211,6 +286,42 @@ export default function ChoresPage() {
           </div>
         )}
 
+        {/* Category filter — only render when there are categories
+            populated. Defaults to "All"; clicking any chip filters. */}
+        {categoriesPresent.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-6">
+            <button
+              onClick={() => setCategoryFilter("")}
+              className="font-mono text-[10px] uppercase tracking-[0.22em] py-1 px-2 border"
+              style={{
+                color: categoryFilter === "" ? "var(--paper)" : "var(--brass)",
+                background: categoryFilter === "" ? "var(--brass)" : "transparent",
+                borderColor: "var(--brass)",
+              }}
+            >
+              All ({chores.length})
+            </button>
+            {categoriesPresent.map((cat) => {
+              const count = chores.filter((c) => c.category === cat).length;
+              const active = categoryFilter === cat;
+              return (
+                <button
+                  key={cat}
+                  onClick={() => setCategoryFilter(active ? "" : cat)}
+                  className="font-mono text-[10px] uppercase tracking-[0.22em] py-1 px-2 border"
+                  style={{
+                    color: active ? "var(--paper)" : "var(--brass)",
+                    background: active ? "var(--brass)" : "transparent",
+                    borderColor: "var(--brass)",
+                  }}
+                >
+                  {CATEGORY_LABELS[cat] ?? cat} ({count})
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         {chores.length === 0 ? (
           <p
             className="font-body italic text-[16px]"
@@ -219,21 +330,31 @@ export default function ChoresPage() {
             No chores yet. Tell me what you'd like done on a schedule and
             I'll set it up.
           </p>
+        ) : filteredChores.length === 0 ? (
+          <p
+            className="font-body italic text-[16px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            No chores in this category.
+          </p>
         ) : (
           <ul className="border-t border-rule">
-            {chores.map((c) => {
+            {filteredChores.map((c) => {
               const isOpen = open === c.slug;
               return (
                 <li key={c.slug} className="border-b border-rule">
-                  <div className="grid grid-cols-[1fr_220px_180px_24px] gap-6 py-5 items-baseline">
-                    <Link
-                      to={`/chores/${encodeURIComponent(c.slug)}`}
-                      className="font-display text-[22px]"
-                      style={{ opacity: c.paused ? 0.5 : 1, color: "var(--ink)" }}
-                    >
-                      {c.name}
-                      {c.paused ? " (paused)" : ""}
-                    </Link>
+                  <div className="grid grid-cols-[1fr_180px_160px_24px] gap-6 py-5 items-baseline">
+                    <div>
+                      <CategoryChip category={c.category} />
+                      <Link
+                        to={`/chores/${encodeURIComponent(c.slug)}`}
+                        className="font-display text-[22px]"
+                        style={{ opacity: c.paused ? 0.5 : 1, color: "var(--ink)" }}
+                      >
+                        {c.displayName}
+                        {c.paused ? " (paused)" : ""}
+                      </Link>
+                    </div>
                     <span
                       className="font-mono text-[10px] uppercase tracking-[0.22em]"
                       style={{ color: "var(--brass)" }}
@@ -244,7 +365,8 @@ export default function ChoresPage() {
                       className="font-mono text-[11px]"
                       style={{ color: "var(--marginalia)" }}
                     >
-                      last {c.last} · next {c.next}
+                      last {c.lastRelative}
+                      {!c.paused && c.nextRelative !== "—" && ` · ${c.nextRelative}`}
                     </span>
                     <button
                       onClick={() => setOpen(isOpen ? null : c.slug)}

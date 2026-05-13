@@ -194,7 +194,8 @@ def _build_instinct_content(instinct: dict[str, Any]) -> str:
     name = instinct.get("name", "Unnamed Instinct")
     description = instinct.get("description", "")
     obs_count = instinct.get("observation_count", 0)
-    threshold = instinct.get("discretion_threshold", 0.95)
+    # discretion_threshold intentionally NOT seeded — see packs_opus.py
+    # for the rationale. Runtime falls back to the obs-count formula.
     weights = instinct.get("matching_weights", {
         "domain": 0.30, "keywords": 0.30,
         "input_type": 0.15, "attachment": 0.15, "tags": 0.10,
@@ -259,7 +260,6 @@ matching_weights:
   input_type: {weights.get("input_type", 0.15)}
   attachment: {weights.get("attachment", 0.15)}
   tags: {weights.get("tags", 0.10)}
-discretion_threshold: {threshold}
 created: {now}
 updated: {now}
 tags: {tags}

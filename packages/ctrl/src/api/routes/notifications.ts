@@ -63,10 +63,27 @@ async function resolveRecipient(channel: string, token: string): Promise<string 
       if (item?.type !== "text" || typeof item.text !== "string") continue;
       const payload = JSON.parse(item.text) as { sessions?: Array<Record<string, any>> };
       const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
-      const matching = sessions
+      // For Telegram, chat_ids are POSITIVE for DMs and NEGATIVE for
+      // groups/supergroups. "Notify the principal" means the principal
+      // directly — never broadcast into a group just because that group
+      // happened to be the most recently active session. Prefer DM
+      // sessions; fall back to group only if no DM is on record. See
+      // 2026-05-13 trace: plex delegate landed in a group because a
+      // shared group's updatedAt was newer than Sir's DM.
+      const isTelegramDm = (s: Record<string, any>): boolean => {
+        if (channel !== "telegram") return true; // no-op outside Telegram
+        const to = String(s?.deliveryContext?.to ?? "");
+        const id = to.startsWith("telegram:") ? to.slice("telegram:".length) : to;
+        return !id.startsWith("-");
+      };
+      const allMatching = sessions
         .filter((s) => (s?.channel ?? "") === channel && s?.deliveryContext?.to)
         .sort((a, b) => Number(b?.updatedAt ?? 0) - Number(a?.updatedAt ?? 0));
-      const top = matching[0];
+      const dmFirst = [
+        ...allMatching.filter(isTelegramDm),
+        ...allMatching.filter((s) => !isTelegramDm(s)),
+      ];
+      const top = dmFirst[0];
       if (top?.deliveryContext?.to) {
         const raw = String(top.deliveryContext.to);
         // openclaw stores slack recipients as "user:U08UGBQL5J5" — the

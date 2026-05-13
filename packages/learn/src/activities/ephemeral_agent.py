@@ -27,22 +27,18 @@ from src.config import load_config
 
 logger = logging.getLogger("ephemeral-agent")
 
-# Tools every ephemeral agent gets regardless of declared per-task needs.
-# These are the openclaw gateway built-in primitives the agent needs to
-# function at all: read/write/edit on its workspace, basic search, and
-# composio_execute (the dispatcher that takes the action slug at
-# runtime — the actual per-task scoping happens in the prompt, not
-# here).
-DEFAULT_SAFE_TOOLS: list[str] = [
-    "Read",
-    "Write",
-    "Edit",
-    "Glob",
-    "Grep",
-    "LS",
-    "Bash",
-    "composio_execute",
-]
+# NOTE: we used to send an explicit per-agent ``tools.allow`` here. We
+# don't anymore. The workers gateway exposes a gateway-level allowlist
+# (built-in primitives + every MCP-namespaced tool from the 5 stdio
+# servers) — that's the surface we want every ephemeral agent to see.
+# A per-agent ``tools.allow`` would shadow that and we kept getting it
+# wrong: case-mismatched primitives (`glob` vs `Glob`), fake
+# composio-named entries (`gmail_send_email`) that don't match real MCP
+# tool names, and the burden of keeping it in sync with the MCP catalog
+# at all. Inherit gateway defaults instead. See the openclaw-workers
+# log warning 2026-05-13 09:28:29 (`allowlist contains unknown entries
+# gmail_fetch_emails, …, glob, grep, ls, composio_execute`) for the
+# canonical evidence this approach was broken.
 
 
 def _http() -> httpx.AsyncClient:
@@ -75,18 +71,19 @@ async def create_ephemeral_agent(
     ``delete_ephemeral_agent`` in a ``finally`` so stale entries don't
     accumulate even when the dispatch raises.
 
-    ``tools_required`` is merged with ``DEFAULT_SAFE_TOOLS``. With the
-    current openclaw gateway, the per-agent ``tools.allow`` enforces
-    only gateway-level tool names (Bash, Read, composio_execute …) —
-    not per-Composio-action scoping. Per-action selection happens in
-    the prompt frame the executor receives.
+    No per-agent ``tools_allow`` is sent — the agent inherits the
+    workers gateway's full allowlist, which already includes the
+    built-in primitives plus every MCP-namespaced tool from the 5
+    stdio servers. ``tools_required`` is accepted for backwards-compat
+    with callers but ignored. Per-task scoping happens in the prompt,
+    not the allowlist.
     """
+    del tools_required  # accepted for compat, intentionally unused
+
     agent_id = _agent_id_for_task(task_id)
-    allow = sorted(set(DEFAULT_SAFE_TOOLS) | set(tools_required or []))
     payload: dict[str, Any] = {
         "id": agent_id,
         "name": f"Ephemeral Executor ({task_id[:24]})",
-        "tools_allow": allow,
     }
     if model:
         payload["model"] = model
@@ -97,8 +94,9 @@ async def create_ephemeral_agent(
         )
         resp.raise_for_status()
     logger.info(
-        "ephemeral_agent.create_ephemeral_agent: created %s with %d tools",
-        agent_id, len(allow),
+        "ephemeral_agent.create_ephemeral_agent: created %s "
+        "(inherits gateway allowlist)",
+        agent_id,
     )
     return agent_id
 

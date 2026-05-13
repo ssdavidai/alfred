@@ -694,6 +694,13 @@ query getActivityFeed {
   entities: [Instance]
 }
 
+// Durable audit feed read from vault/event/ records — what the /study#audit
+// section reads. getActivityFeed remains for the LogsPage container-log view.
+query getAuditFeed {
+  fn: import { getAuditFeed } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
 query getCredentials {
   fn: import { getCredentials } from "@src/dashboard/operations",
   entities: [Instance]
@@ -924,6 +931,11 @@ query getChoreSource {
   entities: [Instance]
 }
 
+query getChoreRuns {
+  fn: import { getChoreRuns } from "@src/chores/operations",
+  entities: [Instance]
+}
+
 action pauseChore {
   fn: import { pauseChore } from "@src/chores/operations",
   entities: [Instance]
@@ -1020,6 +1032,26 @@ action finalizeComposioConnections {
 
 query getOpenclawReadiness {
   fn: import { getOpenclawReadiness } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+// Per-connection scope (read/write action lists) — feeds the "Where I am
+// authorised to act" table on /connections.
+query getIntegrationScope {
+  fn: import { getIntegrationScope } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+// Inbound custom-webhook endpoints — first-class stream sources alongside
+// Composio toolkits + Omi. Each row is a private URL the principal POSTs
+// arbitrary JSON to; each POST lands as a stream_event for the curator.
+action createInboundWebhook {
+  fn: import { createInboundWebhook } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action deleteInboundWebhook {
+  fn: import { deleteInboundWebhook } from "@src/integrations/operations",
   entities: [Instance]
 }
 

@@ -200,7 +200,9 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
                         from src.activities.defer_resurface import (
                             parse_resurface_time,
                         )
-                        parsed = await parse_resurface_time(note)
+                        parsed = await parse_resurface_time(
+                            note, intent="delegate",
+                        )
                         if isinstance(parsed, dict):
                             cand = parsed.get("resurface_at")
                             if isinstance(cand, str) and cand:

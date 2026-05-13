@@ -71,13 +71,61 @@ Emit STRICT JSON, no preamble:
 """
 
 
+# Stricter prompt for the **delegate** intent. The principal's default is
+# "execute now"; only honour a future time if the note *names one
+# explicitly*. The defer prompt is lenient (it interprets vague phrases
+# like "in a few days" as 3 days) — that's wrong for delegate, where
+# "Send me a reminder on Telegram" with no time MUST mean now, not
+# auto-default to 7 days out. Empirical case: plex card delegate on
+# 2026-05-13 auto-scheduled to 2026-05-20 because the lenient prompt
+# guessed a default for a non-time-bearing note. Sir's rule: no explicit
+# time → fire now.
+_PARSE_PROMPT_DELEGATE = """You are Alfred, the principal's agentic butler.
+
+The principal just delegated a task on their Desk with the note:
+
+  "{note}"
+
+Today is {today_iso} (UTC).
+
+**Default: the principal expects the task to be dispatched immediately.** Only return a future datetime if the note *explicitly names a time* — examples that DO name a time: "tomorrow at 9am", "in 3 hours", "next Tuesday morning", "Friday afternoon", "in two weeks", "on May 25th". Examples that do NOT name a time (return null → dispatch now): "Send me a reminder on Telegram", "ping me about this", "handle this", "remind me", "follow up on this".
+
+A "reminder" alone is not a time. "Remind me on Friday" is a time. "Remind me" is not.
+
+Emit STRICT JSON, no preamble:
+
+{{
+  "resurface_at": "<ISO 8601 UTC datetime if the note explicitly names one, else null>",
+  "reasoning": "<one short sentence — what you inferred from the note>"
+}}
+"""
+
+
 @activity.defn
-async def parse_resurface_time(note: str, today_iso: str | None = None) -> dict[str, Any]:
-    """Ask the clerk to turn a defer note into a concrete resurface datetime."""
+async def parse_resurface_time(
+    note: str,
+    today_iso: str | None = None,
+    intent: str = "defer",
+) -> dict[str, Any]:
+    """Ask the clerk to turn a defer/delegate note into a concrete resurface datetime.
+
+    ``intent`` selects the parsing prompt:
+
+    - ``defer`` (default) — lenient. Vague phrases like "in a few days"
+      get interpreted as ~3 days. Used by the actual /desk Defer button.
+    - ``delegate`` — strict. Only returns a non-null datetime if the
+      note *explicitly* names a time. Default is null → dispatch now.
+      Used by the decision_router's delegate path so "Send me a
+      reminder on Telegram" with no time fires immediately, not 7 days
+      out.
+    """
     if not note or not note.strip():
         return {"resurface_at": None, "reasoning": "empty note"}
     today = today_iso or datetime.now(timezone.utc).date().isoformat()
-    prompt = _PARSE_PROMPT.format(note=note.strip(), today_iso=today)
+    template = (
+        _PARSE_PROMPT_DELEGATE if intent == "delegate" else _PARSE_PROMPT
+    )
+    prompt = template.format(note=note.strip(), today_iso=today)
     try:
         from src.activities.clerk import _call_clerk
         result = await _call_clerk(prompt)

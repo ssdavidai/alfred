@@ -1,16 +1,25 @@
 // StudyPage — unified back office (#867 + #868).
 //
-// Six sections in a sidebar layout:
+// Sections in a sidebar layout:
 //
 //   • Settings    — agent config (model + agent voice/tone), workspace
 //                   files (RULES.md, AGENTS.md, SOUL.md), Vexa toggle.
-//   • Credentials — getCredentials + updateCredentials (API keys for
-//                   third-party services: Sure, Plane, OpenRouter, …).
+//   • Account     — billing portal + identity.
 //   • API keys    — listApiKeys / createApiKey / revokeApiKey for
 //                   programmatic SaaS access.
-//   • Audit       — getActivityFeed paginated 50.
-//   • Ledger      — getLedgerEntries paginated 50.
+//   • Audit       — getAuditFeed paginated 50.
 //   • Theme       — light / dark toggle via the existing theme context.
+//
+// Credentials (LLM/provider API keys) was retired as user-facing surface:
+// it mixed real principal choices (which LLM to use) with operationally
+// dangerous values (Vaultwarden master password) and competed with the
+// vault as the source-of-truth for secrets. /dashboard/credentials still
+// redirects here (lands on Settings since "credentials" is no longer a
+// valid hash).
+//
+// Ledger was retired — the feature had no producer (no workflow ever
+// wrote ledger_entry records); resurface only when there's a real
+// financial-tracking surface to populate it.
 //
 // Standing rules editor: parses RULES.md as a bullet list, edits via
 // updateWorkspaceFile (whole-file replace).
@@ -30,13 +39,10 @@ import {
   setVexaAutoJoin,
   getWorkspaceFile,
   updateWorkspaceFile,
-  getCredentials,
-  updateCredentials,
   listApiKeys,
   createApiKey,
   revokeApiKey,
-  getActivityFeed,
-  getLedgerEntries,
+  getAuditFeed,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { useTheme } from "../client/lib/theme";
@@ -46,20 +52,16 @@ import { getCustomerPortalUrl } from "wasp/client/operations";
 const SECTIONS = [
   "settings",
   "account",
-  "credentials",
   "api-keys",
   "audit",
-  "ledger",
   "theme",
 ] as const;
 type Section = (typeof SECTIONS)[number];
 const SECTION_LABEL: Record<Section, string> = {
   settings: "Settings",
   account: "Account",
-  credentials: "Credentials",
   "api-keys": "API keys",
   audit: "Audit",
-  ledger: "Ledger",
   theme: "Theme",
 };
 
@@ -148,10 +150,8 @@ export default function StudyPage() {
         <article>
           {section === "settings" && <SettingsSection />}
           {section === "account" && <AccountSection />}
-          {section === "credentials" && <CredentialsSection />}
           {section === "api-keys" && <ApiKeysSection />}
           {section === "audit" && <AuditSection />}
-          {section === "ledger" && <LedgerSection />}
           {section === "theme" && <ThemeSection />}
         </article>
       </section>
@@ -368,94 +368,20 @@ function SettingsSection() {
 }
 
 // ---------------------------------------------------------------------------
-// Credentials
-// ---------------------------------------------------------------------------
-
-function CredentialsSection() {
-  const { data: credsData, refetch } = useQuery(getCredentials, undefined, {
-    retry: false,
-  });
-  const creds = (credsData as any)?.credentials ?? credsData ?? {};
-  const entries = Object.entries(creds as Record<string, unknown>);
-
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState(false);
-
-  async function save() {
-    setBusy(true);
-    try {
-      const updates: Record<string, string | null> = {};
-      for (const [k, v] of Object.entries(drafts)) {
-        updates[k] = v.trim() ? v.trim() : null;
-      }
-      await updateCredentials(updates);
-      setDrafts({});
-      await refetch();
-    } catch (e) {
-      console.error("update credentials failed", e);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div>
-      <H>Credentials</H>
-      <Sub>Keys to the third-party services I act through. Stored on your tenant.</Sub>
-      {entries.length === 0 ? (
-        <p
-          className="font-body italic text-[15px]"
-          style={{ color: "var(--marginalia)" }}
-        >
-          Nothing yet.
-        </p>
-      ) : (
-        <ul className="border-t border-rule">
-          {entries.map(([k, v]) => {
-            const set = Boolean(v);
-            return (
-              <li
-                key={k}
-                className="grid grid-cols-[1fr_1fr_120px] gap-4 py-4 border-b border-rule items-baseline"
-              >
-                <span className="font-display italic text-[18px]">{k}</span>
-                <input
-                  type="password"
-                  placeholder={set ? "•••••••• (set)" : "Not set"}
-                  value={drafts[k] ?? ""}
-                  onChange={(e) =>
-                    setDrafts((d) => ({ ...d, [k]: e.target.value }))
-                  }
-                  className="bg-transparent border-b font-mono text-[12px] outline-none pb-1"
-                  style={{ borderColor: "var(--rule)" }}
-                />
-                <span
-                  className="font-mono text-[10px] uppercase tracking-[0.22em] text-right"
-                  style={{ color: set ? "var(--brass)" : "var(--marginalia)" }}
-                >
-                  {set ? "set" : "—"}
-                </span>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      {Object.keys(drafts).length > 0 && (
-        <button onClick={save} disabled={busy} className="btn-brass mt-6">
-          {busy ? "…" : "Save credentials"}
-        </button>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
 // API keys
 // ---------------------------------------------------------------------------
 
 function ApiKeysSection() {
   const { data, refetch } = useQuery(listApiKeys, undefined, { retry: false });
-  const keys = (data as any)?.keys ?? data ?? [];
+  // The op returns the array directly. Don't do `data?.keys` — Array
+  // has a `.keys` PROTOTYPE METHOD, so `data?.keys` on a real array is
+  // a bound function (truthy, length=0), which falls through the
+  // nullish-coalescing fallback and lies that the list is empty.
+  const keys: any[] = Array.isArray(data)
+    ? data
+    : Array.isArray((data as any)?.keys)
+      ? (data as any).keys
+      : [];
   const [name, setName] = useState("");
   const [created, setCreated] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -496,27 +422,49 @@ function ApiKeysSection() {
 
       {created && (
         <div
-          className="border border-rule p-4 mb-6"
-          style={{ borderColor: "var(--brass)" }}
+          className="border-2 p-5 mb-6"
+          style={{
+            borderColor: "var(--brass)",
+            background: "var(--paper)",
+          }}
         >
           <div
-            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2 font-extrabold"
             style={{ color: "var(--brass)" }}
           >
-            Save this — it will not be shown again
+            Copy this now — it will never be shown again
           </div>
-          <code className="font-mono text-[12px] block break-all">{created}</code>
-          <button
-            onClick={() => {
-              navigator.clipboard?.writeText(created);
-            }}
-            className="btn-ghost mt-3"
+          <p
+            className="font-body italic text-[13px] mb-3"
+            style={{ color: "var(--marginalia)" }}
           >
-            Copy
-          </button>
-          <button onClick={() => setCreated(null)} className="btn-link mt-3">
-            Done
-          </button>
+            This banner stays until you click Done. Once dismissed, the
+            full key is gone forever — only the prefix below remains for
+            identification. If you lose the key, revoke it and create a
+            new one.
+          </p>
+          <code
+            className="font-mono text-[13px] block break-all p-3 mb-3"
+            style={{
+              background: "rgba(0,0,0,0.04)",
+              border: "1px solid var(--rule)",
+            }}
+          >
+            {created}
+          </code>
+          <div className="flex gap-3 items-center">
+            <button
+              onClick={() => {
+                navigator.clipboard?.writeText(created);
+              }}
+              className="btn-brass"
+            >
+              Copy to clipboard
+            </button>
+            <button onClick={() => setCreated(null)} className="btn-link">
+              I've saved it — dismiss
+            </button>
+          </div>
         </div>
       )}
 
@@ -534,16 +482,25 @@ function ApiKeysSection() {
           (keys as any[]).map((k) => (
             <li
               key={String(k.id)}
-              className="grid grid-cols-[1fr_1fr_140px] gap-4 py-3 border-b border-rule items-baseline"
+              className="grid grid-cols-[1fr_180px_180px_100px] gap-4 py-3 border-b border-rule items-baseline"
             >
-              <span className="font-display italic text-[18px]">
+              <span className="font-display italic text-[18px] truncate">
                 {String(k.name ?? "Untitled")}
               </span>
-              <span
+              <code
                 className="font-mono text-[12px]"
                 style={{ color: "var(--marginalia)" }}
+                title="Key prefix (last 24 chars hidden — only shown once at creation)"
               >
-                {k.lastUsedAt ? `last used ${k.lastUsedAt}` : "unused"}
+                {String(k.keyPrefix ?? "")}
+                {k.keyPrefix ? "…" : ""}
+              </code>
+              <span
+                className="font-mono text-[11px]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                {formatKeyDate(k.createdAt)}
+                {k.lastUsedAt ? ` · used ${formatKeyDate(k.lastUsedAt)}` : ""}
               </span>
               <button
                 onClick={() => revoke(String(k.id))}
@@ -582,23 +539,26 @@ function ApiKeysSection() {
 // ---------------------------------------------------------------------------
 
 function AuditSection() {
-  const { data } = useQuery(getActivityFeed, undefined, {
+  const { data } = useQuery(getAuditFeed, undefined, {
     retry: false,
     refetchInterval: 60_000,
   });
-  const rows = Array.isArray((data as any)?.results)
-    ? (data as any).results
-    : Array.isArray((data as any)?.events)
-      ? (data as any).events
-      : Array.isArray(data)
-        ? (data as any)
-        : [];
+  // Backend returns {items: [{id, path, created, kind, summary}], total}.
+  const items = Array.isArray((data as any)?.items)
+    ? ((data as any).items as Array<{
+        id: string;
+        path: string;
+        created: string;
+        kind: string;
+        summary: string;
+      }>)
+    : [];
 
   return (
     <div>
       <H>Audit</H>
       <Sub>Every act Alfred has taken on your behalf.</Sub>
-      {rows.length === 0 ? (
+      {items.length === 0 ? (
         <p
           className="font-body italic text-[15px]"
           style={{ color: "var(--marginalia)" }}
@@ -616,25 +576,29 @@ function AuditSection() {
                 When
               </th>
               <th className="text-left py-2 uppercase tracking-[0.2em] text-[10px] font-normal">
+                Kind
+              </th>
+              <th className="text-left py-2 uppercase tracking-[0.2em] text-[10px] font-normal">
                 Act
               </th>
             </tr>
           </thead>
           <tbody>
-            {rows.slice(0, 50).map((a: any, i: number) => (
-              <tr key={`${a?.id ?? i}`} className="border-b border-rule">
-                <td className="py-3 pr-3 align-top" style={{ color: "var(--marginalia)" }}>
-                  {String(a?.created_at ?? a?.timestamp ?? "")}
+            {items.map((a) => (
+              <tr key={a.id} className="border-b border-rule">
+                <td
+                  className="py-3 pr-3 align-top whitespace-nowrap"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  {formatAuditWhen(a.created)}
                 </td>
-                <td className="py-3 pr-3 font-body text-[15px]">
-                  {String(
-                    a?.summary ??
-                      a?.title ??
-                      a?.message ??
-                      a?.event_type ??
-                      "—",
-                  )}
+                <td
+                  className="py-3 pr-3 align-top whitespace-nowrap uppercase tracking-[0.18em] text-[10px]"
+                  style={{ color: "var(--brass)" }}
+                >
+                  {a.kind}
                 </td>
+                <td className="py-3 pr-3 font-body text-[15px]">{a.summary}</td>
               </tr>
             ))}
           </tbody>
@@ -644,80 +608,29 @@ function AuditSection() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Ledger
-// ---------------------------------------------------------------------------
+function formatKeyDate(value: unknown): string {
+  if (!value) return "—";
+  const d = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(d.getTime())) return "—";
+  // "13 May 2026" — letterpress-style, matches the Connections table.
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(d);
+}
 
-function LedgerSection() {
-  const { data } = useQuery(getLedgerEntries, undefined, {
-    retry: false,
-    refetchInterval: 60_000,
-  });
-  const rows = Array.isArray((data as any)?.results)
-    ? (data as any).results
-    : Array.isArray(data)
-      ? (data as any)
-      : [];
-
-  return (
-    <div>
-      <H>Ledger</H>
-      <Sub>Every transaction Alfred has logged.</Sub>
-      {rows.length === 0 ? (
-        <p
-          className="font-body italic text-[15px]"
-          style={{ color: "var(--marginalia)" }}
-        >
-          Nothing yet.
-        </p>
-      ) : (
-        <table className="w-full font-mono text-[12px]">
-          <thead>
-            <tr
-              className="border-y border-rule"
-              style={{ color: "var(--marginalia)" }}
-            >
-              <th className="text-left py-2 uppercase tracking-[0.2em] text-[10px] font-normal">
-                Date
-              </th>
-              <th className="text-left py-2 uppercase tracking-[0.2em] text-[10px] font-normal">
-                Entry
-              </th>
-              <th className="text-right py-2 uppercase tracking-[0.2em] text-[10px] font-normal">
-                Amount
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.slice(0, 50).map((e: any, i: number) => {
-              const fm = e?.frontmatter ?? e ?? {};
-              return (
-                <tr
-                  key={`${e?.path ?? i}`}
-                  className="border-b border-rule"
-                >
-                  <td
-                    className="py-3 pr-3 align-top"
-                    style={{ color: "var(--marginalia)" }}
-                  >
-                    {String(fm.created ?? fm.date ?? "")}
-                  </td>
-                  <td className="py-3 pr-3 font-body text-[15px]">
-                    {String(
-                      fm.description ?? fm.summary ?? e?.name ?? "—",
-                    )}
-                  </td>
-                  <td className="py-3 text-right">
-                    {fm.amount != null ? String(fm.amount) : "—"}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
-    </div>
-  );
+function formatAuditWhen(iso: string): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return new Intl.DateTimeFormat("en-GB", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(d);
 }
 
 // ---------------------------------------------------------------------------
@@ -732,6 +645,10 @@ function AccountSection() {
   const { data: user } = useAuth();
   const [portalUrl, setPortalUrl] = useState<string | null>(null);
   const [loadingPortal, setLoadingPortal] = useState(false);
+  // null    = haven't checked
+  // false   = Polar returned no portal (user isn't a Polar customer yet)
+  // true    = portal exists; button is live
+  const [hasPortal, setHasPortal] = useState<boolean | null>(null);
 
   const openCustomerPortal = async () => {
     setLoadingPortal(true);
@@ -739,7 +656,14 @@ function AccountSection() {
       const url = await getCustomerPortalUrl();
       if (typeof url === "string" && url) {
         setPortalUrl(url);
+        setHasPortal(true);
         window.open(url, "_blank");
+      } else {
+        // Polar returns null when the user has never been a Polar
+        // customer (no subscription was ever started through Polar).
+        // The legacy UI silently no-op'd on null — now we surface it
+        // so the principal isn't confused by a button that does nothing.
+        setHasPortal(false);
       }
     } finally {
       setLoadingPortal(false);
@@ -753,12 +677,11 @@ function AccountSection() {
   const status = (user as any).subscriptionStatus
     ? String((user as any).subscriptionStatus)
     : "none";
-  const credits = (user as any).credits ?? 0;
 
   return (
     <div>
       <H>Your account</H>
-      <Sub>The standing details — email, plan, credits. Manage billing in your customer portal.</Sub>
+      <Sub>The standing details — email, plan. Manage billing in your customer portal.</Sub>
 
       <dl className="grid grid-cols-[140px_1fr] gap-y-4 font-body text-[15px] max-w-[560px]">
         <dt className="font-mono text-[10px] uppercase tracking-[0.22em] pt-1" style={{ color: "var(--marginalia)" }}>
@@ -785,10 +708,6 @@ function AccountSection() {
           </span>
         </dd>
 
-        <dt className="font-mono text-[10px] uppercase tracking-[0.22em] pt-1" style={{ color: "var(--marginalia)" }}>
-          Credits
-        </dt>
-        <dd>{credits}</dd>
       </dl>
 
       <hr className="rule my-8" />
@@ -812,6 +731,12 @@ function AccountSection() {
           </a>
         )}
       </div>
+      {hasPortal === false && (
+        <p className="mt-3 font-body text-[14px]" style={{ color: "var(--marginalia)" }}>
+          No Polar customer linked to this account — billing is managed elsewhere.
+          If you expected a customer portal, complete a Polar checkout first.
+        </p>
+      )}
     </div>
   );
 }

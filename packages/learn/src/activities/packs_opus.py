@@ -1208,8 +1208,13 @@ def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
 
     input_patterns = instinct.get("input_patterns") or {}
     routing_rule = instinct.get("routing_rule") or {}
-    threshold = float(instinct.get("discretion_threshold", 0.85))
     confidence = float(instinct.get("confidence_score", 0.85))
+    # Note: discretion_threshold is intentionally NOT pre-seeded. A seeded
+    # pattern starts at "Asking" — the runtime falls back to the obs-count
+    # formula in src/matching/discretion.py (0.95 for <5 obs), so the
+    # principal gets asked until the pattern has earned trust through
+    # repetition. See should_route_autonomously: it only consults the
+    # field when explicitly set; absence is the signal "use the formula."
 
     # Encode the structured nested fields as JSON-scalar strings so the
     # flat parser on the read side can round-trip them via json.loads.
@@ -1226,7 +1231,6 @@ def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
         f"updated: {now}",
         f"created_by: onboarding_pipeline",
         f"generated: true",
-        f"discretion_threshold: {threshold}",
         f"confidence_score: {confidence}",
         f"observation_count: 0",
         f"input_patterns: {_escape_yaml_scalar(input_patterns_json)}",

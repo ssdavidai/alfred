@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { dockerComposeCmd, dockerExec, ALFRED_CMD } from "../helpers.js";
+import { getInstinctCounts } from "../instinctCounts.js";
 
 const VAULT_PATH = "/mnt/encrypted/vault";
 const ALFRED_DATA = "/mnt/encrypted/alfred";
@@ -44,12 +46,33 @@ function parseFrontmatter(content: string): ParsedFm {
   if (end === -1) return { frontmatter: {}, body: content };
   const yamlBlock = content.slice(4, end);
   const body = content.slice(end + 4).replace(/^\r?\n/, "");
-  const fm: Record<string, string> = {};
-  for (const line of yamlBlock.split("\n")) {
-    const m = line.match(/^([a-zA-Z_][a-zA-Z0-9_-]*)\s*:\s*(.*)/);
-    if (m) fm[m[1]] = m[2].trim().replace(/^['"]|['"]$/g, "");
+  // Use a real YAML parser — the previous regex-line implementation
+  // mis-parsed block scalars (`key: |-`) and any other multi-line
+  // value, leaking the YAML indicator (`|-`) into the field. That
+  // surfaced on /instincts as a literal "|-" body for instincts whose
+  // display_body was written as a block scalar.
+  let fm: Record<string, unknown> = {};
+  try {
+    const parsed = yaml.load(yamlBlock, { schema: yaml.DEFAULT_SCHEMA });
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      fm = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Malformed YAML — fall back to empty frontmatter rather than
+    // crashing the whole list endpoint over one bad file.
+    fm = {};
   }
-  return { frontmatter: fm, body };
+  // Caller types the return as Record<string, string> for backward
+  // compatibility. Stringify scalars, preserve structures via JSON for
+  // the few consumers that read nested fields directly off this map.
+  const flat: Record<string, string> = {};
+  for (const [k, v] of Object.entries(fm)) {
+    if (v === null || v === undefined) flat[k] = "";
+    else if (typeof v === "string") flat[k] = v;
+    else if (typeof v === "number" || typeof v === "boolean") flat[k] = String(v);
+    else flat[k] = JSON.stringify(v);
+  }
+  return { frontmatter: flat, body };
 }
 
 function readVaultRecords(dir: string): Array<{ path: string; name: string; status: string; type: string; created: string; frontmatter: Record<string, string>; body: string }> {
@@ -507,6 +530,17 @@ export function registerLearningRoutes(): void {
       ...readVaultRecords(newDir),
     ];
     records.sort((a, b) => a.name.localeCompare(b.name));
+    // Enrich each record with the live observation count derived from
+    // the observation/ directory (decision-sourced only). This is the
+    // truth signal for Progressive Autonomy — counts here drive the
+    // obs-count threshold formula in discretion.py via
+    // signal_actions._instinct_threshold, and the /instincts UI's
+    // stage badge.
+    const counts = await getInstinctCounts();
+    for (const rec of records) {
+      const live = counts.get(rec.path) ?? 0;
+      (rec.frontmatter as Record<string, unknown>).live_observation_count = live;
+    }
     sendJson(res, 200, { items: records, total: records.length });
   });
 

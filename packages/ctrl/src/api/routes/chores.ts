@@ -5,6 +5,7 @@ import { sendJson, ValidationError, NotFoundError, ConflictError } from "../erro
 import { dockerExec, dockerComposeCmd } from "../helpers.js";
 import { VAULT_PATH, walkMd, readRecord, IGNORE_DIRS } from "./vault.js";
 import { CHORE_ACTION_MANIFEST, lookupChoreActions, type ChoreActionSpec } from "./chore_manifest_data.js";
+import { nextFireTime } from "../cron.js";
 
 const USER_CHORES_DIR = "/mnt/encrypted/alfred/user-chores";
 const VALIDATE_STAGING_DIR = "/mnt/encrypted/alfred/.chore-validate";
@@ -312,6 +313,7 @@ interface ChoreSummary {
   schedule: string;
   schedule_id: string;
   last_run: string | null;
+  next_run_at: string | null;
 }
 
 function readChoreFile(slug: string): { frontmatter: Record<string, unknown>; body: string } | null {
@@ -408,6 +410,7 @@ export function registerChoreRoutes(): void {
       .readdirSync(CHORE_DIR)
       .filter((f) => f.endsWith(".md"))
       .sort();
+    const now = new Date();
     const chores: ChoreSummary[] = [];
     for (const file of files) {
       const slug = file.slice(0, -3);
@@ -415,14 +418,23 @@ export function registerChoreRoutes(): void {
       if (!parsed) continue;
       const fm = parsed.frontmatter;
       if ((fm.type ?? "") !== "chore") continue;
+      const schedule = (fm.schedule as string) ?? "";
+      const status = (fm.status as string) ?? "active";
+      // Paused/completed chores have no upcoming fire — leave null.
+      let nextRunAt: string | null = null;
+      if (status === "active" && schedule) {
+        const next = nextFireTime(schedule, now);
+        nextRunAt = next ? next.toISOString() : null;
+      }
       chores.push({
         slug,
         name: (fm.name as string) ?? slug,
-        status: (fm.status as string) ?? "active",
+        status,
         template: (fm.template as string) ?? "",
-        schedule: (fm.schedule as string) ?? "",
+        schedule,
         schedule_id: (fm.schedule_id as string) ?? `chore-${slug}`,
         last_run: (fm.last_run as string) || null,
+        next_run_at: nextRunAt,
       });
     }
     sendJson(res, 200, { chores, count: chores.length });
@@ -491,6 +503,27 @@ export function registerChoreRoutes(): void {
 
     const name = String(b.name ?? slug.replace(/-/g, " ")).trim() || slug;
     const description = String(b.user_facing_description ?? "").trim();
+    // Phase 2 chore metadata. All optional — the LLM-generation path
+    // emits these alongside the python_source so the principal-facing
+    // detail page can render Capabilities + What+Why without re-parsing
+    // the source on every read.
+    const displayName = String(b.display_name ?? name).trim();
+    const displayBody = String(b.display_body ?? description).trim();
+    const category = String(b.category ?? "").trim().toLowerCase();
+    const activitiesUsed = Array.isArray(b.activities_used)
+      ? (b.activities_used as unknown[]).filter((s): s is string => typeof s === "string")
+      : [];
+    const toolsUsed = Array.isArray(b.tools_used)
+      ? (b.tools_used as unknown[]).filter((s): s is string => typeof s === "string")
+      : [];
+    const usesLlm = Boolean(b.uses_llm);
+    const llmAgentId = String(b.llm_agent_id ?? "").trim();
+    const vaultWrites = Array.isArray(b.vault_writes)
+      ? (b.vault_writes as unknown[]).filter((s): s is string => typeof s === "string")
+      : [];
+    const vaultReads = Array.isArray(b.vault_reads)
+      ? (b.vault_reads as unknown[]).filter((s): s is string => typeof s === "string")
+      : [];
     const paramsInput =
       b.params && typeof b.params === "object" && !Array.isArray(b.params)
         ? (b.params as Record<string, unknown>)
@@ -529,13 +562,35 @@ export function registerChoreRoutes(): void {
     const tagsInline = tags.length
       ? `[${tags.map((t) => `'${t.replace(/'/g, "''")}'`).join(", ")}]`
       : "[]";
+    const activitiesInline = activitiesUsed.length
+      ? `[${activitiesUsed.map((s) => `'${s.replace(/'/g, "''")}'`).join(", ")}]`
+      : "[]";
+    const toolsInline = toolsUsed.length
+      ? `[${toolsUsed.map((s) => `'${s.replace(/'/g, "''")}'`).join(", ")}]`
+      : "[]";
+    const vaultWritesInline = vaultWrites.length
+      ? `[${vaultWrites.map((s) => `'${s.replace(/'/g, "''")}'`).join(", ")}]`
+      : "[]";
+    const vaultReadsInline = vaultReads.length
+      ? `[${vaultReads.map((s) => `'${s.replace(/'/g, "''")}'`).join(", ")}]`
+      : "[]";
+
     const recordLines = [
       "---",
+      "activities_used: " + activitiesInline,
+      ...(category ? [`category: ${yamlScalarQuote(category)}`] : []),
       `created: '${now}'`,
       "created_by: self",
+      ...(displayBody ? [`display_body: ${yamlScalarQuote(displayBody)}`] : []),
+      ...(displayName && displayName !== name
+        ? [`display_name: ${yamlScalarQuote(displayName)}`]
+        : []),
       "generated: true",
       "last_result: ''",
       "last_run: ''",
+      ...(usesLlm && llmAgentId
+        ? [`llm_agent_id: ${yamlScalarQuote(llmAgentId)}`]
+        : []),
       `name: ${yamlScalarQuote(name)}`,
       `params: ${yamlScalarQuote(paramsJson)}`,
       "quarantine: false",
@@ -545,14 +600,18 @@ export function registerChoreRoutes(): void {
       "status: active",
       `tags: ${tagsInline}`,
       `template: ${module}`,
+      "tools_used: " + toolsInline,
       "type: chore",
       `user_facing_description: ${yamlScalarQuote(description)}`,
+      `uses_llm: ${usesLlm ? "true" : "false"}`,
+      "vault_reads: " + vaultReadsInline,
+      "vault_writes: " + vaultWritesInline,
       `workflow_class_name: ${workflowClass}`,
       "---",
       "",
       `# ${name}`,
       "",
-      description || "Generated chore.",
+      displayBody || description || "Generated chore.",
       "",
       "> **Generated chore.** Created via `POST /api/v1/chores` (self MCP).",
       "",
@@ -879,9 +938,19 @@ export function registerChoreRoutes(): void {
       throw new NotFoundError(`chore ${slug} not found`);
     }
     const chore = composeChoreDetail(slug, parsed.frontmatter, parsed.body);
+    // Derive next_run_at from the cron expression on the fm so the
+    // detail page can show "next run in 14h" without round-tripping to
+    // Temporal. Paused/completed chores return null.
+    const schedule = String(parsed.frontmatter.schedule ?? "").trim();
+    const status = String(parsed.frontmatter.status ?? "active");
+    let nextRunAt: string | null = null;
+    if (status === "active" && schedule) {
+      const next = nextFireTime(schedule, new Date());
+      nextRunAt = next ? next.toISOString() : null;
+    }
     const body = {
       slug,
-      frontmatter: parsed.frontmatter,
+      frontmatter: { ...parsed.frontmatter, next_run_at: nextRunAt },
       body: parsed.body,
       chore,
     };
@@ -1056,6 +1125,85 @@ export function registerChoreRoutes(): void {
   //   - the chore record doesn't exist
   //   - the chore isn't marked as generated
   //   - the expected .py file isn't in /alfred-data/user-chores/
+  // GET /api/v1/chores/:slug/runs — paginated run history.
+  //
+  // Reads `/alfred-data/chore-run-history.jsonl`, filters by slug,
+  // sorts newest-first. The JSONL is written by record_chore_run
+  // (packages/learn/src/workflows/chores/_base.py:179) every time a
+  // chore fires — that's the canonical run history. No separate vault
+  // record_type, no backfill needed (already populated from real
+  // executions).
+  //
+  // Query params:
+  //   limit  default 25, max 200
+  //   offset default 0
+  // Returns: { runs: [{timestamp, result_summary, was_dry_run, age_seconds}], total }
+  addRoute("GET", "/api/v1/chores/:slug/runs", async ({ res, params, query }) => {
+    const slug = params?.slug;
+    if (!slug) throw new ValidationError("slug is required");
+    // Make sure the chore exists so we don't silently return an empty
+    // history for a typo'd slug.
+    if (!readChoreFile(slug)) {
+      throw new NotFoundError(`chore ${slug} not found`);
+    }
+    const limit = Math.min(
+      Math.max(1, parseInt(query.get("limit") ?? "25", 10) || 25),
+      200,
+    );
+    const offset = Math.max(0, parseInt(query.get("offset") ?? "0", 10) || 0);
+
+    // PATH NOTE: ctrl-api container does NOT remap /mnt/encrypted/alfred to
+    // /alfred-data (unlike alfred-learn). Read directly from the shared host
+    // path so we see the file alfred-learn's record_chore_run wrote.
+    const historyPath = "/mnt/encrypted/alfred/chore-run-history.jsonl";
+    interface RunEntry {
+      timestamp: string;     // ISO 8601 UTC — record_chore_run writes epoch seconds; we convert here
+      result_summary: string;
+      was_dry_run: boolean;
+      age_seconds: number;
+    }
+    const raw0: Array<{
+      tsEpoch: number;
+      result_summary: string;
+      was_dry_run: boolean;
+    }> = [];
+    let raw = "";
+    try {
+      raw = fs.readFileSync(historyPath, "utf-8");
+    } catch {
+      // File doesn't exist yet — first run hasn't happened. Empty history is
+      // a valid state; return [].
+      sendJson(res, 200, { runs: [], total: 0 });
+      return;
+    }
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (entry.chore_slug !== slug) continue;
+        const ts = typeof entry.timestamp === "number" ? entry.timestamp : 0;
+        raw0.push({
+          tsEpoch: ts,
+          result_summary: String(entry.result_summary ?? ""),
+          was_dry_run: Boolean(entry.was_dry_run),
+        });
+      } catch {
+        // Skip malformed lines — best-effort parse.
+      }
+    }
+    // Newest first
+    raw0.sort((a, b) => b.tsEpoch - a.tsEpoch);
+    const total = raw0.length;
+    const nowEpoch = Date.now() / 1000;
+    const page: RunEntry[] = raw0.slice(offset, offset + limit).map((r) => ({
+      timestamp: new Date(r.tsEpoch * 1000).toISOString(),
+      result_summary: r.result_summary,
+      was_dry_run: r.was_dry_run,
+      age_seconds: Math.max(0, Math.round(nowEpoch - r.tsEpoch)),
+    }));
+    sendJson(res, 200, { runs: page, total });
+  });
+
   addRoute("GET", "/api/v1/chores/:slug/source", async ({ res, params }) => {
     const slug = params?.slug;
     if (!slug) throw new ValidationError("slug is required");

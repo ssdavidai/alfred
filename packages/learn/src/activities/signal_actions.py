@@ -84,7 +84,7 @@ SIGNAL_ACTION_LIVE_MODE_ENV = "STEWARD_SIGNAL_ACTION_LIVE_MODE"
 # Default discretion threshold when an instinct's frontmatter doesn't
 # carry one. Same as the 10-19 observations bucket in
 # ``get_discretion_threshold`` — "fairly certain this goes here".
-DEFAULT_DISCRETION_THRESHOLD = 0.85
+DEFAULT_DISCRETION_THRESHOLD = 0.95  # Asking. See _instinct_threshold.
 
 # Below this similarity score the candidate instinct is treated as "no
 # matching instinct" → HUMAN path. Tuned conservatively: with the
@@ -279,28 +279,57 @@ def _score_signal_against_instinct(
 def _instinct_threshold(instinct: dict[str, Any]) -> float:
     """Pull the per-instinct discretion threshold from frontmatter.
 
-    Falls back to ``DEFAULT_DISCRETION_THRESHOLD`` (0.85) when absent.
-    Mirrors the contract in
-    ``src.matching.discretion.should_route_autonomously`` — that helper
-    looks up ``instinct["discretion_threshold"]`` directly, but the
-    instincts we list from ctrl-api come back with the threshold inside
-    ``frontmatter``. We unwrap here so the two callsites converge.
+    Progressive autonomy contract (mirrors
+    ``src.matching.discretion.should_route_autonomously``):
+
+      1. Explicit ``discretion_threshold`` override on the instinct
+         wins. Reserved for operator-tuned exceptions.
+      2. Otherwise use the obs-count formula from
+         ``src.matching.discretion.get_discretion_threshold`` on the
+         live observation count (decision-sourced observations linked
+         to this instinct).
+      3. Bare fallback when neither is available:
+         ``DEFAULT_DISCRETION_THRESHOLD`` (0.95 — Asking).
+
+    The live count comes from ctrl-api on the
+    ``frontmatter.live_observation_count`` field. ctrl-api computes it
+    by scanning the observation directory for decision-sourced records
+    with ``instinct: <path>`` set, so the count reflects real Sir
+    decisions — not retroactive signal matches.
+
+    Falling back to the stored ``observation_count`` keeps the gate
+    sane if ctrl-api is on an older build that doesn't enrich the
+    response yet.
     """
     fm = instinct.get("frontmatter")
     if not isinstance(fm, dict):
         fm = instinct
+
     raw = fm.get("discretion_threshold")
-    if raw is None:
-        return DEFAULT_DISCRETION_THRESHOLD
+    if raw is not None:
+        try:
+            f = float(raw)
+        except (TypeError, ValueError):
+            f = None
+        if f is not None and f == f and f >= 0.0:
+            return min(f, 1.0)
+
+    # No explicit override — defer to the obs-count formula. Prefer
+    # the ctrl-api-enriched live count over the stored snapshot.
+    obs_count_raw = (
+        fm.get("live_observation_count")
+        if fm.get("live_observation_count") is not None
+        else fm.get("observation_count", 0)
+    )
     try:
-        f = float(raw)
+        obs_count = int(obs_count_raw)
     except (TypeError, ValueError):
-        return DEFAULT_DISCRETION_THRESHOLD
-    if f != f or f < 0.0:
-        return DEFAULT_DISCRETION_THRESHOLD
-    if f > 1.0:
-        return 1.0
-    return f
+        obs_count = 0
+    if obs_count < 0:
+        obs_count = 0
+
+    from src.matching.discretion import get_discretion_threshold
+    return get_discretion_threshold(obs_count)
 
 
 def _safe_filename_slug(s: str) -> str:
@@ -990,6 +1019,7 @@ async def dispatch_action_to_agent(
     target_path: str | None,
     matched_instinct_path: str,
     source_signal_path: str = "",
+    principal_note: str = "",
 ) -> dict[str, Any]:
     """Dispatch an autonomous action to openclaw main via clerk subagent.
 
@@ -1161,16 +1191,43 @@ async def dispatch_action_to_agent(
         # Tools auto-discover via MCP tools/list at session start;
         # all we have to do here is tell the agent where the doc is
         # and which namespaces it'll see.
+        # The principal's note (when present) IS the task. The auto-
+        # extracted action_proposal.what is just CONTEXT — the original
+        # signal the principal saw when he clicked Delegate. The agent
+        # must NEVER treat the proposal as the task when a principal
+        # note is present (that was the EDITH failure: the agent
+        # weighted "Unlock or reset EDITH account" equally with Sir's
+        # actual ask "send me a reminder on telegram right now",
+        # producing a confused half-execution).
+        if principal_note:
+            task_line = principal_note
+            task_context_block = (
+                "\nTask context (the original signal the principal "
+                "was looking at when he delegated — do NOT execute "
+                "this, it's just background for why he asked):\n"
+                f"  - Signal: {what or '(none)'}\n"
+                f"  - Source: `{source_signal_path or 'unknown'}`\n"
+                f"  - Target: {target_clause}\n"
+                f"  - Due: {due_clause}\n"
+                f"  - Instinct hint: {guidance_clause}\n"
+            )
+        else:
+            task_line = what
+            task_context_block = (
+                f"Source signal: `{source_signal_path or 'unknown'}`\n"
+                f"Target: {target_clause}\n"
+                f"Due: {due_clause}\n"
+                f"Guidance from instinct (if any): {guidance_clause}\n"
+            )
+
         executor_prompt = (
             "You are Alfred's executor subagent. The principal explicitly "
             "delegated this task to you from /desk. Execute it concretely. "
             "You are NOT Sir-facing — do not ask clarifying questions; do "
             "your best with what you have and report honestly when blocked.\n\n"
-            f"Task: {what}\n"
-            f"Source signal: `{source_signal_path or 'unknown'}`\n"
-            f"Target: {target_clause}\n"
-            f"Due: {due_clause}\n"
-            f"Guidance from instinct (if any): {guidance_clause}\n\n"
+            f"Task (principal's instruction — this is the canonical "
+            f"prompt; execute exactly this):\n{task_line}\n\n"
+            f"{task_context_block}\n"
             "Your tool surface is the canonical 5-app MCP catalog (same "
             "tools claude.ai's Custom Connectors see). Namespaces:\n"
             "  - `alfred__*`      — this tenant's ctrl-api: vault, workflows, "
@@ -1595,28 +1652,25 @@ async def route_signal_action(
         if chosen_path == "agent":
             # We've passed all gates — dispatch.
             #
-            # For principal-delegated signals, fold the principal's note
-            # into ``action_proposal.what`` so the agent prompt sees the
-            # actual decision content (not just the original auto-
-            # extracted proposal). Otherwise the agent acts on what the
-            # signal extractor *thought* the action should be, ignoring
-            # what the principal actually said.
-            dispatch_proposal = proposal
-            if principal_delegate_override and principal_note:
-                dispatch_proposal = dict(proposal)
-                original_what = str(
-                    dispatch_proposal.get("what") or ""
-                ).strip()
-                dispatch_proposal["what"] = (
-                    f"{original_what}\n\n"
-                    f"Principal's instruction: {principal_note}"
-                ).strip()
+            # For principal-delegated signals, pass the principal's note
+            # as a SEPARATE parameter so the executor prompt can promote
+            # it to the canonical task and demote the auto-extracted
+            # action_proposal to background context. Merging the two
+            # into ``what`` (the prior approach) made the agent treat
+            # them as equal-weight instructions — see the EDITH trace
+            # 2026-05-13 where the agent half-executed "Unlock or reset
+            # EDITH account" instead of "send me a reminder on telegram
+            # right now". The principal's words ALWAYS win.
+            dispatch_principal_note = (
+                principal_note if principal_delegate_override else ""
+            )
             try:
                 agent_outcome = await dispatch_action_to_agent(
-                    dispatch_proposal,
+                    proposal,
                     target_path,
                     matched_path or "",
                     source_signal_path=signal_path,
+                    principal_note=dispatch_principal_note,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

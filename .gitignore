@@ -13,3 +13,4 @@ build/
 .env.server
 .env.client
 .DS_Store
+meeting-*

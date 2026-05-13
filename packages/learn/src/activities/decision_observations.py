@@ -252,6 +252,55 @@ def _sender_key_to_domain_patterns(sender_key: str) -> list[str]:
     return out
 
 
+async def _match_instinct_for_observation(
+    *,
+    fact_clean: str,
+    sender: str,
+    topic: str,
+    name_label: str,
+    source_kind: str,
+    source_type: str = "",
+    event_kind: str = "",
+    signal_fm: dict[str, Any] | None = None,
+    event_fm: dict[str, Any] | None = None,
+) -> str | None:
+    """Score this in-flight observation against known instincts; return
+    the best match's path if it clears MATCH_THRESHOLD, else None.
+
+    Shared by extract_observation_from_decision (here) and
+    extract_obs_from_signal (signal_observations.py) — both want the
+    same "which pattern would have fired this" answer at write time
+    so the UI per-instinct observations panel is populated.
+
+    Best-effort: if vault is unreachable or the scorer raises, we log
+    and return None. The observation must still get written.
+    """
+    try:
+        from src.matching.instinct_match import best_instinct_path
+        from src.utils.vault_client import VaultClient
+        cfg = load_config()
+        vc = VaultClient(cfg)
+        try:
+            instincts = await vc.list_records("instinct", limit=200)
+        finally:
+            await vc.close()
+        obs_fm = {
+            "fact": fact_clean,
+            "sender": sender,
+            "topic": topic,
+            "name": name_label,
+            "source_kind": source_kind,
+            "source_type": source_type,
+            "event_kind": event_kind,
+        }
+        return best_instinct_path(
+            obs_fm, instincts, signal_fm=signal_fm, event_fm=event_fm,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("instinct match skipped: %s", exc)
+        return None
+
+
 def _intent_to_routing_rule(intent_key: str) -> dict[str, str] | None:
     """Map a cluster's dominant intent to an instinct routing rule.
 
@@ -345,6 +394,20 @@ async def extract_observation_from_decision(
     name = f"{ts}-{short}"
     name_label = fact_clean if len(fact_clean) <= 90 else fact_clean[:87] + "..."
 
+    # Match this observation back to its instinct so the /instincts UI
+    # can list "observations that taught me this pattern". We feed the
+    # same scorer judge.py uses for fire-or-not decisions; a match
+    # ≥ MATCH_THRESHOLD writes the instinct path into frontmatter,
+    # below threshold yields null. Lookup is best-effort: a vault hiccup
+    # must not block the observation write.
+    instinct_path = await _match_instinct_for_observation(
+        fact_clean=fact_clean,
+        sender=sender,
+        topic=topic,
+        name_label=name_label,
+        source_kind="decision",
+    )
+
     fm_lines = [
         "---",
         'type: "observation"',
@@ -358,6 +421,7 @@ async def extract_observation_from_decision(
         f"matter_ref: {json.dumps(matter_ref) if matter_ref else 'null'}",
         f"intent: {json.dumps(intent) if intent else 'null'}",
         f"sender: {json.dumps(sender) if sender else 'null'}",
+        f"instinct: {json.dumps(instinct_path) if instinct_path else 'null'}",
         "confidence: 1.0",
         'status: "open"',
         "---",
