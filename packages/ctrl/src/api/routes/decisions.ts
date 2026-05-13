@@ -44,7 +44,13 @@ type DecisionSource =
   | "judgment"
   | "to_do"
   | "desk_originated"
-  | "pattern_proposal";
+  | "pattern_proposal"
+  // OBS-6: emitted by signal_router when an instinct fires
+  // autonomously (chosen_path=agent, decision_reason=high_confidence_match).
+  // The companion decision lets OBS-1 fold autonomous fires into the
+  // observation pool with subject=principal_via_alfred so the
+  // intuition engine keeps learning from Alfred's own moves.
+  | "instinct_fire";
 type DecisionState =
   | "open"
   | "scheduled"
@@ -62,7 +68,15 @@ const VALID_SOURCES: readonly DecisionSource[] = [
   "to_do",
   "desk_originated",
   "pattern_proposal",
+  "instinct_fire",
 ];
+
+// OBS-6: who acted. "principal" = Sir clicked from /desk; "alfred" =
+// signal_router fired an instinct autonomously. OBS-1's decision→
+// observation pipeline reads this to stamp subject=principal vs
+// subject=principal_via_alfred.
+type DecisionPrincipal = "principal" | "alfred";
+const VALID_PRINCIPALS: readonly DecisionPrincipal[] = ["principal", "alfred"];
 const VALID_STATES: readonly DecisionState[] = [
   "open", "scheduled", "executing", "completed", "reversed",
 ];
@@ -470,10 +484,27 @@ export function registerDecisionRoutes(): void {
     const initialState: DecisionState =
       synchronousFlipOk && intent !== "delegate" ? "completed" : "open";
 
+    // OBS-6: optional `principal` field on the body — defaults to
+    // "principal" (Sir clicked) but signal_router POSTs with "alfred"
+    // for autonomous instinct fires.
+    const principalRaw = String(b.principal ?? "principal").trim().toLowerCase();
+    if (!VALID_PRINCIPALS.includes(principalRaw as DecisionPrincipal)) {
+      throw new ValidationError(
+        `principal must be one of ${VALID_PRINCIPALS.join(" | ")}, got ${principalRaw}`,
+      );
+    }
+    const principal = principalRaw as DecisionPrincipal;
+    // Optional decision_origin — for instinct_fire decisions, this is
+    // the matched instinct path so the observation layer + audit
+    // ledger can trace which rule fired.
+    const decisionOrigin = typeof b.decision_origin === "string"
+      ? b.decision_origin.trim()
+      : "";
+
     const fields: Record<string, unknown> = {
       type: "decision",
       created: nowIso,
-      principal: "principal",
+      principal,
       source,
       source_record: sourceRecord,
       source_headline: sourceHeadline || null,
@@ -490,6 +521,7 @@ export function registerDecisionRoutes(): void {
         ? synchronousSideEffects
         : null,
       completed_at: initialState === "completed" ? nowIso : null,
+      ...(decisionOrigin ? { decision_origin: decisionOrigin } : {}),
     };
 
     const bodyText = [

@@ -603,6 +603,117 @@ async def _emit_signal_action_audit(
 
 
 # ---------------------------------------------------------------------------
+# OBS-6: autonomous-fire companion decision
+# ---------------------------------------------------------------------------
+
+async def _emit_autonomous_fire_decision(
+    *,
+    signal_path: str,
+    signal_fm: dict[str, Any],
+    matched_instinct_path: str,
+    matched_instinct_name: str,
+    match_score: float,
+    combined_confidence: float,
+) -> str | None:
+    """Post a decision/<id>.md mirroring an autonomous instinct fire.
+
+    Why: Sir's progressive-autonomy thesis treats every Desk click as
+    a training example. When Alfred fires an instinct autonomously
+    (signal_router → high_confidence_match → agent dispatch), we want
+    the same training signal — except subject=principal_via_alfred so
+    the OBS-4 clusterer can keep its rule-mining cohort clean (Alfred
+    re-applying his own rules isn't evidence of a new rule). OBS-1's
+    decision→observation pipeline already handles that distinction
+    via principal=alfred.
+
+    Returns the decision path, or None on best-effort failure (the
+    autonomous dispatch itself does NOT depend on this).
+    """
+    import os
+
+    import httpx
+    from src.config import load_config
+
+    cfg = load_config()
+    api_key = os.environ.get("AAS_API_KEY", "")
+    if not api_key:
+        logger.warning(
+            "signal_actions._emit_autonomous_fire_decision: AAS_API_KEY "
+            "unset — skipping",
+        )
+        return None
+
+    # Headline: prefer signal_extract's voiced fields, fall back to the
+    # signal's name.
+    display_headline = signal_fm.get("display_headline")
+    headline = ""
+    if isinstance(display_headline, str) and display_headline.strip():
+        headline = display_headline.strip()
+    else:
+        nm = signal_fm.get("name")
+        if isinstance(nm, str) and nm.strip():
+            headline = nm.strip()
+    headline = headline[:200]
+
+    matter_ref = ""
+    mref_raw = signal_fm.get("matter_ref")
+    if isinstance(mref_raw, str) and mref_raw.strip():
+        matter_ref = mref_raw.strip()
+
+    # Intent: for the existing route_signal_action autonomous path
+    # the choice is always "dispatched to the agent" — that maps to
+    # `delegate` in the Desk vocabulary. (Once OBS-8 lands and noise
+    # instincts can fire at signal_extract time, those will write
+    # decisions with intent=noise directly from that pre-filter — a
+    # different call site than this one.)
+    intent = "delegate"
+
+    note = (
+        f"Autonomous fire (instinct: {matched_instinct_name or matched_instinct_path}, "
+        f"score={match_score:.2f}, combined_confidence={combined_confidence:.2f})"
+    )
+
+    body = {
+        "source": "instinct_fire",
+        "source_record": signal_path,
+        "source_headline": headline,
+        "intent": intent,
+        "principal": "alfred",
+        "note": note,
+        "matter_ref": matter_ref,
+        "decision_origin": matched_instinct_path,
+    }
+
+    base_url = cfg.alfred_ctrl_url
+    async with httpx.AsyncClient(
+        base_url=base_url,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=30.0,
+    ) as client:
+        try:
+            resp = await client.post("/api/v1/decisions", json=body)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "signal_actions._emit_autonomous_fire_decision: POST "
+                "failed err=%s body=%s",
+                exc, body,
+            )
+            return None
+        data = resp.json() or {}
+        path = str(data.get("path") or "") or None
+        logger.info(
+            "signal_actions._emit_autonomous_fire_decision: emitted %s "
+            "for signal=%s instinct=%s",
+            path, signal_path, matched_instinct_path,
+        )
+        return path
+
+
+# ---------------------------------------------------------------------------
 # Activity: write_needs_attention_record (T6.4.3)
 # ---------------------------------------------------------------------------
 
@@ -1491,6 +1602,44 @@ async def route_signal_action(
                     signal_path, exc,
                 )
                 raise
+
+            # OBS-6: close the learning loop. For truly autonomous
+            # fires (an instinct matched + cleared the discretion
+            # threshold without Sir's involvement), emit a companion
+            # decision so OBS-1's decision→observation pipeline picks
+            # this up the same way it picks up Sir's /desk clicks. The
+            # observation will be stamped subject=principal_via_alfred,
+            # which the OBS-4 clusterer deliberately excludes from its
+            # rule-mining cohort but the LearningWorkflow + audit feed
+            # still surface.
+            #
+            # Skip on principal_delegate_override — that decision was
+            # written by /desk when Sir clicked Delegate; duplicating
+            # it here would double-count the gesture.
+            if (
+                decision_reason == "high_confidence_match"
+                and not principal_delegate_override
+            ):
+                try:
+                    await _emit_autonomous_fire_decision(
+                        signal_path=signal_path,
+                        signal_fm=fm,
+                        matched_instinct_path=matched_path or "",
+                        matched_instinct_name=matched_name or "",
+                        match_score=match_score,
+                        combined_confidence=combined_confidence,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # Decision-write is best-effort — never block the
+                    # dispatch on it. The audit record below still
+                    # captures the fire; we just lose the observation
+                    # pool entry for this particular autonomous tick.
+                    logger.warning(
+                        "signal_actions.route_signal_action: "
+                        "autonomous-fire decision write failed path=%s "
+                        "err=%s",
+                        signal_path, exc,
+                    )
         else:
             # HUMAN path — write the needs_attention card.
             needs_attention_path = await write_needs_attention_record(
