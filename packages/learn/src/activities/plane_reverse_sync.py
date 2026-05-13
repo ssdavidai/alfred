@@ -5,6 +5,20 @@ Consumes ``stream_type: "plane"`` events emitted by
 Translates Plane project/issue/comment events into vault matter/task/comment
 patches and applies them via the ctrl-api vault endpoints.
 
+State-mutation contract (SM-D-W11, spec §7 / STATE-MUTATION.md):
+The single state field this writer mutates is ``status`` — on tasks
+via ``plane_issue_to_vault_patch`` (Plane state_group →
+``status`` lookup, with the ``blocked`` label override) and on matters
+via ``plane_project_to_matter_patch`` (``is_archived``/``archived_at``
+flags → ``active``/``archived``). Archive events (``project.deleted`` /
+``issue.deleted``) also set ``status`` (``archived`` / ``cancelled``).
+Plane is the canonical source of truth in this direction, so the
+propose function below is deterministic with ``confidence=1.0``; no LLM
+reasoning. Non-state fields (``name``, ``priority``, ``description``,
+``archived``) continue to ride the legacy ``apply_plane_patch_to_vault``
+PATCH path — the patched-gate v2 call is layered on top to record the
+state-change audit + timeline entry for the ``status`` mutation alone.
+
 **Loop guards** (all three required so the pair of
 ``PlaneSyncWorkflow`` + ``PlaneReverseSyncWorkflow`` doesn't oscillate):
 
@@ -44,6 +58,11 @@ from typing import Any, Optional
 import httpx
 from temporalio import activity
 
+from src.activities.state_mutator import (
+    ObservedWindow,
+    ProposedMutation,
+    propose_fn,
+)
 from src.config import Config, load_config
 from src.utils.plane_client import PlaneClient
 from src.utils.plane_mapping import (
@@ -855,3 +874,118 @@ async def mark_plane_event_processed(
         await client.mark_event_processed(event_id, vault_path, classification)
     finally:
         await client.close()
+
+
+# ---------------------------------------------------------------------------
+# State-mutation propose function (Phase D, W11)
+# ---------------------------------------------------------------------------
+#
+# Plane is the canonical source of truth in the reverse-sync direction —
+# the propose function here is deterministic plumbing rather than LLM
+# reasoning. We diff the inbound Plane payload's status against the
+# vault target's current ``status`` and, if they differ, emit a
+# ProposedMutation with ``confidence=1.0`` and a one-line reason
+# describing the transition.
+#
+# Non-state fields (``name``, ``priority``, ``description``) continue to
+# ride the legacy ``apply_plane_patch_to_vault`` path; only ``status``
+# (and on ``deleted`` events, the archive-marker ``status`` set by
+# ``archive_vault_record``) lands through v2.
+#
+# ``args`` shape:
+#   {
+#     "record_type": "task" | "matter",
+#     "action":       "updated" | "created" | "deleted",
+#     "plane_payload": dict        # Plane issue/project payload
+#     "state_groups": dict|None,   # state_id → state_group, tasks only
+#   }
+
+
+def _desired_status_from_plane(
+    *,
+    record_type: str,
+    action: str,
+    plane_payload: dict[str, Any],
+    state_groups: Optional[dict[str, str]],
+) -> Optional[str]:
+    """Compute what the vault target's ``status`` should be after the
+    inbound Plane event lands. Returns ``None`` when the event doesn't
+    speak to ``status`` (e.g. an issue-comment event).
+
+    Mirrors the logic in ``apply_plane_patch_to_vault`` /
+    ``archive_vault_record`` so the v2 audit and the legacy PATCH agree
+    on the resulting state value.
+    """
+    if action == "deleted":
+        if record_type == "task":
+            return "cancelled"
+        if record_type == "matter":
+            return "archived"
+        return None
+    if action not in {"updated", "created"}:
+        return None
+    if record_type == "task":
+        patch = plane_issue_to_vault_patch(plane_payload or {}, state_groups)
+        status = patch.get("status")
+        return str(status) if isinstance(status, str) and status else None
+    if record_type == "matter":
+        patch = plane_project_to_matter_patch(plane_payload or {})
+        status = patch.get("status")
+        return str(status) if isinstance(status, str) and status else None
+    return None
+
+
+@propose_fn("plane_reverse_sync.mirror")
+async def propose_plane_mirror(
+    *,
+    target: dict[str, Any],
+    observed: ObservedWindow,
+    args: dict[str, Any],
+) -> Optional[ProposedMutation]:
+    """Translate an inbound Plane event into a ProposedMutation for the
+    target's ``status`` field.
+
+    Returns ``None`` when the event doesn't speak to ``status`` OR when
+    the desired status already matches the target's current frontmatter
+    (no-op write). Plane is the canonical writer in this direction so
+    ``confidence=1.0``; the v2 mode resolution / shadow gate still
+    applies via ``apply_state_change_v2``.
+    """
+    record_type = str(args.get("record_type") or "")
+    action = str(args.get("action") or "")
+    plane_payload = args.get("plane_payload")
+    state_groups = args.get("state_groups")
+
+    if not isinstance(plane_payload, dict):
+        return None
+    if record_type not in ("task", "matter"):
+        return None
+
+    sg = state_groups if isinstance(state_groups, dict) else None
+    desired_status = _desired_status_from_plane(
+        record_type=record_type,
+        action=action,
+        plane_payload=plane_payload,
+        state_groups=sg,
+    )
+    if desired_status is None:
+        return None
+
+    frontmatter = target.get("frontmatter") or {}
+    if not isinstance(frontmatter, dict):
+        frontmatter = {}
+    current_status_raw = frontmatter.get("status")
+    current_status = str(current_status_raw) if current_status_raw is not None else None
+
+    if current_status == desired_status:
+        return None
+
+    return ProposedMutation(
+        fields={"status": desired_status},
+        reason=(
+            f"Plane mirrored status: {current_status!r} -> {desired_status!r}"
+            f" (record_type={record_type}, action={action})"
+        ),
+        confidence=1.0,
+        fan_out=(),
+    )

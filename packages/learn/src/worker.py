@@ -536,6 +536,7 @@ from src.activities.calibration_reversal import (
 # Activities back NightlyNarrativeWorkflow; the schedule lives in
 # scripts/register_schedules.py as ``al-nightly-narrative`` (cron 0 2 * * *).
 from src.activities.nightly_narrative import (
+    apply_matter_narrative_v2 as narrative_apply_matter_narrative_v2,
     generate_matter_narrative as narrative_generate,
     list_active_matters as narrative_list_active_matters,
     load_matter_signals_24h as narrative_load_matter_signals_24h,
@@ -993,6 +994,12 @@ ALL_ACTIVITIES = [
     narrative_load_source_events,
     narrative_generate,
     narrative_patch_matter_narrative,
+    # State-mutation Phase C (#891) — v2-retrofitted per-matter writer.
+    # The new wrapper activity ``apply_matter_narrative_v2`` is dispatched
+    # by ``NightlyNarrativeWorkflow.run`` under the
+    # ``nightly_narrative_state_mutator_v1`` patched gate; legacy
+    # histories continue to drive the pre-patch direct-PATCH activities.
+    narrative_apply_matter_narrative_v2,
     # Decision router (every Desk click → vault record → side-effect
     # cascade). Activities back DecisionRouterWorkflow.
     dr_list_decisions,
