@@ -96,6 +96,13 @@ interface MatterTask {
   state: TaskState;
   current_state: string | null;
   as_of: string | null;
+  /** Provenance — where this task came from. One of:
+   *    - `decision/<ts>.md`     (principal clicked Delegate/Do on the Desk)
+   *    - `instinct/<id>.md`     (autonomous fire by a matched instinct)
+   *    - `legacy/pre-arch11`    (one-time grandfather stamp on pre-ARCH-11 records)
+   *    - "" (or null) when the task pre-dates the stamp and the backfill
+   *      hasn't run yet — surfaced as "unknown" by the UI. */
+  decision_origin: string | null;
 }
 
 interface MatterDetail extends Omit<MatterIndexRow, "state"> {
@@ -507,6 +514,7 @@ function buildMatterIndex(): MatterIndexResult {
       }
       const currentStateRaw = taskFm.current_state;
       const asOfRaw = taskFm.as_of;
+      const decisionOriginRaw = taskFm.decision_origin;
       const task: MatterTask = {
         id: stem,
         path: taskRelPath,
@@ -518,6 +526,10 @@ function buildMatterIndex(): MatterIndexResult {
             : null,
         as_of:
           typeof asOfRaw === "string" && asOfRaw.trim() ? asOfRaw : null,
+        decision_origin:
+          typeof decisionOriginRaw === "string" && decisionOriginRaw.trim() && decisionOriginRaw !== "null"
+            ? decisionOriginRaw
+            : null,
       };
       const created = String(taskFm.created ?? taskFm.updated ?? "");
       tasksByStem.set(stem, { task, matterRefs, created });
