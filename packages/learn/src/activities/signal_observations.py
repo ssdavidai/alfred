@@ -83,6 +83,51 @@ def _normalise_source_type(raw: str) -> str:
     return s or "unknown"
 
 
+def _authoritative_source_type(event_fm: dict[str, Any], signal_source_type: str) -> str:
+    """Return the *real* source type for a stream event.
+
+    There's a known upstream bug on david's vault: ~360 stream_event
+    records carry ``source_type: gcal`` but ``source_ref: gmail:<id>``
+    plus ``tags: [..., email]``. The curator/puller mislabels emails
+    as calendar events for one specific ingestion path. ``source_ref``
+    is set by the puller from the upstream API contract and is the
+    authoritative signal of which API the record came from.
+
+    Resolution order (highest priority first):
+      1. ``source_ref`` prefix when it's a known toolkit (``gmail:`` →
+         gmail, ``gcal:`` → gcal, etc.)
+      2. ``tags`` list — ``email`` strongly implies gmail
+      3. The event's own ``source_type`` field
+      4. The signal's ``source_type`` field (fallback)
+    """
+    source_ref = str(event_fm.get("source_ref") or "").strip().lower()
+    if source_ref.startswith("gmail:"):
+        return "gmail"
+    if source_ref.startswith("gcal:") or source_ref.startswith("googlecalendar:"):
+        return "gcal"
+    if source_ref.startswith("slack:"):
+        return "slack"
+    if source_ref.startswith("github:"):
+        return "github"
+    if source_ref.startswith("notion:"):
+        return "notion"
+    if source_ref.startswith("linear:"):
+        return "linear"
+
+    tags = event_fm.get("tags")
+    if isinstance(tags, list):
+        normalised_tags = {str(t).strip().lower() for t in tags if isinstance(t, str)}
+        if "email" in normalised_tags:
+            return "gmail"
+        if "calendar" in normalised_tags or "gcal" in normalised_tags:
+            return "gcal"
+
+    event_st = str(event_fm.get("source_type") or "").strip()
+    if event_st:
+        return _normalise_source_type(event_st)
+    return _normalise_source_type(signal_source_type or "")
+
+
 def _extract_sender_from_event(event_fm: dict[str, Any]) -> str:
     """Best-effort sender extraction from a stream_event's frontmatter.
 
@@ -279,7 +324,12 @@ async def extract_observation_from_signal(signal_path: str) -> dict[str, Any]:
             if not isinstance(event_fm, dict):
                 event_fm = {}
 
-    source_type = str(signal_fm.get("source_type") or event_fm.get("source_type") or "").strip()
+    raw_source_type = str(signal_fm.get("source_type") or event_fm.get("source_type") or "").strip()
+    # Defensive: source_type on the stream_event is sometimes wrong
+    # (mislabeled gmails as gcal on david — ~49% of "gcal" records).
+    # ``_authoritative_source_type`` cross-references source_ref + tags
+    # before trusting the field.
+    source_type = _authoritative_source_type(event_fm, raw_source_type)
     sender = _extract_sender_from_event(event_fm) if event_fm else ""
     event_kind = _derive_event_kind(source_type, signal_fm.get("effect"))
     topic = _derive_topic(source_type, event_fm, signal_fm)
