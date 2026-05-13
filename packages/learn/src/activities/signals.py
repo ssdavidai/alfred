@@ -1178,22 +1178,54 @@ async def extract_signal_from_event(
             from src.activities.noise_patterns import (
                 load_active_noise_patterns,
                 event_matches_noise,
+                # OBS-8 — new noise pre-filter path via instincts. Reads
+                # active instincts where intent_key=noise (OBS-5's
+                # acceptor output) and uses their sender_domains globs
+                # to suppress matching events. Runs alongside the
+                # legacy signal_noise_pattern filter until those age
+                # out.
+                load_noise_instincts,
+                event_matches_noise_instinct,
             )
+            event_fm_for_match = event.get("frontmatter") or {}
+            if not isinstance(event_fm_for_match, dict):
+                event_fm_for_match = {}
+
+            # Legacy filter — signal_noise_pattern records that pre-
+            # date OBS-8. New Noise clicks no longer write these
+            # (see decision_router.py); existing records keep filtering
+            # until Sir disables them or they age out.
             patterns = await load_active_noise_patterns()
-            if patterns:
-                event_fm_for_match = event.get("frontmatter") or {}
-                if isinstance(event_fm_for_match, dict):
-                    matched = event_matches_noise(event_fm_for_match, patterns)
-                    if matched is not None:
-                        logger.info(
-                            "signals.extract_signal_from_event: NOISE-FILTERED "
-                            "path=%s sig=%s/%s pattern=%s",
-                            stream_event_path,
-                            matched.get("kind"),
-                            matched.get("value"),
-                            matched.get("path"),
-                        )
-                        return None
+            if patterns and event_fm_for_match:
+                matched = event_matches_noise(event_fm_for_match, patterns)
+                if matched is not None:
+                    logger.info(
+                        "signals.extract_signal_from_event: NOISE-FILTERED "
+                        "(legacy pattern) path=%s sig=%s/%s pattern=%s",
+                        stream_event_path,
+                        matched.get("kind"),
+                        matched.get("value"),
+                        matched.get("path"),
+                    )
+                    return None
+
+            # OBS-8 path — active noise instincts.
+            noise_instincts = await load_noise_instincts()
+            if noise_instincts and event_fm_for_match:
+                matched = event_matches_noise_instinct(
+                    event_fm_for_match, noise_instincts,
+                )
+                if matched is not None:
+                    logger.info(
+                        "signals.extract_signal_from_event: NOISE-FILTERED "
+                        "(instinct) path=%s sig=%s/%s glob=%s instinct=%s",
+                        stream_event_path,
+                        matched.get("kind"),
+                        matched.get("value"),
+                        matched.get("matched_glob"),
+                        matched.get("path"),
+                    )
+                    return None
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "signals.extract_signal_from_event: noise check failed "

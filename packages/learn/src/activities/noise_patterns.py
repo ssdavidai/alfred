@@ -338,3 +338,133 @@ def event_matches_noise(
         if p["kind"] == event_sig["kind"] and p["value"] == event_sig["value"]:
             return p
     return None
+
+
+# ---------------------------------------------------------------------------
+# OBS-8: noise-instinct pre-filter — the replacement for signal_noise_pattern
+# ---------------------------------------------------------------------------
+#
+# Architecture migration: Sir's Noise clicks now flow through the same
+# observation→pattern_proposal→instinct loop as every other gesture
+# (OBS-1 .. OBS-5). When a noise-rule emerges and Sir adopts it via
+# /desk, the resulting instinct carries ``intent_key: "noise"`` plus
+# ``input_patterns.sender_domains`` (glob patterns built by OBS-5's
+# ``_sender_key_to_domain_patterns``). We consult those instincts at
+# signal_extract pre-filter time so the autonomous suppression that
+# ``signal_noise_pattern`` used to do is now done through the
+# canonical instinct surface.
+#
+# Legacy ``signal_noise_pattern/*.md`` records keep firing via the
+# existing ``load_active_noise_patterns`` + ``event_matches_noise``
+# path until they age out. New noise rules land as instincts only.
+
+import fnmatch
+
+# Same 60s TTL cache as the legacy patterns.
+_NOISE_INSTINCT_CACHE: dict[str, Any] = {"loaded_at": 0.0, "instincts": []}
+
+
+async def load_noise_instincts() -> list[dict[str, Any]]:
+    """Return active instincts whose ``intent_key`` is ``noise``.
+
+    Result entries:
+      ``{"path": <vault path>, "sender_domains": [<glob>...]}``
+
+    Empty list when none are present, when ctrl-api list fails, or
+    when an instinct has no sender_domains (a noise instinct with no
+    domain anchors can't filter anything).
+    """
+    import time
+    now = time.time()
+    if now - _NOISE_INSTINCT_CACHE["loaded_at"] < _CACHE_TTL_S:
+        return list(_NOISE_INSTINCT_CACHE["instincts"])
+
+    out: list[dict[str, Any]] = []
+    async with _http() as client:
+        try:
+            resp = await client.get(
+                "/api/v1/vault/list/instinct?preview=200",
+            )
+            if resp.status_code >= 400:
+                _NOISE_INSTINCT_CACHE["loaded_at"] = now
+                _NOISE_INSTINCT_CACHE["instincts"] = []
+                return []
+            data = resp.json().get("results", []) or []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "noise_patterns.load_noise_instincts: %s", exc,
+            )
+            _NOISE_INSTINCT_CACHE["loaded_at"] = now
+            _NOISE_INSTINCT_CACHE["instincts"] = []
+            return []
+
+    for r in data:
+        fm = r.get("frontmatter") if isinstance(r, dict) else {}
+        if not isinstance(fm, dict):
+            continue
+        if str(fm.get("status") or "").strip().lower() != "active":
+            continue
+        if str(fm.get("intent_key") or "").strip().lower() != "noise":
+            continue
+        # Pull sender_domains from input_patterns (preferred) or
+        # legacy signals.domain_patterns mirror.
+        ip = fm.get("input_patterns") or {}
+        sender_domains: list[str] = []
+        if isinstance(ip, dict):
+            v = ip.get("sender_domains") or []
+            if isinstance(v, list):
+                sender_domains.extend(str(x) for x in v if isinstance(x, str))
+        if not sender_domains:
+            sigs = fm.get("signals") or {}
+            if isinstance(sigs, dict):
+                v = sigs.get("domain_patterns") or []
+                if isinstance(v, list):
+                    sender_domains.extend(str(x) for x in v if isinstance(x, str))
+        if not sender_domains:
+            continue  # Noise instinct without anchors — can't filter
+        out.append({
+            "path": str(r.get("path") or ""),
+            "sender_domains": sender_domains,
+        })
+
+    _NOISE_INSTINCT_CACHE["loaded_at"] = now
+    _NOISE_INSTINCT_CACHE["instincts"] = out
+    logger.info("noise_patterns: %d noise instincts cached", len(out))
+    return out
+
+
+def event_matches_noise_instinct(
+    event_fm: dict[str, Any],
+    noise_instincts: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Return the first matching noise instinct (or None).
+
+    We use the event's derived signature (gmail sender, gcal organiser,
+    etc.) as the comparison key and match each instinct's
+    ``sender_domains`` glob list against it. Same fnmatch semantics
+    the deterministic scorer uses, so a noise instinct adopted from a
+    cluster (OBS-5) fires here identically to how it would fire on a
+    full signal-routing pass — except cheaper, since we short-circuit
+    the LLM call.
+    """
+    if not noise_instincts:
+        return None
+    sig = derive_signature(event_fm)
+    sig_value = (sig.get("value") or "").strip().lower()
+    if not sig_value:
+        return None
+    # Only sender-anchored signatures are matchable today. Once OBS-5
+    # writes instincts with subject_keywords / attachment patterns,
+    # extend the match here.
+    if sig.get("kind") not in ("gmail_sender", "gcal_organiser", "slack_user"):
+        return None
+    for inst in noise_instincts:
+        for glob in inst["sender_domains"]:
+            if fnmatch.fnmatch(sig_value, glob.strip().lower()):
+                return {
+                    "kind": f"instinct_{sig['kind']}",
+                    "value": sig_value,
+                    "path": inst["path"],
+                    "matched_glob": glob,
+                }
+    return None

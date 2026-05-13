@@ -256,39 +256,24 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
                     # Wait for the agent outcome before terminal flip.
                     next_state = "executing"
             elif intent == "noise":
-                # Mark-as-noise: the principal said this category of
-                # signal should never have surfaced. The synchronous
-                # flip already set status=noise + wrote the audit
-                # event. Here we materialise the noise_pattern record
-                # that signal_extract will consult upstream so the
-                # next event matching this signature is filtered
-                # before reaching the LLM.
-                try:
-                    from src.activities.noise_patterns import (
-                        write_noise_pattern,
-                    )
-                    np_result = await write_noise_pattern(decision)
-                    if np_result.get("ok"):
-                        actions_taken.append("noise.pattern_written")
-                        side_effects["noise_pattern_path"] = (
-                            np_result.get("noise_pattern_path")
-                        )
-                        side_effects["noise_signature_kind"] = (
-                            np_result.get("signature_kind")
-                        )
-                        side_effects["noise_signature_value"] = (
-                            np_result.get("signature_value")
-                        )
-                    else:
-                        actions_taken.append("noise.pattern_failed")
-                        side_effects["noise_reason"] = (
-                            np_result.get("reason")
-                        )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "decision_router: noise pattern write failed for %s: %s",
-                        decision_id, exc,
-                    )
+                # OBS-8: noise clicks no longer materialise a
+                # signal_noise_pattern record. The principal's gesture
+                # now flows through the canonical observation pool:
+                # the synchronous flip already set status=noise +
+                # wrote the audit event; OBS-1 will write an
+                # observation from this decision (subject=principal,
+                # intent=noise) which feeds OBS-4's clusterer. After
+                # MIN_CLUSTER_SIZE noise clicks on the same sender_key
+                # accumulate, OBS-4 surfaces a pattern_proposal on
+                # /desk; Sir adopts it → OBS-5 mints a noise instinct
+                # → signal_extract pre-filter
+                # (noise_patterns.load_noise_instincts) autonomously
+                # suppresses future matches.
+                #
+                # Existing signal_noise_pattern records keep filtering
+                # via the legacy load_active_noise_patterns path until
+                # they age out. New ones are not written here.
+                actions_taken.append("noise.observation_pending")
             elif intent == "take_mine":
                 # Spawn a to_do. needs_attention itself stays pending so
                 # the principal can still close it formally later via
