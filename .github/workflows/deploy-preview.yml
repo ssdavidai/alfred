@@ -182,9 +182,23 @@ jobs:
           '
 
       - name: Update Caddy on preview host
+        # Use the preview-specific Caddyfile. The earlier version of this
+        # step copied `deploy/Caddyfile` (the prod one), which has no
+        # `preview.alfred.black` block and instead has `alfred.black` +
+        # `app.alfred.black` + others — Caddy on preview then tried to
+        # ACME-provision certs for prod-only domains that don't resolve
+        # to preview's IP, and broke TLS for preview.alfred.black with CF
+        # error 525. Always use `deploy/Caddyfile.preview` here.
         run: |
-          scp -i ~/.ssh/preview_key deploy/Caddyfile deploy@${{ secrets.PREVIEW_HOST }}:/tmp/Caddyfile
-          ssh -i ~/.ssh/preview_key deploy@${{ secrets.PREVIEW_HOST }} 'sudo cp /tmp/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy && rm /tmp/Caddyfile && echo "Caddy reloaded"'
+          scp -i ~/.ssh/preview_key deploy/Caddyfile.preview deploy@${{ secrets.PREVIEW_HOST }}:/tmp/Caddyfile
+          ssh -i ~/.ssh/preview_key deploy@${{ secrets.PREVIEW_HOST }} '
+            sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak-$(date +%s)
+            sudo cp /tmp/Caddyfile /etc/caddy/Caddyfile
+            sudo caddy validate --config /etc/caddy/Caddyfile
+            sudo systemctl reload caddy
+            rm /tmp/Caddyfile
+            echo "Caddy reloaded with preview-specific config"
+          '
 
       - name: Purge Cloudflare cache for preview.alfred.black
         # Vite emits new asset hashes on every build; without a purge,

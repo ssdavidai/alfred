@@ -1,0 +1,21 @@
+preview.alfred.black {
+    root * /opt/alfred-saas/client
+
+    @backend {
+        path /api/* /auth/* /operations/* /jobs/* /payments/* /webhooks/*
+    }
+
+    handle @backend {
+        reverse_proxy localhost:3000
+    }
+
+    handle {
+        try_files {path} /index.html
+        file_server
+    }
+}
+
+# Alfred Black redesign demo (wrangler dev) — keep parallel to preview
+demo.alfred.black {
+    reverse_proxy localhost:4000
+}
