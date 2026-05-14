@@ -162,7 +162,7 @@ function BriefingEnvelope({
           </p>
         ) : (
           <div className="max-w-[64ch] font-body text-[19px] leading-[1.6]">
-            <Markdown source={body} useLiveResolver={false} />
+            <Markdown source={body} useLiveResolver={true} />
           </div>
         )}
 

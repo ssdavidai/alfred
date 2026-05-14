@@ -131,7 +131,7 @@ function ExpandedBriefing({ slugDate }: { slugDate: string }) {
   }
   return (
     <div className="max-w-[64ch] font-body text-[17px] leading-[1.6]">
-      <Markdown source={body} useLiveResolver={false} />
+      <Markdown source={body} useLiveResolver={true} />
     </div>
   );
 }
