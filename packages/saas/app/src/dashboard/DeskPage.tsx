@@ -728,10 +728,9 @@ export default function DeskPage() {
           const greeting = slot === "evening" ? "Good evening." : "Good morning.";
           const body = String(latestBriefFull?.body ?? "").trim();
           const isStub = body.includes("brief composer received an empty turn");
-          const tooLong = body.length > 1400;
 
           return (
-            <section className="mb-20 mx-auto max-w-[860px]">
+            <section className="mb-20">
               <div className="flex items-baseline justify-between gap-8 mb-6">
                 <div className="font-mono text-[10px] uppercase tracking-[0.28em]"
                      style={{ color: "var(--brass)" }}>
@@ -784,7 +783,7 @@ export default function DeskPage() {
                       A moment — Alfred is finishing the draft.
                     </p>
                   ) : isStub ? (
-                    <p className="font-body italic text-[17px] leading-[1.55] max-w-[58ch]"
+                    <p className="font-body italic text-[17px] leading-[1.55] text-justify hyphens-auto"
                        style={{ color: "var(--marginalia)" }}>
                       Sir — the clerk is unwell this morning. The composer
                       received an empty turn and could not finish the prose.
@@ -792,29 +791,9 @@ export default function DeskPage() {
                       when the gateway is restored.
                     </p>
                   ) : (
-                    <div className="font-body text-[18px] leading-[1.55] max-w-[58ch] [&>p]:mb-4 [&_strong]:font-bold [&_em]:italic"
-                         style={{
-                           maxHeight: briefExpanded || !tooLong ? undefined : 380,
-                           overflow: briefExpanded || !tooLong ? "visible" : "hidden",
-                           position: "relative",
-                         }}>
+                    <div className="font-body text-[18px] leading-[1.6] text-justify hyphens-auto [&>div>p]:mb-5 [&>div>p]:indent-0 [&_strong]:font-bold [&_em]:italic">
                       <Markdown source={body} useLiveResolver={true} />
-                      {!briefExpanded && tooLong && (
-                        <div style={{
-                          position: "absolute", bottom: 0, left: 0, right: 0, height: 80,
-                          background: "linear-gradient(to bottom, transparent, var(--paper))",
-                          pointerEvents: "none",
-                        }} />
-                      )}
                     </div>
-                  )}
-
-                  {tooLong && !isStub && (
-                    <button onClick={() => setBriefExpanded((b) => !b)}
-                            className="font-mono text-[10px] uppercase tracking-[0.22em] mt-6"
-                            style={{ color: "var(--brass)" }}>
-                      {briefExpanded ? "Collapse ↑" : "Read in full ↓"}
-                    </button>
                   )}
 
                   <div className="mt-12">
@@ -836,7 +815,7 @@ export default function DeskPage() {
                       className="font-mono text-[11px] uppercase tracking-[0.22em] px-6 py-3 border border-rule hover:bg-[var(--paper-dim)] transition-colors"
                       style={{ color: "var(--ink)" }}
                     >
-                      Continue →
+                      Close
                     </button>
                   </div>
                 </div>
@@ -845,6 +824,11 @@ export default function DeskPage() {
           );
         })()}
 
+        {/* The morning brief takes the room while it's unread. The
+            decision queue, backstage, and ledger only return once sir
+            has read the letter and dismissed it. */}
+        {!briefUnseen && (
+        <>
         {/* Featured decision */}
         <motion.div
           initial={{ opacity: 0 }}
@@ -1101,6 +1085,8 @@ export default function DeskPage() {
             )}
           </motion.div>
         </motion.div>
+        </>
+        )}
       </section>
       <Seal />
     </Frame>
