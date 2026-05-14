@@ -171,6 +171,44 @@ export const deleteChore: DeleteChore<{ slug: string }, any> = async (
 };
 
 /**
+ * PATCH /api/v1/chores/:slug
+ *
+ * Patch a chore record's mutable fields. The Schedule editor on
+ * /chores/:slug only ever patches the `schedule` field — but the
+ * ctrl-api endpoint also accepts python_source / workflow_class_name /
+ * params / name / user_facing_description / tags for future use.
+ *
+ * Schedule is a non-state field (chores aren't in the state-mutation
+ * contract per spec §2 — they record their own runs via
+ * record_chore_run); a plain PATCH is the right shape here.
+ */
+export const patchChore: any = async (
+  args: {
+    slug: string;
+    schedule?: string;
+    name?: string;
+    user_facing_description?: string;
+  },
+  context: any,
+) => {
+  if (!args?.slug || typeof args.slug !== "string") {
+    throw new Error("slug is required");
+  }
+  const instance = await getUserInstance(context);
+  const body: Record<string, unknown> = {};
+  if (typeof args.schedule === "string") body.schedule = args.schedule;
+  if (typeof args.name === "string") body.name = args.name;
+  if (typeof args.user_facing_description === "string") {
+    body.user_facing_description = args.user_facing_description;
+  }
+  return proxyToTenant(instance, {
+    method: "PATCH",
+    path: `/api/v1/chores/${encodeURIComponent(args.slug)}`,
+    body,
+  });
+};
+
+/**
  * POST /api/v1/chores/:slug/trigger
  *
  * Manually fires the chore workflow once, outside its normal schedule.

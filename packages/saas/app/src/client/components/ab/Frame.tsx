@@ -20,6 +20,7 @@ type NavItem = { to: string; label: string; icon: IconName };
 // Primary, always-visible items. Kept short on purpose.
 const PRIMARY: NavItem[] = [
   { to: "/desk", label: "Today", icon: "calendar" },
+  { to: "/briefings", label: "Briefings", icon: "envelope" },
   { to: "/decisions", label: "Decisions", icon: "approval" },
   { to: "/matters", label: "Matters", icon: "matter" },
   { to: "/vault", label: "Vault", icon: "calling_card" },

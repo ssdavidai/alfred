@@ -49,10 +49,25 @@ with workflow.unsafe.imports_passed_through():
         spawn_alfred_for_plane_trigger,
     )
     from src.activities.plane_sync import INBOX_SLUG_SENTINEL
+    from src.activities.state_mutator import (
+        ObservedWindow,
+        apply_state_change_v2,
+    )
     from src.utils.plane_mapping import (
         plane_issue_to_vault_patch,
         plane_project_to_matter_patch,
     )
+
+
+# SM-D-W11: patched gate for the universal state-mutator (v2) audit
+# path. New code records a state_change audit + timeline entry for
+# every ``status`` mutation that lands on the matter/task; the legacy
+# ``apply_plane_patch_to_vault`` continues to do the actual field
+# patches so non-state fields (``name``, ``priority``, ``description``)
+# remain covered. In-flight workflow histories started before this gate
+# replay through the un-patched branch and skip the v2 call entirely,
+# preserving deterministic replay per packages/learn/CLAUDE.md.
+PLANE_REVERSE_SYNC_STATE_MUTATOR_PATCH = "plane_reverse_sync_state_mutator_v1"
 
 
 MAX_EVENTS_PER_RUN = 200
@@ -334,6 +349,14 @@ class PlaneReverseSyncWorkflow:
             path = _matter_path_for_slug(slug)
 
             if action == "deleted":
+                await self._mirror_status_v2(
+                    target_path=path,
+                    record_type="matter",
+                    action="deleted",
+                    plane_payload=data,
+                    state_groups=None,
+                    retry=retry,
+                )
                 outcome = await workflow.execute_activity(
                     archive_vault_record,
                     args=[path, "matter"],
@@ -346,6 +369,14 @@ class PlaneReverseSyncWorkflow:
 
             if action in {"updated", "created"}:
                 patch = plane_project_to_matter_patch(data)
+                await self._mirror_status_v2(
+                    target_path=path,
+                    record_type="matter",
+                    action=action,
+                    plane_payload=data,
+                    state_groups=None,
+                    retry=retry,
+                )
                 # Guard #3 fires inside apply_plane_patch_to_vault.
                 outcome = await workflow.execute_activity(
                     apply_plane_patch_to_vault,
@@ -374,6 +405,14 @@ class PlaneReverseSyncWorkflow:
                     # still noop.
                     path = _task_path_for_slug(slug)
                     patch = plane_issue_to_vault_patch(data, state_groups)
+                    await self._mirror_status_v2(
+                        target_path=path,
+                        record_type="task",
+                        action="created",
+                        plane_payload=data,
+                        state_groups=state_groups,
+                        retry=retry,
+                    )
                     outcome = await workflow.execute_activity(
                         apply_plane_patch_to_vault,
                         args=["task", path, patch, ""],
@@ -470,6 +509,14 @@ class PlaneReverseSyncWorkflow:
                     patch["related_matters"] = [new_matter_slug]
                     patch["matter"] = new_matter_slug
 
+                await self._mirror_status_v2(
+                    target_path=path,
+                    record_type="task",
+                    action="updated",
+                    plane_payload=data,
+                    state_groups=state_groups,
+                    retry=retry,
+                )
                 outcome = await workflow.execute_activity(
                     apply_plane_patch_to_vault,
                     args=["task", path, patch, ""],
@@ -485,6 +532,14 @@ class PlaneReverseSyncWorkflow:
                     result.unknown_events += 1
                     return
                 path = _task_path_for_slug(slug)
+                await self._mirror_status_v2(
+                    target_path=path,
+                    record_type="task",
+                    action="deleted",
+                    plane_payload=data,
+                    state_groups=state_groups,
+                    retry=retry,
+                )
                 outcome = await workflow.execute_activity(
                     archive_vault_record,
                     args=[path, "task"],
@@ -520,6 +575,82 @@ class PlaneReverseSyncWorkflow:
 
         # Anything else — cycles, modules, members — is not in B7 scope.
         result.unknown_events += 1
+
+    # ---------------------------------------------------------------------
+    # SM-D-W11 — state-mutator v2 audit emission. Plane is the canonical
+    # writer in this direction, so the propose function the mutator
+    # invokes is deterministic (status diff against current frontmatter).
+    # The legacy ``apply_plane_patch_to_vault`` continues to do the
+    # field-level write; this call layers the state_change audit +
+    # timeline entry on top so /decisions and the matter detail page
+    # see ``source=plane_reverse_sync`` entries alongside every Plane-
+    # driven status mutation. Wrapped in ``workflow.patched(...)`` so
+    # in-flight workflow histories started before this gate replay
+    # deterministically (per packages/learn/CLAUDE.md).
+    # ---------------------------------------------------------------------
+
+    async def _mirror_status_v2(
+        self,
+        *,
+        target_path: str,
+        record_type: str,
+        action: str,
+        plane_payload: dict[str, Any],
+        state_groups: Optional[dict[str, str]],
+        retry: RetryPolicy,
+    ) -> None:
+        """Layer a v2 state-change audit on a Plane-driven mutation.
+
+        Never raises — Plane is upstream and the legacy patch path is
+        the load-bearing write. A failed audit emission logs a warning
+        and the dispatcher continues.
+
+        The propose function (``plane_reverse_sync.mirror``) returns
+        ``None`` whenever the resulting status would equal the target's
+        current ``status`` (a Plane echo that doesn't move state, or a
+        comment-only update). In that case v2 short-circuits without a
+        ctrl-api round-trip.
+        """
+        if not workflow.patched(PLANE_REVERSE_SYNC_STATE_MUTATOR_PATCH):
+            return
+
+        now = workflow.now()
+        observed = ObservedWindow(
+            start=now,
+            end=now,
+            signal_paths=[],
+            decision_paths=[],
+            other_refs=[],
+        )
+        propose_fn_args = {
+            "record_type": record_type,
+            "action": action,
+            "plane_payload": plane_payload,
+            "state_groups": state_groups or {},
+        }
+
+        try:
+            await workflow.execute_activity(
+                apply_state_change_v2,
+                args=[
+                    target_path,
+                    "plane_reverse_sync",
+                    observed,
+                    "plane_reverse_sync.mirror",
+                    propose_fn_args,
+                    "live",
+                ],
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=retry,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Audit emission is best-effort; the legacy patch path is the
+            # source of truth for the vault write itself.
+            workflow.logger.warning(
+                "plane_reverse_sync._mirror_status_v2: v2 audit failed "
+                "target=%s record_type=%s action=%s err=%s",
+                target_path, record_type, action, exc,
+            )
 
     # ---------------------------------------------------------------------
     # B8 — Alfred-as-a-Plane-user trigger dispatch.

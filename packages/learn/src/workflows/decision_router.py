@@ -31,11 +31,28 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.decision_router import (
+        apply_decision_outcome_link_v2,
         check_decision_outcomes,
         list_decisions_by_state,
         reverse_decision,
         route_decision,
     )
+
+
+# SM-D-W7: patched gate for the universal state-mutator (v2) audit
+# path on the delegate-loop outcome linkage. ``check_decision_outcomes``
+# continues to do the decision-side write (state=completed +
+# outcome_record stamped on the decision record); the new code below
+# layers the matching task-side write on top so the task's status
+# flips to "closed" with an ``outcome=...`` summary AND a
+# state_change audit + timeline entry lands with
+# source=decision_router.outcome_link. In-flight workflow histories
+# started before this gate replay through the un-patched branch and
+# skip the v2 fan-out entirely, preserving deterministic replay per
+# packages/learn/CLAUDE.md.
+DECISION_ROUTER_OUTCOME_STATE_MUTATOR_PATCH = (
+    "decision_router_outcome_state_mutator_v1"
+)
 
 
 HEARTBEAT_EVERY = 5
@@ -114,6 +131,7 @@ class DecisionRouterWorkflow:
                 )
 
         # ---- Pass 3: outcome linkage for executing decisions ----
+        outcome_result: dict | None = None
         try:
             outcome_result = await workflow.execute_activity(
                 check_decision_outcomes,
@@ -126,6 +144,59 @@ class DecisionRouterWorkflow:
             workflow.logger.warning(
                 "decision_router: check_decision_outcomes failed: %s", exc,
             )
+
+        # SM-D-W7 — task-side outcome linkage through state_mutator v2.
+        # The decision-side write (state=completed, outcome_record on
+        # the decision) has already landed inside
+        # ``check_decision_outcomes``. The v2 fan-out below is what
+        # actually flips the associated task's status to "closed"
+        # with an ``outcome=...`` summary AND emits the state_change
+        # audit + timeline entry on the task. Gated by
+        # workflow.patched so pre-deploy histories replay
+        # deterministically.
+        if (
+            outcome_result is not None
+            and isinstance(outcome_result, dict)
+            and workflow.patched(DECISION_ROUTER_OUTCOME_STATE_MUTATOR_PATCH)
+        ):
+            matches = outcome_result.get("matches") or []
+            if isinstance(matches, list):
+                for m in matches:
+                    if not isinstance(m, dict):
+                        continue
+                    task_ref = str(m.get("task_ref") or "").strip()
+                    if not task_ref:
+                        # Decision didn't carry an explicit task linkage —
+                        # skip (the decision-side flip is the only write
+                        # we can do safely without a task to point at).
+                        continue
+                    decision_id = str(m.get("decision_id") or "").strip()
+                    outcome_record = str(m.get("outcome_record") or "").strip()
+                    intent = str(m.get("intent") or "delegate").strip()
+                    source_headline = str(m.get("source_headline") or "").strip()
+                    try:
+                        await workflow.execute_activity(
+                            apply_decision_outcome_link_v2,
+                            args=[
+                                task_ref,
+                                decision_id,
+                                outcome_record,
+                                intent,
+                                source_headline,
+                                "live",
+                            ],
+                            start_to_close_timeout=timedelta(seconds=60),
+                            retry_policy=_ROUTE_RETRY,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        # Best-effort: the decision-side write is the
+                        # load-bearing flip; v2 audit emission failure
+                        # logs and continues.
+                        workflow.logger.warning(
+                            "decision_router.v2: apply_decision_outcome_link_v2 "
+                            "failed decision=%s task=%s err=%s",
+                            decision_id, task_ref, exc,
+                        )
 
         workflow.logger.info(
             "decision_router: opens=%d reverseds=%d outcomes_matched=%d",

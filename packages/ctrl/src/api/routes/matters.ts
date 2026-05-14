@@ -78,13 +78,45 @@ type TimelineKind =
   | "signal"
   | "task_transition"
   | "action"
-  | "decision";
+  | "decision"
+  // #889 state-mutation contract: every state mutation lands a
+  // state_change entry on the target's `timeline` frontmatter list
+  // alongside the event/state-change-*.md audit record. The composer
+  // reads matter.fm.timeline and merges state_change kinds in.
+  | "state_change";
 
 interface TimelineEntry {
   when: string;
   kind: TimelineKind;
   headline: string;
   path: string;
+  /** Populated only for kind=state_change. The full provenance
+   *  payload (source, observed_window, changes summary, reason,
+   *  confidence, mode, audit_record path) is forwarded verbatim from
+   *  the matter frontmatter so the SaaS timeline renderer can render
+   *  the inline summary without an extra fetch. */
+  state_change?: StateChangeTimelineDetail;
+}
+
+/** Shape of a `state_change` entry in `matter.timeline` / `task.timeline`
+ *  frontmatter (#889 spec §4.3). Fields are forwarded as-read from the
+ *  vault — the composer doesn't re-derive any of them. */
+export interface StateChangeTimelineDetail {
+  id: string;                  // ulid
+  source: string;              // dotted identifier
+  prior_as_of: string | null;
+  observed_window: {
+    start: string;
+    end: string;
+    signals: number;
+    decisions: number;
+    other: string[];
+  };
+  changes: Record<string, unknown>;
+  reason: string;
+  confidence: number;
+  mode: "shadow" | "live";
+  audit_record: string;
 }
 
 type TaskState = "pending" | "in_progress" | "done" | "archived";
@@ -231,6 +263,74 @@ function summarizeSignalAction(
   return { when, headline };
 }
 
+/** Extract `kind: state_change` entries from a matter or task frontmatter
+ *  `timeline` list (#889 spec §4.3) and yield TimelineEntry rows ready to
+ *  merge into the composed timeline. Tolerates missing fields by skipping
+ *  malformed rows — the writer (POST /state-changes) is the source of
+ *  truth for the shape; the reader is permissive. */
+function extractStateChangeTimeline(
+  fm: Record<string, unknown>,
+  fallbackPath: string,
+): TimelineEntry[] {
+  const raw = fm.timeline;
+  if (!Array.isArray(raw)) return [];
+  const out: TimelineEntry[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const e = entry as Record<string, unknown>;
+    if (String(e.kind ?? "") !== "state_change") continue;
+    const when = String(e.when ?? "");
+    if (!when) continue;
+    const source = String(e.source ?? "");
+    const reason = String(e.reason ?? "");
+    const mode = e.mode === "live" ? "live" : "shadow";
+    const confidence =
+      typeof e.confidence === "number" && Number.isFinite(e.confidence)
+        ? e.confidence
+        : 1.0;
+    const audit = String(e.audit_record ?? "");
+    const ow = (e.observed_window ?? {}) as Record<string, unknown>;
+    const otherRaw = ow.other;
+    const observed_window = {
+      start: String(ow.start ?? ""),
+      end: String(ow.end ?? when),
+      signals: typeof ow.signals === "number" ? ow.signals : 0,
+      decisions: typeof ow.decisions === "number" ? ow.decisions : 0,
+      other: Array.isArray(otherRaw) ? otherRaw.map(String) : [],
+    };
+    const changes =
+      e.changes && typeof e.changes === "object" && !Array.isArray(e.changes)
+        ? (e.changes as Record<string, unknown>)
+        : {};
+    const headline = reason
+      ? firstSentence(reason, 100)
+      : source
+        ? `State change by ${source}`
+        : "State change";
+    out.push({
+      when,
+      kind: "state_change",
+      headline,
+      path: audit || fallbackPath,
+      state_change: {
+        id: String(e.id ?? ""),
+        source,
+        prior_as_of:
+          typeof e.prior_as_of === "string" && e.prior_as_of
+            ? (e.prior_as_of as string)
+            : null,
+        observed_window,
+        changes,
+        reason,
+        confidence,
+        mode,
+        audit_record: audit,
+      },
+    });
+  }
+  return out;
+}
+
 /** Coerce a frontmatter task state to one of the four canonical values.
  *  Defaults to "pending" when missing/unknown. */
 function normalizeTaskState(raw: unknown): TaskState {
@@ -342,6 +442,7 @@ function buildMatterIndex(): MatterIndexResult {
       const n = Number.parseInt(rawCount, 10);
       if (Number.isFinite(n)) signalCount24h = Math.max(0, n);
     }
+    const stateChangeEntries = extractStateChangeTimeline(rec.fm, display);
     byId.set(id, {
       id,
       path: display,
@@ -361,7 +462,7 @@ function buildMatterIndex(): MatterIndexResult {
       current_state: currentState,
       as_of: asOf,
       signal_count_24h: signalCount24h,
-      timeline: [],
+      timeline: [...stateChangeEntries],
       tasks: [],
       state: "waiting",
     });
@@ -406,24 +507,33 @@ function buildMatterIndex(): MatterIndexResult {
     if (recType === "signal" || display.startsWith("signal/")) {
       signalsByPath.set(display, rec);
       const candidates = rec.fm.target_candidates;
-      if (Array.isArray(candidates)) {
-        const matched = new Set<string>();
+      // A signal carries an embedding-similarity ranking across all matters.
+      // Originally we attached it to EVERY candidate path, which polluted
+      // matter timelines with tangentially-related signals (e.g. a Miro
+      // password reset showed up on /matters/erste-agentic-coding-makerspace
+      // because Erste was its #2 candidate with score 0.19). Fix: only the
+      // top candidate, and only if its score clears MIN_SIGNAL_SCORE.
+      const MIN_SIGNAL_SCORE = 0.4;
+      if (Array.isArray(candidates) && candidates.length > 0) {
+        let top: { path: string; score: number } | null = null;
         for (const c of candidates) {
           if (!c || typeof c !== "object") continue;
-          const tp = String(
-            (c as { path?: unknown }).path ?? "",
-          );
+          const tp = String((c as { path?: unknown }).path ?? "");
+          const sc = Number((c as { score?: unknown }).score ?? 0);
           if (!tp.startsWith("matter/")) continue;
-          const id = extractMatterRef(tp);
-          if (id && byId.has(id)) matched.add(id);
+          if (Number.isNaN(sc)) continue;
+          if (top === null || sc > top.score) top = { path: tp, score: sc };
         }
-        for (const matterId of matched) {
-          let bucket = signalsByMatter.get(matterId);
-          if (!bucket) {
-            bucket = [];
-            signalsByMatter.set(matterId, bucket);
+        if (top !== null && top.score >= MIN_SIGNAL_SCORE) {
+          const id = extractMatterRef(top.path);
+          if (id && byId.has(id)) {
+            let bucket = signalsByMatter.get(id);
+            if (!bucket) {
+              bucket = [];
+              signalsByMatter.set(id, bucket);
+            }
+            bucket.push(display);
           }
-          bucket.push(display);
         }
       }
       // Signals don't participate in the legacy by-category buckets;

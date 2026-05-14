@@ -130,6 +130,7 @@ def _make_stubs(
     raise_on_apply_path: Optional[str] = None,
     fixed_now_ms: Optional[int] = None,
     test_state_groups: Optional[dict[str, str]] = None,
+    capture_state_mutator: bool = False,
 ) -> tuple[list, dict[str, Any]]:
     """Build the full set of stub activities for one workflow run.
 
@@ -327,6 +328,52 @@ def _make_stubs(
         _CALL_LOG.append(("mark_processed", (event_id, vault_path, classification)))
         state["events_marked_processed"].append(event_id)
 
+    # SM-D-W11: stub the state-mutator v2 activity so the workflow's
+    # workflow.patched(...) branch can record audit calls without
+    # hitting the real ctrl-api. The stub captures every envelope into
+    # state["v2_calls"] for assertions.
+    state["v2_calls"] = []
+
+    @activity.defn(name="apply_state_change_v2")
+    async def stub_apply_state_change_v2(
+        target_path: str,
+        source: str,
+        observed: dict[str, Any],
+        propose_fn_name: str,
+        propose_fn_args: dict[str, Any],
+        mode: str = "shadow",
+        expected_as_of: Optional[str] = None,
+    ) -> dict[str, Any]:
+        _CALL_LOG.append(("v2", (target_path, source, propose_fn_name)))
+        state["v2_calls"].append({
+            "target_path": target_path,
+            "source": source,
+            "propose_fn_name": propose_fn_name,
+            "propose_fn_args": dict(propose_fn_args or {}),
+            "mode": mode,
+            "expected_as_of": expected_as_of,
+        })
+        # Mirror the real activity's MutationResult shape closely enough
+        # that the workflow's helper doesn't choke. We return a dict
+        # (Temporal serializes dataclass results as dicts on the wire
+        # too) — workflow just discards it.
+        return {
+            "target_path": target_path,
+            "source": source,
+            "applied": True,
+            "mode": mode,
+            "effective_mode": mode,
+            "audit_record_path": (
+                f"event/state-change-stub-{target_path.replace('/', '-')}.md"
+            ),
+            "timeline_entry_id": "stub-ulid",
+            "prior_as_of": None,
+            "new_as_of": "2026-05-13T12:00:00Z",
+            "pending_confirmation": False,
+            "retried_count": 0,
+            "fan_out_triggered": [],
+        }
+
     stubs = [
         stub_enabled,
         stub_load_state,
@@ -340,6 +387,7 @@ def _make_stubs(
         stub_append_comment,
         stub_archive,
         stub_mark,
+        stub_apply_state_change_v2,
     ]
     return stubs, state
 
@@ -1128,3 +1176,286 @@ class TestInfiniteLoopSettles:
             f"total writes across 2 rounds = {total_writes}, must be ≤1 "
             "or we regressed the loop guards"
         )
+
+
+# ---------------------------------------------------------------------------
+# SM-D-W11 — state-mutator v2 audit emission (Phase D retrofit)
+# ---------------------------------------------------------------------------
+
+class TestStateMutatorV2Mirror:
+    """Phase D contract: when the workflow.patched gate is taken,
+    every Plane-driven mutation that lands on a vault matter/task
+    also emits an ``apply_state_change_v2`` activity call with
+    ``source="plane_reverse_sync"`` and the
+    ``"plane_reverse_sync.mirror"`` propose function name. The legacy
+    ``apply_plane_patch_to_vault`` path still runs alongside it so
+    non-state fields (name, priority, description) remain covered.
+
+    The WorkflowEnvironment treats every workflow run as fresh, so
+    ``workflow.patched("plane_reverse_sync_state_mutator_v1")`` returns
+    True and the v2 stub is invoked. This is the same harness pattern
+    used by the existing ``fetch_plane_state_groups`` patched-gate test.
+    """
+
+    def test_issue_status_change_emits_v2(self):
+        """A real Plane status transition (started → completed)
+        triggers the v2 envelope alongside the legacy PATCH."""
+        _reset_call_log()
+        issue_id = "plane-iss-v2-1"
+        updated = _issue_payload(
+            issue_id,
+            name="Done now",
+            state_group="completed",     # vault status will be "done"
+            priority="low",
+            external_id="alfred:done-v2",
+        )
+        ev = _stream_event("issue", "updated", updated)
+
+        stubs, state = _make_stubs(
+            events=[ev],
+            issue_map={"done-v2": issue_id},
+            existing_frontmatter={
+                "task/done-v2.md": {
+                    "name": "Done now",
+                    "status": "active",   # was started, now completed
+                    "priority": "low",
+                },
+            },
+        )
+        result = asyncio.run(_run_workflow(stubs))
+
+        # Legacy path still ran.
+        assert result.tasks_updated == 1
+        # New v2 audit call ran exactly once with the right envelope.
+        assert len(state["v2_calls"]) == 1
+        v2 = state["v2_calls"][0]
+        assert v2["target_path"] == "task/done-v2.md"
+        assert v2["source"] == "plane_reverse_sync"
+        assert v2["propose_fn_name"] == "plane_reverse_sync.mirror"
+        assert v2["mode"] == "live"
+        assert v2["propose_fn_args"]["record_type"] == "task"
+        assert v2["propose_fn_args"]["action"] == "updated"
+        # The Plane payload is passed through verbatim so the propose
+        # function can recompute the desired status in-process.
+        assert v2["propose_fn_args"]["plane_payload"]["id"] == issue_id
+
+    def test_project_archive_via_update_emits_v2_for_matter(self):
+        """A Plane project flagged is_archived=True triggers a v2 call
+        with record_type=matter — the matter's status moves
+        active → archived."""
+        _reset_call_log()
+        proj_id = "proj-v2-archive"
+        archived = _project_payload(
+            proj_id,
+            name="Sunset",
+            is_archived=True,
+            external_id="alfred:sunset-v2",
+        )
+        ev = _stream_event("project", "updated", archived)
+        stubs, state = _make_stubs(
+            events=[ev],
+            project_map={"sunset-v2": proj_id},
+            existing_frontmatter={
+                "matter/sunset-v2.md": {
+                    "name": "Sunset",
+                    "status": "active",
+                    "description": "Was an active engagement",
+                },
+            },
+        )
+        result = asyncio.run(_run_workflow(stubs))
+
+        assert result.matters_updated == 1
+        assert len(state["v2_calls"]) == 1
+        v2 = state["v2_calls"][0]
+        assert v2["target_path"] == "matter/sunset-v2.md"
+        assert v2["source"] == "plane_reverse_sync"
+        assert v2["propose_fn_args"]["record_type"] == "matter"
+        assert v2["propose_fn_args"]["action"] == "updated"
+
+    def test_issue_delete_emits_v2_for_task_archive(self):
+        """A Plane ``issue.deleted`` event emits a v2 call before the
+        archive activity runs. record_type=task, action=deleted."""
+        _reset_call_log()
+        issue_id = "plane-iss-v2-del"
+        deleted = _issue_payload(
+            issue_id,
+            name="Gone",
+            state_group="cancelled",
+            external_id="alfred:gone-v2",
+        )
+        ev = _stream_event("issue", "deleted", deleted)
+        stubs, state = _make_stubs(
+            events=[ev],
+            issue_map={"gone-v2": issue_id},
+            existing_frontmatter={
+                "task/gone-v2.md": {
+                    "name": "Gone",
+                    "status": "active",
+                },
+            },
+        )
+        result = asyncio.run(_run_workflow(stubs))
+
+        assert result.archives == 1
+        assert len(state["v2_calls"]) == 1
+        v2 = state["v2_calls"][0]
+        assert v2["target_path"] == "task/gone-v2.md"
+        assert v2["source"] == "plane_reverse_sync"
+        assert v2["propose_fn_args"]["action"] == "deleted"
+        assert v2["propose_fn_args"]["record_type"] == "task"
+
+    def test_comment_event_does_not_emit_v2(self):
+        """Issue-comment events don't touch state fields, so no v2 call."""
+        _reset_call_log()
+        issue_id = "plane-iss-v2-comment"
+        ev = _stream_event(
+            "issue_comment", "created",
+            {
+                "id": "cmt-1",
+                "issue": issue_id,
+                "actor_display_name": "Sir",
+                "comment_stripped": "Looks good",
+                "created_at": "2026-05-13T12:00:00Z",
+            },
+        )
+        stubs, state = _make_stubs(
+            events=[ev],
+            issue_map={"commented-v2": issue_id},
+            existing_frontmatter={
+                "task/commented-v2.md": {"name": "Commented", "status": "active"},
+            },
+        )
+        result = asyncio.run(_run_workflow(stubs))
+        assert result.comments_applied == 1
+        # No state change → no v2 call.
+        assert state["v2_calls"] == []
+
+
+# ---------------------------------------------------------------------------
+# SM-D-W11 — propose function unit coverage
+# ---------------------------------------------------------------------------
+
+class TestProposePlaneMirror:
+    """Direct unit tests on ``propose_plane_mirror`` — verifying the
+    deterministic Plane → vault status diff without spinning up Temporal.
+    """
+
+    def test_status_change_returns_mutation(self):
+        from src.activities.plane_reverse_sync import propose_plane_mirror
+        from src.activities.state_mutator import ObservedWindow, ProposedMutation
+        from datetime import datetime, timezone
+
+        async def _go():
+            window = ObservedWindow(
+                start=datetime.now(timezone.utc),
+                end=datetime.now(timezone.utc),
+                signal_paths=[],
+                decision_paths=[],
+                other_refs=[],
+            )
+            target = {"frontmatter": {"status": "active"}}
+            args = {
+                "record_type": "task",
+                "action": "updated",
+                "plane_payload": _issue_payload(
+                    "p1", name="X", state_group="completed",
+                ),
+                "state_groups": {},
+            }
+            return await propose_plane_mirror(
+                target=target, observed=window, args=args,
+            )
+
+        result = asyncio.run(_go())
+        assert isinstance(result, ProposedMutation)
+        assert result.fields == {"status": "done"}
+        assert result.confidence == 1.0
+        assert "active" in result.reason and "done" in result.reason
+
+    def test_status_unchanged_returns_none(self):
+        from src.activities.plane_reverse_sync import propose_plane_mirror
+        from src.activities.state_mutator import ObservedWindow
+        from datetime import datetime, timezone
+
+        async def _go():
+            window = ObservedWindow(
+                start=datetime.now(timezone.utc),
+                end=datetime.now(timezone.utc),
+                signal_paths=[],
+                decision_paths=[],
+                other_refs=[],
+            )
+            target = {"frontmatter": {"status": "done"}}
+            args = {
+                "record_type": "task",
+                "action": "updated",
+                # Plane reports the same status — no mutation warranted.
+                "plane_payload": _issue_payload(
+                    "p1", name="X", state_group="completed",
+                ),
+                "state_groups": {},
+            }
+            return await propose_plane_mirror(
+                target=target, observed=window, args=args,
+            )
+
+        assert asyncio.run(_go()) is None
+
+    def test_deleted_task_returns_cancelled(self):
+        from src.activities.plane_reverse_sync import propose_plane_mirror
+        from src.activities.state_mutator import ObservedWindow, ProposedMutation
+        from datetime import datetime, timezone
+
+        async def _go():
+            window = ObservedWindow(
+                start=datetime.now(timezone.utc),
+                end=datetime.now(timezone.utc),
+                signal_paths=[],
+                decision_paths=[],
+                other_refs=[],
+            )
+            target = {"frontmatter": {"status": "active"}}
+            args = {
+                "record_type": "task",
+                "action": "deleted",
+                "plane_payload": _issue_payload(
+                    "p1", name="X", state_group="cancelled",
+                ),
+                "state_groups": {},
+            }
+            return await propose_plane_mirror(
+                target=target, observed=window, args=args,
+            )
+
+        result = asyncio.run(_go())
+        assert isinstance(result, ProposedMutation)
+        assert result.fields == {"status": "cancelled"}
+
+    def test_deleted_matter_returns_archived(self):
+        from src.activities.plane_reverse_sync import propose_plane_mirror
+        from src.activities.state_mutator import ObservedWindow, ProposedMutation
+        from datetime import datetime, timezone
+
+        async def _go():
+            window = ObservedWindow(
+                start=datetime.now(timezone.utc),
+                end=datetime.now(timezone.utc),
+                signal_paths=[],
+                decision_paths=[],
+                other_refs=[],
+            )
+            target = {"frontmatter": {"status": "active"}}
+            args = {
+                "record_type": "matter",
+                "action": "deleted",
+                "plane_payload": {"id": "p1", "name": "X"},
+                "state_groups": {},
+            }
+            return await propose_plane_mirror(
+                target=target, observed=window, args=args,
+            )
+
+        result = asyncio.run(_go())
+        assert isinstance(result, ProposedMutation)
+        assert result.fields == {"status": "archived"}

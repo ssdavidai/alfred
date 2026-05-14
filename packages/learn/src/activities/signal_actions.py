@@ -1543,6 +1543,101 @@ async def route_signal_action(
                 "chosen_path": "skipped",
             }
 
+        # Phase 3 — decision_required gate.
+        # Signals carrying decision_required=false are bookkeeping
+        # entries (Sir already acted, or it's a system echo of Sir's
+        # own upstream action). They MUST land on the matter+task
+        # timeline as state-updates (Phase 2's target_matter_path +
+        # target_candidates already wire this — the matter aggregator
+        # auto-includes signals scored against the matter, so no new
+        # ctrl-api write is needed here). But they MUST NOT surface as
+        # /desk cards or dispatch to agents.
+        #
+        # Back-compat: legacy signals (no decision_required field)
+        # default to true at the validator level, so this gate is a
+        # no-op for them and they keep flowing through the existing
+        # human/agent routing.
+        decision_required_raw = fm.get("decision_required")
+        if isinstance(decision_required_raw, bool):
+            decision_required = decision_required_raw
+        elif isinstance(decision_required_raw, str):
+            decision_required = decision_required_raw.strip().lower() == "true"
+        else:
+            # Field absent — pre-Phase-3 signal. Preserve old behaviour:
+            # surface the card.
+            decision_required = True
+
+        if not decision_required:
+            actor_for_log = str(fm.get("actor") or "unknown").strip()
+            target_matter_path = str(fm.get("target_matter_path") or "").strip()
+            target_path = str(fm.get("target_path") or "").strip()
+            # Inline PATCH the signal's status so the router doesn't
+            # keep picking it up. We don't go through the
+            # mark_signal_status activity because (a) it whitelists
+            # only "action_pending"/"skipped"; (b) calling another
+            # @activity.defn directly from an activity skips the
+            # workflow scheduler. Mirroring the same ctrl-api call
+            # shape used by mark_signal_status keeps the wire
+            # behaviour identical.
+            import os
+            import httpx
+            from datetime import datetime, timezone
+
+            cfg_local = load_config()
+            api_key = os.environ.get("AAS_API_KEY", "")
+            patched_ok = False
+            if api_key:
+                now_iso = datetime.now(timezone.utc).isoformat(
+                    timespec="seconds"
+                )
+                try:
+                    async with httpx.AsyncClient(
+                        base_url=cfg_local.alfred_ctrl_url,
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        timeout=10.0,
+                    ) as patch_client:
+                        resp = await patch_client.patch(
+                            f"/api/v1/vault/records/{signal_path}",
+                            json={
+                                "frontmatter": {
+                                    "status": "routed_bookkeeping",
+                                    "applied_at": now_iso,
+                                }
+                            },
+                        )
+                        resp.raise_for_status()
+                        patched_ok = True
+                except httpx.HTTPError as exc:
+                    logger.warning(
+                        "signal_actions.route_signal_action: "
+                        "bookkeeping PATCH failed path=%s err=%s",
+                        signal_path, exc,
+                    )
+            logger.info(
+                "signal_actions.route_signal_action: BOOKKEEPING "
+                "path=%s actor=%s target_matter=%s target=%s "
+                "patched=%s (no card, no dispatch)",
+                signal_path, actor_for_log,
+                target_matter_path or "(none)",
+                target_path or "(none)",
+                patched_ok,
+            )
+            return {
+                "signal_path": signal_path,
+                "signal_status": "routed_bookkeeping",
+                "skip_reason": "decision_required_false",
+                "chosen_path": "bookkeeping",
+                "decision_reason": "actor_is_principal_or_system_echo",
+                "audit_record_path": None,
+                "needs_attention_path": None,
+                "outcome_signal_path": None,
+                "actor": actor_for_log,
+                "target_matter_path": target_matter_path or None,
+            }
+
         proposal = _parse_action_proposal(fm.get("action_proposal"))
         if not proposal or not isinstance(proposal, dict):
             return {

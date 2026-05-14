@@ -24,6 +24,13 @@ export type MarkdownProps = {
   onLink?: (title: string) => void;
   resolveTitle?: (title: string) => string | undefined;
   /**
+   * Reverse lookup used to render a wikilink as a human title when the
+   * source text is a slug (e.g., `[[matter/family-life-hannas-first-year]]`
+   * → "Hanna's First Year"). Returns undefined when no nicer display is
+   * known; the renderer falls back to the raw `[[...]]` content.
+   */
+  resolveDisplay?: (raw: string) => string | undefined;
+  /**
    * Opt out of the default getVaultTitleIndex-backed resolver. Set this to
    * false in any context that doesn't run inside an authenticated Wasp
    * client (e.g., a static marketing preview).
@@ -35,6 +42,7 @@ function inline(
   src: string,
   onLink?: (title: string) => void,
   resolveTitle?: (title: string) => string | undefined,
+  resolveDisplay?: (raw: string) => string | undefined,
 ): ReactNode[] {
   const out: ReactNode[] = [];
   // wikilinks first, then bold/italic/code
@@ -46,17 +54,21 @@ function inline(
     if (m.index > last) out.push(src.slice(last, m.index));
     const tok = m[0];
     if (tok.startsWith("[[")) {
-      const title = tok.slice(2, -2).trim();
-      const resolved = resolveTitle?.(title);
+      const raw = tok.slice(2, -2).trim();
+      const resolved = resolveTitle?.(raw);
+      // Render the human title when the source is a slug-shaped wikilink
+      // (e.g. `[[matter/family-life-hannas-first-year]]`). Falls back to
+      // the raw token when no nicer display is known.
+      const displayText = resolveDisplay?.(raw) ?? raw;
       out.push(
         <button
           key={i++}
-          onClick={() => onLink?.(title)}
+          onClick={() => onLink?.(raw)}
           data-resolved={resolved ?? undefined}
           className="font-display italic underline-offset-4 hover:underline"
           style={{ color: "var(--brass)" }}
         >
-          {title}
+          {displayText}
         </button>,
       );
     } else if (tok.startsWith("**")) {
@@ -95,6 +107,7 @@ function inline(
 
 function useLiveTitleIndex(): {
   resolve: (title: string) => string | undefined;
+  resolveDisplay: (raw: string) => string | undefined;
   navigateToSlug: (slug: string) => void;
 } {
   const navigate = useNavigate();
@@ -108,28 +121,39 @@ function useLiveTitleIndex(): {
     staleTime: 60_000,
   });
 
-  const lookup = useMemo(() => {
+  const { titleToSlug, slugToTitle } = useMemo(() => {
     const titles = (data?.titles ?? []) as Array<{
       title: string;
       slug: string;
     }>;
-    const map = new Map<string, string>();
+    const titleToSlug = new Map<string, string>();
+    const slugToTitle = new Map<string, string>();
     for (const t of titles) {
-      if (t?.title) map.set(t.title.toLowerCase().trim(), t.slug);
+      if (!t?.title || !t?.slug) continue;
+      titleToSlug.set(t.title.toLowerCase().trim(), t.slug);
+      slugToTitle.set(t.slug.toLowerCase().trim(), t.title);
     }
-    return map;
+    return { titleToSlug, slugToTitle };
   }, [data]);
 
   const resolve = (title: string): string | undefined => {
     if (!title) return undefined;
-    return lookup.get(title.toLowerCase().trim());
+    const k = title.toLowerCase().trim();
+    // Either input form may carry a known slug; in that case it's already
+    // navigable, so just echo it back.
+    return titleToSlug.get(k) ?? (slugToTitle.has(k) ? k : undefined);
+  };
+
+  const resolveDisplay = (raw: string): string | undefined => {
+    if (!raw) return undefined;
+    return slugToTitle.get(raw.toLowerCase().trim());
   };
 
   const navigateToSlug = (slug: string) => {
     navigate(`/dashboard/vault/${slug}`);
   };
 
-  return { resolve, navigateToSlug };
+  return { resolve, resolveDisplay, navigateToSlug };
 }
 
 // Static (no-resolver) variant for contexts that don't run inside a
@@ -139,8 +163,9 @@ function MarkdownStatic({
   source,
   onLink,
   resolveTitle,
+  resolveDisplay,
 }: Omit<MarkdownProps, "useLiveResolver">) {
-  return renderBlocks(source, onLink, resolveTitle);
+  return renderBlocks(source, onLink, resolveTitle, resolveDisplay);
 }
 
 // Live variant — auto-resolves wikilinks against getVaultTitleIndex.
@@ -148,19 +173,21 @@ function MarkdownLive({
   source,
   onLink,
   resolveTitle,
+  resolveDisplay,
 }: Omit<MarkdownProps, "useLiveResolver">) {
   const live = useLiveTitleIndex();
-  // Caller-supplied resolveTitle wins; fall back to the live one. When
+  // Caller-supplied resolvers win; fall back to the live ones. When
   // neither resolveTitle nor onLink is supplied, we auto-wire onLink so
   // [[wikilink]] clicks navigate to /dashboard/vault/<slug> when known.
   const effectiveResolve = resolveTitle ?? live.resolve;
+  const effectiveDisplay = resolveDisplay ?? live.resolveDisplay;
   const effectiveOnLink =
     onLink ??
-    ((title: string) => {
-      const slug = live.resolve(title);
+    ((raw: string) => {
+      const slug = live.resolve(raw);
       if (slug) live.navigateToSlug(slug);
     });
-  return renderBlocks(source, effectiveOnLink, effectiveResolve);
+  return renderBlocks(source, effectiveOnLink, effectiveResolve, effectiveDisplay);
 }
 
 export function Markdown(props: MarkdownProps) {
@@ -168,15 +195,30 @@ export function Markdown(props: MarkdownProps) {
   // The two variants have identical render output; only the resolver hook
   // call differs.
   if (props.useLiveResolver === false) {
-    return <MarkdownStatic source={props.source} onLink={props.onLink} resolveTitle={props.resolveTitle} />;
+    return (
+      <MarkdownStatic
+        source={props.source}
+        onLink={props.onLink}
+        resolveTitle={props.resolveTitle}
+        resolveDisplay={props.resolveDisplay}
+      />
+    );
   }
-  return <MarkdownLive source={props.source} onLink={props.onLink} resolveTitle={props.resolveTitle} />;
+  return (
+    <MarkdownLive
+      source={props.source}
+      onLink={props.onLink}
+      resolveTitle={props.resolveTitle}
+      resolveDisplay={props.resolveDisplay}
+    />
+  );
 }
 
 function renderBlocks(
   source: string,
   effectiveOnLink: ((title: string) => void) | undefined,
   effectiveResolve: ((title: string) => string | undefined) | undefined,
+  effectiveDisplay: ((raw: string) => string | undefined) | undefined,
 ): ReactNode {
 
   const lines = source.replace(/\r\n/g, "\n").split("\n");
@@ -196,20 +238,20 @@ function renderBlocks(
       if (lvl === 1) {
         blocks.push(
           <h1 key={key++} className="font-display text-4xl tracking-tight leading-[1.05] mb-4">
-            {inline(text, effectiveOnLink, effectiveResolve)}
+            {inline(text, effectiveOnLink, effectiveResolve, effectiveDisplay)}
           </h1>,
         );
       } else if (lvl === 2) {
         blocks.push(
           <h2 key={key++} className="font-mono text-[10px] uppercase tracking-[0.22em] mt-8 mb-3"
               style={{ color: "var(--brass)" }}>
-            {inline(text, effectiveOnLink, effectiveResolve)}
+            {inline(text, effectiveOnLink, effectiveResolve, effectiveDisplay)}
           </h2>,
         );
       } else {
         blocks.push(
           <h3 key={key++} className="font-display italic text-xl mt-6 mb-2">
-            {inline(text, effectiveOnLink, effectiveResolve)}
+            {inline(text, effectiveOnLink, effectiveResolve, effectiveDisplay)}
           </h3>,
         );
       }
@@ -230,7 +272,7 @@ function renderBlocks(
         <blockquote key={key++}
           className="border-l pl-5 my-5 font-display italic text-[19px] leading-snug"
           style={{ borderColor: "var(--brass)", color: "var(--ink)" }}>
-          {inline(buf.join(" "), effectiveOnLink, effectiveResolve)}
+          {inline(buf.join(" "), effectiveOnLink, effectiveResolve, effectiveDisplay)}
         </blockquote>,
       );
       continue;
@@ -256,7 +298,7 @@ function renderBlocks(
             {rows.map((r, ri) => (
               <tr key={ri} className="border-b border-rule">
                 {r.map((c, ci) => (
-                  <td key={ci} className="py-3 pr-4 text-[15px] align-top">{inline(c, effectiveOnLink, effectiveResolve)}</td>
+                  <td key={ci} className="py-3 pr-4 text-[15px] align-top">{inline(c, effectiveOnLink, effectiveResolve, effectiveDisplay)}</td>
                 ))}
               </tr>
             ))}
@@ -276,7 +318,7 @@ function renderBlocks(
           {items.map((it, j) => (
             <li key={j} className="grid grid-cols-[14px_1fr] gap-3 font-body text-[16px] leading-snug">
               <span style={{ color: "var(--brass)" }}>·</span>
-              <span>{inline(it, effectiveOnLink, effectiveResolve)}</span>
+              <span>{inline(it, effectiveOnLink, effectiveResolve, effectiveDisplay)}</span>
             </li>
           ))}
         </ul>,
@@ -290,7 +332,7 @@ function renderBlocks(
     }
     blocks.push(
       <p key={key++} className="font-body text-[17px] leading-[1.6] my-3">
-        {inline(buf.join(" "), effectiveOnLink, effectiveResolve)}
+        {inline(buf.join(" "), effectiveOnLink, effectiveResolve, effectiveDisplay)}
       </p>,
     );
   }

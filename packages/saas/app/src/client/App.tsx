@@ -52,6 +52,8 @@ export default function App() {
     if (p === "/household") return true;
     // Daily core (M3)
     if (p === "/desk" || p === "/brief") return true;
+    // Briefings index (state-mutation Phase E #893)
+    if (p === "/briefings") return true;
     // Knowledge surfaces (M4)
     if (
       p === "/vault" ||

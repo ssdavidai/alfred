@@ -46,6 +46,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.nightly_narrative import (
+        apply_matter_narrative_v2,
         generate_matter_narrative,
         list_active_matters,
         load_matter_signals_24h,
@@ -58,6 +59,18 @@ with workflow.unsafe.imports_passed_through():
 
 HEARTBEAT_EVERY = 5
 
+# Patched-gate name for Phase C (#891) — must match across this file
+# and any history-replay safety review. Adding the
+# ``apply_matter_narrative_v2`` activity dispatch inside
+# ``NightlyNarrativeWorkflow.run`` is a non-additive change to the
+# workflow history: pre-deploy histories have no record of the v2
+# activity calls, so we gate the new branch on ``workflow.patched``.
+# Histories started under the old code re-run the legacy direct-PATCH
+# branch verbatim; new histories started after the deploy take the v2
+# branch. See ``packages/learn/CLAUDE.md`` for the replay-safety
+# contract.
+NIGHTLY_NARRATIVE_STATE_MUTATOR_PATCH = "nightly_narrative_state_mutator_v1"
+
 
 @dataclass
 class NightlyNarrativeResult:
@@ -67,6 +80,12 @@ class NightlyNarrativeResult:
     matters_refreshed: int = 0
     matters_skipped_no_activity: int = 0
     matters_errored: int = 0
+    # Phase C aggregate counters — only populated on the patched branch.
+    # We keep them separate from the legacy fields so dashboards reading
+    # the schedule history can tell which branch ran.
+    matters_mutated_v2: int = 0
+    matters_no_change_v2: int = 0
+    matters_errored_v2: int = 0
     error_messages: list[str] = field(default_factory=list)
 
 
@@ -102,6 +121,80 @@ class NightlyNarrativeWorkflow:
         workflow.logger.info(
             "nightly_narrative.run: scanning %d active matters", len(matter_paths),
         )
+
+        use_v2 = workflow.patched(NIGHTLY_NARRATIVE_STATE_MUTATOR_PATCH)
+        if use_v2:
+            # New path (Phase C, #891): route every per-matter write
+            # through ``apply_state_change_v2`` so we land a
+            # ``state_change`` timeline entry + ``event/state-change-*``
+            # audit record per spec §4. The wrapper activity does the
+            # read + load + propose + POST internally; per-matter
+            # 409-retry is handled inside v2 (bounded at 3) — we don't
+            # reimplement it here.
+            #
+            # Stamp the observed-window end with workflow.now() so the
+            # propose function's reasoning window closes deterministically
+            # across retries (replay-safe).
+            as_of_iso = (
+                workflow.now()
+                .astimezone(timezone.utc)
+                .isoformat(timespec="seconds")
+            )
+            workflow.logger.info(
+                "nightly_narrative.run: patched gate ON — using state_mutator v2",
+            )
+            for idx, matter_path in enumerate(matter_paths):
+                if idx and idx % HEARTBEAT_EVERY == 0:
+                    workflow.logger.info(
+                        "nightly_narrative.run: v2 progress %d/%d",
+                        idx, len(matter_paths),
+                    )
+                try:
+                    outcome = await workflow.execute_activity(
+                        apply_matter_narrative_v2,
+                        args=[matter_path, as_of_iso],
+                        start_to_close_timeout=timedelta(minutes=10),
+                        retry_policy=retry,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    result.matters_errored_v2 += 1
+                    result.error_messages.append(
+                        f"{matter_path}: v2 dispatch failed: {exc}"[:500]
+                    )
+                    workflow.logger.warning(
+                        "nightly_narrative.run: v2 dispatch failed matter=%s err=%s",
+                        matter_path, exc,
+                    )
+                    continue
+
+                status = (outcome or {}).get("status") if isinstance(outcome, dict) else None
+                if status == "mutated":
+                    result.matters_mutated_v2 += 1
+                elif status == "no_change":
+                    result.matters_no_change_v2 += 1
+                    workflow.logger.info(
+                        "nightly_narrative.run: no change warranted for %s",
+                        matter_path,
+                    )
+                else:
+                    result.matters_errored_v2 += 1
+                    err = (
+                        (outcome or {}).get("error_message")
+                        if isinstance(outcome, dict)
+                        else "unknown_status"
+                    )
+                    result.error_messages.append(
+                        f"{matter_path}: {err}"[:500]
+                    )
+
+            workflow.logger.info(
+                "nightly_narrative.run: v2 done scanned=%d mutated=%d no_change=%d errors=%d",
+                result.matters_scanned,
+                result.matters_mutated_v2,
+                result.matters_no_change_v2,
+                result.matters_errored_v2,
+            )
+            return result
 
         for idx, matter_path in enumerate(matter_paths):
             if idx and idx % HEARTBEAT_EVERY == 0:

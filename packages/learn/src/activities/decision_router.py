@@ -46,11 +46,18 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
 from temporalio import activity
 
+from src.activities.state_mutator import (
+    ObservedWindow,
+    ProposedMutation,
+    apply_state_change_v2,
+    propose_fn,
+)
 from src.config import load_config
 
 logger = logging.getLogger("decision-router")
@@ -606,15 +613,24 @@ async def check_decision_outcomes() -> dict[str, Any]:
     ``signal/*.md`` records, filter to those with a fresh outcome
     field, and match by source_signal_path or by direct decision_origin
     chain.
+
+    Returns ``{checked, matched, matches}`` where ``matches`` is a list
+    of dicts shaped for SM-D-W7's downstream task-outcome linkage. Each
+    match carries ``{decision_id, outcome_record, task_ref, intent,
+    source_record, source_headline}`` so the workflow can route the
+    task-side ``status="closed" + outcome=...`` write through
+    ``apply_state_change_v2`` under its patched gate. Older callers
+    that only read ``checked`` / ``matched`` keep working unchanged.
     """
     matched = 0
+    match_records: list[dict[str, Any]] = []
     async with _http() as client:
         # 1. Get executing decisions.
         resp = await client.get("/api/v1/decisions?state=executing&limit=200")
         resp.raise_for_status()
         executing = resp.json().get("decisions", []) or []
         if not executing:
-            return {"checked": 0, "matched": 0}
+            return {"checked": 0, "matched": 0, "matches": []}
 
         # 2. Get recent signals — outcomes are written as signals and
         # tagged with `source_signal_path` referencing the upstream.
@@ -622,7 +638,7 @@ async def check_decision_outcomes() -> dict[str, Any]:
             "/api/v1/vault/list/signal?preview=200",
         )
         if sigs_resp.status_code >= 400:
-            return {"checked": len(executing), "matched": 0}
+            return {"checked": len(executing), "matched": 0, "matches": []}
         signals = sigs_resp.json().get("results", []) or []
 
         # Build a quick map: source_signal_path → outcome signal path.
@@ -649,7 +665,6 @@ async def check_decision_outcomes() -> dict[str, Any]:
             if not outcome:
                 continue
             # Match! Stamp the outcome on the decision and flip state.
-            from datetime import datetime, timezone
             await client.patch(
                 f"/api/v1/decisions/{decision_id}",
                 json={
@@ -660,6 +675,156 @@ async def check_decision_outcomes() -> dict[str, Any]:
             )
             matched += 1
 
+            # SM-D-W7 — surface the match so the workflow can route the
+            # task-side closure through state_mutator v2. Only decisions
+            # with a non-empty ``task_ref`` are eligible (otherwise the
+            # decision doesn't speak to a specific task and there's
+            # nothing to flip).
+            match_records.append({
+                "decision_id": decision_id,
+                "outcome_record": outcome,
+                "task_ref": str(d.get("task_ref") or "").strip(),
+                "intent": str(d.get("intent") or "").strip(),
+                "source_record": str(d.get("source_record") or "").strip(),
+                "source_headline": str(d.get("source_headline") or "").strip(),
+            })
+
     if matched:
         logger.info("decision_router: matched %d outcomes", matched)
-    return {"checked": len(executing) if executing else 0, "matched": matched}
+    return {
+        "checked": len(executing) if executing else 0,
+        "matched": matched,
+        "matches": match_records,
+    }
+
+
+# ---------------------------------------------------------------------
+# SM-D-W7 — state-mutator v2 outcome-link propose function + wrapper.
+# ---------------------------------------------------------------------
+#
+# When the cascade closes the delegate loop (state=executing →
+# state=completed with outcome_record stamped on the decision), the
+# original task associated with the decision should also flip to
+# ``status="closed"`` + ``outcome=<short summary referencing the
+# outcome record>``. The decision-side write above already lands
+# verbatim — this is the additional task-side write that closes the
+# universal-contract loop.
+#
+# Deterministic: confidence=1.0. The decision cascade itself has
+# already passed the principal's confidence gate (they clicked
+# Delegate) and the outcome signal has materialised — there is no
+# remaining LLM judgment to make.
+
+
+@propose_fn("decision_router.outcome_link")
+async def propose_decision_outcome_link(
+    *,
+    target: dict[str, Any],
+    observed: ObservedWindow,
+    args: dict[str, Any],
+) -> ProposedMutation | None:
+    """Translate a completed delegate-loop into a task closure mutation.
+
+    ``args`` carries:
+      * ``decision_id`` (str)
+      * ``outcome_record`` (str) — vault path to the outcome signal
+      * ``intent`` (str) — typically "delegate"
+      * ``source_headline`` (str, optional)
+
+    Returns ``None`` when the task is already closed/archived (so a
+    re-tick of ``check_decision_outcomes`` doesn't double-stamp the
+    audit). Otherwise proposes ``status="closed"`` + ``outcome=<short
+    pointer to the outcome record>``. Confidence is 1.0 — the cascade
+    already passed Sir's gate; this is bookkeeping.
+    """
+    fm = target.get("frontmatter") or {}
+    if isinstance(fm, dict):
+        current_status = str(fm.get("status") or "").strip().lower()
+        if current_status in ("closed", "archived", "cancelled", "canceled", "done"):
+            return None
+
+    decision_id = str(args.get("decision_id") or "").strip()
+    outcome_record = str(args.get("outcome_record") or "").strip()
+    intent = str(args.get("intent") or "delegate").strip()
+    source_headline = str(args.get("source_headline") or "").strip()
+
+    if not outcome_record:
+        return None
+
+    outcome = (
+        f"resolved by outcome {outcome_record}"
+        if not source_headline
+        else f"resolved by outcome {outcome_record} ({source_headline})"
+    )[:500]
+
+    reason = (
+        f"DecisionRouter outcome linkage: decision={decision_id} "
+        f"intent={intent} delivered outcome={outcome_record!r}; closing task."
+    )[:500]
+
+    return ProposedMutation(
+        fields={"status": "closed", "outcome": outcome},
+        reason=reason,
+        confidence=1.0,
+        fan_out=(),
+    )
+
+
+@activity.defn
+async def apply_decision_outcome_link_v2(
+    task_path: str,
+    decision_id: str,
+    outcome_record: str,
+    intent: str,
+    source_headline: str,
+    mode: str = "live",
+) -> dict[str, Any]:
+    """Workflow-callable wrapper around ``apply_state_change_v2``.
+
+    Best-effort: a v2 failure logs + returns ``{applied: False, error:
+    ...}`` so a transient ctrl-api blip on one match doesn't break the
+    rest of the tick. The decision-side state flip has already landed
+    above; this wrapper just adds the task-side audit + write.
+    """
+    if mode not in ("shadow", "live"):
+        mode = "live"
+
+    now = datetime.now(timezone.utc)
+    observed = ObservedWindow(
+        start=now,
+        end=now,
+        signal_paths=[outcome_record] if outcome_record else [],
+        decision_paths=[f"decision/{decision_id}.md"] if decision_id else [],
+        other_refs=[],
+    )
+
+    try:
+        result = await apply_state_change_v2(
+            target_path=task_path,
+            source="decision_router.outcome_link",
+            observed=observed,
+            propose_fn_name="decision_router.outcome_link",
+            propose_fn_args={
+                "decision_id": decision_id,
+                "outcome_record": outcome_record,
+                "intent": intent,
+                "source_headline": source_headline,
+            },
+            mode=mode,  # type: ignore[arg-type]
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "decision_router.apply_decision_outcome_link_v2: v2 call failed "
+            "task=%s decision=%s err=%s",
+            task_path, decision_id, exc,
+        )
+        return {"applied": False, "error": str(exc)[:300]}
+
+    return {
+        "applied": bool(result.applied),
+        "audit_record_path": result.audit_record_path,
+        "timeline_entry_id": result.timeline_entry_id,
+        "new_as_of": result.new_as_of,
+        "effective_mode": result.effective_mode,
+        "pending_confirmation": result.pending_confirmation,
+    }

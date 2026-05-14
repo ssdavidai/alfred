@@ -193,6 +193,19 @@ INTERVAL_SCHEDULES = [
         "interval": timedelta(minutes=15),
     },
     {
+        # OpenClaw session-leak reaper — hourly sweep of the
+        # ``.bak-N-<epoch>`` files OpenClaw drops in each agent's
+        # sessions/ dir on rollover. Without this, listing the
+        # sessions dir hits O(N) on every new session create and
+        # CPU-pegs openclaw-workers (>100%) once the count grows
+        # past a few hundred. See ``src/activities/openclaw_sessions.py``
+        # for the full incident note + the prior David openclaw
+        # degradation reference.
+        "id": "al-openclaw-session-sweep",
+        "workflow": "OpenclawSessionSweepWorkflow",
+        "interval": timedelta(hours=1),
+    },
+    {
         # Decision router — every Desk click writes a decision/<ts>.md
         # record; this workflow reads them, runs side effects (status
         # flips on source records, signal re-arms + agent dispatches

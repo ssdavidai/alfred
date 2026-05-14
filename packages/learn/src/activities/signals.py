@@ -1492,6 +1492,567 @@ async def extract_signal_from_event(
 
 
 # ---------------------------------------------------------------------------
+# Activity: extract_signals_from_event (Phase 1 — multi-signal pipeline)
+# ---------------------------------------------------------------------------
+#
+# Why this exists alongside extract_signal_from_event:
+#   - One stream event may carry zero, one, or many independent signals
+#     (e.g. an openclaw-chat turn where Sir closes one task AND spins up
+#     a new matter; an Omi clip with two unrelated decisions). The
+#     single-signal extractor silently dropped the second.
+#   - Temporal replay determinism forbids changing extract_signal_from_event's
+#     return shape in place — in-flight workflows replaying old history
+#     would deserialize the new list-shape and break. This activity is
+#     net-new; the workflow uses workflow.patched("signal_extract_multi_signal_v1")
+#     to choose between the old and new dispatch.
+#
+# Wire shape returned: list[dict]. Each dict is in the SAME shape as the
+# return value of extract_signal_from_event (so write_signal_record and
+# every downstream consumer work unchanged). Empty list = noise/none —
+# the multi-signal analogue of returning None from the legacy extractor.
+
+
+async def _load_soul_md(cfg) -> str | None:
+    """Read SOUL.md from the tenant workspace via ctrl-api.
+
+    Returns the SOUL.md body or ``None`` if unreachable / empty.
+    Best-effort: the signal-extraction prompt is fully functional
+    without SOUL.md (the bullet rules carry the voice), but with
+    SOUL.md inlined the model voices the cards in Sir's own register.
+
+    ctrl-api exposes ``GET /api/v1/admin/workspace/SOUL.md`` returning
+    ``{"filename": "SOUL.md", "content": "..."}``. The endpoint
+    returns an empty string when the file doesn't exist yet (during
+    onboarding before the principal sets their SOUL preset) — we
+    treat that as "no SOUL.md available" and return None.
+
+    NOT cached at the activity level: the extraction activity is
+    invoked at most ~16 times per tick (chunk size); a single round
+    trip per signal is cheap. A worker-level cache would buy little
+    and complicate hot-reload semantics during onboarding.
+    """
+    import os
+
+    import httpx
+
+    base_url = getattr(cfg, "alfred_ctrl_url", None)
+    if not base_url:
+        return None
+    api_key = os.environ.get("AAS_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=5.0,
+        ) as soul_client:
+            resp = await soul_client.get(
+                "/api/v1/admin/workspace/SOUL.md"
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            content = payload.get("content") if isinstance(payload, dict) else None
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            return None
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.info(
+            "signals._load_soul_md: skipping SOUL.md (degraded): %s", exc,
+        )
+        return None
+
+
+async def _read_task_parent_matter(
+    client: VaultClient, task_path: str
+) -> str | None:
+    """Read a task vault record's ``parent_matter`` frontmatter field.
+
+    Returns the matter slug string (e.g. ``"matter/inbox.md"``) when
+    the record has one, or ``None`` when the read fails / the field is
+    missing or malformed. Best-effort: callers fall through to leaving
+    ``target_matter_path`` unset on failure.
+    """
+    if not isinstance(task_path, str) or not task_path.startswith("task/"):
+        return None
+    try:
+        task = await client.read_record(task_path)
+    except httpx.HTTPError as exc:
+        logger.info(
+            "signals._read_task_parent_matter: read failed task=%s err=%s",
+            task_path, exc,
+        )
+        return None
+    if not isinstance(task, dict):
+        return None
+    fm = task.get("frontmatter")
+    if not isinstance(fm, dict):
+        return None
+    parent = fm.get("parent_matter")
+    if not isinstance(parent, str):
+        return None
+    parent = parent.strip()
+    if not (parent.startswith("matter/") and parent.endswith(".md")):
+        return None
+    return parent
+
+
+def _validate_signals_envelope(
+    raw: Any,
+) -> list[dict[str, Any]]:
+    """Parse a `{"signals": [...]}` LLM response into validated per-signal dicts.
+
+    Each entry runs through the same single-signal validator as the
+    legacy path so the downstream signal-record schema is unchanged.
+    Entries that fail validation are dropped (logged) rather than
+    poisoning the whole batch. Backwards-compat: if the LLM emits the
+    legacy single-signal envelope (a bare top-level dict with `effect`)
+    we wrap it as a one-element list — saves a class of failure modes
+    while the prompt is bedding in.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    items: list[Any] = []
+    if isinstance(raw, dict) and isinstance(raw.get("signals"), list):
+        items = raw["signals"]
+    elif isinstance(raw, list):
+        # Tolerate a bare list at the top level.
+        items = raw
+    elif isinstance(raw, dict) and "effect" in raw:
+        # Legacy single-signal shape — wrap.
+        items = [raw]
+    else:
+        return []
+
+    validated: list[dict[str, Any]] = []
+    for i, entry in enumerate(items):
+        if not isinstance(entry, dict):
+            logger.warning(
+                "signals.extract_signals_from_event: skipping non-dict entry "
+                "idx=%d type=%s", i, type(entry).__name__,
+            )
+            continue
+        per_quote = entry.get("raw_quote")
+        classification = _validate_llm_classification(entry)
+        if classification is None:
+            logger.warning(
+                "signals.extract_signals_from_event: validator rejected "
+                "entry idx=%d", i,
+            )
+            continue
+        # Phase 3 — actor + decision_required.
+        # ``actor`` ∈ {principal, counterparty, system, alfred}.
+        # Default to "counterparty" when the LLM omits it (older
+        # prompt runs / replays). The principal-default would over-
+        # silence cards on a partial deploy; counterparty + decision_
+        # required=True preserves the pre-Phase-3 surfacing behaviour.
+        actor_raw = str(entry.get("actor") or "").strip().lower()
+        if actor_raw not in ("principal", "counterparty", "system", "alfred"):
+            actor_raw = "counterparty"
+        classification["actor"] = actor_raw
+        # ``decision_required`` MUST be a strict boolean per the
+        # prompt. Defensive: also accept "true"/"false" strings and
+        # 0/1 ints in case the LLM stringifies. Default for missing:
+        # True for counterparty/system (back-compat: surfacing was the
+        # only behaviour), False for principal/alfred (the whole
+        # point of Phase 3).
+        dr_raw = entry.get("decision_required")
+        if isinstance(dr_raw, bool):
+            decision_required = dr_raw
+        elif isinstance(dr_raw, str):
+            decision_required = dr_raw.strip().lower() == "true"
+        elif isinstance(dr_raw, (int, float)):
+            decision_required = bool(dr_raw)
+        else:
+            decision_required = actor_raw not in ("principal", "alfred")
+        classification["decision_required"] = decision_required
+
+        # The multi-signal envelope says noise/informational entries
+        # are absent — but be defensive against an LLM emitting
+        # effect=none anyway.
+        if classification["effect"] == "none":
+            continue
+        if isinstance(per_quote, str) and per_quote.strip():
+            classification["raw_quote_per_signal"] = per_quote.strip()[:240]
+        validated.append(classification)
+
+    return validated
+
+
+@activity.defn
+async def extract_signals_from_event(
+    stream_event_path: str,
+) -> list[dict[str, Any]]:
+    """Multi-signal extractor — Phase 1 of the n-signals refactor.
+
+    Returns a list of signal proposals (each in the same shape the
+    legacy single-signal extractor returned). An empty list means
+    "no signals — noise, informational, or pre-filter rejected" — the
+    workflow still marks the event processed in that case so we don't
+    re-LLM next tick.
+
+    Implementation parallels extract_signal_from_event but:
+      1. Calls build_signal_extraction_prompt_multi (asks for a list)
+      2. Parses {"signals": [...]} via _validate_signals_envelope
+      3. Runs target resolution + auto-create-task PER signal
+      4. Returns the full list (possibly empty)
+    """
+    from src.utils.signal_prompts import (
+        build_signal_extraction_prompt_multi,
+    )
+    from src.activities.clerk import _call_clerk
+
+    if not stream_event_path or not isinstance(stream_event_path, str):
+        logger.warning(
+            "signals.extract_signals_from_event: empty/invalid path %r",
+            stream_event_path,
+        )
+        return []
+
+    cfg = load_config()
+    client = VaultClient(cfg)
+    try:
+        try:
+            event = await client.read_record(stream_event_path)
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                logger.warning(
+                    "signals.extract_signals_from_event: 404 path=%s",
+                    stream_event_path,
+                )
+                return []
+            logger.warning(
+                "signals.extract_signals_from_event: read failed path=%s err=%s",
+                stream_event_path, exc,
+            )
+            return []
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "signals.extract_signals_from_event: read failed path=%s err=%s",
+                stream_event_path, exc,
+            )
+            return []
+
+        if not isinstance(event, dict):
+            return []
+
+        accepted, reason = _pre_filter(event)
+        if not accepted:
+            logger.info(
+                "signals.extract_signals_from_event: pre-filtered path=%s reason=%s",
+                stream_event_path, reason,
+            )
+            return []
+
+        # Noise-pattern + noise-instinct filter (shared with single-signal path).
+        try:
+            from src.activities.noise_patterns import (
+                load_active_noise_patterns,
+                event_matches_noise,
+                load_noise_instincts,
+                event_matches_noise_instinct,
+            )
+            event_fm_for_match = event.get("frontmatter") or {}
+            if not isinstance(event_fm_for_match, dict):
+                event_fm_for_match = {}
+
+            patterns = await load_active_noise_patterns()
+            if patterns and event_fm_for_match:
+                matched = event_matches_noise(
+                    event_fm_for_match,
+                    patterns,
+                    event_body=_event_body(event),
+                )
+                if matched is not None:
+                    logger.info(
+                        "signals.extract_signals_from_event: NOISE-FILTERED "
+                        "(legacy pattern) path=%s pattern=%s",
+                        stream_event_path, matched.get("path"),
+                    )
+                    return []
+
+            noise_instincts = await load_noise_instincts()
+            if noise_instincts and event_fm_for_match:
+                matched = event_matches_noise_instinct(
+                    event_fm_for_match, noise_instincts,
+                )
+                if matched is not None:
+                    logger.info(
+                        "signals.extract_signals_from_event: NOISE-FILTERED "
+                        "(instinct) path=%s instinct=%s",
+                        stream_event_path, matched.get("path"),
+                    )
+                    return []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "signals.extract_signals_from_event: noise check failed "
+                "(continuing to extract) path=%s err=%s",
+                stream_event_path, exc,
+            )
+
+        source_type = _infer_source_type(event)
+        event_level_raw_quote = _extract_raw_quote(event)
+
+        # Phase 3 — load SOUL.md from the tenant workspace so the
+        # voice block is grounded in the principal's living voice
+        # guide rather than the bullet-rule scaffold alone. Best-
+        # effort: a missing or empty SOUL.md falls back to the
+        # bullet rules in Section 4.5.
+        soul_md = await _load_soul_md(cfg)
+
+        prompt = build_signal_extraction_prompt_multi(
+            source_type=source_type,
+            event_frontmatter=event.get("frontmatter") or {},
+            event_body=_event_body(event),
+            raw_quote=event_level_raw_quote,
+            soul_md=soul_md,
+        )
+
+        import asyncio as _asyncio
+        retry_delays = (3.0, 8.0, 20.0)
+        llm_raw: Any = None
+        last_exc: Exception | None = None
+        for attempt, delay in enumerate([0.0] + list(retry_delays)):
+            if delay:
+                await _asyncio.sleep(delay)
+            try:
+                llm_raw = await _call_clerk(prompt, raw=False)
+                last_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                err_text = str(exc)
+                if not any(
+                    needle in err_text for needle in (
+                        "max active children",
+                        "Could not get session key",
+                        "sessions_spawn has reached",
+                    )
+                ):
+                    break
+                logger.info(
+                    "signals.extract_signals_from_event: clerk rate-limited "
+                    "path=%s attempt=%d", stream_event_path, attempt + 1,
+                )
+
+        if last_exc is not None:
+            # Same critical contract as the single-signal extractor:
+            # raise so Temporal retries the activity rather than the
+            # workflow burying the event as noise.
+            logger.warning(
+                "signals.extract_signals_from_event: clerk call failed "
+                "path=%s err=%s", stream_event_path, last_exc,
+            )
+            raise RuntimeError(
+                f"clerk call failed for {stream_event_path}: {last_exc}"
+            )
+
+        validated_signals = _validate_signals_envelope(llm_raw)
+        if not validated_signals:
+            logger.info(
+                "signals.extract_signals_from_event: 0 signals path=%s "
+                "(noise / informational / question / hypothetical)",
+                stream_event_path,
+            )
+            return []
+
+        # Compute origin_at once at the event level — every signal
+        # extracted from the same event shares it.
+        event_fm = event.get("frontmatter") if isinstance(event, dict) else {}
+        if not isinstance(event_fm, dict):
+            event_fm = {}
+        origin_raw = (
+            event_fm.get("created")
+            or event_fm.get("enriched_at")
+            or _now_utc_iso()
+        )
+        try:
+            from datetime import datetime as _dt
+            origin_dt = _dt.fromisoformat(
+                str(origin_raw).strip().replace("Z", "+00:00")
+            )
+            origin_at = origin_dt.isoformat()
+        except (ValueError, TypeError):
+            try:
+                from email.utils import parsedate_to_datetime
+                origin_at = parsedate_to_datetime(str(origin_raw)).isoformat()
+            except Exception:  # noqa: BLE001
+                origin_at = (
+                    str(origin_raw) if origin_raw else _now_utc_iso()
+                )
+
+        from src.activities.task_creation import create_task_from_signal
+
+        signals_out: list[dict[str, Any]] = []
+        for idx, classification in enumerate(validated_signals):
+            # Per-signal raw_quote: prefer the LLM's evidence; fall
+            # back to the event-level quote so the signal record is
+            # never empty-quoted.
+            per_quote = (
+                classification.pop("raw_quote_per_signal", None)
+                or event_level_raw_quote
+            )
+
+            # Target resolution.
+            try:
+                resolved = await _resolve_target(
+                    classification["target_hint"],
+                    classification["target_kind_hint"],
+                    client=client,
+                )
+            except httpx.HTTPError:
+                raise
+
+            # Phase 2 — every signal binds to exactly one task + one
+            # matter. The extractor's job ends with: target_kind="task",
+            # target_path=<task>, target_matter_path=<matter>. We
+            # auto-create a task in two cases:
+            #   (a) no target resolved at all (was the legacy
+            #       single-signal behaviour),
+            #   (b) target resolved to a matter — we need to fan out
+            #       to a task under that matter so the signal points
+            #       to a concrete actor's queue, not a category.
+            wants_task = classification["effect"] in ("action", "mutation")
+            needs_create = wants_task and (
+                # case (a)
+                (resolved.get("target_kind") is None
+                 and resolved.get("target_path") is None)
+                # case (b) — matter target, no task yet
+                or (resolved.get("target_kind") == "matter"
+                    and resolved.get("target_path"))
+            )
+            if needs_create:
+                # Pass target_kind + target_path to create_task_from_signal
+                # so a matter-targeted signal forces parent_matter to
+                # match the extractor's resolution (the LLM-task-creator
+                # then doesn't get to second-guess the matter pick).
+                try:
+                    provisional_signal: dict[str, Any] = {
+                        "source_event_path": stream_event_path,
+                        "source_type": source_type,
+                        "raw_quote": per_quote,
+                        "effect": classification["effect"],
+                        "mutation_proposal": classification["mutation_proposal"],
+                        "action_proposal": classification["action_proposal"],
+                        "effect_confidence": classification["effect_confidence"],
+                        "reasoning": classification["reasoning"],
+                        # Phase 2 — pass current resolution so the
+                        # task-creator honours the matter the
+                        # extractor identified.
+                        "target_kind": resolved.get("target_kind"),
+                        "target_path": resolved.get("target_path"),
+                        "target_hint": classification.get("target_hint"),
+                    }
+                    new_task_path = await create_task_from_signal(
+                        provisional_signal
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "signals.extract_signals_from_event: auto-create "
+                        "raised path=%s entry=%d err=%s",
+                        stream_event_path, idx, exc,
+                    )
+                    new_task_path = None
+
+                if new_task_path:
+                    # Preserve the resolved matter (if any) for stamping
+                    # below, then promote the resolution to the task.
+                    resolved_matter_pre = (
+                        resolved.get("target_path")
+                        if resolved.get("target_kind") == "matter"
+                        else None
+                    )
+                    resolved = {
+                        "target_path": new_task_path,
+                        "target_kind": "task",
+                        "target_confidence": 1.0,
+                        "candidates": resolved.get("candidates") or [],
+                        "ambiguous": False,
+                        "_resolved_matter_pre": resolved_matter_pre,
+                    }
+                    logger.info(
+                        "signals.extract_signals_from_event: auto-created "
+                        "task path=%s entry=%d -> task=%s",
+                        stream_event_path, idx, new_task_path,
+                    )
+
+            # Phase 2 — derive target_matter_path. Three sources, in
+            # priority order:
+            #   1. The matter the extractor resolved BEFORE we promoted
+            #      it to a task (case b above).
+            #   2. The task's own ``parent_matter`` frontmatter field.
+            #   3. The matter the extractor resolved when target_kind
+            #      stays =="matter" (no task ever materialized; can
+            #      happen when auto-create is env-disabled).
+            target_matter_path: str | None = None
+            pre_matter = resolved.pop("_resolved_matter_pre", None)
+            if pre_matter and isinstance(pre_matter, str):
+                target_matter_path = pre_matter
+            elif resolved.get("target_kind") == "task" and resolved.get("target_path"):
+                target_matter_path = await _read_task_parent_matter(
+                    client, str(resolved["target_path"])
+                )
+            elif resolved.get("target_kind") == "matter" and resolved.get("target_path"):
+                target_matter_path = str(resolved["target_path"])
+
+            # Source-prior calibration — same per-signal as before.
+            adjusted_conf, raw_conf, prior_key = _apply_source_prior(
+                source_type, event, classification["effect_confidence"]
+            )
+
+            signal: dict[str, Any] = {
+                "source_event_path": stream_event_path,
+                "source_type": source_type,
+                "raw_quote": per_quote,
+                "origin_at": origin_at,
+                "target_kind": resolved["target_kind"],
+                "target_path": resolved["target_path"],
+                "target_matter_path": target_matter_path,
+                "target_confidence": resolved["target_confidence"],
+                "target_candidates": resolved["candidates"],
+                "target_ambiguous": resolved["ambiguous"],
+                "effect": classification["effect"],
+                "mutation_proposal": classification["mutation_proposal"],
+                "action_proposal": classification["action_proposal"],
+                "effect_confidence": adjusted_conf,
+                "effect_confidence_raw": raw_conf,
+                "effect_confidence_prior_key": prior_key,
+                "reasoning": classification["reasoning"],
+                "display_headline": classification.get("display_headline"),
+                "display_body": classification.get("display_body"),
+                "created_at": _now_utc_iso(),
+                # Phase 1 marker — lets downstream consumers and the
+                # audit trail tell single-signal from multi-signal
+                # extraction at a glance. Optional in older signals.
+                "extracted_via": "multi_v1",
+                "extraction_idx": idx,
+                "extraction_count": len(validated_signals),
+                # Phase 3 — actor + decision_required carried from
+                # the validated LLM classification onto the signal
+                # record. Routing reads these to choose bookkeeping
+                # vs decision-card surfacing.
+                "actor": classification["actor"],
+                "decision_required": classification["decision_required"],
+            }
+            signals_out.append(signal)
+
+        logger.info(
+            "signals.extract_signals_from_event: extracted path=%s "
+            "n_signals=%d source_type=%s",
+            stream_event_path, len(signals_out), source_type,
+        )
+        return signals_out
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
 # Helpers — write_signal_record support
 # ---------------------------------------------------------------------------
 
@@ -1695,6 +2256,15 @@ def _build_signal_frontmatter(signal: dict[str, Any]) -> str:
     lines.append(_yaml_block_scalar(raw_quote, indent=2))
     lines.append(f"target_kind: {target_kind_yaml}")
     lines.append(f"target_path: {target_path_yaml}")
+    # Phase 2 — every signal binds to exactly one matter. Stamped when
+    # extract_signals_from_event can derive it (from task's parent_matter
+    # or a directly-resolved matter target). Omitted on legacy signals
+    # so existing YAMLs don't drift on replay.
+    target_matter_path = signal.get("target_matter_path")
+    if isinstance(target_matter_path, str) and target_matter_path.strip():
+        lines.append(
+            f"target_matter_path: {_yaml_inline_str(target_matter_path.strip())}"
+        )
     lines.append(f"target_confidence: {target_confidence:.4f}")
     candidates_yaml = _yaml_target_candidates(
         signal.get("target_candidates") or []
@@ -1752,6 +2322,27 @@ def _build_signal_frontmatter(signal: dict[str, Any]) -> str:
     lines.append("status: unrouted")
     lines.append("applied_at: null")
     lines.append("audit_record_path: null")
+    # Phase 3 — actor + decision_required.
+    # Always emit when present on the dict (extractor stamps them
+    # in Phase 3+). Omitted on legacy signals so existing YAMLs
+    # don't drift on replay.
+    actor_v = signal.get("actor")
+    if isinstance(actor_v, str) and actor_v.strip():
+        lines.append(f"actor: {_yaml_inline_str(actor_v.strip())}")
+    if "decision_required" in signal:
+        dr = bool(signal.get("decision_required"))
+        lines.append("decision_required: " + ("true" if dr else "false"))
+    # Phase 1 — provenance marker on the signal record.
+    extracted_via = signal.get("extracted_via")
+    if isinstance(extracted_via, str) and extracted_via.strip():
+        lines.append(
+            f"extracted_via: {_yaml_inline_str(extracted_via.strip())}"
+        )
+    extraction_idx = signal.get("extraction_idx")
+    extraction_count = signal.get("extraction_count")
+    if isinstance(extraction_idx, int) and isinstance(extraction_count, int):
+        lines.append(f"extraction_idx: {int(extraction_idx)}")
+        lines.append(f"extraction_count: {int(extraction_count)}")
     lines.append("---")
     lines.append("")
     return "\n".join(lines)

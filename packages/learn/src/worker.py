@@ -33,6 +33,9 @@ from src.workflows.fleet_audit import FleetAuditWorkflow
 from src.workflows.composio_reconnect_cleanup import (
     ComposioReconnectCleanupWorkflow,
 )
+from src.workflows.openclaw_sessions_sweep import (
+    OpenclawSessionSweepWorkflow,
+)
 from src.workflows.steward import StewardWorkflow
 from src.workflows.nightly_narrative import NightlyNarrativeWorkflow
 from src.workflows.decision_router import DecisionRouterWorkflow
@@ -51,6 +54,7 @@ from src.workflows.signal_router import (
 )
 from src.workflows.stream_event_purge import StreamEventPurgeWorkflow
 from src.workflows.reversal_calibration import ReversalCalibrationWorkflow
+from src.workflows.briefing import BriefingWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -328,6 +332,7 @@ from src.activities.tool_inference import (
 # Inbound signals get checked against open tasks; high-confidence
 # matches auto-close the task via a decision(intent=done) record.
 from src.activities.task_closure import (
+    apply_task_closure_v2,
     list_open_tasks,
     list_recent_signals,
     assess_closure,
@@ -380,6 +385,12 @@ from src.activities.composio_reconnect import (
     remove_ledger_entry,
     verify_new_connection_active,
 )
+
+# Hourly sweep of leaked openclaw-workers .bak-* session files.
+# See packages/learn/src/activities/openclaw_sessions.py for the
+# motivation — same class of leak as the David openclaw degradation
+# incident, fixed durably by a Temporal-scheduled reaper.
+from src.activities.openclaw_sessions import sweep_openclaw_bak_sessions
 
 # Plane reverse sync (#536 B7) — Plane → vault ingress activities
 from src.activities.plane_reverse_sync import (
@@ -445,6 +456,27 @@ from src.activities.briefing_cache import (
     stamp_brief_completed as briefing_stamp_brief_completed,
 )
 
+# State-mutation Phase A (#889) — universal state-mutator primitive.
+# ``apply_state_change_v2`` is the read-reason-write-log entry point
+# every state writer routes through. ``read_target`` + ``gather_observed``
+# are helper activities for Pattern A workflows (spec §6.1) that don't
+# already have the prior state + observed window in hand. The legacy
+# Steward ``apply_state_change`` (v1) is untouched in Phase A and will
+# become a backwards-compat shim around v2 in Phase B.
+from src.activities.state_mutator import (
+    apply_state_change_v2,
+    gather_observed as state_mutator_gather_observed,
+    read_target as state_mutator_read_target,
+)
+
+# State-mutation Phase D writers — propose functions register
+# themselves with the propose-fn registry on import. They are NOT
+# Temporal activities (the universal mutator dispatches them
+# in-process), but the worker imports them so the registry is
+# populated before any workflow asks the mutator for a propose function
+# by name. See ``docs/STATE-MUTATION.md`` §6.1+§6.2.
+import src.activities.archival_sweep  # noqa: F401 — register archival_sweep.cold
+
 # Steward Phase 4 (#840) — Vexa transcript intake. Activities back the
 # MeetingCaptureWorkflow + TranscriptIntakeWorkflow. NO direct Plane
 # writes from these — every action becomes a Steward signal of kind
@@ -468,6 +500,10 @@ from src.activities.transcript import (
 # persist signal records, and mark the source event processed.
 from src.activities.signals import (
     extract_signal_from_event,
+    # Phase 1 multi-signal extractor — wired in via
+    # workflow.patched("signal_extract_multi_signal_v1") in
+    # SignalExtractWorkflow. Returns list[dict] (one event -> N signals).
+    extract_signals_from_event,
     list_unprocessed_stream_events,
     mark_stream_event_processed,
     write_signal_record,
@@ -523,6 +559,7 @@ from src.activities.calibration_reversal import (
 # Activities back NightlyNarrativeWorkflow; the schedule lives in
 # scripts/register_schedules.py as ``al-nightly-narrative`` (cron 0 2 * * *).
 from src.activities.nightly_narrative import (
+    apply_matter_narrative_v2 as narrative_apply_matter_narrative_v2,
     generate_matter_narrative as narrative_generate,
     list_active_matters as narrative_list_active_matters,
     load_matter_signals_24h as narrative_load_matter_signals_24h,
@@ -537,6 +574,7 @@ from src.activities.nightly_narrative import (
 # flips, signal re-arms, to_do spawns, outcome polling) and flips the
 # decision state. Schedule registered as ``al-decision-router``.
 from src.activities.decision_router import (
+    apply_decision_outcome_link_v2 as dr_apply_outcome_link_v2,
     check_decision_outcomes as dr_check_outcomes,
     list_decisions_by_state as dr_list_decisions,
     reverse_decision as dr_reverse_decision,
@@ -583,7 +621,20 @@ from src.activities.noise_patterns import (
 # Decay watcher — six-hourly sweep that stamps freshness bands on
 # pending needs_attention cards and auto-flips deeply stale ones to
 # status=stale, keeping the Desk free of origin-old residue.
-from src.activities.decay_watcher import watch_decay as dw_watch
+#
+# SM-D-W8 (#892) — the workflow's patched branch additionally adjusts
+# matter ``surface_class`` based on activity-decay bands through the
+# universal state-mutator. The propose function
+# ``decay_watcher.adjust`` is registered at module import time (the
+# decay_watcher activity module declares it via @propose_fn). Two new
+# activities back the patched branch:
+#   * ``list_active_matters_for_decay`` — matter enumerator.
+#   * ``adjust_matter_surface_class_v2`` — per-matter v2 wrapper.
+from src.activities.decay_watcher import (
+    adjust_matter_surface_class_v2 as dw_adjust_v2,
+    list_active_matters_for_decay as dw_list_matters,
+    watch_decay as dw_watch,
+)
 
 # Decisions → observations + pattern-proposal lifecycle. Every click
 # distills into an observation the intuition engine consumes; pattern
@@ -592,6 +643,19 @@ from src.activities.decision_observations import (
     extract_observation_from_decision as do_extract_obs,
     adopt_instinct_from_pattern as do_adopt_pattern,
     reject_pattern_proposal as do_reject_pattern,
+)
+
+# State-mutation Phase E (#893) — BriefingWorkflow + activities.
+# Morning + evening briefings are two writers under the universal
+# contract. ``briefing.propose_matter_update`` registers itself with
+# the propose-fn registry on import (the universal mutator dispatches
+# it in-process by name); the four activities below are dispatched by
+# ``BriefingWorkflow.run`` directly.
+from src.activities.briefing import (
+    briefing_visit_matter,
+    compose_and_write_briefing,
+    get_prior_briefing,
+    list_active_matters_for_briefing,
 )
 
 # Validators used as activities
@@ -622,6 +686,7 @@ _STATIC_WORKFLOWS = [
     PlaneReconciliationWorkflow,
     FleetAuditWorkflow,
     ComposioReconnectCleanupWorkflow,
+    OpenclawSessionSweepWorkflow,
     StewardWorkflow,
     NightlyNarrativeWorkflow,
     DecisionRouterWorkflow,
@@ -637,6 +702,7 @@ _STATIC_WORKFLOWS = [
     SignalRouterWorkflow,
     StreamEventPurgeWorkflow,
     ReversalCalibrationWorkflow,
+    BriefingWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -845,6 +911,9 @@ ALL_ACTIVITIES = [
     assess_closure,
     assess_closure_predicate,
     write_closure_decision,
+    # SM-D-W4: v2 wrapper that emits state_change audit + flips task
+    # status="closed" + outcome=... on the matched task.
+    apply_task_closure_v2,
     # OBS-2 — signal → observation extractor
     extract_observation_from_signal,
     # Plane sync (#536 B4)
@@ -871,6 +940,8 @@ ALL_ACTIVITIES = [
     verify_new_connection_active,
     delete_old_connection,
     remove_ledger_entry,
+    # OpenClaw session-leak reaper (hourly schedule via register_schedules)
+    sweep_openclaw_bak_sessions,
     # Plane reverse sync (#536 B7)
     plane_reverse_sync_is_enabled,
     load_reverse_sync_state,
@@ -908,6 +979,10 @@ ALL_ACTIVITIES = [
     steward_gather_signals_ctrl_api_stream,
     steward_evaluate_state,
     steward_update_matter_cadence,
+    # State-mutation Phase A (#889) — universal mutator + helpers.
+    apply_state_change_v2,
+    state_mutator_read_target,
+    state_mutator_gather_observed,
     # Steward Phase 5 (#841): briefing-cache activities used by the
     # daily morning briefing chore for Steward-aware filtering.
     briefing_compute_briefing_context,
@@ -929,6 +1004,10 @@ ALL_ACTIVITIES = [
     # dispatches once the flag flips on).
     list_unprocessed_stream_events,
     extract_signal_from_event,
+    # Phase 1 multi-signal extractor — registered alongside the legacy
+    # single-signal extractor. SignalExtractWorkflow picks via
+    # workflow.patched("signal_extract_multi_signal_v1").
+    extract_signals_from_event,
     write_signal_record,
     mark_stream_event_processed,
     # Steward Phase 6 (T6.5.1) — auto-create tasks for no-target
@@ -976,12 +1055,22 @@ ALL_ACTIVITIES = [
     narrative_load_source_events,
     narrative_generate,
     narrative_patch_matter_narrative,
+    # State-mutation Phase C (#891) — v2-retrofitted per-matter writer.
+    # The new wrapper activity ``apply_matter_narrative_v2`` is dispatched
+    # by ``NightlyNarrativeWorkflow.run`` under the
+    # ``nightly_narrative_state_mutator_v1`` patched gate; legacy
+    # histories continue to drive the pre-patch direct-PATCH activities.
+    narrative_apply_matter_narrative_v2,
     # Decision router (every Desk click → vault record → side-effect
     # cascade). Activities back DecisionRouterWorkflow.
     dr_list_decisions,
     dr_route_decision,
     dr_reverse_decision,
     dr_check_outcomes,
+    # SM-D-W7: per-match task-side outcome linkage through
+    # state_mutator v2. Workflow gates the fan-out behind
+    # ``decision_router_outcome_state_mutator_v1`` patched gate.
+    dr_apply_outcome_link_v2,
     # Decision pattern extraction (daily) — extracts recurring rules
     # from the principal's recent decisions per matter.
     dp_extract,
@@ -1001,7 +1090,22 @@ ALL_ACTIVITIES = [
     # Noise pattern materialisation — runs after intent=noise click.
     np_write,
     # Decay watcher — stamps freshness bands, auto-flips deeply stale.
+    # SM-D-W8 (#892) adds the matter surface_class adjustment pass —
+    # ``list_active_matters_for_decay`` enumerates, ``adjust_matter_surface_class_v2``
+    # routes each matter through the universal state-mutator behind
+    # the ``decay_watcher_state_mutator_v1`` patched gate.
     dw_watch,
+    dw_list_matters,
+    dw_adjust_v2,
+    # State-mutation Phase E (#893) — BriefingWorkflow activities. The
+    # propose function ``briefing.propose_matter_update`` is registered
+    # on import of ``src.activities.briefing``; the four activities
+    # below back the morning + evening briefing slots through
+    # ``BriefingWorkflow.run``.
+    list_active_matters_for_briefing,
+    get_prior_briefing,
+    briefing_visit_matter,
+    compose_and_write_briefing,
 ]
 
 

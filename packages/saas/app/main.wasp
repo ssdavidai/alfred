@@ -368,6 +368,15 @@ page BriefPage {
   component: import BriefPage from "@src/dashboard/BriefPage"
 }
 
+// /briefings — chronological feed of every briefing the composer has
+// written (STATE-MUTATION Phase E, #893). Expandable rows reveal the
+// full body; pill filters by slot (Morning / Evening / All).
+route BriefingsRoute { path: "/briefings", to: BriefingsPage }
+page BriefingsPage {
+  authRequired: true,
+  component: import BriefingsPage from "@src/briefings/BriefingsPage"
+}
+
 // /study — unified back office (M6 #867 + #868).
 route StudyRoute { path: "/study", to: StudyPage }
 page StudyPage {
@@ -613,9 +622,40 @@ query getVaultTitleIndex {
 // M3 #857 — letterpress /brief page. Wraps tenant ctrl-api
 // GET /api/v1/brief/today which renders today's digest record
 // (DailyDigestWorkflow output) into sections + small_matter.
+//
+// As of STATE-MUTATION Phase E (#893), /brief reads the most-recent
+// briefing record via getBriefings({limit:1}) and only falls back to
+// getDailyBrief when no briefing/* records exist on the tenant yet.
+// Phase H retires DailyDigestWorkflow and removes the fallback.
 query getDailyBrief {
   fn: import { getDailyBrief } from "@src/dashboard/operations",
   entities: [Instance]
+}
+
+// STATE-MUTATION Phase E (#893) — briefings index + single. Wraps the
+// ctrl-api endpoints written by the alfred-learn BriefingWorkflow.
+// Powers /brief (most-recent) and /briefings (chronological list).
+query getBriefings {
+  fn: import { getBriefings } from "@src/briefings/operations",
+  entities: [Instance]
+}
+
+query getBriefing {
+  fn: import { getBriefing } from "@src/briefings/operations",
+  entities: [Instance]
+}
+
+// Account-level "I have read this briefing" pointer. Stored on the User
+// row (lastDismissedBriefingSlugDate). /desk shows the brief envelope
+// only when the most-recent briefing.slug_date differs from this.
+query getLastDismissedBriefing {
+  fn: import { getLastDismissedBriefing } from "@src/briefings/operations",
+  entities: [User]
+}
+
+action dismissBriefing {
+  fn: import { dismissBriefing } from "@src/briefings/operations",
+  entities: [User]
 }
 
 // M4 #859 — matters aggregator. The /matters index + /matters/:id
@@ -953,6 +993,53 @@ action deleteChore {
 
 action triggerChore {
   fn: import { triggerChore } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+// ============================================================
+// State-mutation observability (#897 Phase I)
+// ============================================================
+//
+// Wraps the ctrl-api endpoints shipped in Phase A (#889):
+//   GET /api/v1/state-changes          — cross-target feed
+//   GET /api/v1/state-changes/sources  — 30-day source histogram
+//   GET /api/v1/cron/preview           — next-N firing times for a cron
+//
+// Powers /decisions State Changes tab, /matters/:id timeline expansion,
+// /chores/:slug Schedule editor, and /admin observability panels.
+
+query getStateChanges {
+  fn: import { getStateChanges } from "@src/state/operations",
+  entities: [Instance]
+}
+
+query getStateChangeSources {
+  fn: import { getStateChangeSources } from "@src/state/operations",
+  entities: [Instance]
+}
+
+query getChoreScheduleFires {
+  fn: import { getChoreScheduleFires } from "@src/state/operations",
+  entities: [Instance]
+}
+
+// Manual vault edits to matter/task state fields flow through this action
+// (Phase F · #894). Sends a POST /api/v1/state-changes envelope to ctrl-api
+// with source=manual.<currentUserId>; the principal supplies an optional
+// reason which is persisted into both the timeline entry and the audit
+// record. Non-state-field edits continue to use the legacy PATCH path
+// (updateTask / createVaultRecord upsert) — this action is only for the
+// declared state-field allowlist on matter/* and task/* records.
+action applyManualStateChange {
+  fn: import { applyManualStateChange } from "@src/state/operations",
+  entities: [Instance]
+}
+
+// Patch a chore record's mutable fields (schedule / name / description /
+// python_source / etc.). Wraps PATCH /api/v1/chores/:slug. The Schedule
+// editor on /chores/:slug only ever patches the `schedule` field.
+action patchChore {
+  fn: import { patchChore } from "@src/chores/operations",
   entities: [Instance]
 }
 

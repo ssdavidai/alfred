@@ -186,9 +186,46 @@ services:
       # fix (LIMIT + streaming load) + in-tenant periodic prune follow-up.
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
       - NODE_OPTIONS=--max-old-space-size=4096
+      # MCP-child reaper threshold (seconds). Any stdio-app.js or
+      # ctrl-server.mjs process whose elapsed time exceeds this gets
+      # SIGKILLed by the in-container watchdog. Ephemeral subagent
+      # sessions on the workers gateway typically close inside 2 min;
+      # the upstream openclaw session manager fails to reap their MCP
+      # children on close (observed: 16+ orphaned stdio-app processes
+      # accumulating ~5% CPU each → openclaw-workers pegs at 100% CPU
+      # → learn-clerk timeouts cascade). 600s = 10 min headroom past
+      # the longest legitimate ephemeral session.
+      - OPENCLAW_MCP_REAP_AFTER_SECONDS=600
     env_file:
       - .env
-    command: ["node", "openclaw.mjs", "gateway", "--bind", "lan", "--port", "18790", "--allow-unconfigured"]
+    # Wrap the gateway start with a background watchdog that periodically
+    # SIGKILLs orphaned MCP child processes. The watchdog runs every
+    # 60s, finds stdio-app.js / ctrl-server.mjs processes whose elapsed
+    # time exceeds OPENCLAW_MCP_REAP_AFTER_SECONDS, and kills them. Logs
+    # to stdout so docker logs reveals the reaps. node remains PID 1
+    # (post-exec) so SIGTERM still propagates correctly to the gateway.
+    # NB: `$$` escapes docker-compose's own ${VAR} interpolation so the
+    # literal `$VAR` reaches the shell. Without it, compose substitutes
+    # at parse time and the shell loop sees empty strings.
+    command:
+      - "sh"
+      - "-c"
+      - |
+        (
+          while true; do
+            sleep 60
+            ps -eo pid,etimes,comm,args 2>/dev/null \
+              | awk -v lim="$${OPENCLAW_MCP_REAP_AFTER_SECONDS:-600}" '
+                  /stdio-app\.js|ctrl-server\.mjs/ && $$2+0 > lim+0 { print $$1 }' \
+              | while read pid; do
+                  if [ -n "$$pid" ] && [ "$$pid" != "1" ]; then
+                    echo "[mcp-reaper] killing orphan pid=$$pid (older than $${OPENCLAW_MCP_REAP_AFTER_SECONDS:-600}s)" >&2
+                    kill -9 "$$pid" 2>/dev/null || true
+                  fi
+                done
+          done
+        ) &
+        exec node openclaw.mjs gateway --bind lan --port 18790 --allow-unconfigured
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:18790/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
@@ -327,6 +364,14 @@ services:
 
   alfred-learn:
     image: ssdavidai00/alfred-learn:latest
+    # Run as the same uid as openclaw-workers' node user (1000:1000).
+    # The bind mounts (/vault, /alfred-data, /openclaw-workers-state) are
+    # all owned by 1000 on the host; running as root inside the container
+    # was a quiet anomaly that worked for read+write to /vault + /alfred-data
+    # but blocked listing /openclaw-workers-state (drwx------ uid 1000).
+    # Needed by OpenclawSessionSweepWorkflow — see
+    # packages/learn/src/activities/openclaw_sessions.py.
+    user: "1000:1000"
     depends_on:
       temporal:
         condition: service_healthy

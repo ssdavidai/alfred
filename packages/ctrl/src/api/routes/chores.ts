@@ -400,6 +400,40 @@ function writeChoreStatus(slug: string, status: string): boolean {
 }
 
 export function registerChoreRoutes(): void {
+  // GET /api/v1/cron/preview?expr=<cron>&count=N
+  //
+  // STATE-MUTATION Phase I (#897) — Schedule editor next-5-fires preview.
+  // Parses a 5-field cron expression and returns the next N firing times
+  // (default 5, capped at 50) computed via the same `nextFireTime` walker
+  // the chore-list endpoint uses to derive `next_run_at`. All times UTC ISO.
+  // Returns 400 on parse failure with the validation error message so the
+  // editor can surface "Invalid cron expression" inline.
+  addRoute("GET", "/api/v1/cron/preview", async ({ res, query }) => {
+    const expr = query.get("expr");
+    if (typeof expr !== "string" || !expr.trim()) {
+      throw new ValidationError("expr query parameter is required");
+    }
+    const countRaw = query.get("count");
+    const count = Math.min(
+      Math.max(1, parseInt(countRaw ?? "5", 10) || 5),
+      50,
+    );
+    const fires: string[] = [];
+    let cursor = new Date();
+    for (let i = 0; i < count; i++) {
+      const next = nextFireTime(expr, cursor);
+      if (!next) {
+        if (i === 0) {
+          throw new ValidationError(`Invalid cron expression: ${expr}`);
+        }
+        break;
+      }
+      fires.push(next.toISOString());
+      cursor = next;
+    }
+    sendJson(res, 200, { fires, expr, count });
+  });
+
   // List all chores
   addRoute("GET", "/api/v1/chores", async ({ res }) => {
     if (!fs.existsSync(CHORE_DIR)) {

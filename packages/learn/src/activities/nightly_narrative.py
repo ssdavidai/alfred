@@ -25,6 +25,7 @@ two non-negotiable rules from ``CLAUDE.md``.
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -34,6 +35,13 @@ import httpx
 from temporalio import activity
 
 from src.activities.clerk import _call_clerk
+from src.activities.state_mutator import (
+    MutatorContentionError,
+    ObservedWindow,
+    ProposedMutation,
+    apply_state_change_v2,
+    propose_fn,
+)
 from src.config import load_config
 from src.utils.vault_client import VaultClient
 
@@ -586,3 +594,439 @@ async def read_matter_summary(matter_path: str) -> dict[str, Any]:
         "name": str(fm.get("name") or _slug_from_matter_path(canonical)),
         "current_state": str(fm.get("current_state") or "").strip()[:600],
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase C — state-mutator v2 retrofit (SM-C2/C3)
+# ---------------------------------------------------------------------------
+#
+# Under the universal state-mutation contract (#889) every matter
+# ``current_state`` + ``as_of`` write must flow through
+# ``apply_state_change_v2`` so we get a ``state_change`` timeline entry
+# + ``event/state-change-*`` audit record. This block adds the propose
+# function the mutator invokes and the per-matter wrapper activity the
+# patched branch of ``NightlyNarrativeWorkflow.run`` dispatches.
+#
+# The legacy ``generate_matter_narrative`` / ``patch_matter_narrative``
+# activities are NOT modified — they remain registered and continue to
+# run on the unpatched branch for histories started before the patched
+# gate landed. Replay determinism requires their bytes stay stable.
+
+# Default confidence for clerk-drafted narratives when the clerk does
+# not self-report one. Narrative drafting is intrinsically subjective
+# (the clerk picks what to highlight, not a binary fact) so we default
+# to a confidence comfortably above the standard 0.6 live-mode gate but
+# below the 0.85 HC-only threshold — under HC-only env vetoes the write
+# lands as ``pending_confirmation`` for sir to confirm, which is the
+# correct cautious posture for a generated paragraph.
+DEFAULT_NARRATIVE_CONFIDENCE = 0.85
+
+
+def _extract_confidence_and_narrative(
+    raw: str,
+) -> tuple[str | None, float | None]:
+    """Parse the clerk's response into ``(narrative, confidence_or_None)``.
+
+    The propose prompt instructs the clerk to reply with either:
+      * ``NO_CHANGE`` (case-insensitive) when nothing material moved
+      * A JSON object ``{"narrative": "...", "confidence": 0.0-1.0}``
+      * A bare paragraph (legacy fallback)
+
+    We accept all three shapes so a clerk that ignores the JSON
+    instruction still produces a usable mutation. Returns
+    ``(None, None)`` for the no-change signal.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None, None
+    # Reject clerk-failure sentinels so the failure text doesn't become
+    # the matter's current_state. Mirror briefing.py:_is_clerk_failure.
+    low = text.lower()
+    if (
+        "assistant turn failed" in low
+        or "tool use failed" in low
+        or low.startswith("[error")
+        or low.startswith("[failed")
+        or low.startswith("[empty")
+        or (text.startswith("[") and text.endswith("]") and len(text) < 120)
+    ):
+        return None, None
+    if text.upper().startswith("NO_CHANGE") or text.upper() == "NO CHANGE":
+        return None, None
+    # Strip a fenced ``` json ``` envelope if the clerk wrapped its JSON.
+    if text.startswith("```"):
+        # remove first fence + optional lang marker
+        nl = text.find("\n")
+        if nl != -1:
+            text = text[nl + 1 :]
+        if text.endswith("```"):
+            text = text[: -3].rstrip()
+    # JSON object path.
+    if text.lstrip().startswith("{"):
+        try:
+            obj = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            obj = None
+        if isinstance(obj, dict):
+            raw_narrative = obj.get("narrative")
+            raw_conf = obj.get("confidence")
+            if isinstance(raw_narrative, str) and raw_narrative.strip():
+                conf: float | None
+                if isinstance(raw_conf, (int, float)) and 0.0 <= float(raw_conf) <= 1.0:
+                    conf = float(raw_conf)
+                else:
+                    conf = None
+                return raw_narrative.strip(), conf
+            # JSON with no usable narrative → fall through to None
+            return None, None
+    # Bare paragraph fallback — treat the whole response as the narrative.
+    return text, None
+
+
+def _build_propose_prompt(
+    matter_summary: dict[str, Any],
+    prior_as_of: str | None,
+    signals: list[dict[str, Any]],
+    transitions: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+) -> str:
+    """Compose the propose-side prompt asking the clerk whether the
+    narrative should move given the signals + transitions since
+    ``prior_as_of``.
+
+    Reuses the same voice instructions as ``_build_narrative_prompt``
+    but with an explicit "no change" escape hatch for matters whose
+    activity does not warrant a rewrite.
+    """
+    matter_name = str(matter_summary.get("name") or matter_summary.get("path") or "").strip()
+    prior_state = str(matter_summary.get("current_state") or "").strip()
+
+    lines = [
+        "You are Alfred's clerk reviewing a matter's narrative.",
+        "",
+        f"MATTER: {matter_name}",
+        f"PRIOR as_of: {prior_as_of or 'none — first draft'}",
+    ]
+    if prior_state:
+        lines.append(f"PRIOR current_state: {prior_state}")
+    lines.extend([
+        "",
+        f"SIGNALS since prior as_of ({len(signals)} total):",
+        json.dumps(signals, indent=2, default=str)[:4000],
+        "",
+        f"TASK TRANSITIONS since prior as_of ({len(transitions)} total):",
+        json.dumps(transitions, indent=2, default=str)[:2000],
+        "",
+        "SOURCE EVENTS (back-pointer expanded):",
+        json.dumps(events, indent=2, default=str)[:2000],
+        "",
+        "Decide: given what you knew at PRIOR as_of, and what arrived",
+        "since, should the narrative change? If nothing material has",
+        "happened, respond with the single token NO_CHANGE.",
+        "",
+        "If the narrative should change, respond with JSON of the shape:",
+        '  {"narrative": "<paragraph>", "confidence": 0.0-1.0}',
+        "",
+        "Voice: courteous, precise, lightly old-fashioned — Alfred",
+        "speaks as himself; you draft on his behalf. 2-4 sentences",
+        "referencing concrete developments. Address sir as 'sir' when",
+        f"appropriate. Hard cap on the narrative: {NARRATIVE_CHAR_CAP}",
+        "characters. Confidence reflects your certainty that this is",
+        "the right framing — pass below 0.85 when the picture is",
+        "ambiguous so sir can confirm.",
+    ])
+    return "\n".join(lines)
+
+
+@propose_fn("nightly_narrative.propose_matter_narrative")
+async def propose_matter_narrative(
+    *,
+    target: dict[str, Any],
+    observed: ObservedWindow,
+    args: dict[str, Any],
+) -> ProposedMutation | None:
+    """Propose a new matter narrative — or ``None`` for no-change.
+
+    Contract matches the universal propose-fn signature (spec §4.1 +
+    §6.1). ``args`` carries the pre-loaded ``signals``, ``transitions``,
+    ``events``, plus ``matter_path`` and ``matter_name`` so the propose
+    function avoids re-reading vault inside the mutator's read-reason-
+    write cycle (the v2 ``read_target`` already gives us prior_fm; the
+    24h window walks live outside).
+
+    Logic:
+      * Both signals + transitions empty → return None (idempotent gate).
+      * Build clerk prompt with prior_state + observed events.
+      * Parse response: NO_CHANGE / JSON {narrative, confidence} / bare
+        paragraph.
+      * On no-change → return None (no PATCH, no audit).
+      * On narrative → build ``ProposedMutation`` with
+        ``fields={"current_state": ..., "as_of": observed.end iso}``
+        and clerk-self-reported confidence (default
+        ``DEFAULT_NARRATIVE_CONFIDENCE`` = 0.85 when the clerk doesn't
+        return one).
+    """
+    signals = args.get("signals") or []
+    transitions = args.get("transitions") or []
+    events = args.get("events") or []
+    matter_path = str(args.get("matter_path") or target.get("path") or "")
+
+    if not isinstance(signals, list):
+        signals = []
+    if not isinstance(transitions, list):
+        transitions = []
+    if not isinstance(events, list):
+        events = []
+
+    # Idempotency gate — nothing happened in the window → no rewrite.
+    if not signals and not transitions:
+        logger.info(
+            "nightly_narrative.propose: matter=%s no signals/transitions — no change",
+            matter_path,
+        )
+        return None
+
+    target_fm = target.get("frontmatter") if isinstance(target, dict) else None
+    if not isinstance(target_fm, dict):
+        target_fm = {}
+    prior_current_state = str(target_fm.get("current_state") or "").strip()
+    prior_as_of = target.get("as_of") if isinstance(target, dict) else None
+    matter_name = str(args.get("matter_name") or target_fm.get("name") or matter_path)
+
+    matter_summary = {
+        "name": matter_name,
+        "path": matter_path,
+        "current_state": prior_current_state,
+    }
+
+    prompt = _build_propose_prompt(
+        matter_summary,
+        str(prior_as_of) if prior_as_of else None,
+        signals,
+        transitions,
+        events,
+    )
+
+    result = await _call_clerk(prompt, raw=True)
+    if not isinstance(result, str):
+        result = str(result)
+
+    narrative, clerk_confidence = _extract_confidence_and_narrative(result)
+    if narrative is None or not narrative.strip():
+        logger.info(
+            "nightly_narrative.propose: matter=%s clerk returned NO_CHANGE or empty",
+            matter_path,
+        )
+        return None
+
+    trimmed = narrative.strip().strip('"').strip("'").strip()
+    if len(trimmed) > NARRATIVE_CHAR_CAP:
+        trimmed = trimmed[:NARRATIVE_CHAR_CAP].rstrip() + "..."
+
+    # The state-mutator stamps as_of from the envelope's "fields.as_of"
+    # if present; otherwise ctrl-api stamps observed_window.end. We
+    # pass an explicit ISO timestamp from observed.end so the workflow's
+    # deterministic ``workflow.now()`` value wins (replay-stable).
+    end_iso = observed.end.astimezone(timezone.utc).isoformat(timespec="seconds")
+    if end_iso.endswith("+00:00"):
+        end_iso = end_iso[:-6] + "Z"
+
+    confidence = (
+        clerk_confidence
+        if clerk_confidence is not None
+        else DEFAULT_NARRATIVE_CONFIDENCE
+    )
+
+    return ProposedMutation(
+        fields={
+            "current_state": trimmed,
+            "as_of": end_iso,
+        },
+        reason=(
+            f"Refreshed narrative after {len(signals)} signal(s) and "
+            f"{len(transitions)} task transition(s) since prior as_of."
+        )[:500],
+        confidence=confidence,
+        fan_out=(),
+    )
+
+
+@dataclass
+class MatterNarrativeOutcome:
+    """Result of one matter's v2 retrofit pass.
+
+    ``status`` is one of:
+      * ``"mutated"`` — propose returned a mutation and ctrl-api wrote it.
+      * ``"no_change"`` — propose returned None (no signals, or clerk
+        decided the prior narrative still stands).
+      * ``"error"`` — the v2 round-trip raised (contention exhausted,
+        clerk failure, HTTP failure, etc.).
+    """
+
+    matter_path: str
+    status: str
+    audit_record_path: str | None = None
+    new_as_of: str | None = None
+    retried_count: int = 0
+    error_message: str | None = None
+
+
+@activity.defn
+async def apply_matter_narrative_v2(
+    matter_path: str,
+    observed_end_iso: str,
+) -> dict[str, Any]:
+    """Per-matter v2 retrofit entry point — single activity the patched
+    workflow branch dispatches.
+
+    Wraps the read-reason-write cycle inside one activity (rather than
+    fan-out across read_target → gather_observed → execute_activity
+    chain) so the workflow surface stays small and the patched branch
+    is a single new ``execute_activity`` call per matter — minimum
+    surface area for replay-safety review.
+
+    Logic per matter:
+      1. Read the matter summary + signals + transitions + events via
+         the legacy loader activities (same as the pre-patch path).
+      2. Pre-compute the ObservedWindow with end stamped from the
+         workflow's clock (passed in as ``observed_end_iso`` so the
+         value is deterministic across retries).
+      3. Call ``apply_state_change_v2`` with
+         ``propose_fn_name="nightly_narrative.propose_matter_narrative"``.
+         The mutator handles read_target, propose invocation, ctrl-api
+         POST, optimistic-concurrency retries.
+      4. Map the result into a ``MatterNarrativeOutcome`` dict the
+         workflow aggregates into its return value.
+    """
+    canonical = _normalize_matter_path(matter_path)
+    if not canonical:
+        return MatterNarrativeOutcome(
+            matter_path=matter_path,
+            status="error",
+            error_message="invalid matter_path",
+        ).__dict__
+
+    try:
+        summary = await read_matter_summary(canonical)
+        signals = await load_matter_signals_24h(canonical)
+        transitions = await load_task_transitions_24h(canonical)
+        signal_paths = [s.get("path", "") for s in signals if s.get("path")]
+        events = await load_source_events(signal_paths) if signal_paths else []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "nightly_narrative.apply_matter_narrative_v2: load failed matter=%s err=%s",
+            canonical, exc,
+        )
+        return MatterNarrativeOutcome(
+            matter_path=canonical,
+            status="error",
+            error_message=f"load_failed: {exc}"[:300],
+        ).__dict__
+
+    # Idempotency gate — same as legacy path. Avoid even the v2
+    # round-trip when there's nothing to reason over.
+    if not signals and not transitions:
+        logger.info(
+            "nightly_narrative.apply_matter_narrative_v2: matter=%s no activity — no change",
+            canonical,
+        )
+        return MatterNarrativeOutcome(
+            matter_path=canonical, status="no_change",
+        ).__dict__
+
+    # Parse the workflow-supplied ISO timestamp for observed.end so
+    # retries see the same value (Temporal-determinism friendly).
+    end_dt = _parse_iso_or_none(observed_end_iso) or _now_utc()
+    # ObservedWindow.start defaults to the matter's prior as_of. If
+    # absent (fresh matter) fall back to the 24h lookback window so the
+    # state_mutator audit still has a sane start anchor.
+    target_fm = summary if isinstance(summary, dict) else {}
+    prior_as_of_raw = target_fm.get("as_of")
+    start_dt = _parse_iso_or_none(prior_as_of_raw) or (end_dt - LOOKBACK_WINDOW)
+    observed = ObservedWindow(
+        start=start_dt,
+        end=end_dt,
+        signal_paths=signal_paths,
+        decision_paths=[],
+        other_refs=[e.get("path", "") for e in events if e.get("path")],
+    )
+
+    propose_args = {
+        "signals": signals,
+        "transitions": transitions,
+        "events": events,
+        "matter_path": canonical,
+        "matter_name": str(summary.get("name") or _slug_from_matter_path(canonical)),
+    }
+
+    expected_as_of = (
+        str(prior_as_of_raw).strip()
+        if isinstance(prior_as_of_raw, str) and prior_as_of_raw
+        else None
+    )
+
+    try:
+        result = await apply_state_change_v2(
+            target_path=canonical,
+            source="nightly_narrative",
+            observed=observed,
+            propose_fn_name="nightly_narrative.propose_matter_narrative",
+            propose_fn_args=propose_args,
+            mode="live",
+            expected_as_of=expected_as_of,
+        )
+    except MutatorContentionError as exc:
+        logger.warning(
+            "nightly_narrative.apply_matter_narrative_v2: 409 retries exhausted "
+            "matter=%s err=%s",
+            canonical, exc,
+        )
+        return MatterNarrativeOutcome(
+            matter_path=canonical,
+            status="error",
+            error_message=f"contention_exhausted: {exc}"[:300],
+        ).__dict__
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "nightly_narrative.apply_matter_narrative_v2: v2 HTTP failed matter=%s err=%s",
+            canonical, exc,
+        )
+        return MatterNarrativeOutcome(
+            matter_path=canonical,
+            status="error",
+            error_message=f"http_error: {exc}"[:300],
+        ).__dict__
+    except Exception as exc:  # noqa: BLE001 — defensive: don't kill the night
+        logger.warning(
+            "nightly_narrative.apply_matter_narrative_v2: unexpected error matter=%s err=%r",
+            canonical, exc,
+        )
+        return MatterNarrativeOutcome(
+            matter_path=canonical,
+            status="error",
+            error_message=f"unexpected: {type(exc).__name__}: {exc}"[:300],
+        ).__dict__
+
+    if not result.applied:
+        logger.info(
+            "nightly_narrative.apply_matter_narrative_v2: matter=%s no change warranted",
+            canonical,
+        )
+        return MatterNarrativeOutcome(
+            matter_path=canonical,
+            status="no_change",
+            retried_count=result.retried_count,
+        ).__dict__
+
+    logger.info(
+        "nightly_narrative.apply_matter_narrative_v2: matter=%s mutated "
+        "audit=%s retries=%d",
+        canonical, result.audit_record_path, result.retried_count,
+    )
+    return MatterNarrativeOutcome(
+        matter_path=canonical,
+        status="mutated",
+        audit_record_path=result.audit_record_path,
+        new_as_of=result.new_as_of,
+        retried_count=result.retried_count,
+    ).__dict__

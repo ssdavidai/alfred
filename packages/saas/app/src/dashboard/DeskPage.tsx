@@ -23,8 +23,10 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
+import { useAuth } from "wasp/client/auth";
 import {
   useQuery,
+  useAction,
   getNeedsAttention,
   getPendingApprovals,
   getRecentJudgments,
@@ -45,10 +47,15 @@ import {
   completeMyTodo,
   getPatternProposals,
   getInFlightDecisions,
+  getBriefings,
+  getBriefing,
+  getLastDismissedBriefing,
+  dismissBriefing,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { Seal } from "../client/components/ab/Seal";
 import { PageOverture } from "../client/components/ab/PageOverture";
+import { Markdown } from "../client/components/ab/Markdown";
 import { fadeUp, stagger } from "../client/lib/motion";
 import { enqueueDeskAction } from "./desk-action-queue";
 
@@ -176,6 +183,7 @@ interface AuditRow {
 // --------------------------------------------------------------------------
 
 export default function DeskPage() {
+  const { data: user } = useAuth();
   const { data: needs, isLoading: needsLoading } = useQuery(getNeedsAttention);
   const { data: approvals, isLoading: approvalsLoading } = useQuery(getPendingApprovals);
   // NB: `getRecentJudgments` is a misnamed query — it actually proxies
@@ -234,6 +242,37 @@ export default function DeskPage() {
   // Ledger pagination — Sir's request: don't unspool the entire activity
   // history at once. Reveal in 20-row pages with a "Show more" cue.
   const [ledgerVisible, setLedgerVisible] = useState(20);
+
+  // Today's brief — most recent briefing snapshot, surfaced inline on the
+  // Desk so sir reads the morning letter before scanning the queue.
+  const { data: latestBriefings } = useQuery(
+    getBriefings,
+    { limit: 1 },
+    { refetchInterval: 5 * 60_000, retry: false },
+  );
+  const latestBriefSummary =
+    latestBriefings && Array.isArray(latestBriefings.briefings) && latestBriefings.briefings.length > 0
+      ? latestBriefings.briefings[0]
+      : null;
+  const latestBriefSlugDate = latestBriefSummary?.slug_date ?? null;
+  const { data: latestBriefFull } = useQuery(
+    getBriefing,
+    { slugDate: latestBriefSlugDate ?? "" },
+    { enabled: !!latestBriefSlugDate, retry: false },
+  );
+  // Per-account "seen" pointer: hides the brief envelope once sir clicks
+  // Continue, and re-shows it when the next briefing's slug_date arrives.
+  // Stored on User.lastDismissedBriefingSlugDate so it survives devices.
+  const { data: dismissedData, refetch: refetchDismissed } = useQuery(
+    getLastDismissedBriefing,
+    undefined,
+    { retry: false },
+  );
+  const dismissedSlugDate = dismissedData?.slugDate ?? null;
+  const briefUnseen =
+    !!latestBriefSlugDate && latestBriefSlugDate !== dismissedSlugDate;
+  const dismissBriefingAction = useAction(dismissBriefing);
+  const [briefExpanded, setBriefExpanded] = useState(false);
 
   const decisions: Decision[] = useMemo(() => {
     const out: Decision[] = [];
@@ -661,6 +700,135 @@ export default function DeskPage() {
           })}
         />
 
+        {/* Today's brief — letterpress envelope (matches /first-brief and
+            /brief design). Hidden when no briefing exists OR when the
+            principal has already dismissed the most-recent briefing via
+            Continue. Re-appears when a fresh slug_date arrives. */}
+        {latestBriefSummary && briefUnseen && (() => {
+          const slot = latestBriefSummary.slot === "evening" ? "evening" : "morning";
+          const composedAt = latestBriefSummary.composed_at
+            ? new Date(String(latestBriefSummary.composed_at))
+            : null;
+          const dateline = composedAt
+            ? composedAt.toLocaleDateString("en-GB", {
+                weekday: "long", day: "numeric", month: "long", year: "numeric",
+              })
+            : "";
+          const timeline = composedAt
+            ? composedAt.toLocaleTimeString("en-GB", {
+                hour: "2-digit", minute: "2-digit",
+              })
+            : "";
+          const principalName =
+            (user as any)?.username ?? (user as any)?.email?.split("@")[0] ?? "Sir";
+          const principalEmail = (user as any)?.email ?? "";
+          const subject = slot === "evening"
+            ? "Evening Digest."
+            : "Morning Brief.";
+          const greeting = slot === "evening" ? "Good evening." : "Good morning.";
+          const body = String(latestBriefFull?.body ?? "").trim();
+          const isStub = body.includes("brief composer received an empty turn");
+
+          return (
+            <section className="mb-20">
+              <div className="flex items-baseline justify-between gap-8 mb-6">
+                <div className="font-mono text-[10px] uppercase tracking-[0.28em]"
+                     style={{ color: "var(--brass)" }}>
+                  {slot === "evening" ? "Evening Digest" : "Morning Brief"}
+                </div>
+                <Link to="/briefings"
+                      className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                      style={{ color: "var(--brass)" }}>
+                  All briefings →
+                </Link>
+              </div>
+
+              <article className="border border-rule">
+                <header
+                  className="border-b border-rule px-10 py-6 grid grid-cols-[80px_1fr] gap-y-2 gap-x-6 font-mono text-[11px] uppercase tracking-[0.18em]"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  <div>From</div>
+                  <div>Alfred &lt;alfred@alfred.black&gt;</div>
+                  <div>To</div>
+                  <div>
+                    {principalName}
+                    {principalEmail ? ` <${principalEmail}>` : ""}
+                  </div>
+                  <div>Date</div>
+                  <div>{dateline}{timeline ? `, ${timeline}` : ""}</div>
+                  <div>Subject</div>
+                  <div className="font-body normal-case tracking-normal text-[15px]"
+                       style={{ color: "var(--ink)" }}>
+                    {subject}
+                  </div>
+                </header>
+
+                <div className="px-10 md:px-16 py-14">
+                  <h1 className="font-display text-5xl md:text-6xl tracking-[-0.02em] leading-[1.0]">
+                    {greeting}
+                  </h1>
+                  {dateline && (
+                    <p className="font-body italic mt-6 mb-8 text-[17px]"
+                       style={{ color: "var(--marginalia)" }}>
+                      {dateline}
+                    </p>
+                  )}
+
+                  <div className="rule-double mb-10" />
+
+                  {!body ? (
+                    <p className="font-body italic text-[17px]"
+                       style={{ color: "var(--marginalia)" }}>
+                      A moment — Alfred is finishing the draft.
+                    </p>
+                  ) : isStub ? (
+                    <p className="font-body italic text-[17px] leading-[1.55] text-justify hyphens-auto"
+                       style={{ color: "var(--marginalia)" }}>
+                      Sir — the clerk is unwell this morning. The composer
+                      received an empty turn and could not finish the prose.
+                      The matters below are current; I shall write again
+                      when the gateway is restored.
+                    </p>
+                  ) : (
+                    <div className="font-body text-[18px] leading-[1.6] text-justify hyphens-auto [&>div>p]:mb-5 [&>div>p]:indent-0 [&_strong]:font-bold [&_em]:italic">
+                      <Markdown source={body} useLiveResolver={true} />
+                    </div>
+                  )}
+
+                  <div className="mt-12">
+                    <div className="font-display italic text-2xl">— Alfred.</div>
+                  </div>
+
+                  <div className="mt-12 flex justify-end border-t border-rule pt-8">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!latestBriefSlugDate) return;
+                        try {
+                          await dismissBriefingAction({ slugDate: latestBriefSlugDate });
+                          await refetchDismissed();
+                        } catch (_e) {
+                          /* swallow — next refetch will reconcile */
+                        }
+                      }}
+                      className="font-mono text-[11px] uppercase tracking-[0.22em] px-6 py-3 border border-rule hover:bg-[var(--paper-dim)] transition-colors"
+                      style={{ color: "var(--ink)" }}
+                    >
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </article>
+            </section>
+          );
+        })()}
+
+        {/* The morning brief takes the room while it's unread. The
+            decision queue, backstage, and ledger only return once sir
+            has read the letter and dismissed it. */}
+        {!briefUnseen && (
+        <>
         {/* Featured decision */}
         <motion.div
           initial={{ opacity: 0 }}
@@ -917,6 +1085,8 @@ export default function DeskPage() {
             )}
           </motion.div>
         </motion.div>
+        </>
+        )}
       </section>
       <Seal />
     </Frame>
