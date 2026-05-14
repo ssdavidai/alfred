@@ -15,7 +15,10 @@
 import type {
   GetBriefings,
   GetBriefing,
+  GetLastDismissedBriefing,
+  DismissBriefing,
 } from "wasp/server/operations";
+import { HttpError } from "wasp/server";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 
 /**
@@ -69,4 +72,40 @@ export const getBriefing: GetBriefing<{ slugDate: string }, any> = async (
     method: "GET",
     path: `/api/v1/briefings/${encodeURIComponent(args.slugDate)}`,
   });
+};
+
+/**
+ * Returns the slug-date of the most recent briefing the principal has
+ * dismissed via the Desk "Continue" button. Stored on the User row so
+ * the seen-state survives across devices and sessions.
+ */
+export const getLastDismissedBriefing: GetLastDismissedBriefing<
+  void,
+  { slugDate: string | null }
+> = async (_args, context) => {
+  if (!context.user) throw new HttpError(401);
+  const u = await context.entities.User.findUnique({
+    where: { id: context.user.id },
+    select: { lastDismissedBriefingSlugDate: true },
+  });
+  return { slugDate: u?.lastDismissedBriefingSlugDate ?? null };
+};
+
+/**
+ * Bumps the principal's lastDismissedBriefingSlugDate so the /desk
+ * envelope hides until a newer briefing arrives.
+ */
+export const dismissBriefing: DismissBriefing<
+  { slugDate: string },
+  { ok: true }
+> = async (args, context) => {
+  if (!context.user) throw new HttpError(401);
+  if (!args?.slugDate || typeof args.slugDate !== "string") {
+    throw new HttpError(400, "slugDate required");
+  }
+  await context.entities.User.update({
+    where: { id: context.user.id },
+    data: { lastDismissedBriefingSlugDate: args.slugDate },
+  });
+  return { ok: true };
 };

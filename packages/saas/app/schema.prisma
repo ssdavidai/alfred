@@ -21,6 +21,11 @@ model User {
   datePaid                  DateTime?
   credits                   Int             @default(0)
 
+  // Last briefing the principal dismissed (e.g. "2026-05-13-morning").
+  // /desk shows the brief envelope only when the most-recent briefing's
+  // slug_date != this. Bumped when sir clicks Continue.
+  lastDismissedBriefingSlugDate String?
+
   instance                  Instance?
   provisioningJobs          ProvisioningJob[]
   contactFormMessages       ContactFormMessage[]

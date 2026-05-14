@@ -26,6 +26,7 @@ import { motion } from "framer-motion";
 import { useAuth } from "wasp/client/auth";
 import {
   useQuery,
+  useAction,
   getNeedsAttention,
   getPendingApprovals,
   getRecentJudgments,
@@ -48,6 +49,8 @@ import {
   getInFlightDecisions,
   getBriefings,
   getBriefing,
+  getLastDismissedBriefing,
+  dismissBriefing,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { Seal } from "../client/components/ab/Seal";
@@ -257,6 +260,18 @@ export default function DeskPage() {
     { slugDate: latestBriefSlugDate ?? "" },
     { enabled: !!latestBriefSlugDate, retry: false },
   );
+  // Per-account "seen" pointer: hides the brief envelope once sir clicks
+  // Continue, and re-shows it when the next briefing's slug_date arrives.
+  // Stored on User.lastDismissedBriefingSlugDate so it survives devices.
+  const { data: dismissedData, refetch: refetchDismissed } = useQuery(
+    getLastDismissedBriefing,
+    undefined,
+    { retry: false },
+  );
+  const dismissedSlugDate = dismissedData?.slugDate ?? null;
+  const briefUnseen =
+    !!latestBriefSlugDate && latestBriefSlugDate !== dismissedSlugDate;
+  const dismissBriefingAction = useAction(dismissBriefing);
   const [briefExpanded, setBriefExpanded] = useState(false);
 
   const decisions: Decision[] = useMemo(() => {
@@ -686,8 +701,10 @@ export default function DeskPage() {
         />
 
         {/* Today's brief — letterpress envelope (matches /first-brief and
-            /brief design). Hidden when no briefing exists. */}
-        {latestBriefSummary && (() => {
+            /brief design). Hidden when no briefing exists OR when the
+            principal has already dismissed the most-recent briefing via
+            Continue. Re-appears when a fresh slug_date arrives. */}
+        {latestBriefSummary && briefUnseen && (() => {
           const slot = latestBriefSummary.slot === "evening" ? "evening" : "morning";
           const composedAt = latestBriefSummary.composed_at
             ? new Date(String(latestBriefSummary.composed_at))
@@ -802,6 +819,25 @@ export default function DeskPage() {
 
                   <div className="mt-12">
                     <div className="font-display italic text-2xl">— Alfred.</div>
+                  </div>
+
+                  <div className="mt-12 flex justify-end border-t border-rule pt-8">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        if (!latestBriefSlugDate) return;
+                        try {
+                          await dismissBriefingAction({ slugDate: latestBriefSlugDate });
+                          await refetchDismissed();
+                        } catch (_e) {
+                          /* swallow — next refetch will reconcile */
+                        }
+                      }}
+                      className="font-mono text-[11px] uppercase tracking-[0.22em] px-6 py-3 border border-rule hover:bg-[var(--paper-dim)] transition-colors"
+                      style={{ color: "var(--ink)" }}
+                    >
+                      Continue →
+                    </button>
                   </div>
                 </div>
               </article>

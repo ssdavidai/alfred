@@ -46,5 +46,6 @@ function generateMockUserData(): MockUserData {
     subscriptionPlan: subscriptionStatus
       ? faker.helpers.arrayElement(getSubscriptionPaymentPlanIds())
       : null,
+    lastDismissedBriefingSlugDate: null,
   };
 }

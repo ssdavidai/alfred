@@ -645,6 +645,19 @@ query getBriefing {
   entities: [Instance]
 }
 
+// Account-level "I have read this briefing" pointer. Stored on the User
+// row (lastDismissedBriefingSlugDate). /desk shows the brief envelope
+// only when the most-recent briefing.slug_date differs from this.
+query getLastDismissedBriefing {
+  fn: import { getLastDismissedBriefing } from "@src/briefings/operations",
+  entities: [User]
+}
+
+action dismissBriefing {
+  fn: import { dismissBriefing } from "@src/briefings/operations",
+  entities: [User]
+}
+
 // M4 #859 — matters aggregator. The /matters index + /matters/:id
 // detail surfaces, plus the /household placeholder backfill. Both
 // queries proxy to the new GET /api/v1/matters[/<id>] endpoints in
