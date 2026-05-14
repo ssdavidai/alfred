@@ -119,12 +119,12 @@ function _readAllBriefings(): BriefingListItem[] {
     const slotFm = String(fm.slot ?? parsed.slot).toLowerCase();
     const slot: "morning" | "evening" =
       slotFm === "morning" || slotFm === "evening" ? slotFm : parsed.slot;
-    const composed_at = String(fm.composed_at ?? "").trim();
+    const composed_at = _toIsoString(fm.composed_at);
     const prior_briefing_raw = String(fm.prior_briefing ?? "").trim();
     const prior_briefing = prior_briefing_raw || null;
     const window = {
-      start: String(fm.window_start ?? "").trim(),
-      end: String(fm.window_end ?? "").trim() || composed_at,
+      start: _toIsoString(fm.window_start),
+      end: _toIsoString(fm.window_end) || composed_at,
     };
     const observed_matters_count = _coerceNonNegativeInt(fm.observed_matters_count);
     const state_changes_count = _coerceNonNegativeInt(fm.state_changes_count);
@@ -144,12 +144,32 @@ function _readAllBriefings(): BriefingListItem[] {
       decisions_count,
     });
   }
-  // Newest first by composed_at. Falls back to filename date when
-  // composed_at is missing so stale records still sort sensibly.
-  out.sort((a, b) => (a.composed_at < b.composed_at ? 1 : a.composed_at > b.composed_at ? -1 : 0));
+  // Newest first by composed_at. Parse to epoch ms so we sort by real
+  // chronology regardless of how YAML serialized the timestamp (Date
+  // object → toString gives "Thu May 14 ..." which sorts incorrectly
+  // as a raw string because 'T' < 'W').
+  out.sort((a, b) => {
+    const aT = Date.parse(a.composed_at);
+    const bT = Date.parse(b.composed_at);
+    return (Number.isFinite(bT) ? bT : 0) - (Number.isFinite(aT) ? aT : 0);
+  });
 
   _briefingListCache.set(cacheKey, { at: now, mtimeMs, body: out });
   return out;
+}
+
+function _toIsoString(value: unknown): string {
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value.toISOString() : "";
+  }
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  // Already ISO-ish (starts with 4-digit year + dash) — keep as-is.
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw;
+  // Fall back to Date.parse for human-readable forms ("Thu May 14 ..."),
+  // which sort lexicographically wrong but round-trip cleanly through Date.
+  const t = Date.parse(raw);
+  return Number.isFinite(t) ? new Date(t).toISOString() : raw;
 }
 
 function _coerceNonNegativeInt(value: unknown): number {
@@ -201,7 +221,7 @@ function _readBriefingDetail(slugDate: string): BriefingDetail | null {
   const slotFm = String(fm.slot ?? parsed.slot).toLowerCase();
   const slot: "morning" | "evening" =
     slotFm === "morning" || slotFm === "evening" ? slotFm : parsed.slot;
-  const composed_at = String(fm.composed_at ?? "").trim() || `${parsed.date}T00:00:00Z`;
+  const composed_at = _toIsoString(fm.composed_at) || `${parsed.date}T00:00:00Z`;
   const prior_briefing_raw = String(fm.prior_briefing ?? "").trim();
   const prior_briefing = prior_briefing_raw || null;
   const detail: BriefingDetail = {
@@ -212,8 +232,8 @@ function _readBriefingDetail(slugDate: string): BriefingDetail | null {
     composed_at,
     prior_briefing,
     window: {
-      start: String(fm.window_start ?? "").trim(),
-      end: String(fm.window_end ?? "").trim() || composed_at,
+      start: _toIsoString(fm.window_start),
+      end: _toIsoString(fm.window_end) || composed_at,
     },
     observed_matters_count: _coerceNonNegativeInt(fm.observed_matters_count),
     state_changes_count: _coerceNonNegativeInt(fm.state_changes_count),
