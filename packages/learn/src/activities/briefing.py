@@ -848,38 +848,291 @@ def _build_composition_prompt(
     state_changes_count: int,
     signals_count: int,
     decisions_count: int,
+    pending_decisions: list[dict[str, Any]],
+    anomalies: list[dict[str, Any]],
+    autonomous_actions: list[dict[str, Any]],
+    inbox_unresolved_count: int,
 ) -> str:
     """Compose the prompt asking the clerk for the brief body.
 
-    The body is letterpress prose that references matters by wikilink
-    (``[[matter/<slug>]]``) — the SaaS Markdown renderer resolves these
-    via the vault title index. The clerk sees only post-mutation
+    The brief reads like a chief-of-staff briefing, not a narration of
+    static state: today's decisions first, flags, autonomous actions,
+    a one-line summary of holding matters, sign-off. Empty sections are
+    omitted entirely — silence is the signal. See package CLAUDE.md
+    plus the discussion that produced this prompt for the design.
+
+    Wikilinks use the matter *name* ([[Hanna's First Year]]) — the
+    SaaS Markdown renderer's `getVaultTitleIndex` (XC #873) resolves
+    title→slug for navigation. The clerk sees only post-mutation
     matter snapshots so the prose can't drift from current_state.
     """
-    voice = (
-        "expansive but unhurried"
-        if slot == "morning"
-        else "brief and reflective"
-    )
+    pending_top = pending_decisions[:3]
+    holding_names = [
+        s.get("name") for s in matter_snapshots
+        if not s.get("state_changed_this_brief")
+        and not any(
+            (p.get("target_path") or "").lower() == (s.get("path") or "").lower()
+            for p in pending_top
+        )
+    ]
+    holding_names = [n for n in holding_names if n]
     lines = [
-        f"You are Alfred drafting the {slot} brief for sir.",
+        f"You are Alfred. You write Sir's {slot} brief.",
+        "",
+        "You are not a narrator. You are a chief of staff handing Sir his",
+        "day on one page. Every line earns its place. Static state is not",
+        "news. If nothing happened to a matter, do not write about it.",
         "",
         f"WINDOW: {window_start_iso} → {window_end_iso}",
-        f"State changes recorded in this window: {state_changes_count}",
-        f"Signals observed: {signals_count}",
-        f"Decisions observed: {decisions_count}",
         "",
-        "POST-MUTATION matter snapshots (these are the current state of",
-        "each active matter, freshly written if anything moved):",
-        json.dumps(matter_snapshots, indent=2, default=str)[:6000],
+        "What moved in this window:",
+        f"  - State changes recorded:           {state_changes_count}",
+        f"  - Signals observed (24h):           {signals_count}",
+        f"  - Decisions logged (24h):           {decisions_count}",
+        f"  - Pending in Sir's decision queue:  {len(pending_decisions)}",
+        f"  - Inbox items unresolved:           {inbox_unresolved_count}",
         "",
-        "Compose a letterpress-style brief body. Reference each matter",
-        f"by wikilink ([[matter/<slug>]]). Voice: {voice}, courteous,",
-        "precise, lightly old-fashioned. Address sir as 'sir' once or",
-        "twice. No JSON, no headers — just the prose. Hard cap: "
-        f"{BRIEF_BODY_CHAR_CAP} characters.",
+        "POST-MUTATION matter snapshots (current state — wikilink them by",
+        "[[name]], not by slug):",
+        json.dumps(matter_snapshots, indent=2, default=str)[:5000],
+        "",
+        f"PENDING DECISIONS Sir must rule on (top {len(pending_top)} by",
+        "recency, with the question each is asking):",
+        json.dumps(pending_top, indent=2, default=str)[:2500],
+        "",
+        "ANOMALIES the system detected (card declines, missing data feeds,",
+        "failed integrations, expired auth, brief gather errors):",
+        json.dumps(anomalies, indent=2, default=str)[:1500],
+        "",
+        "THINGS I HANDLED AUTONOMOUSLY in this window (state changes Sir",
+        "did not have to make):",
+        json.dumps(autonomous_actions, indent=2, default=str)[:1500],
+        "",
+        f"NAMES OF HOLDING MATTERS (no-change, for the §Quiet line): "
+        f"{json.dumps(holding_names[:12])}",
+        "",
+        "─" * 60,
+        "WRITE THE BRIEF AS FOLLOWS — keep this skeleton, in this order.",
+        "Use **bold** prose labels for the section names. No markdown",
+        "headings (# / ##).",
+        "",
+        "1. ONE-SENTENCE OPENING.",
+        "   Greet Sir, date, and the weather of the day's load",
+        '   (e.g. "a quiet morning", "an unusually busy desk", "three',
+        '   things wanting your call before lunch"). Skip if nothing follows.',
+        "",
+        "2. **Today.** — what needs Sir's hand.",
+        "   If pending_decisions is non-empty: 1–3 most material as a short",
+        "   numbered list. Each item ONE sentence: the matter, the question,",
+        "   the recommended action if you have one. Wikilink the matter as",
+        "   [[<matter name>]]. If the queue is empty, OMIT this section.",
+        "",
+        "3. **Flags.** — anomalies.",
+        "   Only if anomalies is non-empty. Bullet list, one line each.",
+        '   Lead each bullet with the problem verb ("Card declined…",',
+        '   "Signal source absent…", "Auth expired on…"). Skip section if',
+        '   empty. Never write "everything is fine."',
+        "",
+        "4. **I handled.** — what you did so Sir didn't have to.",
+        "   Only if autonomous_actions is non-empty. Bullet list, past",
+        "   tense, one line each. Never fabricate to fill it.",
+        "",
+        "5. **Quiet.** — single line summarising no-change matters.",
+        '   ONE sentence at most, e.g.: "Eight matters holding their state',
+        '   — <names>. I\'ll surface them when something moves." Wikilink',
+        "   only if natural; do not list 12 names.",
+        "",
+        "6. SIGN-OFF.",
+        '   One short line, no flourish. ("Standing by." / "Yours, ready.")',
+        "",
+        "─" * 60,
+        "HARD RULES.",
+        "",
+        "- If a section has no content, OMIT IT. Do not write \"Nothing",
+        '  today" or "All quiet on X." Silence is the signal.',
+        '- Never write that something "rests serene" or "lingers in',
+        '  abeyance" or "shows no motion." If a matter didn\'t move, it',
+        "  belongs in §5 or not at all.",
+        "- Wikilinks use the matter NAME. Write [[Hanna's First Year]],",
+        "  not [[matter/family-life-hannas-first-year]].",
+        "- Past events are past. If a date in your snapshot is older than",
+        "  the window, do not surface it.",
+        "- Voice: courteous, dry, present-tense, short sentences. You are",
+        "  a British chief of staff briefing a busy principal at 06:30.",
+        "  You are not Wodehouse.",
+        f"- Hard cap: {BRIEF_BODY_CHAR_CAP} characters. Be ruthless.",
+        "- No JSON, no YAML, no markdown headings. Only **bold** labels",
+        "  and prose / bullets.",
     ]
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Composer gatherers — feed the new prompt's "Today / Flags / I handled"
+# sections. All best-effort: a failure in any gather returns an empty list
+# and the matching prompt section omits itself.
+# ---------------------------------------------------------------------------
+
+
+async def _gather_pending_decisions(
+    vault: VaultClient, limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Top-N pending needs_attention records, most recent first."""
+    try:
+        records = await vault.list_records(
+            "needs_attention", status="pending", limit=100,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("_gather_pending_decisions: list failed err=%s", exc)
+        return []
+    items: list[dict[str, Any]] = []
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+        fm = rec.get("frontmatter") if isinstance(rec.get("frontmatter"), dict) else {}
+        created_raw = fm.get("created") or rec.get("created") or ""
+        items.append({
+            "path": rec.get("path"),
+            "headline": (
+                fm.get("display_headline")
+                or fm.get("action_what")
+                or "(no headline)"
+            ),
+            "body": (
+                fm.get("display_body")
+                or fm.get("reasoning")
+                or ""
+            )[:300],
+            "target_path": fm.get("target_path") or "",
+            "suggested_actor": fm.get("suggested_actor") or "",
+            "created": str(created_raw),
+        })
+    items.sort(key=lambda x: x.get("created") or "", reverse=True)
+    return items[:limit]
+
+
+def _derive_anomalies_from_visits(
+    visit_results: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Surface briefing_visit errors as anomalies the brief should flag."""
+    out: list[dict[str, Any]] = []
+    for entry in visit_results or []:
+        if not isinstance(entry, dict):
+            continue
+        err = entry.get("error_message")
+        if not err:
+            continue
+        out.append({
+            "kind": "brief_gather_error",
+            "matter_path": entry.get("matter_path"),
+            "message": str(err)[:240],
+        })
+    return out
+
+
+async def _gather_signal_anomalies(
+    vault: VaultClient,
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Signals classified as anomaly/system_error inside the window."""
+    try:
+        records = await vault.list_records("signal", limit=400)
+    except httpx.HTTPError as exc:
+        logger.warning("_gather_signal_anomalies: list failed err=%s", exc)
+        return []
+    out: list[dict[str, Any]] = []
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+        fm = rec.get("frontmatter") if isinstance(rec.get("frontmatter"), dict) else {}
+        classification = str(fm.get("classification") or "").lower()
+        target_kind = str(fm.get("target_kind") or "").lower()
+        if classification not in {"anomaly", "system_error"} and target_kind != "system":
+            continue
+        ts_raw = fm.get("created") or rec.get("created") or ""
+        ts = _parse_iso_or_none(ts_raw)
+        if ts is None or ts < window_start or ts > window_end:
+            continue
+        out.append({
+            "kind": classification or target_kind or "signal_anomaly",
+            "headline": (
+                fm.get("display_headline")
+                or fm.get("name")
+                or "(unnamed signal)"
+            ),
+            "body": (fm.get("display_body") or fm.get("reasoning") or "")[:240],
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _is_autonomous_source(source: str | None) -> bool:
+    """Source strings starting with ``manual.`` are Sir; everything else
+    is autonomous (briefing.*, steward.*, decision_router.*, etc.)."""
+    s = str(source or "").strip().lower()
+    if not s:
+        return False
+    return not s.startswith("manual.")
+
+
+async def _gather_autonomous_actions(
+    vault: VaultClient,
+    window_start: dt.datetime,
+    window_end: dt.datetime,
+    limit: int = 15,
+) -> list[dict[str, Any]]:
+    """State-change audit records in window where source != manual.*."""
+    try:
+        records = await vault.list_records("event", limit=400)
+    except httpx.HTTPError as exc:
+        logger.warning("_gather_autonomous_actions: list failed err=%s", exc)
+        return []
+    out: list[dict[str, Any]] = []
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+        path = str(rec.get("path") or "")
+        # state_mutator audits land at event/state-change-*.md
+        if "state-change-" not in path:
+            continue
+        fm = rec.get("frontmatter") if isinstance(rec.get("frontmatter"), dict) else {}
+        ts_raw = fm.get("applied_at") or fm.get("created") or rec.get("created")
+        ts = _parse_iso_or_none(ts_raw)
+        if ts is None or ts < window_start or ts > window_end:
+            continue
+        source = fm.get("source")
+        if not _is_autonomous_source(source):
+            continue
+        out.append({
+            "source": str(source),
+            "target_path": fm.get("target_path") or "",
+            "reason": (fm.get("reason") or "")[:160],
+            "applied_at": str(ts_raw)[:40],
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def _gather_inbox_unresolved_count(vault: VaultClient) -> int:
+    """Count of inbox items still awaiting Sir's review."""
+    try:
+        records = await vault.list_records("inbox_item", limit=500)
+    except httpx.HTTPError as exc:
+        logger.warning("_gather_inbox_unresolved_count: list failed err=%s", exc)
+        return 0
+    count = 0
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+        fm = rec.get("frontmatter") if isinstance(rec.get("frontmatter"), dict) else {}
+        status = str(fm.get("status") or rec.get("status") or "").lower()
+        if status in {"", "pending", "open", "unresolved", "needs_review"}:
+            count += 1
+    return count
 
 
 @activity.defn
@@ -987,8 +1240,23 @@ async def compose_and_write_briefing(
                 signals_count_total = count
             else:
                 decisions_count_total = count
+
+        # Phase 2a' — Chief-of-staff context: what Sir must rule on, what
+        # broke, what Alfred handled. All best-effort; an empty list just
+        # makes the matching prompt section omit itself.
+        pending_decisions = await _gather_pending_decisions(vault, limit=5)
+        signal_anomalies = await _gather_signal_anomalies(
+            vault, window_start=window_start, window_end=window_end,
+        )
+        autonomous_actions = await _gather_autonomous_actions(
+            vault, window_start=window_start, window_end=window_end,
+        )
+        inbox_unresolved_count = await _gather_inbox_unresolved_count(vault)
     finally:
         await vault.close()
+
+    visit_anomalies = _derive_anomalies_from_visits(visit_results)
+    anomalies = visit_anomalies + signal_anomalies
 
     # Phase 2b — clerk composes the brief body from post-mutation state.
     composition_prompt = _build_composition_prompt(
@@ -999,6 +1267,10 @@ async def compose_and_write_briefing(
         state_changes_count=state_changes_count,
         signals_count=signals_count_total,
         decisions_count=decisions_count_total,
+        pending_decisions=pending_decisions,
+        anomalies=anomalies,
+        autonomous_actions=autonomous_actions,
+        inbox_unresolved_count=inbox_unresolved_count,
     )
 
     try:

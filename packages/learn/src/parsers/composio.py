@@ -106,7 +106,11 @@ def _item_to_event(item: dict) -> ParsedEvent:
     if sender and summary and not summary.startswith(str(sender)):
         summary = f"{sender}: {summary}"
 
-    # Extract timestamp
+    # Extract timestamp. Composio's GMAIL_FETCH_EMAILS uses
+    # ``messageTimestamp`` (the email's actual send time); without it
+    # the parser fell through to ``datetime.now()``, stamping every
+    # email with the fetch time. Decay/window calculations then
+    # treated yesterday's email as fresh.
     received_at = (
         item.get("date")
         or item.get("created_at")
@@ -114,6 +118,7 @@ def _item_to_event(item: dict) -> ParsedEvent:
         or item.get("timestamp")
         or item.get("receivedAt")
         or item.get("internalDate")
+        or item.get("messageTimestamp")
         or datetime.now(timezone.utc).isoformat()
     )
 
@@ -132,6 +137,22 @@ def _item_to_event(item: dict) -> ParsedEvent:
     if item_status == "cancelled":
         event_type = "cancelled"
 
+    # Composio's GMAIL_FETCH_EMAILS returns the email body at
+    # ``item["preview"]["body"]`` (not at the top-level ``snippet`` /
+    # ``body`` fields the template originally expected). Without this
+    # we wrote header-only stream events and SignalExtract correctly
+    # but uselessly classified every gmail as noise. Check the nested
+    # preview shape first, then legacy flat fields.
+    preview_obj = item.get("preview") if isinstance(item.get("preview"), dict) else None
+    body = (
+        (preview_obj or {}).get("body")
+        or item.get("snippet")
+        or item.get("body")
+        or item.get("messageText")
+        or item.get("text")
+        or ""
+    )
+
     return ParsedEvent(
         source_ref=source_ref,
         summary=str(summary)[:500],
@@ -144,6 +165,7 @@ def _item_to_event(item: dict) -> ParsedEvent:
                 "from": item.get("from") or item.get("sender"),
                 "to": item.get("to") or item.get("recipient"),
                 "subject": item.get("subject"),
+                "body": body or None,
                 "labels": item.get("labelIds") or item.get("labels"),
                 "thread_id": item.get("threadId") or item.get("thread_id"),
                 "status": item_status or None,

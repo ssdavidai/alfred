@@ -33,6 +33,9 @@ from src.workflows.fleet_audit import FleetAuditWorkflow
 from src.workflows.composio_reconnect_cleanup import (
     ComposioReconnectCleanupWorkflow,
 )
+from src.workflows.openclaw_sessions_sweep import (
+    OpenclawSessionSweepWorkflow,
+)
 from src.workflows.steward import StewardWorkflow
 from src.workflows.nightly_narrative import NightlyNarrativeWorkflow
 from src.workflows.decision_router import DecisionRouterWorkflow
@@ -383,6 +386,12 @@ from src.activities.composio_reconnect import (
     verify_new_connection_active,
 )
 
+# Hourly sweep of leaked openclaw-workers .bak-* session files.
+# See packages/learn/src/activities/openclaw_sessions.py for the
+# motivation — same class of leak as the David openclaw degradation
+# incident, fixed durably by a Temporal-scheduled reaper.
+from src.activities.openclaw_sessions import sweep_openclaw_bak_sessions
+
 # Plane reverse sync (#536 B7) — Plane → vault ingress activities
 from src.activities.plane_reverse_sync import (
     append_plane_comment_to_vault,
@@ -673,6 +682,7 @@ _STATIC_WORKFLOWS = [
     PlaneReconciliationWorkflow,
     FleetAuditWorkflow,
     ComposioReconnectCleanupWorkflow,
+    OpenclawSessionSweepWorkflow,
     StewardWorkflow,
     NightlyNarrativeWorkflow,
     DecisionRouterWorkflow,
@@ -926,6 +936,8 @@ ALL_ACTIVITIES = [
     verify_new_connection_active,
     delete_old_connection,
     remove_ledger_entry,
+    # OpenClaw session-leak reaper (hourly schedule via register_schedules)
+    sweep_openclaw_bak_sessions,
     # Plane reverse sync (#536 B7)
     plane_reverse_sync_is_enabled,
     load_reverse_sync_state,

@@ -319,16 +319,31 @@ def _template_email(
     event: dict[str, Any], raw: dict, metadata: dict,
 ) -> tuple[str, str, list[str], str]:
     subject = raw.get("subject") or metadata.get("subject") or "(no subject)"
-    sender = raw.get("from") or metadata.get("from") or "unknown"
+    sender = raw.get("from") or raw.get("sender") or metadata.get("from") or "unknown"
     recipient = raw.get("to") or metadata.get("to") or ""
-    snippet = raw.get("snippet", "")
+    # Composio GMAIL_FETCH_EMAILS nests the body at preview.body — none of
+    # the old top-level snippet/body/messageText fields are populated. The
+    # parser surfaces it to metadata.body; we still check the raw nested
+    # shape directly as belt-and-braces for any caller that bypasses the
+    # parser. Truncate at 1000 chars: enough for the LLM to judge intent
+    # without bloating the stream-event record.
+    preview_obj = raw.get("preview") if isinstance(raw.get("preview"), dict) else None
+    snippet = (
+        (preview_obj or {}).get("body")
+        or raw.get("snippet")
+        or raw.get("body")
+        or raw.get("messageText")
+        or raw.get("text")
+        or metadata.get("body")
+        or ""
+    )
     labels = raw.get("labelIds", metadata.get("labels", []))
 
     parts: list[str] = [f"**From**: {sender}"]
     if recipient:
         parts.append(f"**To**: {recipient}")
     if snippet:
-        parts.append(f"\n{snippet[:300]}")
+        parts.append(f"\n{snippet[:1000]}")
 
     tags = ["email"]
     if isinstance(labels, list):
