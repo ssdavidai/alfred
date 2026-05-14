@@ -1168,6 +1168,7 @@ def build_signal_extraction_prompt_multi(
     event_frontmatter: dict,
     event_body: str,
     raw_quote: str,
+    soul_md: str | None = None,
 ) -> str:
     """Multi-signal variant of ``build_signal_extraction_prompt``.
 
@@ -1250,6 +1251,8 @@ def build_signal_extraction_prompt_multi(
   "raw_quote": "<≤200 chars: the exact span of the body that triggered THIS signal — evidence>",
   "classification": "<one of the 8 mutation taxonomy classes; null when effect != mutation>",
   "effect": "<mutation | action>",
+  "actor": "<principal | counterparty | system | alfred — who acted to produce this signal>",
+  "decision_required": true | false,
   "target_kind": "<task | matter | null>",
   "target_hint": "<short text describing what task or matter Sir is referring to, OR null>",
   "mutation_proposal": {
@@ -1264,8 +1267,8 @@ def build_signal_extraction_prompt_multi(
   "target_confidence": 0.0,
   "effect_confidence": 0.0,
   "reasoning": "<1-3 sentences explaining your call>",
-  "display_headline": "<Alfred's one-line headline for Sir's desk, in Alfred's voice>",
-  "display_body": "<Alfred's 1-2 sentence framing: what happened, what he'd suggest. In Alfred's voice.>"
+  "display_headline": "<for decision_required=true: Alfred's forward-looking headline for Sir's desk. For decision_required=false: brief past-tense bookkeeping line for the matter timeline.>",
+  "display_body": "<for decision_required=true: 1-2 sentences in Alfred's voice, second-person, what he'd suggest. For decision_required=false: one terse bookkeeping line, first person fine.>"
 }"""
 
     schema_block = (
@@ -1292,6 +1295,15 @@ def build_signal_extraction_prompt_multi(
         "- `effect` per entry MUST be exactly one of `mutation` or "
         "`action`. Noise/informational events emit no entry; do not "
         "emit `effect=none` items.\n"
+        "- `actor` per entry MUST be one of "
+        "`principal | counterparty | system | alfred` — see Section "
+        "3.5.\n"
+        "- `decision_required` per entry MUST be a strict boolean "
+        "(`true` or `false`, not strings) — see Section 3.5. This is "
+        "the single most load-bearing field after `effect`: it gates "
+        "whether the signal becomes a /desk card asking Sir to act "
+        "or whether it lands silently on the matter timeline as "
+        "bookkeeping.\n"
         "- When `effect` is `mutation`, `classification` MUST be one "
         "of the 8 taxonomy classes and `mutation_proposal` MUST be "
         "an object (not null). `action_proposal` MUST be null.\n"
@@ -1309,19 +1321,138 @@ def build_signal_extraction_prompt_multi(
         "invent a third kind.\n"
         "- `reasoning` MUST be 1-3 sentences. Never emit empty "
         "string.\n"
-        "- `display_headline` and `display_body` MUST be non-empty "
-        "strings written in Alfred's voice (see Section 4.5).\n"
+        "- `display_headline` and `display_body` MUST be non-empty. "
+        "The voice depends on `decision_required` — see Section 4.5. "
+        "Cards face forward (decision_required=true). Bookkeeping "
+        "entries face backward, terse, descriptive "
+        "(decision_required=false).\n"
         "- Order of entries doesn't matter; the downstream pipeline "
         "treats them as a set. If two entries would collapse to the "
         "same target with the same effect, emit ONE entry with the "
         "stronger reasoning rather than duplicating."
     )
 
+    # Section 3.5 — actor + decision_required classification.
+    # This is the load-bearing addition for Phase 3: a signal is
+    # always recorded against a matter+task (bookkeeping), but it
+    # ONLY surfaces as a /desk card when decision_required=true.
+    # Sir's own outbound actions (e.g. an email he sent asking
+    # someone something) ARE signals — they update the matter
+    # timeline — but they do NOT need a Sir-side decision because he
+    # already acted by sending. He shouldn't open /desk to be told
+    # what he did yesterday.
+    actor_decision_block = (
+        "## 3.5 Actor + decision_required (the new load-bearing fields)\n\n"
+        "**Why these exist:** every signal flows to its matter + task "
+        "timeline as bookkeeping. But only a SUBSET need Sir's eyes "
+        "right now. `actor` records who acted; `decision_required` "
+        "says whether Sir needs to look at this card on /desk.\n\n"
+        "### actor — who acted in the underlying event\n"
+        "- `principal` — Sir is the actor. The event is an outbound "
+        "thing Sir sent / a decision Sir already made / Sir's own "
+        "vault edit / Sir's own upstream status change (e.g. he "
+        "moved a Plane issue himself).\n"
+        "  - gmail: `frontmatter.from` matches a Sir-owned address "
+        "(`david@szabostuban.com`, `david@sabo.tech`, "
+        "`alfred@lumberjack.so`).\n"
+        "  - openclaw-chat: anything inside a `### Sir` heading or "
+        "an unstructured chat body Sir authored.\n"
+        "  - omi: Sir is the speaker.\n"
+        "  - vault_edit: any record Sir hand-edited.\n"
+        "  - plane: Sir is named as the actor on the status change.\n"
+        "- `counterparty` — an external human acted: counterparty "
+        "emailed Sir, counterparty commented on a Plane ticket Sir "
+        "watches, counterparty spoke on a Vexa transcript.\n"
+        "- `system` — automated upstream: failed-payment notices, "
+        "Plane state reassignments by a bot, Sure transaction "
+        "categorizations, calendar invites generated by another "
+        "person's calendar app, etc.\n"
+        "- `alfred` — Alfred himself acted autonomously (rare on the "
+        "extractor; this branch is mostly emitted by signal_router "
+        "for OBS-6 companion decisions). When you see no human "
+        "actor and the source is Alfred's own background workflow, "
+        "use this.\n\n"
+        "### decision_required — does Sir need to look at this?\n"
+        "Default rules by actor:\n"
+        "- `actor=principal` → `decision_required=false`. Sir already "
+        "acted. The signal is bookkeeping — it updates the matter "
+        "timeline (e.g. 'Sir contacted Firstbase re EIN on May 14') "
+        "but doesn't put a card on /desk asking him to decide what "
+        "he already decided. Override to `true` ONLY if Sir's "
+        "outbound action explicitly creates a future Sir-side "
+        "follow-up he needs to schedule (rare — usually it just "
+        "means waiting for the counterparty).\n"
+        "- `actor=counterparty` and Sir is the recipient / target of "
+        "an ask → `decision_required=true`. Counterparty needs a "
+        "reply, a payment, a confirmation, a scheduling response. "
+        "This is the canonical /desk card.\n"
+        "- `actor=counterparty` but Sir is NOT being asked for "
+        "anything (FYI cc, broadcast, third-party-to-third-party "
+        "thread Sir is just on) → `decision_required=false` if "
+        "still a signal worth recording, else emit nothing.\n"
+        "- `actor=system` echoing Sir's OWN upstream action → "
+        "`decision_required=false`. (Sir himself moved an issue in "
+        "Plane; the webhook echo doesn't need a card.)\n"
+        "- `actor=system` describing a state Sir must react to "
+        "(failed payment, RSVP-needed invite, due-date overdue) → "
+        "`decision_required=true`.\n"
+        "- `actor=alfred` → `decision_required=false`. The OBS-1 "
+        "decision→observation loop handles training; no card.\n\n"
+        "### Cardinal test\n"
+        "If Sir reads this card, will he say *\"I know, I did that\"* "
+        "or *\"why are you telling me what I already did\"*? If yes "
+        "→ `decision_required=false`. The card shouldn't exist. The "
+        "signal still gets recorded for matter-timeline bookkeeping, "
+        "but it lands silently.\n\n"
+        "### Worked examples\n"
+        "- Sir emails `tax@firstbase.io` asking about the EIN. "
+        "→ `actor=principal`, `decision_required=false`. Bookkeeping "
+        "entry on the tax matter timeline: \"Sent Firstbase the "
+        "EIN question.\" No card.\n"
+        "- Firstbase replies to Sir with the EIN answer. "
+        "→ `actor=counterparty`, `decision_required=true`. /desk "
+        "card: \"Firstbase answered on the EIN — you can finish "
+        "the form.\"\n"
+        "- Stripe webhook: payment Sir initiated yesterday "
+        "settled. → `actor=system` echoing Sir's own action, "
+        "`decision_required=false`. Bookkeeping only.\n"
+        "- Stripe webhook: a customer's card declined. "
+        "→ `actor=system` describing a state Sir must react to, "
+        "`decision_required=true`. Card: \"NeoTerra customer's "
+        "card declined — I'd retry in 24h or email them.\"\n"
+        "- Sir says \"close the Hetzner billing task\" in "
+        "openclaw-chat. → `actor=principal`, "
+        "`decision_required=false`. Bookkeeping: Sir's "
+        "task-resolution decision is already made; the signal "
+        "drives the mutation on the task. No /desk card.\n"
+    )
+
+    # Inline SOUL.md (the principal's voice anchor) when the caller
+    # passed it in. SOUL.md is read once per signal-extract tick from
+    # the tenant workspace and threaded through. The phrase "grounded
+    # in SOUL.md" in the bullet rules below WAS aspirational before
+    # — the model never saw SOUL.md. Now the LLM gets the actual
+    # voice anchor as load-bearing context, not a reference.
+    soul_inline = ""
+    if isinstance(soul_md, str) and soul_md.strip():
+        soul_inline = (
+            "### SOUL.md — Alfred's voice (Sir's living voice guide; "
+            "treat this as the canonical source for HOW to speak)\n\n"
+            "```\n"
+            f"{soul_md.strip()}\n"
+            "```\n\n"
+        )
+
     voice_block = (
         "## 4.5 Alfred's voice for `display_headline` and `display_body`\n\n"
-        "These two fields per signal are the only thing Sir sees on his "
-        "Today screen. Everything else in the JSON is plumbing. Write "
-        "them as Alfred would — grounded in SOUL.md:\n\n"
+        + soul_inline
+        + "These two fields appear in TWO different surfaces, and the "
+        "register depends entirely on `decision_required`:\n\n"
+        "### When `decision_required` is `true` (a /desk card)\n"
+        "Sir is reading this on his Today screen because Alfred is "
+        "asking him to look. The card faces FORWARD — what Alfred "
+        "noticed, what he'd suggest, what Sir might want to decide. "
+        "Apply SOUL.md voice rigorously:\n"
         "- **Genuinely helpful, not performatively helpful.** No "
         '"Great question!", no "Here\'s what I found:", no apologies '
         "for the obvious. Skip filler. Go straight to the point.\n"
@@ -1336,10 +1467,34 @@ def build_signal_extraction_prompt_multi(
         "- **Concise.** Headline: ≤ 9 words, ideally a sentence "
         "fragment with a verb. Body: 1-2 sentences, ≤ 240 chars "
         "total. Use the em dash freely when it tightens the line.\n"
-        "- **Refer to Sir in second person (\"you\") in the body**, "
-        "not third person. The headline can be subjectless.\n"
+        "- **Refer to Sir in second person (\"you\")**, never third. "
+        '"You\'ve got an unresponded invite" — never "He has an '
+        'unresponded invite". The headline can be subjectless.\n'
+        "- **Never narrate Sir's past actions back to him.** If the "
+        "card opens with \"He hit a wall on the Firstbase form\" or "
+        '"Sir sent an email about X", you got it wrong — that signal '
+        "should have been `decision_required=false`. Cards face "
+        "forward; bookkeeping lines face backward. See Section 3.5.\n"
         "- **No jargon, no decision codes**, no confidence numbers, "
-        "no record IDs. Those live elsewhere in the JSON.\n"
+        "no record IDs. Those live elsewhere in the JSON.\n\n"
+        "### When `decision_required` is `false` (matter-timeline "
+        "bookkeeping)\n"
+        "These never surface on /desk. They land on the matter or "
+        "task timeline as silent state-updates. Sir reads them only "
+        "if he opens the matter detail page. The register is "
+        "different:\n"
+        "- **Brief past-tense descriptive.** *\"Sent Firstbase the "
+        "EIN question.\"* / *\"Stripe payment for $400 settled.\"* / "
+        "*\"Closed the Hetzner billing task.\"*\n"
+        "- **First person fine** when Alfred is summarising "
+        "(*\"I'll watch for Firstbase's reply.\"*) but third person "
+        "in past tense is OK too here — the timeline is a record, "
+        "not a conversation.\n"
+        "- **Even shorter.** Headline: ≤ 9 words. Body: ONE sentence, "
+        "≤ 140 chars. These are log entries, not prose.\n"
+        "- **No suggestion, no recommendation.** Don't ask Sir to do "
+        "anything. He already acted (or the actor wasn't him); the "
+        "entry is just what was logged.\n"
     )
 
     multi_signal_rules = (
@@ -1433,10 +1588,20 @@ def build_signal_extraction_prompt_multi(
     def _legacy_to_multi(out: dict[str, Any]) -> dict[str, Any]:
         if out.get("effect") == "none":
             return {"signals": []}
+        # Phase 3 — legacy few-shots predate actor + decision_required.
+        # All legacy examples are counterparty-driven action/mutation
+        # events Sir must react to → inject the canonical defaults so
+        # the rendered example still teaches the new schema.
         entry: dict[str, Any] = {
             "raw_quote": out.get("raw_quote") or "",
             "classification": out.get("classification"),
             "effect": out.get("effect"),
+            "actor": out.get("actor") or "counterparty",
+            "decision_required": (
+                out["decision_required"]
+                if "decision_required" in out
+                else True
+            ),
             "target_kind": out.get("target_kind"),
             "target_hint": out.get("target_hint"),
             "mutation_proposal": out.get("mutation_proposal"),
@@ -1665,11 +1830,127 @@ def build_signal_extraction_prompt_multi(
         ),
     ]
 
+    # Phase 3 — append the canonical Sir-as-sender example.
+    # This is the load-bearing example for the new actor +
+    # decision_required schema. Without it the model has no
+    # calibration anchor for "outbound from Sir → bookkeeping, no
+    # card". The Firstbase EIN scenario is taken from the real
+    # signal that triggered this whole refactor.
+    multi_examples.append(
+        (
+            {
+                "source_type": "gmail",
+                "frontmatter": {
+                    "from": "Admin Szabo-Stuban <admin@szabostuban.com>",
+                    "to": "tax@firstbase.io",
+                    "subject": "EIN question for the tax filing",
+                },
+                "body": (
+                    "Hi — we have a question about the tax filing. "
+                    "I wanted to start the form but hit a wall on "
+                    "the EIN field — wasn't sure of the address on "
+                    "file. Could you confirm? Thanks, David."
+                ),
+                "raw_quote": (
+                    "Sir → Firstbase: EIN question, address-on-file "
+                    "confirmation requested before continuing the "
+                    "tax filing form"
+                ),
+            },
+            {
+                "signals": [
+                    {
+                        "raw_quote": (
+                            "Hi — we have a question about the tax "
+                            "filing. I wanted to start the form but "
+                            "hit a wall on the EIN field"
+                        ),
+                        "classification": None,
+                        "effect": "action",
+                        "actor": "principal",
+                        "decision_required": False,
+                        "target_kind": "matter",
+                        "target_hint": (
+                            "Szabo-Stuban Kft. tax filing"
+                        ),
+                        "mutation_proposal": None,
+                        "action_proposal": {
+                            "what": (
+                                "Wait for Firstbase to confirm the "
+                                "EIN address on file; resume the "
+                                "tax form once they reply."
+                            ),
+                            "suggested_actor": "agent",
+                            "due_at": None,
+                        },
+                        "target_confidence": 0.7,
+                        "effect_confidence": 0.85,
+                        "reasoning": (
+                            "Outbound email from Sir (sender is a "
+                            "Sir-owned address) asking Firstbase a "
+                            "question. Sir has already acted by "
+                            "sending. Bookkeeping for the tax "
+                            "matter timeline; no /desk card because "
+                            "the next move is on Firstbase, not Sir."
+                        ),
+                        "display_headline": (
+                            "Asked Firstbase about the EIN."
+                        ),
+                        "display_body": (
+                            "I'll watch for their reply and surface "
+                            "it when it lands."
+                        ),
+                    }
+                ]
+            },
+        ),
+    )
+
+    # Phase 3 — inject actor + decision_required defaults into any
+    # legacy multi_examples entry that predates the new schema, so
+    # all rendered examples teach the same shape. The first two
+    # multi-signal examples (Hetzner+Berlin, Strategy+Dentist) were
+    # written before Phase 3 and don't carry the new fields.
+    def _ensure_actor_fields(example_out: dict[str, Any]) -> dict[str, Any]:
+        signals = example_out.get("signals")
+        if not isinstance(signals, list):
+            return example_out
+        patched_signals: list[dict[str, Any]] = []
+        for s in signals:
+            if not isinstance(s, dict):
+                patched_signals.append(s)
+                continue
+            s_out = dict(s)
+            if "actor" not in s_out:
+                # Heuristic for legacy examples: openclaw-chat
+                # entries where the example body is Sir's direct
+                # imperatives are `principal` with
+                # decision_required=False (they drive a mutation;
+                # they're not asking Sir to decide what he just
+                # told Alfred). Everything else defaults to
+                # counterparty/system + decision_required=True.
+                # Note: this is a render-time default for examples;
+                # the LIVE classifier still uses Section 3.5.
+                if s.get("classification") in (
+                    "task_resolution",
+                    "task_dismissal",
+                    "matter_creation",
+                    "matter_state_change",
+                ):
+                    s_out.setdefault("actor", "principal")
+                    s_out.setdefault("decision_required", False)
+                else:
+                    s_out.setdefault("actor", "counterparty")
+                    s_out.setdefault("decision_required", True)
+            patched_signals.append(s_out)
+        return {**example_out, "signals": patched_signals}
+
     multi_examples_rendered: list[str] = []
     base_idx = len(legacy_examples_rendered)
     for i, (inp, out) in enumerate(multi_examples):
+        out_patched = _ensure_actor_fields(out)
         inp_block = json.dumps(inp, indent=2, ensure_ascii=False, default=str)
-        out_block = json.dumps(out, indent=2, ensure_ascii=False, default=str)
+        out_block = json.dumps(out_patched, indent=2, ensure_ascii=False, default=str)
         multi_examples_rendered.append(
             f"### Example {base_idx + i + 1} (multi-signal)\n"
             f"**Input event:**\n```json\n{inp_block}\n```\n"
@@ -1712,6 +1993,8 @@ Pick exactly one per entry when `effect` is `mutation`:
 ## 3. The effect taxonomy
 
 {effect_defs}
+
+{actor_decision_block}
 
 ## 4. The output JSON envelope
 

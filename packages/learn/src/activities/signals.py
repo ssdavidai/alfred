@@ -1512,6 +1512,57 @@ async def extract_signal_from_event(
 # the multi-signal analogue of returning None from the legacy extractor.
 
 
+async def _load_soul_md(cfg) -> str | None:
+    """Read SOUL.md from the tenant workspace via ctrl-api.
+
+    Returns the SOUL.md body or ``None`` if unreachable / empty.
+    Best-effort: the signal-extraction prompt is fully functional
+    without SOUL.md (the bullet rules carry the voice), but with
+    SOUL.md inlined the model voices the cards in Sir's own register.
+
+    ctrl-api exposes ``GET /api/v1/admin/workspace/SOUL.md`` returning
+    ``{"filename": "SOUL.md", "content": "..."}``. The endpoint
+    returns an empty string when the file doesn't exist yet (during
+    onboarding before the principal sets their SOUL preset) — we
+    treat that as "no SOUL.md available" and return None.
+
+    NOT cached at the activity level: the extraction activity is
+    invoked at most ~16 times per tick (chunk size); a single round
+    trip per signal is cheap. A worker-level cache would buy little
+    and complicate hot-reload semantics during onboarding.
+    """
+    import os
+
+    import httpx
+
+    base_url = getattr(cfg, "alfred_ctrl_url", None)
+    if not base_url:
+        return None
+    api_key = os.environ.get("AAS_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        async with httpx.AsyncClient(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=5.0,
+        ) as soul_client:
+            resp = await soul_client.get(
+                "/api/v1/admin/workspace/SOUL.md"
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            content = payload.get("content") if isinstance(payload, dict) else None
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+            return None
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.info(
+            "signals._load_soul_md: skipping SOUL.md (degraded): %s", exc,
+        )
+        return None
+
+
 async def _read_task_parent_matter(
     client: VaultClient, task_path: str
 ) -> str | None:
@@ -1595,6 +1646,33 @@ def _validate_signals_envelope(
                 "entry idx=%d", i,
             )
             continue
+        # Phase 3 — actor + decision_required.
+        # ``actor`` ∈ {principal, counterparty, system, alfred}.
+        # Default to "counterparty" when the LLM omits it (older
+        # prompt runs / replays). The principal-default would over-
+        # silence cards on a partial deploy; counterparty + decision_
+        # required=True preserves the pre-Phase-3 surfacing behaviour.
+        actor_raw = str(entry.get("actor") or "").strip().lower()
+        if actor_raw not in ("principal", "counterparty", "system", "alfred"):
+            actor_raw = "counterparty"
+        classification["actor"] = actor_raw
+        # ``decision_required`` MUST be a strict boolean per the
+        # prompt. Defensive: also accept "true"/"false" strings and
+        # 0/1 ints in case the LLM stringifies. Default for missing:
+        # True for counterparty/system (back-compat: surfacing was the
+        # only behaviour), False for principal/alfred (the whole
+        # point of Phase 3).
+        dr_raw = entry.get("decision_required")
+        if isinstance(dr_raw, bool):
+            decision_required = dr_raw
+        elif isinstance(dr_raw, str):
+            decision_required = dr_raw.strip().lower() == "true"
+        elif isinstance(dr_raw, (int, float)):
+            decision_required = bool(dr_raw)
+        else:
+            decision_required = actor_raw not in ("principal", "alfred")
+        classification["decision_required"] = decision_required
+
         # The multi-signal envelope says noise/informational entries
         # are absent — but be defensive against an LLM emitting
         # effect=none anyway.
@@ -1721,11 +1799,19 @@ async def extract_signals_from_event(
         source_type = _infer_source_type(event)
         event_level_raw_quote = _extract_raw_quote(event)
 
+        # Phase 3 — load SOUL.md from the tenant workspace so the
+        # voice block is grounded in the principal's living voice
+        # guide rather than the bullet-rule scaffold alone. Best-
+        # effort: a missing or empty SOUL.md falls back to the
+        # bullet rules in Section 4.5.
+        soul_md = await _load_soul_md(cfg)
+
         prompt = build_signal_extraction_prompt_multi(
             source_type=source_type,
             event_frontmatter=event.get("frontmatter") or {},
             event_body=_event_body(event),
             raw_quote=event_level_raw_quote,
+            soul_md=soul_md,
         )
 
         import asyncio as _asyncio
@@ -1947,6 +2033,12 @@ async def extract_signals_from_event(
                 "extracted_via": "multi_v1",
                 "extraction_idx": idx,
                 "extraction_count": len(validated_signals),
+                # Phase 3 — actor + decision_required carried from
+                # the validated LLM classification onto the signal
+                # record. Routing reads these to choose bookkeeping
+                # vs decision-card surfacing.
+                "actor": classification["actor"],
+                "decision_required": classification["decision_required"],
             }
             signals_out.append(signal)
 
@@ -2230,6 +2322,16 @@ def _build_signal_frontmatter(signal: dict[str, Any]) -> str:
     lines.append("status: unrouted")
     lines.append("applied_at: null")
     lines.append("audit_record_path: null")
+    # Phase 3 — actor + decision_required.
+    # Always emit when present on the dict (extractor stamps them
+    # in Phase 3+). Omitted on legacy signals so existing YAMLs
+    # don't drift on replay.
+    actor_v = signal.get("actor")
+    if isinstance(actor_v, str) and actor_v.strip():
+        lines.append(f"actor: {_yaml_inline_str(actor_v.strip())}")
+    if "decision_required" in signal:
+        dr = bool(signal.get("decision_required"))
+        lines.append("decision_required: " + ("true" if dr else "false"))
     # Phase 1 — provenance marker on the signal record.
     extracted_via = signal.get("extracted_via")
     if isinstance(extracted_via, str) and extracted_via.strip():
