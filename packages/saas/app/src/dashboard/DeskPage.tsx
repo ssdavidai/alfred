@@ -23,6 +23,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { motion } from "framer-motion";
+import { useAuth } from "wasp/client/auth";
 import {
   useQuery,
   getNeedsAttention,
@@ -179,6 +180,7 @@ interface AuditRow {
 // --------------------------------------------------------------------------
 
 export default function DeskPage() {
+  const { data: user } = useAuth();
   const { data: needs, isLoading: needsLoading } = useQuery(getNeedsAttention);
   const { data: approvals, isLoading: approvalsLoading } = useQuery(getPendingApprovals);
   // NB: `getRecentJudgments` is a misnamed query — it actually proxies
@@ -683,65 +685,129 @@ export default function DeskPage() {
           })}
         />
 
-        {/* Today's brief — most recent BriefingWorkflow snapshot. Surfaces
-            the letter sir would otherwise have to navigate to /briefings for.
-            Hidden when no briefing exists (no fallback to legacy DailyDigest
-            here — that's /brief's job). */}
-        {latestBriefSummary && (
-          <section className="mb-16 mx-auto max-w-[760px] border-l-2 pl-6"
-                   style={{ borderColor: "var(--brass)" }}>
-            <div className="flex items-baseline justify-between gap-4 mb-3">
-              <div className="font-mono text-[10px] uppercase tracking-[0.22em]"
-                   style={{ color: "var(--brass)" }}>
-                {latestBriefSummary.slot === "evening" ? "Evening Brief" : "Morning Brief"}
-                {latestBriefSummary.composed_at && (
-                  <span style={{ color: "var(--marginalia)", marginLeft: 12 }}>
-                    {new Date(String(latestBriefSummary.composed_at)).toLocaleString(undefined, {
-                      weekday: "short", day: "numeric", month: "short",
-                      hour: "2-digit", minute: "2-digit",
-                    })}
-                  </span>
-                )}
-              </div>
-              <Link to="/briefings"
-                    className="font-mono text-[10px] uppercase tracking-[0.22em]"
-                    style={{ color: "var(--brass)" }}>
-                All briefings →
-              </Link>
-            </div>
-            {latestBriefFull?.body ? (
-              <div className="font-body text-[16px] leading-[1.65] max-w-[64ch]"
-                   style={{
-                     maxHeight: briefExpanded ? undefined : 220,
-                     overflow: briefExpanded ? "visible" : "hidden",
-                     position: "relative",
-                   }}>
-                <Markdown source={String(latestBriefFull.body)} useLiveResolver={false} />
-                {!briefExpanded && (
-                  <div style={{
-                    position: "absolute", bottom: 0, left: 0, right: 0, height: 60,
-                    background: "linear-gradient(to bottom, transparent, var(--paper))",
-                    pointerEvents: "none",
-                  }} />
-                )}
-              </div>
-            ) : (
-              <p className="font-body italic text-[15px]" style={{ color: "var(--marginalia)" }}>
-                Brief composer didn't produce prose for this slot.{" "}
-                <Link to="/briefings" style={{ color: "var(--brass)" }}>
-                  View matter snapshots →
-                </Link>
-              </p>
-            )}
-            {latestBriefFull?.body && String(latestBriefFull.body).length > 400 && (
-              <button onClick={() => setBriefExpanded((b) => !b)}
-                      className="font-mono text-[10px] uppercase tracking-[0.22em] mt-3"
+        {/* Today's brief — letterpress envelope (matches /first-brief and
+            /brief design). Hidden when no briefing exists. */}
+        {latestBriefSummary && (() => {
+          const slot = latestBriefSummary.slot === "evening" ? "evening" : "morning";
+          const composedAt = latestBriefSummary.composed_at
+            ? new Date(String(latestBriefSummary.composed_at))
+            : null;
+          const dateline = composedAt
+            ? composedAt.toLocaleDateString("en-GB", {
+                weekday: "long", day: "numeric", month: "long", year: "numeric",
+              })
+            : "";
+          const timeline = composedAt
+            ? composedAt.toLocaleTimeString("en-GB", {
+                hour: "2-digit", minute: "2-digit",
+              })
+            : "";
+          const principalName =
+            (user as any)?.username ?? (user as any)?.email?.split("@")[0] ?? "Sir";
+          const principalEmail = (user as any)?.email ?? "";
+          const subject = slot === "evening"
+            ? "Evening Digest."
+            : "Morning Brief.";
+          const greeting = slot === "evening" ? "Good evening." : "Good morning.";
+          const body = String(latestBriefFull?.body ?? "").trim();
+          const isStub = body.includes("brief composer received an empty turn");
+          const tooLong = body.length > 1400;
+
+          return (
+            <section className="mb-20 mx-auto max-w-[860px]">
+              <div className="flex items-baseline justify-between gap-8 mb-6">
+                <div className="font-mono text-[10px] uppercase tracking-[0.28em]"
+                     style={{ color: "var(--brass)" }}>
+                  {slot === "evening" ? "Evening Digest" : "Morning Brief"}
+                </div>
+                <Link to="/briefings"
+                      className="font-mono text-[10px] uppercase tracking-[0.22em]"
                       style={{ color: "var(--brass)" }}>
-                {briefExpanded ? "Collapse ↑" : "Read in full ↓"}
-              </button>
-            )}
-          </section>
-        )}
+                  All briefings →
+                </Link>
+              </div>
+
+              <article className="border border-rule">
+                <header
+                  className="border-b border-rule px-10 py-6 grid grid-cols-[80px_1fr] gap-y-2 gap-x-6 font-mono text-[11px] uppercase tracking-[0.18em]"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  <div>From</div>
+                  <div>Alfred &lt;alfred@alfred.black&gt;</div>
+                  <div>To</div>
+                  <div>
+                    {principalName}
+                    {principalEmail ? ` <${principalEmail}>` : ""}
+                  </div>
+                  <div>Date</div>
+                  <div>{dateline}{timeline ? `, ${timeline}` : ""}</div>
+                  <div>Subject</div>
+                  <div className="font-body normal-case tracking-normal text-[15px]"
+                       style={{ color: "var(--ink)" }}>
+                    {subject}
+                  </div>
+                </header>
+
+                <div className="px-10 md:px-16 py-14">
+                  <h1 className="font-display text-5xl md:text-6xl tracking-[-0.02em] leading-[1.0]">
+                    {greeting}
+                  </h1>
+                  {dateline && (
+                    <p className="font-body italic mt-6 mb-8 text-[17px]"
+                       style={{ color: "var(--marginalia)" }}>
+                      {dateline}
+                    </p>
+                  )}
+
+                  <div className="rule-double mb-10" />
+
+                  {!body ? (
+                    <p className="font-body italic text-[17px]"
+                       style={{ color: "var(--marginalia)" }}>
+                      A moment — Alfred is finishing the draft.
+                    </p>
+                  ) : isStub ? (
+                    <p className="font-body italic text-[17px] leading-[1.55] max-w-[58ch]"
+                       style={{ color: "var(--marginalia)" }}>
+                      Sir — the clerk is unwell this morning. The composer
+                      received an empty turn and could not finish the prose.
+                      The matters below are current; I shall write again
+                      when the gateway is restored.
+                    </p>
+                  ) : (
+                    <div className="font-body text-[18px] leading-[1.55] max-w-[58ch] [&>p]:mb-4 [&_strong]:font-bold [&_em]:italic"
+                         style={{
+                           maxHeight: briefExpanded || !tooLong ? undefined : 380,
+                           overflow: briefExpanded || !tooLong ? "visible" : "hidden",
+                           position: "relative",
+                         }}>
+                      <Markdown source={body} useLiveResolver={false} />
+                      {!briefExpanded && tooLong && (
+                        <div style={{
+                          position: "absolute", bottom: 0, left: 0, right: 0, height: 80,
+                          background: "linear-gradient(to bottom, transparent, var(--paper))",
+                          pointerEvents: "none",
+                        }} />
+                      )}
+                    </div>
+                  )}
+
+                  {tooLong && !isStub && (
+                    <button onClick={() => setBriefExpanded((b) => !b)}
+                            className="font-mono text-[10px] uppercase tracking-[0.22em] mt-6"
+                            style={{ color: "var(--brass)" }}>
+                      {briefExpanded ? "Collapse ↑" : "Read in full ↓"}
+                    </button>
+                  )}
+
+                  <div className="mt-12">
+                    <div className="font-display italic text-2xl">— Alfred.</div>
+                  </div>
+                </div>
+              </article>
+            </section>
+          );
+        })()}
 
         {/* Featured decision */}
         <motion.div
