@@ -272,6 +272,26 @@ async def create_task_from_signal(signal: dict[str, Any]) -> str | None:
     if not parent_matter.startswith("matter/") or not parent_matter.endswith(".md"):
         parent_matter = DEFAULT_PARENT_MATTER
 
+    # Phase 2 — matter override. When the upstream signal already had
+    # target_kind="matter" with a resolved target_path, that matter IS
+    # the parent. The LLM-picked value above is a hint only and gets
+    # overridden so the resulting task always lives under the matter
+    # the extractor identified.
+    signal_target_kind = str(signal.get("target_kind") or "").strip().lower()
+    signal_target_path = str(signal.get("target_path") or "").strip()
+    if (
+        signal_target_kind == "matter"
+        and signal_target_path.startswith("matter/")
+        and signal_target_path.endswith(".md")
+    ):
+        if parent_matter != signal_target_path:
+            logger.info(
+                "task_creation: parent_matter override source_event=%s "
+                "llm_chose=%s using=%s (signal target_kind=matter)",
+                source_event_path, parent_matter, signal_target_path,
+            )
+            parent_matter = signal_target_path
+
     due_at_raw = llm_response.get("due_at")
     due_at: str | None = None
     if isinstance(due_at_raw, str) and due_at_raw.strip():

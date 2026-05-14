@@ -1147,3 +1147,597 @@ You MUST emit exactly this shape (with the field types shown):
 
 Output ONLY the JSON object, no other text. No markdown code fences. No commentary before or after. The first character of your response must be `{{` and the last must be `}}`.
 """
+
+
+# ---------------------------------------------------------------------------
+# Multi-signal prompt builder — Phase 1 of the n-signals refactor.
+# ---------------------------------------------------------------------------
+#
+# Why a second builder rather than evolving the existing one in place:
+# in-flight workflows replaying old history must keep returning the same
+# single-signal shape. The new `extract_signals_from_event` activity is
+# wired through `workflow.patched("signal_extract_multi_signal_v1")`; it
+# calls this builder, parses a `{"signals": [...]}` envelope, and emits
+# 0..N signal dicts (each in the same per-signal shape the legacy
+# validator already accepts). The pre-patched branch keeps calling the
+# legacy single-signal builder above.
+
+
+def build_signal_extraction_prompt_multi(
+    source_type: str,
+    event_frontmatter: dict,
+    event_body: str,
+    raw_quote: str,
+) -> str:
+    """Multi-signal variant of ``build_signal_extraction_prompt``.
+
+    One stream event may contain multiple, conceptually independent
+    signals — e.g. a single openclaw-chat session in which Sir closes
+    one task AND spins up a new matter; an Omi recording in which he
+    makes two separate decisions; a long email thread that triggers
+    both an RSVP and a payment. The legacy prompt forced the LLM into
+    a single-signal frame, which lost the second signal silently. This
+    builder asks the LLM for a *list* — and accepts 0 (noise) as a
+    first-class output.
+
+    The per-signal output shape is identical to the legacy
+    single-signal output (so the validator + downstream consumers
+    stay unchanged), PLUS one new per-signal field:
+
+      - ``raw_quote`` — the LLM's own evidence excerpt for THIS
+        signal (≤200 chars). The activity will fall back to the
+        stream-event-level raw_quote (T6.6 purge-survival quote) when
+        the LLM omits it, but per-signal quotes are the goal — they
+        let Sir's reader and the audit ledger anchor each signal to
+        the exact span that triggered it.
+
+    The wire envelope:
+
+      {
+        "signals": [
+          { ...per-signal shape, with raw_quote... },
+          ...
+        ]
+      }
+
+    An empty list means "this event produced no signals" (the
+    multi-signal analogue of the legacy ``effect=none`` shortcut).
+    """
+    source_type = (source_type or "").strip().lower()
+    frame = _SOURCE_FRAMES.get(source_type, _SOURCE_FRAME_GENERIC)
+
+    mutation_defs = "\n".join(
+        f"- `{cls}` — {desc}"
+        for cls, desc in (
+            ("task_resolution",
+             "Sir says a task is already done / handled / resolved."),
+            ("task_dismissal",
+             "Sir says to drop the task entirely (not pursuing it)."),
+            ("task_reframing",
+             "Sir says the task is really about something different from "
+             "what it currently says."),
+            ("task_blocked_on",
+             "Sir says the task is waiting on something / someone before "
+             "it can move."),
+            ("matter_context_edit",
+             "Sir says the matter's framing is wrong — the situation is "
+             "actually about a different topic / person / scope."),
+            ("matter_state_change",
+             "Sir says to park, archive, reactivate, or close a matter."),
+            ("matter_creation",
+             "Sir says a topic should become its own matter (split-off, "
+             "spin-up, promote-to-matter)."),
+            ("matter_membership",
+             "Sir says a task / sub-thing belongs under a different "
+             "matter than where it currently lives."),
+        )
+    )
+
+    effect_defs = (
+        "- `mutation` — the event implies a state change to an existing "
+        "task or matter record. Pick this when one of the 8 mutation "
+        "classes above clearly fires.\n"
+        "- `action` — the event implies work needs to happen (reply, "
+        "send, schedule, pay, decide). No existing record state changes "
+        "yet — but Sir or an agent has to do something.\n"
+        "- `informational` and `noise` — these never appear as items in "
+        "the `signals` list. When an event is purely informational OR "
+        "purely noise, return an EMPTY list `\"signals\": []`. Do not "
+        "emit a signal entry just to mark something as noise.\n"
+    )
+
+    per_signal_schema = """{
+  "raw_quote": "<≤200 chars: the exact span of the body that triggered THIS signal — evidence>",
+  "classification": "<one of the 8 mutation taxonomy classes; null when effect != mutation>",
+  "effect": "<mutation | action>",
+  "target_kind": "<task | matter | null>",
+  "target_hint": "<short text describing what task or matter Sir is referring to, OR null>",
+  "mutation_proposal": {
+    "decision": "<for effect=mutation only: e.g. 'likely_done', 'archive', 'reparent_to:matter/<slug>', 'create_matter:matter/<slug>'>",
+    "details": "<free-form description of the proposed change>"
+  },
+  "action_proposal": {
+    "what": "<short action description>",
+    "suggested_actor": "<human | agent | either>",
+    "due_at": "<ISO8601 datetime string or null>"
+  },
+  "target_confidence": 0.0,
+  "effect_confidence": 0.0,
+  "reasoning": "<1-3 sentences explaining your call>",
+  "display_headline": "<Alfred's one-line headline for Sir's desk, in Alfred's voice>",
+  "display_body": "<Alfred's 1-2 sentence framing: what happened, what he'd suggest. In Alfred's voice.>"
+}"""
+
+    schema_block = (
+        "{\n"
+        '  "signals": [\n'
+        f"    {per_signal_schema},\n"
+        "    ... (zero or more signal entries)\n"
+        "  ]\n"
+        "}"
+    )
+
+    schema_rules = (
+        "Schema rules:\n"
+        "- Top-level shape is ALWAYS `{\"signals\": [...]}`. The list "
+        "MAY be empty (noise / informational / question / "
+        "hypothetical) — that is the valid encoding for \"no "
+        "signals fire on this event.\"\n"
+        "- Each entry in the list represents ONE independent signal: "
+        "one decision Sir made, one action that needs taking, one "
+        "mutation to a single record. If Sir closed two unrelated "
+        "tasks in the same Omi clip, emit TWO entries. If a long "
+        "email thread triggers both an RSVP and a payment, emit TWO "
+        "entries.\n"
+        "- `effect` per entry MUST be exactly one of `mutation` or "
+        "`action`. Noise/informational events emit no entry; do not "
+        "emit `effect=none` items.\n"
+        "- When `effect` is `mutation`, `classification` MUST be one "
+        "of the 8 taxonomy classes and `mutation_proposal` MUST be "
+        "an object (not null). `action_proposal` MUST be null.\n"
+        "- When `effect` is `action`, `classification` MUST be null "
+        "and `action_proposal` MUST be an object (not null). "
+        "`mutation_proposal` MUST be null.\n"
+        "- `raw_quote` per entry is mandatory and ≤200 chars. Pick the "
+        "smallest excerpt from the event body that is sufficient on "
+        "its own evidence for THIS signal. Don't share quotes across "
+        "entries — each signal stands alone.\n"
+        "- `target_confidence` and `effect_confidence` are floats in "
+        "[0.0, 1.0]. Do not emit percentages, do not emit strings, "
+        "do not emit nulls.\n"
+        "- `target_kind` MUST be `task` or `matter` (or null). Never "
+        "invent a third kind.\n"
+        "- `reasoning` MUST be 1-3 sentences. Never emit empty "
+        "string.\n"
+        "- `display_headline` and `display_body` MUST be non-empty "
+        "strings written in Alfred's voice (see Section 4.5).\n"
+        "- Order of entries doesn't matter; the downstream pipeline "
+        "treats them as a set. If two entries would collapse to the "
+        "same target with the same effect, emit ONE entry with the "
+        "stronger reasoning rather than duplicating."
+    )
+
+    voice_block = (
+        "## 4.5 Alfred's voice for `display_headline` and `display_body`\n\n"
+        "These two fields per signal are the only thing Sir sees on his "
+        "Today screen. Everything else in the JSON is plumbing. Write "
+        "them as Alfred would — grounded in SOUL.md:\n\n"
+        "- **Genuinely helpful, not performatively helpful.** No "
+        '"Great question!", no "Here\'s what I found:", no apologies '
+        "for the obvious. Skip filler. Go straight to the point.\n"
+        "- **Have an opinion.** Don't list options when one is "
+        "clearly better. Suggest the thing. If there's a real "
+        "tradeoff, say so in one phrase, then recommend.\n"
+        "- **Proactive, not reactive.** Frame what happened as "
+        "Alfred noticing on Sir's behalf, and what he'd suggest "
+        "doing. Use first person sparingly (\"I'd update the card\", "
+        '"I\'d skip this one") but never sycophantic ("I\'d be '
+        'happy to…").\n'
+        "- **Concise.** Headline: ≤ 9 words, ideally a sentence "
+        "fragment with a verb. Body: 1-2 sentences, ≤ 240 chars "
+        "total. Use the em dash freely when it tightens the line.\n"
+        "- **Refer to Sir in second person (\"you\") in the body**, "
+        "not third person. The headline can be subjectless.\n"
+        "- **No jargon, no decision codes**, no confidence numbers, "
+        "no record IDs. Those live elsewhere in the JSON.\n"
+    )
+
+    multi_signal_rules = (
+        "## 0. Multi-signal framing (read first)\n\n"
+        "One stream event may carry zero, one, or many signals. Your "
+        "job is to enumerate ALL of them — not collapse them into one. "
+        "Each signal corresponds to a single decision/action/mutation "
+        "on a single target.\n\n"
+        "Examples of multi-signal events:\n"
+        "- An openclaw-chat turn where Sir says \"close the Hetzner "
+        "billing task, and also spin up a matter for the Berlin "
+        "trip\" → 2 signals: 1 mutation (task_resolution) + 1 "
+        "mutation (matter_creation).\n"
+        "- A long email thread where the counterparty asks Sir to "
+        "RSVP for a meeting AND to confirm a payment plan → 2 "
+        "action signals.\n"
+        "- An Omi clip where Sir says \"the Sembly thing is dead, "
+        "drop it\" AND \"actually the Anna onboarding belongs under "
+        "Berlin not under household\" → 2 mutations "
+        "(task_dismissal + matter_membership).\n\n"
+        "Examples of zero-signal events (emit `\"signals\": []`):\n"
+        "- Receipts, newsletters, marketing.\n"
+        "- Sir asking a question, recalling, hypothesising.\n"
+        "- Ambient Omi narration / domestic chatter.\n"
+        "- System echoes of Sir's own upstream actions.\n\n"
+        "Examples of single-signal events:\n"
+        "- A simple invoice email → 1 action signal.\n"
+        "- A calendar invite needing RSVP → 1 action signal.\n"
+        "- Sir tells Alfred via openclaw-chat to close one task → "
+        "1 mutation signal.\n\n"
+        "Independence rule: if two candidate signals share the same "
+        "target AND the same effect AND are saying essentially the "
+        "same thing, MERGE them into one entry with the stronger "
+        "reasoning. The list is a SET of distinct signals, not a "
+        "transcript of every sentence."
+    )
+
+    assertion_filter = (
+        "Assertion-vs-question filter (apply BEFORE classifying):\n"
+        "- An *assertion* is 'I've decided X' / 'X is done' / 'stop "
+        "doing Y' / 'this is wrong, it's actually Z' / 'spin up a "
+        "matter for X'. Assertions can produce signals.\n"
+        "- A *question* is 'should I do X?' / 'what's on my list?' / "
+        "'tell me about Y' / 'is X done yet?'. Questions NEVER "
+        "produce mutation/action signals — drop them.\n"
+        "- A *hypothetical* is 'what if I…' / 'imagine…' / 'in "
+        "theory…' / 'we could maybe…' / 'I'm thinking … maybe'. "
+        "Hypotheticals NEVER produce signals.\n"
+        "- A *narration* is Sir reading something out loud, ambient "
+        "OMI silence, third-party speech in background, essay-"
+        "drafting, domestic chatter. Narration NEVER produces "
+        "signals.\n"
+        "- A *system/automation echo* is when an upstream system "
+        "describes a state in third-person (e.g. 'Plane issue X "
+        "status changed', 'Sir hand-edited frontmatter on Y', "
+        "'Recurring charge ended'). These DO produce signals when "
+        "the described state is something Sir or his agent must "
+        "react to (RSVP, pay, review, mirror a closed task). Only "
+        "echoes of Sir's OWN upstream actions are pure "
+        "informational noise.\n"
+        "The bar: would a human assistant reading this expect to "
+        "TAKE ACTION or CHANGE A RECORD because of it? If not → "
+        "drop the signal (or emit empty list). If yes → emit one "
+        "signal entry per distinct action/mutation.\n\n"
+        "Upstream-hints rule (load-bearing):\n"
+        "- If `frontmatter.action_items` is a non-empty list, each "
+        "item is typically a separate action signal. Emit one entry "
+        "per action item unless two items collapse to the same "
+        "target. Set `target_kind=matter` and `target_hint` from "
+        "`frontmatter.related_matters[0]` if present.\n"
+        "- `frontmatter.topic_tags` like `failed-payment`, "
+        "`invoice`, `due-date` are strong action indicators — these "
+        "alone (with empty body) are enough to produce an action "
+        "signal grounded in the subject.\n\n"
+        "Empty-body rule:\n"
+        "- Compute the body's actionable length: strip leading lines "
+        "that are just `**From**:`, `**To**:`, `## Entities`. If "
+        "what remains is ≤300 chars, ground decisions in `subject` + "
+        "`frontmatter.action_items` + `frontmatter.topic_tags`. "
+        "Don't default to empty list just because the body looks "
+        "short — many gmail events have lost bodies but their "
+        "subjects (e.g. 'DigitalOcean - Failed to process card "
+        "payment') are still unambiguous action signals."
+    )
+
+    # Few-shot examples for multi-signal. We reuse the existing
+    # FEW_SHOT_EXAMPLES dataset (each is a single-signal scenario) and
+    # render it as the equivalent multi-signal output: signals=[entry]
+    # for action/mutation, signals=[] for noise. Then we add a handful
+    # of multi-signal scenarios for the truly multi-signal cases.
+    def _legacy_to_multi(out: dict[str, Any]) -> dict[str, Any]:
+        if out.get("effect") == "none":
+            return {"signals": []}
+        entry: dict[str, Any] = {
+            "raw_quote": out.get("raw_quote") or "",
+            "classification": out.get("classification"),
+            "effect": out.get("effect"),
+            "target_kind": out.get("target_kind"),
+            "target_hint": out.get("target_hint"),
+            "mutation_proposal": out.get("mutation_proposal"),
+            "action_proposal": out.get("action_proposal"),
+            "target_confidence": out.get("target_confidence", 0.0),
+            "effect_confidence": out.get("effect_confidence", 0.0),
+            "reasoning": out.get("reasoning") or "",
+            "display_headline": out.get(
+                "display_headline"
+            ) or "(placeholder — set this in your output)",
+            "display_body": out.get(
+                "display_body"
+            ) or "(placeholder — set this in your output)",
+        }
+        return {"signals": [entry]}
+
+    legacy_examples_rendered: list[str] = []
+    for i, (inp, out) in enumerate(FEW_SHOT_EXAMPLES):
+        # Lift the input's raw_quote into the per-signal raw_quote so
+        # the example output models how the field flows.
+        out_with_quote = dict(out)
+        if out.get("effect") not in (None, "none"):
+            out_with_quote["raw_quote"] = inp.get("raw_quote") or ""
+        multi_out = _legacy_to_multi(out_with_quote)
+        inp_block = json.dumps(inp, indent=2, ensure_ascii=False, default=str)
+        out_block = json.dumps(multi_out, indent=2, ensure_ascii=False, default=str)
+        legacy_examples_rendered.append(
+            f"### Example {i + 1}\n"
+            f"**Input event:**\n```json\n{inp_block}\n```\n"
+            f"**Expected output:**\n```json\n{out_block}\n```"
+        )
+
+    # ---- Two-signal worked examples (these are the load-bearing
+    # additions; the legacy examples cover the 0/1 cases).
+    multi_examples: list[tuple[dict[str, Any], dict[str, Any]]] = [
+        (
+            {
+                "source_type": "openclaw-chat",
+                "frontmatter": {
+                    "session_id": "synthetic-two-signal-chat",
+                },
+                "body": (
+                    "Alfred — the Hetzner billing dispute is resolved, "
+                    "they credited the account, close that task. Also "
+                    "the Berlin trip planning conversations should be "
+                    "their own matter, not buried under household-life. "
+                    "Spin one up."
+                ),
+                "raw_quote": (
+                    "Hetzner billing dispute is resolved... close that "
+                    "task ... Berlin trip planning should be its own "
+                    "matter ... Spin one up"
+                ),
+            },
+            {
+                "signals": [
+                    {
+                        "raw_quote": (
+                            "the Hetzner billing dispute is resolved, "
+                            "they credited the account, close that task"
+                        ),
+                        "classification": "task_resolution",
+                        "effect": "mutation",
+                        "target_kind": "task",
+                        "target_hint": "Hetzner billing dispute",
+                        "mutation_proposal": {
+                            "decision": "likely_done",
+                            "details": (
+                                "Sir says the Hetzner billing dispute "
+                                "is resolved and explicitly asks to "
+                                "close the task."
+                            ),
+                        },
+                        "action_proposal": None,
+                        "target_confidence": 0.85,
+                        "effect_confidence": 0.95,
+                        "reasoning": (
+                            "Direct chat command — task_resolution on "
+                            "the Hetzner billing task."
+                        ),
+                        "display_headline": (
+                            "Hetzner credited the account — closing "
+                            "the dispute."
+                        ),
+                        "display_body": (
+                            "You confirmed they refunded. I'll mark "
+                            "the billing task done."
+                        ),
+                    },
+                    {
+                        "raw_quote": (
+                            "Berlin trip planning conversations should "
+                            "be their own matter, not buried under "
+                            "household-life. Spin one up"
+                        ),
+                        "classification": "matter_creation",
+                        "effect": "mutation",
+                        "target_kind": "matter",
+                        "target_hint": "Berlin trip planning",
+                        "mutation_proposal": {
+                            "decision": (
+                                "create_matter:matter/berlin-trip-planning"
+                            ),
+                            "details": (
+                                "Sir asked to split Berlin trip "
+                                "planning out of household-life into "
+                                "its own matter."
+                            ),
+                        },
+                        "action_proposal": None,
+                        "target_confidence": 0.9,
+                        "effect_confidence": 0.95,
+                        "reasoning": (
+                            "Same chat turn but a second, independent "
+                            "mutation — matter_creation."
+                        ),
+                        "display_headline": (
+                            "Berlin trip deserves its own matter."
+                        ),
+                        "display_body": (
+                            "You asked to split it out of household-"
+                            "life. I'll spin up matter/berlin-trip-"
+                            "planning and move the thread there."
+                        ),
+                    },
+                ]
+            },
+        ),
+        (
+            {
+                "source_type": "gcal",
+                "frontmatter": {
+                    "name": (
+                        "Two-event day — Strategy review + Dentist "
+                        "appointment"
+                    ),
+                },
+                "body": (
+                    "1) Event: Strategy review w/ Sergii. Mon May 12, "
+                    "2026 4:00pm-5:00pm CEST. Status: not yet "
+                    "responded.\n"
+                    "2) Event: Dentist — Dr. Nagy. Tue May 13, 2026 "
+                    "9:00am-9:30am CEST. Status: not yet responded."
+                ),
+                "raw_quote": (
+                    "Strategy review Mon May 12 — not yet responded; "
+                    "Dentist Tue May 13 — not yet responded"
+                ),
+            },
+            {
+                "signals": [
+                    {
+                        "raw_quote": (
+                            "Strategy review w/ Sergii. Mon May 12, "
+                            "2026 4:00pm-5:00pm CEST. Status: not yet "
+                            "responded"
+                        ),
+                        "classification": None,
+                        "effect": "action",
+                        "target_kind": None,
+                        "target_hint": (
+                            "RSVP to strategy review with Sergii May 12"
+                        ),
+                        "mutation_proposal": None,
+                        "action_proposal": {
+                            "what": (
+                                "RSVP to the May 12 strategy review "
+                                "with Sergii."
+                            ),
+                            "suggested_actor": "human",
+                            "due_at": None,
+                        },
+                        "target_confidence": 0.3,
+                        "effect_confidence": 0.85,
+                        "reasoning": (
+                            "Unresponded invite where Sir is an "
+                            "attendee — needs RSVP."
+                        ),
+                        "display_headline": (
+                            "Sergii wants an RSVP for Monday's review."
+                        ),
+                        "display_body": (
+                            "Mon 4-5pm CEST. I'd accept unless you "
+                            "want to push it; nothing else is on the "
+                            "calendar."
+                        ),
+                    },
+                    {
+                        "raw_quote": (
+                            "Dentist — Dr. Nagy. Tue May 13, 2026 "
+                            "9:00am-9:30am CEST. Status: not yet "
+                            "responded"
+                        ),
+                        "classification": None,
+                        "effect": "action",
+                        "target_kind": None,
+                        "target_hint": (
+                            "RSVP to dentist appointment May 13"
+                        ),
+                        "mutation_proposal": None,
+                        "action_proposal": {
+                            "what": (
+                                "Confirm the May 13 dentist "
+                                "appointment with Dr. Nagy."
+                            ),
+                            "suggested_actor": "human",
+                            "due_at": None,
+                        },
+                        "target_confidence": 0.4,
+                        "effect_confidence": 0.85,
+                        "reasoning": (
+                            "Separate invite, separate target — "
+                            "second action signal."
+                        ),
+                        "display_headline": (
+                            "Dr. Nagy is holding a 9am slot Tuesday."
+                        ),
+                        "display_body": (
+                            "Half-hour dental check. I'd confirm "
+                            "now if you're keeping it; otherwise tell "
+                            "me to push it."
+                        ),
+                    },
+                ]
+            },
+        ),
+    ]
+
+    multi_examples_rendered: list[str] = []
+    base_idx = len(legacy_examples_rendered)
+    for i, (inp, out) in enumerate(multi_examples):
+        inp_block = json.dumps(inp, indent=2, ensure_ascii=False, default=str)
+        out_block = json.dumps(out, indent=2, ensure_ascii=False, default=str)
+        multi_examples_rendered.append(
+            f"### Example {base_idx + i + 1} (multi-signal)\n"
+            f"**Input event:**\n```json\n{inp_block}\n```\n"
+            f"**Expected output:**\n```json\n{out_block}\n```"
+        )
+
+    few_shot_block = "\n\n".join(
+        legacy_examples_rendered + multi_examples_rendered
+    )
+
+    fm_excerpt = _frontmatter_excerpt(event_frontmatter or {})
+    body_excerpt = _truncate_body(event_body or "")
+    raw_quote_clean = (raw_quote or "").strip()
+
+    event_block = (
+        f"source_type: `{source_type or 'unknown'}`\n\n"
+        f"frontmatter (excerpt):\n```json\n{fm_excerpt}\n```\n\n"
+        f"body:\n```\n{body_excerpt}\n```\n\n"
+        f"event-level raw_quote (≤200 chars; survives stream-event "
+        f"purge — use this as a fallback if you can't isolate a "
+        f"per-signal quote):\n```\n{raw_quote_clean}\n```"
+    )
+
+    return f"""You are Alfred's signal extractor. Your job: read ONE stream event and decide which `signal` records it should produce — ZERO, ONE, or MANY — and emit them as a JSON list. Each signal will downstream become its own decision card, its own task (creating one if no match), and its own audit trail entry.
+
+You produce STRICT JSON output that another Python module parses. Malformed JSON, missing fields, values outside the declared enums, or a missing top-level `signals` key all break the downstream pipeline silently and lose Sir's signal. Be precise.
+
+{multi_signal_rules}
+
+## 1. Source-type frame
+
+{frame}
+
+## 2. The 8 mutation classes (RFC #842 §6)
+
+Pick exactly one per entry when `effect` is `mutation`:
+
+{mutation_defs}
+
+## 3. The effect taxonomy
+
+{effect_defs}
+
+## 4. The output JSON envelope
+
+You MUST emit exactly this top-level shape:
+
+```json
+{schema_block}
+```
+
+{schema_rules}
+
+{voice_block}
+
+## 5. Assertion-vs-question filter (the critical gate)
+
+{assertion_filter}
+
+## 6. Few-shot examples (real events from Sir's vault unless flagged synthetic)
+
+{few_shot_block}
+
+## 7. The event you must classify now
+
+{event_block}
+
+## 8. Output
+
+Output ONLY the JSON object, no other text. No markdown code fences. No commentary before or after. The first character of your response must be `{{` and the last must be `}}`.
+"""

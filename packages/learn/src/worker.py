@@ -500,6 +500,10 @@ from src.activities.transcript import (
 # persist signal records, and mark the source event processed.
 from src.activities.signals import (
     extract_signal_from_event,
+    # Phase 1 multi-signal extractor — wired in via
+    # workflow.patched("signal_extract_multi_signal_v1") in
+    # SignalExtractWorkflow. Returns list[dict] (one event -> N signals).
+    extract_signals_from_event,
     list_unprocessed_stream_events,
     mark_stream_event_processed,
     write_signal_record,
@@ -1000,6 +1004,10 @@ ALL_ACTIVITIES = [
     # dispatches once the flag flips on).
     list_unprocessed_stream_events,
     extract_signal_from_event,
+    # Phase 1 multi-signal extractor — registered alongside the legacy
+    # single-signal extractor. SignalExtractWorkflow picks via
+    # workflow.patched("signal_extract_multi_signal_v1").
+    extract_signals_from_event,
     write_signal_record,
     mark_stream_event_processed,
     # Steward Phase 6 (T6.5.1) — auto-create tasks for no-target
