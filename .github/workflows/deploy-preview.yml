@@ -1,7 +1,7 @@
-name: Deploy Preview (feat/alfred-black-1.0)
+name: Deploy Preview (staging)
 on:
   push:
-    branches: [feat/alfred-black-1.0]
+    branches: [main]
     paths:
       - 'packages/saas/**'
       - 'packages/ctrl/**'
@@ -12,13 +12,14 @@ concurrency:
   group: deploy-preview
   cancel-in-progress: false
 
-# Preview deployment for the Alfred Black 1.0 cutover branch. Mirrors
-# deploy-saas.yml but targets preview.alfred.black with two safety belts
-# baked into the Wasp .env.server:
+# Preview deployment for preview.alfred.black. Mirrors deploy-saas.yml in
+# build shape but the runtime topology on the preview VM is different from
+# prod: systemd `alfred-saas.service` + native PostgreSQL (not docker
+# compose). The two safety belts in `.env.server` stay in place:
 #   WASP_DISABLE_JOBS=true            → all PgBoss workers short-circuit
 #   WRITE_BLOCK_TENANT_OPS_DENYLIST=… → refuses non-GET proxyToTenant
 #                                       calls for the four prod tenants
-# These are removed at cutover (see deploy/CUTOVER.md).
+# These keep preview a read-only mirror of prod data; do NOT remove them.
 
 jobs:
   deploy:
@@ -59,29 +60,46 @@ jobs:
       - name: Build web-app client
         run: cd packages/saas/app/.wasp/build/web-app && REACT_APP_API_URL=https://preview.alfred.black npx vite build
 
+      - name: Build server bundle
+        # Preview runs the bundled server.js directly under systemd (no
+        # Docker), so we have to produce bundle/server.js here on the
+        # runner where the Wasp-generated tsconfig path layout
+        # (`../../../tsconfig.json`) resolves correctly.
+        run: cd packages/saas/app/.wasp/build/server && npm run bundle
+
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.PREVIEW_SSH_KEY }}" > ~/.ssh/preview_key
           chmod 600 ~/.ssh/preview_key
-          # Best-effort: if PREVIEW_HOST is Tailscale-only or
-          # otherwise unresolvable from the GH runner, skip the
-          # keyscan and rely on accept-new in the rsync step below.
+          # PREVIEW_HOST may be Tailscale-only and unresolvable from the
+          # GH runner; rely on accept-new in the rsync/ssh steps below.
           ssh-keyscan -H ${{ secrets.PREVIEW_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Patch Dockerfile for provisioning deps
-        run: |
-          sed -i 's/RUN apk add --no-cache python3$/RUN apk add --no-cache python3 openssh-keygen openssh-client sqlite util-linux/' packages/saas/app/.wasp/build/Dockerfile
-
       - name: Deploy server build to preview VM
+        # Preview's runtime layout is /opt/alfred-saas/{server,sdk,db,client}
+        # — no docker, no /opt/alfred-saas/wasp-build/ staging dir. Exclude
+        # node_modules (host has its own Linux native node_modules; preview's
+        # `npm install` step below refreshes them in place) and the wasp
+        # checksums file.
         run: |
           rsync -azP --delete \
-            --exclude='web-app/' \
             --exclude='node_modules/' \
             --exclude='.waspchecksums' \
             -e "ssh -i ~/.ssh/preview_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
-            packages/saas/app/.wasp/build/ \
-            deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/wasp-build/
+            packages/saas/app/.wasp/build/server/ \
+            deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/server/
+
+      - name: Deploy SDK + db schema to preview VM
+        run: |
+          rsync -azP --delete \
+            -e "ssh -i ~/.ssh/preview_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
+            packages/saas/app/.wasp/build/sdk/ \
+            deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/sdk/
+          rsync -azP --delete \
+            -e "ssh -i ~/.ssh/preview_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
+            packages/saas/app/.wasp/build/db/ \
+            deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/db/
 
       - name: Deploy client to preview VM
         run: |
@@ -89,17 +107,6 @@ jobs:
             -e "ssh -i ~/.ssh/preview_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
             packages/saas/app/.wasp/build/web-app/build/ \
             deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/client/
-
-      - name: Deploy Plausible config to preview VM
-        run: |
-          rsync -azP \
-            -e "ssh -i ~/.ssh/preview_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
-            deploy/clickhouse/ \
-            deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/clickhouse/
-          rsync -azP \
-            -e "ssh -i ~/.ssh/preview_key -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=$HOME/.ssh/known_hosts" \
-            deploy/docker-compose.yaml \
-            deploy@${{ secrets.PREVIEW_HOST }}:/opt/alfred-saas/docker-compose.yaml
 
       - name: Set preview-mode env vars on Wasp service
         run: |
@@ -139,40 +146,38 @@ jobs:
             grep -E "^(WASP_DISABLE_JOBS|WRITE_BLOCK_TENANT_OPS_DENYLIST|WASP_WEB_CLIENT_URL|WASP_SERVER_URL)=" "$ENV_FILE"
           '
 
-      - name: Build Docker image and restart preview Wasp
+      - name: npm install + prisma push + systemctl restart
+        # Preview's `app` runs as systemd, not docker. Run prisma push
+        # natively against host Postgres (DATABASE_URL on preview points
+        # at localhost:5432, which works on the host but never from
+        # inside a `docker compose run` container — that's why the
+        # previous docker-compose-based version of this workflow had
+        # been failing silently for days).
         run: |
           ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=60 \
               -i ~/.ssh/preview_key deploy@${{ secrets.PREVIEW_HOST }} '
             set -e
-            cd /opt/alfred-saas/wasp-build
-            docker build -t alfred-saas:latest .
-            cd /opt/alfred-saas
+            cd /opt/alfred-saas/server
 
-            # Clean up stale app containers from a previous failed deploy.
-            docker ps -a --filter "name=alfred-saas-app-1" -q | xargs -r docker rm -f
+            echo "=== npm install (server) ==="
+            npm install --no-audit --no-fund 2>&1 | tail -3
 
-            # Stop the old app container BEFORE pushing schema.
-            docker compose stop app || true
-            docker compose rm -f app || true
-
-            # Push the new schema using a one-shot container from the new image.
+            echo "=== prisma db push (native, against host Postgres) ==="
+            set -a; source /opt/alfred-saas/.env.server; set +a
             for attempt in 1 2 3; do
-              if docker compose run --rm --no-deps --entrypoint "" app \
-                   npx prisma db push --schema="../db/schema.prisma" --skip-generate --accept-data-loss; then
+              if npx prisma db push --schema=../db/schema.prisma --skip-generate --accept-data-loss; then
                 echo "prisma db push succeeded (attempt $attempt)"
                 break
               fi
-              if [ $attempt -eq 3 ]; then
-                echo "prisma db push failed after 3 attempts"
-                exit 1
-              fi
+              if [ "$attempt" -eq 3 ]; then echo "prisma db push failed after 3 attempts" >&2; exit 1; fi
               echo "prisma db push failed (attempt $attempt), retrying in 10s..."
               sleep 10
             done
 
-            # Start the app with the schema in place. systemd-managed Caddy
-            # in front handles TLS for preview.alfred.black.
-            docker compose up -d --force-recreate app
+            echo "=== restart alfred-saas.service ==="
+            sudo systemctl restart alfred-saas.service
+            sleep 5
+            systemctl is-active alfred-saas.service
             echo "Preview Wasp app restarted"
           '
 
@@ -180,6 +185,26 @@ jobs:
         run: |
           scp -i ~/.ssh/preview_key deploy/Caddyfile deploy@${{ secrets.PREVIEW_HOST }}:/tmp/Caddyfile
           ssh -i ~/.ssh/preview_key deploy@${{ secrets.PREVIEW_HOST }} 'sudo cp /tmp/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy && rm /tmp/Caddyfile && echo "Caddy reloaded"'
+
+      - name: Purge Cloudflare cache for preview.alfred.black
+        # Vite emits new asset hashes on every build; without a purge,
+        # users on the edge see stale HTML pointing at hash bundles that
+        # no longer exist (404). Same pattern as the prod cutover.
+        env:
+          CF_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID_ALFRED_BLACK }}
+          CF_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$CF_ZONE_ID" ] || [ -z "$CF_API_TOKEN" ]; then
+            echo "Cloudflare secrets not set — skipping cache purge (manual purge recommended)"
+            exit 0
+          fi
+          curl -sS -X POST \
+            -H "Authorization: Bearer $CF_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}' \
+            "https://api.cloudflare.com/client/v4/zones/$CF_ZONE_ID/purge_cache" \
+            | tee /tmp/cf_purge.json
+          grep -q '"success":true' /tmp/cf_purge.json
 
       - name: Verify preview deployment
         run: |
