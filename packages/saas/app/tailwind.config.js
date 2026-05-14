@@ -13,9 +13,14 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        serif: ["'EB Garamond'", "Georgia", "serif"],
-        sans: ["'DM Sans'", "-apple-system", "BlinkMacSystemFont", "sans-serif"],
-        mono: ["'JetBrains Mono'", "monospace"],
+        // Alfred Black type stack — three families, no sans.
+        display: ['"Playfair Display"', '"Didot"', '"Bodoni 72"', "serif"],
+        body: ['"EB Garamond"', "Garamond", "Georgia", "serif"],
+        serif: ['"EB Garamond"', "Garamond", "Georgia", "serif"],
+        // sans is aliased to body so any legacy `font-sans` utilities still
+        // resolve to a real on-brand serif (we don't ship a sans).
+        sans: ['"EB Garamond"', "Garamond", "Georgia", "serif"],
+        mono: ['"JetBrains Mono"', "ui-monospace", '"SF Mono"', "monospace"],
       },
       colors: {
         current: "currentColor",
@@ -27,60 +32,68 @@ export default {
         },
         cream: "#F5F1EB",
 
-        // ShadCN color system
-        background: "hsl(var(--background))",
-        foreground: "hsl(var(--foreground))",
+        // Alfred Black material
+        paper: "var(--paper)",
+        wool: "var(--wool)",
+        ink: "var(--ink)",
+        brass: "var(--brass)",
+        marginalia: "var(--marginalia)",
+        rule: "var(--rule)",
+
+        // Semantic — bound to the AB tokens via :root / .dark
+        background: "var(--background)",
+        foreground: "var(--foreground)",
         card: {
-          DEFAULT: "hsl(var(--card))",
-          foreground: "hsl(var(--card-foreground))",
+          DEFAULT: "var(--card)",
+          foreground: "var(--card-foreground)",
           accent: {
-            DEFAULT: "hsl(var(--card-accent))",
-            foreground: "hsl(var(--card-accent-foreground))",
+            DEFAULT: "var(--card-accent)",
+            foreground: "var(--card-accent-foreground)",
           },
           subtle: {
-            DEFAULT: "hsl(var(--card-subtle))",
-            foreground: "hsl(var(--card-subtle-foreground))",
+            DEFAULT: "var(--card-subtle)",
+            foreground: "var(--card-subtle-foreground)",
           },
         },
         popover: {
-          DEFAULT: "hsl(var(--popover))",
-          foreground: "hsl(var(--popover-foreground))",
+          DEFAULT: "var(--popover)",
+          foreground: "var(--popover-foreground)",
         },
         primary: {
-          DEFAULT: "hsl(var(--primary))",
-          foreground: "hsl(var(--primary-foreground))",
+          DEFAULT: "var(--primary)",
+          foreground: "var(--primary-foreground)",
         },
         secondary: {
-          DEFAULT: "hsl(var(--secondary))",
-          foreground: "hsl(var(--secondary-foreground))",
+          DEFAULT: "var(--secondary)",
+          foreground: "var(--secondary-foreground)",
           muted: {
-            DEFAULT: "hsl(var(--secondary-muted))",
-            foreground: "hsl(var(--secondary-muted-foreground))",
+            DEFAULT: "var(--secondary-muted)",
+            foreground: "var(--secondary-muted-foreground)",
           },
         },
         muted: {
-          DEFAULT: "hsl(var(--muted))",
-          foreground: "hsl(var(--muted-foreground))",
+          DEFAULT: "var(--muted)",
+          foreground: "var(--muted-foreground)",
         },
         accent: {
-          DEFAULT: "hsl(var(--accent))",
-          foreground: "hsl(var(--accent-foreground))",
+          DEFAULT: "var(--accent)",
+          foreground: "var(--accent-foreground)",
         },
         destructive: {
-          DEFAULT: "hsl(var(--destructive))",
-          foreground: "hsl(var(--destructive-foreground))",
+          DEFAULT: "var(--destructive)",
+          foreground: "var(--destructive-foreground)",
         },
         success: {
-          DEFAULT: "hsl(var(--success))",
-          foreground: "hsl(var(--success-foreground))",
+          DEFAULT: "var(--success)",
+          foreground: "var(--success-foreground)",
         },
         warning: {
-          DEFAULT: "hsl(var(--warning))",
-          foreground: "hsl(var(--warning-foreground))",
+          DEFAULT: "var(--warning)",
+          foreground: "var(--warning-foreground)",
         },
-        border: "hsl(var(--border))",
-        input: "hsl(var(--input))",
-        ring: "hsl(var(--ring))",
+        border: "var(--border)",
+        input: "var(--input)",
+        ring: "var(--ring)",
       },
       screens: {
         "2xsm": "375px",
@@ -296,10 +309,17 @@ export default {
         "fade-up": "fadeUp 1.2s ease forwards",
         "scroll-pulse": "scrollPulse 2s ease-in-out infinite",
       },
+      // Alfred Black has no rounded corners — every named radius collapses to 0.
       borderRadius: {
-        lg: "var(--radius)",
-        md: "calc(var(--radius) - 2px)",
-        sm: "calc(var(--radius) - 4px)",
+        none: "0px",
+        sm: "0px",
+        DEFAULT: "0px",
+        md: "0px",
+        lg: "0px",
+        xl: "0px",
+        "2xl": "0px",
+        "3xl": "0px",
+        full: "0px",
       },
     },
   },

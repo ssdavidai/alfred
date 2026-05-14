@@ -103,6 +103,28 @@ SaaS app (alfred.black)
 - Timeout: 15s (hardcoded in `tenantProxy.ts`)
 - Source: `packages/saas/app/src/server/tenantProxy.ts`
 
+### Canonical SaaS URL Map
+
+| Path | Page | Notes |
+|------|------|-------|
+| `/desk` | DeskPage | canonical home — today's decision queue + audit ledger |
+| `/brief` | BriefPage | daily letterpress brief |
+| `/vault` | VaultPage | three-pane Obsidian view |
+| `/matters`, `/matters/:id` | MattersPage / MatterDetailPage | aggregator |
+| `/instincts` | InstinctsPage | Asking / Confirming / Acting |
+| `/decisions` | DecisionsPage | audit feed with HANDLED/HELD/ASKED filters |
+| `/chores`, `/chores/:slug` | ChoresPage / ChoreDetailPage2 | recurring work |
+| `/connections` | ConnectionsPage | Composio catalogue |
+| `/channels` | ChannelsPage | email + phone + vexa + omi cards |
+| `/tools` | ToolsPage2 | gateway allowlist viewer |
+| `/claude` | ClaudePage | MCP setup + Skill + secrets |
+| `/study` | StudyPage | unified back office (settings/credentials/api keys/audit/ledger/theme) |
+| `/household` | HouseholdPage | RULES.md editor + chores |
+| `/awaken` → `/reading-the-room` → `/verify` → `/soul` → `/composing` → `/preparing` → `/first-brief` → `/desk` | onboarding ritual | sequential pages |
+
+Legacy `/dashboard/*` paths redirect to canonical names. See `CLAUDE.md`
+for the full redirect map.
+
 ### User → Tenant OpenClaw (AI Gateway)
 
 ```

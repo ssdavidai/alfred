@@ -18,7 +18,7 @@
 // message in both cases without breaking the dashboard for tenants
 // without the route.
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import {
   useQuery,
   getStewardFeed,
@@ -128,7 +128,14 @@ const KIND_META: Record<
   },
 };
 
+// M4 #861 — /dashboard/command-center/steward-feed redirects to /decisions.
+// The legacy implementation is preserved as LegacyStewardFeedPage so the
+// cutover can be reverted with one line.
 export default function StewardFeedPage() {
+  return <Navigate to="/decisions" replace />;
+}
+
+function LegacyStewardFeedPage() {
   const { data, isLoading, error, refetch } = useQuery(
     getStewardFeed,
     undefined,

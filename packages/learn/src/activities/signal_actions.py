@@ -43,10 +43,33 @@ while mutations already run live). Default ``shadow``. Same shape as
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from temporalio import activity
+
+# Serial-execution gate for autonomous agent dispatches.
+#
+# Sir's call: every delegate (principal-explicit OR autonomous
+# instinct-confident) gets a fresh ephemeral subagent. Those agents
+# do real work — Composio calls that take 20-60 s, vault reads,
+# multi-step reasoning. Running them in parallel piles concurrent
+# write-heavy work on ctrl-api at the same moment the principal might
+# be clicking on /desk, causing the desk to 504 under load.
+#
+# Solution: serialize. ONE dispatch runs at a time per tenant (alfred-
+# learn is single-worker per tenant, so a module-level asyncio.Lock
+# is the entire fence). When a second dispatch wants to run, it
+# queues here until the first completes. With a 900 s agent ceiling
+# this means worst-case queue wait of 15 min for a batch — acceptable
+# because nothing the agent does is real-time-visible to Sir; the
+# Desk just shows "Alfred is working" until each one completes.
+#
+# Belongs at module level (not per-call) so the lock is shared across
+# every concurrent Temporal activity invocation in the same worker
+# process.
+_AGENT_DISPATCH_LOCK = asyncio.Lock()
 
 # Module-level logger — same name everything else in alfred-learn uses.
 logger = logging.getLogger("alfred-learn")
@@ -61,7 +84,7 @@ SIGNAL_ACTION_LIVE_MODE_ENV = "STEWARD_SIGNAL_ACTION_LIVE_MODE"
 # Default discretion threshold when an instinct's frontmatter doesn't
 # carry one. Same as the 10-19 observations bucket in
 # ``get_discretion_threshold`` — "fairly certain this goes here".
-DEFAULT_DISCRETION_THRESHOLD = 0.85
+DEFAULT_DISCRETION_THRESHOLD = 0.95  # Asking. See _instinct_threshold.
 
 # Below this similarity score the candidate instinct is treated as "no
 # matching instinct" → HUMAN path. Tuned conservatively: with the
@@ -256,28 +279,57 @@ def _score_signal_against_instinct(
 def _instinct_threshold(instinct: dict[str, Any]) -> float:
     """Pull the per-instinct discretion threshold from frontmatter.
 
-    Falls back to ``DEFAULT_DISCRETION_THRESHOLD`` (0.85) when absent.
-    Mirrors the contract in
-    ``src.matching.discretion.should_route_autonomously`` — that helper
-    looks up ``instinct["discretion_threshold"]`` directly, but the
-    instincts we list from ctrl-api come back with the threshold inside
-    ``frontmatter``. We unwrap here so the two callsites converge.
+    Progressive autonomy contract (mirrors
+    ``src.matching.discretion.should_route_autonomously``):
+
+      1. Explicit ``discretion_threshold`` override on the instinct
+         wins. Reserved for operator-tuned exceptions.
+      2. Otherwise use the obs-count formula from
+         ``src.matching.discretion.get_discretion_threshold`` on the
+         live observation count (decision-sourced observations linked
+         to this instinct).
+      3. Bare fallback when neither is available:
+         ``DEFAULT_DISCRETION_THRESHOLD`` (0.95 — Asking).
+
+    The live count comes from ctrl-api on the
+    ``frontmatter.live_observation_count`` field. ctrl-api computes it
+    by scanning the observation directory for decision-sourced records
+    with ``instinct: <path>`` set, so the count reflects real Sir
+    decisions — not retroactive signal matches.
+
+    Falling back to the stored ``observation_count`` keeps the gate
+    sane if ctrl-api is on an older build that doesn't enrich the
+    response yet.
     """
     fm = instinct.get("frontmatter")
     if not isinstance(fm, dict):
         fm = instinct
+
     raw = fm.get("discretion_threshold")
-    if raw is None:
-        return DEFAULT_DISCRETION_THRESHOLD
+    if raw is not None:
+        try:
+            f = float(raw)
+        except (TypeError, ValueError):
+            f = None
+        if f is not None and f == f and f >= 0.0:
+            return min(f, 1.0)
+
+    # No explicit override — defer to the obs-count formula. Prefer
+    # the ctrl-api-enriched live count over the stored snapshot.
+    obs_count_raw = (
+        fm.get("live_observation_count")
+        if fm.get("live_observation_count") is not None
+        else fm.get("observation_count", 0)
+    )
     try:
-        f = float(raw)
+        obs_count = int(obs_count_raw)
     except (TypeError, ValueError):
-        return DEFAULT_DISCRETION_THRESHOLD
-    if f != f or f < 0.0:
-        return DEFAULT_DISCRETION_THRESHOLD
-    if f > 1.0:
-        return 1.0
-    return f
+        obs_count = 0
+    if obs_count < 0:
+        obs_count = 0
+
+    from src.matching.discretion import get_discretion_threshold
+    return get_discretion_threshold(obs_count)
 
 
 def _safe_filename_slug(s: str) -> str:
@@ -580,6 +632,117 @@ async def _emit_signal_action_audit(
 
 
 # ---------------------------------------------------------------------------
+# OBS-6: autonomous-fire companion decision
+# ---------------------------------------------------------------------------
+
+async def _emit_autonomous_fire_decision(
+    *,
+    signal_path: str,
+    signal_fm: dict[str, Any],
+    matched_instinct_path: str,
+    matched_instinct_name: str,
+    match_score: float,
+    combined_confidence: float,
+) -> str | None:
+    """Post a decision/<id>.md mirroring an autonomous instinct fire.
+
+    Why: Sir's progressive-autonomy thesis treats every Desk click as
+    a training example. When Alfred fires an instinct autonomously
+    (signal_router → high_confidence_match → agent dispatch), we want
+    the same training signal — except subject=principal_via_alfred so
+    the OBS-4 clusterer can keep its rule-mining cohort clean (Alfred
+    re-applying his own rules isn't evidence of a new rule). OBS-1's
+    decision→observation pipeline already handles that distinction
+    via principal=alfred.
+
+    Returns the decision path, or None on best-effort failure (the
+    autonomous dispatch itself does NOT depend on this).
+    """
+    import os
+
+    import httpx
+    from src.config import load_config
+
+    cfg = load_config()
+    api_key = os.environ.get("AAS_API_KEY", "")
+    if not api_key:
+        logger.warning(
+            "signal_actions._emit_autonomous_fire_decision: AAS_API_KEY "
+            "unset — skipping",
+        )
+        return None
+
+    # Headline: prefer signal_extract's voiced fields, fall back to the
+    # signal's name.
+    display_headline = signal_fm.get("display_headline")
+    headline = ""
+    if isinstance(display_headline, str) and display_headline.strip():
+        headline = display_headline.strip()
+    else:
+        nm = signal_fm.get("name")
+        if isinstance(nm, str) and nm.strip():
+            headline = nm.strip()
+    headline = headline[:200]
+
+    matter_ref = ""
+    mref_raw = signal_fm.get("matter_ref")
+    if isinstance(mref_raw, str) and mref_raw.strip():
+        matter_ref = mref_raw.strip()
+
+    # Intent: for the existing route_signal_action autonomous path
+    # the choice is always "dispatched to the agent" — that maps to
+    # `delegate` in the Desk vocabulary. (Once OBS-8 lands and noise
+    # instincts can fire at signal_extract time, those will write
+    # decisions with intent=noise directly from that pre-filter — a
+    # different call site than this one.)
+    intent = "delegate"
+
+    note = (
+        f"Autonomous fire (instinct: {matched_instinct_name or matched_instinct_path}, "
+        f"score={match_score:.2f}, combined_confidence={combined_confidence:.2f})"
+    )
+
+    body = {
+        "source": "instinct_fire",
+        "source_record": signal_path,
+        "source_headline": headline,
+        "intent": intent,
+        "principal": "alfred",
+        "note": note,
+        "matter_ref": matter_ref,
+        "decision_origin": matched_instinct_path,
+    }
+
+    base_url = cfg.alfred_ctrl_url
+    async with httpx.AsyncClient(
+        base_url=base_url,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        timeout=30.0,
+    ) as client:
+        try:
+            resp = await client.post("/api/v1/decisions", json=body)
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "signal_actions._emit_autonomous_fire_decision: POST "
+                "failed err=%s body=%s",
+                exc, body,
+            )
+            return None
+        data = resp.json() or {}
+        path = str(data.get("path") or "") or None
+        logger.info(
+            "signal_actions._emit_autonomous_fire_decision: emitted %s "
+            "for signal=%s instinct=%s",
+            path, signal_path, matched_instinct_path,
+        )
+        return path
+
+
+# ---------------------------------------------------------------------------
 # Activity: write_needs_attention_record (T6.4.3)
 # ---------------------------------------------------------------------------
 
@@ -633,6 +796,21 @@ async def write_needs_attention_record(
     action_what = str(proposal.get("what") or "").strip()
     suggested_actor = str(proposal.get("suggested_actor") or "").strip()
     due_at = proposal.get("due_at")
+    # Voiced surface fields lifted from the signal frontmatter when
+    # the extraction prompt produced them. The desk renders these in
+    # preference to action_what / reasoning.
+    display_headline_raw = fm.get("display_headline")
+    display_body_raw = fm.get("display_body")
+    display_headline = (
+        str(display_headline_raw).strip()
+        if isinstance(display_headline_raw, str) and display_headline_raw.strip()
+        else ""
+    )
+    display_body = (
+        str(display_body_raw).strip()
+        if isinstance(display_body_raw, str) and display_body_raw.strip()
+        else ""
+    )
 
     # Confidence — for actions, target_confidence only gates when there
     # IS a target (target_kind set). Many actions don't bind to a specific
@@ -647,13 +825,61 @@ async def write_needs_attention_record(
     else:
         combined_confidence = effect_confidence
 
-    ts_iso = _now_utc_iso()
-    ts_part = _ts_filename(ts_iso)
+    # Idempotency: derive the filename from STABLE inputs only. The
+    # docstring claims "filename derives deterministically from
+    # source_event_path + raw_quote so a Temporal retry hits the same
+    # path" — but the original code used _now_utc_iso() for the
+    # timestamp prefix, which advances on every retry. Result: all
+    # retries had the same `-<short_id>` suffix but unique timestamp
+    # prefixes, so each retry wrote a NEW file instead of overwriting
+    # the previous attempt. Confirmed on david 2026-05-12: a single
+    # signal produced 38 needs_attention cards across retries +
+    # workflow ticks.
+    #
+    # Fix: anchor the timestamp to the source signal's `created`
+    # field (stable across retries) rather than current time. The
+    # short_id is already a hash of source_event_path + raw_quote.
+    # Both inputs survive Temporal retries unchanged, so the full
+    # name is now genuinely deterministic.
+    signal_created = str(fm.get("created") or "").strip()
+    ts_iso_for_name = signal_created or _now_utc_iso()
+    ts_now = _now_utc_iso()  # for the `created` field on the card itself
+    ts_part = _ts_filename(ts_iso_for_name)
     digest_input = (
         f"{source_event_path}\x00{raw_quote}".encode("utf-8", errors="replace")
     )
     short_id = hashlib.sha256(digest_input).hexdigest()[:8]
     name = f"{ts_part}-{short_id}"
+
+    # Pre-write idempotency check. Even with the deterministic name,
+    # write_record may not be atomic with respect to retries from
+    # parallel ticks. Belt-and-suspenders: if the target path already
+    # exists, return it instead of writing again.
+    target_existing_path = f"needs_attention/{name}.md"
+    try:
+        check_cfg = load_config()
+        check_client = VaultClient(check_cfg)
+        try:
+            existing = await check_client.read_record(target_existing_path)
+            if isinstance(existing, dict):
+                logger.info(
+                    "signal_actions.write_needs_attention_record: "
+                    "idempotency hit — path=%s already exists (retry)",
+                    target_existing_path,
+                )
+                return target_existing_path
+        except httpx.HTTPStatusError as exc:
+            if exc.response is None or exc.response.status_code != 404:
+                raise
+            # 404 → not present → safe to write below.
+        finally:
+            await check_client.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "signal_actions.write_needs_attention_record: "
+            "idempotency check failed (continuing to write) err=%s",
+            exc,
+        )
 
     def _scalar(v: Any) -> str:
         if v is None:
@@ -672,10 +898,21 @@ async def write_needs_attention_record(
     else:
         due_at_yaml = _scalar(str(due_at))
 
+    # origin_at = when the underlying real-world event happened. Copy
+    # from the source signal so /desk can show the principal's clock
+    # (when the email arrived, when the meeting was) instead of
+    # Alfred's clock (when this card was written).
+    signal_origin_at = str(fm.get("origin_at") or "").strip()
+    origin_at_line = (
+        f"origin_at: {_scalar(signal_origin_at)}"
+        if signal_origin_at else "origin_at: null"
+    )
+
     fm_lines = [
         "---",
         f"type: {_scalar('needs_attention')}",
-        f"created: {_scalar(ts_iso)}",
+        f"created: {_scalar(ts_now)}",
+        origin_at_line,
         f"source_signal_path: {_scalar(source_signal_path)}",
         f"source_event_path: {_scalar(source_event_path)}",
         f"action_what: {_scalar(action_what)}",
@@ -693,6 +930,13 @@ async def write_needs_attention_record(
         # multi-line content + YAML metacharacters cleanly.
         f"raw_quote: {json.dumps(raw_quote, ensure_ascii=False)}",
         f"reasoning: {json.dumps(reasoning, ensure_ascii=False)}",
+        # Voiced surface fields — only emitted when the upstream
+        # signal carried them. Same JSON-encoded scalar trick so
+        # quotes/newlines/em-dashes survive intact.
+        f"display_headline: {json.dumps(display_headline, ensure_ascii=False)}"
+        if display_headline else "display_headline: null",
+        f"display_body: {json.dumps(display_body, ensure_ascii=False)}"
+        if display_body else "display_body: null",
         "---",
         "",
     ]
@@ -774,6 +1018,8 @@ async def dispatch_action_to_agent(
     action_proposal: dict[str, Any],
     target_path: str | None,
     matched_instinct_path: str,
+    source_signal_path: str = "",
+    principal_note: str = "",
 ) -> dict[str, Any]:
     """Dispatch an autonomous action to openclaw main via clerk subagent.
 
@@ -859,7 +1105,7 @@ async def dispatch_action_to_agent(
     due_clause = str(due_at) if due_at else "none"
     guidance_clause = instinct_description or "(no guidance text on record)"
 
-    prompt = (
+    legacy_prompt = (
         "You are Alfred. Sir has an item that needs handling automatically "
         f"per his instinct '{instinct_name}'.\n\n"
         f"Action: {what}\n"
@@ -870,18 +1116,193 @@ async def dispatch_action_to_agent(
         "Do the action and report what you did in 1-2 sentences."
     )
 
-    # Call clerk with raw=True — we want natural-language response, not
-    # JSON. The clerk subagent has full tool access (Plane, vault, etc.)
-    # so it can actually carry out the action.
-    try:
-        agent_raw = await _call_clerk(prompt, raw=True)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "signal_actions.dispatch_action_to_agent: clerk call failed "
-            "what=%r instinct=%s err=%s",
-            what[:100], matched_instinct_path, exc,
+    # ---- New ephemeral-executor path (env-gated) ----
+    # When DISPATCH_USE_EPHEMERAL_EXECUTOR is set, spawn a fresh
+    # exec-<id> subagent on the workers gateway with a tool surface
+    # tailored to this task, run the dispatch against it, then clean
+    # up. This isolates each delegate dispatch from learn-clerk's
+    # shared background context and gives us a deliberate audit
+    # boundary per task.
+    import os as _os
+    use_ephemeral = (
+        _os.environ.get("DISPATCH_USE_EPHEMERAL_EXECUTOR", "").strip().lower()
+        in ("1", "true", "yes", "on")
+    )
+
+    agent_raw: str | dict[str, Any] = ""
+
+    # Serial gate — at most one autonomous agent dispatch in flight per
+    # alfred-learn worker. See module-level _AGENT_DISPATCH_LOCK for
+    # the rationale.
+    logger.info(
+        "signal_actions.dispatch_action_to_agent: acquiring dispatch lock "
+        "(use_ephemeral=%s, source=%s)",
+        use_ephemeral, source_signal_path or "?",
+    )
+    async with _AGENT_DISPATCH_LOCK:
+      logger.info(
+          "signal_actions.dispatch_action_to_agent: dispatch lock acquired",
+      )
+      if use_ephemeral:
+        # Infer Composio slug hints from the source signal's source_type.
+        source_type = ""
+        if source_signal_path:
+            try:
+                sig_client = VaultClient(cfg)
+                try:
+                    sig_rec = await sig_client.read_record(source_signal_path)
+                    sig_fm = (sig_rec or {}).get("frontmatter") or {}
+                    source_type = str(
+                        sig_fm.get("source_type") or ""
+                    ).strip().lower()
+                finally:
+                    await sig_client.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "dispatch_action_to_agent: source signal read failed "
+                    "path=%s err=%s — proceeding without hints",
+                    source_signal_path, exc,
+                )
+
+        from src.activities.tool_inference import infer_required_tools
+        try:
+            hint_payload = await infer_required_tools({"source_type": source_type})
+        except Exception:  # noqa: BLE001
+            hint_payload = {"hints": [], "source_type": source_type}
+        hints: list[str] = list(hint_payload.get("hints") or [])
+
+        hint_block = ""
+        if hints:
+            hint_block = (
+                "\n\nFor this task, consider these Composio actions "
+                "(call them via `composio_execute({action, arguments})`):\n"
+                + "\n".join(f"  - {h}" for h in hints)
+                + "\n\nIf none of these fit, call the `self` tool to discover "
+                "more: `self({endpoint: \"/api/v1/integrations/<toolkit>/actions\"})`.\n"
+            )
+
+        # MCP-5: the executor prompt no longer inlines a hardcoded
+        # tool list. Each openclaw runtime now bundles all 5 stdio MCP
+        # servers (alfred, sure, plane, vaultwarden, execute) + the
+        # canonical AGENTS.md instructions file at
+        # /home/node/.openclaw/AGENTS.md — sourced from the SAME
+        # packages/mcp-server/ tree the claude.ai HTTP Custom
+        # Connector reads, so the surface stays single-source-of-truth.
+        # Tools auto-discover via MCP tools/list at session start;
+        # all we have to do here is tell the agent where the doc is
+        # and which namespaces it'll see.
+        # The principal's note (when present) IS the task. The auto-
+        # extracted action_proposal.what is just CONTEXT — the original
+        # signal the principal saw when he clicked Delegate. The agent
+        # must NEVER treat the proposal as the task when a principal
+        # note is present (that was the EDITH failure: the agent
+        # weighted "Unlock or reset EDITH account" equally with Sir's
+        # actual ask "send me a reminder on telegram right now",
+        # producing a confused half-execution).
+        if principal_note:
+            task_line = principal_note
+            task_context_block = (
+                "\nTask context (the original signal the principal "
+                "was looking at when he delegated — do NOT execute "
+                "this, it's just background for why he asked):\n"
+                f"  - Signal: {what or '(none)'}\n"
+                f"  - Source: `{source_signal_path or 'unknown'}`\n"
+                f"  - Target: {target_clause}\n"
+                f"  - Due: {due_clause}\n"
+                f"  - Instinct hint: {guidance_clause}\n"
+            )
+        else:
+            task_line = what
+            task_context_block = (
+                f"Source signal: `{source_signal_path or 'unknown'}`\n"
+                f"Target: {target_clause}\n"
+                f"Due: {due_clause}\n"
+                f"Guidance from instinct (if any): {guidance_clause}\n"
+            )
+
+        executor_prompt = (
+            "You are Alfred's executor subagent. The principal explicitly "
+            "delegated this task to you from /desk. Execute it concretely. "
+            "You are NOT Sir-facing — do not ask clarifying questions; do "
+            "your best with what you have and report honestly when blocked.\n\n"
+            f"Task (principal's instruction — this is the canonical "
+            f"prompt; execute exactly this):\n{task_line}\n\n"
+            f"{task_context_block}\n"
+            "Your tool surface is the canonical 5-app MCP catalog (same "
+            "tools claude.ai's Custom Connectors see). Namespaces:\n"
+            "  - `alfred__*`      — this tenant's ctrl-api: vault, workflows, "
+            "matters, chores, agents, devices, openclaw config, etc.\n"
+            "  - `plane__*`       — Plane project management (issues, "
+            "comments, cycles, projects, states, labels).\n"
+            "  - `sure__*`        — Sure (Maybe Finance): transactions, "
+            "accounts, categories, budgets, rules.\n"
+            "  - `vaultwarden__*` — Vaultwarden secrets vault (items, "
+            "folders, collections, generation).\n"
+            "  - `execute__*`     — Composio dispatcher for any third-party "
+            "action (Gmail, Calendar, Slack, Notion, GitHub, …).\n"
+            "  - Plus workspace primitives: Read, Write, Edit, Glob, Grep, "
+            "LS, Bash.\n\n"
+            "Full instructions including per-tool usage patterns: read "
+            "`/home/node/.openclaw/AGENTS.md` (the canonical instructions "
+            "doc — same file the claude.ai client loads). Each MCP server "
+            "also exposes its skill markdown as a `resources/read` entry "
+            "(`alfred://skills/<app>-mcp-skill.md`) — use the resources "
+            "list when you need a deeper recipe for that app.\n"
+            f"{hint_block}\n"
+            "Workflow: read the source signal record for context (use the "
+            "appropriate `alfred__*` tool, e.g. `alfred__get_vault_record`), "
+            "pick the right namespaced tool, call it, report what you did in "
+            "1-2 sentences."
         )
-        raise
+
+        from src.activities.ephemeral_agent import (
+            create_ephemeral_agent,
+            wait_for_agent_ready,
+            delete_ephemeral_agent,
+        )
+        # Derive an agent_id from the source signal path or a digest of
+        # the action so retries land on the same name (idempotent for
+        # the ctrl-api POST, which replaces same-id entries).
+        if source_signal_path:
+            task_seed = source_signal_path.split("/")[-1].replace(".md", "")
+        else:
+            task_seed = hashlib.sha256(
+                f"{what}\x00{matched_instinct_path}".encode("utf-8")
+            ).hexdigest()[:12]
+        exec_agent_id = await create_ephemeral_agent(task_seed, hints)
+        try:
+            await wait_for_agent_ready(exec_agent_id)
+            try:
+                agent_raw = await _call_clerk(
+                    executor_prompt, raw=True, agent_id=exec_agent_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "dispatch_action_to_agent: ephemeral dispatch failed "
+                    "agent=%s err=%s",
+                    exec_agent_id, exc,
+                )
+                raise
+        finally:
+            try:
+                await delete_ephemeral_agent(exec_agent_id)
+            except Exception as cleanup_exc:  # noqa: BLE001
+                logger.warning(
+                    "dispatch_action_to_agent: ephemeral cleanup failed "
+                    "agent=%s err=%s",
+                    exec_agent_id, cleanup_exc,
+                )
+      else:
+        # ---- Legacy path: shared learn-clerk subagent ----
+        try:
+            agent_raw = await _call_clerk(legacy_prompt, raw=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "signal_actions.dispatch_action_to_agent: clerk call failed "
+                "what=%r instinct=%s err=%s",
+                what[:100], matched_instinct_path, exc,
+            )
+            raise
 
     # _call_clerk(raw=True) returns str | dict — defensively coerce.
     if isinstance(agent_raw, dict):
@@ -919,6 +1340,12 @@ async def dispatch_action_to_agent(
         f"created: {_scalar(ts_iso)}",
         f"source_type: {_scalar('agent_outcome')}",
         f"source_event_path: {_scalar('')}",
+        # source_signal_path is the upstream signal this outcome is FOR.
+        # check_decision_outcomes uses this field to match outcomes back
+        # to the originating decision (decision.side_effects.re_routed_signal
+        # == outcome.source_signal_path). Without this the executing →
+        # completed transition never fires and decisions stay stuck.
+        f"source_signal_path: {_scalar(source_signal_path)}",
         f"matched_instinct: {_scalar(matched_instinct_path)}",
         f"matched_instinct_name: {_scalar(instinct_name)}",
         f"target_path: {_scalar(target_path) if target_path else 'null'}",
@@ -1077,6 +1504,35 @@ async def route_signal_action(
         if not isinstance(fm, dict):
             fm = {}
 
+        # Idempotency guard. If the signal is already routed, return a
+        # skip — the activity is being retried (likely because a prior
+        # attempt's PATCH step failed and Temporal re-ran the whole
+        # function from the top). Without this gate, every retry calls
+        # `write_needs_attention_record` again, leaving duplicate
+        # pending cards on the Desk. Symptom on david 2026-05-12:
+        # 38 needs_attention cards from a single signal, all created
+        # in clusters of 3 every ~2 min as the workflow ticked + the
+        # retry chain fired. With the guard: re-entry returns early,
+        # no duplicate write, no duplicate audit, signal stays at its
+        # already-set status.
+        existing_status = str(fm.get("status") or "").strip().lower()
+        if existing_status in ("routed_human", "routed_agent"):
+            logger.info(
+                "signal_actions.route_signal_action: idempotency skip "
+                "path=%s already_status=%s",
+                signal_path, existing_status,
+            )
+            return {
+                "signal_path": signal_path,
+                "signal_status": existing_status,
+                "skip_reason": "already_routed",
+                "chosen_path": "skipped",
+                "decision_reason": "idempotency_guard",
+                "audit_record_path": str(fm.get("audit_record_path") or ""),
+                "needs_attention_path": None,
+                "outcome_signal_path": None,
+            }
+
         # 2. Validate effect.
         effect = str(fm.get("effect") or "").strip().lower()
         if effect != "action":
@@ -1132,15 +1588,58 @@ async def route_signal_action(
         agent_outcome: dict[str, Any] | None = None
         needs_attention_path: str | None = None
 
-        if matched is None or matched_path is None:
+        # Principal-override: if the signal carries a ``decision_origin``
+        # pointing at a delegate-intent decision, the principal has
+        # already made the call from /desk. Bypass tier classification
+        # and dispatch to the agent regardless of confidence. Without
+        # this gate, re-armed signals fall back into HUMAN_HIGH (because
+        # that's the tier that put them in needs_attention to begin
+        # with), get marked ``routed_human``, and the originating
+        # decision stays state=executing forever because no outcome
+        # signal ever lands. Symptom on david 2026-05-12: 6 ghost
+        # "Alfred is working" cards over 4-17 hours old, all with
+        # dispatched_at=null. Shadow mode still wins — we don't want
+        # principal-delegate to side-step the live-mode safety belt.
+        decision_origin = fm.get("decision_origin")
+        principal_delegate_override = False
+        principal_note: str = ""
+        if isinstance(decision_origin, str) and decision_origin.strip():
+            try:
+                origin_rec = await client.read_record(decision_origin)
+                origin_fm = (origin_rec or {}).get("frontmatter") or {}
+                if str(origin_fm.get("intent") or "").strip() == "delegate":
+                    principal_delegate_override = True
+                    principal_note = str(
+                        origin_fm.get("note") or ""
+                    ).strip()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "signal_actions.route_signal_action: could not read "
+                    "decision_origin=%s err=%s — falling back to tier",
+                    decision_origin, exc,
+                )
+
+        # Precedence:
+        #   1. principal-delegate override beats everything, including
+        #      shadow mode. The shadow gate exists to block *autonomous*
+        #      agent dispatch (signals routing to the agent without
+        #      principal involvement); when the principal explicitly
+        #      clicked Delegate from /desk that's the opposite case and
+        #      shadow shouldn't apply.
+        #   2. shadow mode for autonomous signals → human.
+        #   3. confidence / instinct-match tier gates.
+        if principal_delegate_override:
+            chosen_path = "agent"
+            decision_reason = "principal_delegated"
+        elif effective_mode == "shadow":
+            chosen_path = "human"
+            decision_reason = "shadow_mode"
+        elif matched is None or matched_path is None:
             chosen_path = "human"
             decision_reason = "no_matching_instinct"
         elif combined_confidence < threshold:
             chosen_path = "human"
             decision_reason = "low_confidence"
-        elif effective_mode == "shadow":
-            chosen_path = "human"
-            decision_reason = "shadow_mode"
         else:
             chosen_path = "agent"
             decision_reason = "high_confidence_match"
@@ -1152,11 +1651,26 @@ async def route_signal_action(
 
         if chosen_path == "agent":
             # We've passed all gates — dispatch.
+            #
+            # For principal-delegated signals, pass the principal's note
+            # as a SEPARATE parameter so the executor prompt can promote
+            # it to the canonical task and demote the auto-extracted
+            # action_proposal to background context. Merging the two
+            # into ``what`` (the prior approach) made the agent treat
+            # them as equal-weight instructions — see the EDITH trace
+            # 2026-05-13 where the agent half-executed "Unlock or reset
+            # EDITH account" instead of "send me a reminder on telegram
+            # right now". The principal's words ALWAYS win.
+            dispatch_principal_note = (
+                principal_note if principal_delegate_override else ""
+            )
             try:
                 agent_outcome = await dispatch_action_to_agent(
                     proposal,
                     target_path,
                     matched_path or "",
+                    source_signal_path=signal_path,
+                    principal_note=dispatch_principal_note,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -1165,6 +1679,44 @@ async def route_signal_action(
                     signal_path, exc,
                 )
                 raise
+
+            # OBS-6: close the learning loop. For truly autonomous
+            # fires (an instinct matched + cleared the discretion
+            # threshold without Sir's involvement), emit a companion
+            # decision so OBS-1's decision→observation pipeline picks
+            # this up the same way it picks up Sir's /desk clicks. The
+            # observation will be stamped subject=principal_via_alfred,
+            # which the OBS-4 clusterer deliberately excludes from its
+            # rule-mining cohort but the LearningWorkflow + audit feed
+            # still surface.
+            #
+            # Skip on principal_delegate_override — that decision was
+            # written by /desk when Sir clicked Delegate; duplicating
+            # it here would double-count the gesture.
+            if (
+                decision_reason == "high_confidence_match"
+                and not principal_delegate_override
+            ):
+                try:
+                    await _emit_autonomous_fire_decision(
+                        signal_path=signal_path,
+                        signal_fm=fm,
+                        matched_instinct_path=matched_path or "",
+                        matched_instinct_name=matched_name or "",
+                        match_score=match_score,
+                        combined_confidence=combined_confidence,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # Decision-write is best-effort — never block the
+                    # dispatch on it. The audit record below still
+                    # captures the fire; we just lose the observation
+                    # pool entry for this particular autonomous tick.
+                    logger.warning(
+                        "signal_actions.route_signal_action: "
+                        "autonomous-fire decision write failed path=%s "
+                        "err=%s",
+                        signal_path, exc,
+                    )
         else:
             # HUMAN path — write the needs_attention card.
             needs_attention_path = await write_needs_attention_record(

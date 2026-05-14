@@ -133,16 +133,22 @@ const PricingPage = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#0A0A0A] px-6 py-32">
+    <div className="paper min-h-screen px-6 py-32">
       <div className="mx-auto max-w-5xl">
         <div className="text-center">
-          <p className="font-mono text-[0.62rem] font-light uppercase tracking-[0.45em] text-gold">
-            PRICING
+          <p
+            className="font-mono text-[10px] uppercase tracking-[0.32em]"
+            style={{ color: "var(--brass)" }}
+          >
+            Pricing
           </p>
-          <h2 className="mt-8 font-serif text-3xl font-light leading-[1.4] text-cream md:text-4xl">
+          <h2 className="mt-8 font-display text-4xl md:text-5xl tracking-tight leading-[1.1]">
             Hire your butler
           </h2>
-          <p className="mx-auto mt-6 max-w-2xl font-sans text-base font-light leading-relaxed text-[#8A8680]">
+          <p
+            className="mx-auto mt-6 max-w-2xl font-body text-[17px] leading-[1.6]"
+            style={{ color: "var(--marginalia)" }}
+          >
             Alfred is ready in minutes. You don't configure him — he serves you.
           </p>
         </div>
@@ -160,37 +166,47 @@ const PricingPage = () => {
             return (
               <div
                 key={planId}
-                className={`flex flex-col justify-between rounded-sm border p-8 transition-all duration-300 ${
-                  isPremium
-                    ? "border-gold bg-[#0A0A0A]"
-                    : "border-gold-dim bg-[#0A0A0A]"
-                }`}
+                className="flex flex-col justify-between border p-8"
+                style={{
+                  borderColor: isPremium ? "var(--brass)" : "var(--rule)",
+                  background: "var(--paper)",
+                }}
               >
                 <div>
-                  <h3 className="font-serif text-2xl font-light text-cream">
+                  <h3 className="font-display text-3xl tracking-tight">
                     {card.name}
                   </h3>
-                  <p className="mt-3 font-sans text-sm font-light leading-relaxed text-[#8A8680]">
+                  <p
+                    className="mt-3 font-body text-[15px] leading-[1.55]"
+                    style={{ color: "var(--marginalia)" }}
+                  >
                     {card.description}
                   </p>
                   <div className="mt-6 flex items-baseline gap-1">
-                    <span className="font-serif text-4xl font-light text-cream">
+                    <span className="font-display text-5xl tracking-tight">
                       {card.price}
                     </span>
                     {card.isCheckout && (
-                      <span className="font-sans text-sm font-light text-[#8A8680]">
+                      <span
+                        className="font-body text-[15px]"
+                        style={{ color: "var(--marginalia)" }}
+                      >
                         /month
                       </span>
                     )}
                   </div>
-                  <ul className="mt-8 space-y-3">
+                  <hr className="gilt my-8" />
+                  <ul className="space-y-3">
                     {card.features.map((feature) => (
                       <li
                         key={feature}
-                        className="flex items-start gap-3 font-sans text-sm font-light text-[#8A8680]"
+                        className="grid grid-cols-[18px_1fr] gap-3 font-body text-[15px] leading-[1.55]"
                       >
-                        <CheckCircle className="mt-0.5 h-4 w-4 flex-none text-gold" />
-                        {feature}
+                        <CheckCircle
+                          className="mt-1 h-3.5 w-3.5"
+                          style={{ color: "var(--brass)" }}
+                        />
+                        <span>{feature}</span>
                       </li>
                     ))}
                   </ul>

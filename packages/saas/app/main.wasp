@@ -3,26 +3,33 @@ app AlfredSaaS {
     version: "^0.19.0"
   },
 
-  title: "Alfred - Your Personal Agentic Butler",
+  title: "Alfred Black — Agentic Butler",
 
   head: [
+    "<link rel='icon' type='image/svg+xml' href='/favicon.svg' />",
     "<link rel='icon' href='/favicon.ico' />",
     "<link rel='apple-touch-icon' href='/images/alfred-logo-192.png' />",
     "<meta charset='utf-8' />",
-    "<meta name='description' content='Alfred is an agentic butler for people who have too many tabs open in their head. Calendar, email, finances, health data, family logistics — Alfred manages it all.' />",
-    "<meta name='author' content='Alfred' />",
-    "<meta name='keywords' content='alfred, agentic butler, ai assistant, personal ai, life management, automation' />",
+    "<meta name='description' content='Alfred Black is an agentic butler for people who have too many tabs open in their head. Calendar, email, finances, health data, family logistics — Alfred manages it all.' />",
+    "<meta name='author' content='Alfred Black' />",
+    "<meta name='keywords' content='alfred black, agentic butler, ai assistant, personal ai, life management, automation' />",
 
     "<meta property='og:type' content='website' />",
-    "<meta property='og:title' content='Alfred - Your Personal Agentic Butler' />",
-    "<meta property='og:site_name' content='Alfred' />",
+    "<meta property='og:title' content='Alfred Black — Agentic Butler' />",
+    "<meta property='og:site_name' content='Alfred Black' />",
     "<meta property='og:url' content='https://alfred.black' />",
     "<meta property='og:description' content='Agentic butler for people who have too many tabs open in their head.' />",
     "<meta property='og:image' content='/images/alfred-logo-512.png' />",
 
+    // Alfred Black theme boot — sets the `dark` class on <html> before paint,
+    // avoiding a flash of incorrect theme. Source of truth for the body lives
+    // in src/client/lib/theme.tsx (export `themeBootScript`); keep these two
+    // copies in sync.
+    "<script>(function(){try{var t=localStorage.getItem('ab-theme');if(!t){t=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}var r=document.documentElement;if(t==='dark')r.classList.add('dark');r.style.colorScheme=t;}catch(e){}})();</script>",
+
     "<link rel='preconnect' href='https://fonts.googleapis.com' />",
     "<link rel='preconnect' href='https://fonts.gstatic.com' crossorigin />",
-    "<link href='https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=DM+Sans:wght@300;400;500&family=JetBrains+Mono:wght@300;400&display=swap' rel='stylesheet' />",
+    "<link href='https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400&family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=JetBrains+Mono:wght@400;500;700;800&display=swap' rel='stylesheet' />",
 
     "<script defer data-domain='alfred.black' src='https://plausible.alfred.black/js/script.js'></script>",
   ],
@@ -93,6 +100,33 @@ app AlfredSaaS {
 route LandingPageRoute { path: "/", to: LandingPage }
 page LandingPage {
   component: import LandingPage from "@src/landing-page/LandingPage"
+}
+
+// Public marketing — the small staff of specialists (#848). No authRequired.
+route StaffRoute { path: "/staff", to: StaffPage }
+page StaffPage {
+  component: import StaffPage from "@src/landing-page/StaffPage"
+}
+
+// Public marketing — companion / voice / sms / voice-and-tone (#849). No authRequired.
+route CompanionRoute { path: "/companion", to: CompanionPage }
+page CompanionPage {
+  component: import CompanionPage from "@src/landing-page/CompanionPage"
+}
+
+route VoiceRoute { path: "/voice", to: VoicePage }
+page VoicePage {
+  component: import VoicePage from "@src/landing-page/VoicePage"
+}
+
+route SmsRoute { path: "/sms", to: SmsPage }
+page SmsPage {
+  component: import SmsPage from "@src/landing-page/SmsPage"
+}
+
+route VoiceAndToneRoute { path: "/voice-and-tone", to: VoiceAndTonePage }
+page VoiceAndTonePage {
+  component: import VoiceAndTonePage from "@src/landing-page/VoiceAndTonePage"
 }
 
 // ============================================================
@@ -251,7 +285,9 @@ job destroyInstance {
 }
 
 // ============================================================
-// Onboarding
+// Onboarding — ritual (#852). The legacy /onboarding and /onboarding/orb
+// pages now redirect to /awaken; their wasp routes stay so post-signup
+// hooks and old emails still resolve.
 // ============================================================
 route OnboardingRoute { path: "/onboarding", to: OnboardingPage }
 page OnboardingPage {
@@ -265,9 +301,157 @@ page OnboardingOrbPage {
   component: import OnboardingOrbPage from "@src/onboarding/OnboardingOrbPage"
 }
 
+route AwakenRoute { path: "/awaken", to: AwakenPage }
+page AwakenPage {
+  authRequired: true,
+  component: import AwakenPage from "@src/onboarding/AwakenPage"
+}
+
+route ReadingTheRoomRoute { path: "/reading-the-room", to: ReadingTheRoomPage }
+page ReadingTheRoomPage {
+  authRequired: true,
+  component: import ReadingTheRoomPage from "@src/onboarding/ReadingTheRoomPage"
+}
+
+route VerifyRoute { path: "/verify", to: VerifyPage }
+page VerifyPage {
+  authRequired: true,
+  component: import VerifyPage from "@src/onboarding/VerifyPage"
+}
+
+// SOUL preset chooser (#853) — sits between /verify and /composing.
+route SoulPresetRoute { path: "/soul", to: SoulPresetPage }
+page SoulPresetPage {
+  authRequired: true,
+  component: import SoulPresetPage from "@src/onboarding/SoulPresetPage"
+}
+
+route ComposingRoute { path: "/composing", to: ComposingPage }
+page ComposingPage {
+  authRequired: true,
+  component: import ComposingPage from "@src/onboarding/ComposingPage"
+}
+
+route PreparingRoute { path: "/preparing", to: PreparingPage }
+page PreparingPage {
+  authRequired: true,
+  component: import PreparingPage from "@src/onboarding/PreparingPage"
+}
+
+route FirstBriefRoute { path: "/first-brief", to: FirstBriefPage }
+page FirstBriefPage {
+  authRequired: true,
+  component: import FirstBriefPage from "@src/onboarding/FirstBriefPage"
+}
+
+// Household editor — sits at the seam between /first-brief and /desk (#854).
+route HouseholdRoute { path: "/household", to: HouseholdPage }
+page HouseholdPage {
+  authRequired: true,
+  component: import HouseholdPage from "@src/onboarding/HouseholdPage"
+}
+
 // ============================================================
 // Dashboard
 // ============================================================
+// /desk — canonical home (M3 #855). Decision queue + audit ledger.
+route DeskRoute { path: "/desk", to: DeskPage }
+page DeskPage {
+  authRequired: true,
+  component: import DeskPage from "@src/dashboard/DeskPage"
+}
+
+// /brief — letterpress daily missive (M3 #857).
+route BriefRoute { path: "/brief", to: BriefPage }
+page BriefPage {
+  authRequired: true,
+  component: import BriefPage from "@src/dashboard/BriefPage"
+}
+
+// /study — unified back office (M6 #867 + #868).
+route StudyRoute { path: "/study", to: StudyPage }
+page StudyPage {
+  authRequired: true,
+  component: import StudyPage from "@src/dashboard/StudyPage"
+}
+
+// Legacy /back-office redirect (CommandCenterPage no longer canonical).
+route BackOfficeRoute { path: "/back-office", to: BackOfficePage }
+page BackOfficePage {
+  authRequired: true,
+  component: import BackOfficePage from "@src/dashboard/BackOfficeRedirect"
+}
+
+// /claude — Claude Setup, restyled (M5 #866).
+route ClaudeRoute { path: "/claude", to: ClaudePage }
+page ClaudePage {
+  authRequired: true,
+  component: import ClaudePage from "@src/dashboard/ClaudePage"
+}
+
+// /channels — live channels (M5 #864).
+route ChannelsRoute { path: "/channels", to: ChannelsPage }
+page ChannelsPage {
+  authRequired: true,
+  component: import ChannelsPage from "@src/dashboard/ChannelsPage"
+}
+
+// /connections + /connect — Composio catalogue, restyled (M5 #863).
+route ConnectionsRoute { path: "/connections", to: ConnectionsPage }
+page ConnectionsPage {
+  authRequired: true,
+  component: import ConnectionsPage from "@src/integrations/ConnectionsPage"
+}
+
+route ConnectRedirectRoute { path: "/connect", to: ConnectionsPage }
+
+// /chores + /chores/:slug — recurring workflows (M4 #862).
+route ChoresRoute { path: "/chores", to: ChoresPage }
+page ChoresPage {
+  authRequired: true,
+  component: import ChoresPage from "@src/intelligence/ChoresPage"
+}
+
+route ChoreDetailRoute2 { path: "/chores/:slug", to: ChoreDetailPage2 }
+page ChoreDetailPage2 {
+  authRequired: true,
+  component: import ChoreDetailPage2 from "@src/intelligence/ChoreDetailPage2"
+}
+
+// /decisions — audit feed of every decision Alfred has made (M4 #861).
+route DecisionsRoute { path: "/decisions", to: DecisionsPage }
+page DecisionsPage {
+  authRequired: true,
+  component: import DecisionsPage from "@src/dashboard/DecisionsPage"
+}
+
+// /instincts — patterns Alfred has learned (M4 #860).
+route InstinctsRoute { path: "/instincts", to: InstinctsPage }
+page InstinctsPage {
+  authRequired: true,
+  component: import InstinctsPage from "@src/intuition/InstinctsPage"
+}
+
+// /vault — three-pane Obsidian view (M4 #858).
+route VaultRoute { path: "/vault", to: VaultPage }
+page VaultPage {
+  authRequired: true,
+  component: import VaultPage from "@src/dashboard/VaultPage"
+}
+
+// /matters + /matters/:id — long-running concerns (M4 #859).
+route MattersRoute { path: "/matters", to: MattersPage }
+page MattersPage {
+  authRequired: true,
+  component: import MattersPage from "@src/dashboard/MattersPage"
+}
+
+route MatterDetailRoute { path: "/matters/:id", to: MatterDetailPage }
+page MatterDetailPage {
+  authRequired: true,
+  component: import MatterDetailPage from "@src/dashboard/MatterDetailPage"
+}
+
 route DashboardRoute { path: "/dashboard", to: DashboardPage }
 page DashboardPage {
   authRequired: true,
@@ -418,6 +602,48 @@ query getVaultRecord {
   entities: [Instance]
 }
 
+// XC #873 — title-index for live wikilink resolution in the Markdown
+// component. Wraps tenant ctrl-api GET /api/v1/vault/index (60s in-memory
+// cached on the tenant side).
+query getVaultTitleIndex {
+  fn: import { getVaultTitleIndex } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// M3 #857 — letterpress /brief page. Wraps tenant ctrl-api
+// GET /api/v1/brief/today which renders today's digest record
+// (DailyDigestWorkflow output) into sections + small_matter.
+query getDailyBrief {
+  fn: import { getDailyBrief } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// M4 #859 — matters aggregator. The /matters index + /matters/:id
+// detail surfaces, plus the /household placeholder backfill. Both
+// queries proxy to the new GET /api/v1/matters[/<id>] endpoints in
+// ctrl-api. Note: the existing tasks/operations.ts already exports
+// a `getMatters` wrapping a triage-style endpoint — we use a distinct
+// dashboard.getMatters here that hits the new /api/v1/matters route.
+// To avoid Wasp name collision, this query is named `getMattersIndex`
+// and the detail is `getMatterDetail`.
+query getMattersIndex {
+  fn: import { getMattersIndex } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getMatterDetail {
+  fn: import { getMatterDetail } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// RFC #884 — living-narrative per-chore detail. Distinct from `getChoreSource`
+// (which returns generated Python). Returns current_state + as_of + timeline
+// keyed off a task vault record.
+query getChoreDetail2 {
+  fn: import { getChoreDetail2 } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
 query getVaultGraph {
   fn: import { getVaultGraph } from "@src/dashboard/operations",
   entities: [Instance]
@@ -465,6 +691,13 @@ query getContainerLogs {
 
 query getActivityFeed {
   fn: import { getActivityFeed } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// Durable audit feed read from vault/event/ records — what the /study#audit
+// section reads. getActivityFeed remains for the LogsPage container-log view.
+query getAuditFeed {
+  fn: import { getAuditFeed } from "@src/dashboard/operations",
   entities: [Instance]
 }
 
@@ -698,6 +931,11 @@ query getChoreSource {
   entities: [Instance]
 }
 
+query getChoreRuns {
+  fn: import { getChoreRuns } from "@src/chores/operations",
+  entities: [Instance]
+}
+
 action pauseChore {
   fn: import { pauseChore } from "@src/chores/operations",
   entities: [Instance]
@@ -797,6 +1035,26 @@ query getOpenclawReadiness {
   entities: [Instance]
 }
 
+// Per-connection scope (read/write action lists) — feeds the "Where I am
+// authorised to act" table on /connections.
+query getIntegrationScope {
+  fn: import { getIntegrationScope } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+// Inbound custom-webhook endpoints — first-class stream sources alongside
+// Composio toolkits + Omi. Each row is a private URL the principal POSTs
+// arbitrary JSON to; each POST lands as a stream_event for the curator.
+action createInboundWebhook {
+  fn: import { createInboundWebhook } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action deleteInboundWebhook {
+  fn: import { deleteInboundWebhook } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
 // Reconciler — closes the gap between "Composio reports ACTIVE" and
 // "tenant has its stream/skill/schedule wired up". Runs every minute and
 // picks up any ComposioConnection where Composio is ACTIVE but our
@@ -818,6 +1076,14 @@ job reconcileComposioAutoConfig {
 // ============================================================
 // Tools (Gateway Allowlist Inspector)
 // ============================================================
+// /tools — restyled in the AB design language (M5 #865). The legacy
+// /dashboard/tools page redirects here.
+route ToolsRoute2 { path: "/tools", to: ToolsPage2 }
+page ToolsPage2 {
+  authRequired: true,
+  component: import ToolsPage2 from "@src/tools/ToolsPage2"
+}
+
 route ToolsRoute { path: "/dashboard/tools", to: ToolsPage }
 page ToolsPage {
   authRequired: true,
@@ -977,6 +1243,62 @@ action resolveNeedsAttentionDispatch {
 
 action resolveNeedsAttentionSkip {
   fn: import { resolveNeedsAttentionSkip } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// Generic Desk-card audit. Every click on Delegate / Defer / Delete /
+// Do — across all source types — writes a permanent audit event via
+// ctrl-api so the activity ledger never loses an action. Additive to
+// the per-source endpoints; the only server call for "Do".
+action recordDeskAction {
+  fn: import { recordDeskAction } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// Decisions — first-class records of every Desk click. Every click
+// writes one; the DecisionRouterWorkflow (alfred-learn, 60s cadence)
+// fans out the side effects. See packages/ctrl/src/api/routes/decisions.ts.
+action recordDecision {
+  fn: import { recordDecision } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getRecentDecisions {
+  fn: import { getRecentDecisions } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action reverseDecision {
+  fn: import { reverseDecision } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// to_do — the principal's persistent personal queue. Spawned by the
+// DecisionRouterWorkflow when intent=take_mine. Replaces the
+// in-React Backstage tray.
+query getMyTodos {
+  fn: import { getMyTodos } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action completeMyTodo {
+  fn: import { completeMyTodo } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// Pattern proposals — proposed standing rules extracted from the
+// principal's recent decisions. Surfaced on /desk as a new card type
+// so adopting / rejecting a rule is itself a Decision.
+// In-flight decisions — for the "What Alfred is doing now" Desk strip.
+// Returns decisions in state=open/scheduled/executing so the page can
+// poll every ~10s and show live progress.
+query getInFlightDecisions {
+  fn: import { getInFlightDecisions } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getPatternProposals {
+  fn: import { getPatternProposals } from "@src/dashboard/operations",
   entities: [Instance]
 }
 

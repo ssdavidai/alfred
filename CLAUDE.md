@@ -155,3 +155,75 @@ Python + Temporal Docker container providing Alfred Black's self-improving intel
 - `TOPOLOGY.md` — service connection map (ports, protocols, env vars)
 - Each package has a `CONTRACT.md` — what it provides and requires
 - `scripts/smoke-test.sh` — post-deploy tenant verification
+
+---
+
+## Alfred Black 1.0 — Vocabulary, Rituals, URLs
+
+### Canonical Home
+
+The canonical home is now **`/desk`** (was `/dashboard`). `/dashboard` is a
+thin back-compat redirect to `/desk`; all the legacy `/dashboard/*` sub-routes
+have been renamed to vocabulary the redesign actually uses.
+
+### Vocabulary (the surface a principal sees)
+
+`Desk · Brief · Vault · Matters · Instincts · Decisions · Chores · Connections · Channels · Tools · Claude · Study · Household · Staff`
+
+- **Desk** (`/desk`) — today's decision queue + audit ledger.
+- **Brief** (`/brief`) — the daily letterpress brief.
+- **Vault** (`/vault`) — three-pane Obsidian view of the principal's vault.
+- **Matters** (`/matters`, `/matters/:id`) — aggregator across the household.
+- **Instincts** (`/instincts`) — Asking / Confirming / Acting tiers.
+- **Decisions** (`/decisions`) — audit feed with HANDLED / HELD / ASKED filters.
+- **Chores** (`/chores`, `/chores/:slug`) — the principal's recurring work.
+- **Connections** (`/connections`) — Composio catalogue.
+- **Channels** (`/channels`) — email + phone + vexa + omi cards.
+- **Tools** (`/tools`) — gateway allowlist viewer.
+- **Claude** (`/claude`) — MCP setup + Skill + secrets.
+- **Study** (`/study`) — the unified back office (settings, credentials, API
+  keys, audit, ledger, theme).
+- **Household** (`/household`) — RULES.md editor + chores.
+- **Staff** (`/staff`) — the small staff of specialists, marketing surface.
+
+### Onboarding Ritual
+
+Onboarding is a sequential ritual, not a single page:
+
+```
+/awaken → /reading-the-room → /verify → /soul → /composing → /preparing → /first-brief → /desk
+```
+
+Each step has its own page and writes its own state into the workspace.
+`/onboarding` redirects to `/awaken`.
+
+### URL Canonicalisation Map
+
+All legacy `/dashboard/*` paths now redirect to canonical names:
+
+| Legacy path | Canonical | Notes |
+|-------------|-----------|-------|
+| `/dashboard` | `/desk` | thin redirect |
+| `/dashboard/vault` | `/vault` | |
+| `/dashboard/integrations` | `/connections` | |
+| `/dashboard/intuition` | `/instincts` | |
+| `/dashboard/tasks` | `/chores` | |
+| `/dashboard/tools` | `/tools` | |
+| `/dashboard/command-center/steward-feed` | `/decisions` | |
+| `/dashboard/settings` | `/study#settings` | unified back office |
+| `/dashboard/credentials` | `/study#credentials` | unified back office |
+| `/dashboard/api-docs` | `/study#api-keys` | unified back office |
+| `/back-office` | `/study` | unified back office |
+| `/onboarding` | `/awaken` | ritual entry |
+
+The `/states` route is dropped. `/triage` redirects to `/desk`.
+
+### Validation Strategy: Parallel Preview
+
+The Alfred Black 1.0 cutover used a parallel-preview validation strategy:
+the redesigned app shipped to **`preview.alfred.black`** built from the
+`feat/alfred-black-1.0` branch with `WASP_DISABLE_JOBS=true` (Wasp jobs
+suppressed on the preview host) and a tenant-proxy denylist
+(`WRITE_BLOCK_TENANT_OPS_DENYLIST`) blocking write operations against real
+tenants. Production stayed on `alfred.black` until the preview was
+exercised end-to-end. See `deploy/CUTOVER.md` for the runbook.

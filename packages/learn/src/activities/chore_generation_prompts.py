@@ -227,6 +227,9 @@ Return ONLY valid JSON matching this exact schema. No markdown fences, no preamb
   "module_name": "<a snake_case slug, e.g. 'gym_attendance_tracker'>",
   "workflow_class_name": "<a CamelCase class name, e.g. 'GymAttendanceTrackerWorkflow' — must end with 'Workflow'>",
   "user_facing_description": "<2-4 sentences in plain English explaining what this chore actually DOES — not what problem it solves. The user will read this in their dashboard. Write in second person ('You' or 'Your'). Mention the schedule, the data sources, and the trigger condition. Be specific about thresholds and behavior. Example: 'Every Tuesday at 9am, this chore pulls your last 7 days of Stripe + Polar payments and compares them against the prior week. If incoming payment volume drops by more than 20%%, you get an alert. Otherwise it stays silent.'>",
+  "display_name": "<a short, principal-facing title — ≤ 50 characters, sentence case, no trailing period. Examples: 'Watch subscriptions', 'Weekly cash-flow forecast', 'Daily morning briefing'.>",
+  "display_body": "<60-160 words of MARKDOWN explaining what + why this chore exists. Address the principal as 'you' / 'your'. Use **bold** for the action verb. End with one sentence on what would go wrong without this chore. This is the prose rendered prominently on /chores/:slug — make it land as careful butler-speak, not technical prose.>",
+  "category": "<one of: briefing | digest | watch | context-build | prefetch | maintenance. Pick the dominant intent. briefing = morning/evening overview, digest = weekly synthesis, watch = monitor for change, context-build = populate vault state, prefetch = warm up future context, maintenance = housekeeping.>",
   "schedule": "<a 5-field cron expression in UTC that matches the schedule you just described, e.g. '0 9 * * 2' for 'every Tuesday at 9am UTC'>",
   "python_source": "<the full Python file source as a single string with \\n line breaks>"
 }}

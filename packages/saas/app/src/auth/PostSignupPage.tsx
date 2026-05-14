@@ -47,12 +47,12 @@ export default function PostSignupPage() {
     // Non-Google signups (email+password) have no credential row at all. Nothing
     // to fix; head straight to the dashboard.
     if (!tokenStatus?.hasCredential) {
-      window.location.replace("/dashboard");
+      window.location.replace("/desk");
       return;
     }
 
     if (tokenStatus.hasRefreshToken) {
-      window.location.replace("/dashboard");
+      window.location.replace("/desk");
       return;
     }
 
@@ -63,7 +63,7 @@ export default function PostSignupPage() {
     const params = new URLSearchParams({
       userId: user.id,
       scopes: GMAIL_READONLY_SCOPE,
-      redirectAfter: "/dashboard",
+      redirectAfter: "/desk",
     });
     window.location.replace(`/auth/oauth2/google/start?${params.toString()}`);
   }, [user, userLoading, tokenStatus, tokenLoading]);

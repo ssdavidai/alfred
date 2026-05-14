@@ -18,6 +18,10 @@ export const calculateDailyStats: DailyStatsJob<never, void> = async (
   _args,
   context,
 ) => {
+  if (process.env.WASP_DISABLE_JOBS === 'true') {
+    console.log('[WASP_DISABLE_JOBS] skipping calculateDailyStats');
+    return;
+  }
   const nowUTC = new Date(Date.now());
   nowUTC.setUTCHours(0, 0, 0, 0);
 

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { Navigate } from "react-router-dom";
 import {
   useQuery,
   getIntegrationCatalog,
@@ -140,7 +141,14 @@ const INTERVAL_PRESETS: Array<{ seconds: number; label: string }> = [
 // Main Page
 // ---------------------------------------------------------------------------
 
+// M5 #863 — /dashboard/integrations redirects to /connections. The legacy
+// implementation is preserved as LegacyIntegrationsPage so cutover can be
+// reverted with one line.
 export default function IntegrationsPage() {
+  return <Navigate to="/connections" replace />;
+}
+
+function LegacyIntegrationsPage() {
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("all");
   const [expandedConn, setExpandedConn] = useState<string | null>(null);

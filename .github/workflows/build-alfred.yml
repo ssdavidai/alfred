@@ -10,6 +10,14 @@ on:
       - 'packages/openclaw/config.yaml.tpl'
       - 'packages/openclaw/openclaw-wrapper'
       - 'packages/openclaw/patches/**'
+      # MCP-4: init image bundles the mcp-server stdio build, so
+      # changes to either trigger a rebuild.
+      - 'packages/mcp-server/src/**'
+      - 'packages/mcp-server/skills/**'
+      - 'packages/mcp-server/instructions/**'
+      - 'packages/mcp-server/package.json'
+      - 'packages/mcp-server/package-lock.json'
+      - 'packages/mcp-server/tsconfig.json'
   workflow_dispatch:
 
 concurrency:
@@ -36,7 +44,11 @@ jobs:
       - name: Build and push alfred-init image
         uses: docker/build-push-action@v6
         with:
-          context: packages/openclaw
+          # MCP-4: context switched from packages/openclaw → . so the
+          # Dockerfile's multi-stage mcp-builder can COPY from
+          # packages/mcp-server/. All other COPYs in the Dockerfile
+          # are now repo-relative (packages/openclaw/init/...).
+          context: .
           file: packages/openclaw/init/Dockerfile
           push: true
           build-args: |

@@ -2,7 +2,14 @@ import { HttpError } from "wasp/server";
 import { Instance } from "wasp/entities";
 import { encryptApiKey, decryptApiKey } from "./columnCrypto";
 
-const TENANT_API_TIMEOUT = 15_000;
+// 60s, not 15s. Several ctrl-api endpoints (admin/activity, vault/list/*,
+// matters aggregator) scan thousands of vault files synchronously and
+// regularly take 2-4 s under no load; under burst load from the Desk's
+// ~12 parallel queries plus alfred-learn's background workers, individual
+// requests serialise on the single Node event loop and routinely cross
+// 15 s. The old ceiling caused 504 storms on every Desk action because
+// the post-mutation invalidateQueries re-fires the whole fan-out at once.
+const TENANT_API_TIMEOUT = 60_000;
 
 interface ProxyOptions {
   method?: string;
@@ -32,6 +39,37 @@ export async function proxyToTenant(
       503,
       `Instance is ${instance.status}. It must be running to access the dashboard.`,
     );
+  }
+
+  // Preview-mode write blocker. Two modes:
+  //   WRITE_BLOCK_TENANT_OPS=true                    → block ALL non-GET writes
+  //   WRITE_BLOCK_TENANT_OPS_DENYLIST=host1,host2    → block writes only for
+  //                                                    listed tailscale hostnames
+  // The blanket switch takes precedence over the denylist.
+  const method = (options.method || 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') {
+    if (process.env.WRITE_BLOCK_TENANT_OPS === 'true') {
+      throw new HttpError(
+        503,
+        `Preview-mode write blocker — refusing ${method} ${options.path}`,
+      );
+    }
+    const denylist = process.env.WRITE_BLOCK_TENANT_OPS_DENYLIST;
+    if (denylist) {
+      const blocked = denylist
+        .split(',')
+        .map((h) => h.trim())
+        .filter(Boolean);
+      if (
+        instance.tailscaleHostname &&
+        blocked.includes(instance.tailscaleHostname)
+      ) {
+        throw new HttpError(
+          503,
+          `Preview-mode write blocker — refusing ${method} ${options.path}`,
+        );
+      }
+    }
   }
 
   const apiKey = decryptApiKey(instance.apiKey);

@@ -28,6 +28,7 @@ import { ApiError, sendJson, ValidationError, NotFoundError, ConflictError } fro
 import { dockerExec, ALFRED_CMD } from "../helpers.js";
 import { VAULT_PATH, VAULT_ENV, readRecord, walkMd, IGNORE_DIRS } from "./vault.js";
 import { revertStewardAction, postStewardAction } from "./plane.js";
+import { vaultWalkCache } from "../vaultCache.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -388,54 +389,68 @@ export function registerStewardRoutes(): void {
     // (fast) and skips the IGNORE_DIRS the rest of the vault routes
     // use — we want the same skip-list so a misplaced record under
     // ``_templates/`` etc. doesn't pollute the timeline.
-    const allFiles = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
-    const actions: StewardActionRecord[] = [];
-    const sourcePruned: StewardSourcePrunedRecord[] = [];
-    for (const relPath of allFiles) {
-      if (isStewardActionPath(relPath)) {
-        const record = loadActionRecord(relPath);
-        if (!record) continue;
-        const tsMs = parseTs(record.timestamp);
-        if (tsMs === null || tsMs < sinceMs) continue;
-        if (target && record.target !== target) continue;
-        actions.push(record);
-        continue;
+    //
+    // Cache the (since, limit, target, include_source_pruned) tuple
+    // for a few seconds so the Desk's per-page-load + per-click
+    // refetches collapse onto a single walk + loadActionRecord pass.
+    //
+    // ``sinceMs`` for the default code path is ``now - 24h``, recomputed
+    // every call — without bucketing every request produces a unique
+    // cache key and we miss 100% of the time. Round to a 3 s window so
+    // bursts share a key while preserving 3 s freshness.
+    const sinceBucket = Math.floor(sinceMs / 3_000);
+    const cacheKey = `steward:${sinceBucket}:${limit}:${target}:${includeSourcePruned ? 1 : 0}`;
+    const responsePayload = await vaultWalkCache.get(cacheKey, () => {
+      const allFiles = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+      const actions: StewardActionRecord[] = [];
+      const sourcePruned: StewardSourcePrunedRecord[] = [];
+      for (const relPath of allFiles) {
+        if (isStewardActionPath(relPath)) {
+          const record = loadActionRecord(relPath);
+          if (!record) continue;
+          const tsMs = parseTs(record.timestamp);
+          if (tsMs === null || tsMs < sinceMs) continue;
+          if (target && record.target !== target) continue;
+          actions.push(record);
+          continue;
+        }
+        if (includeSourcePruned && isStewardSourcePrunedPath(relPath)) {
+          const record = loadSourcePrunedRecord(relPath);
+          if (!record) continue;
+          const tsMs = parseTs(record.timestamp);
+          if (tsMs === null || tsMs < sinceMs) continue;
+          if (target && record.target !== target) continue;
+          sourcePruned.push(record);
+        }
       }
-      if (includeSourcePruned && isStewardSourcePrunedPath(relPath)) {
-        const record = loadSourcePrunedRecord(relPath);
-        if (!record) continue;
-        const tsMs = parseTs(record.timestamp);
-        if (tsMs === null || tsMs < sinceMs) continue;
-        if (target && record.target !== target) continue;
-        sourcePruned.push(record);
+
+      // Newest first — timeline UI expectation.
+      actions.sort((a, b) => {
+        const ta = parseTs(a.timestamp) ?? 0;
+        const tb = parseTs(b.timestamp) ?? 0;
+        return tb - ta;
+      });
+      sourcePruned.sort((a, b) => {
+        const ta = parseTs(a.timestamp) ?? 0;
+        const tb = parseTs(b.timestamp) ?? 0;
+        return tb - ta;
+      });
+
+      const truncated = actions.length > limit;
+      const payload: Record<string, unknown> = {
+        actions: actions.slice(0, limit),
+        count: Math.min(actions.length, limit),
+        since: new Date(sinceMs).toISOString(),
+        truncated,
+      };
+      if (includeSourcePruned) {
+        const sourcePrunedTruncated = sourcePruned.length > limit;
+        payload.source_pruned = sourcePruned.slice(0, limit);
+        payload.source_pruned_count = Math.min(sourcePruned.length, limit);
+        payload.source_pruned_truncated = sourcePrunedTruncated;
       }
-    }
-
-    // Newest first — timeline UI expectation.
-    actions.sort((a, b) => {
-      const ta = parseTs(a.timestamp) ?? 0;
-      const tb = parseTs(b.timestamp) ?? 0;
-      return tb - ta;
+      return payload;
     });
-    sourcePruned.sort((a, b) => {
-      const ta = parseTs(a.timestamp) ?? 0;
-      const tb = parseTs(b.timestamp) ?? 0;
-      return tb - ta;
-    });
-
-    const truncated = actions.length > limit;
-    const responsePayload: Record<string, unknown> = {
-      actions: actions.slice(0, limit),
-      count: Math.min(actions.length, limit),
-      since: new Date(sinceMs).toISOString(),
-      truncated,
-    };
-    if (includeSourcePruned) {
-      const sourcePrunedTruncated = sourcePruned.length > limit;
-      responsePayload.source_pruned = sourcePruned.slice(0, limit);
-      responsePayload.source_pruned_count = Math.min(sourcePruned.length, limit);
-      responsePayload.source_pruned_truncated = sourcePrunedTruncated;
-    }
     sendJson(res, 200, responsePayload);
   });
 

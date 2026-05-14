@@ -10,6 +10,7 @@ import type {
   GetDevices,
   GetContainerLogs,
   GetActivityFeed,
+  GetAuditFeed,
   GetCredentials,
   GetAgentConfig,
   GetModelCatalog,
@@ -444,6 +445,18 @@ export const getActivityFeed: GetActivityFeed<void, any> = async (
   });
 };
 
+// Audit feed — reads vault/event/ records (durable trail of every act
+// Alfred has taken on the principal's behalf). Distinct from
+// getActivityFeed, which scrapes the alfred container's docker-compose
+// logs (debug-ops surface).
+export const getAuditFeed: GetAuditFeed<void, any> = async (_args, context) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/admin/audit",
+    query: { limit: "50" },
+  });
+};
+
 // ============================================================
 // Container Logs
 // ============================================================
@@ -569,7 +582,15 @@ export const updateAgentModel: UpdateAgentModel<
 // ============================================================
 // Workspace Files
 // ============================================================
-const WORKSPACE_FILES = ["SOUL.md", "USER.md", "MEMORY.md", "AGENTS.md", "TOOLS.md"];
+const WORKSPACE_FILES = [
+  "SOUL.md",
+  "USER.md",
+  "MEMORY.md",
+  "AGENTS.md",
+  "TOOLS.md",
+  // M2-D #854 — household editor + M6 #867 standing-rules editor in /study.
+  "RULES.md",
+];
 
 export const getWorkspaceFile: GetWorkspaceFile<
   { filename: string },
@@ -945,6 +966,207 @@ export const resolveNeedsAttentionSkip = async (
   });
 };
 
+// Every Desk-card click writes an audit event regardless of source.
+// The per-source endpoints (resolveNeedsAttentionDispatch etc., or the
+// approvals endpoints) still mutate the underlying record; this is
+// additive and guarantees the action lands in the activity ledger.
+// "Do" is the only action with no per-source endpoint — this becomes
+// its only server call.
+export const recordDeskAction = async (
+  args: {
+    source: "needs_attention" | "approval" | "judgment" | "pattern_proposal";
+    sourceId: string;
+    action: "delegate" | "defer" | "delete" | "do" | "noise";
+    note?: string;
+  },
+  context: any,
+): Promise<any> => {
+  if (!args?.source) throw new HttpError(400, "source required");
+  if (!args?.sourceId) throw new HttpError(400, "sourceId required");
+  if (!args?.action) throw new HttpError(400, "action required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/admin/desk-action",
+    body: {
+      source: args.source,
+      source_id: args.sourceId,
+      action: args.action,
+      note: args.note ?? "",
+    },
+  });
+};
+
+// ============================================================
+// Decisions — first-class records of every Desk click.
+// ============================================================
+//
+// recordDecision writes a decision/<ts>.md record. The
+// DecisionRouterWorkflow on alfred-learn picks it up within ~60s and
+// fans out the side effects (status flips, signal re-arm, to_do spawn).
+// Every click on the Desk now goes through this; the older
+// recordDeskAction remains as a parallel audit format for backwards
+// compat with the /decisions page.
+
+export const recordDecision = async (
+  args: {
+    source:
+      | "needs_attention"
+      | "approval"
+      | "judgment"
+      | "to_do"
+      | "desk_originated"
+      | "pattern_proposal";
+    sourceRecord: string;
+    intent: "delegate" | "defer" | "done" | "take_mine" | "noise";
+    note?: string;
+    matterRef?: string;
+    taskRef?: string;
+    sourceHeadline?: string;
+    timeToDecisionMs?: number;
+  },
+  context: any,
+): Promise<any> => {
+  if (!args?.source) throw new HttpError(400, "source required");
+  if (!args?.sourceRecord) throw new HttpError(400, "sourceRecord required");
+  if (!args?.intent) throw new HttpError(400, "intent required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/decisions",
+    body: {
+      source: args.source,
+      source_record: args.sourceRecord,
+      intent: args.intent,
+      note: args.note ?? "",
+      matter_ref: args.matterRef ?? "",
+      task_ref: args.taskRef ?? "",
+      source_headline: args.sourceHeadline ?? "",
+      time_to_decision_ms: args.timeToDecisionMs ?? null,
+    },
+  });
+};
+
+export const getRecentDecisions = async (
+  args: { state?: string; source?: string; limit?: number } | void,
+  context: any,
+): Promise<any> => {
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args && typeof args === "object") {
+    if (args.state) query.state = args.state;
+    if (args.source) query.source = args.source;
+    if (typeof args.limit === "number") query.limit = String(args.limit);
+  }
+  try {
+    return await proxyToTenant(instance, {
+      method: "GET",
+      path: "/api/v1/decisions",
+      query: Object.keys(query).length ? query : undefined,
+    });
+  } catch {
+    // Older ctrl-api without the route → empty list so the page renders.
+    return { decisions: [], count: 0 };
+  }
+};
+
+export const reverseDecision = async (
+  args: { id: string },
+  context: any,
+): Promise<any> => {
+  if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: `/api/v1/decisions/${encodeURIComponent(args.id)}/reverse`,
+  });
+};
+
+// ============================================================
+// to_do — persistent personal queue (replaces the in-React Backstage).
+// ============================================================
+
+export const getMyTodos = async (
+  args: { state?: string; limit?: number } | void,
+  context: any,
+): Promise<any> => {
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args && typeof args === "object") {
+    if (args.state) query.state = args.state;
+    if (typeof args.limit === "number") query.limit = String(args.limit);
+  }
+  try {
+    return await proxyToTenant(instance, {
+      method: "GET",
+      path: "/api/v1/todos",
+      query: Object.keys(query).length ? query : undefined,
+    });
+  } catch {
+    return { todos: [], count: 0 };
+  }
+};
+
+export const completeMyTodo = async (
+  args: { id: string },
+  context: any,
+): Promise<any> => {
+  if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PATCH",
+    path: `/api/v1/todos/${encodeURIComponent(args.id)}`,
+    body: { state: "completed" },
+  });
+};
+
+// In-flight decisions — the live activity feed. Returns decisions
+// whose work hasn't fully settled yet (state=open / scheduled /
+// executing). The Desk strip polls this every ~10s so the principal
+// can watch Alfred work through a batch they just delegated.
+export const getInFlightDecisions = async (
+  args: { limit?: number } | void,
+  context: any,
+): Promise<any> => {
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args && typeof args === "object" && typeof args.limit === "number") {
+    query.limit = String(args.limit);
+  }
+  try {
+    return await proxyToTenant(instance, {
+      method: "GET",
+      path: "/api/v1/decisions/in-flight",
+      query: Object.keys(query).length ? query : undefined,
+    });
+  } catch {
+    return { decisions: [], count: 0 };
+  }
+};
+
+// Pattern proposals — proposed standing rules. The principal's
+// Delegate click on one of these adopts it as an active instinct;
+// Delete rejects it. Surfaced on /desk alongside needs_attention etc.
+export const getPatternProposals = async (
+  args: { limit?: number } | void,
+  context: any,
+): Promise<any> => {
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args && typeof args === "object" && typeof args.limit === "number") {
+    query.limit = String(args.limit);
+  }
+  try {
+    return await proxyToTenant(instance, {
+      method: "GET",
+      path: "/api/v1/admin/pattern-proposals",
+      query: Object.keys(query).length ? query : undefined,
+    });
+  } catch {
+    return { proposals: [], count: 0 };
+  }
+};
+
 // ============================================================
 // Phase 6 — Steward feed (#160)
 // ============================================================
@@ -1007,4 +1229,417 @@ export const submitFactCorrections: any = async (
   });
 
   return { status: "brief_generating" };
+};
+
+// ============================================================
+// Vault title-index (#873) — wraps GET /api/v1/vault/index on the
+// tenant-side ctrl-api. Consumed by client/components/ab/Markdown.tsx
+// for live wikilink resolution.
+// ============================================================
+
+// ============================================================
+// Matters aggregator (#859) — GET /api/v1/matters[/:id] on tenant
+// ctrl-api. The aggregator walks the vault once and surfaces a per-
+// matter tally (counts of conversations/decisions/tasks/drafts) plus
+// — for the detail endpoint — a recent-decisions list and a
+// per-category vault link list. Both endpoints degrade to empty
+// payloads on tenant errors so older ctrl-api builds don't break the
+// page.
+// ============================================================
+
+export const getMattersIndex = async (
+  _args: void,
+  context: any,
+): Promise<{
+  matters: Array<{
+    id: string;
+    path: string;
+    name: string;
+    summary: string;
+    last: string;
+    next: string;
+    counts: {
+      conversations: number;
+      decisions: number;
+      tasks: number;
+      drafts: number;
+    };
+  }>;
+  count: number;
+}> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  const instance = await getUserInstance(context);
+  // Prefer the rich /api/v1/matters aggregator if the tenant ctrl-api has it.
+  try {
+    const data: any = await proxyToTenant(instance, { path: "/api/v1/matters" });
+    const matters = Array.isArray(data?.matters) ? data.matters : [];
+    if (matters.length > 0 || data?.matters !== undefined) {
+      return { matters, count: Number(data?.count ?? matters.length) };
+    }
+  } catch (err) {
+    // 404 from older ctrl-api builds → fall through to vault list shim
+    console.warn(
+      "[getMattersIndex] /api/v1/matters not available, falling back to /vault/list/matter:",
+      (err as Error)?.message,
+    );
+  }
+  // Fallback: list raw matter/* records from the existing vault endpoint.
+  // Counts are unknown (0) until the tenant runs a ctrl-api with the aggregator.
+  try {
+    const list: any = await proxyToTenant(instance, {
+      path: "/api/v1/vault/list/matter",
+    });
+    const results: any[] = Array.isArray(list?.results) ? list.results : [];
+    const matters = results.map((r) => {
+      const fm = r?.frontmatter ?? {};
+      const stem = String(r?.path ?? "").replace(/^matter\//, "").replace(/\.md$/, "");
+      return {
+        id: stem,
+        path: r?.path ?? "",
+        name: r?.name || stem,
+        summary: String(fm.description ?? fm.summary ?? ""),
+        last: String(fm.updated ?? fm.modified ?? fm.created ?? ""),
+        next: String(fm.next ?? fm.next_action ?? ""),
+        counts: { conversations: 0, decisions: 0, tasks: 0, drafts: 0 },
+      };
+    });
+    return { matters, count: matters.length };
+  } catch (err) {
+    console.warn(
+      "[getMattersIndex] vault/list/matter fallback failed:",
+      (err as Error)?.message,
+    );
+    return { matters: [], count: 0 };
+  }
+};
+
+// RFC #884 — Living narratives. matters and tasks gain `current_state`,
+// `as_of` (last-rewrite ISO-8601 datetime), and matters also carry a
+// `signal_count_24h` bookkeeping counter. The aggregator endpoint is the
+// canonical source; the fallback path here maps frontmatter directly so the
+// UI stays renderable against older ctrl-api builds that don't yet emit the
+// new shape.
+type TaskState = "pending" | "in_progress" | "done" | "archived";
+
+interface MatterTimelineEntry {
+  when: string;
+  kind: "signal" | "task_transition" | "action";
+  headline: string;
+  path: string;
+}
+
+interface MatterTaskRow {
+  id: string;
+  name: string;
+  state: TaskState;
+  current_state: string | null;
+  as_of: string | null;
+}
+
+function normalizeTaskState(value: unknown): TaskState {
+  const s = String(value ?? "").toLowerCase();
+  if (s === "in_progress" || s === "in-progress" || s === "active") return "in_progress";
+  if (s === "done" || s === "complete" || s === "completed") return "done";
+  if (s === "archived" || s === "cancelled" || s === "canceled") return "archived";
+  return "pending";
+}
+
+function nullableString(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  return s ? s : null;
+}
+
+export const getMatterDetail = async (
+  args: { id: string },
+  context: any,
+): Promise<{
+  matter: any | null;
+}> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  // Prefer the rich aggregator endpoint when available.
+  try {
+    const data: any = await proxyToTenant(instance, {
+      path: `/api/v1/matters/${encodeURIComponent(args.id)}`,
+    });
+    if (data?.matter) {
+      // Aggregator path: trust the server shape but defensively fill in the
+      // RFC-884 fields if an older ctrl-api forgot them so the UI never sees
+      // `undefined`.
+      const m = data.matter;
+      return {
+        matter: {
+          ...m,
+          current_state:
+            m.current_state === undefined ? null : m.current_state,
+          as_of: m.as_of === undefined ? null : m.as_of,
+          signal_count_24h:
+            typeof m.signal_count_24h === "number" ? m.signal_count_24h : 0,
+          timeline: Array.isArray(m.timeline) ? m.timeline : [],
+          tasks: Array.isArray(m.tasks) ? m.tasks : [],
+        },
+      };
+    }
+  } catch (err) {
+    console.warn(
+      "[getMatterDetail] /api/v1/matters not available, falling back to /vault/record:",
+      (err as Error)?.message,
+    );
+  }
+  // Fallback: read the raw matter record + its backlinks via existing endpoints.
+  try {
+    const cleanId = String(args.id).replace(/^matter\//, "").replace(/\.md$/, "");
+    const recordPath = `matter/${cleanId}.md`;
+    const rec: any = await proxyToTenant(instance, {
+      path: `/api/v1/vault/records/${encodeURIComponent(recordPath)}`,
+    });
+    if (!rec || (rec.error && !rec.body && !rec.frontmatter)) {
+      return { matter: null };
+    }
+    const fm = rec.frontmatter ?? {};
+    const body: string = String(rec.body ?? rec.content ?? "");
+    // Strip the YAML frontmatter from the body if it's included
+    const stripped = body.replace(/^---[\s\S]*?---\s*/, "").trim();
+    // Extract the first H1 as the human name (records endpoint doesn't return name/title)
+    const h1 = stripped.match(/^\s*#\s+(.+?)\s*$/m);
+    const extractedName = h1 ? h1[1].trim() : "";
+    // Drop the H1 line from the about body so the page doesn't show the title twice
+    const about = h1 ? stripped.replace(h1[0], "").trim() : stripped;
+    // Best-effort backlinks via the graph endpoint
+    let backlinks: any[] = [];
+    try {
+      const graph: any = await proxyToTenant(instance, {
+        path: `/api/v1/vault/graph?focus=${encodeURIComponent(recordPath)}`,
+      });
+      backlinks = Array.isArray(graph?.backlinks) ? graph.backlinks : [];
+    } catch {
+      /* ignore — graph is optional for fallback */
+    }
+    const bin = (type: string) =>
+      backlinks
+        .filter((b) => String(b?.type ?? b?.path ?? "").toLowerCase().includes(type))
+        .map((b) => ({ title: b.title ?? b.name ?? b.path, path: b.path, date: b.updated ?? b.created ?? "" }));
+    const conversations = bin("conversation");
+    const decisions = bin("decision");
+    const tasks = bin("task");
+    const drafts = bin("draft");
+    // RFC #884 fallback fields. Older ctrl-api builds won't have written
+    // `current_state`/`as_of` into the matter frontmatter yet, so leave them
+    // null and let the UI render an empty-state. `timeline` and `tasks` are
+    // empty — the aggregator endpoint is the only place that joins those.
+    const fallbackTimeline: MatterTimelineEntry[] = [];
+    const fallbackTasks: MatterTaskRow[] = [];
+    return {
+      matter: {
+        id: cleanId,
+        path: recordPath,
+        name: rec.name || fm.title || extractedName || cleanId,
+        summary: String(fm.description ?? fm.summary ?? ""),
+        last: String(fm.updated ?? fm.modified ?? fm.created ?? ""),
+        next: String(fm.next ?? fm.next_action ?? ""),
+        about,
+        counts: {
+          conversations: conversations.length,
+          decisions: decisions.length,
+          tasks: tasks.length,
+          drafts: drafts.length,
+        },
+        recent_decisions: decisions.slice(0, 10).map((d: any) => ({
+          date: d.date ?? "",
+          label: d.title,
+          outcome: "Handled",
+          path: d.path,
+        })),
+        vault_by_category: { conversations, decisions, tasks, drafts },
+        // Living narrative fields (RFC #884) — fallback maps directly off
+        // raw frontmatter; absent values become null so the UI surfaces an
+        // empty-state copy rather than crashing.
+        current_state: nullableString(fm.current_state),
+        as_of: nullableString(fm.as_of),
+        signal_count_24h:
+          typeof fm.signal_count_24h === "number" ? fm.signal_count_24h : 0,
+        timeline: fallbackTimeline,
+        tasks: fallbackTasks,
+      },
+    };
+  } catch (err) {
+    console.warn(
+      "[getMatterDetail] vault/record fallback failed:",
+      (err as Error)?.message,
+    );
+    return { matter: null };
+  }
+};
+
+// RFC #884 — per-chore living-narrative detail. Separate from the existing
+// `getChoreSource` so we don't disturb the M4 source-audit endpoint.
+//
+// The ctrl-api `/api/v1/chores/:slug` endpoint (cf20192) embeds the new
+// RFC-884 `chore` block alongside the legacy `{slug, frontmatter, body}`
+// payload, so we pull that and pass it through. Older ctrl-api builds that
+// only return `frontmatter` are handled by mapping raw frontmatter; a final
+// fallback reads the chore vault record directly.
+//
+// Return type is intentionally `any | null` to satisfy Wasp's SuperJSON
+// serialisation constraint (which rejects strict interface types without an
+// index signature) — the client narrows the shape locally.
+export const getChoreDetail2 = async (
+  args: { id: string },
+  context: any,
+): Promise<{ chore: any | null }> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  if (!args?.id) throw new HttpError(400, "id required");
+  const instance = await getUserInstance(context);
+  const cleanId = String(args.id)
+    .replace(/^chore\//, "")
+    .replace(/^task\//, "")
+    .replace(/\.md$/, "");
+  // Try the chore detail endpoint — embeds RFC-884 fields when available.
+  try {
+    const data: any = await proxyToTenant(instance, {
+      path: `/api/v1/chores/${encodeURIComponent(cleanId)}`,
+    });
+    if (data?.chore) {
+      const c = data.chore;
+      return {
+        chore: {
+          id: String(c.id ?? cleanId),
+          path: String(c.path ?? `chore/${cleanId}.md`),
+          name: String(c.name ?? cleanId),
+          state: normalizeTaskState(c.state),
+          current_state:
+            c.current_state === undefined ? null : nullableString(c.current_state),
+          as_of: c.as_of === undefined ? null : nullableString(c.as_of),
+          timeline: Array.isArray(c.timeline) ? c.timeline : [],
+        },
+      };
+    }
+    // Older ctrl-api: only `frontmatter` is present, no `chore` block. Map
+    // the raw frontmatter into the new shape so the UI degrades gracefully.
+    if (data?.frontmatter) {
+      const fm = data.frontmatter ?? {};
+      return {
+        chore: {
+          id: cleanId,
+          path: String(data.path ?? `chore/${cleanId}.md`),
+          name: String(fm.name ?? data.slug ?? cleanId),
+          state: normalizeTaskState(fm.state),
+          current_state: nullableString(fm.current_state),
+          as_of: nullableString(fm.as_of),
+          timeline: [],
+        },
+      };
+    }
+  } catch (err) {
+    console.warn(
+      "[getChoreDetail2] /api/v1/chores/:slug not available, falling back to /vault/record:",
+      (err as Error)?.message,
+    );
+  }
+  // Final fallback: read the chore vault record directly. Tries `chore/`
+  // first (spec-canonical location), then `task/` (legacy).
+  for (const folder of ["chore", "task"]) {
+    try {
+      const recordPath = `${folder}/${cleanId}.md`;
+      const rec: any = await proxyToTenant(instance, {
+        path: `/api/v1/vault/records/${encodeURIComponent(recordPath)}`,
+      });
+      if (!rec || (rec.error && !rec.body && !rec.frontmatter)) continue;
+      const fm = rec.frontmatter ?? {};
+      const body: string = String(rec.body ?? rec.content ?? "");
+      const stripped = body.replace(/^---[\s\S]*?---\s*/, "").trim();
+      const h1 = stripped.match(/^\s*#\s+(.+?)\s*$/m);
+      const extractedName = h1 ? h1[1].trim() : "";
+      return {
+        chore: {
+          id: cleanId,
+          path: recordPath,
+          name: rec.name || fm.title || fm.name || extractedName || cleanId,
+          state: normalizeTaskState(fm.state),
+          current_state: nullableString(fm.current_state),
+          as_of: nullableString(fm.as_of),
+          timeline: [],
+        },
+      };
+    } catch (err) {
+      console.warn(
+        `[getChoreDetail2] vault/${folder} fallback failed:`,
+        (err as Error)?.message,
+      );
+    }
+  }
+  return { chore: null };
+};
+
+// ============================================================
+// Daily brief (#857) — proxies GET /api/v1/brief/today on the tenant-
+// side ctrl-api. The endpoint reads today's most-recent vault digest
+// record (DailyDigestWorkflow output) and returns sections + small_matter
+// for the letterpress /brief page. Empty/no-digest-yet returns
+// `{ sections: [] }` rather than 404 so the page renders a polite empty
+// state.
+// ============================================================
+
+export const getDailyBrief = async (
+  _args: void,
+  context: any,
+): Promise<{
+  date: string;
+  subject: string;
+  sections: Array<{
+    title: string;
+    items: Array<{ id: string; line: string; reasoning: string }>;
+  }>;
+  small_matter: string | null;
+}> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  try {
+    const instance = await getUserInstance(context);
+    const data: any = await proxyToTenant(instance, {
+      path: "/api/v1/brief/today",
+    });
+    return {
+      date: String(data?.date ?? new Date().toISOString().slice(0, 10)),
+      subject: String(data?.subject ?? "Your Brief."),
+      sections: Array.isArray(data?.sections) ? data.sections : [],
+      small_matter: data?.small_matter ?? null,
+    };
+  } catch (err) {
+    console.warn(
+      "[getDailyBrief] proxyToTenant failed:",
+      (err as Error)?.message,
+    );
+    return {
+      date: new Date().toISOString().slice(0, 10),
+      subject: "Your Brief.",
+      sections: [],
+      small_matter: null,
+    };
+  }
+};
+
+export const getVaultTitleIndex = async (
+  _args: void,
+  context: any,
+): Promise<{ titles: Array<{ title: string; slug: string; type: string }> }> => {
+  if (!context.user) throw new HttpError(401, "Not authenticated");
+  try {
+    const instance = await getUserInstance(context);
+    const data: any = await proxyToTenant(instance, {
+      path: "/api/v1/vault/index",
+    });
+    const titles = Array.isArray(data?.titles) ? data.titles : [];
+    return { titles };
+  } catch (err) {
+    // Older ctrl-api builds may not have the route yet; degrade quietly so
+    // the Markdown renderer simply doesn't get a resolver and falls back
+    // to its existing "no-prop" behaviour. The caller is fine without it.
+    console.warn(
+      "[getVaultTitleIndex] proxyToTenant failed:",
+      (err as Error)?.message,
+    );
+    return { titles: [] };
+  }
 };

@@ -18,16 +18,33 @@ export default function ProvisioningJobsPage() {
   if (!user) return null;
   if (!user.isAdmin) return <Navigate to="/" replace />;
 
+  // M7 #869 — admin tokens pass.
   return (
     <DashboardLayout>
-      <div className="p-6">
-        <h1 className="text-foreground mb-6 text-2xl font-bold">
-          Provisioning Jobs
+      <div className="p-6 paper">
+        <div
+          className="font-mono text-[10px] uppercase tracking-[0.28em] mb-2"
+          style={{ color: "var(--brass)" }}
+        >
+          Admin
+        </div>
+        <h1 className="font-display text-5xl tracking-tight mb-8">
+          Provisioning jobs.
         </h1>
 
-        {isLoading && <p className="text-muted-foreground">Loading...</p>}
+        {isLoading && (
+          <p
+            className="font-body italic"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Composing the queue…
+          </p>
+        )}
         {error && (
-          <div className="bg-destructive/10 text-destructive rounded-lg p-4">
+          <div
+            className="border border-rule p-4"
+            style={{ borderColor: "var(--brass)", color: "var(--brass)" }}
+          >
             {error.message}
           </div>
         )}

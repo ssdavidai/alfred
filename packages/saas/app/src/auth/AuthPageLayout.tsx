@@ -1,5 +1,15 @@
+// Door-aesthetic shell for every Wasp auth form (#851).
+//
+// Wraps each auth form (Login / Signup / RequestPasswordReset / PasswordReset /
+// EmailVerification) in a Frame-style paper card with Playfair / EB Garamond
+// typography, a brass rule, and the alfred-logo-brass mark.
+//
+// PostSignupPage is deliberately NOT a consumer of this layout — its
+// refresh-token bounce logic is load-bearing and renders without chrome.
+
 import { ReactNode } from "react";
-import ParticleCanvas from "../landing-page/components/ParticleCanvas";
+import { Link as WaspRouterLink, routes } from "wasp/client/router";
+import logoBrass from "../client/assets/brand/alfred-logo-brass.svg";
 
 export function AuthPageLayout({
   children,
@@ -11,28 +21,62 @@ export function AuthPageLayout({
   subtitle?: string;
 }) {
   return (
-    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-[#0A0A0A] px-4">
-      <ParticleCanvas particleCount={30} opacity={0.4} />
-      <div className="relative z-10 w-full max-w-md rounded-sm border border-gold-dim bg-[#0A0A0A]/80 px-8 py-10 backdrop-blur-lg">
-        <div className="mb-8 flex flex-col items-center gap-4">
-          <img
-            src="/images/alfred-logo.png"
-            alt="ALFRED BLACK"
-            className="h-12 w-auto"
+    <div className="paper relative flex min-h-screen items-center justify-center px-4 py-12">
+      <div
+        className="relative z-10 w-full max-w-md border p-10"
+        style={{
+          background: "var(--paper)",
+          borderColor: "var(--rule)",
+        }}
+      >
+        <div className="mb-10 flex flex-col items-center gap-5">
+          <WaspRouterLink
+            to={routes.LandingPageRoute.to}
+            className="flex items-center gap-3 leading-none"
+            aria-label="Alfred Black — home"
+          >
+            <img src={logoBrass} alt="" className="h-9 w-auto" />
+            <span className="block">
+              <span
+                className="font-display tracking-tight block"
+                style={{ color: "var(--ink)", fontSize: 24, lineHeight: 1 }}
+              >
+                Alfred<span style={{ color: "var(--brass)" }}>·</span>Black
+              </span>
+              <span
+                className="font-mono uppercase block mt-1.5"
+                style={{
+                  color: "var(--brass)",
+                  fontSize: 9,
+                  letterSpacing: "0.32em",
+                  opacity: 0.85,
+                }}
+              >
+                By appointment
+              </span>
+            </span>
+          </WaspRouterLink>
+
+          <hr
+            className="gilt"
+            style={{ width: 80, marginTop: 4, marginBottom: 4 }}
           />
-          <div className="h-px w-[60px] bg-gold" />
+
           {title && (
-            <h1 className="font-serif text-2xl font-light text-cream">
+            <h1 className="font-display text-3xl tracking-tight text-center">
               {title}
             </h1>
           )}
           {subtitle && (
-            <p className="font-serif text-sm font-light italic text-[#8A8680]">
+            <p
+              className="font-display italic text-base text-center"
+              style={{ color: "var(--marginalia)" }}
+            >
               {subtitle}
             </p>
           )}
         </div>
-        {children}
+        <div className="font-body">{children}</div>
       </div>
     </div>
   );

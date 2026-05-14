@@ -27,9 +27,11 @@
 // AND the human resolution.
 import fs from "node:fs";
 import path from "node:path";
+import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { VAULT_PATH } from "./vault.js";
+import { attentionCache, invalidateVaultCachesForType } from "../vaultCache.js";
 
 const NEEDS_ATTENTION_DIR = path.join(VAULT_PATH, "needs_attention");
 const EVENTS_DIR = path.join(VAULT_PATH, "event");
@@ -41,7 +43,7 @@ interface NeedsAttentionRecord {
   body: string;
 }
 
-function readNeedsAttention(id: string): NeedsAttentionRecord | null {
+export function readNeedsAttention(id: string): NeedsAttentionRecord | null {
   const safe = id.replace(/[^a-zA-Z0-9_.-]/g, "");
   if (!safe || safe !== id) return null;
   const fullPath = path.join(NEEDS_ATTENTION_DIR, `${safe}.md`);
@@ -56,32 +58,23 @@ function readNeedsAttention(id: string): NeedsAttentionRecord | null {
   } catch {
     return null;
   }
-  // Parse YAML frontmatter — minimal parser, same shape as steward's
-  // audit records. We don't need full YAML; the records use only
-  // top-level scalars and a few inline JSON values.
+  // Parse YAML frontmatter with js-yaml. The Python writer emits multi-line
+  // block scalars (long `action_what` / `reasoning` paragraphs wrap with an
+  // indented continuation) and single-quoted values (`created`, `raw_quote`).
+  // The previous line-by-line regex parser truncated the first and left the
+  // literal quote characters on the second — both fields are user-visible.
   const match = /^---\n([\s\S]*?)\n---\n?([\s\S]*)$/.exec(raw);
   if (!match) return null;
   const fmText = match[1];
   const body = match[2] ?? "";
-  const fm: Record<string, unknown> = {};
-  for (const line of fmText.split("\n")) {
-    const m = /^([A-Za-z0-9_]+):\s*(.*)$/.exec(line);
-    if (!m) continue;
-    const [, k, v] = m;
-    let value: unknown = v.trim();
-    if (value === "null" || value === "") value = null;
-    else if (value === "true") value = true;
-    else if (value === "false") value = false;
-    else if (typeof value === "string" && /^-?\d+(\.\d+)?$/.test(value)) {
-      value = Number(value);
-    } else if (
-      typeof value === "string" &&
-      (value as string).startsWith('"') &&
-      (value as string).endsWith('"')
-    ) {
-      value = (value as string).slice(1, -1);
+  let fm: Record<string, unknown> = {};
+  try {
+    const parsed = yaml.load(fmText) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      fm = parsed as Record<string, unknown>;
     }
-    fm[k] = value;
+  } catch {
+    // Malformed YAML — keep fm empty rather than 500ing the whole list.
   }
   return {
     id: safe,
@@ -91,7 +84,7 @@ function readNeedsAttention(id: string): NeedsAttentionRecord | null {
   };
 }
 
-function writeFrontmatterPatch(
+export function writeFrontmatterPatch(
   rec: NeedsAttentionRecord,
   updates: Record<string, string | null>,
 ): void {
@@ -134,9 +127,12 @@ function writeFrontmatterPatch(
   }
   const next = `---\n${out.join("\n")}\n---${rest}`;
   fs.writeFileSync(fullPath, next, "utf-8");
+  // Bust the needs_attention-specific read caches; do not touch the
+  // signal/matter/event caches that the Desk reads from every poll.
+  invalidateVaultCachesForType("needs_attention");
 }
 
-function emitResolutionEvent(
+export function emitResolutionEvent(
   rec: NeedsAttentionRecord,
   action: "done" | "dispatched" | "skipped",
   note: string,
@@ -182,6 +178,7 @@ function emitResolutionEvent(
 
 async function dispatchSignalToAgent(
   rec: NeedsAttentionRecord,
+  decisionOrigin?: string,
 ): Promise<{ outcome_signal_path: string | null; error: string | null }> {
   // Re-route this needs_attention item back through the action router
   // by triggering the al-signal-router schedule (which reads
@@ -216,7 +213,18 @@ async function dispatchSignalToAgent(
   if (!m) {
     return { outcome_signal_path: null, error: "source signal malformed" };
   }
-  const newFm = m[1].replace(/^status:.*$/m, "status: unrouted");
+  let newFm = m[1].replace(/^status:.*$/m, "status: unrouted");
+  // Stamp the originating decision path onto the re-armed signal so
+  // outcomes the agent writes later can be matched back to the
+  // principal's intent. Idempotent: replace if present, append if not.
+  if (decisionOrigin) {
+    const safeOrigin = JSON.stringify(decisionOrigin);
+    if (/^decision_origin:/m.test(newFm)) {
+      newFm = newFm.replace(/^decision_origin:.*$/m, `decision_origin: ${safeOrigin}`);
+    } else {
+      newFm = `${newFm}\ndecision_origin: ${safeOrigin}`;
+    }
+  }
   const newRaw = `---\n${newFm}\n---${m[2] ?? ""}`;
   fs.writeFileSync(sigResolved, newRaw, "utf-8");
   return { outcome_signal_path: sourceSignal, error: null };
@@ -234,14 +242,15 @@ export function registerAttentionRoutes(): void {
       Math.min(500, parseInt(url.searchParams.get("limit") ?? "100", 10) || 100),
     );
 
-    if (!fs.existsSync(NEEDS_ATTENTION_DIR)) {
-      sendJson(res, 200, { records: [], count: 0 });
-      return;
-    }
-    const files = fs
-      .readdirSync(NEEDS_ATTENTION_DIR)
-      .filter((f) => f.endsWith(".md"));
-    const records: any[] = [];
+    const cacheKey = `${includeAll ? "all" : "pending"}:${limit}`;
+    const payload = await attentionCache.get(cacheKey, () => {
+      if (!fs.existsSync(NEEDS_ATTENTION_DIR)) {
+        return { records: [], count: 0 };
+      }
+      const files = fs
+        .readdirSync(NEEDS_ATTENTION_DIR)
+        .filter((f) => f.endsWith(".md"));
+      const records: any[] = [];
     for (const f of files) {
       const id = f.replace(/\.md$/, "");
       const rec = readNeedsAttention(id);
@@ -253,22 +262,45 @@ export function registerAttentionRoutes(): void {
         path: rec.path,
         status,
         created: rec.frontmatter.created,
+        // origin_at = when the underlying event happened (email
+        // arrival, calendar event time). The Desk shows this as
+        // "arrived" so the principal sees the source's date, not
+        // Alfred's processing time.
+        origin_at: rec.frontmatter.origin_at ?? null,
         action_what: rec.frontmatter.action_what,
         suggested_actor: rec.frontmatter.suggested_actor,
         target_path: rec.frontmatter.target_path,
         target_kind: rec.frontmatter.target_kind,
         confidence: rec.frontmatter.confidence,
         decision_reason: rec.frontmatter.decision_reason,
+        // The model-written paragraph explaining *why* the steward
+        // flagged this and what action is implied. This is the field
+        // the desk card should show as its "why" — the raw_quote is
+        // just the upstream source text and is too noisy for the UI.
+        reasoning: rec.frontmatter.reasoning,
+        // Voiced surface fields — Alfred's in-character headline +
+        // body. Populated when the signal-extraction LLM produces
+        // them; older cards are null and the UI falls back to
+        // action_what + reasoning.
+        display_headline: rec.frontmatter.display_headline ?? null,
+        display_body: rec.frontmatter.display_body ?? null,
         raw_quote: rec.frontmatter.raw_quote,
+        // Decay band stamped by DecayWatcherWorkflow — fresh/aging/stale.
+        // The Desk groups the queue under these bands so the principal
+        // sees aging cards under the fold without losing them entirely.
+        decay_band: rec.frontmatter.decay_band ?? null,
+        decay_score: rec.frontmatter.decay_score ?? null,
         body_preview: rec.body.slice(0, 500),
       });
     }
-    // Newest pending first; for /include=all show by created desc as well.
-    records.sort((a, b) => String(b.created ?? "").localeCompare(String(a.created ?? "")));
-    sendJson(res, 200, {
-      records: records.slice(0, limit),
-      count: records.length,
+      // Newest pending first; for /include=all show by created desc as well.
+      records.sort((a, b) => String(b.created ?? "").localeCompare(String(a.created ?? "")));
+      return {
+        records: records.slice(0, limit),
+        count: records.length,
+      };
     });
+    sendJson(res, 200, payload);
   });
 
   // POST /api/v1/admin/needs-attention/:id/done — Sir handled it
@@ -303,7 +335,15 @@ export function registerAttentionRoutes(): void {
       const id = params.id;
       const rec = readNeedsAttention(id);
       if (!rec) throw new NotFoundError(`needs_attention/${id} not found`);
-      const dispatchResult = await dispatchSignalToAgent(rec);
+      // Optional `decision_origin` (path to the originating decision
+      // record) gets stamped onto the re-armed signal so the outcome
+      // can be matched back to the human's intent by the
+      // DecisionRouterWorkflow.
+      const decisionOrigin =
+        (body as any)?.decision_origin
+          ? String((body as any).decision_origin)
+          : undefined;
+      const dispatchResult = await dispatchSignalToAgent(rec, decisionOrigin);
       if (dispatchResult.error) {
         throw new ValidationError(
           `dispatch failed: ${dispatchResult.error}`,
@@ -349,4 +389,73 @@ export function registerAttentionRoutes(): void {
       });
     },
   );
+
+  // POST /api/v1/admin/desk-action — generic desk-card action audit.
+  // Every click on the Desk's Delegate / Defer / Delete / Do buttons must
+  // produce a permanent audit record, regardless of source type. The
+  // per-source endpoints above still mutate the underlying record's
+  // status — this endpoint is *additive* and writes a unified audit
+  // event capturing the user's intent (incl. the optional note) so the
+  // ledger never loses an action.
+  //
+  // For "Do" — which doesn't have a per-source endpoint — this is the
+  // only call. The user is moving the item to their personal Backstage
+  // tray; the underlying source record stays in its current status.
+  addRoute("POST", "/api/v1/admin/desk-action", async ({ res, body }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const source = String(b.source ?? "").trim().toLowerCase();
+    const sourceId = String(b.source_id ?? "").trim();
+    const action = String(b.action ?? "").trim().toLowerCase();
+    const note = b.note ? String(b.note) : "";
+    if (!["needs_attention", "approval", "judgment", "pattern_proposal"].includes(source)) {
+      throw new ValidationError(
+        `source must be one of needs_attention | approval | judgment | pattern_proposal, got ${source}`,
+      );
+    }
+    if (!["delegate", "defer", "delete", "do", "noise"].includes(action)) {
+      throw new ValidationError(
+        `action must be one of delegate | defer | delete | do | noise, got ${action}`,
+      );
+    }
+    if (!sourceId) throw new ValidationError("source_id required");
+
+    if (!fs.existsSync(EVENTS_DIR)) {
+      fs.mkdirSync(EVENTS_DIR, { recursive: true });
+    }
+    const nowIso = new Date().toISOString();
+    const ts = nowIso.replace(/:/g, "-").replace(/\..*$/, "Z");
+    // Short hash of source+id so audit filenames stay unique even if the
+    // same user clicks the same button twice in a second.
+    const shortId = ts.slice(-6) + "-" + sourceId.slice(0, 8).replace(/[^a-zA-Z0-9]/g, "x");
+    const auditId = `desk-action-${ts}-${shortId}`;
+    const auditPath = path.join(EVENTS_DIR, `${auditId}.md`);
+    const escNote = note.replace(/"/g, '\\"').replace(/\n/g, " ");
+    const safeSourceId = sourceId.replace(/"/g, '\\"');
+    const yaml = [
+      "---",
+      'type: "desk_action"',
+      `created: "${nowIso}"`,
+      `source: "${source}"`,
+      `source_id: "${safeSourceId}"`,
+      `action: "${action}"`,
+      `note: ${note ? `"${escNote}"` : "null"}`,
+      "---",
+      "",
+      `# Desk action: ${action} on ${source}/${sourceId}`,
+      "",
+      `Sir clicked **${action}** on a \`${source}\` card via the Today desk at ${nowIso}.`,
+      "",
+      note ? `Note: ${note}` : "",
+    ]
+      .filter((s) => s !== "")
+      .join("\n");
+    fs.writeFileSync(auditPath, yaml + "\n", "utf-8");
+    sendJson(res, 200, {
+      ok: true,
+      source,
+      source_id: sourceId,
+      action,
+      audit_record_path: `event/${auditId}.md`,
+    });
+  });
 }

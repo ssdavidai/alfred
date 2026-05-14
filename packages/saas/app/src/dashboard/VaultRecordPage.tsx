@@ -1,11 +1,20 @@
-import { useParams, Link } from "react-router-dom";
+import { useParams, Link, Navigate } from "react-router-dom";
 import { useQuery, getVaultRecord } from "wasp/client/operations";
 import DashboardLayout from "./DashboardLayout";
 import { Card, CardContent, CardTitle } from "../client/components/ui/card";
 import { Button } from "../client/components/ui/button";
 import { ArrowLeft, Home } from "lucide-react";
 
+// M4 #858 — /dashboard/vault/* redirects to /vault?slug=<path>. The
+// legacy single-record viewer is preserved as LegacyVaultRecordPage.
 export default function VaultRecordPage() {
+  const { "*": path } = useParams();
+  const decodedPath = path ? decodeURIComponent(path) : "";
+  const slug = decodedPath.replace(/\.md$/, "");
+  return <Navigate to={`/vault?slug=${encodeURIComponent(slug)}`} replace />;
+}
+
+function LegacyVaultRecordPage() {
   const { "*": path } = useParams();
   const decodedPath = path ? decodeURIComponent(path) : "";
 

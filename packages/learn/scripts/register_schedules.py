@@ -162,6 +162,17 @@ INTERVAL_SCHEDULES = [
         "interval": timedelta(hours=1),
     },
     {
+        # Pattern detection (OBS-4) — hourly deterministic scan of the
+        # unified observation pool. Clusters by (sender, intent) and
+        # writes pattern_proposal records for surviving clusters. The
+        # detector is cheap (one ctrl-api list call + in-memory work)
+        # but uses overlap=SKIP via the default schedule policy so two
+        # ticks can't race on the skip-set.
+        "id": "al-pattern-detection",
+        "workflow": "PatternDetectionWorkflow",
+        "interval": timedelta(hours=1),
+    },
+    {
         "id": "al-omi-processor",
         "workflow": "OmiAudioProcessorWorkflow",
         "interval": timedelta(minutes=10),
@@ -180,6 +191,59 @@ INTERVAL_SCHEDULES = [
         "id": "al-composio-reconnect-cleanup",
         "workflow": "ComposioReconnectCleanupWorkflow",
         "interval": timedelta(minutes=15),
+    },
+    {
+        # Decision router — every Desk click writes a decision/<ts>.md
+        # record; this workflow reads them, runs side effects (status
+        # flips on source records, signal re-arms + agent dispatches
+        # for delegate, to_do spawns for take_mine, outcome polling for
+        # executing delegates) and flips the decision state. 60-second
+        # cadence is the click→side-effect latency budget.
+        "id": "al-decision-router",
+        "workflow": "DecisionRouterWorkflow",
+        "interval": timedelta(seconds=60),
+    },
+    {
+        # Task closure watcher (LIFECYCLE-2) — every 5 min scan the open
+        # task population against recent signals. High-confidence matches
+        # auto-write a decision(intent=done) that the DecisionRouter
+        # picks up to close the task. Backward arrow of the signal-task
+        # loop; the forward arrow has been the Desk-click path since
+        # ARCH-11.
+        "id": "al-task-closure-watcher",
+        "workflow": "TaskClosureWatcherWorkflow",
+        "interval": timedelta(minutes=5),
+    },
+    {
+        # Defer resurface — hourly scan for skipped needs_attention
+        # cards whose resurface_at has fallen due. Flips status back to
+        # pending so they reappear on /desk. The "when" parsing itself
+        # happens inline in the DecisionRouterWorkflow when the click
+        # lands, not here — this is just the sweep that re-surfaces.
+        "id": "al-defer-resurface",
+        "workflow": "DeferResurfaceWorkflow",
+        "interval": timedelta(minutes=15),
+    },
+    {
+        # Scheduled dispatch — fires delegate-with-when decisions when
+        # their execute_at has fallen due. The decision lands in
+        # state=scheduled with execute_at stamped by clerk; this sweep
+        # picks it up at the right time and triggers the real dispatch.
+        "id": "al-scheduled-dispatch",
+        "workflow": "ScheduledDispatchWorkflow",
+        "interval": timedelta(minutes=15),
+    },
+    {
+        # Decay watcher — six-hourly sweep that scores every pending
+        # needs_attention card against a per-source half-life and stamps
+        # decay_band ∈ {fresh, aging, stale}. Cards below the auto-flip
+        # threshold (freshness < 0.05) are status-flipped to stale so
+        # the Desk doesn't silt up with origin-old residue. The Desk UI
+        # reads decay_band off needs_attention frontmatter to group the
+        # queue into bands.
+        "id": "al-decay-watcher",
+        "workflow": "DecayWatcherWorkflow",
+        "interval": timedelta(hours=6),
     },
 ]
 
@@ -233,6 +297,19 @@ CALENDAR_SCHEDULES = [
         "workflow": "NightlyNarrativeWorkflow",
         "calendar": ScheduleCalendarSpec(
             hour=[ScheduleRange(start=2)],
+            minute=[ScheduleRange(start=0)],
+        ),
+    },
+    {
+        # Decision patterns — daily extraction of recurring reasoning
+        # from the principal's recent decisions. Writes proposed
+        # decision_pattern records the principal can promote on /study.
+        # Runs at 03:00 after the nightly_narrative so matter state is
+        # already refreshed for the day.
+        "id": "al-decision-patterns",
+        "workflow": "DecisionPatternsWorkflow",
+        "calendar": ScheduleCalendarSpec(
+            hour=[ScheduleRange(start=3)],
             minute=[ScheduleRange(start=0)],
         ),
     },

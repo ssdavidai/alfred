@@ -10,7 +10,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
-import { dockerExec } from "../helpers.js";
+import { dockerExec, OPENCLAW_CMD } from "../helpers.js";
+
+// Vault root — for synthetic integration sources (Omi, custom webhooks).
+const VAULT_ROOT = "/mnt/encrypted/vault";
+const STREAM_EVENT_DIR = path.join(VAULT_ROOT, "stream_event");
+const WEBHOOK_ENDPOINT_DIR = path.join(VAULT_ROOT, "webhook_endpoint");
 
 // Composio REST API bases
 const COMPOSIO_API_V3 = "https://backend.composio.dev/api/v3";
@@ -1091,6 +1096,129 @@ function scheduleInProcessReap(entry: ReconnectLedgerEntry): void {
 }
 
 // ---------------------------------------------------------------------------
+// Local frontmatter parser
+//
+// Standalone (does not pull in vault.ts) — keeps the import graph here narrow,
+// integrations.ts is already large. Mirrors the YAML-1.2 behaviour of vault.ts
+// closely enough for the small frontmatter blocks our synthetic vault records
+// use (type / token / label / created_at / event_count / etc.). On malformed
+// YAML we return {} and let the caller treat it as a stub.
+// ---------------------------------------------------------------------------
+function parseFrontmatterLocal(content: string): Record<string, unknown> {
+  if (!content.startsWith("---")) return {};
+  const end = content.indexOf("\n---", 3);
+  if (end === -1) return {};
+  const block = content.slice(4, end);
+  const out: Record<string, unknown> = {};
+  for (const rawLine of block.split("\n")) {
+    const line = rawLine.replace(/\r$/, "");
+    const idx = line.indexOf(":");
+    if (idx <= 0) continue;
+    const key = line.slice(0, idx).trim();
+    let val: string = line.slice(idx + 1).trim();
+    if (!key) continue;
+    // Strip surrounding quotes
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    if (val === "null" || val === "~" || val === "") {
+      out[key] = val === "" ? "" : null;
+      continue;
+    }
+    if (val === "true") { out[key] = true; continue; }
+    if (val === "false") { out[key] = false; continue; }
+    if (/^-?\d+$/.test(val)) { out[key] = parseInt(val, 10); continue; }
+    if (/^-?\d+\.\d+$/.test(val)) { out[key] = parseFloat(val); continue; }
+    out[key] = val;
+  }
+  return out;
+}
+
+// Scan stream_event/ once and collect the set of unique `source_type` strings.
+// Sampling cap keeps this cheap even for tenants with tens of thousands of
+// stream events; we just need enough to detect "is this toolkit producing
+// events at all". Limit per file matters because frontmatter is the first
+// ~500 bytes — we don't need the whole record.
+function collectStreamEventSourceTypes(): Set<string> {
+  const out = new Set<string>();
+  let entries: string[] = [];
+  try {
+    if (!fs.existsSync(STREAM_EVENT_DIR)) return out;
+    entries = fs.readdirSync(STREAM_EVENT_DIR).filter((f) => f.endsWith(".md"));
+  } catch {
+    return out;
+  }
+  // Cap to last 500 files — recent activity is what the UI cares about, and
+  // we don't want to read 50k files on every list call.
+  const sampled = entries.length > 500 ? entries.slice(entries.length - 500) : entries;
+  for (const entry of sampled) {
+    try {
+      const full = path.join(STREAM_EVENT_DIR, entry);
+      // Read just the head — frontmatter is bounded.
+      const fd = fs.openSync(full, "r");
+      try {
+        const buf = Buffer.alloc(1024);
+        const bytes = fs.readSync(fd, buf, 0, buf.length, 0);
+        const head = buf.slice(0, bytes).toString("utf-8");
+        const fm = parseFrontmatterLocal(head);
+        const st = String(fm.source_type ?? "");
+        if (st) out.add(st);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch { /* skip unreadable */ }
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Scope endpoint — per-toolkit action cache
+// ---------------------------------------------------------------------------
+interface ScopeCacheEntry {
+  data: { read: string[]; write: string[] };
+  fetchedAt: number;
+}
+const SCOPE_CACHE = new Map<string, ScopeCacheEntry>();
+const SCOPE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+async function fetchScopeForToolkit(
+  toolkit: string,
+  apiKey: string,
+): Promise<{ read: string[]; write: string[] }> {
+  const cached = SCOPE_CACHE.get(toolkit);
+  if (cached && Date.now() - cached.fetchedAt < SCOPE_CACHE_TTL_MS) {
+    return cached.data;
+  }
+  const read: string[] = [];
+  const write: string[] = [];
+  try {
+    const resp = await fetch(
+      `${COMPOSIO_API_V3}/actions?apps=${encodeURIComponent(toolkit)}&limit=500`,
+      { headers: { "x-api-key": apiKey } },
+    );
+    if (resp.ok) {
+      const data = (await resp.json()) as any;
+      const items = Array.isArray(data.items) ? data.items
+        : Array.isArray(data.tools) ? data.tools : [];
+      for (const item of items as any[]) {
+        const slug = (item.name ?? item.slug ?? "") as string;
+        if (!slug) continue;
+        if (item.deprecated) continue;
+        const displayName = (item.displayName ?? item.display_name ?? "").trim() || slug;
+        const kind = classifyAction(slug);
+        if (kind === "stream") read.push(displayName);
+        else write.push(displayName);
+      }
+    }
+  } catch { /* swallow — return whatever we have */ }
+  read.sort((a, b) => a.localeCompare(b));
+  write.sort((a, b) => a.localeCompare(b));
+  const data = { read, write };
+  SCOPE_CACHE.set(toolkit, { data, fetchedAt: Date.now() });
+  return data;
+}
+
+// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -1103,18 +1231,111 @@ export function registerIntegrationRoutes(): void {
     const apiKey = getComposioApiKey();
     const userId = getComposioUserId();
     try {
+      // Load streams.json once so we can flag each Composio toolkit row with
+      // is_stream_source = true if there's a `composio-<toolkit>-*` stream
+      // with event_count > 0. Cheap, single-file read.
+      let streamsMeta: any[] = [];
+      try {
+        streamsMeta = JSON.parse(
+          fs.readFileSync(path.join(STREAMS_DIR, "streams.json"), "utf-8"),
+        );
+      } catch { /* missing is fine — empty fleet */ }
+
+      // For Omi / webhook sources we need to peek at stream_event vault
+      // records (filenames usually encode source_type, but we also sample
+      // frontmatter so naming convention isn't load-bearing). One readdir +
+      // up to ~25 small reads.
+      const sourceTypeSet = collectStreamEventSourceTypes();
+
+      // 1. Composio rows — same shape as before plus is_stream_source flag.
       const owned = await fetchAllOwnedConnectedAccounts(apiKey, userId);
-      const filtered = owned.map((a: any) => ({
-        id: a.id,
-        toolkit: a.toolkit?.slug ?? a.appName ?? "",
-        toolkit_name: a.toolkit?.displayName ?? a.toolkit?.name ?? a.appName ?? "",
-        toolkit_icon: a.toolkit?.logo ?? "",
-        status: a.status,
-        auth_scheme: a.authScheme ?? "",
-        user_id: a.member_id ?? a.user_id ?? "",
-        created_at: a.createdAt ?? a.created_at ?? "",
-      }));
-      sendJson(res, 200, { integrations: filtered, count: filtered.length });
+      const composioRows = owned.map((a: any) => {
+        const slug = (a.toolkit?.slug ?? a.appName ?? "").toLowerCase();
+        const hasStream = streamsMeta.some(
+          (s: any) =>
+            typeof s?.id === "string" &&
+            slug &&
+            s.id.toLowerCase().startsWith(`composio-${slug}-`) &&
+            (s.event_count || 0) > 0,
+        );
+        return {
+          id: a.id,
+          toolkit: a.toolkit?.slug ?? a.appName ?? "",
+          toolkit_name: a.toolkit?.displayName ?? a.toolkit?.name ?? a.appName ?? "",
+          toolkit_icon: a.toolkit?.logo ?? "",
+          status: a.status,
+          auth_scheme: a.authScheme ?? "",
+          user_id: a.member_id ?? a.user_id ?? "",
+          created_at: a.createdAt ?? a.created_at ?? "",
+          is_stream_source: hasStream,
+        };
+      });
+
+      // 2. Omi device rows — best-effort. Failure here MUST NOT fail the
+      //    whole listing endpoint, so anything goes wrong we just skip.
+      const omiRows: any[] = [];
+      try {
+        const stdout = await dockerExec("openclaw", [...OPENCLAW_CMD, "devices", "list", "--json"]);
+        let parsed: unknown = null;
+        try { parsed = JSON.parse(stdout); } catch { /* ignore */ }
+        // The CLI returns either an array or {devices: [...]}; handle both.
+        const devices: any[] = Array.isArray(parsed)
+          ? parsed as any[]
+          : Array.isArray((parsed as any)?.devices)
+            ? (parsed as any).devices
+            : [];
+        const omiHasEvent = [...sourceTypeSet].some((s) => s.toLowerCase().includes("omi"));
+        for (const d of devices) {
+          const kind = String(d?.type ?? d?.device_type ?? "").toLowerCase();
+          if (!kind.includes("omi")) continue;
+          const id = d?.id ?? d?.serial ?? d?.device_id ?? d?.uuid ?? "";
+          if (!id) continue;
+          omiRows.push({
+            id: `omi:${id}`,
+            toolkit: "alfred-omi",
+            toolkit_name: d?.name || "Omi",
+            toolkit_icon: "",
+            status: "ACTIVE",
+            auth_scheme: "DEVICE_PAIR",
+            user_id: "",
+            created_at: d?.paired_at || d?.created_at || "",
+            is_stream_source: omiHasEvent,
+          });
+        }
+      } catch { /* openclaw not reachable or no devices — skip */ }
+
+      // 3. Inbound webhook rows — list vault records under webhook_endpoint/.
+      const webhookRows: any[] = [];
+      try {
+        const entries = fs.existsSync(WEBHOOK_ENDPOINT_DIR)
+          ? fs.readdirSync(WEBHOOK_ENDPOINT_DIR).filter((f) => f.endsWith(".md"))
+          : [];
+        for (const entry of entries) {
+          const full = path.join(WEBHOOK_ENDPOINT_DIR, entry);
+          let raw = "";
+          try { raw = fs.readFileSync(full, "utf-8"); } catch { continue; }
+          const fm = parseFrontmatterLocal(raw);
+          const token = String(fm.token ?? entry.replace(/\.md$/, "")) || "";
+          if (!token) continue;
+          const label = String(fm.label ?? "Custom Webhook");
+          const eventCount = typeof fm.event_count === "number" ? fm.event_count : 0;
+          const labelHasEvent = sourceTypeSet.has(`webhook:${label}`);
+          webhookRows.push({
+            id: `webhook:${token}`,
+            toolkit: "alfred-webhook",
+            toolkit_name: label || "Custom Webhook",
+            toolkit_icon: "",
+            status: "ACTIVE",
+            auth_scheme: "INBOUND_WEBHOOK",
+            user_id: "",
+            created_at: String(fm.created_at ?? ""),
+            is_stream_source: eventCount > 0 || labelHasEvent,
+          });
+        }
+      } catch { /* dir missing or unreadable — no webhook integrations */ }
+
+      const integrations = [...composioRows, ...omiRows, ...webhookRows];
+      sendJson(res, 200, { integrations, count: integrations.length });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to fetch integrations: ${err.message}` });
     }
@@ -1126,7 +1347,34 @@ export function registerIntegrationRoutes(): void {
   addRoute("GET", "/api/v1/integrations/catalog", async ({ res, query }) => {
     const apiKey = getComposioApiKey();
     try {
-      const all = await fetchCatalog(apiKey);
+      const composioCatalog = await fetchCatalog(apiKey);
+
+      // Synthetic catalog entries — surfaced at the head of the list so the
+      // dashboard can render them like first-class toolkits. These don't go
+      // through Composio's OAuth flow; the UI keys off the unique
+      // auth_schemes ("DEVICE_PAIR" / "INBOUND_WEBHOOK") to render bespoke
+      // modals instead of the Connect Link flow.
+      const synthetic: CatalogEntry[] = [
+        {
+          slug: "alfred-omi",
+          name: "Omi",
+          description:
+            "Wearable mic — Alfred listens, transcribes, and turns conversations into actions on your desk.",
+          icon_url: "",
+          category: "wearables",
+          auth_schemes: ["DEVICE_PAIR"],
+        },
+        {
+          slug: "alfred-webhook",
+          name: "Custom Webhook",
+          description:
+            "A private URL you can POST anything to. Each call lands as a stream event for Alfred to curate.",
+          icon_url: "",
+          category: "developer",
+          auth_schemes: ["INBOUND_WEBHOOK"],
+        },
+      ];
+      const all = [...synthetic, ...composioCatalog];
 
       // Optional client-side search filter (server assists for convenience)
       const search = (query.get("search") || "").toLowerCase().trim();
@@ -1145,8 +1393,12 @@ export function registerIntegrationRoutes(): void {
         filtered = filtered.filter((t) => t.category === category);
       }
 
-      // Collect unique categories
-      const categories = [...new Set(all.map((t) => t.category))].sort();
+      // Collect unique categories. Ensure the synthetic categories are
+      // always present even if Composio's set didn't include them.
+      const categorySet = new Set(all.map((t) => t.category));
+      categorySet.add("wearables");
+      categorySet.add("developer");
+      const categories = [...categorySet].sort();
 
       sendJson(res, 200, {
         toolkits: filtered,
@@ -1156,6 +1408,56 @@ export function registerIntegrationRoutes(): void {
       });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to fetch catalog: ${err.message}` });
+    }
+  });
+
+  // =========================================================================
+  // GET /api/v1/integrations/:id/scope — what data this connection can touch
+  //
+  // Returns a {read, write, note?} pair of human-readable action display names
+  // so the dashboard can answer "what does this integration actually see and
+  // do?" without firing /capabilities (which is much heavier and joins on
+  // live stream state). Three classes of id:
+  //   - "webhook:<token>" → inbound only, no scope to enumerate.
+  //   - "omi:<device-id>" → audio + transcript stream, no write actions.
+  //   - Composio connection id → real classification via the Composio actions
+  //     catalogue, cached 10 minutes per toolkit.
+  // =========================================================================
+  addRoute("GET", "/api/v1/integrations/:id/scope", async ({ res, params }) => {
+    const id = params.id;
+    if (id.startsWith("webhook:")) {
+      sendJson(res, 200, {
+        read: [],
+        write: [],
+        note: "Inbound only — accepts anything you POST to the URL.",
+      });
+      return;
+    }
+    if (id.startsWith("omi:")) {
+      sendJson(res, 200, {
+        read: ["audio", "transcript"],
+        write: [],
+        note: "Omi streams audio + transcripts.",
+      });
+      return;
+    }
+    // Composio connection — resolve toolkit, then ask Composio for actions.
+    const apiKey = getComposioApiKey();
+    const userId = getComposioUserId();
+    try {
+      const conn = await assertConnectionOwnedByTenant(res, id, userId, apiKey);
+      if (!conn) return;
+      const toolkit = String(
+        (conn as any).toolkit?.slug ?? (conn as any).appName ?? "",
+      ).toLowerCase();
+      if (!toolkit) {
+        sendJson(res, 200, { read: [], write: [] });
+        return;
+      }
+      const scope = await fetchScopeForToolkit(toolkit, apiKey);
+      sendJson(res, 200, scope);
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Failed to fetch scope: ${err.message}` });
     }
   });
 

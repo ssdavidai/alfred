@@ -5,6 +5,7 @@ import pytest
 from src.validators.frontmatter import parse_frontmatter, validate_frontmatter
 from src.validators.observation import validate_observation_record
 from src.validators.instinct import validate_instinct_record, validate_instinct_proposal
+from src.validators.pattern_proposal import validate_pattern_proposal_record
 from src.validators.schema import ValidationResult
 
 
@@ -253,3 +254,81 @@ class TestValidateInstinctProposal:
             "changes": {"observation_count": 5},
         })
         assert not result.valid
+
+
+class TestValidatePatternProposal:
+    """OBS-3 — shape of clustered pattern_proposal records."""
+
+    def _valid(self, **overrides):
+        base = {
+            "name": "Newsletter senders → noise",
+            "rule": "When sender is in the newsletter cohort and Sir has not opened in 14d",
+            "proposed_action": "Auto-mark as noise without /desk surface",
+            "observation_refs": [
+                "observation/2026-04-10-aaa.md",
+                "observation/2026-04-11-bbb.md",
+                "observation/2026-04-12-ccc.md",
+            ],
+            "cluster_size": 14,
+            "confidence": 0.82,
+            "status": "proposed",
+        }
+        base.update(overrides)
+        return base
+
+    def test_valid(self):
+        result = validate_pattern_proposal_record(self._valid())
+        assert result.valid, result.errors
+
+    def test_missing_rule(self):
+        result = validate_pattern_proposal_record(self._valid(rule=""))
+        assert not result.valid
+        assert any("rule" in e for e in result.errors)
+
+    def test_missing_proposed_action(self):
+        result = validate_pattern_proposal_record(self._valid(proposed_action=None))
+        assert not result.valid
+
+    def test_insufficient_evidence(self):
+        # 2 refs < MIN_PATTERN_PROPOSAL_EVIDENCE (3)
+        result = validate_pattern_proposal_record(self._valid(
+            observation_refs=["observation/a.md", "observation/b.md"],
+        ))
+        assert not result.valid
+        assert any("observation_refs" in e for e in result.errors)
+
+    def test_evidence_must_point_at_observation_paths(self):
+        result = validate_pattern_proposal_record(self._valid(
+            observation_refs=[
+                "observation/a.md",
+                "signal/b.md",  # wrong namespace
+                "observation/c.md",
+            ],
+        ))
+        assert not result.valid
+
+    def test_invalid_status_rejected(self):
+        result = validate_pattern_proposal_record(self._valid(status="active"))
+        assert not result.valid
+        assert any("status" in e for e in result.errors)
+
+    def test_confidence_out_of_range(self):
+        result = validate_pattern_proposal_record(self._valid(confidence=1.7))
+        assert not result.valid
+
+    def test_cluster_size_smaller_than_visible_refs(self):
+        result = validate_pattern_proposal_record(self._valid(cluster_size=1))
+        assert not result.valid
+
+    def test_matter_ref_optional_but_typed(self):
+        ok = validate_pattern_proposal_record(self._valid(matter_ref=None))
+        assert ok.valid, ok.errors
+        bad = validate_pattern_proposal_record(self._valid(matter_ref="task/123.md"))
+        assert not bad.valid
+
+    def test_default_status_accepted(self):
+        # status omitted entirely → defaults to "proposed" → valid
+        proposal = self._valid()
+        del proposal["status"]
+        result = validate_pattern_proposal_record(proposal)
+        assert result.valid, result.errors

@@ -35,6 +35,13 @@ from src.workflows.composio_reconnect_cleanup import (
 )
 from src.workflows.steward import StewardWorkflow
 from src.workflows.nightly_narrative import NightlyNarrativeWorkflow
+from src.workflows.decision_router import DecisionRouterWorkflow
+from src.workflows.decision_patterns import DecisionPatternsWorkflow
+from src.workflows.pattern_detection import PatternDetectionWorkflow
+from src.workflows.defer_resurface import DeferResurfaceWorkflow
+from src.workflows.task_closure import TaskClosureWatcherWorkflow
+from src.workflows.scheduled_dispatch import ScheduledDispatchWorkflow
+from src.workflows.decay_watcher import DecayWatcherWorkflow
 from src.workflows.meeting_capture import MeetingCaptureWorkflow
 from src.workflows.transcript_intake import TranscriptIntakeWorkflow
 from src.workflows.signals import SignalExtractWorkflow
@@ -311,6 +318,29 @@ from src.activities.ephemeral_agent import (
     wait_for_agent_ready,
 )
 
+# Tool inference for delegate dispatch — maps source_type → Composio
+# action slug hints injected into the executor's prompt.
+from src.activities.tool_inference import (
+    infer_required_tools,
+)
+
+# Task closure watcher — backward arrow of the signal-task loop.
+# Inbound signals get checked against open tasks; high-confidence
+# matches auto-close the task via a decision(intent=done) record.
+from src.activities.task_closure import (
+    list_open_tasks,
+    list_recent_signals,
+    assess_closure,
+    assess_closure_predicate,
+    write_closure_decision,
+)
+
+# Signal → observation extractor (OBS-2). Fires per signal write
+# inside SignalExtractWorkflow.
+from src.activities.signal_observations import (
+    extract_observation_from_signal,
+)
+
 # Plane sync (#536 B4) — vault → Plane one-way sync activities
 from src.activities.plane_sync import (
     ensure_inbox_project,
@@ -502,6 +532,68 @@ from src.activities.nightly_narrative import (
     read_matter_summary as narrative_read_matter_summary,
 )
 
+# Decision router — every Desk click writes a decision/<ts>.md record;
+# this workflow (cron */1 min) reads them, runs side effects (status
+# flips, signal re-arms, to_do spawns, outcome polling) and flips the
+# decision state. Schedule registered as ``al-decision-router``.
+from src.activities.decision_router import (
+    check_decision_outcomes as dr_check_outcomes,
+    list_decisions_by_state as dr_list_decisions,
+    reverse_decision as dr_reverse_decision,
+    route_decision as dr_route_decision,
+)
+
+# Decision pattern extraction (daily 3am) — groups recent decisions by
+# matter, asks clerk for recurring rules, writes proposed
+# decision_pattern records for principal review on /study.
+from src.activities.decision_patterns import (
+    extract_decision_patterns as dp_extract,
+)
+
+# Pattern detection (OBS-4, hourly) — deterministic clustering over
+# the unified observation pool. Writes pattern_proposal records that
+# OBS-5's acceptor materialises into instincts once the principal
+# clicks Delegate on the /desk card.
+from src.activities.pattern_detection import (
+    detect_pattern_proposals as pd_detect,
+)
+
+# Defer resurface — parses "when shall I resurface this?" notes into
+# concrete datetimes and re-flips skipped needs_attention back to
+# pending when their resurface_at falls due.
+from src.activities.defer_resurface import (
+    parse_resurface_time as dr_parse_resurface,
+    resurface_due_needs_attention as dr_resurface_due,
+    stamp_resurface_on_needs_attention as dr_stamp_resurface,
+)
+
+# Scheduled dispatch — fires delegate-with-note decisions when their
+# execute_at falls due.
+from src.activities.scheduled_dispatch import (
+    fire_due_scheduled_dispatches as sd_fire_due,
+)
+
+# Noise patterns — materialised when the principal clicks "Noise" on a
+# Desk card. Activity writes signal_noise_pattern records; signal_extract
+# consults them before LLM calls.
+from src.activities.noise_patterns import (
+    write_noise_pattern as np_write,
+)
+
+# Decay watcher — six-hourly sweep that stamps freshness bands on
+# pending needs_attention cards and auto-flips deeply stale ones to
+# status=stale, keeping the Desk free of origin-old residue.
+from src.activities.decay_watcher import watch_decay as dw_watch
+
+# Decisions → observations + pattern-proposal lifecycle. Every click
+# distills into an observation the intuition engine consumes; pattern
+# proposals materialize as instinct records when adopted.
+from src.activities.decision_observations import (
+    extract_observation_from_decision as do_extract_obs,
+    adopt_instinct_from_pattern as do_adopt_pattern,
+    reject_pattern_proposal as do_reject_pattern,
+)
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -532,6 +624,13 @@ _STATIC_WORKFLOWS = [
     ComposioReconnectCleanupWorkflow,
     StewardWorkflow,
     NightlyNarrativeWorkflow,
+    DecisionRouterWorkflow,
+    DecisionPatternsWorkflow,
+    PatternDetectionWorkflow,
+    DeferResurfaceWorkflow,
+    TaskClosureWatcherWorkflow,
+    ScheduledDispatchWorkflow,
+    DecayWatcherWorkflow,
     MeetingCaptureWorkflow,
     TranscriptIntakeWorkflow,
     SignalExtractWorkflow,
@@ -738,6 +837,16 @@ ALL_ACTIVITIES = [
     create_ephemeral_agent,
     delete_ephemeral_agent,
     wait_for_agent_ready,
+    # Tool inference for delegate dispatch
+    infer_required_tools,
+    # Task closure watcher — signal-closes-task backward arrow
+    list_open_tasks,
+    list_recent_signals,
+    assess_closure,
+    assess_closure_predicate,
+    write_closure_decision,
+    # OBS-2 — signal → observation extractor
+    extract_observation_from_signal,
     # Plane sync (#536 B4)
     plane_sync_is_enabled,
     load_plane_sync_state,
@@ -867,6 +976,32 @@ ALL_ACTIVITIES = [
     narrative_load_source_events,
     narrative_generate,
     narrative_patch_matter_narrative,
+    # Decision router (every Desk click → vault record → side-effect
+    # cascade). Activities back DecisionRouterWorkflow.
+    dr_list_decisions,
+    dr_route_decision,
+    dr_reverse_decision,
+    dr_check_outcomes,
+    # Decision pattern extraction (daily) — extracts recurring rules
+    # from the principal's recent decisions per matter.
+    dp_extract,
+    # Pattern detection (hourly, OBS-4) — deterministic clustering
+    # over the unified observation pool.
+    pd_detect,
+    # Defer resurface (hourly + on-defer parse).
+    dr_parse_resurface,
+    dr_stamp_resurface,
+    dr_resurface_due,
+    # Decisions → observations + pattern-proposal lifecycle.
+    do_extract_obs,
+    do_adopt_pattern,
+    do_reject_pattern,
+    # Scheduled dispatch — fires delegate-with-when at the right time.
+    sd_fire_due,
+    # Noise pattern materialisation — runs after intent=noise click.
+    np_write,
+    # Decay watcher — stamps freshness bands, auto-flips deeply stale.
+    dw_watch,
 ]
 
 

@@ -11,6 +11,7 @@ import {
   submitFactCorrections,
 } from "wasp/client/operations";
 import { useAuth } from "wasp/client/auth";
+import { Navigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import DashboardLayout from "./DashboardLayout";
 import VaultNebula from "../components/nebula/VaultNebula";
@@ -341,7 +342,17 @@ function AppGrid({ apps }: { apps: AppInfo[] }) {
 // DashboardPage — zero-config onboarding + VaultNebula home
 // ---------------------------------------------------------------------------
 
+// M3 #856 — /dashboard now redirects to the canonical home /desk.
+// Deep-link sub-routes (/dashboard/inbox, /dashboard/vault/*, etc.) live
+// on their own page declarations in main.wasp and aren't affected by this
+// gate; they get their own redirects in M4/M5/M6 issues. We keep the
+// legacy state-machine implementation as `LegacyDashboardPage` so the
+// cutover can be reverted with a one-line change if needed.
 export default function DashboardPage() {
+  return <Navigate to="/desk" replace />;
+}
+
+function LegacyDashboardPage() {
   const { data: authUser } = useAuth();
 
   // ---------------------------------------------------------------------------

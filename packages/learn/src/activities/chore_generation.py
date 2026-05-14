@@ -946,6 +946,43 @@ def _validate_envelope(parsed: dict[str, Any]) -> tuple[bool, str]:
             if not ok:
                 return False, f"schedule does not match user_facing_description: {err}"
 
+    # Phase 2 metadata fields: display_name, display_body, category.
+    # All optional — pre-Phase-2 envelopes pass without them. When the
+    # LLM emits them, validate shape so the principal-facing detail
+    # page gets coherent values rather than half-broken markdown.
+    display_name = parsed.get("display_name")
+    if display_name is not None:
+        if not isinstance(display_name, str):
+            return False, "display_name must be a string"
+        dn = display_name.strip()
+        if dn and len(dn) > 60:
+            return False, f"display_name too long ({len(dn)} chars, max 60)"
+
+    display_body = parsed.get("display_body")
+    if display_body is not None:
+        if not isinstance(display_body, str):
+            return False, "display_body must be a string"
+        db = display_body.strip()
+        if db:
+            if len(db) < 40:
+                return False, f"display_body too short ({len(db)} chars, min 40)"
+            if len(db) > 2000:
+                return False, f"display_body too long ({len(db)} chars, max 2000)"
+
+    category = parsed.get("category")
+    if category is not None:
+        if not isinstance(category, str):
+            return False, "category must be a string"
+        cat = category.strip().lower()
+        valid_categories = {
+            "briefing", "digest", "watch",
+            "context-build", "prefetch", "maintenance",
+        }
+        if cat and cat not in valid_categories:
+            return False, (
+                f"category {cat!r} not one of {sorted(valid_categories)}"
+            )
+
     return True, ""
 
 

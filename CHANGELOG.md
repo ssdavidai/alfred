@@ -2,6 +2,77 @@
 
 All notable changes to the alfred-platform monorepo.
 
+## [Unreleased] — Alfred Black 1.0
+
+The Alfred Black 1.0 rollout: a full visual + IA redesign of the SaaS surface
+into the Door + manifesto wool aesthetic, the canonical home moves from
+`/dashboard` to `/desk`, the dashboard sub-routes are renamed to vocabulary
+the redesign actually uses, the back office is unified at `/study`, and the
+onboarding becomes a sequential ritual. Validated against production with the
+parallel-preview strategy (`preview.alfred.black`, `WASP_DISABLE_JOBS`,
+`WRITE_BLOCK_TENANT_OPS_DENYLIST`) before cutover.
+
+### Packages Changed
+
+- `packages/saas` —
+  - **Design system**: ported Alfred Black tokens (paper/wool/ink/brass) (#842),
+    Playfair Display + EB Garamond + JetBrains Mono typography stack (#843),
+    Frame/Seal/Icon/RitualNav/PageOverture/Markdown/Phone components
+    (#844 #845), motion library + ThemeProvider with FOUC-free boot (#846),
+    shadcn/ui primitives reskinned (#845).
+  - **Marketing**: rebuilt LandingPage as Door + manifesto wool (#847),
+    `/staff` page (#848), `/companion` `/voice` `/sms` `/voice-and-tone`
+    pages (#849), restyled `/pricing` `/tos` `/pp` (#850), restyled auth
+    pages with Door + Frame aesthetic (#851).
+  - **Onboarding ritual**: replaced `/onboarding` with sequential
+    `/awaken → /reading-the-room → /verify → /soul → /composing
+    → /preparing → /first-brief → /desk` (#852), SOUL preset selector
+    moved inside ritual (#853).
+  - **Household editor** at `/household` wired to RULES.md + chores (#854).
+  - **Canonical home**: `/desk` decision queue + audit ledger (#855),
+    `/dashboard` back-compat redirect to `/desk` (#856).
+  - **Brief**: `/brief` letterpress page + `getDailyBrief` query (#857).
+  - **Matters**: `/matters` aggregator + `/matters/:id` (#859).
+  - **Vault**: `/vault` three-pane Obsidian view (#858) +
+    `getVaultTitleIndex` Wasp query wired to a Markdown live wikilink
+    resolver (#873).
+  - **Instincts/Decisions/Chores/Connections/Channels**: `/instincts`
+    restyle (Asking/Confirming/Acting) (#860), `/decisions` audit feed
+    with HANDLED/HELD/ASKED filters (#861), `/chores` + `/chores/:slug`
+    restyle (#862), `/connections` Composio catalogue restyle (#863),
+    `/channels` live email + phone + vexa + omi cards with Slack/Telegram
+    "Soon" (#864).
+  - **Tools/Claude**: `/tools` gateway allowlist viewer restyle (#865),
+    `/claude` MCP setup + Skill + secrets (#866).
+  - **Study**: unified back office at `/study` for settings, credentials,
+    API keys, audit, ledger, theme (#867 #868) — `/back-office` and
+    `/dashboard/{settings,credentials,api-docs}` now redirect into `/study`.
+  - **Admin**: Alfred Black tokens + typography applied (no IA changes)
+    (#869).
+  - **e2e tests**: updated for the new canonical URL map; removed the
+    obsolete `/demo-app` test file; deleted unreferenced legacy landing
+    components (Hero, Overwhelm, KnowledgeGraph, WhatIsAlfred,
+    LifeWithAlfred, EarlyAccess, ParticleCanvas, GraphCanvas) (#870).
+  - **Preview safety**: `WASP_DISABLE_JOBS` env switch for preview-mode
+    worker safety, `WRITE_BLOCK_TENANT_OPS` denylist middleware in
+    `tenantProxy`, `deploy-preview.yml` workflow for the
+    `feat/alfred-black-1.0` branch.
+
+- `packages/ctrl` — three new tenant API endpoints powering the redesign:
+  - `GET /api/v1/matters` + `GET /api/v1/matters/:id` (#859)
+  - `GET /api/v1/brief/today` (#857)
+  - `GET /api/v1/vault/index` with 60s tenant cache (#873)
+
+- `deploy/` — `CUTOVER.md` runbook for the Alfred Black 1.0 rollout.
+
+### URL Canonicalisation
+
+All legacy `/dashboard/*` paths now redirect to canonical names. See
+`CLAUDE.md` for the full map. `/triage` redirects to `/desk` and the
+`/states` route is dropped.
+
+---
+
 ## [2026.04.11] — 2026-04-11
 
 ### Connected Apps — Composio Integration Marketplace

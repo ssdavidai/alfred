@@ -1,6 +1,6 @@
 import DashboardLayout from "./DashboardLayout";
 import { Card, CardContent, CardTitle } from "../client/components/ui/card";
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 
 const API_BASE = "https://alfred.black/user-api";
@@ -63,7 +63,12 @@ function methodColor(method: string) {
   }
 }
 
+// M6 #868 — /dashboard/api-docs → /study#api-keys.
 export default function ApiDocsPage() {
+  return <Navigate to="/study#api-keys" replace />;
+}
+
+function LegacyApiDocsPage() {
   return (
     <DashboardLayout>
       <div className="mb-6">

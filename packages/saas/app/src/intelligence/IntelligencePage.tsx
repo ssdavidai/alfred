@@ -1,4 +1,5 @@
 import { useState, useMemo as useMemoBoxed } from "react";
+import { Navigate } from "react-router-dom";
 import {
   useQuery,
   getTasks,
@@ -86,7 +87,14 @@ const TABS: { key: IntelligenceTab; label: string; icon: React.ComponentType<{ c
   { key: "activity", label: "Activity", icon: Activity },
 ];
 
+// M4 #862 — /dashboard/tasks redirects to /chores. The legacy combined
+// inbox/errands/chores/activity surface is preserved as
+// LegacyIntelligencePage so the cutover can be reverted with one line.
 export default function IntelligencePage() {
+  return <Navigate to="/chores" replace />;
+}
+
+function LegacyIntelligencePage() {
   const [activeTab, setActiveTab] = useState<IntelligenceTab>("inbox");
 
   // Fetch counts for badge indicators

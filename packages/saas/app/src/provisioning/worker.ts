@@ -46,6 +46,10 @@ export async function provisionInstanceJob(
   _args: unknown,
   context: any,
 ): Promise<void> {
+  if (process.env.WASP_DISABLE_JOBS === 'true') {
+    console.log('[WASP_DISABLE_JOBS] skipping provisionInstanceJob');
+    return;
+  }
   // Recover orphaned jobs: if a job is "running" but we have no active
   // child process for it, the container was restarted mid-provisioning.
   const runningJobs = await context.entities.ProvisioningJob.findMany({

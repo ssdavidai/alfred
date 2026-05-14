@@ -7,6 +7,11 @@ import { sendJson, ValidationError, NotFoundError, ExecError } from "../errors.j
 import { dockerExec, ALFRED_CMD } from "../helpers.js";
 import { emitStreamEvent } from "./streams.js";
 import {
+  vaultListCache,
+  invalidateAllVaultCaches,
+  invalidateVaultCachesForType,
+} from "../vaultCache.js";
+import {
   triggerPlaneSyncNudge,
   slugFromVaultPath,
   type PlaneNudgeRecordType,
@@ -38,6 +43,14 @@ const STEWARD_SIGNALS_FILE = "/alfred-data/streams/steward-signals.jsonl";
  */
 export function emitVaultEditSignal(relPath: string, kind: "create" | "edit" | "delete" = "edit"): void {
   if (!relPath) return;
+  // Every vault mutation flows through here — also the single chokepoint
+  // for busting the read-side caches so the next /vault/list/<type> or
+  // /admin/needs-attention call reflects the write immediately. Only
+  // the same-type caches are invalidated; an alfred-learn task writeback
+  // must not nuke the signal/matter/event caches the Desk reads from
+  // every poll.
+  const type = relPath.split("/")[0] ?? "";
+  invalidateVaultCachesForType(type);
   setImmediate(() => {
     try {
       fs.mkdirSync(path.dirname(STEWARD_SIGNALS_FILE), { recursive: true });
@@ -91,6 +104,18 @@ async function _withVaultPathLock<T>(relPath: string, fn: () => Promise<T>): Pro
 
 export const IGNORE_DIRS = new Set(["_templates", "_bases", "_docs", ".obsidian", "view", "dashboard"]);
 
+// ---------------------------------------------------------------------------
+// Title-index cache (#873).
+//
+// Per-tenant in-memory cache for GET /api/v1/vault/index. ctrl-api runs
+// one process per tenant, so the cache cardinality is 1; the Map keying
+// is preserved per the contract so the route stays trivially extendable
+// if a multi-tenant control-plane ctrl-api ever shares this code.
+// ---------------------------------------------------------------------------
+const VAULT_INDEX_TTL_MS = 60_000;
+const VAULT_INDEX_CACHE_KEY = "_self";
+const _vaultIndexCache = new Map<string, { at: number; body: unknown }>();
+
 const KNOWN_TYPES = [
   "person", "org", "project", "task", "event", "note", "location",
   "process", "account", "asset", "conversation", "input", "run",
@@ -106,7 +131,21 @@ const KNOWN_TYPES = [
   //                       OR no matching instinct).
   //  - stream_event     : Phase 6.6 — unified replacement for event/ +
   //                       conversation/ once the migration script runs.
-  "signal", "needs_attention", "stream_event",
+  //  - signal_noise_pattern : ARCH-12 — materialised when the principal
+  //                       clicks Noise on /desk. signal_extract consults
+  //                       these before the LLM call to filter
+  //                       known-noise events at source. Missing this
+  //                       allowlist entry meant both the writer and the
+  //                       loader got 400 from /vault/list and /vault/records.
+  //  - pattern_proposal  : OBS-3 — clustered proposals from the unified
+  //                       observation pool (decisions + signals).
+  //                       PatternDetectionWorkflow (OBS-4) writes
+  //                       status=proposed; the principal accepts on /desk
+  //                       and OBS-5's acceptor materialises an instinct.
+  //                       Distinct from legacy decision_pattern/ which
+  //                       extracts only from decisions.
+  "signal", "needs_attention", "stream_event", "signal_noise_pattern",
+  "pattern_proposal",
 ];
 
 const STATUS_BY_TYPE: Record<string, string[]> = {
@@ -133,6 +172,19 @@ const STATUS_BY_TYPE: Record<string, string[]> = {
   matter: ["active", "resolved", "abandoned"],
   ledger_entry: ["active"],
   chore: ["active", "paused", "completed"],
+  // pattern_proposal lifecycle (OBS-3..OBS-5):
+  //  - proposed  : freshly written by PatternDetectionWorkflow,
+  //                awaiting principal review on /desk
+  //  - adopted   : principal clicked delegate; OBS-5 acceptor wrote
+  //                the instinct (the loop closure step)
+  //  - rejected  : principal clicked delete; the next detection run
+  //                avoids re-proposing this rule
+  //  - deferred  : principal clicked defer; will resurface later
+  //  - superseded: replaced by a refined cluster in a later run
+  // Status verbs match the existing decision_pattern flow so the
+  // DecisionRouterWorkflow's pattern handler can stay uniform across
+  // both legacy and OBS-era proposals.
+  pattern_proposal: ["proposed", "adopted", "rejected", "deferred", "superseded"],
 };
 
 const TYPE_DIRECTORY: Record<string, string> = {
@@ -158,6 +210,7 @@ const TYPE_DIRECTORY: Record<string, string> = {
   matter: "matter",
   ledger_entry: "ledger_entry",
   chore: "chore",
+  pattern_proposal: "pattern_proposal",
 };
 
 const LIST_FIELDS = [
@@ -468,6 +521,51 @@ export function registerVaultRoutes(): void {
   // --- READ OPERATIONS: direct filesystem (fast, no docker overhead) ---
 
   // Vault context — returns all records grouped by type
+  // ---------------------------------------------------------------------------
+  // Vault title-index (#873)
+  //
+  // Lightweight enumeration of every record's display title + slug + type so
+  // the SaaS Markdown renderer can resolve [[wikilinks]] without one HTTP
+  // call per link. Walks the same .md set as /context, but emits only what
+  // the live wikilink resolver needs:
+  //
+  //   { titles: [{ title, slug, type }, ...] }
+  //
+  // The response is cached in-memory for 60s. ctrl-api runs per-tenant so
+  // the cache cardinality is effectively 1; we still key the Map (per the
+  // #873 contract) so the shape can extend later if a control-plane
+  // ctrl-api ever proxies multiple tenants from a single process.
+  // ---------------------------------------------------------------------------
+  addRoute("GET", "/api/v1/vault/index", async ({ res }) => {
+    const cached = _vaultIndexCache.get(VAULT_INDEX_CACHE_KEY);
+    const now = Date.now();
+    if (cached && now - cached.at < VAULT_INDEX_TTL_MS) {
+      sendJson(res, 200, cached.body);
+      return;
+    }
+
+    const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+    const titles: Array<{ title: string; slug: string; type: string }> = [];
+    for (const relPath of files) {
+      const rec = readRecord(relPath);
+      if (!rec) continue;
+      // slug = path under vault root, no .md, forward-slash normalized
+      const slug = relPath.replace(/\\/g, "/").replace(/\.md$/, "");
+      // Prefer frontmatter title; fall back to name/subject; then stem.
+      const title = String(
+        rec.fm.title ?? rec.fm.name ?? rec.fm.subject ?? rec.stem,
+      );
+      const type = String(rec.fm.type ?? "");
+      if (!title) continue;
+      titles.push({ title, slug, type });
+    }
+    titles.sort((a, b) => a.title.localeCompare(b.title));
+
+    const body = { titles };
+    _vaultIndexCache.set(VAULT_INDEX_CACHE_KEY, { at: now, body });
+    sendJson(res, 200, body);
+  });
+
   addRoute("GET", "/api/v1/vault/context", async ({ res }) => {
     const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
     const byType: Record<string, Array<{ path: string; name: string; status: string }>> = {};
@@ -580,37 +678,54 @@ export function registerVaultRoutes(): void {
       2000,
     );
 
-    const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
-    const results: Array<{
-      path: string;
-      name: string;
-      status: string;
-      frontmatter: Record<string, unknown>;
-      body_preview: string;
-      created: string;
-    }> = [];
-    for (const relPath of files) {
-      const rec = readRecord(relPath);
-      if (!rec) continue;
-      if (rec.fm.type !== type) continue;
+    const cacheKey = `${type}:${previewLen}`;
+    const payload = await vaultListCache.get(cacheKey, () => {
+      const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+      const results: Array<{
+        path: string;
+        name: string;
+        status: string;
+        frontmatter: Record<string, unknown>;
+        body_preview: string;
+        created: string;
+      }> = [];
+      for (const relPath of files) {
+        const rec = readRecord(relPath);
+        if (!rec) continue;
+        if (rec.fm.type !== type) continue;
 
-      // Truncate body to preview length for list rendering — the full
-      // body is available via GET /api/v1/vault/records/:path
-      const bodyPreview = rec.body.length > previewLen
-        ? rec.body.slice(0, previewLen) + "…"
-        : rec.body;
+        // Truncate body to preview length for list rendering — the full
+        // body is available via GET /api/v1/vault/records/:path
+        const bodyPreview = rec.body.length > previewLen
+          ? rec.body.slice(0, previewLen) + "…"
+          : rec.body;
 
-      results.push({
-        path: relPath.replace(/\\/g, "/"),
-        name: String(rec.fm.name || rec.fm.subject || rec.stem),
-        status: String(rec.fm.status || ""),
-        frontmatter: rec.fm,
-        body_preview: bodyPreview,
-        created: String(rec.fm.created || ""),
-      });
+        results.push({
+          path: relPath.replace(/\\/g, "/"),
+          name: String(rec.fm.name || rec.fm.subject || rec.stem),
+          status: String(rec.fm.status || ""),
+          frontmatter: rec.fm,
+          body_preview: bodyPreview,
+          created: String(rec.fm.created || ""),
+        });
+      }
+      results.sort((a, b) => a.name.localeCompare(b.name));
+      return { results, count: results.length };
+    });
+    // For instincts only: enrich each record with the live observation
+    // count (decision-sourced only). signal_actions._instinct_threshold
+    // reads this field to apply the obs-count discretion formula
+    // instead of a flat default. Done outside the cache so the count
+    // can refresh independently when observations are written.
+    if (type === "instinct") {
+      const { getInstinctCounts } = await import("../instinctCounts.js");
+      const counts = await getInstinctCounts();
+      for (const r of payload.results) {
+        const live = counts.get(r.path) ?? 0;
+        (r.frontmatter as Record<string, unknown>).live_observation_count = live;
+      }
     }
-    results.sort((a, b) => a.name.localeCompare(b.name));
-    sendJson(res, 200, { results, count: results.length });
+    sendJson(res, 200, payload);
   });
 
   // Read vault record

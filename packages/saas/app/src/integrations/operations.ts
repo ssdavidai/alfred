@@ -21,6 +21,7 @@ import type {
   GetConnectedIntegrations,
   GetIntegrationCapabilities,
   GetOpenclawReadiness,
+  GetIntegrationScope,
   InitiateConnect,
   InitiateApiKeyConnect,
   DisconnectIntegration,
@@ -31,6 +32,8 @@ import type {
   DisableIntegrationTool,
   AutoConfigIntegration,
   FinalizeComposioConnections,
+  CreateInboundWebhook,
+  DeleteInboundWebhook,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
 import {
@@ -131,6 +134,35 @@ export const getConnectedIntegrations: GetConnectedIntegrations<void, any> = asy
   const enriched = await Promise.all(
     tenantList.map(async (t: any) => {
       const toolkit = String(t.toolkit || "").toLowerCase();
+
+      // Synthetic non-Composio rows (Omi devices, custom webhooks) pass
+      // through untouched — they don't have a ComposioConnection Prisma
+      // row and never will. They live on the tenant (vault + openclaw
+      // device list) as the only source of truth.
+      const isSynthetic =
+        typeof t.id === "string" &&
+        (t.id.startsWith("omi:") || t.id.startsWith("webhook:"));
+      if (isSynthetic) {
+        return {
+          id: t.id,
+          toolkit,
+          toolkit_name: t.toolkit_name,
+          toolkit_icon: t.toolkit_icon,
+          status: t.status,
+          auth_scheme: t.auth_scheme,
+          created_at: t.created_at,
+          is_stream_source: Boolean(t.is_stream_source),
+          // Auto-config fields don't apply to non-Composio sources —
+          // surface clean defaults so the UI doesn't render half-state.
+          auto_config_state: "configured",
+          auto_config_error: null,
+          auto_configured_at: null,
+          streams_created: 0,
+          tools_enabled: 0,
+          skill_name: null,
+        };
+      }
+
       let row = saasByConnId.get(t.id) ?? saasByToolkit.get(toolkit) ?? null;
 
       if (!row) {
@@ -174,6 +206,7 @@ export const getConnectedIntegrations: GetConnectedIntegrations<void, any> = asy
         status: t.status,
         auth_scheme: t.auth_scheme,
         created_at: t.created_at,
+        is_stream_source: Boolean(t.is_stream_source),
         // SaaS fields (our auto-config truth)
         auto_config_state: row?.autoConfigState ?? "pending",
         auto_config_error: row?.autoConfigError ?? null,
@@ -741,3 +774,62 @@ async function rollbackMismatchedComposioConnection(
     );
   }
 }
+
+// =============================================================================
+// Unified-connections additions (#863 follow-up):
+//   - getIntegrationScope    — per-row "read · write" labels for the table
+//   - createInboundWebhook   — generate a per-tenant inbound webhook URL
+//   - deleteInboundWebhook   — revoke one
+//
+// ctrl-api owns the truth; these are thin proxies. Webhooks are stored as
+// vault `webhook_endpoint` records on the tenant; Composio + Omi rows are
+// folded into the same /api/v1/integrations response so the SaaS only has
+// to consume one merged list.
+// =============================================================================
+
+export const getIntegrationScope: GetIntegrationScope<
+  { connectionId: string },
+  any
+> = async (args, context) => {
+  if (!args?.connectionId) throw new Error("connectionId is required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: `/api/v1/integrations/${encodeURIComponent(args.connectionId)}/scope`,
+  });
+};
+
+export const createInboundWebhook: CreateInboundWebhook<
+  { label: string },
+  any
+> = async (args, context) => {
+  const label = String(args?.label ?? "").trim();
+  if (!label) throw new Error("label is required");
+  const instance = await getUserInstance(context);
+  const result: any = await proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/webhooks/inbound",
+    body: { label },
+  });
+  // Prepend the tenant's subdomain (cloudflared tunnel) so the user sees a
+  // copyable absolute URL, not just the path. The frontend can't safely
+  // assemble this on its own — it doesn't know the tenant base URL.
+  const base = (instance as any).subdomainUrl
+    ? String((instance as any).subdomainUrl).replace(/\/$/, "")
+    : "";
+  if (result?.url && !/^https?:\/\//i.test(result.url) && base) {
+    result.url = `${base}${result.url}`;
+  }
+  return result;
+};
+
+export const deleteInboundWebhook: DeleteInboundWebhook<
+  { id: string },
+  any
+> = async (args, context) => {
+  if (!args?.id) throw new Error("id is required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/webhooks/inbound/${encodeURIComponent(args.id)}`,
+  });
+};

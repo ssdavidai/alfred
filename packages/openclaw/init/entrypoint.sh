@@ -133,6 +133,61 @@ if [[ -f "$MCP_SRC" ]]; then
     done
 fi
 
+# 2e. Deploy the 5-app stdio MCP bundle (MCP-4). Same tool catalog the HTTP
+# MCP server in alfred-mcp-server exposes to claude.ai Custom Connectors —
+# served over stdio here so each tenant's openclaw runtimes can spawn the
+# 5 servers (alfred, sure, plane, vaultwarden, execute) as child processes
+# and surface them to learn-clerk on main + ephemeral exec-* subagents on
+# workers. Source: packages/mcp-server/src/bin/stdio-app.ts compiled in
+# stage 1 of init/Dockerfile.
+#
+# Idempotent: rsync --checksum --delete keeps the destination in lockstep
+# with /setup/mcp-stdio while detecting genuine content changes via md5,
+# not mtime. The hash-stamp on the directory short-circuits the rsync
+# entirely when nothing changed — bundles are ~13 MB so the savings
+# matter on tenants that restart init frequently.
+MCP_STDIO_SRC="/setup/mcp-stdio"
+if [[ -d "$MCP_STDIO_SRC" ]]; then
+    BUNDLE_HASH=$(find "$MCP_STDIO_SRC" -type f -not -name '.*' \
+        -exec md5sum {} \; | sort | md5sum | cut -d' ' -f1)
+    for state_dir in /openclaw-state /openclaw-workers-state; do
+        [[ -d "$state_dir" ]] || continue
+        MCP_STDIO_DST="$state_dir/mcp-stdio"
+        HASH_FILE="$state_dir/.mcp-stdio.content-hash"
+        if [[ -f "$HASH_FILE" ]] && [[ "$(cat "$HASH_FILE")" == "$BUNDLE_HASH" ]]; then
+            echo "[init] MCP stdio bundle unchanged in $state_dir, skipping"
+        else
+            mkdir -p "$MCP_STDIO_DST"
+            rsync -a --delete "$MCP_STDIO_SRC/" "$MCP_STDIO_DST/"
+            echo "$BUNDLE_HASH" > "$HASH_FILE"
+            echo "[init] MCP stdio bundle deployed to $state_dir/mcp-stdio/"
+        fi
+    done
+fi
+
+# 2f. Deploy AGENTS.md to each tenant's openclaw state. The executor
+# prompt in signal_actions.dispatch_action_to_agent (MCP-5) references
+# this file at /home/node/.openclaw/AGENTS.md instead of inlining a
+# stale hardcoded tool list. Source: packages/mcp-server/instructions/
+# alfred-custom-instructions.md — same instructions doc claude.ai's
+# Custom Connector loads when the user adds Alfred as a connector.
+AGENTS_SRC="/setup/AGENTS.md"
+if [[ -f "$AGENTS_SRC" ]]; then
+    AGENTS_HASH=$(md5sum "$AGENTS_SRC" | cut -d' ' -f1)
+    for state_dir in /openclaw-state /openclaw-workers-state; do
+        [[ -d "$state_dir" ]] || continue
+        AGENTS_DST="$state_dir/AGENTS.md"
+        HASH_FILE="$state_dir/.agents-md.content-hash"
+        if [[ -f "$HASH_FILE" ]] && [[ "$(cat "$HASH_FILE")" == "$AGENTS_HASH" ]]; then
+            echo "[init] AGENTS.md unchanged in $state_dir, skipping"
+        else
+            cp "$AGENTS_SRC" "$AGENTS_DST"
+            echo "$AGENTS_HASH" > "$HASH_FILE"
+            echo "[init] AGENTS.md deployed to $state_dir/AGENTS.md"
+        fi
+    done
+fi
+
 # --- 3. Generate Alfred config.yaml ---
 if [[ ! -f /alfred-data/config.yaml ]]; then
     echo "[init] Generating config.yaml..."
@@ -376,6 +431,45 @@ if current != desired:
     print(f'[init] MCP server alfred-ctrl registered ({mode}) in {p}')
 else:
     print(f'[init] MCP server alfred-ctrl already configured in {p}')
+" 2>/dev/null || true
+done
+
+# --- 7d. Register the 5-app stdio MCP servers (MCP-4) ---
+# Same tool catalog the HTTP alfred-mcp-server exposes to claude.ai
+# Custom Connectors. Each entry spawns
+# /home/node/.openclaw/mcp-stdio/dist/bin/stdio-app.js <appId>; the
+# bundle on the volume came from section 2e above. Idempotent: only
+# writes when the resolved entry actually differs.
+for TARGET_CFG in "$MAIN_CFG" "$WORKERS_CFG"; do
+    [[ -f "$TARGET_CFG" ]] || continue
+    python3 -c "
+import json, os
+p = '$TARGET_CFG'
+with open(p) as f: c = json.load(f)
+
+aas_key = os.environ.get('AAS_API_KEY', '')
+env_block = {
+    'CTRL_API_URL': 'http://ctrl-api:3100',
+    'AAS_API_KEY': aas_key,
+}
+mcp = c.setdefault('mcp', {})
+servers = mcp.setdefault('servers', {})
+changed = []
+for app in ('alfred', 'sure', 'plane', 'vaultwarden', 'execute'):
+    desired = {
+        'command': 'node',
+        'args': ['/home/node/.openclaw/mcp-stdio/dist/bin/stdio-app.js', app],
+        'env': env_block,
+    }
+    if servers.get(app) != desired:
+        servers[app] = desired
+        changed.append(app)
+
+if changed:
+    with open(p, 'w') as f: json.dump(c, f, indent=2)
+    print(f'[init] MCP servers registered/updated in {p}: {changed}')
+else:
+    print(f'[init] MCP servers (5-app) already configured in {p}')
 " 2>/dev/null || true
 done
 

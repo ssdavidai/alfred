@@ -12,6 +12,10 @@ export async function destroyInstanceJob(
   _args: unknown,
   context: any,
 ): Promise<void> {
+  if (process.env.WASP_DISABLE_JOBS === 'true') {
+    console.log('[WASP_DISABLE_JOBS] skipping destroyInstanceJob');
+    return;
+  }
   const destroyable = await context.entities.Instance.findMany({
     where: { status: "destroying" },
   });
@@ -56,6 +60,10 @@ export async function syncSubscriptionsJob(
   _args: unknown,
   context: any,
 ): Promise<void> {
+  if (process.env.WASP_DISABLE_JOBS === 'true') {
+    console.log('[WASP_DISABLE_JOBS] skipping syncSubscriptionsJob');
+    return;
+  }
   // Find users with canceled subscriptions whose instances are still running
   const usersToSuspend = await context.entities.User.findMany({
     where: {
@@ -106,6 +114,10 @@ export async function suspendedCleanupJob(
   _args: unknown,
   context: any,
 ): Promise<void> {
+  if (process.env.WASP_DISABLE_JOBS === 'true') {
+    console.log('[WASP_DISABLE_JOBS] skipping suspendedCleanupJob');
+    return;
+  }
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - SUSPENDED_GRACE_DAYS);
 

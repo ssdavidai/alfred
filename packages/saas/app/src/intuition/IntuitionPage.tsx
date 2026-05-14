@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Navigate } from "react-router-dom";
 import {
   useQuery,
   getIntuitionStatus,
@@ -641,7 +642,14 @@ export function IntuitionActivityContent() {
   );
 }
 
+// M4 #860 — /dashboard/intuition redirects to /instincts. The legacy
+// implementation is preserved as LegacyIntuitionPage so the cutover can
+// be reverted with one line.
 export default function IntuitionPage() {
+  return <Navigate to="/instincts" replace />;
+}
+
+function LegacyIntuitionPage() {
   const {
     data: status,
     isLoading: statusLoading,

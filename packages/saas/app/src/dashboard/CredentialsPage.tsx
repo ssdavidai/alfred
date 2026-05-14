@@ -258,6 +258,7 @@ export function CredentialsContent() {
   );
 }
 
+// M6 #867 — /dashboard/credentials → /study#credentials.
 export default function CredentialsPage() {
-  return <Navigate to="/dashboard/settings?tab=credentials" replace />;
+  return <Navigate to="/study#credentials" replace />;
 }

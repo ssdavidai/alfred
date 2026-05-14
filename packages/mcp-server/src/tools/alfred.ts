@@ -344,6 +344,59 @@ const deviceTools: ToolDef[] = [
   },
 ];
 
+// ─── channels (notify the principal via main openclaw) ──────────────────────
+
+// Outbound channels (Telegram, Slack, …) belong to the MAIN openclaw
+// runtime — its gateway holds the bot tokens, its `message` tool dispatches
+// into them. Workers-side agents (learn-clerk, ephemeral exec-*) live on a
+// different gateway and can't invoke main's `message` tool directly.
+// ctrl-api bridges them via /api/v1/notifications: the request lands on
+// ctrl-api, which forwards {action: "send", channel, to, message, urgency}
+// to MAIN openclaw's /tools/invoke endpoint. The principal is paired with
+// the chosen channel by openclaw, so the recipient resolution happens
+// server-side via pickPrimaryChannel() + resolveRecipient().
+
+const channelTools: ToolDef[] = [
+  {
+    name: "notify_principal",
+    description:
+      "Send a message to Sir on his preferred channel (Telegram, Slack, …). USE THIS — never composio_execute — when the principal asks you to ping/notify/remind him. Telegram is NOT a Composio toolkit; it's an OpenClaw main-gateway channel, and only the main runtime can reach it. This tool bridges that: ctrl-api forwards to main openclaw's `message` tool, which dispatches into the right channel using main's stored bot tokens. Auto-picks the tenant's primary channel when you pass channel='auto' or omit it. When Sir explicitly names a channel (\"send me a reminder on Telegram\"), pass that channel slug — do NOT rely on auto. Backing: POST /api/v1/notifications → main openclaw /tools/invoke {tool: message}.",
+    inputSchema: z.object({
+      message: z.string().min(1).describe(
+        "The text to send Sir. Plain text; no markdown formatting unless the channel renders it. Keep it tight — this lands as a notification, not a document.",
+      ),
+      channel: z
+        .enum(["auto", "telegram", "slack"])
+        .optional()
+        .describe(
+          "Channel name. 'auto' (default) picks the tenant's primary channel server-side. Pass 'telegram' or 'slack' explicitly whenever Sir names a channel — auto is a fallback, not a Sir-aware resolver.",
+        ),
+      urgency: z
+        .enum(["normal", "high"])
+        .optional()
+        .describe(
+          "Message urgency. 'normal' (default) for routine pings; 'high' for time-sensitive ones — some channels render high-urgency messages with elevated push priority.",
+        ),
+      to: z
+        .string()
+        .optional()
+        .describe(
+          "Optional explicit recipient address (channel-specific id). Almost never needed — leave unset and ctrl-api resolves Sir's paired identity for the chosen channel. Useful only when sending to a NON-principal recipient on a channel where the bot has multi-recipient access.",
+        ),
+    }),
+    buildRequest: ({ message, channel, urgency, to }) => ({
+      method: "POST",
+      path: "/api/v1/notifications",
+      body: {
+        message,
+        channel: channel ?? "auto",
+        urgency: urgency ?? "normal",
+        ...(to ? { to } : {}),
+      },
+    }),
+  },
+];
+
 // ─── flat catalogue ─────────────────────────────────────────────────────────
 
 export const ALL_ALFRED_TOOLS: ToolDef[] = [
@@ -352,4 +405,5 @@ export const ALL_ALFRED_TOOLS: ToolDef[] = [
   ...workflowTools,
   ...openclawTools,
   ...deviceTools,
+  ...channelTools,
 ];
