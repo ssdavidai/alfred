@@ -57,11 +57,16 @@ your VM's public IP, where `example.com` is your domain:
 
 | Record  | Host                | Serves                            |
 |---------|---------------------|-----------------------------------|
-| `@`     | `example.com`       | the Alfred Black web app          |
+| `@`     | `example.com`       | the Alfred Black dashboard (SPA)  |
+| `api`   | `api.example.com`   | the Alfred Black API server       |
 | `plane` | `plane.example.com` | Plane (project management)        |
 | `sure`  | `sure.example.com`  | Sure (personal finance)           |
 | `vault` | `vault.example.com` | Vaultwarden (secrets manager)     |
 | `mcp`   | `mcp.example.com`   | MCP server (Claude connector)     |
+
+`wasp build` produces the dashboard as two parts — a static React SPA and
+its API server — served on `@` and `api.` respectively. Both A-records are
+required; the SPA calls the API cross-subdomain.
 
 Caddy obtains a Let's Encrypt certificate per host using the HTTP-01
 challenge — **no DNS API token is needed**. If DNS hasn't propagated when the
