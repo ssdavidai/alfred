@@ -3,7 +3,15 @@ FROM python:3.12-slim
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# hdbscan (surveyor clustering) ships no arm64 wheel — it compiles from
+# source, so a C toolchain is required. Install it, build, then purge to
+# keep the image lean.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential python3-dev \
+ && pip install --no-cache-dir -r requirements.txt \
+ && apt-get purge -y build-essential python3-dev \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
 
 # Download whisper-large-v3 model during build (cached in Docker layer).
 # This makes the image ~3GB larger but ensures zero-config deployment.
