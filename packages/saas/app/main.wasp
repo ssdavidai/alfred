@@ -1543,6 +1543,20 @@ action adminPatchAllInstanceConfigs {
   entities: [Instance]
 }
 
+// STORE-X-3: per-tenant storage observability for the Storage Architecture
+// migration (epic #898). Proxies to each tenant's ctrl-api
+// /api/v1/admin/storage-metrics.
+route AdminStorageRoute { path: "/admin/storage", to: StorageDashboardPage }
+page StorageDashboardPage {
+  authRequired: true,
+  component: import StorageDashboard from "@src/admin/StorageDashboard"
+}
+
+query getStorageMetrics {
+  fn: import { getStorageMetrics } from "@src/admin/storageOperations",
+  entities: [User, Instance]
+}
+
 // ============================================================
 // Waitlist / Closed Beta
 // ============================================================

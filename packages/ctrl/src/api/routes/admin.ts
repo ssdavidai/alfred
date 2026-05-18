@@ -5,12 +5,23 @@ import { dockerComposeCmd, dockerExec, execAsync, sudoExec, parseJsonLines, vali
 import { getVaultContextData, getInboxFiles, VAULT_PATH } from "./vault.js";
 import { parseActivityFeed } from "../activity.js";
 import { ttlCache } from "../cache.js";
+import { openStateDb, listMigrations } from "../../db/state.js";
+import { getRequestLatencies } from "../metrics.js";
 
 // Activity feed is the most expensive read on the Desk page — it spawns
 // `docker compose logs --tail=N alfred` which forks a process per call.
 // Coalesce repeat reads (every Desk page-load fires this once, and
 // every click invalidates+refetches) onto a single subprocess invocation.
 const activityFeedCache = ttlCache<{ items: any[] }>({ ttlMs: 3_000 });
+
+// STORE-X-3: file-count walk under /mnt/encrypted/vault is the only
+// expensive piece of /admin/storage-metrics. Cache the result for 60s so
+// the SaaS dashboard can poll without forking `find` on every fetch.
+// The other reads (sqlite count(*), fs.statSync) are cheap enough to do
+// inline on every call.
+const filesOnDiskCache = ttlCache<{ files_on_disk: number; by_type_disk: Record<string, number> }>({
+  ttlMs: 60_000,
+});
 
 // Host paths for alfred-data and chore directory.
 // The ctrl-api container mounts /mnt/encrypted/alfred to the SAME path
@@ -264,7 +275,130 @@ function toSentenceVerb(action: string): string {
   return map[action] || sentenceCase(action);
 }
 
+// STORE-X-3: count *.md files under VAULT_PATH and group by top-level
+// directory (which is record_type by vault layout convention). Single
+// readdir-recursive pass. The result is cached for 60s by the caller.
+function countVaultFilesOnDisk(): { files_on_disk: number; by_type_disk: Record<string, number> } {
+  const out: Record<string, number> = {};
+  let total = 0;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(VAULT_PATH, { withFileTypes: true });
+  } catch {
+    return { files_on_disk: 0, by_type_disk: {} };
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name.startsWith(".")) continue;
+    const recordType = entry.name;
+    const subdir = `${VAULT_PATH}/${recordType}`;
+    let count = 0;
+    try {
+      // recursive readdir is fastest; we don't need stat info.
+      const names = fs.readdirSync(subdir, { recursive: true }) as string[];
+      for (const n of names) {
+        if (typeof n === "string" && n.endsWith(".md")) count += 1;
+      }
+    } catch {
+      // skip unreadable subdir
+    }
+    if (count > 0) {
+      out[recordType] = count;
+      total += count;
+    }
+  }
+  return { files_on_disk: total, by_type_disk: out };
+}
+
+// STORE-X-3: list every user table in state.db and its row count. We skip
+// SQLite-internal tables (sqlite_*) and the migrations bookkeeping table.
+function readStateDbTables(): Record<string, number> {
+  const db = openStateDb();
+  const rows = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+    )
+    .all() as { name: string }[];
+  const out: Record<string, number> = {};
+  for (const r of rows) {
+    if (r.name === "_migrations") continue;
+    try {
+      // We trust sqlite_master output — name is server-controlled, not user input.
+      const c = db.prepare(`SELECT count(*) AS c FROM "${r.name}"`).get() as { c: number };
+      out[r.name] = Number(c.c) || 0;
+    } catch {
+      out[r.name] = -1; // sentinel — table existed but count failed
+    }
+  }
+  return out;
+}
+
 export function registerAdminRoutes(): void {
+  // --- STORE-X-3: storage architecture observability ---
+  //
+  // Single round-trip view of vault disk vs. vault_index drift, state.db
+  // size + per-table row counts, applied migrations, and recent
+  // per-endpoint request latency. Read by the SaaS admin /admin/storage
+  // dashboard; threshold checks live on the SaaS side so all tenants
+  // share one alerting policy.
+  addRoute("GET", "/api/v1/admin/storage-metrics", async ({ res }) => {
+    // --- vault ---
+    const { files_on_disk, by_type_disk } = await filesOnDiskCache.get(
+      "storage-metrics:files",
+      async () => countVaultFilesOnDisk(),
+    );
+
+    const db = openStateDb();
+    let indexRows = 0;
+    const byType: Record<string, number> = {};
+    try {
+      const row = db
+        .prepare("SELECT count(*) AS c FROM vault_index")
+        .get() as { c: number };
+      indexRows = Number(row.c) || 0;
+      const typeRows = db
+        .prepare(
+          "SELECT record_type AS t, count(*) AS c FROM vault_index GROUP BY record_type",
+        )
+        .all() as { t: string; c: number }[];
+      for (const r of typeRows) byType[r.t] = Number(r.c) || 0;
+    } catch {
+      // vault_index migration may not have shipped yet on a brand-new tenant
+    }
+
+    // --- state.db ---
+    const dbPath = process.env.ALFRED_STATE_DB ?? "/var/lib/alfred/state.db";
+    let sizeBytes = 0;
+    try {
+      sizeBytes = fs.statSync(dbPath).size;
+    } catch {
+      // file may not exist yet
+    }
+    const tables = readStateDbTables();
+    const migrationsApplied = listMigrations(db).map((m) => m.version);
+
+    // --- request latency (from in-memory metrics) ---
+    const requestLatency = getRequestLatencies();
+
+    sendJson(res, 200, {
+      vault: {
+        files_on_disk,
+        index_rows: indexRows,
+        index_drift: files_on_disk - indexRows,
+        by_type: byType,
+        by_type_disk,
+      },
+      state_db: {
+        path: dbPath,
+        size_bytes: sizeBytes,
+        tables,
+        migrations_applied: migrationsApplied,
+      },
+      request_latency: requestLatency,
+      collected_at: new Date().toISOString(),
+    });
+  });
+
   // --- Containers ---
 
   // List containers

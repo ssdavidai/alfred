@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { authenticate } from "./auth.js";
 import { handleError, sendJson, ValidationError } from "./errors.js";
 import { setCors, parseBody, readRawBody, logRequest } from "./middleware.js";
+import { recordRequestLatency } from "./metrics.js";
 import { registerVaultRoutes } from "./routes/vault.js";
 import { registerDeviceRoutes } from "./routes/devices.js";
 import { registerLogRoutes } from "./routes/logs.js";
@@ -44,6 +45,7 @@ import { registerBriefingsRoutes } from "./routes/briefings.js";
 import { registerMatterRoutes } from "./routes/matters.js";
 import { registerDecisionRoutes } from "./routes/decisions.js";
 import { registerStateChangeRoutes } from "./routes/stateChanges.js";
+import { registerAuditRoutes } from "./routes/audit.js";
 import { registerTodoRoutes } from "./routes/todos.js";
 import { registerPlaneStewardWebhookRoute } from "./routes/webhooks/plane.js";
 import { registerVexaWebhookRoute } from "./routes/webhooks/vexa.js";
@@ -64,6 +66,7 @@ type RouteHandler = (ctx: ApiRequest) => Promise<void>;
 
 interface Route {
   method: string;
+  pattern: string;       // original path string (e.g. "/api/v1/vault/:type")
   regex: RegExp;
   keys: string[];
   handler: RouteHandler;
@@ -87,10 +90,10 @@ const routes: Route[] = [];
 
 export function addRoute(method: string, path: string, handler: RouteHandler): void {
   const { regex, keys } = pathToRegex(path);
-  routes.push({ method, regex, keys, handler });
+  routes.push({ method, pattern: path, regex, keys, handler });
 }
 
-export function matchRoute(method: string, pathname: string): { handler: RouteHandler; params: RouteParams } | null {
+export function matchRoute(method: string, pathname: string): { handler: RouteHandler; params: RouteParams; pattern: string } | null {
   for (const route of routes) {
     if (route.method !== method) continue;
     const match = pathname.match(route.regex);
@@ -99,7 +102,7 @@ export function matchRoute(method: string, pathname: string): { handler: RouteHa
     for (let i = 0; i < route.keys.length; i++) {
       params[route.keys[i]] = decodeURIComponent(match[i + 1]);
     }
-    return { handler: route.handler, params };
+    return { handler: route.handler, params, pattern: route.pattern };
   }
   return null;
 }
@@ -147,6 +150,7 @@ export function createApiServer(): http.Server {
   registerMatterRoutes();
   registerDecisionRoutes();
   registerStateChangeRoutes();
+  registerAuditRoutes();
   registerTodoRoutes();
   registerPlaneStewardWebhookRoute();
   registerVexaWebhookRoute();
@@ -237,10 +241,28 @@ export function createApiServer(): http.Server {
         query,
       });
 
-      logRequest(method, url, res.statusCode, Date.now() - start);
+      const elapsed = Date.now() - start;
+      // STORE-X-3: record per-route latency keyed by the *pattern*
+      // (e.g. /api/v1/vault/:type) so the cardinality stays bounded.
+      recordRequestLatency(`${method} ${matched.pattern}`, elapsed);
+      logRequest(method, url, res.statusCode, elapsed);
     } catch (err) {
       handleError(res, err);
-      logRequest(method, url, res.statusCode, Date.now() - start);
+      const elapsed = Date.now() - start;
+      // Best-effort: only record latency when we actually resolved a route
+      // (i.e. matched is in scope). matched may not exist on early throws
+      // — in that case there is no useful endpoint key.
+      try {
+        const qIdx2 = (req.url ?? "/").indexOf("?");
+        const pathname2 = qIdx2 >= 0 ? (req.url ?? "/").slice(0, qIdx2) : (req.url ?? "/");
+        const m2 = matchRoute(method, pathname2);
+        if (m2) {
+          recordRequestLatency(`${method} ${m2.pattern}`, elapsed);
+        }
+      } catch {
+        // never let the metrics path mask the real error
+      }
+      logRequest(method, url, res.statusCode, elapsed);
     }
   });
 
