@@ -372,11 +372,15 @@ fi
 # actual API-key mint runs in the separate `sure-init` compose service.
 # Init's job is to stage the inputs that one-shot needs.
 # =============================================================================
-if [[ "${SURE_ENABLED:-false}" != "true" ]]; then
+# Sure runs in the default compose stack, so default SURE_ENABLED on.
+if [[ "${SURE_ENABLED:-true}" != "true" ]]; then
     echo "[init] SURE_ENABLED!=true, skipping Sure bootstrap staging."
 else
+    # Fall back to ACME_EMAIL — every deploy provides one, so Sure staging
+    # works without the deployer setting a separate OWNER_EMAIL.
+    OWNER_EMAIL="${OWNER_EMAIL:-${ACME_EMAIL:-}}"
     if [[ -z "${OWNER_EMAIL:-}" ]]; then
-        echo "[init] ACTION REQUIRED: SURE_ENABLED=true but OWNER_EMAIL is unset."
+        echo "[init] ACTION REQUIRED: SURE_ENABLED=true but OWNER_EMAIL/ACME_EMAIL is unset."
         echo "[init]   Cannot stage Sure bootstrap without an admin email."
     else
         SURE_EMAIL_FILE=/alfred-data/.sure-bootstrap-email
