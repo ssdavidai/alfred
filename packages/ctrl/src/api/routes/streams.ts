@@ -16,6 +16,7 @@ import {
   setConsumerOffset,
   markEventProcessed as sqlMarkEventProcessed,
   getEventProcessed,
+  detectStuckPipeline,
 } from "../../db/stream_queries.js";
 
 const DEFAULT_CONSUMER = "event_processor";
@@ -900,6 +901,33 @@ export function registerStreamRoutes(): void {
     });
 
     sendJson(res, 200, { streams: enriched });
+  });
+
+  // GET /api/v1/streams/stuck-report — STORE-P4-2 stuck-consumer detector.
+  //
+  // Reports events in /vault/_raw/<date>.jsonl partitions older than
+  // `stuck_after_days` (default 7) that are NOT in stream_event_processed.
+  // The raw event being old isn't the problem on its own — the daily
+  // compactor garbage-collects processed events at 7d. Anything past
+  // the cutoff that's not marked processed = stuck consumer.
+  //
+  // MUST be registered before "/:id" so "stuck-report" doesn't match as
+  // a stream id.
+  addRoute("GET", "/api/v1/streams/stuck-report", async ({ res, query }) => {
+    const stuckAfterDays = Math.max(
+      1,
+      parseInt(query.get("stuck_after_days") || "7", 10) || 7,
+    );
+    const sampleSize = Math.max(
+      1,
+      Math.min(parseInt(query.get("sample_size") || "10", 10) || 10, 100),
+    );
+    const db = openStateDb();
+    const report = detectStuckPipeline(db, {
+      stuck_after_days: stuckAfterDays,
+      sample_size: sampleSize,
+    });
+    sendJson(res, 200, { ...report, stuck_after_days: stuckAfterDays });
   });
 
   // GET /api/v1/streams/schema — agent-facing reference for creating + configuring

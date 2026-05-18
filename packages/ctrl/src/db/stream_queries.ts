@@ -10,6 +10,8 @@
 // calls `stmt.setReadBigInts(true)`. Without that flag node:sqlite
 // throws RangeError when materialising the row (STORE-P1-4 lesson).
 
+import fs from "node:fs";
+import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 export interface ConsumerOffsetRow {
@@ -138,4 +140,140 @@ export function deleteProcessedOlderThan(
   );
   const result = stmt.run(cutoffNs);
   return Number(result.changes);
+}
+
+// --- stuck pipeline detection (STORE-P4-2) ---------------------------------
+
+export interface StuckPipelineReport {
+  unprocessed_old_count: number;
+  oldest_date: string | null;
+  oldest_age_days: number;
+  sample_event_ids: string[];
+  consumer_lag_by_date: Array<{
+    date: string;
+    total: number;
+    processed: number;
+  }>;
+}
+
+/**
+ * Walk /vault/_raw/*.jsonl partitions older than `stuck_after_days` (default
+ * 7), counting events in each partition vs. how many of those event ids
+ * have a corresponding row in stream_event_processed. Anything in an
+ * old partition that's not marked processed = stuck.
+ *
+ * Returns:
+ *   * unprocessed_old_count — total events sitting in partitions older
+ *     than the cutoff that are NOT marked processed
+ *   * oldest_date / oldest_age_days — the most-stuck partition
+ *   * sample_event_ids — up to `sample_size` (default 10) ids the
+ *     operator can grep for
+ *   * consumer_lag_by_date — per-partition (total, processed) pairs
+ *
+ * The raw event being old isn't the problem on its own — the daily
+ * compactor (STORE-P4-1) garbage-collects processed events at 7d.
+ * Anything past 7d that's *not* marked processed = a stuck consumer.
+ */
+export function detectStuckPipeline(
+  db: DatabaseSync,
+  opts: { stuck_after_days?: number; sample_size?: number } = {},
+): StuckPipelineReport {
+  const stuckAfterDays = Math.max(1, opts.stuck_after_days ?? 7);
+  const sampleSize = Math.max(1, Math.min(opts.sample_size ?? 10, 100));
+
+  const vaultPath = process.env.VAULT_PATH ?? "/mnt/encrypted/vault";
+  const rawDir = path.join(vaultPath, "_raw");
+
+  let dates: string[];
+  try {
+    dates = fs
+      .readdirSync(rawDir)
+      .filter((f) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(f))
+      .map((f) => f.slice(0, 10))
+      .sort();
+  } catch {
+    return {
+      unprocessed_old_count: 0,
+      oldest_date: null,
+      oldest_age_days: 0,
+      sample_event_ids: [],
+      consumer_lag_by_date: [],
+    };
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const todayMs = new Date(`${today}T00:00:00Z`).getTime();
+
+  // Helper: age of a partition in whole UTC days from today.
+  const ageDays = (date: string): number => {
+    const partitionMs = new Date(`${date}T00:00:00Z`).getTime();
+    return Math.floor((todayMs - partitionMs) / 86_400_000);
+  };
+
+  const lag: Array<{ date: string; total: number; processed: number }> = [];
+  const samples: string[] = [];
+  let unprocessedOld = 0;
+  let oldestDate: string | null = null;
+  let oldestAge = 0;
+
+  for (const date of dates) {
+    const age = ageDays(date);
+    if (age < stuckAfterDays) continue;
+
+    // Count lines + collect unprocessed ids from the partition. Read the
+    // file once and walk line by line. Partitions in the david fleet are
+    // ~MB-scale even on the heaviest day, so the simple readFile is fine
+    // — same assumption as readStreamLogSlice / compactPartition.
+    const file = path.join(rawDir, `${date}.jsonl`);
+    let raw: string;
+    try {
+      raw = fs.readFileSync(file, "utf-8");
+    } catch {
+      continue;
+    }
+
+    // Build the set of processed event_ids for this partition once
+    // (single SELECT vs. one per line).
+    const processedIds = listProcessedIdsForDate(db, date);
+
+    let total = 0;
+    let processed = 0;
+    const lines = raw.split("\n");
+    for (const line of lines) {
+      if (!line) continue;
+      total++;
+      let id: string | undefined;
+      try {
+        id = (JSON.parse(line) as { id?: string }).id;
+      } catch {
+        // Malformed lines — treat as unprocessed so the operator
+        // notices, but skip the id sampling.
+        unprocessedOld++;
+        continue;
+      }
+      if (id && processedIds.has(id)) {
+        processed++;
+      } else {
+        unprocessedOld++;
+        if (id && samples.length < sampleSize) {
+          samples.push(id);
+        }
+      }
+    }
+
+    lag.push({ date, total, processed });
+
+    if (total - processed > 0 && (oldestDate === null || age > oldestAge)) {
+      oldestDate = date;
+      oldestAge = age;
+    }
+  }
+
+  return {
+    unprocessed_old_count: unprocessedOld,
+    oldest_date: oldestDate,
+    oldest_age_days: oldestAge,
+    sample_event_ids: samples,
+    consumer_lag_by_date: lag,
+  };
 }

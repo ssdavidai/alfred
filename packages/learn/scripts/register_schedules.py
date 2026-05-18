@@ -120,6 +120,25 @@ STREAM_EVENT_PURGE_WORKFLOW = "StreamEventPurgeWorkflow"
 STREAM_RAW_COMPACT_SCHEDULE_ID = "al-stream-raw-compact"
 STREAM_RAW_COMPACT_WORKFLOW = "StreamRawCompactWorkflow"
 
+# STORE-P4-2 — hourly stuck-consumer alert. Calls ctrl-api's stuck-report
+# (events in /vault/_raw/<date>.jsonl older than 7d AND not in
+# stream_event_processed); if any are found, posts a Slack-compatible
+# alert to ALERT_WEBHOOK_URL. Always-on (no env gate); the alert
+# activity logs at ERROR + returns when ALERT_WEBHOOK_URL is unset, so
+# tenants without a webhook still get the visibility through container
+# logs instead of silent drift.
+STUCK_PIPELINE_ALERT_SCHEDULE_ID = "al-stuck-pipeline-alert"
+STUCK_PIPELINE_ALERT_WORKFLOW = "StuckPipelineAlertWorkflow"
+STUCK_PIPELINE_ALERT_INTERVAL = timedelta(hours=1)
+
+# STORE-P5-1 (#921) — daily 90-day Parquet roll-out of state.db hot
+# tables (audit / signal / observation). Calendar schedule at 03:00 UTC
+# daily, SKIP overlap. Always-on (no env gate) because the activity
+# short-circuits when state.db isn't mounted — a freshly-provisioned
+# tenant with zero rows older than 90d completes in milliseconds.
+ARCHIVAL_SWEEP_SCHEDULE_ID = "al-archival-sweep"
+ARCHIVAL_SWEEP_WORKFLOW = "ArchivalSweepWorkflow"
+
 # Steward Phase 6 (RFC #842 / T6.7.5) — reversal-driven negative
 # calibration. Polls the vault every 10 minutes for new
 # ``event/steward-action-reversed-*.md`` (and signal-action-reversed-)
@@ -1128,6 +1147,140 @@ async def register_stream_raw_compact(client: Client, task_queue: str) -> None:
         raise
 
 
+async def register_archival_sweep(client: Client, task_queue: str) -> None:
+    """Create ``al-archival-sweep`` — STORE-P5-1 daily Parquet archiver.
+
+    Calendar schedule at 03:00 UTC daily. SKIP overlap so a long sweep
+    doesn't pile on with itself (the activity is already idempotent —
+    skipped rows on attempt N show up on attempt N+1 — but SKIP keeps
+    Temporal history tidy). Always-on; the activity short-circuits when
+    state.db isn't present and the workflow returns per-table outcomes
+    either way.
+    """
+    action = ScheduleActionStartWorkflow(
+        ARCHIVAL_SWEEP_WORKFLOW,
+        id=f"{ARCHIVAL_SWEEP_SCHEDULE_ID}-run",
+        task_queue=task_queue,
+        # 45 min envelope across all three tables. Each activity is
+        # capped at 15 min (see ArchivalSweepWorkflow.run) so even a
+        # full-fan-out worst case (each table maxes its inner timeout)
+        # leaves headroom before the run-level cap fires.
+        execution_timeout=timedelta(minutes=50),
+        run_timeout=timedelta(minutes=50),
+    )
+    spec = ScheduleSpec(
+        calendars=[
+            ScheduleCalendarSpec(
+                hour=[ScheduleRange(start=3)],
+                minute=[ScheduleRange(start=0)],
+            )
+        ],
+        # Pinned to UTC so the 90-day retention math is consistent
+        # across the fleet regardless of tenant timezone.
+        time_zone_name="UTC",
+    )
+    policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
+
+    try:
+        await client.create_schedule(
+            ARCHIVAL_SWEEP_SCHEDULE_ID,
+            Schedule(action=action, spec=spec, policy=policy),
+        )
+        logger.info(
+            "Created schedule: %s → %s (daily 03:00 UTC, SKIP overlap)",
+            ARCHIVAL_SWEEP_SCHEDULE_ID,
+            ARCHIVAL_SWEEP_WORKFLOW,
+        )
+    except RPCError as e:
+        if e.status == RPCStatusCode.ALREADY_EXISTS:
+            logger.info(
+                "Schedule already exists: %s (skipping)",
+                ARCHIVAL_SWEEP_SCHEDULE_ID,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s",
+            ARCHIVAL_SWEEP_SCHEDULE_ID, e,
+        )
+        raise
+    except Exception as e:  # noqa: BLE001 — parity with sibling helpers
+        err = str(e).lower()
+        if "already" in err or "exists" in err:
+            logger.info(
+                "Schedule already exists: %s (skipping)",
+                ARCHIVAL_SWEEP_SCHEDULE_ID,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s",
+            ARCHIVAL_SWEEP_SCHEDULE_ID, e,
+        )
+        raise
+
+
+async def register_stuck_pipeline_alert(
+    client: Client, task_queue: str,
+) -> None:
+    """Create ``al-stuck-pipeline-alert`` — STORE-P4-2 hourly alert.
+
+    Interval schedule (1h), SKIP overlap. Always-on: if no webhook is
+    configured the activity logs at ERROR and returns, so the schedule
+    is safe to register fleet-wide. Idempotent — re-running the
+    registrar leaves the schedule alone (ALREADY_EXISTS path).
+    """
+    handle = client.get_schedule_handle(STUCK_PIPELINE_ALERT_SCHEDULE_ID)
+    action = ScheduleActionStartWorkflow(
+        STUCK_PIPELINE_ALERT_WORKFLOW,
+        id=f"{STUCK_PIPELINE_ALERT_SCHEDULE_ID}-run",
+        task_queue=task_queue,
+        # 2-minute envelope: the check is a single ctrl-api GET; even a
+        # fleet-heaviest tenant with ~7d × 10k events/day = 70k lines
+        # walks in seconds. The cap protects against a ctrl-api wedge.
+        execution_timeout=timedelta(minutes=2),
+        run_timeout=timedelta(minutes=2),
+    )
+    spec = ScheduleSpec(
+        intervals=[ScheduleIntervalSpec(every=STUCK_PIPELINE_ALERT_INTERVAL)],
+    )
+    policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
+
+    try:
+        await client.create_schedule(
+            STUCK_PIPELINE_ALERT_SCHEDULE_ID,
+            Schedule(action=action, spec=spec, policy=policy),
+        )
+        logger.info(
+            "Created schedule: %s → %s (hourly, SKIP overlap)",
+            STUCK_PIPELINE_ALERT_SCHEDULE_ID,
+            STUCK_PIPELINE_ALERT_WORKFLOW,
+        )
+    except RPCError as e:
+        if e.status == RPCStatusCode.ALREADY_EXISTS:
+            logger.info(
+                "Schedule already exists: %s (skipping)",
+                STUCK_PIPELINE_ALERT_SCHEDULE_ID,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s",
+            STUCK_PIPELINE_ALERT_SCHEDULE_ID, e,
+        )
+        raise
+    except Exception as e:  # noqa: BLE001 — parity with sibling helpers
+        err = str(e).lower()
+        if "already" in err or "exists" in err:
+            logger.info(
+                "Schedule already exists: %s (skipping)",
+                STUCK_PIPELINE_ALERT_SCHEDULE_ID,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s",
+            STUCK_PIPELINE_ALERT_SCHEDULE_ID, e,
+        )
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Steward (#835) — per-matter schedule registration
 # ---------------------------------------------------------------------------
@@ -1448,6 +1601,17 @@ async def register_all() -> None:
     # Drops events older than 7d that are processed, hard-deletes
     # partitions older than 30d. Always-on (no env gate).
     await register_stream_raw_compact(client, config.task_queue)
+    # STORE-P4-2 — hourly stuck-consumer alert. Checks for any
+    # /vault/_raw/<date>.jsonl events older than 7d that are NOT in
+    # stream_event_processed; posts to ALERT_WEBHOOK_URL when found.
+    # Always-on (no env gate); no webhook = log-only.
+    await register_stuck_pipeline_alert(client, config.task_queue)
+    # STORE-P5-1 (#921) — daily 90-day Parquet archive of state.db hot
+    # tables (audit / signal / observation). 03:00 UTC, SKIP overlap.
+    # Always-on; the activity short-circuits when state.db isn't
+    # mounted (dev environments) so it's safe to arm before fleet
+    # rollout completes the corresponding compose-template change.
+    await register_archival_sweep(client, config.task_queue)
     # Steward Phase 6 (RFC #842 / T6.7.5) — reversal-driven negative
     # calibration. 10-min sweep over ``event/steward-action-reversed-*``
     # / ``event/signal-action-reversed-*`` records. Gated on

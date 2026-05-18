@@ -14,3 +14,9 @@ tsfresh==0.21.1
 hdbscan==0.8.40
 pyod==2.0.2
 lifetimes==0.11.3
+
+# STORE-P5-1 (#921) — columnar Parquet writer for the rolling 90-day
+# archive of state.db hot tables (audit / signal / observation). Used
+# only by src/activities/archive.py; lazy-imported so dev environments
+# without the wheel can still import the module without exploding.
+pyarrow==18.1.0

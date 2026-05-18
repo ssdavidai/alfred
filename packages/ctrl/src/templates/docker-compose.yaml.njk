@@ -393,8 +393,21 @@ services:
       - /mnt/encrypted/vault:/vault
       - /mnt/encrypted/alfred:/alfred-data
       - /mnt/encrypted/openclaw-workers:/openclaw-workers-state
+      # STORE-P5-1 (#921) — alfred-learn's daily archival sweep
+      # (ArchivalSweepWorkflow + compact_to_parquet) needs read+write
+      # access to state.db so it can SELECT the >90d rows and DELETE
+      # them after the Parquet write verifies. The same host directory
+      # is bind-mounted into ctrl-api (see ctrl-api service above); WAL
+      # mode + busy_timeout on both connections keep contention bounded
+      # (SQLite's writer lock serialises the BEGIN IMMEDIATE blocks).
+      - /opt/alfred/state:/var/lib/alfred
     environment:
       - TEMPORAL_HOST=temporal:7233
+      # STORE-P5-1 (#921) — direct state.db path for the archival
+      # sweep. Mirrors the path used inside the ctrl-api container so
+      # the activity's defaults match production without per-tenant
+      # override.
+      - STATE_DB_PATH=/var/lib/alfred/state.db
       # alfred-learn talks to BOTH gateways:
       #
       # * OPENCLAW_GATEWAY_URL → MAIN (:18789). Used by notify_eod_prompt,

@@ -53,8 +53,10 @@ from src.workflows.signal_router import (
 )
 from src.workflows.stream_event_purge import StreamEventPurgeWorkflow
 from src.workflows.stream_raw_compact import StreamRawCompactWorkflow
+from src.workflows.stuck_pipeline_alert import StuckPipelineAlertWorkflow
 from src.workflows.reversal_calibration import ReversalCalibrationWorkflow
 from src.workflows.briefing import BriefingWorkflow
+from src.workflows.archival import ArchivalSweepWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -264,6 +266,15 @@ from src.activities.maintenance import (
     purge_old_stream_events,
     run_distiller_batch,
     run_janitor_scan_and_fix,
+)
+
+# STORE-P4-2 — hourly stuck-consumer alert. ``check_stuck_pipeline``
+# fetches the JSON report from ctrl-api; ``post_stuck_pipeline_alert``
+# forwards a 3-line message to ALERT_WEBHOOK_URL when the report is
+# non-zero (or logs at ERROR if no webhook is set).
+from src.activities.stuck_pipeline import (
+    check_stuck_pipeline,
+    post_stuck_pipeline_alert,
 )
 
 # Activities — behavioral profiler + packs (#283, #284)
@@ -647,6 +658,12 @@ from src.activities.briefing import (
     list_active_matters_for_briefing,
 )
 
+# STORE-P5-1 (#921) — daily 90-day Parquet archive of state.db hot
+# tables (audit / signal / observation). Activity is dispatched by
+# ``ArchivalSweepWorkflow.run`` (one invocation per table, serial).
+# Schedule registered as ``al-archival-sweep`` at 03:00 UTC daily.
+from src.activities.archive import compact_to_parquet
+
 # Validators used as activities
 from src.validators.frontmatter import validate_classification
 
@@ -690,8 +707,10 @@ _STATIC_WORKFLOWS = [
     SignalRouterWorkflow,
     StreamEventPurgeWorkflow,
     StreamRawCompactWorkflow,
+    StuckPipelineAlertWorkflow,
     ReversalCalibrationWorkflow,
     BriefingWorkflow,
+    ArchivalSweepWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -825,6 +844,11 @@ ALL_ACTIVITIES = [
     # STORE-P4-1: daily compaction of /vault/_raw/<date>.jsonl. Soft-compacts
     # files >7d (drops processed events), hard-deletes files >30d.
     compact_stream_raw_jsonl,
+    # STORE-P4-2: hourly stuck-consumer alert pair. ``check_stuck_pipeline``
+    # GETs ctrl-api /api/v1/streams/stuck-report; ``post_stuck_pipeline_alert``
+    # forwards to ALERT_WEBHOOK_URL when the report is non-zero.
+    check_stuck_pipeline,
+    post_stuck_pipeline_alert,
     # Behavioral profiler + packs
     run_behavioral_profiler,
     generate_stream_pack,
@@ -1091,6 +1115,12 @@ ALL_ACTIVITIES = [
     get_prior_briefing,
     briefing_visit_matter,
     compose_and_write_briefing,
+    # STORE-P5-1 (#921) — daily 90-day Parquet archive of state.db hot
+    # tables. Dispatched by ArchivalSweepWorkflow (one call per table:
+    # audit / signal / observation). Each invocation is wrapped in a
+    # BEGIN IMMEDIATE / COMMIT around state.db so a crash mid-archive
+    # leaves the DB unchanged.
+    compact_to_parquet,
 ]
 
 
