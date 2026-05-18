@@ -19,6 +19,7 @@ import { setApiKey } from "./auth.js";
 import { createApiServer } from "./server.js";
 import { attachTerminalUpgrade } from "./routes/terminal.js";
 import { flushPendingOpenclawWrites } from "./routes/integrations.js";
+import { openStateDb, runMigrations } from "../db/state.js";
 
 const apiKey = process.env.AAS_API_KEY;
 if (!apiKey) {
@@ -27,6 +28,17 @@ if (!apiKey) {
 }
 
 setApiKey(apiKey);
+
+try {
+  const stateDb = openStateDb();
+  const result = await runMigrations(stateDb);
+  console.log(
+    `migrations.run: applied=[${result.applied.join(",")}] skipped=[${result.skipped.join(",")}]`,
+  );
+} catch (err) {
+  console.error(`FATAL: state.db migrations failed: ${(err as Error).message}`);
+  process.exit(1);
+}
 
 const port = parseInt(process.env.AAS_PORT ?? "3100", 10);
 const host = process.env.AAS_HOST ?? "127.0.0.1";

@@ -87,8 +87,23 @@ All routes use `/api/v1/` prefix (e.g., `/api/v1/vault/schema`, `/api/v1/admin/c
 ### Database (`src/db/`)
 
 - `schema.sql` — three tables: `instances`, `health_checks`, `events`
-- `index.ts` — singleton `DatabaseSync` connection, auto-creates `data/` directory
+- `index.ts` — singleton `DatabaseSync` connection for `data/alfred-ctrl.db`, auto-creates `data/` directory
 - `queries.ts` — typed query functions (CRUD for instances, health checks, events)
+- `state.ts` — singleton `DatabaseSync` connection for `/var/lib/alfred/state.db` (configurable via `ALFRED_STATE_DB`), opens WAL + `synchronous=NORMAL`, runs migrations
+- `migrations/` — numbered `.sql` files applied in order to state.db; see "state.db migrations" below
+
+### state.db migrations
+
+`state.db` is the per-tenant working-memory database (vault_index, audit, signal, observation, embedding, link tables — added incrementally by future Phase 1 issues). It lives alongside `alfred-ctrl.db` but is owned by `state.ts`, not `index.ts`.
+
+How to add a migration:
+
+1. Create `src/db/migrations/NNN_short_name.sql` with the next zero-padded integer.
+2. Plain SQL only, applied transactionally by the runner.
+3. Add a static import + entry to the `MIGRATIONS` array in `src/db/state.ts`.
+4. Never edit a migration after it has merged to `main` — append a new one instead.
+
+Migrations are bundled into both `dist/index.mjs` and `dist/api/standalone.mjs` as text via esbuild's `.sql` loader. `standalone.ts` calls `runMigrations(openStateDb())` before the HTTP server starts; on failure it logs and exits 1. `node dist/index.mjs migrate-status` prints the full known + applied table.
 
 ### Monitoring (`src/monitoring/`)
 

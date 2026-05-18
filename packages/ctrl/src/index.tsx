@@ -910,4 +910,35 @@ snapshotCmd
     }
   });
 
+program
+  .command("migrate-status")
+  .description("List state.db migrations (known + applied)")
+  .action(async () => {
+    const { openStateDb, listMigrations, knownMigrations, closeStateDb } =
+      await import("./db/state.js");
+    const db = openStateDb();
+    const appliedRows = listMigrations(db);
+    const appliedMap = new Map(appliedRows.map((r) => [r.version, r]));
+    const known = knownMigrations();
+    const all = new Map<number, { version: number; name: string }>();
+    for (const m of known) all.set(m.version, m);
+    for (const r of appliedRows) if (!all.has(r.version)) all.set(r.version, { version: r.version, name: r.name });
+    const versions = [...all.keys()].sort((a, b) => a - b);
+
+    console.log(
+      `${"Version".padEnd(8)} ${"Name".padEnd(28)} ${"Applied At".padEnd(26)} Status`,
+    );
+    console.log("-".repeat(80));
+    for (const v of versions) {
+      const m = all.get(v)!;
+      const row = appliedMap.get(v);
+      const applied = row ? new Date(row.applied_at).toISOString() : "--";
+      const status = row ? "applied" : "pending";
+      console.log(
+        `${String(v).padEnd(8)} ${m.name.padEnd(28)} ${applied.padEnd(26)} ${status}`,
+      );
+    }
+    closeStateDb();
+  });
+
 program.parse();
