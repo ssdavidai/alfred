@@ -118,14 +118,49 @@ async function storeGoogleCredential(
 }
 
 /**
- * After signup: capture Google tokens so Gmail works immediately.
+ * After signup:
+ *  1. Auto-verify the OWNER (first user). Single-VM deploys may run with no
+ *     mail provider configured, so the verification email can't be
+ *     delivered — without this the principal could never log in. Later
+ *     users still verify by email as normal.
+ *  2. Capture Google tokens so Gmail works immediately.
  */
-export const onAfterSignup: OnAfterSignupHook = async ({ oauth, user }) => {
-  if (!oauth) return;
+export const onAfterSignup: OnAfterSignupHook = async (args) => {
+  const { oauth, user } = args;
+  const providerId = (args as any).providerId;
 
+  // 1. owner email auto-verification
+  if (providerId?.providerName === "email" && (user as any).isOwner) {
+    try {
+      const key = {
+        providerName_providerUserId: {
+          providerName: "email",
+          providerUserId: providerId.providerUserId,
+        },
+      };
+      const identity = await prisma.authIdentity.findUnique({ where: key });
+      if (identity) {
+        const data = JSON.parse(identity.providerData);
+        if (!data.isEmailVerified) {
+          data.isEmailVerified = true;
+          await prisma.authIdentity.update({
+            where: key,
+            data: { providerData: JSON.stringify(data) },
+          });
+          console.info(
+            `[auth] Auto-verified owner email ${providerId.providerUserId}`
+          );
+        }
+      }
+    } catch (e: any) {
+      console.error("[auth] owner auto-verify failed:", e.message);
+    }
+  }
+
+  // 2. capture Google tokens so Gmail works immediately
+  if (!oauth) return;
   const tokens = extractGoogleTokens(oauth);
   if (!tokens) return;
-
   try {
     await storeGoogleCredential(user.id, tokens);
   } catch (e: any) {
