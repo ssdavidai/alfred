@@ -40,6 +40,22 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           wasp build
 
+      - name: Generate Prisma baseline migration
+        # The repo ships no migration files (the multi-tenant SaaS history
+        # was dropped). Generate a baseline `0_init` from the Wasp-expanded
+        # schema so the web container's `prisma migrate deploy` creates the
+        # full schema on a fresh database.
+        working-directory: packages/web/.wasp/build/db
+        run: |
+          mkdir -p migrations/0_init
+          npx -y prisma@5.19.1 migrate diff \
+            --from-empty \
+            --to-schema-datamodel schema.prisma \
+            --script > migrations/0_init/migration.sql
+          printf 'provider = "postgresql"\n' > migrations/migration_lock.toml
+          echo "baseline migration: $(wc -l < migrations/0_init/migration.sql) lines"
+          head -3 migrations/0_init/migration.sql
+
       - name: Build the Wasp SPA client
         # The Wasp client is an npm-workspace project — building it inside a
         # standalone Docker stage is fragile (the `wasp/*` SDK + hoisted
