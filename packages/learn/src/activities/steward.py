@@ -4105,6 +4105,52 @@ async def apply_state_change(
         # ── 7. Write the audit record ───────────────────────────────────
         written_path = await client.write_record("event", audit_name, content)
 
+        # ── 7b. STORE-P2-2 — also emit a row to the unified audit table.
+        # Replay-safety: this call lives inside an @activity.defn body,
+        # which is replay-safe — no workflow.patched() gate needed (see
+        # packages/learn/CLAUDE.md "Adding NEW activity calls is just as
+        # load-bearing as renames"). The legacy ``event/steward-action-*.md``
+        # write above stays in shadow mode so the new table can be soaked
+        # against the old markdown before STATE_AUDIT_ENFORCEMENT flips to
+        # warn/reject.
+        from src.activities.audit_writer import (
+            current_enforcement_mode,
+            write_audit_safe,
+        )
+
+        audit_enforcement = current_enforcement_mode()
+        audit_row = await write_audit_safe(
+            actor="steward",
+            action_type="steward_action",
+            target_type=target_kind_normalized,
+            target_id=canonical_task_path,
+            payload={
+                **payload,
+                "audit_record_path": written_path,
+                "audit_name": audit_name,
+                "body": content,
+            },
+            decision_origin=None,
+            reasoning=reasoning or None,
+            reversible=(effective_mode == "live" and will_act_on_plane),
+        )
+        if audit_enforcement != "shadow":
+            # warn/reject: the legacy markdown write above is the duplicate
+            # we plan to retire; log it. Reject-mode hard-stop is a
+            # follow-up — STORE-P2-2 lands in shadow only.
+            logger.warning(
+                "steward.apply_state_change: STATE_AUDIT_ENFORCEMENT=%s — "
+                "legacy markdown audit was still written (path=%s); "
+                "promote to reject after soak period.",
+                audit_enforcement, written_path,
+            )
+        if audit_row is None:
+            logger.info(
+                "steward.apply_state_change: audit row write returned None "
+                "(soak path); legacy markdown record=%s remains authoritative",
+                written_path,
+            )
+
         # ── 8. Multi-matter dispatch (live mode only) ───────────────────
         # Fire dependency-change signals on every related task so the
         # next Steward tick re-evaluates them with the just-applied

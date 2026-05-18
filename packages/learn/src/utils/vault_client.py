@@ -248,6 +248,50 @@ class VaultClient:
         if resp.status_code >= 500:
             resp.raise_for_status()
 
+    # --- Audit (STORE-P2-1) ------------------------------------------------
+
+    async def write_audit(
+        self,
+        *,
+        actor: str,
+        action_type: str,
+        target_type: str,
+        target_id: str,
+        payload: dict[str, Any],
+        decision_origin: str | None = None,
+        reasoning: str | None = None,
+        reversible: bool = False,
+    ) -> dict[str, Any]:
+        """POST one row to the unified audit table via ctrl-api.
+
+        Wraps ``POST /api/v1/audit`` (STORE-P2-1). The server assigns
+        ``id`` (UUIDv4) and ``ts`` (unix ns). ``ts`` is returned as a
+        decimal STRING so nanosecond precision survives JSON's
+        ``Number.MAX_SAFE_INTEGER`` ceiling.
+
+        ``payload`` is sent as a JSON object; ctrl-api stringifies for
+        storage. Keep it serialisable — ``datetime`` and similar
+        non-JSON-native types should be coerced by the caller before
+        invocation.
+
+        Returns ``{"id": "<uuid>", "ts": "<unix-ns-string>"}``.
+        """
+        body: dict[str, Any] = {
+            "actor": actor,
+            "action_type": action_type,
+            "target_type": target_type,
+            "target_id": target_id,
+            "payload": payload,
+            "reversible": bool(reversible),
+        }
+        if decision_origin is not None:
+            body["decision_origin"] = decision_origin
+        if reasoning is not None:
+            body["reasoning"] = reasoning
+        resp = await self._client.post("/api/v1/audit", json=body)
+        resp.raise_for_status()
+        return resp.json()
+
     # --- Plane Steward action helpers (#839 Phase 3) -----------------------
 
     async def plane_post_steward_action(

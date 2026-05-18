@@ -1074,10 +1074,53 @@ async def _emit_audit_record(
             "task_creation: audit emitted source_event=%s task=%s -> %s",
             source_event_path, task_path, path,
         )
-        return path
     except httpx.HTTPError as exc:
         logger.warning(
             "task_creation: audit write failed task=%s err=%s",
             task_path, exc,
         )
         return None
+
+    # STORE-P2-2 — also emit a row to the unified audit table. Caller
+    # (``create_task_from_signal``) is an @activity.defn, so this is
+    # replay-safe and does NOT need a workflow.patched() gate. Shadow
+    # mode keeps the markdown record as the authoritative copy during
+    # the soak period.
+    try:
+        from src.activities.audit_writer import (
+            current_enforcement_mode,
+            write_audit_safe,
+        )
+
+        await write_audit_safe(
+            actor="task_creation",
+            action_type="auto_task_created",
+            target_type="task",
+            target_id=task_path,
+            payload={
+                "type": "auto-task-created",
+                "timestamp": created_iso,
+                "target": task_path,
+                "source_event_path": source_event_path,
+                "title": title,
+                "description": description,
+                "prompt": prompt,
+                "llm_response": llm_response,
+                "audit_record_path": path,
+                "audit_name": audit_name,
+                "body": content,
+            },
+            decision_origin=source_event_path or None,
+            reasoning=None,
+            reversible=False,
+        )
+        _ = current_enforcement_mode()  # plumbed for future warn/reject
+    except Exception as exc:  # noqa: BLE001
+        # Audit-row failure must never starve the task; the markdown
+        # record is still the source of truth in shadow mode.
+        logger.warning(
+            "task_creation: audit-row emit failed task=%s err=%r",
+            task_path, exc,
+        )
+
+    return path

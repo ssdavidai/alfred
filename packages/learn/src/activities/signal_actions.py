@@ -617,7 +617,7 @@ async def _emit_signal_action_audit(
     client = VaultClient(cfg)
     try:
         try:
-            return await client.write_record(
+            written_path = await client.write_record(
                 record_type="event", name=name, content=content,
             )
         except httpx.HTTPError as exc:
@@ -627,6 +627,48 @@ async def _emit_signal_action_audit(
                 name, exc,
             )
             raise
+
+        # STORE-P2-2 — emit the matching row in the unified audit table.
+        # Inside an @activity.defn body (route_signal_action), so no
+        # workflow.patched() gate is required (activity-internal changes
+        # are replay-safe — see packages/learn/CLAUDE.md). Shadow mode by
+        # default: the markdown above remains the source of truth until
+        # STATE_AUDIT_ENFORCEMENT flips.
+        from src.activities.audit_writer import (
+            current_enforcement_mode,
+            write_audit_safe,
+        )
+
+        # Best-effort target — prefer the resolved target_path on the
+        # signal frontmatter; fall back to chosen_path / signal_path so
+        # the audit row is always anchored to something queryable.
+        target_id_for_audit = (
+            str(signal_fm.get("target_path") or "").strip()
+            or chosen_path
+            or signal_path
+        )
+        target_kind_for_audit = (
+            str(signal_fm.get("target_kind") or "").strip() or "signal"
+        )
+
+        await write_audit_safe(
+            actor="signal_router",
+            action_type="signal_action",
+            target_type=target_kind_for_audit,
+            target_id=target_id_for_audit,
+            payload={
+                **payload,
+                "audit_record_path": written_path,
+                "audit_name": name,
+                "body": content,
+            },
+            decision_origin=signal_path or None,
+            reasoning=decision_reason or None,
+            reversible=False,
+        )
+        _ = current_enforcement_mode()  # plumbed for future warn/reject
+
+        return written_path
     finally:
         await client.close()
 

@@ -277,8 +277,14 @@ async def test_happy_path_writes_audit_and_returns_result(
     assert result.prior_as_of == "2026-05-12T18:00:02Z"
 
     # One POST to /api/v1/state-changes with the expected envelope.
-    assert len(transport.requests) == 1
-    req = transport.requests[0]
+    # STORE-P2-2 also fires a /api/v1/audit row after success; the test
+    # filters by URL so the new emission doesn't perturb the existing
+    # state-change assertions.
+    state_change_reqs = [
+        r for r in transport.requests if r.url.path == "/api/v1/state-changes"
+    ]
+    assert len(state_change_reqs) == 1
+    req = state_change_reqs[0]
     assert req.method == "POST"
     assert req.url.path == "/api/v1/state-changes"
     assert req.headers.get("authorization") == "Bearer secret-key"
@@ -370,9 +376,14 @@ async def test_409_retries_then_succeeds(
     assert result.applied is True
     assert result.retried_count == 1
     assert result.new_as_of == "2026-05-13T07:02:00Z"
-    assert len(transport.requests) == 2
+    # STORE-P2-2 introduced a follow-up POST to /api/v1/audit after the
+    # state-change land; filter to keep the retry-count assertion stable.
+    state_change_reqs = [
+        r for r in transport.requests if r.url.path == "/api/v1/state-changes"
+    ]
+    assert len(state_change_reqs) == 2
     # Second envelope's expected_as_of is the server-reported value.
-    env2 = json.loads(transport.requests[1].content.decode("utf-8"))
+    env2 = json.loads(state_change_reqs[1].content.decode("utf-8"))
     assert env2["expected_as_of"] == "2026-05-13T07:01:00Z"
 
 

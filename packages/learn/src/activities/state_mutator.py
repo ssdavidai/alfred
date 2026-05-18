@@ -748,6 +748,57 @@ async def apply_state_change_v2(
         timeline_entry_id = body.get("timeline_entry_id")
         new_as_of = body.get("new_as_of")
 
+        # STORE-P2-2 — also emit a row to the unified audit table.
+        # ctrl-api's /api/v1/state-changes already wrote the legacy
+        # ``event/state-change-*.md``; in shadow mode (default) we keep
+        # that record AND log the new row so soak diffs can verify
+        # parity before STATE_AUDIT_ENFORCEMENT flips to warn/reject.
+        #
+        # Replay-safety: this is inside an @activity.defn, so no
+        # workflow.patched() gate is required — see
+        # packages/learn/CLAUDE.md "Adding NEW activity calls".
+        try:
+            from src.activities.audit_writer import (
+                current_enforcement_mode,
+                write_audit_safe,
+            )
+
+            await write_audit_safe(
+                actor=source,
+                action_type="state_change",
+                target_type="matter" if target_path.startswith("matter/") else "task",
+                target_id=target_path,
+                payload={
+                    "fields": fields,
+                    "prior_as_of": prior_as_of,
+                    "new_as_of": str(new_as_of) if new_as_of else None,
+                    "expected_as_of": current_expected_as_of,
+                    "reason": proposed.reason,
+                    "confidence": proposed.confidence,
+                    "mode": effective_mode,
+                    "pending_confirmation": pending_confirmation,
+                    "observed_window": _observed_to_envelope(observed),
+                    "undo_recipe": undo_recipe,
+                    "audit_record_path": (
+                        str(audit_record_path) if audit_record_path else None
+                    ),
+                    "timeline_entry_id": (
+                        str(timeline_entry_id) if timeline_entry_id else None
+                    ),
+                    "fan_out": list(proposed.fan_out),
+                },
+                decision_origin=None,
+                reasoning=proposed.reason or None,
+                reversible=(effective_mode == "live"),
+            )
+            _ = current_enforcement_mode()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "state_mutator.apply_state_change_v2: audit-row emit "
+                "failed target=%s source=%s err=%r",
+                target_path, source, exc,
+            )
+
         fan_out_triggered = await _trigger_fan_out(
             proposed.fan_out, target_path, source
         )

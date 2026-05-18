@@ -782,8 +782,14 @@ async def test_phase_c_signals_plus_clerk_mutation_lands_audit(
     assert outcome["retried_count"] == 0
 
     # Exactly one POST to /api/v1/state-changes with the expected envelope.
-    assert len(transport.requests) == 1
-    req = transport.requests[0]
+    # STORE-P2-2 added a follow-up POST to /api/v1/audit on the same
+    # transport — filter by URL so this assertion stays focused on the
+    # state-change envelope.
+    state_change_reqs = [
+        r for r in transport.requests if r.url.path == "/api/v1/state-changes"
+    ]
+    assert len(state_change_reqs) == 1
+    req = state_change_reqs[0]
     assert req.method == "POST"
     assert req.url.path == "/api/v1/state-changes"
     envelope = _json.loads(req.content.decode("utf-8"))
@@ -909,9 +915,14 @@ async def test_phase_c_409_retry_then_success(
     assert outcome["audit_record_path"] == (
         "event/state-change-2026-05-13-carter-r1.md"
     )
-    assert len(transport.requests) == 2
+    # STORE-P2-2 adds a follow-up /api/v1/audit POST that shares the
+    # transport; filter by URL to keep the retry assertion focused.
+    state_change_reqs = [
+        r for r in transport.requests if r.url.path == "/api/v1/state-changes"
+    ]
+    assert len(state_change_reqs) == 2
     # The retry envelope carries the server-reported expected_as_of.
-    env2 = _json.loads(transport.requests[1].content.decode("utf-8"))
+    env2 = _json.loads(state_change_reqs[1].content.decode("utf-8"))
     assert env2["expected_as_of"] == later_as_of
 
 

@@ -788,8 +788,13 @@ async def test_phase_b_shadow_audit_emitted_no_plane_no_patch(
     assert rec_type == "event"
     assert name.startswith("steward-action-")
     # Shadow mode + no current_state composition → propose returns None
-    # → no v2 envelope POSTed.
-    assert transport.requests == []
+    # → no v2 envelope POSTed. STORE-P2-2 added a follow-up POST to
+    # /api/v1/audit that piggy-backs on the same httpx transport; filter
+    # by URL so the assertion stays focused on the v2 envelope.
+    state_change_reqs = [
+        r for r in transport.requests if r.url.path == "/api/v1/state-changes"
+    ]
+    assert state_change_reqs == []
 
 
 @pytest.mark.asyncio
@@ -973,8 +978,13 @@ async def test_phase_b_v2_409_retry_then_succeeds(
             p.stop()
         ctx.stop()
 
-    # v2 made two HTTP attempts (409 then 200).
-    assert len(transport.requests) == 2
+    # v2 made two HTTP attempts (409 then 200). STORE-P2-2's follow-up
+    # POST to /api/v1/audit shares the transport — filter by URL so the
+    # retry-count assertion stays focused on the state-change envelope.
+    state_change_reqs = [
+        r for r in transport.requests if r.url.path == "/api/v1/state-changes"
+    ]
+    assert len(state_change_reqs) == 2
     # Legacy contract still holds end-to-end despite the retry.
     assert result["mode"] == "live"
     assert result["live_action_taken"] is True
