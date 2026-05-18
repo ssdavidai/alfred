@@ -3,11 +3,13 @@ import path from "node:path";
 import fs from "node:fs";
 
 import m001 from "./migrations/001_init.sql";
+import m002 from "./migrations/002_vault_index.sql";
 
 // Append new migrations here. Files are SQL text loaded by esbuild.
 // Never reorder; never edit a migration after it has shipped.
 const MIGRATIONS: { version: number; name: string; sql: string }[] = [
   { version: 1, name: "001_init", sql: m001 },
+  { version: 2, name: "002_vault_index", sql: m002 },
 ];
 
 let stateDb: DatabaseSync | null = null;

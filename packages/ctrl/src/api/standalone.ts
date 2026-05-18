@@ -20,6 +20,7 @@ import { createApiServer } from "./server.js";
 import { attachTerminalUpgrade } from "./routes/terminal.js";
 import { flushPendingOpenclawWrites } from "./routes/integrations.js";
 import { openStateDb, runMigrations } from "../db/state.js";
+import { scanVaultAndPopulate, vaultIndexIsEmpty } from "./vault_indexer.js";
 
 const apiKey = process.env.AAS_API_KEY;
 if (!apiKey) {
@@ -35,6 +36,24 @@ try {
   console.log(
     `migrations.run: applied=[${result.applied.join(",")}] skipped=[${result.skipped.join(",")}]`,
   );
+
+  // STORE-P1-2: backfill the vault_index read accelerator on first boot
+  // after migration 002 lands. The boot blocks on the scan deliberately
+  // — every list endpoint that we rewire onto vault_index in P1-4 needs
+  // the table populated before it answers, and the alternative (lazy
+  // first-request scan) would race with the SaaS proxy's first poll.
+  if (vaultIndexIsEmpty(stateDb)) {
+    console.log("vault_index empty — running initial scan...");
+    const scan = await scanVaultAndPopulate({ db: stateDb });
+    console.log(
+      `vault_indexer.scan: scanned=${scan.scanned} inserted=${scan.inserted} elapsed_ms=${scan.ms}`,
+    );
+  } else {
+    const row = stateDb
+      .prepare("SELECT count(*) AS n FROM vault_index")
+      .get() as { n: number };
+    console.log(`vault_index has ${row.n} rows; skipping initial scan`);
+  }
 } catch (err) {
   console.error(`FATAL: state.db migrations failed: ${(err as Error).message}`);
   process.exit(1);
