@@ -23,6 +23,11 @@ snapshot_download('Systran/faster-whisper-large-v3', local_dir='/app/models/whis
 COPY src/ src/
 COPY scripts/ scripts/
 COPY templates/ templates/
+
+# alfred-learn runs as uid 1000 (shared-volume parity) but the dynamic chore
+# loader materialises a package dir under src/workflows/ at runtime — make
+# that subtree writable by non-root.
+RUN chmod -R a+rwX /app/src/workflows
 COPY entrypoint.sh .
 
 RUN chmod +x entrypoint.sh

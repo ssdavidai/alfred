@@ -73,10 +73,13 @@ app AlfredSaaS {
   },
 
   emailSender: {
-    provider: Mailgun,
+    // Dummy: verification / password-reset emails are printed to the web
+    // container logs instead of sent. Single-VM deploys assume no external
+    // mail provider; swap to Mailgun/SendGrid by setting the provider here.
+    provider: Dummy,
     defaultFrom: {
       name: "Alfred",
-      email: "noreply@mg.alfred.black"
+      email: "noreply@new.alfred.black"
     },
   },
 
