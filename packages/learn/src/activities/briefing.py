@@ -124,7 +124,10 @@ async def _load_soul_md() -> str | None:
                 return content.strip()
             return None
     except (httpx.HTTPError, ValueError) as exc:
-        logger.info("briefing._load_soul_md: skipping SOUL.md (degraded): %s", exc)
+        logger.warning(
+            "_load_soul_md: skipping SOUL.md (degraded) type=%s err=%s",
+            type(exc).__name__, repr(exc),
+        )
         return None
 
 
@@ -215,9 +218,10 @@ async def list_active_matters_for_briefing() -> list[str]:
             records = await client.list_records("matter", limit=10_000)
         except httpx.HTTPError as exc:
             logger.warning(
-                "briefing.list_active_matters_for_briefing: list failed: %s", exc,
+                "list_active_matters_for_briefing failed type=%s err=%s",
+                type(exc).__name__, repr(exc),
             )
-            return []
+            raise
     finally:
         await client.close()
 
@@ -299,9 +303,9 @@ async def get_prior_briefing(slot: str) -> dict[str, Any] | None:
             records = await client.list_records("briefing", limit=10_000)
         except httpx.HTTPError as exc:
             logger.warning(
-                "briefing.get_prior_briefing: list_records failed slot=%s err=%s — "
+                "get_prior_briefing: list_records failed slot=%s type=%s err=%s — "
                 "treating as no prior briefing",
-                target_slot, exc,
+                target_slot, type(exc).__name__, repr(exc),
             )
             return None
     finally:
@@ -405,8 +409,8 @@ async def _gather_observed_for_matter(
                 records = await vault.list_records(record_type, limit=10_000)
             except httpx.HTTPError as exc:
                 logger.warning(
-                    "briefing.gather_observed: %s list failed target=%s err=%s",
-                    record_type, target_path, exc,
+                    "gather_observed: %s list failed target=%s type=%s err=%s",
+                    record_type, target_path, type(exc).__name__, repr(exc),
                 )
                 continue
             for rec in records:
@@ -797,8 +801,8 @@ async def briefing_visit_matter(
                 prior_fm = fm_raw
     except httpx.HTTPError as exc:
         logger.warning(
-            "briefing_visit_matter: read failed matter=%s err=%s",
-            canonical, exc,
+            "briefing_visit_matter: read failed matter=%s type=%s err=%s",
+            canonical, type(exc).__name__, repr(exc),
         )
         return {
             "matter_path": canonical,
@@ -858,8 +862,8 @@ async def briefing_visit_matter(
         }
     except httpx.HTTPError as exc:
         logger.warning(
-            "briefing_visit_matter: v2 HTTP failed matter=%s err=%s",
-            canonical, exc,
+            "briefing_visit_matter: v2 HTTP failed matter=%s type=%s err=%s",
+            canonical, type(exc).__name__, repr(exc),
         )
         return {
             "matter_path": canonical,
@@ -1243,7 +1247,10 @@ async def _gather_pending_decisions(
             "needs_attention", status="pending", limit=100,
         )
     except httpx.HTTPError as exc:
-        logger.warning("_gather_pending_decisions: list failed err=%s", exc)
+        logger.warning(
+            "_gather_pending_decisions: list failed type=%s err=%s",
+            type(exc).__name__, repr(exc),
+        )
         return []
     items: list[dict[str, Any]] = []
     for rec in records or []:
@@ -1300,7 +1307,10 @@ async def _gather_signal_anomalies(
     try:
         records = await vault.list_records("signal", limit=400)
     except httpx.HTTPError as exc:
-        logger.warning("_gather_signal_anomalies: list failed err=%s", exc)
+        logger.warning(
+            "_gather_signal_anomalies: list failed type=%s err=%s",
+            type(exc).__name__, repr(exc),
+        )
         return []
     out: list[dict[str, Any]] = []
     for rec in records or []:
@@ -1348,7 +1358,10 @@ async def _gather_autonomous_actions(
     try:
         records = await vault.list_records("event", limit=400)
     except httpx.HTTPError as exc:
-        logger.warning("_gather_autonomous_actions: list failed err=%s", exc)
+        logger.warning(
+            "_gather_autonomous_actions: list failed type=%s err=%s",
+            type(exc).__name__, repr(exc),
+        )
         return []
     out: list[dict[str, Any]] = []
     for rec in records or []:
@@ -1392,7 +1405,10 @@ async def _gather_window_signals(
     try:
         records = await vault.list_records("signal", limit=600)
     except httpx.HTTPError as exc:
-        logger.warning("_gather_window_signals: list failed err=%s", exc)
+        logger.warning(
+            "_gather_window_signals: list failed type=%s err=%s",
+            type(exc).__name__, repr(exc),
+        )
         return []
     out: list[dict[str, Any]] = []
     for rec in records or []:
@@ -1438,7 +1454,10 @@ async def _gather_window_decisions(
     try:
         records = await vault.list_records("decision", limit=600)
     except httpx.HTTPError as exc:
-        logger.warning("_gather_window_decisions: list failed err=%s", exc)
+        logger.warning(
+            "_gather_window_decisions: list failed type=%s err=%s",
+            type(exc).__name__, repr(exc),
+        )
         return []
     out: list[dict[str, Any]] = []
     for rec in records or []:
@@ -1470,7 +1489,10 @@ async def _gather_inbox_unresolved_count(vault: VaultClient) -> int:
     try:
         records = await vault.list_records("inbox_item", limit=500)
     except httpx.HTTPError as exc:
-        logger.warning("_gather_inbox_unresolved_count: list failed err=%s", exc)
+        logger.warning(
+            "_gather_inbox_unresolved_count: list failed type=%s err=%s",
+            type(exc).__name__, repr(exc),
+        )
         return 0
     count = 0
     for rec in records or []:
@@ -1520,8 +1542,11 @@ async def _ctrl_call(
             resp.raise_for_status()
             return resp.json() if resp.text else {}
     except (httpx.HTTPError, ValueError) as exc:
-        logger.info("briefing._ctrl_call %s %s degraded: %s", method, path, exc)
-        return None
+        logger.warning(
+            "_ctrl_call degraded type=%s err=%s method=%s path=%s",
+            type(exc).__name__, repr(exc), method, path,
+        )
+        raise
 
 
 # ----- A: Waiting on you -----
@@ -1601,7 +1626,10 @@ async def _load_prior_brief_today(
     try:
         rec = await vault.read_record(prior_briefing_path)
     except httpx.HTTPError as exc:
-        logger.info("_load_prior_brief_today: read failed err=%s", exc)
+        logger.warning(
+            "_load_prior_brief_today: read failed type=%s err=%s",
+            type(exc).__name__, repr(exc),
+        )
         return ""
     body = ""
     if isinstance(rec, dict):
@@ -1861,8 +1889,8 @@ async def compose_and_write_briefing(
                 rec = await vault.read_record(mpath)
             except httpx.HTTPError as exc:
                 logger.warning(
-                    "compose_and_write_briefing: read failed matter=%s err=%s",
-                    mpath, exc,
+                    "compose_and_write_briefing: read failed matter=%s type=%s err=%s",
+                    mpath, type(exc).__name__, repr(exc),
                 )
                 continue
             fm = rec.get("frontmatter") if isinstance(rec, dict) else None
@@ -1887,7 +1915,11 @@ async def compose_and_write_briefing(
         ):
             try:
                 records = await vault.list_records(record_type, limit=10_000)
-            except httpx.HTTPError:
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "compose_and_write_briefing: %s count failed type=%s err=%s",
+                    record_type, type(exc).__name__, repr(exc),
+                )
                 continue
             count = 0
             for rec in records:
