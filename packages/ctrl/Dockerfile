@@ -62,7 +62,11 @@ RUN set -eux; \
 # ---- runtime -------------------------------------------------------------------
 FROM node:22-slim AS runtime
 
-# Baked-in tooling. docker.io pulls the CLI + compose plugin.
+# Baked-in tooling. Debian's docker.io provides the `docker` CLI; the Compose
+# v2 plugin is NOT packaged for Debian, so fetch the official plugin binary
+# into the CLI plugins dir. ctrl-api shells `docker compose` to restart
+# sibling containers via the bind-mounted docker socket.
+ARG TARGETARCH
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
        procps \
@@ -72,8 +76,18 @@ RUN apt-get update \
        python3 \
        python3-yaml \
        docker.io \
-       docker-compose-plugin \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && case "${TARGETARCH}" in \
+       amd64) DC_ARCH="x86_64" ;; \
+       arm64) DC_ARCH="aarch64" ;; \
+       *) echo "unsupported arch: ${TARGETARCH}" >&2; exit 1 ;; \
+     esac \
+  && mkdir -p /usr/local/lib/docker/cli-plugins \
+  && curl -fsSL \
+       "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-${DC_ARCH}" \
+       -o /usr/local/lib/docker/cli-plugins/docker-compose \
+  && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+  && docker compose version
 
 WORKDIR /app
 

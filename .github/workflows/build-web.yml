@@ -24,6 +24,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Install Wasp
         run: curl -sSL https://get.wasp.sh/installer.sh | sh -s -- -v 0.19.0
 

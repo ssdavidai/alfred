@@ -39,7 +39,9 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: packages/hermes
+          # repo-root context: the Hermes image bundles the MCP server
+          # (packages/mcp-server) alongside packages/hermes.
+          context: .
           file: packages/hermes/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
