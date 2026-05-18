@@ -80,7 +80,7 @@ const TOOLS: ToolDef[] = [
     name: "service_restart",
     description: "Restart a Docker service",
     parameters: {
-      service: { type: "string", required: true, enum: ["alfred", "openclaw", "ctrl-api", "alfred-learn"] },
+      service: { type: "string", required: true, enum: ["alfred", "hermes", "ctrl-api", "alfred-learn"] },
     },
     endpoint: "POST /api/v1/admin/containers/{service}/restart",
   },
@@ -294,7 +294,7 @@ const TOOLS: ToolDef[] = [
     name: "container_logs",
     description: "Get logs from a Docker container",
     parameters: {
-      service: { type: "string", required: true, enum: ["alfred", "openclaw", "openclaw-workers", "ctrl-api", "alfred-learn", "temporal"] },
+      service: { type: "string", required: true, enum: ["alfred", "hermes", "ctrl-api", "alfred-learn", "temporal"] },
     },
     endpoint: "GET /api/v1/admin/containers/{service}/logs",
   },

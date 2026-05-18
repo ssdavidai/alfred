@@ -1,7 +1,8 @@
 import fs from "node:fs";
+import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
-import { dockerComposeCmd, dockerExec, execAsync, sudoExec, parseJsonLines, validateServiceName, COMPOSE_DIR, OPENCLAW_CMD } from "../helpers.js";
+import { dockerComposeCmd, dockerExec, execAsync, sudoExec, parseJsonLines, validateServiceName, COMPOSE_DIR, HERMES_CMD, HERMES_CONTAINER } from "../helpers.js";
 import { getVaultContextData, getInboxFiles, VAULT_PATH } from "./vault.js";
 import { parseActivityFeed } from "../activity.js";
 import { ttlCache } from "../cache.js";
@@ -12,17 +13,21 @@ import { ttlCache } from "../cache.js";
 // every click invalidates+refetches) onto a single subprocess invocation.
 const activityFeedCache = ttlCache<{ items: any[] }>({ ttlMs: 3_000 });
 
-// Host paths for alfred-data and chore directory.
-// The ctrl-api container mounts /mnt/encrypted/alfred to the SAME path
-// (not to /alfred-data like alfred-learn does), so we use the host
-// path directly here. See docker-compose.yaml.njk for the mount config.
-const CHORE_GENERATION_AUDIT_LOG = "/mnt/encrypted/alfred/chore-generation-audit.jsonl";
+// alfred-black mounts the alfred daemon's data dir as a named Docker volume
+// (PLAN.md Part E), bind-mounted into ctrl-api at /alfred-data by default.
+const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
+const CHORE_GENERATION_AUDIT_LOG = `${ALFRED_DATA_DIR}/chore-generation-audit.jsonl`;
 const CHORE_VAULT_DIR = `${VAULT_PATH}/chore`;
-const PROMOTION_DRAFTS_DIR = "/mnt/encrypted/alfred/promotion-drafts";
+const PROMOTION_DRAFTS_DIR = `${ALFRED_DATA_DIR}/promotion-drafts`;
 
 const ENV_PATH = `${COMPOSE_DIR}/.env`;
-const OPENCLAW_JSON_PATH = "/mnt/encrypted/openclaw/openclaw.json";
-const OPENCLAW_WORKERS_JSON_PATH = "/mnt/encrypted/openclaw-workers/openclaw.json";
+// Hermes per-profile config (was openclaw.json). The hermes_data volume holds
+// one config.yaml per profile; the `main` profile config is the dashboard's
+// view target. Note: the legacy /api/v1/admin/config/openclaw PATCH route
+// deep-merges JSON — under Hermes the config is YAML, so that route now
+// read-merges YAML via js-yaml (see the route body).
+const HERMES_CONFIG_DIR = process.env.HERMES_CONFIG_DIR ?? "/hermes-data";
+const OPENCLAW_JSON_PATH = `${HERMES_CONFIG_DIR}/main/config.yaml`;
 
 // In-memory rate limit for the chore-specific learn restart route. Prevents
 // thrashing when an onboarding generates multiple templates and each tries
@@ -277,10 +282,10 @@ export function registerAdminRoutes(): void {
   addRoute("POST", "/api/v1/admin/containers/:service/restart", async ({ res, params, req }) => {
     validateServiceName(params.service);
     // Guardrail #3 — self-lockout refusal.
-    // Restarting `openclaw` kills the running session; restarting `ctrl-api`
+    // Restarting `hermes` kills the running session; restarting `ctrl-api`
     // kills the API connection mid-request. Both are allowed, but require an
     // explicit opt-in header so an agent can't accidentally lock itself out.
-    const SELF_RESTART_SERVICES = ["openclaw", "ctrl-api"];
+    const SELF_RESTART_SERVICES = ["hermes", "ctrl-api"];
     if (SELF_RESTART_SERVICES.includes(params.service)) {
       const confirmHeader = req.headers["x-confirm-self-restart"];
       if (confirmHeader !== "yes") {
@@ -801,192 +806,63 @@ export function registerAdminRoutes(): void {
     sendJson(res, 200, { message: "Environment updated", keys: Object.keys(b) });
   });
 
-  // Read openclaw.json
+  // Read the Hermes `main` profile config.yaml.
+  // Kept at /api/v1/admin/config/openclaw (the dashboard's existing route);
+  // the runtime is now Hermes and the config is YAML, parsed to JSON here.
   addRoute("GET", "/api/v1/admin/config/openclaw", async ({ res }) => {
     try {
-      const content = fs.readFileSync(OPENCLAW_JSON_PATH, "utf-8");
-      sendJson(res, 200, JSON.parse(content));
+      const parsed = yaml.load(fs.readFileSync(OPENCLAW_JSON_PATH, "utf-8"));
+      sendJson(res, 200, parsed && typeof parsed === "object" ? parsed : {});
     } catch {
       sendJson(res, 200, {});
     }
   });
 
-  // Update openclaw.json (deep merge)
+  // Update the Hermes `main` profile config.yaml (deep merge).
   addRoute("PATCH", "/api/v1/admin/config/openclaw", async ({ res, body }) => {
     const b = body as Record<string, unknown> | undefined;
     if (!b || typeof b !== "object") throw new ValidationError("Request body must be an object");
 
     let existing: Record<string, unknown> = {};
     try {
-      existing = JSON.parse(fs.readFileSync(OPENCLAW_JSON_PATH, "utf-8"));
+      const parsed = yaml.load(fs.readFileSync(OPENCLAW_JSON_PATH, "utf-8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        existing = parsed as Record<string, unknown>;
+      }
     } catch {
       // file doesn't exist yet
     }
 
-    // Guardrail #2 — backup before write, then validate the merged result.
-    // Write a timestamped .bak copy so any bad patch can be reverted manually.
+    // Backup before write — a timestamped .bak copy so a bad patch can be
+    // reverted manually.
     const isoStamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const backupPath = OPENCLAW_JSON_PATH.replace(/\.json$/, `.bak-${isoStamp}.json`);
+    const backupPath = OPENCLAW_JSON_PATH.replace(/\.ya?ml$/, `.bak-${isoStamp}.yaml`);
     try {
       if (fs.existsSync(OPENCLAW_JSON_PATH)) {
         fs.copyFileSync(OPENCLAW_JSON_PATH, backupPath);
       }
     } catch (backupErr) {
-      // Non-fatal — log but do not block the patch.
-      console.warn(`[admin] openclaw.json backup failed: ${backupErr}`);
+      console.warn(`[admin] hermes config backup failed: ${backupErr}`);
     }
 
     const merged = deepMerge(existing, b);
 
-    // Structural validation: must still satisfy openclaw's minimum schema.
-    const agentsList = (merged as Record<string, unknown>)["agents"] as Record<string, unknown> | undefined;
-    const gatewaySection = (merged as Record<string, unknown>)["gateway"] as Record<string, unknown> | undefined;
-
-    if (!agentsList || !Array.isArray(agentsList["list"]) || (agentsList["list"] as unknown[]).length === 0) {
-      sendJson(res, 400, {
-        error: "patch would produce invalid openclaw config: agents.list must be a non-empty array",
-      });
-      return;
-    }
-    if (!gatewaySection || typeof gatewaySection["auth"] !== "object" || gatewaySection["auth"] === null) {
-      sendJson(res, 400, {
-        error: "patch would produce invalid openclaw config: gateway.auth must be present",
-      });
-      return;
-    }
-    if (!Array.isArray(gatewaySection["tools"]
-      ? (gatewaySection["tools"] as Record<string, unknown>)["allow"]
-      : undefined)) {
-      sendJson(res, 400, {
-        error: "patch would produce invalid openclaw config: gateway.tools.allow must be an array",
-      });
-      return;
-    }
-
-    fs.writeFileSync(OPENCLAW_JSON_PATH, JSON.stringify(merged, null, 2) + "\n", "utf-8");
-    sendJson(res, 200, { message: "OpenClaw config updated", backup: backupPath });
-  });
-
-  // --- Workers ephemeral agents (per-task scoped subagents) ---
-  //
-  // alfred-learn manages openclaw-workers/openclaw.json indirectly through
-  // these endpoints because the alfred-learn container runs with all Linux
-  // capabilities dropped (CapEff=0) — it can't traverse the mode-700
-  // encrypted volume even as root. ctrl-api has CAP_DAC_OVERRIDE and the
-  // same bind-mount, so it owns the writes.
-  //
-  // Each ephemeral entry is one scoped subagent for one delegated task.
-  // ``meta.lastTouchedAt`` is bumped on every write so the openclaw-workers
-  // gateway hot-reloads (~10-15s) and the new agent becomes invokable.
-
-  // GET /api/v1/admin/openclaw-workers/agents — list current agent IDs.
-  addRoute("GET", "/api/v1/admin/openclaw-workers/agents", async ({ res }) => {
-    let cfg: Record<string, unknown> = {};
-    try {
-      cfg = JSON.parse(fs.readFileSync(OPENCLAW_WORKERS_JSON_PATH, "utf-8"));
-    } catch {
-      sendJson(res, 404, { error: "workers config not found" });
-      return;
-    }
-    const agents = (cfg.agents as Record<string, unknown> | undefined)?.list;
-    const list = Array.isArray(agents) ? agents : [];
-    const summary = list.map((a: any) => ({
-      id: String(a?.id ?? ""),
-      name: String(a?.name ?? ""),
-      model: a?.model?.primary ?? null,
-      tools_allow_count: Array.isArray(a?.tools?.allow) ? a.tools.allow.length : null,
-    }));
-    sendJson(res, 200, { agents: summary, count: summary.length });
-  });
-
-  // POST /api/v1/admin/openclaw-workers/agents — append (or replace) an
-  // agent entry. Body: { id, name?, tools_allow?, model? }.
-  addRoute("POST", "/api/v1/admin/openclaw-workers/agents", async ({ res, body }) => {
-    const b = body as Record<string, unknown> | undefined;
-    if (!b || typeof b !== "object") {
-      throw new ValidationError("Request body must be an object");
-    }
-    const id = String(b.id ?? "").trim();
-    if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) {
-      throw new ValidationError("id must be alphanumeric (with - _ allowed)");
-    }
-    const name = String(b.name ?? `Ephemeral ${id}`);
-    const toolsAllow = Array.isArray(b.tools_allow)
-      ? (b.tools_allow as unknown[]).map(String)
-      : null;
-    const model = typeof b.model === "string" && b.model.trim() ? b.model.trim() : null;
-
-    let cfg: Record<string, any> = {};
-    try {
-      cfg = JSON.parse(fs.readFileSync(OPENCLAW_WORKERS_JSON_PATH, "utf-8"));
-    } catch (err) {
-      sendJson(res, 500, { error: `workers config not readable: ${(err as Error).message}` });
-      return;
-    }
-
-    cfg.agents = cfg.agents || {};
-    const list: any[] = Array.isArray(cfg.agents.list) ? cfg.agents.list : [];
-    // Replace existing entry with same id (defensive — should never happen,
-    // but if the cleanup-after-dispatch failed we don't want orphans
-    // accumulating duplicates).
-    const filtered = list.filter((a) => String(a?.id) !== id);
-    const entry: Record<string, any> = {
-      id,
-      name,
-      workspace: "/home/node/.openclaw/workspace",
-    };
-    if (toolsAllow) entry.tools = { allow: toolsAllow };
-    if (model) entry.model = { primary: model };
-    entry.subagents = { allowAgents: [] };
-    filtered.push(entry);
-    cfg.agents.list = filtered;
-
-    cfg.meta = cfg.meta || {};
-    cfg.meta.lastTouchedAt = new Date().toISOString().replace(/\.\d+Z$/, ".000Z");
-
     fs.writeFileSync(
-      OPENCLAW_WORKERS_JSON_PATH,
-      JSON.stringify(cfg, null, 2) + "\n",
+      OPENCLAW_JSON_PATH,
+      yaml.dump(merged, { lineWidth: 120, noRefs: true }),
       "utf-8",
     );
-    sendJson(res, 201, { id, agent: entry });
+    sendJson(res, 200, { message: "Hermes config updated", backup: backupPath });
   });
 
-  // DELETE /api/v1/admin/openclaw-workers/agents/:id — remove an entry.
-  // Idempotent — returns 200 even if the id wasn't there (cleanup ran twice).
-  addRoute(
-    "DELETE",
-    "/api/v1/admin/openclaw-workers/agents/:id",
-    async ({ res, params }) => {
-      const id = String(params.id ?? "").trim();
-      if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) {
-        throw new ValidationError("id must be alphanumeric (with - _ allowed)");
-      }
-      let cfg: Record<string, any> = {};
-      try {
-        cfg = JSON.parse(fs.readFileSync(OPENCLAW_WORKERS_JSON_PATH, "utf-8"));
-      } catch {
-        sendJson(res, 200, { id, removed: false, reason: "config_not_found" });
-        return;
-      }
-      const list: any[] = Array.isArray(cfg.agents?.list) ? cfg.agents.list : [];
-      const before = list.length;
-      const filtered = list.filter((a) => String(a?.id) !== id);
-      if (filtered.length === before) {
-        sendJson(res, 200, { id, removed: false, reason: "not_found" });
-        return;
-      }
-      cfg.agents.list = filtered;
-      cfg.meta = cfg.meta || {};
-      cfg.meta.lastTouchedAt = new Date().toISOString().replace(/\.\d+Z$/, ".000Z");
-      fs.writeFileSync(
-        OPENCLAW_WORKERS_JSON_PATH,
-        JSON.stringify(cfg, null, 2) + "\n",
-        "utf-8",
-      );
-      sendJson(res, 200, { id, removed: true });
-    },
-  );
+  // --- Ephemeral agents: REMOVED (PLAN.md Part F, issue #15) ---
+  //
+  // The `openclaw-workers/agents` GET/POST/DELETE routes are gone. Under
+  // Hermes an ephemeral executor is a single `POST /v1/runs` against the
+  // workers profile with session_id = `exec-<hash>` — there is no
+  // create-config / hot-reload / delete-config dance, so there is nothing
+  // for ctrl-api to mediate. In-flight ephemeral runs are listed via
+  // GET /api/v1/hermes/agents/ephemeral (routes/hermes.ts).
 
   // --- Tailscale ---
 
@@ -1023,15 +899,18 @@ export function registerAdminRoutes(): void {
     const [healthResult, containersResult, devicesResult] = await Promise.allSettled([
       execAsync("/opt/alfred/healthcheck.sh", []).then(r => JSON.parse(r.stdout.trim())),
       dockerComposeCmd(["ps", "--format", "json"]).then(s => parseJsonLines(s)),
-      dockerExec("openclaw", [...OPENCLAW_CMD, "devices", "list", "--json"]).then(s => JSON.parse(s)),
+      dockerExec(HERMES_CONTAINER, [...HERMES_CMD, "-p", "main", "devices", "list", "--json"]).then(s => JSON.parse(s)),
     ]);
 
     // Fast synchronous reads
     const vaultRaw = getVaultContextData();
     const inboxFiles = getInboxFiles();
+    // Hermes `main` profile config (YAML). Key stays `openclawCfg` for the
+    // dashboard's existing reader; drop the alias in Phase 2.
     let openclawCfg: unknown = {};
     try {
-      openclawCfg = JSON.parse(fs.readFileSync(OPENCLAW_JSON_PATH, "utf-8"));
+      const parsed = yaml.load(fs.readFileSync(OPENCLAW_JSON_PATH, "utf-8"));
+      if (parsed && typeof parsed === "object") openclawCfg = parsed;
     } catch {
       // file may not exist yet
     }
@@ -1133,54 +1012,22 @@ export function registerAdminRoutes(): void {
     }
   });
 
-  // Fix OpenClaw memory limit in docker-compose.yaml (safe, non-destructive)
+  // POST /api/v1/admin/compose/fix-memory — RETIRED (no-op stub).
+  //
+  // This route used to sed-surgery the tenant's rendered docker-compose.yaml
+  // to bump OpenClaw's mem_limit. alfred-black ships a single static,
+  // version-controlled `docker-compose.yaml` at the repo root — runtime
+  // editing of it is no longer correct (the next `git pull` would clobber
+  // the patch). Resource sizing is canonical in the committed compose file;
+  // change it there. Kept as a clearly-marked no-op so any dashboard caller
+  // gets a 200 with an explanation instead of a 404.
   addRoute("POST", "/api/v1/admin/compose/fix-memory", async ({ res }) => {
-    const fs = await import("node:fs");
-    const composePath = `${COMPOSE_DIR}/docker-compose.yaml`;
-    let content: string;
-    try {
-      content = fs.readFileSync(composePath, "utf-8");
-    } catch (err) {
-      sendJson(res, 500, { error: `Cannot read compose file: ${err}` });
-      return;
-    }
-
-    const changes: string[] = [];
-
-    // Fix openclaw mem_limit: 2g -> 4g
-    if (content.includes("mem_limit: 2g")) {
-      content = content.replace(/mem_limit: 2g/g, "mem_limit: 4g");
-      changes.push("mem_limit: 2g -> 4g (all services)");
-    }
-
-    // Add NODE_OPTIONS if not in environment block for openclaw
-    if (!content.includes("NODE_OPTIONS")) {
-      content = content.replace(
-        /- OPENCLAW_GATEWAY_TOKEN_FILE=/,
-        "- NODE_OPTIONS=--max-old-space-size=3072\n      - OPENCLAW_GATEWAY_TOKEN_FILE="
-      );
-      changes.push("Added NODE_OPTIONS=--max-old-space-size=3072 to openclaw");
-    }
-
-    // Fix healthcheck retries
-    content = content.replace(
-      /retries: 10\n(\s+)start_period: 30s/g,
-      "retries: 30\n$1start_period: 60s"
-    );
-
-    if (changes.length === 0) {
-      sendJson(res, 200, { message: "No changes needed — compose already up to date", changes: [] });
-      return;
-    }
-
-    // Write updated compose
-    fs.writeFileSync(composePath, content, "utf-8");
-
-    // Respond immediately, recreate in background
-    sendJson(res, 200, { message: "Compose updated. OpenClaw recreating in background.", changes });
-
-    dockerComposeCmd(["up", "-d", "--no-deps", "--force-recreate", "openclaw"]).catch((err) => {
-      console.error("Failed to recreate openclaw after compose fix:", err);
+    sendJson(res, 200, {
+      message:
+        "Retired on alfred-black. docker-compose.yaml is static + version-controlled — " +
+        "adjust resource limits in the committed compose file, not at runtime.",
+      changes: [],
+      retired: true,
     });
   });
 }

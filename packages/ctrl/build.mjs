@@ -1,6 +1,22 @@
+// ============================================================================
+// ctrl build — alfred-black.
+//
+// alfred-black keeps ONLY the tenant API server (`src/api/`). The Ink TUI and
+// the Commander CLI (`src/index.tsx`, `src/infra`, `src/components`, …) were
+// pruned with the SaaS provisioning layer. This build produces a single
+// artefact: `dist/api.mjs`, the standalone API bundle the alfred-ctrl-api
+// Docker image runs.
+//
+// node builtins (incl. `node:sqlite`) are marked external — Node 22 provides
+// them. Everything else (js-yaml, nunjucks, …) is bundled in, so the runtime
+// image needs no node_modules.
+//
+// `.sql` / `.njk` / `.md` / `.yaml` files are loaded as text strings — that's
+// how schema.sql, the templates, and the skill markdown reach the bundle.
+// ============================================================================
+
 import * as esbuild from "esbuild";
 import { builtinModules } from "module";
-import { readFile } from "fs/promises";
 
 const watch = process.argv.includes("--watch");
 
@@ -10,58 +26,7 @@ const nodeBuiltins = [
   "node:sqlite",
 ];
 
-// Plugin to load hook handler JS files as text strings (for deployment to tenants)
-const hookTextLoader = {
-  name: "hook-text-loader",
-  setup(build) {
-    build.onLoad({ filter: /\/hooks\/[^/]+\/handler\.js$/ }, async (args) => ({
-      contents: `export default ${JSON.stringify(await readFile(args.path, "utf8"))};`,
-      loader: "js",
-    }));
-  },
-};
-
-// Plugin to stub out optional packages that aren't installed
-const optionalExternals = {
-  name: "optional-externals",
-  setup(build) {
-    const optionals = ["react-devtools-core", "yoga-wasm-web"];
-    for (const pkg of optionals) {
-      build.onResolve({ filter: new RegExp(`^${pkg}$`) }, () => ({
-        path: pkg,
-        namespace: "optional-stub",
-      }));
-    }
-    build.onLoad({ filter: /.*/, namespace: "optional-stub" }, () => ({
-      contents: "export default undefined;",
-    }));
-  },
-};
-
-const buildOptions = {
-  entryPoints: ["src/index.tsx"],
-  bundle: true,
-  platform: "node",
-  target: "node22",
-  format: "esm",
-  outfile: "dist/index.mjs",
-  banner: { js: "#!/usr/bin/env node\nimport{createRequire}from'module';const require=createRequire(import.meta.url);" },
-  external: [
-    ...nodeBuiltins,
-    "ssh2",  // native addon
-  ],
-  plugins: [hookTextLoader, optionalExternals],
-  loader: {
-    ".sql": "text",
-    ".njk": "text",
-    ".md": "text",
-    ".yaml": "text",
-  },
-  sourcemap: true,
-  minify: false,
-};
-
-// Standalone API build — no React, no ssh2, no sqlite, no ink
+// Standalone API build — the only artefact.
 const apiBuildOptions = {
   entryPoints: ["src/api/standalone.ts"],
   bundle: true,
@@ -69,7 +34,9 @@ const apiBuildOptions = {
   target: "node22",
   format: "esm",
   outfile: "dist/api.mjs",
-  banner: { js: "#!/usr/bin/env node\nimport{createRequire}from'module';const require=createRequire(import.meta.url);" },
+  banner: {
+    js: "#!/usr/bin/env node\nimport{createRequire}from'module';const require=createRequire(import.meta.url);",
+  },
   external: nodeBuiltins,
   loader: {
     ".sql": "text",
@@ -82,16 +49,10 @@ const apiBuildOptions = {
 };
 
 if (watch) {
-  const [ctx, apiCtx] = await Promise.all([
-    esbuild.context(buildOptions),
-    esbuild.context(apiBuildOptions),
-  ]);
-  await Promise.all([ctx.watch(), apiCtx.watch()]);
-  console.log("Watching for changes...");
+  const apiCtx = await esbuild.context(apiBuildOptions);
+  await apiCtx.watch();
+  console.log("Watching for changes (dist/api.mjs)...");
 } else {
-  await Promise.all([
-    esbuild.build(buildOptions),
-    esbuild.build(apiBuildOptions),
-  ]);
-  console.log("Build complete.");
+  await esbuild.build(apiBuildOptions);
+  console.log("Build complete — dist/api.mjs");
 }

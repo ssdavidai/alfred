@@ -8,7 +8,7 @@ import { registerDeviceRoutes } from "./routes/devices.js";
 import { registerLogRoutes } from "./routes/logs.js";
 import { registerWorkflowRoutes } from "./routes/workflows.js";
 import { registerWorkerRoutes } from "./routes/workers.js";
-import { registerOpenClawRoutes } from "./routes/openclaw.js";
+import { registerHermesRoutes } from "./routes/hermes.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerCredentialRoutes } from "./routes/credentials.js";
 import { registerAgentRoutes } from "./routes/agents.js";
@@ -47,6 +47,9 @@ import { registerStateChangeRoutes } from "./routes/stateChanges.js";
 import { registerTodoRoutes } from "./routes/todos.js";
 import { registerPlaneStewardWebhookRoute } from "./routes/webhooks/plane.js";
 import { registerVexaWebhookRoute } from "./routes/webhooks/vexa.js";
+import { registerStateRoutes } from "./routes/state.js";
+import { registerIngestRoutes } from "./routes/ingest.js";
+import { registerVaultIndexRoutes } from "./routes/vaultIndex.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -110,7 +113,7 @@ export function createApiServer(): http.Server {
   registerWorkerRoutes();
   registerWorkflowRoutes();
   registerDeviceRoutes();
-  registerOpenClawRoutes();
+  registerHermesRoutes();
   registerLogRoutes();
   registerAdminRoutes();
   registerCredentialRoutes();
@@ -150,6 +153,10 @@ export function createApiServer(): http.Server {
   registerTodoRoutes();
   registerPlaneStewardWebhookRoute();
   registerVexaWebhookRoute();
+  // Four-store architecture (PLAN.md Part I): state.db + ingest.db surfaces.
+  registerStateRoutes();
+  registerIngestRoutes();
+  registerVaultIndexRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
@@ -167,6 +174,15 @@ export function createApiServer(): http.Server {
     try {
       const qIdx = url.indexOf("?");
       const pathname = qIdx >= 0 ? url.slice(0, qIdx) : url;
+
+      // Unauthenticated liveness probe. Used by the container HEALTHCHECK and
+      // by compose `depends_on: service_healthy` gating. Returns 200 as long
+      // as the event loop is responsive — no auth, no DB, no docker exec.
+      if (method === "GET" && (pathname === "/api/v1/health" || pathname === "/healthz")) {
+        sendJson(res, 200, { ok: true, service: "ctrl-api", ts: new Date().toISOString() });
+        logRequest(method, url, 200, Date.now() - start);
+        return;
+      }
 
       // Public routes that authenticate via their own mechanism (e.g. webhook token,
       // HMAC signature).

@@ -2,11 +2,15 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
-import { execAsync, dockerExec, dockerComposeCmd, OPENCLAW_CMD } from "../helpers.js";
+import { execAsync, dockerExec, dockerComposeCmd, HERMES_CMD, HERMES_CONTAINER } from "../helpers.js";
 
+// The init container writes the gateway token to /alfred-data/.gateway-token
+// (PLAN.md Part F) — that value becomes the Hermes API_SERVER_KEY for both
+// profiles. The shim validates the same token, so this caller logic is
+// unchanged from OpenClaw.
 const GATEWAY_TOKEN_CANDIDATES = [
+  process.env.HERMES_GATEWAY_TOKEN_FILE,
   process.env.OPENCLAW_GATEWAY_TOKEN_FILE,
-  "/mnt/encrypted/alfred/.gateway-token",
   "/alfred-data/.gateway-token",
 ].filter((p): p is string => typeof p === "string" && p.length > 0);
 
@@ -20,14 +24,16 @@ function readGatewayToken(): string {
   return "";
 }
 
-const CONFIG_PATH = "/mnt/encrypted/alfred/config.yaml";
+// alfred daemon config (the surveyor lives here, not in the Hermes config).
+const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
+const CONFIG_PATH = `${ALFRED_DATA_DIR}/config.yaml`;
 
 const AGENTS = [
-  { id: "main", label: "Alfred", description: "Default agent for device interactions", agentDir: "/home/node/.openclaw/agents/main/agent" },
-  { id: "learn-clerk", label: "Clerk", description: "Stateless LLM worker for learning workflows", agentDir: "/home/node/.openclaw/agents/learn-clerk/agent" },
-  { id: "vault-curator", label: "Curator", description: "Processes inbox into structured vault records", agentDir: "/home/node/.openclaw/agents/vault-curator/agent" },
-  { id: "vault-janitor", label: "Janitor", description: "Fixes structural vault issues", agentDir: "/home/node/.openclaw/agents/vault-janitor/agent" },
-  { id: "vault-distiller", label: "Distiller", description: "Extracts latent knowledge from records", agentDir: "/home/node/.openclaw/agents/vault-distiller/agent" },
+  { id: "main", label: "Alfred", description: "Default agent for device interactions" },
+  { id: "learn-clerk", label: "Clerk", description: "Stateless LLM worker for learning workflows" },
+  { id: "vault-curator", label: "Curator", description: "Processes inbox into structured vault records" },
+  { id: "vault-janitor", label: "Janitor", description: "Fixes structural vault issues" },
+  { id: "vault-distiller", label: "Distiller", description: "Extracts latent knowledge from records" },
 ];
 
 /** Read config.yaml via Python's yaml module and return parsed JSON. */
@@ -85,15 +91,18 @@ interface AgentModelStatus {
   };
 }
 
-const OPENCLAW_JSON = "/home/node/.openclaw/openclaw.json";
+// Hermes `main` profile config (was openclaw.json). Per-agent model lives in
+// the agent list; the file is YAML, so the read/patch scripts use yaml.
+const HERMES_CONFIG_DIR_AGENTS = process.env.HERMES_CONFIG_DIR ?? "/hermes-data";
+const HERMES_CONFIG = `${HERMES_CONFIG_DIR_AGENTS}/main/config.yaml`;
 
-/** Read per-agent model from openclaw.json, then enrich with live provider auth. */
+/** Read per-agent model from the Hermes config, then enrich with live auth. */
 async function getAgentModelStatus(agentDef: typeof AGENTS[number]): Promise<Record<string, any>> {
   try {
-    // Read model from openclaw.json (source of truth for per-agent config)
+    // Read model from the Hermes config (source of truth for per-agent config)
     const readScript = [
-      "import json",
-      `d = json.load(open("${OPENCLAW_JSON}"))`,
+      "import json, yaml",
+      `d = yaml.safe_load(open("${HERMES_CONFIG}")) or {}`,
       `aid = "${agentDef.id}"`,
       "agents = d.get('agents', {}).get('list', [])",
       "defaults = d.get('agents', {}).get('defaults', {}).get('model', {})",
@@ -103,23 +112,24 @@ async function getAgentModelStatus(agentDef: typeof AGENTS[number]): Promise<Rec
       "    m = a.get('model')",
       "    agent_model = m.get('primary') if isinstance(m, dict) else m",
       "    break",
-      "print(json.dumps({'model': agent_model, 'default': defaults.get('primary')}))",
+      "print(json.dumps({'model': agent_model, 'default': (defaults or {}).get('primary')}))",
     ].join("\n");
-    const modelResult = await dockerExec("openclaw", ["python3", "-c", readScript]);
+    const modelResult = await dockerExec(HERMES_CONTAINER, ["python3", "-c", readScript]);
     const modelInfo = JSON.parse(modelResult.trim());
 
     const agentModel = modelInfo.model || modelInfo.default || null;
 
-    // Try to get live provider auth status (non-critical)
+    // Try to get live provider auth status (non-critical). Hermes exposes its
+    // model inventory at `GET /v1/models`; the CLI surfaces it here.
     let providers: any[] = [];
     let missingProviders: string[] = [];
     try {
-      const raw = await dockerExec("openclaw", [...OPENCLAW_CMD, "models", "status", "--agent", agentDef.id, "--json"]);
+      const raw = await dockerExec(HERMES_CONTAINER, [...HERMES_CMD, "models", "status", "--agent", agentDef.id, "--json"]);
       const status: AgentModelStatus = JSON.parse(raw.trim());
       providers = status.auth?.providers || [];
       missingProviders = status.auth?.missingProvidersInUse || [];
     } catch {
-      // OpenClaw may be starting up
+      // Hermes may be starting up
     }
 
     return {
@@ -232,12 +242,12 @@ export function registerAgentRoutes(): void {
       throw new ValidationError(`Unknown agent: ${agentId}. Known agents: ${AGENTS.map((a) => a.id).join(", ")}, surveyor`);
     }
 
-    // Directly patch openclaw.json to set the per-agent model.
-    // `openclaw models set` only sets the global default, not per-agent.
+    // Directly patch the Hermes `main` config.yaml to set the per-agent
+    // model. The config is YAML — the patch script round-trips via yaml.
     const patchScript = [
-      "import json, sys, shutil",
-      `p = "${OPENCLAW_JSON}"`,
-      "d = json.load(open(p))",
+      "import json, sys, shutil, yaml",
+      `p = "${HERMES_CONFIG}"`,
+      "d = yaml.safe_load(open(p)) or {}",
       `aid = "${agentDef.id}"`,
       `model = "${model}"`,
       "agents = d.get('agents', {}).get('list', [])",
@@ -248,28 +258,28 @@ export function registerAgentRoutes(): void {
       "    found = True",
       "    break",
       "if not found:",
-      "  print(json.dumps({'error': f'Agent {aid} not found in openclaw.json'}))",
+      "  print(json.dumps({'error': f'Agent {aid} not found in Hermes config'}))",
       "  sys.exit(1)",
-      "# Also update the global defaults so sessions_spawn uses the right model",
+      "# Also update the global defaults so new runs use the right model",
       "defaults = d.get('agents', {}).get('defaults', {})",
       "if 'model' not in defaults: defaults['model'] = {}",
       "defaults['model']['primary'] = model",
       "d.setdefault('agents', {})['defaults'] = defaults",
       "shutil.copy2(p, p + '.bak')",
       "with open(p, 'w') as f:",
-      "  json.dump(d, f, indent=2)",
+      "  yaml.safe_dump(d, f, default_flow_style=False)",
       "print(json.dumps({'ok': True, 'agent': aid, 'model': model}))",
     ].join("\n");
 
-    const patchResult = await dockerExec("openclaw", ["python3", "-c", patchScript]);
+    const patchResult = await dockerExec(HERMES_CONTAINER, ["python3", "-c", patchScript]);
     const parsed = JSON.parse(patchResult.trim());
     if (parsed.error) {
       throw new ValidationError(parsed.error);
     }
 
-    // Restart OpenClaw to pick up the new model config
+    // Restart Hermes to pick up the new model config
     try {
-      await dockerComposeCmd(["restart", "openclaw"]);
+      await dockerComposeCmd(["restart", HERMES_CONTAINER]);
     } catch {
       // Best effort — gateway may pick up changes on next request
     }
@@ -356,7 +366,12 @@ export function registerAgentRoutes(): void {
     if (announce && !toTarget) {
       try {
         const gatewayToken = readGatewayToken();
-        const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL || "http://openclaw:18789";
+        // The hermes-shim binds the legacy :18789 and preserves the OpenClaw
+        // `POST /tools/invoke` contract — this call is unchanged.
+        const gatewayUrl =
+          process.env.HERMES_GATEWAY_URL ||
+          process.env.OPENCLAW_GATEWAY_URL ||
+          "http://hermes:18789";
         const resp = await fetch(`${gatewayUrl}/tools/invoke`, {
           method: "POST",
           headers: {
@@ -392,7 +407,7 @@ export function registerAgentRoutes(): void {
     }
 
     const args = [
-      ...OPENCLAW_CMD,
+      ...HERMES_CMD,
       "cron", "add",
       "--name", jobName,
       "--agent", "main",
@@ -412,7 +427,7 @@ export function registerAgentRoutes(): void {
     }
 
     try {
-      const stdout = await dockerExec("openclaw", args);
+      const stdout = await dockerExec(HERMES_CONTAINER, args);
       let envelope: unknown = null;
       try {
         envelope = JSON.parse(stdout.trim() || "{}");

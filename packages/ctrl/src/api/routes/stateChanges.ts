@@ -36,12 +36,13 @@ import {
   resolveVaultPath,
   emitVaultEditSignal,
 } from "./vault.js";
-import { vaultWalkCache } from "../vaultCache.js";
 import {
   classifyTarget,
   stateFieldsFor,
   type StateFieldTarget,
 } from "../stateFields.js";
+import { getStateDb } from "../../db/state.js";
+import { appendAudit } from "./state.js";
 
 // ---------------------------------------------------------------------------
 // Source identifier regex (spec §5.1 step 3).
@@ -583,6 +584,36 @@ export function registerStateChangeRoutes(): void {
         emitVaultEditSignal(auditRelPath, "create");
       }
 
+      // Mirror the state change into state.db `audit` (PLAN.md Part I).
+      // The vault `event/state-change-*.md` record stays for now (callers
+      // still resolve audit_record_path), but the audit ledger in state.db
+      // is the SQL-backed source the GET /state-changes route serves from.
+      appendAudit({
+        ts: whenIso,
+        action_type: "state_change",
+        actor: source,
+        source,
+        target_path: targetPath,
+        target_kind: targetKind,
+        subject_ref: auditRelPath,
+        summary: reason || `state change on ${targetPath}`,
+        changes: auditChanges,
+        mode,
+        confidence,
+        undo: undoRecipe ?? undefined,
+        payload: {
+          prior_as_of: priorAsOf,
+          observed_window: {
+            start: owIn.start,
+            end: owIn.end,
+            signal_paths: signalPaths,
+            decision_paths: decisionPaths,
+            other_refs: otherRefs,
+          },
+          timeline_entry_id: isShadow ? null : ulid,
+        },
+      });
+
       return {
         audit_record_path: auditRelPath,
         timeline_entry_id: isShadow ? null : ulid,
@@ -594,102 +625,97 @@ export function registerStateChangeRoutes(): void {
   });
 
   // GET /api/v1/state-changes (spec §5.3)
+  //
+  // Backed by state.db `audit` (action_type='state_change') instead of a
+  // markdown directory walk (PLAN.md Part I). The audit row's payload_json
+  // carries the observed-window detail; changes_json carries the per-field
+  // diff — both are reconstituted into the shape the dashboard expects.
   addRoute("GET", "/api/v1/state-changes", async ({ res, query }) => {
     const target = query.get("target");
     const source = query.get("source");
     const since = query.get("since");
     const until = query.get("until");
-    const limitRaw = query.get("limit");
-    const offsetRaw = query.get("offset");
     const limit = Math.min(
-      Math.max(1, parseInt(limitRaw ?? "50", 10) || 50),
+      Math.max(1, parseInt(query.get("limit") ?? "50", 10) || 50),
       200,
     );
-    const offset = Math.max(0, parseInt(offsetRaw ?? "0", 10) || 0);
+    const offset = Math.max(0, parseInt(query.get("offset") ?? "0", 10) || 0);
 
-    const cacheKey = `state-changes:${target ?? ""}:${source ?? ""}:${since ?? ""}:${until ?? ""}`;
-    const all = (await vaultWalkCache.get(cacheKey, () => indexAllStateChanges())) as IndexedStateChange[];
+    const db = getStateDb();
+    const where: string[] = ["action_type = 'state_change'"];
+    const args: unknown[] = [];
+    if (target) { where.push("target_path = ?"); args.push(target.replace(/\\/g, "/")); }
+    if (source) { where.push("source = ?"); args.push(source); }
+    if (since) { where.push("ts >= ?"); args.push(since); }
+    if (until) { where.push("ts <= ?"); args.push(until); }
+    const whereSql = "WHERE " + where.join(" AND ");
 
-    const filtered = all.filter((e: IndexedStateChange) => {
-      if (target && e.target_path !== target.replace(/\\/g, "/")) return false;
-      if (source && e.source !== source) return false;
-      if (since && e.when < since) return false;
-      if (until && e.when > until) return false;
-      return true;
+    const total = (
+      db.prepare(`SELECT COUNT(*) AS n FROM audit ${whereSql}`).get(...args) as { n: number }
+    ).n;
+    const rows = db
+      .prepare(`SELECT * FROM audit ${whereSql} ORDER BY ts DESC LIMIT ? OFFSET ?`)
+      .all(...args, limit, offset) as Array<Record<string, unknown>>;
+
+    const entries = rows.map((r) => {
+      let payload: Record<string, unknown> = {};
+      let changes: unknown = {};
+      try { payload = r.payload_json ? JSON.parse(String(r.payload_json)) : {}; } catch { /* */ }
+      try { changes = r.changes_json ? JSON.parse(String(r.changes_json)) : {}; } catch { /* */ }
+      const ow = (payload.observed_window ?? {}) as Record<string, unknown>;
+      return {
+        id: r.id,
+        when: r.ts,
+        target_path: r.target_path,
+        source: r.source,
+        prior_as_of: payload.prior_as_of ?? null,
+        observed_window: {
+          start: ow.start ?? "",
+          end: ow.end ?? r.ts,
+          signals: Array.isArray(ow.signal_paths) ? ow.signal_paths.length : 0,
+          decisions: Array.isArray(ow.decision_paths) ? ow.decision_paths.length : 0,
+          other: Array.isArray(ow.other_refs) ? ow.other_refs : [],
+        },
+        changes,
+        reason: r.summary,
+        confidence: typeof r.confidence === "number" ? r.confidence : 1.0,
+        mode: r.mode,
+        audit_record: r.subject_ref,
+      };
     });
-    filtered.sort((a: IndexedStateChange, b: IndexedStateChange) =>
-      a.when < b.when ? 1 : a.when > b.when ? -1 : 0,
-    );
 
-    const total = filtered.length;
-    const page = filtered.slice(offset, offset + limit);
-    sendJson(res, 200, { entries: page, total, limit, offset });
+    sendJson(res, 200, { entries, total, limit, offset });
   });
 
   // GET /api/v1/state-changes/sources (spec §11.1)
   //
-  // Distinct sources seen in the last 30 days with counts and last-seen
-  // timestamps. Cached 5 min — this powers the source-filter pills on
-  // /decisions, which doesn't need fresher than that.
+  // Distinct state-change sources seen in the last 30 days, with counts and
+  // last-seen timestamps. Backed by a `GROUP BY` over state.db `audit`
+  // (PLAN.md Part I) — no markdown walk, no cache layer needed.
   addRoute("GET", "/api/v1/state-changes/sources", async ({ res }) => {
-    const body = await _sourcesCache.get();
-    sendJson(res, 200, body);
+    const db = getStateDb();
+    const windowEnd = new Date();
+    const windowStart = new Date(windowEnd.getTime() - 30 * 24 * 60 * 60_000);
+    const startIso = windowStart.toISOString();
+    const endIso = windowEnd.toISOString();
+    const rows = db
+      .prepare(
+        `SELECT source, COUNT(*) AS count, MAX(ts) AS last_seen
+           FROM audit
+          WHERE action_type = 'state_change'
+            AND source IS NOT NULL
+            AND ts >= ? AND ts <= ?
+          GROUP BY source
+          ORDER BY count DESC`,
+      )
+      .all(startIso, endIso);
+    sendJson(res, 200, {
+      sources: rows,
+      window_start: startIso,
+      window_end: endIso,
+    });
   });
 }
-
-// ---------------------------------------------------------------------------
-// 5-minute source histogram cache.
-// ---------------------------------------------------------------------------
-
-interface SourcesResponse {
-  sources: Array<{ source: string; count: number; last_seen: string }>;
-  window_start: string;
-  window_end: string;
-}
-
-const _sourcesCache = (() => {
-  const TTL_MS = 5 * 60_000;
-  let entry: { at: number; body: SourcesResponse } | null = null;
-  let inflight: Promise<SourcesResponse> | null = null;
-  return {
-    async get(): Promise<SourcesResponse> {
-      const now = Date.now();
-      if (entry && now - entry.at < TTL_MS) return entry.body;
-      if (inflight) return inflight;
-      inflight = (async () => {
-        const all = indexAllStateChanges();
-        const windowEnd = new Date();
-        const windowStart = new Date(windowEnd.getTime() - 30 * 24 * 60 * 60_000);
-        const startIso = windowStart.toISOString();
-        const endIso = windowEnd.toISOString();
-        const byName = new Map<string, { count: number; last_seen: string }>();
-        for (const e of all) {
-          if (!e.source) continue;
-          if (e.when < startIso || e.when > endIso) continue;
-          const cur = byName.get(e.source);
-          if (cur) {
-            cur.count += 1;
-            if (e.when > cur.last_seen) cur.last_seen = e.when;
-          } else {
-            byName.set(e.source, { count: 1, last_seen: e.when });
-          }
-        }
-        const sources = [...byName.entries()]
-          .map(([source, v]) => ({ source, count: v.count, last_seen: v.last_seen }))
-          .sort((a, b) => b.count - a.count);
-        const body: SourcesResponse = {
-          sources,
-          window_start: startIso,
-          window_end: endIso,
-        };
-        entry = { at: Date.now(), body };
-        inflight = null;
-        return body;
-      })();
-      return inflight;
-    },
-  };
-})();
 
 // Re-exports for testing.
 export const _internal = {

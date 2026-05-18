@@ -4,8 +4,10 @@ import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, ConflictError, NotFoundError } from "../errors.js";
 
-const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
-const VAULT_PATH = "/mnt/encrypted/vault";
+// alfred-black named volumes (PLAN.md Part E) — env-configurable.
+const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
+const STREAMS_DIR = `${ALFRED_DATA_DIR}/streams`;
+const VAULT_PATH = process.env.VAULT_PATH ?? "/vault";
 const PROCESSED_EVENTS_PATH = path.join(STREAMS_DIR, "processed-events.json");
 const STREAM_CONFIGS_DIR = path.join(STREAMS_DIR, "configs");
 

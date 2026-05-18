@@ -1,7 +1,28 @@
 import { execFile as execFileCb, spawn } from "node:child_process";
 import { ExecError } from "./errors.js";
 
-const COMPOSE_DIR = "/opt/alfred/compose";
+// ---------------------------------------------------------------------------
+// Compose project directory.
+//
+// alfred-black is a single-VM `docker compose up` deployment: the user clones
+// the repo and runs compose from the repo root. ctrl-api restarts sibling
+// containers via the bind-mounted docker socket, so it needs the path of the
+// directory that holds docker-compose.yaml.
+//
+//   COMPOSE_DIR  — absolute path to the directory containing
+//                  docker-compose.yaml. Defaults to `/srv/alfred-black`.
+//                  Point this at wherever the repo was cloned.
+//   COMPOSE_FILE — full override of the compose file path; takes precedence
+//                  over COMPOSE_DIR when set.
+//
+// `COMPOSE_PROJECT_NAME` is honoured implicitly: every `docker compose`
+// invocation inherits the ambient process environment (which carries
+// COMPOSE_PROJECT_NAME from the container's `.env`), so sibling-container
+// targeting resolves correctly regardless of the project name compose was
+// brought up under.
+// ---------------------------------------------------------------------------
+const COMPOSE_DIR = process.env.COMPOSE_DIR ?? "/srv/alfred-black";
+const COMPOSE_FILE = process.env.COMPOSE_FILE ?? `${COMPOSE_DIR}/docker-compose.yaml`;
 
 interface ExecResult {
   stdout: string;
@@ -83,7 +104,7 @@ export async function dockerExec(service: string, command: string[], envVars?: R
       envFlags.push("-e", `${k}=${v}`);
     }
   }
-  const args = ["compose", "-f", `${COMPOSE_DIR}/docker-compose.yaml`, "exec", ...envFlags, "-T", service, ...command];
+  const args = ["compose", "-f", COMPOSE_FILE, "exec", ...envFlags, "-T", service, ...command];
   await _acquireDockerExecSlot();
   try {
     const { stdout } = await execAsync("docker", args);
@@ -113,7 +134,7 @@ export async function dockerExecWithStdin(
   const args = [
     "compose",
     "-f",
-    `${COMPOSE_DIR}/docker-compose.yaml`,
+    COMPOSE_FILE,
     "exec",
     ...envFlags,
     "-T",
@@ -156,7 +177,7 @@ export async function dockerExecWithStdin(
 }
 
 export async function dockerComposeCmd(command: string[]): Promise<string> {
-  const args = ["compose", "-f", `${COMPOSE_DIR}/docker-compose.yaml`, ...command];
+  const args = ["compose", "-f", COMPOSE_FILE, ...command];
   const { stdout } = await execAsync("docker", args);
   return stdout;
 }
@@ -170,7 +191,29 @@ export function sudoExec(cmd: string, args: string[]): Promise<string> {
 }
 
 export const ALFRED_CMD = ["alfred", "--config", "/app/data/config.yaml"];
-export const OPENCLAW_CMD = ["node", "openclaw.mjs"];
+
+// ---------------------------------------------------------------------------
+// Hermes runtime.
+//
+// alfred-black replaces the two-container OpenClaw split (`openclaw` +
+// `openclaw-workers`) with a single `hermes` container running two profiles.
+// `hermes` is on PATH inside the image, so the in-container CLI invocation is
+// just `["hermes"]` — no `node openclaw.mjs` shim.
+//
+//   HERMES_CMD       — argv prefix for in-container Hermes CLI calls.
+//   HERMES_CONTAINER — compose service name of the runtime container.
+//
+// `OPENCLAW_CMD` / `OPENCLAW_CONTAINER` are kept as aliases for one release so
+// callers that still reference the old names compile unchanged; they resolve
+// to the same Hermes values.
+// ---------------------------------------------------------------------------
+export const HERMES_CMD = ["hermes"];
+export const HERMES_CONTAINER = "hermes";
+
+/** @deprecated alias of HERMES_CMD — removed next release. */
+export const OPENCLAW_CMD = HERMES_CMD;
+/** @deprecated alias of HERMES_CONTAINER — removed next release. */
+export const OPENCLAW_CONTAINER = HERMES_CONTAINER;
 
 export function parseJsonLines(raw: string): unknown[] {
   const trimmed = raw.trim();

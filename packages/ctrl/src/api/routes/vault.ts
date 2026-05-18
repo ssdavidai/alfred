@@ -20,8 +20,12 @@ import {
   classifyTarget,
   stateFieldsFor,
 } from "../stateFields.js";
+import { indexVaultWrite, removeFromVaultIndex } from "../../db/vaultIndex.js";
+import { assertCanonicalVaultPath } from "../../db/promotionContract.js";
 
-export const VAULT_PATH = "/mnt/encrypted/vault";
+// alfred-black mounts the vault as a named Docker volume (PLAN.md Part E),
+// bind-mounted into ctrl-api at /vault by default. VAULT_PATH overrides it.
+export const VAULT_PATH = process.env.VAULT_PATH ?? "/vault";
 const INBOX_PATH = `${VAULT_PATH}/inbox`;
 export const VAULT_ENV = { ALFRED_VAULT_PATH: "/vault" };
 
@@ -55,6 +59,25 @@ export function emitVaultEditSignal(relPath: string, kind: "create" | "edit" | "
   // every poll.
   const type = relPath.split("/")[0] ?? "";
   invalidateVaultCachesForType(type);
+  // Keep state.db's vault_index exact on every vault write. ctrl-api is the
+  // sole vault writer, so updating the index here makes drift structurally
+  // impossible (PLAN.md Part I — no fanotify, no reconciler race). The
+  // boot-time reconciler only exists to catch out-of-band human edits.
+  setImmediate(() => {
+    try {
+      const norm = relPath.replace(/\\/g, "/");
+      if (kind === "delete") {
+        removeFromVaultIndex(norm);
+      } else {
+        indexVaultWrite(norm);
+      }
+    } catch (err) {
+      console.warn(
+        `[vault.index] failed to update vault_index path=${relPath} err=${(err as Error).message}`,
+      );
+    }
+  });
+
   setImmediate(() => {
     try {
       fs.mkdirSync(path.dirname(STEWARD_SIGNALS_FILE), { recursive: true });
@@ -767,6 +790,19 @@ export function registerVaultRoutes(): void {
       throw new ValidationError("type and name are required");
     }
 
+    // Promotion contract (PLAN.md Part I): the vault holds only the ~12
+    // canonical record types. A demoted type (signal, observation,
+    // *-action audit, stream_event, …) must NOT be written as markdown —
+    // assertCanonicalVaultPath throws PromotionContractError, which the
+    // error handler maps to a 4xx telling the caller the correct store.
+    {
+      const nm = b.name as string;
+      const probePath = nm.endsWith(".md")
+        ? nm
+        : `${b.type as string}/${nm}.md`;
+      assertCanonicalVaultPath(probePath);
+    }
+
     // If raw content is provided, write the file directly
     if (typeof b.content === "string") {
       const name = b.name as string;
@@ -1088,6 +1124,11 @@ export function registerVaultRoutes(): void {
     if (!b || typeof b.from !== "string" || typeof b.to !== "string") {
       throw new ValidationError("from and to are required");
     }
+
+    // Promotion contract: a move's destination must still be a canonical
+    // vault type. State transitions move files into `<type>/_closed/` — that
+    // is still canonical, so this allows it (the type segment is unchanged).
+    assertCanonicalVaultPath(b.to as string);
 
     const stdout = await dockerExec("alfred", [...ALFRED_CMD, "vault", "move", b.from as string, b.to as string], VAULT_ENV);
     try {

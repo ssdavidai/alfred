@@ -21,6 +21,7 @@
 import { mock, describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import yaml from "js-yaml";
 import type { AddressInfo } from "node:net";
 
 // ---------------------------------------------------------------------------
@@ -277,7 +278,7 @@ process.env.COMPOSIO_USER_ID = "alfred-test-user";
 const integrationsModule = await import("../src/api/routes/integrations.js");
 const { createApiServer } = await import("../src/api/server.js");
 
-const OPENCLAW_CONFIG_PATH = "/mnt/encrypted/openclaw/openclaw.json";
+const OPENCLAW_CONFIG_PATH = "/hermes-data/main/config.yaml";
 const STREAM_CONFIGS_DIR = "/mnt/encrypted/alfred/streams/configs";
 
 let server: http.Server;
@@ -344,10 +345,11 @@ function seedConn(opts: { id: string; toolkit: string; status?: string }): void 
   });
 }
 
+// Hermes profile config is YAML with a `tools.enabled` list.
 function seedOpenclawConfig(allow: string[]): void {
-  const cfg = { gateway: { tools: { allow } } };
-  memFs.set(OPENCLAW_CONFIG_PATH, JSON.stringify(cfg));
-  memFs.set("/mnt/encrypted/openclaw-workers/openclaw.json", JSON.stringify(cfg));
+  const cfg = yaml.dump({ tools: { enabled: allow } });
+  memFs.set(OPENCLAW_CONFIG_PATH, cfg);
+  memFs.set("/hermes-data/workers/config.yaml", cfg);
 }
 
 /**

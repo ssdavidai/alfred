@@ -8,12 +8,13 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
-import { dockerExec, OPENCLAW_CMD } from "../helpers.js";
+import { dockerExec, dockerComposeCmd, HERMES_CMD } from "../helpers.js";
 
 // Vault root — for synthetic integration sources (Omi, custom webhooks).
-const VAULT_ROOT = "/mnt/encrypted/vault";
+const VAULT_ROOT = process.env.VAULT_PATH ?? "/vault";
 const STREAM_EVENT_DIR = path.join(VAULT_ROOT, "stream_event");
 const WEBHOOK_ENDPOINT_DIR = path.join(VAULT_ROOT, "webhook_endpoint");
 
@@ -21,19 +22,25 @@ const WEBHOOK_ENDPOINT_DIR = path.join(VAULT_ROOT, "webhook_endpoint");
 const COMPOSIO_API_V3 = "https://backend.composio.dev/api/v3";
 const COMPOSIO_API_V2 = "https://backend.composio.dev/api/v2";
 
-// Paths
-const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
+// Paths — alfred-black named volumes (PLAN.md Part E).
+const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
+const STREAMS_DIR = `${ALFRED_DATA_DIR}/streams`;
 const STREAM_CONFIGS_DIR = path.join(STREAMS_DIR, "configs");
-const OPENCLAW_CONFIG_PATH = "/mnt/encrypted/openclaw/openclaw.json";
-const OPENCLAW_WORKERS_CONFIG_PATH = "/mnt/encrypted/openclaw-workers/openclaw.json";
-const OPENCLAW_SKILLS_DIR = "/mnt/encrypted/openclaw/workspace/skills";
-const OPENCLAW_WORKERS_SKILLS_DIR = "/mnt/encrypted/openclaw-workers/workspace/skills";
+
+// Hermes per-profile config (was openclaw.json / openclaw-workers.json). One
+// config.yaml per profile, in the hermes_data volume. The Composio
+// `enable-tool` flow edits the tool-enable list in BOTH profile configs.
+const HERMES_CONFIG_DIR = process.env.HERMES_CONFIG_DIR ?? "/hermes-data";
+const OPENCLAW_CONFIG_PATH = `${HERMES_CONFIG_DIR}/main/config.yaml`;
+const OPENCLAW_WORKERS_CONFIG_PATH = `${HERMES_CONFIG_DIR}/workers/config.yaml`;
+const OPENCLAW_SKILLS_DIR = `${HERMES_CONFIG_DIR}/main/workspace/skills`;
+const OPENCLAW_WORKERS_SKILLS_DIR = `${HERMES_CONFIG_DIR}/workers/workspace/skills`;
 
 // Reconnect ledger — tracks (old_connection_id → new_connection_id) pairs from
 // the /reconnect endpoint so the old connection can be deleted 1h after the
 // new one is verified ACTIVE. Persisted on disk so the grace window survives
 // ctrl-api restarts. See registerIntegrationRoutes for the lazy-reaper logic.
-const RECONNECT_LEDGER_PATH = "/mnt/encrypted/alfred/.composio-reconnect-ledger.json";
+const RECONNECT_LEDGER_PATH = `${ALFRED_DATA_DIR}/.composio-reconnect-ledger.json`;
 const RECONNECT_GRACE_MS = 60 * 60 * 1000; // 1 hour
 
 function getComposioApiKey(): string {
@@ -59,7 +66,7 @@ function getComposioApiKey(): string {
 // Fallback file written by the init container for tenants provisioned
 // before the provisioner learned to inject COMPOSIO_USER_ID. See
 // packages/openclaw/init/entrypoint.sh step 10.
-const COMPOSIO_USER_ID_FALLBACK_FILE = "/mnt/encrypted/alfred/.composio-user-id";
+const COMPOSIO_USER_ID_FALLBACK_FILE = `${ALFRED_DATA_DIR}/.composio-user-id`;
 
 function getComposioUserId(): string {
   let uid = (process.env.COMPOSIO_USER_ID || "").trim();
@@ -300,13 +307,19 @@ async function fetchCatalog(apiKey: string): Promise<CatalogEntry[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers for openclaw.json tool management
+// Helpers for the Hermes tool-enable list (was openclaw.json gateway.tools).
 //
-// Writes to openclaw.json are debounced: when gateway.tools.allow changes,
-// openclaw detects the config file change and does a full gateway process
-// restart (~40s). If multiple writes land in quick succession (e.g. a
-// disconnect+reconnect cycle), we coalesce them into a single flush so
-// openclaw only restarts once.
+// alfred-black runs one `hermes` container with two profiles (`main`,
+// `workers`), each with its own `config.yaml`. The Composio enable-tool flow
+// edits the tool-enable list in BOTH profile configs so a Composio action is
+// callable from the user-facing chat AND background runs.
+//
+// Writes are debounced: changing the tool-enable list triggers a hermes
+// gateway restart. Coalescing multiple writes (e.g. a disconnect+reconnect
+// cycle) into one flush means hermes only restarts once.
+//
+// The tool list is written to the canonical Hermes key `tools.enabled`. The
+// `meta.last_touched_at` stamp drives the readiness probe in routes/hermes.ts.
 // ---------------------------------------------------------------------------
 
 const OPENCLAW_WRITE_DEBOUNCE_MS = 500;
@@ -320,64 +333,90 @@ function scheduleFlush(): void {
   flushTimer = setTimeout(flushPendingOpenclawWrites, OPENCLAW_WRITE_DEBOUNCE_MS);
 }
 
-/** Flush any pending openclaw.json writes to disk immediately. Exported so the
- *  api server can call it on SIGTERM/beforeExit to avoid losing queued writes. */
+/** Flush any pending Hermes config writes to disk immediately. Exported so the
+ *  api server can call it on SIGTERM/beforeExit to avoid losing queued writes.
+ *  Name kept for one release for the standalone.ts caller.
+ *
+ *  Unlike OpenClaw (which watched its config file and self-restarted), Hermes
+ *  does not hot-reload `config.yaml` — so after a flush that actually changed
+ *  a profile config we issue a single `docker compose restart hermes`. The
+ *  debounce on scheduleFlush() already coalesces a burst of writes, so the
+ *  restart fires at most once per burst. */
 export function flushPendingOpenclawWrites(): void {
   if (flushTimer) {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
+  let changed = false;
   if (pendingMainCfg) {
     try {
-      fs.writeFileSync(OPENCLAW_CONFIG_PATH, JSON.stringify(pendingMainCfg, null, 2));
+      fs.writeFileSync(OPENCLAW_CONFIG_PATH, yaml.dump(pendingMainCfg, { lineWidth: 120, noRefs: true }));
+      changed = true;
     } catch { /* best effort */ }
     pendingMainCfg = null;
   }
   if (pendingWorkersCfg) {
     try {
-      fs.writeFileSync(OPENCLAW_WORKERS_CONFIG_PATH, JSON.stringify(pendingWorkersCfg, null, 2));
+      fs.writeFileSync(OPENCLAW_WORKERS_CONFIG_PATH, yaml.dump(pendingWorkersCfg, { lineWidth: 120, noRefs: true }));
+      changed = true;
     } catch { /* best effort */ }
     pendingWorkersCfg = null;
   }
+  if (changed) {
+    // Fire-and-forget — the dashboard masks the restart window via the
+    // /api/v1/hermes/ready probe.
+    dockerComposeCmd(["restart", "hermes"]).catch((err) => {
+      console.error(`[integrations] hermes restart after config flush failed: ${err}`);
+    });
+  }
+}
+
+function readHermesConfigFile(configPath: string): Record<string, any> {
+  try {
+    const parsed = yaml.load(fs.readFileSync(configPath, "utf-8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, any>;
+    }
+  } catch { /* missing / unparseable */ }
+  return {};
 }
 
 function readOpenclawConfig(): Record<string, any> {
   // If a write is pending but not yet flushed, return that in-memory state so
   // subsequent read-modify-write cycles don't clobber queued changes.
   if (pendingMainCfg) return pendingMainCfg;
-  try {
-    return JSON.parse(fs.readFileSync(OPENCLAW_CONFIG_PATH, "utf-8"));
-  } catch {
-    return {};
-  }
+  return readHermesConfigFile(OPENCLAW_CONFIG_PATH);
 }
 
 function writeOpenclawConfig(data: Record<string, any>): void {
   data.meta = data.meta || {};
-  data.meta.lastTouchedAt = new Date().toISOString().replace(/\.\d{3}Z/, ".000Z");
+  data.meta.last_touched_at = new Date().toISOString().replace(/\.\d{3}Z/, ".000Z");
   pendingMainCfg = data;
   scheduleFlush();
 }
 
 function readWorkersConfig(): Record<string, any> {
   if (pendingWorkersCfg) return pendingWorkersCfg;
-  try {
-    return JSON.parse(fs.readFileSync(OPENCLAW_WORKERS_CONFIG_PATH, "utf-8"));
-  } catch {
-    return {};
-  }
+  return readHermesConfigFile(OPENCLAW_WORKERS_CONFIG_PATH);
 }
 
 function writeWorkersConfig(data: Record<string, any>): void {
   data.meta = data.meta || {};
-  data.meta.lastTouchedAt = new Date().toISOString().replace(/\.\d{3}Z/, ".000Z");
+  data.meta.last_touched_at = new Date().toISOString().replace(/\.\d{3}Z/, ".000Z");
   pendingWorkersCfg = data;
   scheduleFlush();
 }
 
-/** Add a tool to gateway.tools.allow in both openclaw configs if not present.
- *  Returns true iff at least one config file was mutated (and will therefore
- *  trigger an openclaw gateway restart once the debounced flush lands). */
+/** The Hermes config tool-enable list (`tools.enabled`). */
+function toolEnableList(cfg: Record<string, any>): string[] {
+  if (!cfg.tools) cfg.tools = {};
+  if (!Array.isArray(cfg.tools.enabled)) cfg.tools.enabled = [];
+  return cfg.tools.enabled as string[];
+}
+
+/** Add a tool to the Hermes tool-enable list in BOTH profile configs if not
+ *  present. Returns true iff at least one config file was mutated (and will
+ *  therefore trigger a hermes restart once the debounced flush lands). */
 function ensureToolInGateway(toolName: string): boolean {
   let changed = false;
   for (const [readFn, writeFn] of [
@@ -386,12 +425,10 @@ function ensureToolInGateway(toolName: string): boolean {
   ] as const) {
     try {
       const cfg = readFn();
-      if (!cfg.gateway) cfg.gateway = {};
-      if (!cfg.gateway.tools) cfg.gateway.tools = {};
-      if (!Array.isArray(cfg.gateway.tools.allow)) cfg.gateway.tools.allow = [];
-      if (!cfg.gateway.tools.allow.includes(toolName)) {
-        cfg.gateway.tools.allow.push(toolName);
-        cfg.gateway.tools.allow.sort();
+      const enabled = toolEnableList(cfg);
+      if (!enabled.includes(toolName)) {
+        enabled.push(toolName);
+        enabled.sort();
         writeFn(cfg);
         changed = true;
       }
@@ -480,7 +517,7 @@ export async function describeScheduleStreamId(
   return { exists: true, streamId: undefined };
 }
 
-/** Remove a tool from gateway.tools.allow in both openclaw configs.
+/** Remove a tool from the Hermes tool-enable list in BOTH profile configs.
  *  Returns true iff at least one config file was mutated. */
 function removeToolFromGateway(toolName: string): boolean {
   let changed = false;
@@ -490,11 +527,10 @@ function removeToolFromGateway(toolName: string): boolean {
   ] as const) {
     try {
       const cfg = readFn();
-      const allow: string[] = cfg?.gateway?.tools?.allow || [];
-      const idx = allow.indexOf(toolName);
+      const enabled = toolEnableList(cfg);
+      const idx = enabled.indexOf(toolName);
       if (idx >= 0) {
-        allow.splice(idx, 1);
-        cfg.gateway.tools.allow = allow;
+        enabled.splice(idx, 1);
         writeFn(cfg);
         changed = true;
       }
@@ -1275,7 +1311,7 @@ export function registerIntegrationRoutes(): void {
       //    whole listing endpoint, so anything goes wrong we just skip.
       const omiRows: any[] = [];
       try {
-        const stdout = await dockerExec("openclaw", [...OPENCLAW_CMD, "devices", "list", "--json"]);
+        const stdout = await dockerExec("hermes", [...HERMES_CMD, "-p", "main", "devices", "list", "--json"]);
         let parsed: unknown = null;
         try { parsed = JSON.parse(stdout); } catch { /* ignore */ }
         // The CLI returns either an array or {devices: [...]}; handle both.
@@ -1833,24 +1869,30 @@ export function registerIntegrationRoutes(): void {
         }
 
         if (lastOfToolkit) {
-          // 6. Strip <TOOLKIT>_* prefix from gateway.tools.allow
+          // 6. Strip <TOOLKIT>_* prefix from the Hermes tool-enable list,
+          //    in BOTH profile configs.
           try {
-            const cfg = readOpenclawConfig();
-            const allow: string[] = cfg?.gateway?.tools?.allow || [];
             const prefix = toolkit.toUpperCase() + "_";
-            const kept = allow.filter((t) => {
-              if (t.startsWith(prefix)) {
-                removedTools.push(t);
-                return false;
+            for (const [readFn, writeFn] of [
+              [readOpenclawConfig, writeOpenclawConfig],
+              [readWorkersConfig, writeWorkersConfig],
+            ] as const) {
+              const cfg = readFn();
+              const enabled = toolEnableList(cfg);
+              const kept = enabled.filter((t) => {
+                if (t.startsWith(prefix)) {
+                  if (!removedTools.includes(t)) removedTools.push(t);
+                  return false;
+                }
+                return true;
+              });
+              if (kept.length !== enabled.length) {
+                cfg.tools.enabled = kept;
+                writeFn(cfg);
+                toolsAllowMutated = true;
               }
-              return true;
-            });
-            if (removedTools.length > 0) {
-              cfg.gateway.tools.allow = kept;
-              writeOpenclawConfig(cfg);
-              toolsAllowMutated = true;
             }
-          } catch { /* openclaw config cleanup is best-effort */ }
+          } catch { /* hermes config cleanup is best-effort */ }
 
           // 7. Remove shared per-toolkit skill dir
           const skillDirName = `alfred-composio-${toolkit}`;
@@ -1973,39 +2015,37 @@ export function registerIntegrationRoutes(): void {
       }
 
       // 4 + 5. Strip every <TOOLKIT>_* prefix we know about, plus
-      //        composio_execute itself.
+      //        composio_execute itself — from BOTH Hermes profile configs.
       const removedTools: string[] = [];
       let toolsAllowMutated = false;
       try {
-        const cfg = readOpenclawConfig();
-        const allow: string[] = cfg?.gateway?.tools?.allow || [];
         const prefixes = [...toolkits].map((t) => t.toUpperCase() + "_");
-        const kept = allow.filter((t) => {
-          if (t === "composio_execute") {
-            removedTools.push(t);
-            return false;
-          }
-          for (const p of prefixes) {
-            if (t.startsWith(p)) {
-              removedTools.push(t);
+        for (const [readFn, writeFn] of [
+          [readOpenclawConfig, writeOpenclawConfig],
+          [readWorkersConfig, writeWorkersConfig],
+        ] as const) {
+          const cfg = readFn();
+          const enabled = toolEnableList(cfg);
+          const kept = enabled.filter((t) => {
+            if (t === "composio_execute") {
+              if (!removedTools.includes(t)) removedTools.push(t);
               return false;
             }
+            for (const p of prefixes) {
+              if (t.startsWith(p)) {
+                if (!removedTools.includes(t)) removedTools.push(t);
+                return false;
+              }
+            }
+            return true;
+          });
+          if (kept.length !== enabled.length) {
+            cfg.tools.enabled = kept;
+            writeFn(cfg);
+            toolsAllowMutated = true;
           }
-          return true;
-        });
-        if (removedTools.length > 0) {
-          cfg.gateway.tools.allow = kept;
-          writeOpenclawConfig(cfg);
-          toolsAllowMutated = true;
         }
       } catch { /* best effort */ }
-
-      // Mirror onto the workers config too — ensureToolInGateway /
-      // removeToolFromGateway both touch both, but our above loop only
-      // mutated main. Use removeToolFromGateway for symmetry on both.
-      if (removeToolFromGateway("composio_execute")) {
-        toolsAllowMutated = true;
-      }
 
       // 6. Delete every alfred-composio-* skill dir.
       const removedSkillDirs: string[] = [];
@@ -2323,17 +2363,15 @@ export function registerIntegrationRoutes(): void {
         }
       } catch { /* ok */ }
 
-      // 4. Check if composio_execute is in the openclaw gateway allowlist —
+      // 4. Check if composio_execute is in the Hermes tool-enable list —
       //    that's the real binary "can Alfred invoke tools on this toolkit"
-      //    signal. Per-action toggles on gateway.tools.allow don't exist.
+      //    signal. Per-action toggles don't exist.
       let composioExecuteEnabled = false;
       try {
-        const cfg = readOpenclawConfig();
-        const allow: string[] = cfg?.gateway?.tools?.allow || [];
+        const enabled = toolEnableList(readOpenclawConfig());
         // The legacy `ctrl_composio_execute` name was a ghost (issue #659),
-        // never dispatched, removed from auto-config in this PR. Only the
-        // canonical name signals enabled.
-        composioExecuteEnabled = allow.includes("composio_execute");
+        // never dispatched. Only the canonical name signals enabled.
+        composioExecuteEnabled = enabled.includes("composio_execute");
       } catch { /* ok */ }
 
       // 5. Build enriched stream_actions + tool_actions with pretty names
@@ -2759,7 +2797,10 @@ export function registerIntegrationRoutes(): void {
   });
 
   // =========================================================================
-  // POST /api/v1/integrations/enable-tool — add a Composio tool to gateway.tools.allow
+  // POST /api/v1/integrations/enable-tool — add a Composio tool to the Hermes
+  // tool-enable list. Edits BOTH profile configs (main + workers) so the
+  // action is callable from chat and from background runs; the debounced
+  // flush triggers a single hermes restart.
   // =========================================================================
   addRoute("POST", "/api/v1/integrations/enable-tool", async ({ res, body }) => {
     const b = body as Record<string, unknown> | undefined;
@@ -2769,22 +2810,13 @@ export function registerIntegrationRoutes(): void {
     const slug = b.action_slug as string;
 
     try {
-      const cfg = readOpenclawConfig();
-      if (!cfg.gateway) cfg.gateway = {};
-      if (!cfg.gateway.tools) cfg.gateway.tools = {};
-      if (!Array.isArray(cfg.gateway.tools.allow)) cfg.gateway.tools.allow = [];
-
-      const allow: string[] = cfg.gateway.tools.allow;
-      if (!allow.includes(slug)) {
-        allow.push(slug);
-        allow.sort();
-        writeOpenclawConfig(cfg);
-      }
-
+      const mutated = ensureToolInGateway(slug);
+      const enabled = toolEnableList(readOpenclawConfig());
       sendJson(res, 200, {
         status: "enabled",
         action_slug: slug,
-        tools_count: allow.length,
+        tools_count: enabled.length,
+        gateway_restart_triggered: mutated,
       });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to enable tool: ${err.message}` });
@@ -2792,7 +2824,8 @@ export function registerIntegrationRoutes(): void {
   });
 
   // =========================================================================
-  // POST /api/v1/integrations/disable-tool — remove a Composio tool from gateway.tools.allow
+  // POST /api/v1/integrations/disable-tool — remove a Composio tool from the
+  // Hermes tool-enable list. Edits BOTH profile configs.
   // =========================================================================
   addRoute("POST", "/api/v1/integrations/disable-tool", async ({ res, body }) => {
     const b = body as Record<string, unknown> | undefined;
@@ -2802,19 +2835,13 @@ export function registerIntegrationRoutes(): void {
     const slug = b.action_slug as string;
 
     try {
-      const cfg = readOpenclawConfig();
-      const allow: string[] = cfg?.gateway?.tools?.allow || [];
-      const idx = allow.indexOf(slug);
-      if (idx >= 0) {
-        allow.splice(idx, 1);
-        cfg.gateway.tools.allow = allow;
-        writeOpenclawConfig(cfg);
-      }
-
+      const mutated = removeToolFromGateway(slug);
+      const enabled = toolEnableList(readOpenclawConfig());
       sendJson(res, 200, {
         status: "disabled",
         action_slug: slug,
-        tools_count: allow.length,
+        tools_count: enabled.length,
+        gateway_restart_triggered: mutated,
       });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to disable tool: ${err.message}` });

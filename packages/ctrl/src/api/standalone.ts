@@ -19,6 +19,9 @@ import { setApiKey } from "./auth.js";
 import { createApiServer } from "./server.js";
 import { attachTerminalUpgrade } from "./routes/terminal.js";
 import { flushPendingOpenclawWrites } from "./routes/integrations.js";
+import { getStateDb, closeStateDb } from "../db/state.js";
+import { getIngestDb, startIngestSweep, closeIngestDb } from "../db/ingest.js";
+import { reconcileVaultIndex } from "../db/vaultIndex.js";
 
 const apiKey = process.env.AAS_API_KEY;
 if (!apiKey) {
@@ -27,6 +30,29 @@ if (!apiKey) {
 }
 
 setApiKey(apiKey);
+
+// ---------------------------------------------------------------------------
+// Four-store boot (PLAN.md Part I).
+//
+//   1. Open state.db (Store 2) — ctrl-api is its SOLE write handle. This also
+//      loads the sqlite-vec extension and creates the `embedding` vec0 table.
+//   2. Open ingest.db (Store 4) and start the periodic 7-day TTL sweep.
+//   3. Reconcile vault_index against the markdown vault (Store 1) — catches
+//      out-of-band edits made while ctrl-api was down. Per-write hooks keep it
+//      exact thereafter.
+//
+// A reconcile failure (e.g. the vault volume not yet mounted on a cold first
+// boot) is logged but non-fatal — the index self-heals on the next vault
+// write or an explicit POST /api/v1/vault-index/reconcile.
+// ---------------------------------------------------------------------------
+getStateDb();
+getIngestDb();
+startIngestSweep();
+try {
+  reconcileVaultIndex();
+} catch (err) {
+  console.error(`[boot] vault_index reconcile failed (non-fatal): ${err}`);
+}
 
 const port = parseInt(process.env.AAS_PORT ?? "3100", 10);
 const host = process.env.AAS_HOST ?? "127.0.0.1";
@@ -43,17 +69,16 @@ server.listen(port, host, () => {
   console.log(`Alfred tenant API listening on http://${host}:${port}`);
 });
 
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received, shutting down...");
+function shutdown(signal: string): void {
+  console.log(`${signal} received, shutting down...`);
   flushPendingOpenclawWrites();
+  closeIngestDb();
+  closeStateDb();
   server.close(() => process.exit(0));
-});
+}
 
-process.on("SIGINT", () => {
-  console.log("SIGINT received, shutting down...");
-  flushPendingOpenclawWrites();
-  server.close(() => process.exit(0));
-});
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
 
 process.on("beforeExit", () => {
   flushPendingOpenclawWrites();

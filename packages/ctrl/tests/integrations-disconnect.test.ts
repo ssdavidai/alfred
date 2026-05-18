@@ -20,6 +20,7 @@
 import { mock, describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import yaml from "js-yaml";
 import type { AddressInfo } from "node:net";
 
 // ---------------------------------------------------------------------------
@@ -241,8 +242,8 @@ process.env.COMPOSIO_USER_ID = "alfred-test-user";
 const integrationsModule = await import("../src/api/routes/integrations.js");
 const { createApiServer } = await import("../src/api/server.js");
 
-const OPENCLAW_CONFIG_PATH = "/mnt/encrypted/openclaw/openclaw.json";
-const OPENCLAW_WORKERS_CONFIG_PATH = "/mnt/encrypted/openclaw-workers/openclaw.json";
+const OPENCLAW_CONFIG_PATH = "/hermes-data/main/config.yaml";
+const OPENCLAW_WORKERS_CONFIG_PATH = "/hermes-data/workers/config.yaml";
 
 let server: http.Server;
 
@@ -316,18 +317,20 @@ function seedConn(opts: Partial<FakeConn> & { id: string; toolkit: string }): Fa
   return conn;
 }
 
+// Hermes profile config is YAML with a `tools.enabled` list (was openclaw.json
+// `gateway.tools.allow`). seed/read helpers model that.
 function seedOpenclawConfig(allow: string[]): void {
-  const cfg = { gateway: { tools: { allow } } };
-  memFs.set(OPENCLAW_CONFIG_PATH, JSON.stringify(cfg));
-  memFs.set(OPENCLAW_WORKERS_CONFIG_PATH, JSON.stringify(cfg));
+  const cfg = yaml.dump({ tools: { enabled: allow } });
+  memFs.set(OPENCLAW_CONFIG_PATH, cfg);
+  memFs.set(OPENCLAW_WORKERS_CONFIG_PATH, cfg);
 }
 
 function readAllow(path: string): string[] {
   const raw = memFs.get(path);
   if (!raw) return [];
   try {
-    const cfg = JSON.parse(raw);
-    return cfg?.gateway?.tools?.allow ?? [];
+    const cfg = yaml.load(raw) as any;
+    return cfg?.tools?.enabled ?? [];
   } catch { return []; }
 }
 
@@ -353,7 +356,7 @@ describe("DELETE /api/v1/integrations/:id — sibling-of-same-toolkit survival (
     ]);
     // Pre-seed the per-toolkit skill dir so we can confirm it survives.
     memFs.set(
-      "/mnt/encrypted/openclaw/workspace/skills/alfred-composio-gmail/SKILL.md",
+      "/hermes-data/main/workspace/skills/alfred-composio-gmail/SKILL.md",
       "x",
     );
 
@@ -382,7 +385,7 @@ describe("DELETE /api/v1/integrations/:id — sibling-of-same-toolkit survival (
     assert.ok(allow.includes("GMAIL_SEND_EMAIL"));
     assert.ok(allow.includes("GOOGLECALENDAR_EVENTS_LIST"), "unrelated toolkit untouched");
     assert.ok(
-      memFs.has("/mnt/encrypted/openclaw/workspace/skills/alfred-composio-gmail/SKILL.md"),
+      memFs.has("/hermes-data/main/workspace/skills/alfred-composio-gmail/SKILL.md"),
       "shared per-toolkit skill dir must survive",
     );
   });
@@ -399,15 +402,15 @@ describe("DELETE /api/v1/integrations/:id — sibling-of-same-toolkit survival (
       "NOTION_FETCH_DATA",
     ]);
     memFs.set(
-      "/mnt/encrypted/openclaw/workspace/skills/alfred-composio-gmail/SKILL.md",
+      "/hermes-data/main/workspace/skills/alfred-composio-gmail/SKILL.md",
       "x",
     );
     memFs.set(
-      "/mnt/encrypted/openclaw-workers/workspace/skills/alfred-composio-gmail/SKILL.md",
+      "/hermes-data/workers/workspace/skills/alfred-composio-gmail/SKILL.md",
       "x",
     );
     memFs.set(
-      "/mnt/encrypted/openclaw/workspace/skills/alfred-composio-notion/SKILL.md",
+      "/hermes-data/main/workspace/skills/alfred-composio-notion/SKILL.md",
       "y",
     );
 
@@ -430,15 +433,15 @@ describe("DELETE /api/v1/integrations/:id — sibling-of-same-toolkit survival (
     assert.ok(allow.includes("NOTION_FETCH_DATA"), "unrelated toolkit untouched");
 
     assert.ok(
-      !memFs.has("/mnt/encrypted/openclaw/workspace/skills/alfred-composio-gmail/SKILL.md"),
+      !memFs.has("/hermes-data/main/workspace/skills/alfred-composio-gmail/SKILL.md"),
       "deleted toolkit skill dir gone (main)",
     );
     assert.ok(
-      !memFs.has("/mnt/encrypted/openclaw-workers/workspace/skills/alfred-composio-gmail/SKILL.md"),
+      !memFs.has("/hermes-data/workers/workspace/skills/alfred-composio-gmail/SKILL.md"),
       "deleted toolkit skill dir gone (workers)",
     );
     assert.ok(
-      memFs.has("/mnt/encrypted/openclaw/workspace/skills/alfred-composio-notion/SKILL.md"),
+      memFs.has("/hermes-data/main/workspace/skills/alfred-composio-notion/SKILL.md"),
       "unrelated toolkit skill dir untouched",
     );
   });
@@ -454,7 +457,7 @@ describe("DELETE /api/v1/integrations/:id — sibling-of-same-toolkit survival (
       "sessions_send",
     ]);
     memFs.set(
-      "/mnt/encrypted/openclaw/workspace/skills/alfred-composio-gmail/SKILL.md",
+      "/hermes-data/main/workspace/skills/alfred-composio-gmail/SKILL.md",
       "x",
     );
 
@@ -493,17 +496,17 @@ describe("POST /api/v1/integrations/disconnect-all — explicit global cleanup (
     ]);
     for (const toolkit of ["gmail", "googlecalendar", "notion"]) {
       memFs.set(
-        `/mnt/encrypted/openclaw/workspace/skills/alfred-composio-${toolkit}/SKILL.md`,
+        `/hermes-data/main/workspace/skills/alfred-composio-${toolkit}/SKILL.md`,
         "x",
       );
       memFs.set(
-        `/mnt/encrypted/openclaw-workers/workspace/skills/alfred-composio-${toolkit}/SKILL.md`,
+        `/hermes-data/workers/workspace/skills/alfred-composio-${toolkit}/SKILL.md`,
         "x",
       );
     }
     // Sentinel: a non-composio skill dir must NOT be touched.
     memFs.set(
-      "/mnt/encrypted/openclaw/workspace/skills/alfred-vault-operations/SKILL.md",
+      "/hermes-data/main/workspace/skills/alfred-vault-operations/SKILL.md",
       "keep me",
     );
 
@@ -538,12 +541,12 @@ describe("POST /api/v1/integrations/disconnect-all — explicit global cleanup (
     // Skill dirs: every alfred-composio-* gone, vault-operations survives.
     for (const toolkit of ["gmail", "googlecalendar", "notion"]) {
       assert.ok(
-        !memFs.has(`/mnt/encrypted/openclaw/workspace/skills/alfred-composio-${toolkit}/SKILL.md`),
+        !memFs.has(`/hermes-data/main/workspace/skills/alfred-composio-${toolkit}/SKILL.md`),
         `alfred-composio-${toolkit} should be gone`,
       );
     }
     assert.ok(
-      memFs.has("/mnt/encrypted/openclaw/workspace/skills/alfred-vault-operations/SKILL.md"),
+      memFs.has("/hermes-data/main/workspace/skills/alfred-vault-operations/SKILL.md"),
       "non-composio skills untouched",
     );
   });

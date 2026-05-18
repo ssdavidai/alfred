@@ -226,12 +226,12 @@ beforeEach(() => {
   files.clear();
   dirs.clear();
   dropWritesTo = null;
-  ensureDirs("/mnt/encrypted/openclaw/workspace/skills");
-  ensureDirs("/mnt/encrypted/openclaw-workers/workspace/skills");
+  ensureDirs("/hermes-data/main/workspace/skills");
+  ensureDirs("/hermes-data/workers/workspace/skills");
 });
 
-const OC = "/mnt/encrypted/openclaw/workspace/skills";
-const OCW = "/mnt/encrypted/openclaw-workers/workspace/skills";
+const OC = "/hermes-data/main/workspace/skills";
+const OCW = "/hermes-data/workers/workspace/skills";
 
 async function req(
   method: string,

@@ -32,6 +32,7 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { VAULT_PATH } from "./vault.js";
 import { attentionCache, invalidateVaultCachesForType } from "../vaultCache.js";
+import { appendAudit } from "./state.js";
 
 const NEEDS_ATTENTION_DIR = path.join(VAULT_PATH, "needs_attention");
 const EVENTS_DIR = path.join(VAULT_PATH, "event");
@@ -173,6 +174,26 @@ export function emitResolutionEvent(
     .filter((s) => s !== "")
     .join("\n");
   fs.writeFileSync(auditPath, yaml + "\n", "utf-8");
+
+  // Mirror the resolution into state.db `audit` (PLAN.md Part I — the
+  // needs_attention_action type is demoted to the audit ledger). The vault
+  // `event/*.md` record above stays for the calibration loop's current
+  // reader; Phase 2 moves that reader onto state.db too.
+  appendAudit({
+    action_type: "needs_attention_action",
+    actor: "principal",
+    target_path: rec.path,
+    target_kind: "needs_attention",
+    subject_ref: sourceSignal || null,
+    summary: `needs_attention ${action}: ${rec.id}`,
+    changes: { action, note: note || null },
+    payload: {
+      original_decision_reason: reason,
+      source_signal_path: sourceSignal,
+      event_record: `event/${auditId}.md`,
+    },
+  });
+
   return `event/${auditId}.md`;
 }
 
@@ -450,6 +471,20 @@ export function registerAttentionRoutes(): void {
       .filter((s) => s !== "")
       .join("\n");
     fs.writeFileSync(auditPath, yaml + "\n", "utf-8");
+
+    // Mirror the desk action into state.db `audit` (PLAN.md Part I — the
+    // desk-action type is demoted to the audit ledger).
+    appendAudit({
+      ts: nowIso,
+      action_type: "desk_action",
+      actor: "principal",
+      source,
+      subject_ref: sourceId,
+      summary: `desk action ${action} on ${source}/${sourceId}`,
+      changes: { action, note: note || null },
+      payload: { event_record: `event/${auditId}.md` },
+    });
+
     sendJson(res, 200, {
       ok: true,
       source,

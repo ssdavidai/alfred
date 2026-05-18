@@ -1,17 +1,14 @@
 {
-  "name": "alfred-ctrl",
+  "name": "alfred-ctrl-api",
   "version": "0.1.0",
-  "description": "Mission Control for Alfred Fleet Management",
+  "description": "alfred-black tenant API server",
   "type": "module",
-  "main": "dist/index.mjs",
-  "bin": {
-    "aas": "dist/index.mjs"
-  },
+  "main": "dist/api.mjs",
   "scripts": {
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
-    "start": "node dist/index.mjs",
-    "test": "node --experimental-test-module-mocks --import tsx/esm --test tests/*.test.ts"
+    "start": "node --experimental-sqlite dist/api.mjs",
+    "test": "node --experimental-sqlite --experimental-test-module-mocks --import tsx/esm --experimental-loader ./tests/text-loader.mjs --test tests/*.test.ts"
   },
   "dependencies": {
     "commander": "^13.1.0",

@@ -34,6 +34,8 @@ import {
   writeFrontmatterPatch,
   emitResolutionEvent,
 } from "./attention.js";
+import { getStateDb } from "../../db/state.js";
+import { appendAudit } from "./state.js";
 
 const DECISIONS_DIR = path.join(VAULT_PATH, "decision");
 
@@ -542,6 +544,23 @@ export function registerDecisionRoutes(): void {
 
     fs.writeFileSync(fullPath, renderDecisionRecord(fields, bodyText), "utf-8");
 
+    // Mirror the decision into state.db `audit` (PLAN.md Part I). The
+    // `decision/*.md` vault record stays — `decision` is one of the 12
+    // canonical types the principal reads — but the desk action it captures
+    // is also an audit-class event, so the audit ledger gets a row too.
+    appendAudit({
+      ts: nowIso,
+      action_type: "decision",
+      actor: principal,
+      source,
+      target_path: `decision/${id}.md`,
+      target_kind: "decision",
+      subject_ref: sourceRecord,
+      summary: `decision: ${intent} on ${source}`,
+      changes: { intent, state: initialState, note: note || null },
+      payload: { ...fields },
+    });
+
     sendJson(res, 201, {
       ok: true,
       id,
@@ -558,6 +577,12 @@ export function registerDecisionRoutes(): void {
   //   source  — filter (needs_attention | approval | judgment | to_do)
   //   since   — ISO timestamp; only return decisions created on/after
   //   limit   — default 100, max 500
+  //
+  // Backed by state.db `vault_index` (record_type='decision') instead of a
+  // markdown directory readdir (PLAN.md Part I). `decision` is a canonical
+  // vault type, so every decision/*.md write lands a vault_index row via the
+  // sole-writer hook; the parsed frontmatter is reconstituted from
+  // frontmatter_json. A boot reconciler covers any out-of-band edits.
   // ─────────────────────────────────────────────────────────────
   addRoute("GET", "/api/v1/decisions", async ({ res, req }) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -569,31 +594,36 @@ export function registerDecisionRoutes(): void {
       Math.min(500, parseInt(url.searchParams.get("limit") ?? "100", 10) || 100),
     );
 
-    if (!fs.existsSync(DECISIONS_DIR)) {
-      sendJson(res, 200, { decisions: [], count: 0 });
-      return;
-    }
-    const files = fs.readdirSync(DECISIONS_DIR).filter((f) => f.endsWith(".md"));
+    const db = getStateDb();
+    const where: string[] = ["record_type = 'decision'"];
+    const args: unknown[] = [];
+    if (stateFilter) { where.push("status = ?"); args.push(stateFilter); }
+    if (since) { where.push("mtime >= ?"); args.push(since); }
+    const rows = db
+      .prepare(
+        `SELECT path, frontmatter_json FROM vault_index
+          WHERE ${where.join(" AND ")}
+          ORDER BY mtime DESC`,
+      )
+      .all(...args) as Array<{ path: string; frontmatter_json: string | null }>;
+
     const records: any[] = [];
-    for (const f of files) {
-      const id = f.replace(/\.md$/, "");
-      const rec = readDecision(id);
-      if (!rec) continue;
-      const fm = rec.frontmatter;
-      const state = String(fm.state ?? "open");
-      if (stateFilter && state !== stateFilter) continue;
+    for (const row of rows) {
+      let fm: Record<string, unknown> = {};
+      try {
+        fm = row.frontmatter_json ? JSON.parse(row.frontmatter_json) : {};
+      } catch {
+        continue;
+      }
+      // `status` on the index row mirrors decision frontmatter `state`, but
+      // older rows may carry `state` only — filter defensively on both.
       if (sourceFilter && String(fm.source ?? "") !== sourceFilter) continue;
-      const created = String(fm.created ?? "");
-      if (since && created < since) continue;
       records.push({
-        id: rec.id,
-        path: rec.path,
+        id: row.path.replace(/^decision\//, "").replace(/\.md$/, ""),
+        path: row.path,
         ...fm,
       });
     }
-    records.sort((a, b) =>
-      String(b.created ?? "").localeCompare(String(a.created ?? "")),
-    );
     sendJson(res, 200, {
       decisions: records.slice(0, limit),
       count: records.length,

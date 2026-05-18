@@ -4,6 +4,11 @@ import http from "node:http";
 import path from "node:path";
 import type { AddressInfo } from "node:net";
 
+// alfred-black's VAULT_PATH is env-configurable (defaults to /vault). This
+// test's in-memory fs mock is keyed on the legacy path, so pin the env var
+// to match before the route module reads it at import time.
+process.env.VAULT_PATH = "/mnt/encrypted/vault";
+
 // ---------------------------------------------------------------------------
 // Mocks must register BEFORE the route module is imported.
 // The cross-channel context endpoint walks vault directories with

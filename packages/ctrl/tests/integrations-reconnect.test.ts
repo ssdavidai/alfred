@@ -271,7 +271,7 @@ function seedOldConn(opts?: Partial<FakeConn>): FakeConn {
 }
 
 function readLedger(): any[] {
-  const raw = memFs.get("/mnt/encrypted/alfred/.composio-reconnect-ledger.json");
+  const raw = memFs.get("/alfred-data/.composio-reconnect-ledger.json");
   if (!raw) return [];
   return JSON.parse(raw);
 }
