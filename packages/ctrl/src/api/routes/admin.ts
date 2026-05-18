@@ -8,6 +8,7 @@ import { ttlCache } from "../cache.js";
 import { openStateDb, listMigrations } from "../../db/state.js";
 import { getRequestLatencies } from "../metrics.js";
 import { syncVaultIndexFromContent } from "../vault_index_sync.js";
+import { getLastReconcileResult } from "../maintenance/vault_reconciler.js";
 
 // Activity feed is the most expensive read on the Desk page — it spawns
 // `docker compose logs --tail=N alfred` which forks a process per call.
@@ -381,6 +382,13 @@ export function registerAdminRoutes(): void {
     // --- request latency (from in-memory metrics) ---
     const requestLatency = getRequestLatencies();
 
+    // STORE-P1-5: surface the most recent reconciler tick so the SaaS
+    // dashboard can distinguish "drift is shrinking" from "drift keeps
+    // growing". `alert` is set when the last tick saw > 500
+    // missing-in-index records — the canary for a new writer bypassing
+    // ctrl-api at scale.
+    const lastReconcile = getLastReconcileResult();
+
     sendJson(res, 200, {
       vault: {
         files_on_disk,
@@ -388,6 +396,7 @@ export function registerAdminRoutes(): void {
         index_drift: files_on_disk - indexRows,
         by_type: byType,
         by_type_disk,
+        last_reconcile: lastReconcile,
       },
       state_db: {
         path: dbPath,

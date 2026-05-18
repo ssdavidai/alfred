@@ -21,6 +21,7 @@ import { attachTerminalUpgrade } from "./routes/terminal.js";
 import { flushPendingOpenclawWrites } from "./routes/integrations.js";
 import { openStateDb, runMigrations } from "../db/state.js";
 import { scanVaultAndPopulate, vaultIndexIsEmpty } from "./vault_indexer.js";
+import { startScheduledReconciler } from "./maintenance/vault_reconciler.js";
 
 const apiKey = process.env.AAS_API_KEY;
 if (!apiKey) {
@@ -69,6 +70,15 @@ attachTerminalUpgrade(server);
 (globalThis as any).__terminalReady = true;
 console.log("Terminal WebSocket endpoint attached");
 
+
+// STORE-P1-5: drift detector + repair workflow. First tick fires 5 min
+// after boot (giving the initial boot scan room to settle), then once an
+// hour. Stays in-process — ctrl-api owns state.db so this is simpler
+// than promoting to Temporal at our scale.
+startScheduledReconciler();
+console.log(
+  "vault_reconciler scheduled: first tick in 5m, then hourly",
+);
 
 server.listen(port, host, () => {
   console.log(`Alfred tenant API listening on http://${host}:${port}`);

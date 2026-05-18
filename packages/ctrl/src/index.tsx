@@ -941,4 +941,120 @@ program
     closeStateDb();
   });
 
+// --- STORE-P1-5: vault_index reconciler subcommands ---
+//
+// These run against state.db on whatever host the binary is invoked
+// on. In practice that's a tenant VPS — these are operator commands,
+// not fleet-wide. `reconcile` is the same op the scheduled hourly tick
+// already runs; the CLI form is for ad-hoc "run it now" use.
+
+program
+  .command("reindex")
+  .description("Truncate vault_index and rerun the boot scan from scratch (heavy hammer)")
+  .action(async () => {
+    const { reindexFull } = await import("./api/maintenance/vault_reconciler.js");
+    const { closeStateDb } = await import("./db/state.js");
+    try {
+      const result = await reindexFull();
+      console.log(
+        `vault_indexer.scan: scanned=${result.scanned} inserted=${result.inserted} elapsed_ms=${result.ms}`,
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`reindex FAILED: ${msg}`);
+      process.exitCode = 1;
+    } finally {
+      closeStateDb();
+    }
+  });
+
+program
+  .command("index-diff")
+  .description("Show vault_index drift report without repairing")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { diffVaultIndex } = await import("./api/maintenance/vault_reconciler.js");
+    const { closeStateDb } = await import("./db/state.js");
+    try {
+      const result = await diffVaultIndex();
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(
+          `scanned=${result.scanned} index_rows=${result.indexRows} ` +
+            `missing_in_index=${result.missingInIndex} missing_in_fs=${result.missingInFs} ` +
+            `mtime_mismatch=${result.mtimeMismatch} elapsed_ms=${result.ms}`,
+        );
+        const types = new Set<string>([
+          ...Object.keys(result.byTypeDisk),
+          ...Object.keys(result.byTypeIndex),
+        ]);
+        const sorted = [...types].sort();
+        console.log("");
+        console.log(
+          `${"Type".padEnd(24)} ${"Disk".padStart(8)} ${"Index".padStart(8)} ${"Drift".padStart(8)}`,
+        );
+        console.log("-".repeat(52));
+        for (const t of sorted) {
+          const d = result.byTypeDisk[t] ?? 0;
+          const i = result.byTypeIndex[t] ?? 0;
+          console.log(
+            `${t.padEnd(24)} ${String(d).padStart(8)} ${String(i).padStart(8)} ${String(d - i).padStart(8)}`,
+          );
+        }
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`index-diff FAILED: ${msg}`);
+      process.exitCode = 1;
+    } finally {
+      closeStateDb();
+    }
+  });
+
+program
+  .command("reconcile")
+  .description("Run the vault_index reconciler once (same code path as the scheduled tick)")
+  .option("--json", "Output as JSON")
+  .action(async (opts) => {
+    const { reconcileVaultIndex } = await import("./api/maintenance/vault_reconciler.js");
+    const { closeStateDb } = await import("./db/state.js");
+    try {
+      const result = await reconcileVaultIndex();
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(
+          `scanned=${result.scanned} inserted=${result.inserted} updated=${result.updated} ` +
+            `deleted=${result.deleted} missing_in_index=${result.missingInIndex} ` +
+            `missing_in_fs=${result.missingInFs} mtime_mismatch=${result.mtimeMismatch} ` +
+            `elapsed_ms=${result.ms}`,
+        );
+        const types = new Set<string>([
+          ...Object.keys(result.byTypeDisk),
+          ...Object.keys(result.byTypeIndex),
+        ]);
+        const sorted = [...types].sort();
+        console.log("");
+        console.log(
+          `${"Type".padEnd(24)} ${"Disk".padStart(8)} ${"Index".padStart(8)} ${"Drift".padStart(8)}`,
+        );
+        console.log("-".repeat(52));
+        for (const t of sorted) {
+          const d = result.byTypeDisk[t] ?? 0;
+          const i = result.byTypeIndex[t] ?? 0;
+          console.log(
+            `${t.padEnd(24)} ${String(d).padStart(8)} ${String(i).padStart(8)} ${String(d - i).padStart(8)}`,
+          );
+        }
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`reconcile FAILED: ${msg}`);
+      process.exitCode = 1;
+    } finally {
+      closeStateDb();
+    }
+  });
+
 program.parse();
