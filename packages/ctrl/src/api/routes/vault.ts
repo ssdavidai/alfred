@@ -31,6 +31,7 @@ import {
   syncVaultIndexFromContent,
   deleteVaultIndexRow,
 } from "../vault_index_sync.js";
+import { enforceVaultWritePath } from "../middleware/canonical_path.js";
 
 // ---------------------------------------------------------------------------
 // STORE-P1-4: serve list endpoints from the `vault_index` SQLite table
@@ -914,6 +915,19 @@ export function registerVaultRoutes(): void {
       throw new ValidationError("type and name are required");
     }
 
+    // STORE-P6-1: canonical-path enforcement. Computed up here so it
+    // applies to both the raw-content fast path AND the CLI-routed
+    // branch below.
+    {
+      const name = b.name as string;
+      const candidate = name.endsWith(".md") ? name : `${b.type as string}/${name}.md`;
+      const outcome = enforceVaultWritePath(candidate);
+      if (outcome.block) {
+        sendJson(res, 400, outcome.body);
+        return;
+      }
+    }
+
     // If raw content is provided, write the file directly
     if (typeof b.content === "string") {
       const name = b.name as string;
@@ -995,6 +1009,18 @@ export function registerVaultRoutes(): void {
     const recordPath = params.path;
     const b = body as Record<string, unknown> | undefined;
     if (!b) throw new ValidationError("Request body required");
+
+    // STORE-P6-1: canonical-path enforcement. PATCH would create a row
+    // on disk if the path doesn't exist (alfred CLI `vault edit --set`
+    // is idempotent that way), so we gate even read-modify-write paths
+    // by the same allowlist as creates.
+    {
+      const outcome = enforceVaultWritePath(recordPath);
+      if (outcome.block) {
+        sendJson(res, 400, outcome.body);
+        return;
+      }
+    }
 
     // State-mutation contract enforcement (#889 spec §5.2).
     //
@@ -1274,6 +1300,18 @@ export function registerVaultRoutes(): void {
       throw new ValidationError("from and to are required");
     }
 
+    // STORE-P6-1: canonical-path enforcement on the destination only.
+    // `from` is allowed to be a legacy non-canonical path (the whole
+    // point of move is to migrate stuff out of the old layout); `to`
+    // must be a legal write target.
+    {
+      const outcome = enforceVaultWritePath(b.to as string);
+      if (outcome.block) {
+        sendJson(res, 400, outcome.body);
+        return;
+      }
+    }
+
     const stdout = await dockerExec("alfred", [...ALFRED_CMD, "vault", "move", b.from as string, b.to as string], VAULT_ENV);
     try {
       sendJson(res, 200, JSON.parse(stdout));
@@ -1410,6 +1448,17 @@ export function registerVaultRoutes(): void {
     const taskDir = path.resolve(VAULT_PATH, "task");
     await fs.promises.mkdir(taskDir, { recursive: true });
     const taskPath = `task/${taskSlug}.md`;
+    // STORE-P6-1: belt-and-braces check. `task/` is canonical so this
+    // will always pass under normal config, but the explicit gate means
+    // if the route ever gets refactored to write somewhere else the
+    // enforcement still fires.
+    {
+      const outcome = enforceVaultWritePath(taskPath);
+      if (outcome.block) {
+        sendJson(res, 400, outcome.body);
+        return;
+      }
+    }
     const fullTaskPath = path.resolve(VAULT_PATH, taskPath);
     await fs.promises.writeFile(fullTaskPath, taskContent, "utf-8");
     // STORE-P1-3: index the freshly-promoted task.
