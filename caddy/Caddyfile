@@ -17,8 +17,17 @@
 	email {$ACME_EMAIL}
 }
 
-# Apex — the Wasp web app (serves both the SPA and its API server).
+# Apex — the Wasp React SPA (static, served by the web-client nginx).
+# `wasp build` splits the app in two: the SPA is served here; its API
+# server lives on api.<domain> below. Distinct hosts — no path-prefix
+# ambiguity between client routes and server endpoints.
 {$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy web-client:80
+}
+
+# API — the Wasp server (auth, operations, custom api routes).
+api.{$DOMAIN} {
 	encode zstd gzip
 	reverse_proxy web:3000
 }

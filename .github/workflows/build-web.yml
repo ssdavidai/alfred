@@ -1,9 +1,11 @@
-# Build + push the alfred-web image (the Wasp dashboard).
+# Build + push the alfred-web images (the Wasp dashboard).
 #
-# `wasp build` compiles the app into packages/web/.wasp/build/, which holds a
-# generated Dockerfile. We build that, multi-arch, and push :latest.
-# wasp build needs no database — `prisma migrate deploy` runs at container
-# start against web-db.
+# `wasp build` compiles the app into packages/web/.wasp/build/, which holds
+# BOTH artefacts:
+#   * the server  → .wasp/build/Dockerfile        → alfred-web
+#   * the client  → .wasp/build/web-app/ (Vite)   → alfred-web-client
+# Both are built multi-arch and pushed :latest. wasp build needs no database
+# — `prisma migrate deploy` runs at container start against web-db.
 name: build-web
 
 on:
@@ -50,12 +52,25 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push alfred-web (server)
         uses: docker/build-push-action@v6
         with:
           context: packages/web/.wasp/build
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ssdavidai00/alfred-web:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=web-server
+          cache-to: type=gha,mode=max,scope=web-server
+
+      - name: Build and push alfred-web-client (SPA)
+        uses: docker/build-push-action@v6
+        with:
+          # context is packages/web so the Dockerfile reaches the freshly
+          # built .wasp/build/web-app/ alongside nginx-spa.conf etc.
+          context: packages/web
+          file: packages/web/Dockerfile.client
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ssdavidai00/alfred-web-client:latest
+          cache-from: type=gha,scope=web-client
+          cache-to: type=gha,mode=max,scope=web-client

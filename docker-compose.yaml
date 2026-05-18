@@ -87,7 +87,9 @@ services:
       - DATABASE_URL=postgresql://alfred:${WEB_DATABASE_PASSWORD}@web-db:5432/alfred_web
       - PORT=3000
       - WASP_WEB_CLIENT_URL=https://${DOMAIN}
-      - WASP_SERVER_URL=https://${DOMAIN}
+      # the server is reached on its own subdomain; the SPA (apex) calls it
+      # cross-origin — WASP_WEB_CLIENT_URL above configures Wasp's CORS.
+      - WASP_SERVER_URL=https://api.${DOMAIN}
       - JWT_SECRET=${JWT_SECRET}
       - CTRL_API_URL=http://ctrl-api:3100
       - AAS_API_KEY=${AAS_API_KEY}
@@ -102,6 +104,29 @@ services:
       start_period: 90s
     mem_limit: 2g
     pids_limit: 512
+
+  # ── web-client — the Wasp React SPA (static, nginx) ─────────────────
+  # `wasp build` emits the client separately from the server; this nginx
+  # image serves the static bundle with SPA history-fallback. Caddy routes
+  # the apex domain here and api.<domain> to the `web` server.
+  web-client:
+    image: ssdavidai00/alfred-web-client:latest
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_started
+    environment:
+      # baked into the SPA bundle at container start (replaces the
+      # __ALFRED_API_URL__ placeholder) — must match the api subdomain.
+      - WASP_SERVER_URL=https://api.${DOMAIN}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    mem_limit: 128m
+    pids_limit: 256
 
   # ── init — one-shot bootstrap gate ──────────────────────────────────
   # Scaffolds the vault, deploys skills + the MCP bundle, renders Hermes
