@@ -692,7 +692,10 @@ export function registerVaultRoutes(): void {
 
     const cacheKey = `${type}:${previewLen}`;
     const payload = await vaultListCache.get(cacheKey, () => {
-      const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+      const t0 = Date.now();
+      // Scope walk to /vault/<type> — david's vault has ~88k files;
+      // full-vault walk takes 6–7s vs <100ms scoped.
+      const files = walkMd(path.join(VAULT_PATH, type), VAULT_PATH, IGNORE_DIRS);
       const results: Array<{
         path: string;
         name: string;
@@ -722,6 +725,7 @@ export function registerVaultRoutes(): void {
         });
       }
       results.sort((a, b) => a.name.localeCompare(b.name));
+      console.log("[vault.list] type=%s files=%d results=%d elapsed_ms=%d", type, files.length, results.length, Date.now() - t0);
       return { results, count: results.length };
     });
     // For instincts only: enrich each record with the live observation
