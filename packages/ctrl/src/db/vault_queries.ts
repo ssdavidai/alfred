@@ -77,19 +77,23 @@ export function listByType(
     }
   }
 
-  return db.prepare(sql).all(...args) as unknown as VaultIndexRow[];
+  // mtime_ns is unix nanoseconds (~1.78e18), well above Number.MAX_SAFE_INTEGER.
+  // node:sqlite throws RangeError unless we ask for bigints on this column.
+  const stmt = db.prepare(sql);
+  stmt.setReadBigInts(true);
+  return stmt.all(...args) as unknown as VaultIndexRow[];
 }
 
 export function getByPath(
   db: DatabaseSync,
   vaultPath: string,
 ): VaultIndexRow | null {
-  const row = db
-    .prepare(
-      `SELECT record_id, record_type, path, mtime_ns, state, parent_matter, frontmatter, body_first_n
-       FROM vault_index WHERE path = ?`,
-    )
-    .get(vaultPath) as VaultIndexRow | undefined;
+  const stmt = db.prepare(
+    `SELECT record_id, record_type, path, mtime_ns, state, parent_matter, frontmatter, body_first_n
+     FROM vault_index WHERE path = ?`,
+  );
+  stmt.setReadBigInts(true);
+  const row = stmt.get(vaultPath) as VaultIndexRow | undefined;
   return row ?? null;
 }
 
@@ -97,12 +101,12 @@ export function getByRecordId(
   db: DatabaseSync,
   id: string,
 ): VaultIndexRow | null {
-  const row = db
-    .prepare(
-      `SELECT record_id, record_type, path, mtime_ns, state, parent_matter, frontmatter, body_first_n
-       FROM vault_index WHERE record_id = ?`,
-    )
-    .get(id) as VaultIndexRow | undefined;
+  const stmt = db.prepare(
+    `SELECT record_id, record_type, path, mtime_ns, state, parent_matter, frontmatter, body_first_n
+     FROM vault_index WHERE record_id = ?`,
+  );
+  stmt.setReadBigInts(true);
+  const row = stmt.get(id) as VaultIndexRow | undefined;
   return row ?? null;
 }
 
@@ -110,12 +114,12 @@ export function listChildrenOfMatter(
   db: DatabaseSync,
   matterPath: string,
 ): VaultIndexRow[] {
-  return db
-    .prepare(
-      `SELECT record_id, record_type, path, mtime_ns, state, parent_matter, frontmatter, body_first_n
-       FROM vault_index WHERE parent_matter = ? ORDER BY path ASC`,
-    )
-    .all(matterPath) as unknown as VaultIndexRow[];
+  const stmt = db.prepare(
+    `SELECT record_id, record_type, path, mtime_ns, state, parent_matter, frontmatter, body_first_n
+     FROM vault_index WHERE parent_matter = ? ORDER BY path ASC`,
+  );
+  stmt.setReadBigInts(true);
+  return stmt.all(matterPath) as unknown as VaultIndexRow[];
 }
 
 export function countByType(db: DatabaseSync): Record<string, number> {
@@ -149,10 +153,10 @@ export function vaultIndexCount(db: DatabaseSync): number {
  * narrower SELECT for memory hygiene.
  */
 export function listAll(db: DatabaseSync): VaultIndexRow[] {
-  return db
-    .prepare(
-      `SELECT record_id, record_type, path, mtime_ns, state, parent_matter, frontmatter, body_first_n
-       FROM vault_index ORDER BY path ASC`,
-    )
-    .all() as unknown as VaultIndexRow[];
+  const stmt = db.prepare(
+    `SELECT record_id, record_type, path, mtime_ns, state, parent_matter, frontmatter, body_first_n
+     FROM vault_index ORDER BY path ASC`,
+  );
+  stmt.setReadBigInts(true);
+  return stmt.all() as unknown as VaultIndexRow[];
 }
