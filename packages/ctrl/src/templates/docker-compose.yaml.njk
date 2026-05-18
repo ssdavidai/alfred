@@ -324,6 +324,16 @@ services:
       - /mnt/encrypted/openclaw:/mnt/encrypted/openclaw
       - /mnt/encrypted/openclaw-workers:/mnt/encrypted/openclaw-workers
       - /opt/alfred/compose:/opt/alfred/compose
+      # OPS-PERSIST-1: state.db (vault_index, audit, signal, embedding, …)
+      # lives at /var/lib/alfred/state.db INSIDE this container. Without this
+      # host bind, every `docker compose up --force-recreate ctrl-api` wipes
+      # the working-memory db — losing audit history accumulated since the
+      # last boot and triggering the ~12s vault_index repopulation scan on
+      # every restart. The host dir is created by cloud-init (0700 owned by
+      # root), since ctrl-api runs as root inside this vanilla node:22-slim
+      # image (no `user:` directive). scripts/setup-state-mount.sh
+      # retrofits existing tenants.
+      - /opt/alfred/state:/var/lib/alfred
       - /var/run/docker.sock:/var/run/docker.sock
       - /usr/bin/docker:/usr/bin/docker:ro
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro

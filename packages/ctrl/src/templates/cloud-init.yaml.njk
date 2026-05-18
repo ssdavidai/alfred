@@ -175,6 +175,14 @@ runcmd:
   # --- Docker compose auto-update timer ---
   - mkdir -p /opt/alfred/compose
   - chown deploy:deploy /opt/alfred /opt/alfred/compose
+  # OPS-PERSIST-1: persistent host dir for ctrl-api's state.db
+  # (bind-mounted to /var/lib/alfred inside the container). ctrl-api runs
+  # as root inside vanilla node:22-slim (no `user:` directive in compose),
+  # so the mount must be writable by root — uid 1000 would block writes.
+  # Without this bind, every container restart wipes the working-memory db.
+  - mkdir -p /opt/alfred/state
+  - chown 0:0 /opt/alfred/state
+  - chmod 700 /opt/alfred/state
   - |
     cat > /etc/systemd/system/alfred-update.service << 'UPDATE_SVC'
     [Unit]
