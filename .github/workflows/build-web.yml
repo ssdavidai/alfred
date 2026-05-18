@@ -1,0 +1,56 @@
+# Build + push the alfred-web image (the Wasp dashboard).
+#
+# `wasp build` compiles the app into packages/web/.wasp/build/, which holds a
+# generated Dockerfile. We build that, multi-arch, and push :latest.
+# wasp build needs no database — `prisma migrate deploy` runs at container
+# start against web-db.
+name: build-web
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/web/**"
+      - ".github/workflows/build-web.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: build-web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Wasp
+        run: curl -sSL https://get.wasp.sh/installer.sh | sh -s -- -v 0.19.0
+
+      - name: wasp build
+        working-directory: packages/web
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          wasp build
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: packages/web/.wasp/build
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ssdavidai00/alfred-web:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

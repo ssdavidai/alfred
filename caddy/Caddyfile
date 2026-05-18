@@ -1,0 +1,48 @@
+# alfred-black — Caddy ingress.
+#
+# Static file. Caddy substitutes {$DOMAIN} / {$ACME_EMAIL} from the
+# environment (set on the `caddy` service in docker-compose.yaml) at load
+# time — no template rendering step.
+#
+# TLS: automatic Let's Encrypt via the HTTP-01 challenge. Each host gets its
+# own certificate; no DNS API token is needed. Certs persist in the
+# `caddy_data` volume — keep it across `docker compose down`/`up` or repeated
+# restarts will hit Let's Encrypt rate limits.
+#
+# DNS: before `docker compose up -d`, point these A-records at the VM's
+# public IP — `@` (apex), `plane`, `sure`, `vault`, `mcp`. Caddy self-heals
+# ACME on retry, so a stale record only delays the first cert.
+
+{
+	email {$ACME_EMAIL}
+}
+
+# Apex — the Wasp web app (serves both the SPA and its API server).
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy web:3000
+}
+
+# Plane — self-hosted project management.
+plane.{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy plane-proxy:80
+}
+
+# Sure — self-hosted personal finance.
+sure.{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy sure-web:3000
+}
+
+# Vaultwarden — the secrets manager.
+vault.{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy vaultwarden:80
+}
+
+# MCP server — Claude Custom Connector endpoint.
+mcp.{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy mcp-server:8787
+}
