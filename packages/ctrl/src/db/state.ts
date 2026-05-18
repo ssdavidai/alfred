@@ -5,6 +5,7 @@ import fs from "node:fs";
 import m001 from "./migrations/001_init.sql";
 import m002 from "./migrations/002_vault_index.sql";
 import m003 from "./migrations/003_audit.sql";
+import m004 from "./migrations/004_signal_observation_embedding.sql";
 
 // Append new migrations here. Files are SQL text loaded by esbuild.
 // Never reorder; never edit a migration after it has shipped.
@@ -12,6 +13,7 @@ const MIGRATIONS: { version: number; name: string; sql: string }[] = [
   { version: 1, name: "001_init", sql: m001 },
   { version: 2, name: "002_vault_index", sql: m002 },
   { version: 3, name: "003_audit", sql: m003 },
+  { version: 4, name: "004_signal_observation_embedding", sql: m004 },
 ];
 
 let stateDb: DatabaseSync | null = null;
