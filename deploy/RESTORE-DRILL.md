@@ -115,8 +115,20 @@ the rollout.
 | Date | Tenant | Snapshot ID | Live rows | Restored rows | Result |
 |---|---|---|---|---|---|
 | 2026-05-18 | raj313 | `3aded238` | 844 | 844 | PASS |
+| 2026-05-18 | miguel | `e956af83` | — | — | snapshot ✓ / drill pending (OPS-BACKUP-1) |
+| 2026-05-18 | rapali | `e8b0ff2f` | — | — | snapshot ✓ / drill pending (OPS-BACKUP-1) |
+| 2026-05-18 | david  | `df0989e1` | — | — | snapshot ✓ / drill pending (OPS-BACKUP-1) |
 
 When a new drill runs, append a row to this table.
+
+### Fleet backup status (post OPS-BACKUP-1)
+
+STORE-X-1 left three tenants in a "deployed-but-undrilled" state because
+the Hetzner S3 buckets were never initialised. OPS-BACKUP-1 added
+`AWS_DEFAULT_REGION=fsn1` to `/opt/alfred/restic.env`, ran `restic init`,
+and verified one backup landed (with `state.db.snap` present) on each.
+Full restore drills are still pending — miguel/rapali/david have not yet
+run the §3 procedure end-to-end.
 
 ## 5. Operational notes
 
