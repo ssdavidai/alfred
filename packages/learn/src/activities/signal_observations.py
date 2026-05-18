@@ -425,6 +425,33 @@ async def extract_observation_from_signal(signal_path: str) -> dict[str, Any]:
         "extract_obs_from_signal: %s -> %s (sender=%s topic=%s)",
         signal_path, path, sender or "-", topic,
     )
+
+    # STORE-P3-3 shadow write — emit a corresponding row to state.db's
+    # ``observation`` table via ctrl-api. The markdown record remains
+    # authoritative during the soak; failures here are logged +
+    # swallowed (never starve the primary write that already landed).
+    # Skipped when no instinct matched, because ``observation.instinct_id``
+    # is NOT NULL in migration 004 — the markdown file is still
+    # written, and P3-4's backfill can re-emit once an instinct is
+    # promoted to match. Replay-safe: inside an ``@activity.defn``
+    # body, no ``workflow.patched()`` gate required.
+    if instinct_path:
+        try:
+            from src.activities.signal_writer import write_observation_safe
+
+            await write_observation_safe(
+                instinct_id=instinct_path,
+                signal_id=signal_path,
+                confidence=1.0,
+                embedding=None,
+                embedding_id=None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "extract_obs_from_signal: shadow SQL emit failed err=%r",
+                exc,
+            )
+
     return {
         "observation_path": path,
         "fact": fact_clean,

@@ -2472,6 +2472,79 @@ async def write_signal_record(
             signal.get("target_path"),
             float(signal.get("effect_confidence") or 0.0),
         )
+
+        # STORE-P3-3 shadow write — emit a corresponding row to
+        # state.db's ``signal`` table via ctrl-api. The markdown record
+        # remains authoritative during the soak; failures here are
+        # logged + swallowed (never starve the primary write that
+        # already landed). Replay-safe: this is inside an
+        # ``@activity.defn`` body, so no ``workflow.patched()`` gate
+        # is required per packages/learn/CLAUDE.md.
+        try:
+            from src.activities.signal_writer import write_signal_safe
+
+            target_kind = signal.get("target_kind")
+            target_path_v = signal.get("target_path")
+            target_matter_path_v = signal.get("target_matter_path")
+            # Prefer the explicit matter binding (Phase 2 stamped
+            # ``target_matter_path``); fall back to ``target_path``
+            # when the resolver landed on a matter directly.
+            target_matter: str | None = None
+            if isinstance(target_matter_path_v, str) and target_matter_path_v.strip():
+                target_matter = target_matter_path_v.strip()
+            elif (
+                isinstance(target_path_v, str)
+                and target_path_v.strip().startswith("matter/")
+            ):
+                target_matter = target_path_v.strip()
+
+            display_headline_v = signal.get("display_headline")
+            display_body_v = signal.get("display_body")
+            actor_v = signal.get("actor")
+
+            await write_signal_safe(
+                source_type=str(signal.get("source_type") or ""),
+                body=body,
+                source_event=(
+                    str(signal.get("source_event_path")).strip()
+                    if signal.get("source_event_path")
+                    else None
+                ),
+                target_matter=target_matter,
+                target_kind=(
+                    str(target_kind).strip()
+                    if isinstance(target_kind, str) and target_kind.strip()
+                    else None
+                ),
+                actor=(
+                    str(actor_v).strip()
+                    if isinstance(actor_v, str) and actor_v.strip()
+                    else None
+                ),
+                decision_required=bool(signal.get("decision_required")),
+                display_headline=(
+                    str(display_headline_v).strip()
+                    if isinstance(display_headline_v, str)
+                    and display_headline_v.strip()
+                    else None
+                ),
+                display_body=(
+                    str(display_body_v).strip()
+                    if isinstance(display_body_v, str) and display_body_v.strip()
+                    else None
+                ),
+                classified_noise=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Defence in depth — write_signal_safe already swallows
+            # transport errors, but a programming error in the kwargs
+            # mapping above would surface here. Never sink the primary
+            # markdown write because of a shadow-mode bug.
+            logger.warning(
+                "signals.write_signal_record: shadow SQL emit failed err=%r",
+                exc,
+            )
+
         return path
     finally:
         await client.close()

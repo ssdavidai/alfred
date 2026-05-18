@@ -447,6 +447,29 @@ async def extract_observation_from_decision(
         "extract_observation: decision=%s -> %s (intent=%s sender=%s)",
         decision_id, path, intent, sender or "-",
     )
+
+    # STORE-P3-3 shadow write — emit a corresponding row to state.db's
+    # ``observation`` table via ctrl-api. Skipped when no instinct
+    # matched (NOT NULL constraint in migration 004). Replay-safe:
+    # inside an ``@activity.defn`` body, no ``workflow.patched()`` gate
+    # is required per packages/learn/CLAUDE.md.
+    if instinct_path:
+        try:
+            from src.activities.signal_writer import write_observation_safe
+
+            await write_observation_safe(
+                instinct_id=instinct_path,
+                signal_id=None,  # decision-sourced; no signal binding
+                confidence=1.0,
+                embedding=None,
+                embedding_id=None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "extract_observation: shadow SQL emit failed err=%r",
+                exc,
+            )
+
     return {"observation_path": path, "fact": fact_clean, "topic": topic}
 
 

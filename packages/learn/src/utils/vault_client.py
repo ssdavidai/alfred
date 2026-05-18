@@ -292,6 +292,86 @@ class VaultClient:
         resp.raise_for_status()
         return resp.json()
 
+    # --- Signal + Observation rows (STORE-P3-3) ---------------------------
+
+    async def write_signal(
+        self,
+        *,
+        source_type: str,
+        body: str,
+        source_event: str | None = None,
+        target_matter: str | None = None,
+        target_kind: str | None = None,
+        actor: str | None = None,
+        decision_required: bool = False,
+        display_headline: str | None = None,
+        display_body: str | None = None,
+        classified_noise: bool = False,
+    ) -> dict[str, Any]:
+        """POST one row to the signal table via ctrl-api.
+
+        Wraps ``POST /api/v1/signals`` (STORE-P3-2). The server assigns
+        ``id`` (UUIDv4) and ``ts`` (unix ns, returned as decimal STRING
+        so nanosecond precision survives JSON's ``Number.MAX_SAFE_INTEGER``
+        ceiling).
+
+        Returns ``{"id": "<uuid>", "ts": "<unix-ns-string>"}``.
+        """
+        payload: dict[str, Any] = {
+            "source_type": source_type,
+            "body": body,
+            "decision_required": bool(decision_required),
+            "classified_noise": bool(classified_noise),
+        }
+        if source_event is not None:
+            payload["source_event"] = source_event
+        if target_matter is not None:
+            payload["target_matter"] = target_matter
+        if target_kind is not None:
+            payload["target_kind"] = target_kind
+        if actor is not None:
+            payload["actor"] = actor
+        if display_headline is not None:
+            payload["display_headline"] = display_headline
+        if display_body is not None:
+            payload["display_body"] = display_body
+        resp = await self._client.post("/api/v1/signals", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def write_observation(
+        self,
+        *,
+        instinct_id: str,
+        signal_id: str | None = None,
+        confidence: float | None = None,
+        embedding: list[float] | None = None,
+        embedding_id: int | None = None,
+    ) -> dict[str, Any]:
+        """POST one row to the observation table via ctrl-api.
+
+        Wraps ``POST /api/v1/observations`` (STORE-P3-2). Pass either
+        an inline ``embedding`` (number[768]) or a pre-allocated
+        ``embedding_id`` rowid — never both. Returns
+        ``{"id", "ts", "embedding_id"}``.
+        """
+        if embedding is not None and embedding_id is not None:
+            raise ValueError(
+                "supply either `embedding` or `embedding_id`, not both"
+            )
+        payload: dict[str, Any] = {"instinct_id": instinct_id}
+        if signal_id is not None:
+            payload["signal_id"] = signal_id
+        if confidence is not None:
+            payload["confidence"] = float(confidence)
+        if embedding is not None:
+            payload["embedding"] = embedding
+        if embedding_id is not None:
+            payload["embedding_id"] = int(embedding_id)
+        resp = await self._client.post("/api/v1/observations", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
     # --- Plane Steward action helpers (#839 Phase 3) -----------------------
 
     async def plane_post_steward_action(
