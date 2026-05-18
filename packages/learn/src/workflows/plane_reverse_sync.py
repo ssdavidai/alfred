@@ -615,13 +615,18 @@ class PlaneReverseSyncWorkflow:
             return
 
         now = workflow.now()
-        observed = ObservedWindow(
-            start=now,
-            end=now,
-            signal_paths=[],
-            decision_paths=[],
-            other_refs=[],
-        )
+        # Pre-serialize observed to a JSON-safe dict so Temporal's data
+        # converter doesn't choke on datetime fields when dispatching the
+        # activity. apply_state_change_v2 normalizes the dict back to an
+        # ObservedWindow at the activity boundary.
+        now_iso = now.isoformat(timespec="seconds").replace("+00:00", "Z")
+        observed_envelope = {
+            "start": now_iso,
+            "end": now_iso,
+            "signal_paths": [],
+            "decision_paths": [],
+            "other_refs": [],
+        }
         propose_fn_args = {
             "record_type": record_type,
             "action": action,
@@ -635,7 +640,7 @@ class PlaneReverseSyncWorkflow:
                 args=[
                     target_path,
                     "plane_reverse_sync",
-                    observed,
+                    observed_envelope,
                     "plane_reverse_sync.mirror",
                     propose_fn_args,
                     "live",

@@ -562,11 +562,36 @@ async def _trigger_fan_out(
     return triggered
 
 
+def _coerce_observed(value: ObservedWindow | dict[str, Any]) -> ObservedWindow:
+    """Accept ObservedWindow or its JSON-safe envelope dict.
+
+    Workflow callers (e.g. plane_reverse_sync._mirror_status_v2) pre-
+    serialize to dict so Temporal's data converter doesn't choke on
+    datetime fields. In-process callers (briefing, steward, …) pass
+    the dataclass directly.
+    """
+    if isinstance(value, ObservedWindow):
+        return value
+    start = value.get("start")
+    end = value.get("end")
+    if isinstance(start, str):
+        start = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    if isinstance(end, str):
+        end = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    return ObservedWindow(
+        start=start,
+        end=end,
+        signal_paths=list(value.get("signal_paths") or []),
+        decision_paths=list(value.get("decision_paths") or []),
+        other_refs=list(value.get("other_refs") or []),
+    )
+
+
 @activity.defn
 async def apply_state_change_v2(
     target_path: str,
     source: str,
-    observed: ObservedWindow,
+    observed: ObservedWindow | dict[str, Any],
     propose_fn_name: str,
     propose_fn_args: dict[str, Any],
     mode: Literal["shadow", "live"] = "shadow",
@@ -598,6 +623,7 @@ async def apply_state_change_v2(
     if mode not in ("shadow", "live"):
         raise ValueError(f"state_mutator: unsupported mode {mode!r}")
 
+    observed = _coerce_observed(observed)
     propose = _resolve_propose_fn(propose_fn_name)
     env_mode = _resolve_env_live_mode()
 
