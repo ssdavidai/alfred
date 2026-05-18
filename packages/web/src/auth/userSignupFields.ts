@@ -1,7 +1,17 @@
 import { defineUserSignupFields } from "wasp/auth/providers/types";
+import { prisma } from "wasp/server";
 import { z } from "zod";
 
 const adminEmails = process.env.ADMIN_EMAILS?.split(",") || [];
+
+// Single-VM: the very first account created on a fresh install is the owner.
+// `isOwner` + `isAdmin` are both set so the owner has full control. Every
+// subsequent signup is a plain member. The User.count() runs inside the
+// signup transaction, so concurrent first-signups still resolve to one owner.
+async function isFirstSignup(): Promise<boolean> {
+  const count = await prisma.user.count();
+  return count === 0;
+}
 
 const emailDataSchema = z.object({
   email: z.string(),
@@ -16,8 +26,12 @@ export const getEmailUserFields = defineUserSignupFields({
     const emailData = emailDataSchema.parse(data);
     return emailData.email;
   },
-  isAdmin: (data) => {
+  isOwner: async () => {
+    return isFirstSignup();
+  },
+  isAdmin: async (data) => {
     const emailData = emailDataSchema.parse(data);
+    if (await isFirstSignup()) return true;
     return adminEmails.includes(emailData.email);
   },
 });
@@ -88,8 +102,12 @@ export const getGoogleUserFields = defineUserSignupFields({
     const googleData = googleDataSchema.parse(data);
     return googleData.profile.email;
   },
-  isAdmin: (data) => {
+  isOwner: async () => {
+    return isFirstSignup();
+  },
+  isAdmin: async (data) => {
     const googleData = googleDataSchema.parse(data);
+    if (await isFirstSignup()) return true;
     if (!googleData.profile.email_verified) {
       return false;
     }

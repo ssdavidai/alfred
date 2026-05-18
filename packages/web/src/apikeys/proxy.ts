@@ -2,9 +2,15 @@ import crypto from "crypto";
 import express from "express";
 import type { MiddlewareConfigFn } from "wasp/server";
 import { prisma } from "wasp/server";
-import { decryptApiKey } from "../server/tenantProxy";
 
-const TENANT_API_TIMEOUT = 15_000;
+// Single-VM reframe. There is no fleet — every user-scoped API key proxies
+// to the same local ctrl-api over the Docker compose network. The caller's
+// `alf_*` key authenticates the request against the Wasp DB; the upstream
+// hop to ctrl-api carries the shared AAS_API_KEY.
+const CTRL_API_URL = process.env.CTRL_API_URL ?? "http://ctrl-api:3100";
+const CTRL_API_KEY = process.env.AAS_API_KEY ?? "";
+
+const CTRL_API_TIMEOUT = 60_000;
 
 function hashKey(key: string): string {
   return crypto.createHash("sha256").update(key).digest("hex");
@@ -19,12 +25,14 @@ export const apiProxyMiddleware: MiddlewareConfigFn = (middlewareConfig) => {
 async function authenticateAndProxy(
   req: any,
   res: any,
-  tenantPath: string,
+  ctrlPath: string,
 ): Promise<void> {
   // Extract Bearer token
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Missing or invalid Authorization header. Use: Bearer <api-key>" });
+    return res.status(401).json({
+      error: "Missing or invalid Authorization header. Use: Bearer <api-key>",
+    });
   }
 
   const token = authHeader.slice(7);
@@ -36,7 +44,6 @@ async function authenticateAndProxy(
   const keyHash = hashKey(token);
   const apiKey = await prisma.apiKey.findUnique({
     where: { keyHash },
-    include: { user: { include: { instance: true } } },
   });
 
   if (!apiKey) {
@@ -44,34 +51,30 @@ async function authenticateAndProxy(
   }
 
   // Update lastUsedAt (fire-and-forget)
-  prisma.apiKey.update({
-    where: { id: apiKey.id },
-    data: { lastUsedAt: new Date() },
-  }).catch(() => {});
+  prisma.apiKey
+    .update({
+      where: { id: apiKey.id },
+      data: { lastUsedAt: new Date() },
+    })
+    .catch(() => {});
 
-  const instance = apiKey.user.instance;
-  if (!instance) {
-    return res.status(404).json({ error: "No instance found. Please complete setup first." });
-  }
-  if (!instance.tailscaleHostname || !instance.apiKey) {
-    return res.status(503).json({ error: "Instance is not ready yet." });
-  }
-  if (instance.status !== "running") {
-    return res.status(503).json({ error: `Instance is ${instance.status}. It must be running.` });
+  if (!CTRL_API_KEY) {
+    return res
+      .status(500)
+      .json({ error: "AAS_API_KEY is not configured on this server." });
   }
 
-  const tenantApiKey = decryptApiKey(instance.apiKey);
-  const tenantUrl = buildTenantUrl(instance.tailscaleHostname, tenantPath, req.query);
+  const ctrlUrl = buildCtrlUrl(ctrlPath, req.query);
 
-  // Forward request to tenant
+  // Forward request to the local ctrl-api
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), TENANT_API_TIMEOUT);
+  const timeout = setTimeout(() => controller.abort(), CTRL_API_TIMEOUT);
 
   try {
     const fetchOptions: RequestInit = {
       method: req.method,
       headers: {
-        Authorization: `Bearer ${tenantApiKey}`,
+        Authorization: `Bearer ${CTRL_API_KEY}`,
         "Content-Type": "application/json",
       },
       signal: controller.signal,
@@ -82,7 +85,7 @@ async function authenticateAndProxy(
       fetchOptions.body = JSON.stringify(req.body);
     }
 
-    const response = await fetch(tenantUrl, fetchOptions);
+    const response = await fetch(ctrlUrl, fetchOptions);
 
     // Forward status and headers
     res.status(response.status);
@@ -101,25 +104,30 @@ async function authenticateAndProxy(
   }
 }
 
-// Legacy route: /user-api/vault/context → tenant /api/v1/vault/context
+// Legacy route: /user-api/vault/context → ctrl-api /api/v1/vault/context
 export const userApiProxy = async (req: any, res: any, _context: any) => {
   try {
     const fullPath: string = req.originalUrl || req.url || "";
     const prefixIndex = fullPath.indexOf("/user-api/");
-    const subPath = prefixIndex >= 0 ? fullPath.slice(prefixIndex + "/user-api/".length) : "";
+    const subPath =
+      prefixIndex >= 0
+        ? fullPath.slice(prefixIndex + "/user-api/".length)
+        : "";
     const subPathClean = subPath.split("?")[0];
-    const tenantPath = `/api/v1/${subPathClean}`;
-    return await authenticateAndProxy(req, res, tenantPath);
+    const ctrlPath = `/api/v1/${subPathClean}`;
+    return await authenticateAndProxy(req, res, ctrlPath);
   } catch (error: any) {
     if (error.name === "AbortError") {
-      return res.status(504).json({ error: "Tenant API request timed out" });
+      return res.status(504).json({ error: "ctrl-api request timed out" });
     }
     console.error("API proxy error:", error);
-    return res.status(502).json({ error: `Failed to reach tenant: ${error.message}` });
+    return res
+      .status(502)
+      .json({ error: `Failed to reach ctrl-api: ${error.message}` });
   }
 };
 
-// Public API route: /api/v1/* → tenant /api/v1/* (pass-through)
+// Public API route: /api/v1/* → ctrl-api /api/v1/* (pass-through)
 // Uses an Express Router with its own json() middleware because Wasp's
 // middleware config only applies to Wasp-defined api routes, not app.use().
 // Without this, POST request bodies are undefined and never forwarded.
@@ -128,24 +136,22 @@ v1Router.use(express.json({ limit: "50mb" }));
 v1Router.all("/{*path}", async (req: any, res: any) => {
   try {
     const fullPath: string = req.originalUrl || req.url || "";
-    const tenantPath = fullPath.split("?")[0];
-    return await authenticateAndProxy(req, res, tenantPath);
+    const ctrlPath = fullPath.split("?")[0];
+    return await authenticateAndProxy(req, res, ctrlPath);
   } catch (error: any) {
     if (error.name === "AbortError") {
-      return res.status(504).json({ error: "Tenant API request timed out" });
+      return res.status(504).json({ error: "ctrl-api request timed out" });
     }
     console.error("API proxy error:", error);
-    return res.status(502).json({ error: `Failed to reach tenant: ${error.message}` });
+    return res
+      .status(502)
+      .json({ error: `Failed to reach ctrl-api: ${error.message}` });
   }
 });
 export const v1ApiProxy = v1Router;
 
-function buildTenantUrl(
-  hostname: string,
-  path: string,
-  query?: Record<string, string>,
-): string {
-  const base = `https://${hostname}:3100${path}`;
+function buildCtrlUrl(path: string, query?: Record<string, string>): string {
+  const base = `${CTRL_API_URL}${path}`;
   if (!query || Object.keys(query).length === 0) return base;
   // Filter out express internal params
   const params = new URLSearchParams();

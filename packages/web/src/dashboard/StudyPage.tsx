@@ -47,7 +47,6 @@ import {
 import { Frame } from "../client/components/ab/Frame";
 import { useTheme } from "../client/lib/theme";
 import { useAuth } from "wasp/client/auth";
-import { getCustomerPortalUrl } from "wasp/client/operations";
 
 const SECTIONS = [
   "settings",
@@ -643,45 +642,16 @@ function formatAuditWhen(iso: string): string {
 
 function AccountSection() {
   const { data: user } = useAuth();
-  const [portalUrl, setPortalUrl] = useState<string | null>(null);
-  const [loadingPortal, setLoadingPortal] = useState(false);
-  // null    = haven't checked
-  // false   = Polar returned no portal (user isn't a Polar customer yet)
-  // true    = portal exists; button is live
-  const [hasPortal, setHasPortal] = useState<boolean | null>(null);
-
-  const openCustomerPortal = async () => {
-    setLoadingPortal(true);
-    try {
-      const url = await getCustomerPortalUrl();
-      if (typeof url === "string" && url) {
-        setPortalUrl(url);
-        setHasPortal(true);
-        window.open(url, "_blank");
-      } else {
-        // Polar returns null when the user has never been a Polar
-        // customer (no subscription was ever started through Polar).
-        // The legacy UI silently no-op'd on null — now we surface it
-        // so the principal isn't confused by a button that does nothing.
-        setHasPortal(false);
-      }
-    } finally {
-      setLoadingPortal(false);
-    }
-  };
 
   if (!user) return null;
-  const planLabel = (user as any).subscriptionPlan
-    ? String((user as any).subscriptionPlan).replace(/_/g, " ")
-    : "—";
-  const status = (user as any).subscriptionStatus
-    ? String((user as any).subscriptionStatus)
-    : "none";
+  // Single-VM: no billing, no subscription plan. The account is identified
+  // by email and role (owner vs member).
+  const role = (user as any).isOwner ? "Owner" : "Member";
 
   return (
     <div>
       <H>Your account</H>
-      <Sub>The standing details — email, plan. Manage billing in your customer portal.</Sub>
+      <Sub>The standing details — email and role on this household.</Sub>
 
       <dl className="grid grid-cols-[140px_1fr] gap-y-4 font-body text-[15px] max-w-[560px]">
         <dt className="font-mono text-[10px] uppercase tracking-[0.22em] pt-1" style={{ color: "var(--marginalia)" }}>
@@ -699,44 +669,10 @@ function AccountSection() {
         )}
 
         <dt className="font-mono text-[10px] uppercase tracking-[0.22em] pt-1" style={{ color: "var(--marginalia)" }}>
-          Plan
+          Role
         </dt>
-        <dd>
-          <span className="capitalize">{planLabel}</span>
-          <span className="ml-2 font-mono text-[10px] uppercase tracking-[0.22em]" style={{ color: "var(--marginalia)" }}>
-            · {status}
-          </span>
-        </dd>
-
+        <dd>{role}</dd>
       </dl>
-
-      <hr className="rule my-8" />
-
-      <div className="flex flex-wrap items-baseline gap-x-6 gap-y-3">
-        <button
-          onClick={openCustomerPortal}
-          disabled={loadingPortal}
-          className="btn-brass disabled:opacity-50"
-        >
-          {loadingPortal ? "Opening…" : "Manage billing →"}
-        </button>
-        {portalUrl && (
-          <a
-            href={portalUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="btn-link"
-          >
-            Re-open portal
-          </a>
-        )}
-      </div>
-      {hasPortal === false && (
-        <p className="mt-3 font-body text-[14px]" style={{ color: "var(--marginalia)" }}>
-          No Polar customer linked to this account — billing is managed elsewhere.
-          If you expected a customer portal, complete a Polar checkout first.
-        </p>
-      )}
     </div>
   );
 }

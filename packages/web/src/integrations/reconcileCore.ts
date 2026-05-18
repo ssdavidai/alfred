@@ -21,13 +21,11 @@ import {
 // but cross-tenant concurrency is fine — different VPSes.
 const DEFAULT_CONCURRENCY = 4;
 
-export interface PendingRowInstance {
-  id: string;
-  tailscaleHostname: string | null;
-  apiKey: string | null;
-  subdomainUrl: string | null;
-  status: string;
-}
+// Single-VM: there is no fleet, no per-user Acme Cloud instance. The auto-config
+// reconciler always hits the one local ctrl-api. This sentinel keeps the
+// `fetchAutoConfig` seam (and its unit tests) signature-stable; the value is
+// not consulted any more.
+export type PendingRowInstance = Record<string, never>;
 
 export interface PendingRow {
   id: string;
@@ -38,7 +36,6 @@ export interface PendingRow {
   lastSyncedAt: Date;
   user: {
     id: string;
-    instance: PendingRowInstance | null;
   };
 }
 
@@ -94,15 +91,9 @@ export async function reconcileOne(
   row: PendingRow,
   deps: ReconcileDeps,
 ): Promise<{ outcome: "configured" | "errored" | "skipped" }> {
-  const instance = row.user?.instance ?? null;
-  if (!instance || !instance.tailscaleHostname || !instance.apiKey) {
-    // Tenant not provisioned yet — leave the row as-is, it'll get picked up
-    // once the instance comes online.
-    return { outcome: "skipped" };
-  }
-  if (instance.status !== "running") {
-    return { outcome: "skipped" };
-  }
+  // Single-VM: the local ctrl-api is always the target. No provisioning
+  // gate — go straight to marking the row running and firing auto-config.
+  const instance: PendingRowInstance = {};
 
   try {
     await markAutoConfigRunning(deps.delegate, row.userId, row.connectionId);

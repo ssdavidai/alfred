@@ -26,13 +26,16 @@
  *   idempotent — re-running it on a `configured` row is a no-op (filtered
  *   out by the autoConfigState predicate).
  */
-import { decryptApiKey } from "../server/tenantProxy";
 import {
   buildPendingRowsWhere,
   reconcileBatch,
   type PendingRow,
   type PendingRowInstance,
 } from "./reconcileCore";
+
+// Single-VM: the auto-config reconciler always calls the one local ctrl-api.
+const CTRL_API_URL = process.env.CTRL_API_URL ?? "http://ctrl-api:3100";
+const CTRL_API_KEY = process.env.AAS_API_KEY ?? "";
 
 // Don't re-fire on rows we just bounced off — Composio's OAuth handshake
 // can take seconds to settle into ACTIVE, and a tenant ctrl-api outage
@@ -67,7 +70,7 @@ export async function reconcileComposioAutoConfigJob(
   const rows: PendingRow[] = await context.entities.ComposioConnection.findMany({
     where: buildPendingRowsWhere(new Date(), ERROR_BACKOFF_MS),
     include: {
-      user: { include: { instance: true } },
+      user: { select: { id: true } },
     },
     orderBy: { lastSyncedAt: "asc" },
     take: MAX_ROWS_PER_TICK,
@@ -84,19 +87,19 @@ export async function reconcileComposioAutoConfigJob(
 }
 
 /**
- * Call the tenant ctrl-api's `/auto-config` endpoint directly. We do NOT use
+ * Call the local ctrl-api's `/auto-config` endpoint directly. We do NOT use
  * `proxyToTenant` here because that helper depends on Wasp's HttpError
  * machinery, which the PgBoss worker context doesn't carry. The shape we send
  * mirrors what `autoConfigIntegration` produces in operations.ts.
  */
 async function callTenantAutoConfig(
-  instance: PendingRowInstance,
+  _instance: PendingRowInstance,
   connectionId: string,
 ): Promise<any> {
-  const apiKey = decryptApiKey(instance.apiKey!);
-  const url = instance.subdomainUrl
-    ? `${instance.subdomainUrl.replace(/\/$/, "")}/api/v1/integrations/${encodeURIComponent(connectionId)}/auto-config`
-    : `https://${instance.tailscaleHostname}:3100/api/v1/integrations/${encodeURIComponent(connectionId)}/auto-config`;
+  if (!CTRL_API_KEY) {
+    throw new Error("AAS_API_KEY is not configured — cannot reach ctrl-api");
+  }
+  const url = `${CTRL_API_URL}/api/v1/integrations/${encodeURIComponent(connectionId)}/auto-config`;
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), AUTO_CONFIG_TIMEOUT_MS);
@@ -104,7 +107,7 @@ async function callTenantAutoConfig(
     const response = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${CTRL_API_KEY}`,
         "Content-Type": "application/json",
       },
       signal: controller.signal,

@@ -1,6 +1,6 @@
 import express from "express";
 import type { MiddlewareConfigFn } from "wasp/server";
-import { proxyToTenant } from "../server/tenantProxy";
+import { proxyToTenant, getUserInstance } from "../server/tenantProxy";
 
 // Allow up to 50MB JSON bodies for file uploads (base64-encoded files)
 export const uploadMiddleware: MiddlewareConfigFn = (middlewareConfig) => {
@@ -13,13 +13,8 @@ export const uploadToInbox = async (req: any, res: any, context: any) => {
     return res.status(401).json({ error: "Not authenticated" });
   }
 
-  const instance = await context.entities.Instance.findUnique({
-    where: { userId: context.user.id },
-  });
-
-  if (!instance) {
-    return res.status(404).json({ error: "No instance found. Please complete setup first." });
-  }
+  // Single-VM: the local ctrl-api is the one fixed target.
+  const instance = await getUserInstance(context);
 
   const { filename, content, encoding } = req.body;
   if (typeof filename !== "string" || typeof content !== "string") {

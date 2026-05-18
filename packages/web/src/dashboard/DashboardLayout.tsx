@@ -1,12 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { useAuth, logout } from "wasp/client/auth";
+import { logout } from "wasp/client/auth";
 import {
   useQuery,
-  getProvisioningStatus,
   getOpenclawReadiness,
 } from "wasp/client/operations";
-import ProvisioningProgress from "../provisioning/ProvisioningProgress";
 import ReconfiguringBanner from "./ReconfiguringBanner";
 import { useOpenclawStatus } from "../shared/OpenclawStatusContext";
 import { motion, AnimatePresence } from "framer-motion";
@@ -16,13 +14,7 @@ import {
   Settings,
   Menu,
   X,
-  Shield,
-  LayoutDashboard,
-  Sheet,
-  Server,
-  Cog,
   LogOut,
-  Loader2,
   Brain,
   FolderTree,
   Puzzle,
@@ -52,13 +44,6 @@ const dashboardNavItems: NavItem[] = [
   { path: "/dashboard/settings", label: "Settings", icon: Settings },
 ];
 
-const adminNavItems: NavItem[] = [
-  { path: "/admin", label: "Analytics", icon: Home },
-  { path: "/admin/users", label: "Users", icon: Sheet },
-  { path: "/admin/instances", label: "Instances", icon: Server },
-  { path: "/admin/provisioning", label: "Provisioning", icon: Cog },
-];
-
 // ---------------------------------------------------------------------------
 // Orb intensity per route
 // ---------------------------------------------------------------------------
@@ -81,12 +66,10 @@ function isNebulaPage(pathname: string): boolean {
 
 function CollapsibleSidebar({
   navItems,
-  adminItems,
   isActive,
   glassMode,
 }: {
   navItems: NavItem[];
-  adminItems: NavItem[] | null;
   isActive: (path: string) => boolean;
   glassMode?: boolean;
 }) {
@@ -172,58 +155,6 @@ function CollapsibleSidebar({
             </Link>
           );
         })}
-
-        {/* Admin section */}
-        {adminItems && (
-          <>
-            <div className="mx-3 my-3 border-t border-white/[0.06]" />
-            {isExpanded && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="mb-1 flex items-center gap-2 px-3"
-              >
-                <Shield className="h-3 w-3 text-[#8A8680]" />
-                <span className="font-mono text-[0.55rem] font-light uppercase tracking-[0.2em] text-[#8A8680]">
-                  Admin
-                </span>
-              </motion.div>
-            )}
-            {adminItems.map((item) => {
-              const active = isActive(item.path);
-              return (
-                <Link
-                  key={item.path}
-                  to={item.path}
-                  className={cn(
-                    "group relative flex items-center gap-3 rounded-lg px-3 py-2.5 transition-all duration-200",
-                    active
-                      ? "text-[#C9A84C]"
-                      : "text-[#F0EDE8]/60 hover:text-[#C9A84C]",
-                  )}
-                >
-                  {active && (
-                    <div className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-[#C9A84C]" />
-                  )}
-                  <item.icon className="h-5 w-5 flex-shrink-0" />
-                  <AnimatePresence>
-                    {isExpanded && (
-                      <motion.span
-                        initial={{ opacity: 0, x: -10 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0, x: -10 }}
-                        transition={{ duration: 0.15 }}
-                        className="whitespace-nowrap font-sans text-sm font-light"
-                      >
-                        {item.label}
-                      </motion.span>
-                    )}
-                  </AnimatePresence>
-                </Link>
-              );
-            })}
-          </>
-        )}
       </nav>
 
       {/* Logout at bottom */}
@@ -259,13 +190,11 @@ function CollapsibleSidebar({
 
 function MobileSidebar({
   navItems,
-  adminItems,
   isActive,
   isOpen,
   onClose,
 }: {
   navItems: NavItem[];
-  adminItems: NavItem[] | null;
   isActive: (path: string) => boolean;
   isOpen: boolean;
   onClose: () => void;
@@ -317,34 +246,6 @@ function MobileSidebar({
             </Link>
           ))}
         </nav>
-        {adminItems && (
-          <nav className="mt-6 px-3">
-            <div className="mb-2 flex items-center gap-2 px-3">
-              <Shield className="h-3 w-3 text-[#8A8680]" />
-              <span className="font-mono text-[0.6rem] font-light uppercase tracking-[0.2em] text-[#8A8680]">
-                Admin
-              </span>
-            </div>
-            <div className="space-y-1">
-              {adminItems.map((item) => (
-                <Link
-                  key={item.path}
-                  to={item.path}
-                  onClick={onClose}
-                  className={cn(
-                    "flex items-center gap-3 rounded-sm px-3 py-2 font-sans text-sm font-light transition-all duration-200",
-                    isActive(item.path)
-                      ? "border-l-2 border-[#C9A84C] bg-[#C9A84C]/5 text-[#C9A84C]"
-                      : "text-[#8A8680] hover:bg-[#C9A84C]/5 hover:text-[#E8E4DE]",
-                  )}
-                >
-                  <item.icon className="h-4 w-4" />
-                  {item.label}
-                </Link>
-              ))}
-            </div>
-          </nav>
-        )}
       </aside>
     </div>
   );
@@ -361,26 +262,18 @@ export default function DashboardLayout({
   children: React.ReactNode;
   hideSidebar?: boolean;
 }) {
-  const { data: user } = useAuth();
   const location = useLocation();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  const isAdminPage = location.pathname.startsWith("/admin");
-  const { data: provStatus, isLoading: provLoading } = useQuery(
-    getProvisioningStatus,
-    undefined,
-    {
-      enabled: !isAdminPage,
-      refetchInterval: 3000,
-    },
-  );
-  const instanceReady = provStatus?.instance?.status === "running";
+  // Single-VM: there is no fleet and no provisioning step — the local
+  // ctrl-api is always the (one) running instance, so the dashboard renders
+  // immediately with no "wait for provisioning" gate.
 
-  // While the tenant's openclaw gateway is restarting to pick up a
-  // tools.allow change, poll the readiness endpoint and clear the banner
-  // once the gateway is back. Requires two consecutive `ready: true`
-  // responses to guard against a probe landing on the pre-restart process
-  // in the narrow window before SIGUSR1 takes effect.
+  // While the gateway is restarting to pick up a tools.allow change, poll
+  // the readiness endpoint and clear the banner once the gateway is back.
+  // Requires two consecutive `ready: true` responses to guard against a
+  // probe landing on the pre-restart process in the narrow window before
+  // SIGUSR1 takes effect.
   const { reconfiguringUntil, reconfiguringLabel, clearReconfiguring } =
     useOpenclawStatus();
   const isReconfiguring =
@@ -391,7 +284,7 @@ export default function DashboardLayout({
     getOpenclawReadiness,
     undefined,
     {
-      enabled: isReconfiguring && !isAdminPage,
+      enabled: isReconfiguring,
       refetchInterval: isReconfiguring ? 2000 : false,
       retry: false,
     },
@@ -415,11 +308,9 @@ export default function DashboardLayout({
 
   const isActive = (path: string) => {
     if (path === "/dashboard") return location.pathname === "/dashboard";
-    if (path === "/admin") return location.pathname === "/admin";
     return location.pathname.startsWith(path);
   };
 
-  const adminItems = user?.isAdmin ? adminNavItems : null;
   const nebulaOpacity = getNebulaOpacity(location.pathname);
   const glassMode = isNebulaPage(location.pathname);
 
@@ -438,7 +329,6 @@ export default function DashboardLayout({
         {!hideSidebar && (
           <CollapsibleSidebar
             navItems={dashboardNavItems}
-            adminItems={adminItems}
             isActive={isActive}
             glassMode={glassMode}
           />
@@ -472,7 +362,6 @@ export default function DashboardLayout({
         {!hideSidebar && (
           <MobileSidebar
             navItems={dashboardNavItems}
-            adminItems={adminItems}
             isActive={isActive}
             isOpen={mobileMenuOpen}
             onClose={() => setMobileMenuOpen(false)}
@@ -488,25 +377,10 @@ export default function DashboardLayout({
             children
           ) : (
             <div className="p-6 lg:p-8">
-              {isAdminPage ? (
-                children
-              ) : provLoading ? (
-                <div className="flex items-center justify-center py-16">
-                  <Loader2 className="h-8 w-8 animate-spin text-[#C9A84C]" />
-                </div>
-              ) : instanceReady ? (
-                <>
-                  {isReconfiguring && (
-                    <ReconfiguringBanner label={reconfiguringLabel} />
-                  )}
-                  {children}
-                </>
-              ) : (
-                <ProvisioningProgress
-                  data={provStatus ?? null}
-                  isLoading={provLoading}
-                />
+              {isReconfiguring && (
+                <ReconfiguringBanner label={reconfiguringLabel} />
               )}
+              {children}
             </div>
           )}
         </main>

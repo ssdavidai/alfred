@@ -41,46 +41,37 @@ function extractEmailAddress(raw: string): string {
   return "";
 }
 
-// Per-tenant cache of { senders: Set<string>, expiresAt: number }
-const authorizedCache = new Map<
-  string,
-  { senders: Set<string>; expiresAt: number }
->();
+// Single-VM: one local ctrl-api, so a single-slot cache of authorized senders.
+let authorizedCache: { senders: Set<string>; expiresAt: number } | null = null;
 
-async function fetchAuthorizedSenders(instance: {
-  id: string;
-  tailscaleHostname: string | null;
-  apiKey: string | null;
-  status: string;
-}): Promise<Set<string> | null> {
-  const cached = authorizedCache.get(instance.id);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.senders;
-  }
-  if (!instance.tailscaleHostname || !instance.apiKey || instance.status !== "running") {
-    // Tenant VM not reachable right now — fail closed (treat as unauthorized
-    // which routes to stream ingest; safer than treating unknown senders as
-    // authorized). StreamEvent fallback below preserves the message.
-    return null;
+async function fetchAuthorizedSenders(): Promise<Set<string> | null> {
+  if (authorizedCache && authorizedCache.expiresAt > Date.now()) {
+    return authorizedCache.senders;
   }
   try {
-    const resp: any = await proxyToTenant(instance as any, {
-      method: "GET",
-      path: "/api/v1/auth/senders",
-    });
+    const resp: any = await proxyToTenant(
+      {},
+      {
+        method: "GET",
+        path: "/api/v1/auth/senders",
+      },
+    );
     const senders = new Set<string>(
       Array.isArray(resp?.senders)
         ? resp.senders.map((s: string) => s.toLowerCase())
         : [],
     );
-    authorizedCache.set(instance.id, {
+    authorizedCache = {
       senders,
       expiresAt: Date.now() + AUTHORIZED_CACHE_MS,
-    });
+    };
     return senders;
   } catch (err) {
+    // ctrl-api not reachable — fail closed (treat as unauthorized, which
+    // routes to stream ingest; the StreamEvent fallback preserves the
+    // message either way).
     console.warn(
-      `[agentmail-receiver] failed to fetch authorized senders for ${instance.id}:`,
+      "[agentmail-receiver] failed to fetch authorized senders:",
       err,
     );
     return null;
@@ -134,16 +125,17 @@ export function registerAgentMailReceiver(app: Application): void {
         return;
       }
 
-      // 2. Tenant lookup
-      const instance = await prisma.instance.findFirst({
-        where: { agentmailInboxId: inboxId },
-      });
-      if (!instance) {
-        // Stale inbox id — either the tenant was destroyed or this event
-        // belongs to a non-fleet inbox (e.g. Sir's personal one). Ack
-        // and drop so AgentMail doesn't retry.
+      // 2. Owner lookup. Single-VM: there is exactly one household and one
+      // local ctrl-api — the inbox belongs to the owner account. StreamEvent
+      // fallbacks are attributed to that user.
+      const owner =
+        (await prisma.user.findFirst({ where: { isOwner: true } })) ??
+        (await prisma.user.findFirst({ orderBy: { createdAt: "asc" } }));
+      if (!owner) {
+        // No account yet (fresh install, pre-signup) — ack and drop so
+        // AgentMail doesn't retry.
         console.log(
-          `[agentmail-receiver] no instance for inbox_id=${inboxId}, dropping`,
+          `[agentmail-receiver] no owner account for inbox_id=${inboxId}, dropping`,
         );
         res.status(204).send();
         return;
@@ -167,13 +159,13 @@ export function registerAgentMailReceiver(app: Application): void {
           ? (fromRaw[0] ?? "")
           : String(fromRaw);
         const sender = extractEmailAddress(fromString);
-        const authorized = await fetchAuthorizedSenders(instance as any);
+        const authorized = await fetchAuthorizedSenders();
         const isAuthorized = !!sender && authorized?.has(sender) === true;
 
         // 4. Dispatch
         if (isAuthorized) {
           // Channel path — full payload, preserve quoted history (Alfred needs context)
-          await proxyToTenant(instance as any, {
+          await proxyToTenant({}, {
             method: "POST",
             path: "/api/v1/channels/email/inbound",
             body: {
@@ -188,7 +180,7 @@ export function registerAgentMailReceiver(app: Application): void {
             return prisma.streamEvent.create({
               data: {
                 streamId: "agentmail-channel-buffer", // logical marker
-                userId: instance.userId,
+                userId: owner.id,
                 sourceRef: message.message_id ?? null,
                 type: "agentmail-channel",
                 raw: message as any,
@@ -204,7 +196,7 @@ export function registerAgentMailReceiver(app: Application): void {
               : typeof message.text === "string"
                 ? message.text
                 : null;
-          await proxyToTenant(instance as any, {
+          await proxyToTenant({}, {
             method: "POST",
             path: "/api/v1/streams/ingest",
             body: {
@@ -223,7 +215,7 @@ export function registerAgentMailReceiver(app: Application): void {
             return prisma.streamEvent.create({
               data: {
                 streamId: "agentmail-stream-buffer",
-                userId: instance.userId,
+                userId: owner.id,
                 sourceRef: message.message_id ?? null,
                 type: "agentmail",
                 raw: message as any,

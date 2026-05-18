@@ -1,14 +1,11 @@
 // /awaken — first ritual step (#852).
 //
-// Adapted from /tmp/alfred-black-redesign/src/routes/awaken.tsx and wired to
-// the live `getProvisioningStatus` query. Three planes (account / wire /
-// household) animate in line by line at TICK ms; once the local animation has
-// finished AND the backend reports the instance is running, the user advances
-// to /reading-the-room.
+// Three planes (account / wire / household) animate in line by line at
+// TICK ms. Single-VM has no fleet provisioning step, so the user advances
+// to /reading-the-room as soon as the canned animation finishes.
 
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, getProvisioningStatus } from "wasp/client/operations";
 import { RitualNav, HairlineFill } from "../client/components/ab/RitualNav";
 
 const PLANES: Array<{ name: string; where: string; lines: string[] }> = [
@@ -49,12 +46,6 @@ export default function AwakenPage() {
   const [line, setLine] = useState(0);
   const navigate = useNavigate();
 
-  // Poll provisioning status — until the instance is "running" we hold the
-  // user on this page even after the canned animation finishes.
-  const { data: provStatus } = useQuery(getProvisioningStatus, undefined, {
-    refetchInterval: 5_000,
-  });
-
   useEffect(() => {
     if (plane >= PLANES.length) return;
     const cur = PLANES[plane];
@@ -70,11 +61,9 @@ export default function AwakenPage() {
   }, [plane, line]);
 
   const animationDone = plane >= PLANES.length;
-  const instanceStatus = (provStatus?.instance?.status ?? null) as
-    | string
-    | null;
-  const provisionDone = instanceStatus === "running";
-  const done = animationDone && provisionDone;
+  // Single-VM: no fleet provisioning to wait on — the ritual advances as
+  // soon as the canned animation completes.
+  const done = animationDone;
 
   useEffect(() => {
     if (!done) return;
@@ -136,24 +125,13 @@ export default function AwakenPage() {
           </ol>
 
           {!done && (
-            <>
-              <HairlineFill
-                ms={
-                  (PLANES.reduce((s, p) => s + p.lines.length, 0) +
-                    PLANES.length) *
-                  TICK
-                }
-              />
-              {animationDone && !provisionDone && (
-                <p
-                  className="mt-6 font-body italic text-[15px]"
-                  style={{ color: "var(--marginalia)" }}
-                >
-                  A moment. Alfred is finishing the wiring
-                  {instanceStatus ? ` (${instanceStatus})` : ""}.
-                </p>
-              )}
-            </>
+            <HairlineFill
+              ms={
+                (PLANES.reduce((s, p) => s + p.lines.length, 0) +
+                  PLANES.length) *
+                TICK
+              }
+            />
           )}
 
           {done && (

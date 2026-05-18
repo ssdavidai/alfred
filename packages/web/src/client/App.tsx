@@ -16,11 +16,7 @@ import { ThemeProvider } from "./lib/theme";
 export default function App() {
   const location = useLocation();
   const isMarketingPage = useMemo(() => {
-    return (
-      location.pathname === "/" ||
-      location.pathname.startsWith("/pricing") ||
-      location.pathname.startsWith("/checkout")
-    );
+    return location.pathname === "/";
   }, [location]);
 
   // Pages that bring their own Frame (header + footer) — App-level

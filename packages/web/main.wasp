@@ -30,8 +30,6 @@ app AlfredSaaS {
     "<link rel='preconnect' href='https://fonts.googleapis.com' />",
     "<link rel='preconnect' href='https://fonts.gstatic.com' crossorigin />",
     "<link href='https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400&family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=JetBrains+Mono:wght@400;500;700;800&display=swap' rel='stylesheet' />",
-
-    "<script defer data-domain='alfred.black' src='https://plausible.alfred.black/js/script.js'></script>",
   ],
 
   auth: {
@@ -68,12 +66,6 @@ app AlfredSaaS {
     onAuthSucceededRedirectTo: "/post-signup",
     onAfterSignup: import { onAfterSignup } from "@src/auth/hooks",
     onAfterLogin: import { onAfterLogin } from "@src/auth/hooks",
-  },
-
-  db: {
-    seeds: [
-      import { seedMockUsers } from "@src/server/scripts/dbSeeds",
-    ]
   },
 
   client: {
@@ -177,111 +169,6 @@ route AccountRoute { path: "/account", to: AccountPage }
 page AccountPage {
   authRequired: true,
   component: import Account from "@src/user/AccountPage"
-}
-
-query getPaginatedUsers {
-  fn: import { getPaginatedUsers } from "@src/user/operations",
-  entities: [User]
-}
-
-action updateIsUserAdminById {
-  fn: import { updateIsUserAdminById } from "@src/user/operations",
-  entities: [User]
-}
-
-action deleteUserById {
-  fn: import { deleteUserById } from "@src/user/operations",
-  entities: [User, Instance, ProvisioningJob, ApiKey, ContactFormMessage]
-}
-
-action adminUpdateUser {
-  fn: import { adminUpdateUser } from "@src/user/operations",
-  entities: [User]
-}
-
-action adminCreateInstance {
-  fn: import { adminCreateInstance } from "@src/admin/instanceOperations",
-  entities: [Instance, User, ProvisioningJob]
-}
-
-// ============================================================
-// Payment / Pricing
-// ============================================================
-route PricingPageRoute { path: "/pricing", to: PricingPage }
-page PricingPage {
-  component: import PricingPage from "@src/payment/PricingPage"
-}
-
-route CheckoutResultRoute { path: "/checkout", to: CheckoutResultPage }
-page CheckoutResultPage {
-  authRequired: true,
-  component: import CheckoutResultPage from "@src/payment/CheckoutResultPage"
-}
-
-query getCustomerPortalUrl {
-  fn: import { getCustomerPortalUrl } from "@src/payment/operations",
-  entities: [User]
-}
-
-action generateCheckoutSession {
-  fn: import { generateCheckoutSession } from "@src/payment/operations",
-  entities: [User, AdminSetting]
-}
-
-api paymentsWebhook {
-  fn: import { paymentsWebhook } from "@src/payment/webhook",
-  entities: [User, Instance, ProvisioningJob],
-  middlewareConfigFn: import { paymentsMiddlewareConfigFn } from "@src/payment/webhook",
-  httpRoute: (POST, "/payments-webhook")
-}
-
-// ============================================================
-// Provisioning
-// ============================================================
-route SetupRoute { path: "/setup", to: SetupPage }
-page SetupPage {
-  authRequired: true,
-  component: import SetupPage from "@src/provisioning/SetupPage"
-}
-
-query getProvisioningStatus {
-  fn: import { getProvisioningStatus } from "@src/provisioning/operations",
-  entities: [Instance, ProvisioningJob, OAuthCredential]
-}
-
-action reprovisionInstance {
-  fn: import { reprovisionInstance } from "@src/provisioning/operations",
-  entities: [Instance, ProvisioningJob]
-}
-
-action provisionNewUser {
-  fn: import { provisionNewUser } from "@src/provisioning/operations",
-  entities: [Instance, ProvisioningJob]
-}
-
-job provisionInstance {
-  executor: PgBoss,
-  perform: {
-    fn: import { provisionInstanceJob } from "@src/provisioning/worker"
-  },
-  schedule: {
-    cron: "*/1 * * * *" // poll for pending jobs every minute (backup)
-  },
-  // `User` is read by worker.ts to source `TENANT_OWNER_EMAIL` (fed through
-  // to ctrl provisioner → tenant .env → init container for
-  // authorized_senders.json seeding + AgentMail defaults). Omitting it made
-  // every tenant signup after #446 landed crash at the first location-retry
-  // with `Cannot read properties of undefined (reading 'findUnique')` —
-  // Wasp only populates `context.entities.X` for X declared here.
-  entities: [Instance, ProvisioningJob, User]
-}
-
-job destroyInstance {
-  executor: PgBoss,
-  perform: {
-    fn: import { destroyInstanceJob } from "@src/lifecycle/worker"
-  },
-  entities: [Instance]
 }
 
 // ============================================================
@@ -570,7 +457,7 @@ action revokeApiKey {
 // User API proxy (Bearer token auth with user API keys)
 api userApiProxy {
   fn: import { userApiProxy } from "@src/apikeys/proxy",
-  entities: [ApiKey, Instance],
+  entities: [ApiKey],
   middlewareConfigFn: import { apiProxyMiddleware } from "@src/apikeys/proxy",
   httpRoute: (ALL, "/user-api")
 }
@@ -578,37 +465,37 @@ api userApiProxy {
 // Dashboard queries and actions (proxy to tenant API)
 query getDashboardData {
   fn: import { getDashboardData } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getInstalledApps {
   fn: import { getInstalledApps } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getClaudeSetup {
   fn: import { getClaudeSetup } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getInboxItems {
   fn: import { getInboxItems } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action submitInboxItem {
   fn: import { submitInboxItem } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getVaultRecords {
   fn: import { getVaultRecords } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getVaultRecord {
   fn: import { getVaultRecord } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // XC #873 — title-index for live wikilink resolution in the Markdown
@@ -616,7 +503,7 @@ query getVaultRecord {
 // cached on the tenant side).
 query getVaultTitleIndex {
   fn: import { getVaultTitleIndex } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // STATE-MUTATION Phase E (#893) — briefings index + single. Wraps the
@@ -624,12 +511,12 @@ query getVaultTitleIndex {
 // Powers /brief (most-recent) and /briefings (chronological list).
 query getBriefings {
   fn: import { getBriefings } from "@src/briefings/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getBriefing {
   fn: import { getBriefing } from "@src/briefings/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Account-level "I have read this briefing" pointer. Stored on the User
@@ -655,12 +542,12 @@ action dismissBriefing {
 // and the detail is `getMatterDetail`.
 query getMattersIndex {
   fn: import { getMattersIndex } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getMatterDetail {
   fn: import { getMatterDetail } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // RFC #884 — living-narrative per-chore detail. Distinct from `getChoreSource`
@@ -668,146 +555,146 @@ query getMatterDetail {
 // keyed off a task vault record.
 query getChoreDetail2 {
   fn: import { getChoreDetail2 } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getVaultGraph {
   fn: import { getVaultGraph } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getNebulaData {
   fn: import { getNebulaData } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getWorkerStatus {
   fn: import { getWorkerStatus } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action triggerWorker {
   fn: import { triggerWorker } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getDevices {
   fn: import { getDevices } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action approveDevice {
   fn: import { approveDevice } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action rejectDevice {
   fn: import { rejectDevice } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action removeDevice {
   fn: import { removeDevice } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getContainerLogs {
   fn: import { getContainerLogs } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getActivityFeed {
   fn: import { getActivityFeed } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Durable audit feed read from vault/event/ records — what the /study#audit
 // section reads. getActivityFeed remains for the LogsPage container-log view.
 query getAuditFeed {
   fn: import { getAuditFeed } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getCredentials {
   fn: import { getCredentials } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action updateCredentials {
   fn: import { updateCredentials } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Vexa meeting-bot auto-join toggle
 query getVexaAutoJoin {
   fn: import { getVexaAutoJoin } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action setVexaAutoJoin {
   fn: import { setVexaAutoJoin } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // AgentPhone (Phase 8)
 query getPhoneConfig {
   fn: import { getPhoneConfig } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action addAuthorizedNumber {
   fn: import { addAuthorizedNumber } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action removeAuthorizedNumber {
   fn: import { removeAuthorizedNumber } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action updateAgentConfig {
   fn: import { updateAgentConfig } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action updateAgentModel {
   fn: import { updateAgentModel } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getModelCatalog {
   fn: import { getModelCatalog } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getWorkspaceFile {
   fn: import { getWorkspaceFile } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action updateWorkspaceFile {
   fn: import { updateWorkspaceFile } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getFirstBrief {
   fn: import { getFirstBrief } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action startOnboarding {
   fn: import { startOnboarding } from "@src/dashboard/operations",
-  entities: [Instance, Stream, OAuthCredential]
+  entities: [Stream, OAuthCredential]
 }
 
 query getOnboardingProgress {
   fn: import { getOnboardingProgress } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // ============================================================
@@ -828,115 +715,115 @@ page ChoreDetailPage {
 
 query getTasks {
   fn: import { getTasks } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getTaskDetail {
   fn: import { getTaskDetail } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action updateTask {
   fn: import { updateTask } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action updateTaskStatus {
   fn: import { updateTaskStatus } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getTriage {
   fn: import { getTriage } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getMatters {
   fn: import { getMatters } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getQuarantine {
   fn: import { getQuarantine } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action retryQuarantine {
   fn: import { retryQuarantine } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action dismissQuarantine {
   fn: import { dismissQuarantine } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getLedgerEntries {
   fn: import { getLedgerEntries } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Approval queue
 query getPendingApprovals {
   fn: import { getPendingApprovals } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action approveAction {
   fn: import { approveAction } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action rejectAction {
   fn: import { rejectAction } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action promoteTriage {
   fn: import { promoteTriage } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action createVaultRecord {
   fn: import { createVaultRecord } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action triggerErrandExecution {
   fn: import { triggerErrandExecution } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getSchedules {
   fn: import { getSchedules } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action triggerSchedule {
   fn: import { triggerSchedule } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action pauseSchedule {
   fn: import { pauseSchedule } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action resumeSchedule {
   fn: import { resumeSchedule } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Steward (#836 Phase 0.5) — recent-actions list + undo proxy.
 // Both wrap ctrl-api endpoints in packages/ctrl/src/api/routes/steward.ts.
 query getRecentStewardActions {
   fn: import { getRecentStewardActions } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action undoStewardAction {
   fn: import { undoStewardAction } from "@src/tasks/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // ============================================================
@@ -945,42 +832,42 @@ action undoStewardAction {
 
 query getChores {
   fn: import { getChores } from "@src/chores/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getChore {
   fn: import { getChore } from "@src/chores/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getChoreSource {
   fn: import { getChoreSource } from "@src/chores/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getChoreRuns {
   fn: import { getChoreRuns } from "@src/chores/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action pauseChore {
   fn: import { pauseChore } from "@src/chores/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action resumeChore {
   fn: import { resumeChore } from "@src/chores/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action deleteChore {
   fn: import { deleteChore } from "@src/chores/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action triggerChore {
   fn: import { triggerChore } from "@src/chores/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // ============================================================
@@ -997,17 +884,17 @@ action triggerChore {
 
 query getStateChanges {
   fn: import { getStateChanges } from "@src/state/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getStateChangeSources {
   fn: import { getStateChangeSources } from "@src/state/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getChoreScheduleFires {
   fn: import { getChoreScheduleFires } from "@src/state/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Manual vault edits to matter/task state fields flow through this action
@@ -1019,7 +906,7 @@ query getChoreScheduleFires {
 // declared state-field allowlist on matter/* and task/* records.
 action applyManualStateChange {
   fn: import { applyManualStateChange } from "@src/state/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Patch a chore record's mutable fields (schedule / name / description /
@@ -1027,7 +914,7 @@ action applyManualStateChange {
 // editor on /chores/:slug only ever patches the `schedule` field.
 action patchChore {
   fn: import { patchChore } from "@src/chores/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // ============================================================
@@ -1041,79 +928,79 @@ page IntegrationsPage {
 
 query getIntegrationCatalog {
   fn: import { getIntegrationCatalog } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getConnectedIntegrations {
   fn: import { getConnectedIntegrations } from "@src/integrations/operations",
-  entities: [Instance, ComposioConnection]
+  entities: [ComposioConnection]
 }
 
 query getIntegrationCapabilities {
   fn: import { getIntegrationCapabilities } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action initiateConnect {
   fn: import { initiateConnect } from "@src/integrations/operations",
-  entities: [Instance, ComposioConnection]
+  entities: [ComposioConnection]
 }
 
 action initiateApiKeyConnect {
   fn: import { initiateApiKeyConnect } from "@src/integrations/operations",
-  entities: [Instance, ComposioConnection]
+  entities: [ComposioConnection]
 }
 
 action disconnectIntegration {
   fn: import { disconnectIntegration } from "@src/integrations/operations",
-  entities: [Instance, ComposioConnection]
+  entities: [ComposioConnection]
 }
 
 action enableIntegrationStream {
   fn: import { enableIntegrationStream } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action disableIntegrationStream {
   fn: import { disableIntegrationStream } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action migrateIntegrationStream {
   fn: import { migrateIntegrationStream } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action enableIntegrationTool {
   fn: import { enableIntegrationTool } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action disableIntegrationTool {
   fn: import { disableIntegrationTool } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action autoConfigIntegration {
   fn: import { autoConfigIntegration } from "@src/integrations/operations",
-  entities: [Instance, ComposioConnection]
+  entities: [ComposioConnection]
 }
 
 action finalizeComposioConnections {
   fn: import { finalizeComposioConnections } from "@src/integrations/operations",
-  entities: [Instance, ComposioConnection]
+  entities: [ComposioConnection]
 }
 
 query getOpenclawReadiness {
   fn: import { getOpenclawReadiness } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Per-connection scope (read/write action lists) — feeds the "Where I am
 // authorised to act" table on /connections.
 query getIntegrationScope {
   fn: import { getIntegrationScope } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Inbound custom-webhook endpoints — first-class stream sources alongside
@@ -1121,12 +1008,12 @@ query getIntegrationScope {
 // arbitrary JSON to; each POST lands as a stream_event for the curator.
 action createInboundWebhook {
   fn: import { createInboundWebhook } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action deleteInboundWebhook {
   fn: import { deleteInboundWebhook } from "@src/integrations/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Reconciler — closes the gap between "Composio reports ACTIVE" and
@@ -1144,7 +1031,7 @@ job reconcileComposioAutoConfig {
   schedule: {
     cron: "*/1 * * * *"
   },
-  entities: [Instance, ComposioConnection, User]
+  entities: [ComposioConnection, User]
 }
 
 // ============================================================
@@ -1166,7 +1053,7 @@ page ToolsPage {
 
 query getAllowedTools {
   fn: import { getAllowedTools } from "@src/tools/operations",
-  entities: [Instance, ComposioConnection]
+  entities: [ComposioConnection]
 }
 
 // ============================================================
@@ -1180,52 +1067,52 @@ page IntuitionPage {
 
 query getIntuitionStatus {
   fn: import { getIntuitionStatus } from "@src/intuition/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getIntuitionInstincts {
   fn: import { getIntuitionInstincts } from "@src/intuition/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getIntuitionQueue {
   fn: import { getIntuitionQueue } from "@src/intuition/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getObservations {
   fn: import { getObservations } from "@src/intuition/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getRecentJudgments {
   fn: import { getRecentJudgments } from "@src/intuition/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action routeInput {
   fn: import { routeInput } from "@src/intuition/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action enableIntuition {
   fn: import { enableIntuition } from "@src/intuition/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action disableIntuition {
   fn: import { disableIntuition } from "@src/intuition/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getSessions {
   fn: import { getSessions } from "@src/intuition/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action updateInstinct {
   fn: import { updateInstinct } from "@src/intuition/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // ============================================================
@@ -1233,17 +1120,17 @@ action updateInstinct {
 // ============================================================
 query getStreams {
   fn: import { getStreams } from "@src/streams/operations",
-  entities: [Stream, StreamEvent, Instance, ComposioConnection]
+  entities: [Stream, StreamEvent, ComposioConnection]
 }
 
 query getStreamEvents {
   fn: import { getStreamEvents } from "@src/streams/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action createStream {
   fn: import { createStream } from "@src/streams/operations",
-  entities: [Stream, Instance]
+  entities: [Stream]
 }
 
 action updateStream {
@@ -1253,17 +1140,17 @@ action updateStream {
 
 action deleteStream {
   fn: import { deleteStream } from "@src/streams/operations",
-  entities: [Stream, StreamEvent, Instance]
+  entities: [Stream, StreamEvent]
 }
 
 action pauseStream {
   fn: import { pauseStream } from "@src/streams/operations",
-  entities: [Stream, Instance]
+  entities: [Stream]
 }
 
 action resumeStream {
   fn: import { resumeStream } from "@src/streams/operations",
-  entities: [Stream, Instance]
+  entities: [Stream]
 }
 
 action regenerateWebhookToken {
@@ -1275,13 +1162,13 @@ action regenerateWebhookToken {
 // extensible to other auth-already-granted sources later)
 action applyStreamSuggestions {
   fn: import { applyStreamSuggestions } from "@src/streams/operations",
-  entities: [Instance, Stream]
+  entities: [Stream]
 }
 
 // A.3: list unresolved suggestions for the Streams page UI cards
 query getStreamSuggestions {
   fn: import { getStreamSuggestions } from "@src/streams/operations",
-  entities: [Instance, Stream]
+  entities: [Stream]
 }
 
 action storeIntegrationToken {
@@ -1291,7 +1178,7 @@ action storeIntegrationToken {
 
 action submitFactCorrections {
   fn: import { submitFactCorrections } from "@src/dashboard/operations",
-  entities: [Instance, Stream]
+  entities: [Stream]
 }
 
 // ============================================================
@@ -1302,22 +1189,22 @@ action submitFactCorrections {
 // homepage — older tenants without the route shouldn't break.
 query getNeedsAttention {
   fn: import { getNeedsAttention } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action resolveNeedsAttentionDone {
   fn: import { resolveNeedsAttentionDone } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action resolveNeedsAttentionDispatch {
   fn: import { resolveNeedsAttentionDispatch } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action resolveNeedsAttentionSkip {
   fn: import { resolveNeedsAttentionSkip } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Generic Desk-card audit. Every click on Delegate / Defer / Delete /
@@ -1326,7 +1213,7 @@ action resolveNeedsAttentionSkip {
 // the per-source endpoints; the only server call for "Do".
 action recordDeskAction {
   fn: import { recordDeskAction } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Decisions — first-class records of every Desk click. Every click
@@ -1334,17 +1221,17 @@ action recordDeskAction {
 // fans out the side effects. See packages/ctrl/src/api/routes/decisions.ts.
 action recordDecision {
   fn: import { recordDecision } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getRecentDecisions {
   fn: import { getRecentDecisions } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action reverseDecision {
   fn: import { reverseDecision } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // to_do — the principal's persistent personal queue. Spawned by the
@@ -1352,12 +1239,12 @@ action reverseDecision {
 // in-React Backstage tray.
 query getMyTodos {
   fn: import { getMyTodos } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 action completeMyTodo {
   fn: import { completeMyTodo } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // Pattern proposals — proposed standing rules extracted from the
@@ -1368,12 +1255,12 @@ action completeMyTodo {
 // poll every ~10s and show live progress.
 query getInFlightDecisions {
   fn: import { getInFlightDecisions } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 query getPatternProposals {
   fn: import { getPatternProposals } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 // ============================================================
@@ -1384,7 +1271,7 @@ query getPatternProposals {
 // needs_attention_action- prefixes.
 query getStewardFeed {
   fn: import { getStewardFeed } from "@src/dashboard/operations",
-  entities: [Instance]
+  entities: []
 }
 
 route StewardFeedRoute { path: "/dashboard/command-center/steward-feed", to: StewardFeedPage }
@@ -1399,174 +1286,6 @@ action submitAccessRequest {
   entities: [],
   auth: false
 }
-
-// ============================================================
-// Monitoring & Operations
-// ============================================================
-job healthMonitor {
-  executor: PgBoss,
-  perform: {
-    fn: import { healthMonitorJob } from "@src/monitoring/worker"
-  },
-  schedule: {
-    cron: "*/2 * * * *" // every 2 minutes
-  },
-  entities: [Instance]
-}
-
-job syncSubscriptions {
-  executor: PgBoss,
-  perform: {
-    fn: import { syncSubscriptionsJob } from "@src/lifecycle/worker"
-  },
-  schedule: {
-    cron: "0 * * * *" // every hour
-  },
-  entities: [User, Instance]
-}
-
-job suspendedCleanup {
-  executor: PgBoss,
-  perform: {
-    fn: import { suspendedCleanupJob } from "@src/lifecycle/worker"
-  },
-  schedule: {
-    cron: "0 4 * * *" // daily at 4am
-  },
-  entities: [Instance]
-}
-
-// ============================================================
-// Analytics (kept from OpenSaaS template)
-// ============================================================
-query getDailyStats {
-  fn: import { getDailyStats } from "@src/analytics/operations",
-  entities: [User, DailyStats]
-}
-
-job dailyStatsJob {
-  executor: PgBoss,
-  perform: {
-    fn: import { calculateDailyStats } from "@src/analytics/stats"
-  },
-  schedule: {
-    cron: "0 * * * *"
-  },
-  entities: [User, DailyStats, Logs, PageViewSource]
-}
-
-// ============================================================
-// Internal Admin Dashboard
-// ============================================================
-route AdminRoute { path: "/admin", to: AdminDashboardPage }
-page AdminDashboardPage {
-  authRequired: true,
-  component: import AdminDashboardPage from "@src/admin/dashboards/analytics/AnalyticsDashboardPage"
-}
-
-route AdminUsersRoute { path: "/admin/users", to: AdminUsersPage }
-page AdminUsersPage {
-  authRequired: true,
-  component: import AdminUsers from "@src/admin/dashboards/users/UsersDashboardPage"
-}
-
-route AdminInstancesRoute { path: "/admin/instances", to: AdminInstancesPage }
-page AdminInstancesPage {
-  authRequired: true,
-  component: import AdminInstances from "@src/admin/dashboards/instances/InstancesDashboardPage"
-}
-
-query getAdminInstances {
-  fn: import { getAdminInstances } from "@src/admin/operations",
-  entities: [Instance, User]
-}
-
-route AdminInstanceDetailRoute { path: "/admin/instances/:instanceId", to: AdminInstanceDetailPage }
-page AdminInstanceDetailPage {
-  authRequired: true,
-  component: import AdminInstanceDetail from "@src/admin/dashboards/instances/InstanceDetailPage"
-}
-
-route AdminProvisioningJobsRoute { path: "/admin/provisioning", to: AdminProvisioningJobsPage }
-page AdminProvisioningJobsPage {
-  authRequired: true,
-  component: import AdminProvisioningJobs from "@src/admin/dashboards/instances/ProvisioningJobsPage"
-}
-
-query getAdminInstanceDetail {
-  fn: import { getAdminInstanceDetail } from "@src/admin/instanceOperations",
-  entities: [Instance, User, ProvisioningJob]
-}
-
-query getAdminInstanceHealth {
-  fn: import { getAdminInstanceHealth } from "@src/admin/instanceOperations",
-  entities: [Instance]
-}
-
-query getAdminInstanceDevices {
-  fn: import { getAdminInstanceDevices } from "@src/admin/instanceOperations",
-  entities: [Instance]
-}
-
-query getAdminProvisioningJobs {
-  fn: import { getAdminProvisioningJobs } from "@src/admin/instanceOperations",
-  entities: [ProvisioningJob, User]
-}
-
-action adminDestroyInstance {
-  fn: import { adminDestroyInstance } from "@src/admin/instanceOperations",
-  entities: [Instance]
-}
-
-action adminProvisionInstance {
-  fn: import { adminProvisionInstance } from "@src/admin/instanceOperations",
-  entities: [Instance, ProvisioningJob]
-}
-
-action adminTriggerWorker {
-  fn: import { adminTriggerWorker } from "@src/admin/instanceOperations",
-  entities: [Instance]
-}
-
-action adminApproveDevice {
-  fn: import { adminApproveDevice } from "@src/admin/instanceOperations",
-  entities: [Instance]
-}
-
-action adminRejectDevice {
-  fn: import { adminRejectDevice } from "@src/admin/instanceOperations",
-  entities: [Instance]
-}
-
-action adminPatchAllInstanceConfigs {
-  fn: import { adminPatchAllInstanceConfigs } from "@src/admin/instanceOperations",
-  entities: [Instance]
-}
-
-// ============================================================
-// Waitlist / Closed Beta
-// ============================================================
-route WaitlistRoute { path: "/waitlist", to: WaitlistPage }
-page WaitlistPage {
-  authRequired: true,
-  component: import WaitlistPage from "@src/payment/WaitlistPage"
-}
-
-query getAdminSettings {
-  fn: import { getAdminSettings } from "@src/admin/settingsOperations",
-  entities: [AdminSetting]
-}
-
-action updateAdminSetting {
-  fn: import { updateAdminSetting } from "@src/admin/settingsOperations",
-  entities: [AdminSetting]
-}
-
-query getClosedBetaStatus {
-  fn: import { getClosedBetaStatus } from "@src/admin/settingsOperations",
-  entities: [AdminSetting]
-}
-
 
 route TermsOfServiceRoute { path: "/tos", to: TermsOfServicePage }
 page TermsOfServicePage {

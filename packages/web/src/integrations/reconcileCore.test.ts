@@ -80,16 +80,9 @@ function makeRow(overrides: Partial<PendingRow> & {
     toolkit: overrides.toolkit,
     autoConfigState: overrides.autoConfigState ?? "pending",
     lastSyncedAt: overrides.lastSyncedAt ?? new Date(0),
-    user: overrides.user ?? {
-      id: "user-david",
-      instance: {
-        id: "inst-david",
-        tailscaleHostname: "alfred-david.example.ts.net",
-        apiKey: "decrypted:fake-api-key",
-        subdomainUrl: null,
-        status: "running",
-      },
-    },
+    // Single-VM: no per-user instance — the reconciler always hits the one
+    // local ctrl-api.
+    user: overrides.user ?? { id: "user-david" },
   };
 }
 
@@ -112,12 +105,12 @@ test("reconcileBatch: fires auto-config on a pending ACTIVE row and flips it to 
     lastSyncedAt: new Date(0),
   }];
   const delegate = makeFakeDelegate(fakeRows);
-  const fetchCalls: Array<{ instanceId: string; connectionId: string }> = [];
+  const fetchCalls: Array<{ connectionId: string }> = [];
 
   const deps: ReconcileDeps = {
     delegate,
-    fetchAutoConfig: async (instance, connectionId) => {
-      fetchCalls.push({ instanceId: instance.id, connectionId });
+    fetchAutoConfig: async (_instance, connectionId) => {
+      fetchCalls.push({ connectionId });
       return {
         toolkit: "gmail",
         composio_execute_enabled: true,
@@ -143,7 +136,6 @@ test("reconcileBatch: fires auto-config on a pending ACTIVE row and flips it to 
   });
   assert.strictEqual(fetchCalls.length, 1, "auto-config must be called exactly once");
   assert.strictEqual(fetchCalls[0].connectionId, "ca_gmail_raj");
-  assert.strictEqual(fetchCalls[0].instanceId, "inst-david");
 
   const updated = delegate.rows.get("ca_gmail_raj")!;
   assert.strictEqual(updated.autoConfigState, "configured");
@@ -194,87 +186,10 @@ test("reconcileBatch: marks the row 'error' when the tenant call rejects", async
   );
 });
 
-test("reconcileBatch: skips rows whose tenant instance isn't running", async () => {
-  const fakeRows: FakeRow[] = [{
-    connectionId: "ca_gmail_provisioning",
-    userId: "user-pending",
-    toolkit: "gmail",
-    status: "ACTIVE",
-    autoConfigState: "pending",
-    autoConfigError: null,
-    autoConfiguredAt: null,
-    streamsCreated: 0,
-    toolsEnabled: 0,
-    skillName: null,
-    lastSyncedAt: new Date(0),
-  }];
-  const delegate = makeFakeDelegate(fakeRows);
-  let fetched = false;
-  const deps: ReconcileDeps = {
-    delegate,
-    fetchAutoConfig: async () => {
-      fetched = true;
-      return {};
-    },
-  };
-
-  const row = makeRow({
-    connectionId: "ca_gmail_provisioning",
-    toolkit: "gmail",
-    user: {
-      id: "user-pending",
-      instance: {
-        id: "inst-pending",
-        tailscaleHostname: "alfred-foo.example.ts.net",
-        apiKey: "decrypted:abc",
-        subdomainUrl: null,
-        status: "provisioning",
-      },
-    },
-  });
-
-  const summary = await reconcileBatch([row], deps);
-
-  assert.strictEqual(summary.skipped, 1);
-  assert.strictEqual(summary.configured, 0);
-  assert.strictEqual(fetched, false, "fetchAutoConfig must not be called for non-running tenants");
-
-  // Row state untouched — caller will retry once the tenant comes online.
-  const stillPending = delegate.rows.get("ca_gmail_provisioning")!;
-  assert.strictEqual(stillPending.autoConfigState, "pending");
-});
-
-test("reconcileBatch: skips rows whose user has no instance row (tenant being torn down)", async () => {
-  const fakeRows: FakeRow[] = [{
-    connectionId: "ca_orphan",
-    userId: "user-orphan",
-    toolkit: "gmail",
-    status: "ACTIVE",
-    autoConfigState: "pending",
-    autoConfigError: null,
-    autoConfiguredAt: null,
-    streamsCreated: 0,
-    toolsEnabled: 0,
-    skillName: null,
-    lastSyncedAt: new Date(0),
-  }];
-  const delegate = makeFakeDelegate(fakeRows);
-  const deps: ReconcileDeps = {
-    delegate,
-    fetchAutoConfig: async () => { throw new Error("must not be called"); },
-  };
-
-  const row = makeRow({
-    connectionId: "ca_orphan",
-    toolkit: "gmail",
-    user: { id: "user-orphan", instance: null },
-  });
-
-  const summary = await reconcileBatch([row], deps);
-  assert.strictEqual(summary.skipped, 1);
-  assert.strictEqual(summary.configured, 0);
-  assert.strictEqual(summary.errored, 0);
-});
+// NOTE: the legacy "skips rows whose tenant instance isn't running" /
+// "...has no instance row" tests are intentionally dropped. Single-VM has
+// no fleet and no provisioning gate — the reconciler always targets the one
+// local ctrl-api, so there is no skip-when-not-provisioned path to cover.
 
 test("reconcileBatch: respects the per-tick concurrency cap", async () => {
   const ids = ["a", "b", "c", "d", "e"];

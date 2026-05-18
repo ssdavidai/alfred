@@ -3,7 +3,6 @@ import { useAuth } from "wasp/client/auth";
 import { useSearchParams, Navigate } from "react-router-dom";
 import {
   useQuery,
-  getCustomerPortalUrl,
   listApiKeys,
   createApiKey,
   revokeApiKey,
@@ -145,18 +144,13 @@ function LegacySettingsPage() {
 
 export function AccountContent() {
   const { data: user } = useAuth();
-  const {
-    data: portalUrl,
-    isLoading: portalLoading,
-    error: portalError,
-  } = useQuery(getCustomerPortalUrl);
 
   return (
     <>
       <h2 className="font-serif mb-6 text-xl font-light text-cream">Account</h2>
 
       <div className="space-y-6">
-        {/* Account Info */}
+        {/* Account Info — single-VM: no billing plan / subscription. */}
         <SpotlightCard title="Account">
           <dl className="space-y-3 text-sm">
             <div className="flex justify-between">
@@ -164,43 +158,12 @@ export function AccountContent() {
               <dd className="text-foreground">{user?.email || "-"}</dd>
             </div>
             <div className="flex justify-between">
-              <dt className="text-muted-foreground">Plan</dt>
+              <dt className="text-muted-foreground">Role</dt>
               <dd className="text-foreground capitalize">
-                {user?.subscriptionPlan || "None"}
-              </dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-muted-foreground">Subscription Status</dt>
-              <dd className="text-foreground capitalize">
-                {user?.subscriptionStatus?.replace(/_/g, " ") || "None"}
+                {(user as any)?.isOwner ? "Owner" : "Member"}
               </dd>
             </div>
           </dl>
-        </SpotlightCard>
-
-        {/* Subscription Management */}
-        <SpotlightCard title="Subscription">
-          <p className="text-muted-foreground mb-4 text-sm">
-            Manage your subscription, update payment methods, or cancel through
-            the customer portal.
-          </p>
-          {portalError && (
-            <div className="bg-destructive/10 text-destructive mb-4 rounded-sm p-3 text-sm">
-              <p>Failed to load subscription portal: {portalError.message}</p>
-            </div>
-          )}
-          {portalUrl ? (
-            <Button
-              onClick={() => window.open(portalUrl, "_blank")}
-            >
-              <ExternalLink className="mr-2 h-4 w-4" />
-              Manage Subscription
-            </Button>
-          ) : (
-            <Button disabled={portalLoading || !!portalError}>
-              {portalLoading ? "Loading..." : "No active subscription"}
-            </Button>
-          )}
         </SpotlightCard>
 
         {/* API Keys */}

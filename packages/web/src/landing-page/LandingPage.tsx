@@ -408,7 +408,6 @@ const FOOTER_LINKS: Array<{ to: string; label: string }> = [
   { to: "/voice", label: "Voice" },
   { to: "/sms", label: "SMS" },
   { to: "/voice-and-tone", label: "Voice & tone" },
-  { to: "/pricing", label: "Pricing" },
 ];
 
 function FooterLinks() {

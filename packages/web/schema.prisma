@@ -15,19 +15,15 @@ model User {
   username                  String?         @unique
   isAdmin                   Boolean         @default(false)
 
-  paymentProcessorUserId    String?         @unique
-  subscriptionStatus        String?         // 'active', 'cancel_at_period_end', 'past_due', 'deleted'
-  subscriptionPlan          String?         // 'premium', 'black' (grandfathered: 'starter', 'pro')
-  datePaid                  DateTime?
-  credits                   Int             @default(0)
+  // The first account created on a fresh single-VM install becomes the
+  // owner (see src/auth/userSignupFields.ts). There is exactly one owner.
+  isOwner                   Boolean         @default(false)
 
   // Last briefing the principal dismissed (e.g. "2026-05-13-morning").
   // /desk shows the brief envelope only when the most-recent briefing's
   // slug_date != this. Bumped when sir clicks Continue.
   lastDismissedBriefingSlugDate String?
 
-  instance                  Instance?
-  provisioningJobs          ProvisioningJob[]
   contactFormMessages       ContactFormMessage[]
   apiKeys                   ApiKey[]
   streams                   Stream[]
@@ -45,105 +41,6 @@ model ApiKey {
   keyPrefix         String                   // first 8 chars for display (e.g. "alf_a1b2...")
   lastUsedAt        DateTime?
   createdAt         DateTime  @default(now())
-}
-
-model Instance {
-  id                    String    @id @default(uuid())
-  userId                String    @unique
-  user                  User      @relation(fields: [userId], references: [id])
-  customerName          String    @unique    // "alfred-<slug>"
-  tier                  String               // PREMIUM, BLACK (grandfathered: STARTER, PRO)
-  serverType            String               // cx53 (grandfathered: cx33, cx43)
-  status                String    @default("provisioning")  // provisioning|running|suspended|error|destroyed
-  // ISO-3166-1 alpha-2 country code that drives Twilio number provisioning
-  // (`buyNumberWithWebhooks` in `provisioner.ts:provisionAgentPhone`).
-  // Defaults to "US" because that is the only country our Twilio account is
-  // currently entitled to buy local numbers in. Once a regulatory bundle
-  // lands for HU / other EU countries (see issue #535), set this per-tenant
-  // (HU, DE, AT, …) before re-provisioning to get an in-country number.
-  // Distinct from `phoneCountry`, which is the country Twilio actually
-  // assigned and is written *after* provisioning.
-  country               String?   @default("US")
-  tailscaleHostname     String?
-  subdomainUrl          String?              // e.g. https://acme.alfred.black
-  apiKey                String?              // encrypted AAS_API_KEY for tenant API
-  ipAddress             String?
-  provisionedAt         DateTime?
-  suspendedAt           DateTime?
-  lastHealthCheck       DateTime?
-  lastHealthStatus      String?              // ok|degraded|down|unreachable
-
-  // AgentMail — per-tenant email inbox (see deploy/agentmail-bootstrap.md)
-  agentmailInboxId         String?           // AgentMail internal inbox_id
-  agentmailInboxAddress    String?           // e.g. "alfred.owner@mail.alfred.black"
-  agentmailInboxApiKey     String?           // inbox-scoped API key, encrypted via COLUMN_ENCRYPTION_KEY
-  // Provisioning state tracker so the admin UI can surface mint failures
-  // without crashing VM provisioning. NULL = never attempted (legacy rows
-  // pre-#686), "ok" = inbox + key minted successfully, "failed" = mint
-  // attempt threw and the tenant ships without an email channel until a
-  // retry succeeds. See packages/saas/app/src/server/agentmail.ts.
-  agentmailProvisionStatus String?           // null|ok|failed
-  agentmailProvisionError  String?           // human-readable last error
-
-  // AgentPhone (Twilio + OpenAI Realtime) — see plan
-  phoneNumber           String?   @unique    // E.164, e.g. +15555550100
-  twilioNumberSid       String?              // Twilio resource SID
-  phoneCountry          String?              // ISO-3166-1 alpha-2 (HU, US, ...)
-  audioRecordingEnabled Boolean   @default(false)
-
-  createdAt             DateTime  @default(now())
-  updatedAt             DateTime  @updatedAt
-}
-
-// Spam denylist for AgentPhone — populated at SaaS edge by abandoned-call heuristics.
-// Voice webhook returns <Reject/> early for any caller with attempts >= threshold.
-model SpamNumber {
-  phoneNumber String   @id   // caller E.164
-  firstSeen   DateTime @default(now())
-  lastSeen    DateTime @updatedAt
-  attempts    Int      @default(1)
-  reason      String?  // "abandoned-calls", "manual", etc.
-}
-
-model ProvisioningJob {
-  id          String    @id @default(uuid())
-  userId      String
-  user        User      @relation(fields: [userId], references: [id])
-  instanceId  String?
-  status      String    @default("pending")  // pending|running|completed|failed
-  currentStep String?
-  logs        String[]
-  error       String?
-  startedAt   DateTime?
-  completedAt DateTime?
-  createdAt   DateTime  @default(now())
-}
-
-model DailyStats {
-  id                               Int             @id @default(autoincrement())
-  date                             DateTime        @default(now()) @unique
-
-  totalViews                       Int             @default(0)
-  prevDayViewsChangePercent        String          @default("0")
-  userCount                        Int             @default(0)
-  paidUserCount                    Int             @default(0)
-  userDelta                        Int             @default(0)
-  paidUserDelta                    Int             @default(0)
-  totalRevenue                     Float           @default(0)
-  totalProfit                      Float           @default(0)
-
-  sources                          PageViewSource[]
-}
-
-model PageViewSource {
-  @@id([date, name])
-  name                     String
-  date                     DateTime        @default(now())
-
-  dailyStats               DailyStats?     @relation(fields: [dailyStatsId], references: [id])
-  dailyStatsId             Int?
-
-  visitors                 Int
 }
 
 model Logs {
@@ -164,12 +61,6 @@ model ContactFormMessage {
   content                   String
   isRead                    Boolean         @default(false)
   repliedAt                 DateTime?
-}
-
-model AdminSetting {
-  key       String   @id
-  value     String
-  updatedAt DateTime @updatedAt
 }
 
 model Stream {

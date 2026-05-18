@@ -71,25 +71,11 @@ export function registerWebhookReceiver(app: Application): void {
         summary: extractSummary(req.body),
       };
 
-      // Fetch tenant instance separately
-      const instance = await prisma.instance.findUnique({ where: { userId: stream.userId } });
-
-      if (instance && instance.tailscaleHostname && instance.apiKey && instance.status === "running") {
-        try {
-          await proxyToTenant(instance, { method: "POST", path: "/api/v1/streams/ingest", body: event });
-        } catch {
-          await prisma.streamEvent.create({
-            data: {
-              streamId: stream.id,
-              userId: stream.userId,
-              sourceRef: event.source_ref ?? null,
-              type: stream.source,
-              raw: req.body as any,
-              summary: event.summary ?? null,
-            },
-          });
-        }
-      } else {
+      // Single-VM: proxy straight to the local ctrl-api. On failure, persist
+      // the event so it isn't lost and can be retried by the curator.
+      try {
+        await proxyToTenant({}, { method: "POST", path: "/api/v1/streams/ingest", body: event });
+      } catch {
         await prisma.streamEvent.create({
           data: {
             streamId: stream.id,
