@@ -8,9 +8,10 @@
 # This image only PACKAGES the static output — no build step here, so the
 # multi-arch build is trivial.
 #
-# The API base URL is inlined by Vite with an __ALFRED_API_URL__ placeholder;
-# the nginx entrypoint substitutes the real URL ($WASP_SERVER_URL) at
-# container start, keeping the image domain-agnostic.
+# The API base URL is inlined by Vite with a placeholder sentinel URL
+# (https://alfred-api-url.placeholder.invalid — a reserved-TLD URL that
+# passes Wasp's env validation); the nginx entrypoint substitutes the real
+# URL ($WASP_SERVER_URL) at container start, keeping the image domain-agnostic.
 #
 # Build context: packages/web — `web-app-build/` is the staged static bundle.
 # =============================================================================

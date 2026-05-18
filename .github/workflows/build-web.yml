@@ -50,7 +50,10 @@ jobs:
         working-directory: packages/web/.wasp/build/web-app
         run: |
           npm install --no-audit --no-fund
-          REACT_APP_API_URL=__ALFRED_API_URL__ npm run build
+          # A valid-URL sentinel (.invalid is a reserved TLD) so Wasp's
+          # client env validation passes; the entrypoint rewrites it at
+          # container start to the real API URL.
+          REACT_APP_API_URL=https://alfred-api-url.placeholder.invalid npm run build
           test -d build
           rm -rf "$GITHUB_WORKSPACE/packages/web/web-app-build"
           cp -r build "$GITHUB_WORKSPACE/packages/web/web-app-build"
