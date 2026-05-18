@@ -29,6 +29,21 @@ import {
   type AuditRow,
   type ListAuditOpts,
 } from "../../db/audit_queries.js";
+import { readColdAudit } from "../../db/cold_reader.js";
+
+// STORE-P5-2: hot-tier retention boundary. Rows older than this live
+// ONLY in the Parquet archive at /vault/_archive (see
+// packages/learn/src/activities/archive.py for the writer). Computed
+// on every request so it tracks wall-clock without restart. Mirrors
+// the env knob used by the writer so the two sides agree.
+function coldBoundaryNs(): bigint {
+  const days = parseInt(process.env.AUDIT_HOT_TTL_DAYS ?? "90", 10);
+  const safeDays = Number.isFinite(days) && days > 0 ? days : 90;
+  return (
+    BigInt(Date.now()) * 1_000_000n -
+    BigInt(safeDays * 86_400 * 1000) * 1_000_000n
+  );
+}
 
 // Audit rows carry a bigint `ts` (unix ns) that exceeds Number.MAX_SAFE_INTEGER
 // on a few-decade horizon, so we serialise it as a string on the wire to keep
@@ -235,14 +250,90 @@ export function registerAuditRoutes(): void {
   });
 
   // GET /api/v1/audit — paginated list with filters.
+  //
+  // STORE-P5-2: tier-spanning read. If the caller's `since` predates the
+  // hot-tier boundary, also query the cold Parquet archive via DuckDB
+  // and merge with the hot SQLite result. The HTTP contract stays
+  // identical; an `X-Audit-Tiers` header reports which tiers were
+  // consulted ("hot" | "cold" | "both").
   addRoute("GET", "/api/v1/audit", async ({ res, query }) => {
     const opts = parseListOpts(query);
     const db = openStateDb();
-    const rows = listAudit(db, opts);
-    const count = countAudit(db, opts);
+
+    const boundary = coldBoundaryNs();
+    const needsCold = opts.since !== undefined && opts.since < boundary;
+    // Pure-cold: the requested window ends BEFORE the hot boundary,
+    // so there's nothing in the hot table that matches — skip the hot
+    // SQL entirely. Saves a scan on a backlogged tenant.
+    const pureCold =
+      opts.until !== undefined && opts.until < boundary;
+
+    const limit = opts.limit ?? 50;
+    const offset = opts.offset ?? 0;
+
+    // Both tiers ORDER BY ts DESC. Cold rows older than hot rows by
+    // definition, so the merge is a simple [cold-after-hot] concat.
+    // We oversample (offset + limit) from each tier so the post-merge
+    // slice has enough rows even when offset > 0.
+    const fetchCap = offset + limit;
+    const hotOpts: ListAuditOpts = { ...opts, limit: fetchCap, offset: 0 };
+    const hotRows: AuditRow[] = pureCold ? [] : listAudit(db, hotOpts);
+
+    let coldRows: AuditRow[] = [];
+    if (needsCold) {
+      try {
+        coldRows = await readColdAudit({
+          since: opts.since,
+          until: opts.until,
+          actor: opts.actor,
+          action_type: opts.action_type,
+          target_type: opts.target_type,
+          target_id: opts.target_id,
+          limit: fetchCap,
+        });
+      } catch (err) {
+        // readColdAudit catches its own errors and returns [], so this
+        // should be unreachable — log and continue with just hot.
+        console.error(
+          `audit: cold-tier read failed: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    // Merge + sort DESC + paginate. Both tiers are already sorted DESC,
+    // but a simple full re-sort is O(n log n) on n ~= 2 * fetchCap which
+    // stays small (default fetchCap is 50).
+    const merged = [...hotRows, ...coldRows].sort((a, b) => {
+      if (a.ts === b.ts) return 0;
+      return a.ts > b.ts ? -1 : 1;
+    });
+    const page = merged.slice(offset, offset + limit);
+
+    // Count is best-effort tier-aware:
+    //   * hot-only:   exact SQL count
+    //   * pure-cold:  cold rows we actually fetched (capped at fetchCap)
+    //   * both:       hot SQL count + cold rows we actually fetched
+    // The hot count is exact; the cold count is the materialised batch
+    // size. Callers wanting an exact total over a >90d window can re-
+    // query without limit (bounded by the duckdb scan timeout).
+    let total: number;
+    if (!needsCold) {
+      total = countAudit(db, opts);
+    } else if (pureCold) {
+      total = coldRows.length;
+    } else {
+      total = countAudit(db, opts) + coldRows.length;
+    }
+
+    const tiers = pureCold
+      ? "cold"
+      : needsCold
+        ? "both"
+        : "hot";
+    res.setHeader("X-Audit-Tiers", tiers);
     sendJson(res, 200, {
-      results: rows.map(rowToWire),
-      count,
+      results: page.map(rowToWire),
+      count: total,
     });
   });
 

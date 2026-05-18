@@ -338,7 +338,14 @@ services:
       - /usr/bin/docker:/usr/bin/docker:ro
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
     working_dir: /opt/alfred/compose
-    command: ["bash", "-c", "apt-get update -qq && apt-get install -y -qq procps jq curl python3-yaml >/dev/null 2>&1; exec node --max-old-space-size=768 /app/api.mjs"]
+    # STORE-P5-2 (#922): the tier-spanning /api/v1/audit handler shells
+    # out to the `duckdb` CLI to read /vault/_archive/<YYYY-MM>/audit.parquet
+    # when a query predates the hot-tier boundary. The CLI is a single
+    # static binary; we fetch the pinned release at boot (idempotent
+    # across container restarts because /usr/local/bin is ephemeral on
+    # this image). If the download fails the audit endpoint still
+    # serves hot-tier results — cold_reader.ts logs + returns [].
+    command: ["bash", "-c", "apt-get update -qq && apt-get install -y -qq procps jq curl python3-yaml unzip >/dev/null 2>&1; if ! command -v duckdb >/dev/null 2>&1; then curl -fsSL -o /tmp/duckdb_cli.zip https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip && unzip -q -o /tmp/duckdb_cli.zip -d /usr/local/bin && chmod +x /usr/local/bin/duckdb && rm -f /tmp/duckdb_cli.zip || echo 'WARN: duckdb cli install failed — cold-audit reads will be empty'; fi; exec node --max-old-space-size=768 /app/api.mjs"]
     env_file:
       - .env
     environment:
