@@ -81,6 +81,24 @@ self({ endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
 | `GET /api/v1/learning/reflections` | Nightly reflection syntheses. |
 | `GET /api/v1/learning/sessions` | Tracked conversation sessions. |
 
+### Briefings, decisions, state-changes, pending, in-flight
+
+The Desk-and-delegation surface — the canonical source-of-truth for
+what Alfred has surfaced to Sir, what Sir has decided, and what
+mutations have been made. Always read these BEFORE acting on a
+delegation. See AGENTS.md §"Delegation & Brief-Awareness Protocol".
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/v1/briefings` | List morning / evening brief snapshots. Query: `slot=morning\|evening\|all`, `since`/`until` (ISO), `limit` (default 20, cap 100). Returns `{briefings, total}`. |
+| `GET /api/v1/briefings/:slug-date` | Read one brief by slug-date (e.g. `2026-05-14-morning`). Returns frontmatter + letterpress body. |
+| `GET /api/v1/decisions` | List decision records. Query: `state` (`open`/`completed`/`superseded`), `source` (`desk`, `decision-router.auto`, …), `since`, `limit` (default 100, cap 500). Returns `{decisions, count}`. |
+| `GET /api/v1/decisions/in-flight` | Decisions Sir has routed that are still working their outcome (delegated, deferred, …). |
+| `GET /api/v1/decisions/:id` | Read one decision by id. |
+| `GET /api/v1/state-changes` | List the universal state-change audit ledger. Query: `target` (vault-relative path), `source` (writer name), `since`/`until`, `limit` (default 50, cap 200), `offset`. Returns `{entries, total, limit, offset}`. |
+| `GET /api/v1/admin/needs-attention` | Decision cards waiting on Sir (the `/desk` queue). Query: `include=pending\|all` (default pending), `limit` (default 100, cap 500). Returns `{records, count}`. |
+| `GET /api/v1/openclaw/agents/ephemeral` | List in-flight `exec-*` subagents (delegations Alfred is still resolving). Returns `{agents, count, last_touched_at}`. |
+
 ### Workflows & schedules
 
 | Endpoint | What it does |

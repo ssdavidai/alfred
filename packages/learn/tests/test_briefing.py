@@ -131,6 +131,15 @@ class ScriptedTransport(httpx.AsyncBaseTransport):
         self, request: httpx.Request
     ) -> httpx.Response:
         body_raw = await request.aread()
+        # patching httpx.AsyncClient via the state_mutator namespace is
+        # actually module-wide (httpx is a singleton), so the new
+        # briefing.py gatherers (_load_soul_md, _gather_window_signals,
+        # _gather_money_envelope, _gather_day_shape, _gather_in_flight_agents)
+        # also flow through this transport. Filter to only record the
+        # state-change POSTs the test is asserting on; stub everything
+        # else with a 200 empty payload so the gatherers degrade cleanly.
+        if not request.url.path.endswith("/state-changes") or request.method != "POST":
+            return httpx.Response(200, json={})
         envelope = json.loads(body_raw.decode("utf-8")) if body_raw else {}
         target = envelope.get("target_path", "")
         self.requests.append({

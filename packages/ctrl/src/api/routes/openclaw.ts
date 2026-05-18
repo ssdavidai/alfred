@@ -110,6 +110,47 @@ export function registerOpenClawRoutes(): void {
     }
   });
 
+  // GET /api/v1/openclaw/agents/ephemeral — in-flight ephemeral exec-* agents.
+  // These are the short-lived subagents created by the dispatch-action path
+  // (DecisionRouterWorkflow, chore_actions.spawn_subagent, ephemeral_agent.py)
+  // and torn down by the cleanup pass. Each exec-* agent represents a
+  // delegation Alfred is currently working through.
+  //
+  // Sourced from the workers gateway config at
+  // /openclaw-workers-state/openclaw.json — same file the
+  // /api/v1/admin/openclaw-workers/agents listing reads, filtered to the
+  // `exec-` prefix. Returns the structured shape briefing.py + the
+  // alfred-self MCP `list_in_flight_agents` tool consume.
+  addRoute("GET", "/api/v1/openclaw/agents/ephemeral", async ({ res }) => {
+    const WORKERS_JSON = "/openclaw-workers-state/openclaw.json";
+    let cfg: Record<string, any> = {};
+    try {
+      cfg = JSON.parse(fs.readFileSync(WORKERS_JSON, "utf-8"));
+    } catch {
+      sendJson(res, 200, { agents: [], count: 0, last_touched_at: null });
+      return;
+    }
+    const list = (cfg.agents?.list ?? []) as any[];
+    const lastTouchedAt: string | null = cfg.meta?.lastTouchedAt ?? null;
+    const ephemeral = (Array.isArray(list) ? list : [])
+      .filter((a) => typeof a?.id === "string" && a.id.startsWith("exec-"))
+      .map((a) => ({
+        id: String(a.id),
+        name: String(a.name ?? `Ephemeral ${a.id}`),
+        model: a?.model?.primary ?? null,
+        tools_allow_count: Array.isArray(a?.tools?.allow) ? a.tools.allow.length : null,
+        // Best-effort timestamp — meta.lastTouchedAt is per-config not
+        // per-agent, but it tells the brief "as of when" the list is
+        // accurate. A future PR can stamp per-agent created_at on POST.
+        started_at_hint: lastTouchedAt,
+      }));
+    sendJson(res, 200, {
+      agents: ephemeral,
+      count: ephemeral.length,
+      last_touched_at: lastTouchedAt,
+    });
+  });
+
   // Cron
   addRoute("GET", "/api/v1/openclaw/cron", async ({ res }) => {
     const stdout = await dockerExec("openclaw", [...OPENCLAW_CMD, "cron"]);

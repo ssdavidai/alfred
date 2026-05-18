@@ -404,6 +404,14 @@ services:
       - TASK_QUEUE=alfred-learn
       - ALFRED_LEARN_ENABLED=${ALFRED_LEARN_ENABLED:-true}
       - ALFRED_CTRL_URL=http://ctrl-api:3100
+      # Composio Python SDK writes its module-load cache to ~/.composio. The
+      # alfred-learn container has no writable $HOME, which resolves to "/"
+      # and the SDK crashes at IMPORT time with PermissionError on /.composio.
+      # Pin the cache to /tmp (always writable) so any Composio import — via
+      # composio_client._get_client OR via composio_execute's docker-exec
+      # script (ctrl-api integrations.ts:2914) — initialises cleanly.
+      - COMPOSIO_CACHE_DIR=/tmp/composio
+      - HOME=/tmp
       - SAAS_API_URL=https://alfred.black
       - WORKERS_OPENCLAW_CONFIG=/openclaw-workers-state/openclaw.json
       - EXECUTION_GATEWAY_URL=http://openclaw-workers:18790

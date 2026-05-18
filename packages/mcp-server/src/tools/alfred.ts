@@ -344,6 +344,154 @@ const deviceTools: ToolDef[] = [
   },
 ];
 
+// ─── briefings / decisions / state-changes / pending / in-flight ────────────
+//
+// The Desk-and-delegation surface: every reader an exec subagent (or a
+// remote LLM via the connector) needs to know what just happened, what's
+// open, and what Alfred is still working on, without falling back to vault
+// walks. Backing endpoints are all under packages/ctrl/src/api/routes/
+// {briefings,decisions,stateChanges,attention,openclaw}.ts.
+
+const briefDecisionTools: ToolDef[] = [
+  {
+    name: "list_briefings",
+    description:
+      "List the principal's morning / evening brief snapshots written by BriefingWorkflow. Each entry summarises one slot: `slug_date` (e.g. `2026-05-14-morning`), `slot`, `composed_at`, plus the observed counts (`observed_matters_count`, `state_changes_count`, `signals_count`, `decisions_count`). Use this to find a specific brief before calling `get_briefing` for the body, or to answer 'when was the last brief?' / 'show me this week's briefs.' Filters: `slot` (morning|evening|all), `since`/`until` ISO timestamps over `composed_at`, `limit` (default 20, cap 100). Backing: filesystem walk of /vault/briefing/ via /api/v1/briefings.",
+    inputSchema: z.object({
+      slot: z.enum(["all", "morning", "evening"]).optional().describe(
+        "Filter to one slot. Default `all`.",
+      ),
+      since: z.string().optional().describe(
+        "ISO timestamp; only briefs with composed_at >= since.",
+      ),
+      until: z.string().optional().describe(
+        "ISO timestamp; only briefs with composed_at <= until.",
+      ),
+      limit: z.number().int().min(1).max(100).optional().describe(
+        "Max entries (default 20, cap 100).",
+      ),
+    }),
+    buildRequest: (args) => ({
+      method: "GET",
+      path: "/api/v1/briefings",
+      query: args,
+    }),
+  },
+  {
+    name: "get_briefing",
+    description:
+      "Read ONE brief snapshot by its slug-date — the body the principal sees on /brief plus all frontmatter. Use AFTER `list_briefings` (don't guess slug-dates; they're `YYYY-MM-DD-<slot>`). The body is letterpress prose written by Alfred from post-mutation matter state plus signals + decisions in the window; the frontmatter carries `composed_at`, `prior_briefing`, `window_start`/`end`, and the counts. Use to answer 'what did this morning's brief say?' or to ground a follow-up action ('did the brief mention X?'). Backing: GET /api/v1/briefings/:slug-date.",
+    inputSchema: z.object({
+      slug_date: z.string().min(1).describe(
+        "Brief identifier — `YYYY-MM-DD-<slot>`, e.g. `2026-05-14-morning`.",
+      ),
+    }),
+    buildRequest: ({ slug_date }) => ({
+      method: "GET",
+      path: `/api/v1/briefings/${encodeURIComponent(slug_date)}`,
+    }),
+  },
+  {
+    name: "list_decisions",
+    description:
+      "List decision records — choices the principal (or Alfred autonomously) has made and the state-machine that closes the loop on each. Each entry carries `id`, `path`, plus the frontmatter: `intent` (delegate/done/noise/defer/hold), `state` (open/completed/...), `created`, `completed_at`, `note`, `matter_ref`, `outcome_record`, `source`. Filters: `state` (e.g. `open` or `completed`), `source` (e.g. `desk` for principal-originated, `decision-router.auto` for autonomous fires), `since` ISO timestamp, `limit` (default 100, cap 500). Use to answer 'what have you done autonomously this week?', 'what's still open?', 'show me everything I delegated yesterday.' Backing: filesystem walk + frontmatter scan via /api/v1/decisions.",
+    inputSchema: z.object({
+      state: z.string().optional().describe(
+        "Filter on frontmatter.state. Common values: `open`, `completed`, `superseded`.",
+      ),
+      source: z.string().optional().describe(
+        "Filter on frontmatter.source — where the decision originated. Examples: `desk` (principal click), `decision-router.auto` (autonomous), `learn.judgment`.",
+      ),
+      since: z.string().optional().describe(
+        "ISO timestamp; only decisions with frontmatter.created >= since.",
+      ),
+      limit: z.number().int().min(1).max(500).optional().describe(
+        "Max entries (default 100, cap 500).",
+      ),
+    }),
+    buildRequest: (args) => ({
+      method: "GET",
+      path: "/api/v1/decisions",
+      query: args,
+    }),
+  },
+  {
+    name: "get_decision",
+    description:
+      "Read ONE decision record by id — the principal's exact note, the matter it touches, what intent was chosen, and the outcome_record that closed the loop (when state=completed). Use AFTER `list_decisions` to inspect a specific decision's full body. Returns `{id, path, frontmatter, body}`. Backing: GET /api/v1/decisions/:id.",
+    inputSchema: z.object({
+      id: z.string().min(1).describe(
+        "Decision id from list_decisions (e.g. `2026-05-14-firstbase-rsvp`).",
+      ),
+    }),
+    buildRequest: ({ id }) => ({
+      method: "GET",
+      path: `/api/v1/decisions/${encodeURIComponent(id)}`,
+    }),
+  },
+  {
+    name: "list_pending_decisions",
+    description:
+      "List decision cards currently awaiting the principal's attention — what's on /desk right now. Each entry is a `needs_attention` record with frontmatter (`status`, `created`, `origin_at`, `actor`, `display_headline`, `display_body`, `target_path`, `decision_required`). Use BEFORE creating a new card / triage so you don't duplicate an existing one, and to answer 'what's on my desk?' / 'is there anything I haven't seen yet?'. Returns `{records, count}`; capped at 100 (max 500 via `limit`). `include=all` flips the filter to surface dismissed/completed cards too — default returns only `status: pending`. Backing: filesystem walk of /vault/needs_attention/ via /api/v1/admin/needs-attention.",
+    inputSchema: z.object({
+      include: z.enum(["pending", "all"]).optional().describe(
+        "`pending` (default) returns only open cards. `all` includes dismissed/handled cards.",
+      ),
+      limit: z.number().int().min(1).max(500).optional().describe(
+        "Max entries (default 100, cap 500).",
+      ),
+    }),
+    buildRequest: ({ include, limit }) => ({
+      method: "GET",
+      path: "/api/v1/admin/needs-attention",
+      query: {
+        ...(include === "all" ? { include: "all" } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+      },
+    }),
+  },
+  {
+    name: "list_state_changes",
+    description:
+      "List entries from the state-change audit ledger — the canonical record of every mutation to matter / task state-fields written through state_mutator v2 (per docs/STATE-MUTATION.md). Each entry: `{when, source, target_kind, target_path, fields_changed, reason, audit_record_path}`. Filters: `target` (full vault-relative target_path like `matter/firstbase.md`), `source` (writer name, e.g. `briefing.morning`, `steward`, `nightly_narrative`, `manual.<userid>`), `since` / `until` ISO timestamps, `limit` (default 50, cap 200), `offset`. Use to answer 'who changed this matter?', 'show me everything Steward did last hour', 'what mutated under the briefing source today'. Backing: indexed vault walk via /api/v1/state-changes.",
+    inputSchema: z.object({
+      target: z.string().optional().describe(
+        "Filter by exact target path (e.g. `matter/firstbase.md` or `task/follow-up-robert.md`).",
+      ),
+      source: z.string().optional().describe(
+        "Filter by writer name (e.g. `briefing.morning`, `steward`, `nightly_narrative`, `manual.<userid>`).",
+      ),
+      since: z.string().optional().describe(
+        "ISO timestamp; only entries with when >= since.",
+      ),
+      until: z.string().optional().describe(
+        "ISO timestamp; only entries with when <= until.",
+      ),
+      limit: z.number().int().min(1).max(200).optional().describe(
+        "Max entries (default 50, cap 200).",
+      ),
+      offset: z.number().int().min(0).optional().describe(
+        "Pagination offset (default 0). Pair with `limit`.",
+      ),
+    }),
+    buildRequest: (args) => ({
+      method: "GET",
+      path: "/api/v1/state-changes",
+      query: args,
+    }),
+  },
+  {
+    name: "list_in_flight_agents",
+    description:
+      "List ephemeral exec-* subagents that Alfred has spawned and not yet torn down — the live delegations the system is currently working through. Each entry: `{id, name, model, tools_allow_count, started_at_hint}`. Distinct from `list_agents` (static personas: main, learn-clerk, vault-curator, …) and from `list_openclaw_agents` (the gateway's full agent registry). Use to answer 'what are you working on right now?', or BEFORE creating another exec agent to avoid double-spawning. Returns `{agents, count, last_touched_at}`; empty list when no delegations are in flight. Backing: GET /api/v1/openclaw/agents/ephemeral (workers gateway config filtered to `exec-*` prefix).",
+    inputSchema: z.object({}),
+    buildRequest: () => ({
+      method: "GET",
+      path: "/api/v1/openclaw/agents/ephemeral",
+    }),
+  },
+];
+
 // ─── channels (notify the principal via main openclaw) ──────────────────────
 
 // Outbound channels (Telegram, Slack, …) belong to the MAIN openclaw
@@ -405,5 +553,6 @@ export const ALL_ALFRED_TOOLS: ToolDef[] = [
   ...workflowTools,
   ...openclawTools,
   ...deviceTools,
+  ...briefDecisionTools,
   ...channelTools,
 ];
