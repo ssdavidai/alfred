@@ -73,10 +73,12 @@ app AlfredSaaS {
   },
 
   emailSender: {
-    // Dummy: verification / password-reset emails are printed to the web
-    // container logs instead of sent. Single-VM deploys assume no external
-    // mail provider; swap to Mailgun/SendGrid by setting the provider here.
-    provider: Dummy,
+    // Wasp forbids the Dummy sender in production builds, so a real
+    // provider is required. Supply MAILGUN_API_KEY + MAILGUN_DOMAIN in
+    // .env (or switch to SendGrid/SMTP). Without valid creds the app
+    // still boots — only outbound mail (verification, password reset)
+    // fails to deliver.
+    provider: Mailgun,
     defaultFrom: {
       name: "Alfred",
       email: "noreply@new.alfred.black"

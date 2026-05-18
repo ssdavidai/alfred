@@ -93,7 +93,9 @@ services:
       - AAS_API_KEY=${AAS_API_KEY}
       - COLUMN_ENCRYPTION_KEY=${COLUMN_ENCRYPTION_KEY}
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || exit 1"]
+      # the Wasp server image is slim (no wget/curl) and exposes no fixed
+      # 200 route — a TCP-connect probe via the bundled Node is robust.
+      test: ["CMD-SHELL", "node -e \"require('net').connect(3000,'127.0.0.1').on('connect',function(){process.exit(0)}).on('error',function(){process.exit(1)})\""]
       interval: 15s
       timeout: 5s
       retries: 20
