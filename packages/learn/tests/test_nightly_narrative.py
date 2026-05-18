@@ -69,6 +69,112 @@ class FakeVaultClient:
         self.list_calls.append((record_type, limit))
         return list(self.list_records_map.get(record_type, []))
 
+    async def list_signals(
+        self,
+        *,
+        target_matter: str | None = None,
+        source_type: str | None = None,
+        since_ns: int | None = None,
+        until_ns: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """STORE-P3-5: translate markdown fixtures into SQL row shape.
+
+        Test fixtures register records under ``list_records_map["signal"]``
+        in the historical ``{path, frontmatter}`` markdown shape. The
+        production ``VaultClient.list_signals`` returns the ctrl-api SQL
+        row shape ``{id, ts, source_type, source_event, target_matter,
+        target_kind, ...}``. To keep every existing fixture working
+        without rewrites, this stub maps the markdown frontmatter back
+        into a SQL row so the activity's downstream adapter can convert
+        it back to markdown — round-trip-safe for the fields tests
+        actually assert on.
+        """
+        self.list_calls.append(("signal", limit))
+        out: list[dict[str, Any]] = []
+        for rec in self.list_records_map.get("signal", []):
+            if not isinstance(rec, dict):
+                continue
+            fm = rec.get("frontmatter") or {}
+            tm = (
+                fm.get("target_matter_path")
+                or fm.get("target_path")
+                or ""
+            )
+            if target_matter is not None and tm != target_matter:
+                # Filter by target_matter when explicitly requested.
+                # Activities scoped by matter call with target_matter
+                # set; gatherers without a matter scope leave it None.
+                # Also accept fixtures that only carry target_candidates
+                # — historical tests built on that markdown convention.
+                cands = fm.get("target_candidates")
+                matched_cand = False
+                if isinstance(cands, list):
+                    for c in cands:
+                        if isinstance(c, dict) and c.get("path") == target_matter:
+                            matched_cand = True
+                            break
+                        if isinstance(c, str) and c == target_matter:
+                            matched_cand = True
+                            break
+                if not matched_cand:
+                    continue
+                tm = target_matter
+            # Derive a ns timestamp from applied_at/created so the
+            # since/until filters behave like a real SQL query.
+            ts_raw = fm.get("applied_at") or fm.get("created") or ""
+            ts_ns: int | None = None
+            try:
+                if isinstance(ts_raw, str) and ts_raw:
+                    s = ts_raw
+                    if s.endswith("Z"):
+                        s = s[:-1] + "+00:00"
+                    ts_ns = int(
+                        datetime.fromisoformat(s).timestamp() * 1_000_000_000
+                    )
+            except (ValueError, TypeError):
+                ts_ns = None
+            if since_ns is not None and ts_ns is not None and ts_ns < since_ns:
+                continue
+            if until_ns is not None and ts_ns is not None and ts_ns > until_ns:
+                continue
+            # Synthesise a SQL ``id`` whose ``signal/<id>.md`` form
+            # round-trips back to the markdown path the fixture used.
+            raw_path = str(rec.get("path") or "")
+            synth_id = raw_path
+            if synth_id.startswith("signal/"):
+                synth_id = synth_id[len("signal/"):]
+            if synth_id.endswith(".md"):
+                synth_id = synth_id[:-3]
+            out.append({
+                "id": synth_id,
+                "ts": str(ts_ns) if ts_ns is not None else "0",
+                "source_type": fm.get("source_type") or "",
+                "source_event": fm.get("source_event_path") or None,
+                "target_matter": tm,
+                "target_kind": fm.get("target_kind") or None,
+                "actor": fm.get("actor") or None,
+                "decision_required": int(bool(fm.get("decision_required"))),
+                "display_headline": fm.get("display_headline") or None,
+                "display_body": fm.get("display_body") or None,
+                "body": fm.get("reasoning") or fm.get("body") or "",
+                "processed_at": None,
+                "classified_noise": 0,
+            })
+            if len(out) >= limit:
+                break
+        return out
+
+    async def list_observations(
+        self,
+        *,
+        instinct_id: str | None = None,
+        signal_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        self.list_calls.append(("observation", limit))
+        return []
+
     async def read_record(self, path: str) -> dict[str, Any]:
         self.read_calls.append(path)
         if path in self.read_records_map:

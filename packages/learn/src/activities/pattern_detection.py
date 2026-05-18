@@ -41,6 +41,7 @@ import httpx
 from temporalio import activity
 
 from src.config import load_config
+from src.utils.vault_client import VaultClient
 from src.validators.pattern_proposal import validate_pattern_proposal_record
 from src.validators.schema import MIN_PATTERN_PROPOSAL_EVIDENCE
 
@@ -122,6 +123,54 @@ def _http() -> httpx.AsyncClient:
     return httpx.AsyncClient(
         base_url=cfg.alfred_ctrl_url, headers=headers, timeout=60.0,
     )
+
+
+def _readers_use_sql() -> bool:
+    """STORE-P3-5: gate the SQL read switch. Default ``1`` (on)."""
+    raw = (os.environ.get("READERS_USE_SQL") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _sql_observation_to_record(row: dict[str, Any]) -> dict[str, Any]:
+    """Adapt one ctrl-api ``observation`` row into the legacy markdown shape.
+
+    The clustering code keys off ``subject``, ``source_kind``, ``sender``,
+    ``intent``, ``topic``, ``matter_ref``, and ``created`` inside
+    ``frontmatter``. The SQL row only carries ``{id, ts, signal_id,
+    instinct_id, confidence, embedding_id}`` — every analytic field the
+    markdown record carried lives in companion tables we haven't joined
+    yet. So the SQL path returns a record whose frontmatter has the
+    minimum the clusterer can act on: ``instinct_id`` as the dedup key
+    surrogate for ``sender`` and ``created`` translated from ``ts``.
+    Subject/source_kind default to "principal" / "decision" so the
+    clusterer's coarse filters pass — STORE-P3 will widen the SQL
+    schema before this becomes the only path.
+    """
+    ts_raw = row.get("ts")
+    created_iso = ""
+    if ts_raw is not None:
+        try:
+            ts_ns = int(str(ts_raw))
+            created_iso = (
+                datetime.fromtimestamp(ts_ns / 1_000_000_000, tz=timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z")
+            )
+        except (TypeError, ValueError):
+            created_iso = ""
+    fm: dict[str, Any] = {
+        "subject": "principal",
+        "source_kind": "decision",
+        "sender": row.get("instinct_id") or "",
+        "intent": "delegate",
+        "topic": "",
+        "matter_ref": "",
+        "created": created_iso,
+        "confidence": row.get("confidence"),
+    }
+    obs_id = str(row.get("id") or "").strip()
+    path = f"observation/{obs_id}.md" if obs_id else ""
+    return {"path": path, "frontmatter": fm}
 
 
 def _parse_iso(s: str) -> datetime | None:
@@ -460,18 +509,49 @@ async def detect_pattern_proposals() -> dict[str, Any]:
     }
 
     async with _http() as client:
-        # 1. Pull observations. ``preview=2000`` returns frontmatter only,
-        # which is exactly what the clusterer needs.
-        try:
-            resp = await client.get(
-                "/api/v1/vault/list/observation?preview=2000",
-            )
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            counters["errors"] += 1
-            counters["error_messages"].append(f"list obs: {exc}"[:300])
-            return counters
-        observations = resp.json().get("results", []) or []
+        # 1. Pull observations.
+        #
+        # STORE-P3-5: activity-internal SQL read; no workflow.patched gate needed per CLAUDE.md.
+        # When READERS_USE_SQL=1 (default) we pull rows from
+        # ctrl-api's GET /api/v1/observations and adapt them into the
+        # markdown-record shape the clusterer expects. The SQL row
+        # schema is narrower than the markdown frontmatter (no
+        # subject/sender/intent/topic on the SQL side yet), so the
+        # adapter fills the analytical fields with conservative
+        # defaults — this path returns fewer clusters than the
+        # markdown walk until the SQL schema widens. The legacy
+        # markdown path stays the READERS_USE_SQL=0 fallback.
+        use_sql = _readers_use_sql()
+        observations: list[dict[str, Any]] = []
+        if use_sql:
+            cfg = load_config()
+            vault = VaultClient(cfg)
+            try:
+                rows = await vault.list_observations(limit=2000)
+                observations = [
+                    _sql_observation_to_record(r)
+                    for r in rows
+                    if isinstance(r, dict)
+                ]
+            except (httpx.HTTPError, AttributeError) as exc:
+                counters["errors"] += 1
+                counters["error_messages"].append(f"list obs (sql): {exc}"[:300])
+                return counters
+            finally:
+                await vault.close()
+        else:
+            # ``preview=2000`` returns frontmatter only, which is
+            # exactly what the clusterer needs.
+            try:
+                resp = await client.get(
+                    "/api/v1/vault/list/observation?preview=2000",
+                )
+                resp.raise_for_status()
+            except httpx.HTTPError as exc:
+                counters["errors"] += 1
+                counters["error_messages"].append(f"list obs: {exc}"[:300])
+                return counters
+            observations = resp.json().get("results", []) or []
         counters["scanned"] = len(observations)
 
         # 2. Cluster.

@@ -176,6 +176,92 @@ def _slug_from_matter_path(matter_path: str) -> str:
     return s
 
 
+# --- STORE-P3-5: SQL read switch + row-to-record adapter ------------------
+#
+# When ``READERS_USE_SQL=1`` (default), signal gather paths inside the
+# briefing activities pull rows from ctrl-api's ``GET /api/v1/signals``
+# (STORE-P3-2) instead of walking ``/vault/signal/*.md``. The SQL row
+# shape differs from the markdown record shape downstream code grew up
+# against, so ``_sql_signal_to_record`` adapts each row into the same
+# ``{path, frontmatter: {...}}`` dict the legacy markdown path returns.
+# That keeps every downstream filter / pretty-printer unchanged.
+#
+# Setting ``READERS_USE_SQL=0`` reverts to the markdown walk for safety
+# (the SQL backfill in STORE-P3-4 is recent — keep the fallback alive
+# until we delete the markdown writers in a later phase).
+
+
+def _readers_use_sql() -> bool:
+    raw = (os.environ.get("READERS_USE_SQL") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _sql_signal_to_record(row: dict[str, Any]) -> dict[str, Any]:
+    """Adapt one ctrl-api ``signal`` row into the legacy markdown record shape.
+
+    Downstream code (``_record_targets_matter``, the gatherer filters,
+    etc.) expects ``{path, frontmatter: {target_path, target_matter_path,
+    applied_at, created, source_type, target_kind, classification,
+    display_headline, display_body, name, reasoning, raw_quote,
+    source_event_path, actor, decision_required}}``. Map every SQL field
+    to its markdown frontmatter equivalent; ``ts`` is nanoseconds-since-
+    epoch as a decimal string, which we convert to ISO-8601 UTC so the
+    ``_parse_iso_or_none`` time filters keep working.
+    """
+    ts_raw = row.get("ts")
+    created_iso: str = ""
+    if ts_raw is not None:
+        try:
+            ts_ns = int(str(ts_raw))
+            created_iso = (
+                datetime.fromtimestamp(ts_ns / 1_000_000_000, tz=timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z")
+            )
+        except (TypeError, ValueError):
+            created_iso = ""
+    target_matter = row.get("target_matter") or ""
+    # The legacy markdown frontmatter carried ``target_matter_path`` for the
+    # matter binding and ``target_path`` for whatever was actually touched
+    # (often a task). The SQL row only captures the matter, so we mirror it
+    # into both — every consumer we touch here keys off either field.
+    fm: dict[str, Any] = {
+        "source_type": row.get("source_type") or "",
+        "target_path": target_matter,
+        "target_matter_path": target_matter,
+        "target_kind": row.get("target_kind") or "",
+        "actor": row.get("actor") or "",
+        "decision_required": bool(row.get("decision_required") or 0),
+        "display_headline": row.get("display_headline") or "",
+        "display_body": row.get("display_body") or "",
+        # The SQL row stores the markdown body verbatim — most consumers
+        # treat that as ``reasoning`` so the prompt-text fields keep
+        # rendering even when display_body is empty.
+        "reasoning": row.get("body") or "",
+        "raw_quote": "",
+        "source_event_path": row.get("source_event") or "",
+        # ``applied_at`` and ``created`` were two different timestamps in
+        # the markdown world (one stamped on first write, one on apply).
+        # The SQL row has a single ``ts``; populate both so the
+        # window-filter checks behave like the markdown record.
+        "applied_at": created_iso,
+        "created": created_iso,
+        # The legacy ``classification`` was set by the extractor for
+        # anomaly detection. SQL rows surface ``classified_noise`` as a
+        # 0/1 — map "noise" to a classification string so the anomaly
+        # filter still matches on the expected vocabulary.
+        "classification": (
+            "noise" if bool(row.get("classified_noise") or 0) else ""
+        ),
+    }
+    sig_id = str(row.get("id") or "").strip()
+    # The legacy ``path`` is the markdown filename; ctrl-api gives us a
+    # UUID. Mint a synthetic ``signal/<uuid>.md`` path so signal_paths
+    # collected downstream still look like vault paths to log lines etc.
+    path = f"signal/{sig_id}.md" if sig_id else ""
+    return {"path": path, "frontmatter": fm, "created": created_iso}
+
+
 def _is_matter_active(fm: dict[str, Any]) -> bool:
     """Active-matter filter for the briefing walk.
 
@@ -399,39 +485,89 @@ async def _gather_observed_for_matter(
     vault = VaultClient(config)
     signal_paths: list[str] = []
     decision_paths: list[str] = []
+    # STORE-P3-5: activity-internal SQL read; no workflow.patched gate needed per CLAUDE.md.
+    use_sql = _readers_use_sql()
 
     try:
-        for record_type, sink in (
-            ("signal", signal_paths),
-            ("decision", decision_paths),
-        ):
+        # --- Signals ----------------------------------------------------
+        if use_sql:
             try:
-                records = await vault.list_records(record_type, limit=10_000)
+                rows = await vault.list_signals(
+                    target_matter=target_path,
+                    since_ns=int(window_start.timestamp() * 1_000_000_000),
+                    until_ns=int(window_end.timestamp() * 1_000_000_000),
+                    limit=10_000,
+                )
+                signal_records: list[dict[str, Any]] = [
+                    _sql_signal_to_record(r) for r in rows if isinstance(r, dict)
+                ]
+            except (httpx.HTTPError, AttributeError) as exc:
+                logger.warning(
+                    "gather_observed: SQL signal list failed target=%s type=%s err=%s",
+                    target_path, type(exc).__name__, repr(exc),
+                )
+                signal_records = []
+        else:
+            try:
+                signal_records = await vault.list_records(
+                    "signal", limit=10_000,
+                )
             except httpx.HTTPError as exc:
                 logger.warning(
-                    "gather_observed: %s list failed target=%s type=%s err=%s",
-                    record_type, target_path, type(exc).__name__, repr(exc),
+                    "gather_observed: signal list failed target=%s type=%s err=%s",
+                    target_path, type(exc).__name__, repr(exc),
                 )
+                signal_records = []
+        for rec in signal_records or []:
+            if not isinstance(rec, dict):
                 continue
-            for rec in records:
-                if not isinstance(rec, dict):
-                    continue
-                fm = rec.get("frontmatter") or rec
-                if not isinstance(fm, dict):
-                    fm = {}
-                if not _record_targets_matter(fm, target_path):
-                    continue
-                ts_raw = (
-                    fm.get("applied_at")
-                    or fm.get("created")
-                    or rec.get("created")
-                )
-                ts = _parse_iso_or_none(ts_raw)
-                if ts is None or ts < window_start or ts > window_end:
-                    continue
-                path = str(rec.get("path") or fm.get("path") or "").strip()
-                if path:
-                    sink.append(path)
+            fm = rec.get("frontmatter") or rec
+            if not isinstance(fm, dict):
+                fm = {}
+            if not _record_targets_matter(fm, target_path):
+                continue
+            ts_raw = (
+                fm.get("applied_at")
+                or fm.get("created")
+                or rec.get("created")
+            )
+            ts = _parse_iso_or_none(ts_raw)
+            if ts is None or ts < window_start or ts > window_end:
+                continue
+            path = str(rec.get("path") or fm.get("path") or "").strip()
+            if path:
+                signal_paths.append(path)
+
+        # --- Decisions (still markdown; out of scope for P3-5) ---------
+        try:
+            decision_records = await vault.list_records(
+                "decision", limit=10_000,
+            )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "gather_observed: decision list failed target=%s type=%s err=%s",
+                target_path, type(exc).__name__, repr(exc),
+            )
+            decision_records = []
+        for rec in decision_records or []:
+            if not isinstance(rec, dict):
+                continue
+            fm = rec.get("frontmatter") or rec
+            if not isinstance(fm, dict):
+                fm = {}
+            if not _record_targets_matter(fm, target_path):
+                continue
+            ts_raw = (
+                fm.get("applied_at")
+                or fm.get("created")
+                or rec.get("created")
+            )
+            ts = _parse_iso_or_none(ts_raw)
+            if ts is None or ts < window_start or ts > window_end:
+                continue
+            path = str(rec.get("path") or fm.get("path") or "").strip()
+            if path:
+                decision_paths.append(path)
     finally:
         await vault.close()
 
@@ -1304,14 +1440,32 @@ async def _gather_signal_anomalies(
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """Signals classified as anomaly/system_error inside the window."""
-    try:
-        records = await vault.list_records("signal", limit=400)
-    except httpx.HTTPError as exc:
-        logger.warning(
-            "_gather_signal_anomalies: list failed type=%s err=%s",
-            type(exc).__name__, repr(exc),
-        )
-        return []
+    # STORE-P3-5: activity-internal SQL read; no workflow.patched gate needed per CLAUDE.md.
+    if _readers_use_sql():
+        try:
+            rows = await vault.list_signals(
+                since_ns=int(window_start.timestamp() * 1_000_000_000),
+                until_ns=int(window_end.timestamp() * 1_000_000_000),
+                limit=400,
+            )
+            records = [
+                _sql_signal_to_record(r) for r in rows if isinstance(r, dict)
+            ]
+        except (httpx.HTTPError, AttributeError) as exc:
+            logger.warning(
+                "_gather_signal_anomalies: SQL list failed type=%s err=%s",
+                type(exc).__name__, repr(exc),
+            )
+            return []
+    else:
+        try:
+            records = await vault.list_records("signal", limit=400)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "_gather_signal_anomalies: list failed type=%s err=%s",
+                type(exc).__name__, repr(exc),
+            )
+            return []
     out: list[dict[str, Any]] = []
     for rec in records or []:
         if not isinstance(rec, dict):
@@ -1402,14 +1556,32 @@ async def _gather_window_signals(
     what other people said, what the world surfaced) so the brief can
     reference real movement rather than counters.
     """
-    try:
-        records = await vault.list_records("signal", limit=600)
-    except httpx.HTTPError as exc:
-        logger.warning(
-            "_gather_window_signals: list failed type=%s err=%s",
-            type(exc).__name__, repr(exc),
-        )
-        return []
+    # STORE-P3-5: activity-internal SQL read; no workflow.patched gate needed per CLAUDE.md.
+    if _readers_use_sql():
+        try:
+            rows = await vault.list_signals(
+                since_ns=int(window_start.timestamp() * 1_000_000_000),
+                until_ns=int(window_end.timestamp() * 1_000_000_000),
+                limit=600,
+            )
+            records = [
+                _sql_signal_to_record(r) for r in rows if isinstance(r, dict)
+            ]
+        except (httpx.HTTPError, AttributeError) as exc:
+            logger.warning(
+                "_gather_window_signals: SQL list failed type=%s err=%s",
+                type(exc).__name__, repr(exc),
+            )
+            return []
+    else:
+        try:
+            records = await vault.list_records("signal", limit=600)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "_gather_window_signals: list failed type=%s err=%s",
+                type(exc).__name__, repr(exc),
+            )
+            return []
     out: list[dict[str, Any]] = []
     for rec in records or []:
         if not isinstance(rec, dict):

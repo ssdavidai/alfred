@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -100,6 +101,54 @@ class EventRecord:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+# --- STORE-P3-5: SQL read switch + row-to-record adapter ------------------
+
+
+def _readers_use_sql() -> bool:
+    raw = (os.environ.get("READERS_USE_SQL") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _sql_signal_to_record(row: dict[str, Any]) -> dict[str, Any]:
+    """Adapt one ctrl-api ``signal`` row into the legacy markdown record shape.
+
+    See ``briefing._sql_signal_to_record`` for the rationale. Kept here as
+    a sibling so this activity has no import dependency on briefing.
+    """
+    ts_raw = row.get("ts")
+    created_iso: str = ""
+    if ts_raw is not None:
+        try:
+            ts_ns = int(str(ts_raw))
+            created_iso = (
+                datetime.fromtimestamp(ts_ns / 1_000_000_000, tz=timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z")
+            )
+        except (TypeError, ValueError):
+            created_iso = ""
+    target_matter = row.get("target_matter") or ""
+    fm: dict[str, Any] = {
+        "source_type": row.get("source_type") or "",
+        "target_path": target_matter,
+        "target_matter_path": target_matter,
+        "target_kind": row.get("target_kind") or "",
+        "actor": row.get("actor") or "",
+        "decision_required": bool(row.get("decision_required") or 0),
+        "display_headline": row.get("display_headline") or "",
+        "display_body": row.get("display_body") or "",
+        "reasoning": row.get("body") or "",
+        "raw_quote": "",
+        "source_event_path": row.get("source_event") or "",
+        "applied_at": created_iso,
+        "created": created_iso,
+        "effect": "mutation" if not bool(row.get("classified_noise") or 0) else "noise",
+    }
+    sig_id = str(row.get("id") or "").strip()
+    path = f"signal/{sig_id}.md" if sig_id else ""
+    return {"path": path, "frontmatter": fm, "created": created_iso}
 
 
 def _now_utc() -> datetime:
@@ -237,15 +286,35 @@ async def load_matter_signals_24h(matter_path: str) -> list[dict[str, Any]]:
 
     config = load_config()
     client = VaultClient(config)
+    # STORE-P3-5: activity-internal SQL read; no workflow.patched gate needed per CLAUDE.md.
+    use_sql = _readers_use_sql()
+    cutoff_dt = _now_utc() - LOOKBACK_WINDOW
     try:
-        try:
-            records = await client.list_records("signal", limit=10_000)
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "nightly_narrative.load_matter_signals_24h: list failed matter=%s err=%s",
-                canonical, exc,
-            )
-            return []
+        if use_sql:
+            try:
+                rows = await client.list_signals(
+                    target_matter=canonical,
+                    since_ns=int(cutoff_dt.timestamp() * 1_000_000_000),
+                    limit=10_000,
+                )
+                records = [
+                    _sql_signal_to_record(r) for r in rows if isinstance(r, dict)
+                ]
+            except (httpx.HTTPError, AttributeError) as exc:
+                logger.warning(
+                    "nightly_narrative.load_matter_signals_24h: SQL list failed matter=%s err=%s",
+                    canonical, exc,
+                )
+                return []
+        else:
+            try:
+                records = await client.list_records("signal", limit=10_000)
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "nightly_narrative.load_matter_signals_24h: list failed matter=%s err=%s",
+                    canonical, exc,
+                )
+                return []
     finally:
         await client.close()
 

@@ -407,6 +407,63 @@ class VaultClient:
         resp.raise_for_status()
         return resp.json()
 
+    # --- Signal + Observation reads (STORE-P3-5) --------------------------
+
+    async def list_signals(
+        self,
+        *,
+        target_matter: str | None = None,
+        source_type: str | None = None,
+        since_ns: int | None = None,
+        until_ns: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """GET /api/v1/signals with filters. Returns the raw JSON rows.
+
+        Wraps the STORE-P3-2 endpoint. Each row carries the SQL columns
+        ``{id, ts, source_type, source_event, target_matter, target_kind,
+        actor, decision_required, display_headline, display_body, body,
+        processed_at, classified_noise}`` — ``ts``/``processed_at`` are
+        decimal STRINGS so nanosecond precision survives JSON's
+        ``Number.MAX_SAFE_INTEGER`` ceiling. Pure read; callers convert
+        to whatever internal shape they want.
+        """
+        params: dict[str, Any] = {"limit": int(limit)}
+        if target_matter is not None:
+            params["target_matter"] = target_matter
+        if source_type is not None:
+            params["source_type"] = source_type
+        if since_ns is not None:
+            params["since"] = str(int(since_ns))
+        if until_ns is not None:
+            params["until"] = str(int(until_ns))
+        resp = await self._client.get("/api/v1/signals", params=params)
+        resp.raise_for_status()
+        return resp.json().get("results", []) or []
+
+    async def list_observations(
+        self,
+        *,
+        instinct_id: str | None = None,
+        signal_id: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """GET /api/v1/observations with filters. Returns the raw JSON rows.
+
+        Wraps the STORE-P3-2 endpoint. Each row carries the SQL columns
+        ``{id, ts, signal_id, instinct_id, confidence, embedding_id}`` —
+        ``ts`` is a decimal string for the same nanosecond-precision
+        reason as ``list_signals``.
+        """
+        params: dict[str, Any] = {"limit": int(limit)}
+        if instinct_id is not None:
+            params["instinct_id"] = instinct_id
+        if signal_id is not None:
+            params["signal_id"] = signal_id
+        resp = await self._client.get("/api/v1/observations", params=params)
+        resp.raise_for_status()
+        return resp.json().get("results", []) or []
+
     # --- Plane Steward action helpers (#839 Phase 3) -----------------------
 
     async def plane_post_steward_action(
