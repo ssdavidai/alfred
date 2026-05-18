@@ -13,12 +13,10 @@ RUN apt-get update \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 
-# Download whisper-large-v3 model during build (cached in Docker layer).
-# This makes the image ~3GB larger but ensures zero-config deployment.
-# faster-whisper uses CTranslate2 format from Hugging Face.
-RUN python -c "\
-from huggingface_hub import snapshot_download; \
-snapshot_download('Systran/faster-whisper-large-v3', local_dir='/app/models/whisper-large-v3')"
+# NOTE: no local Whisper model is baked. Audio transcription runs through
+# Groq's hosted whisper-large-v3 (see src/activities/omi_audio.py and
+# transcript.py) — set GROQ_API_KEY in .env. The old ~3 GB faster-whisper
+# bundle was vestigial and has been removed.
 
 COPY src/ src/
 COPY scripts/ scripts/
@@ -36,6 +34,5 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 ENV USE_DATE_PATHS=true
 ENV CLERK_AGENT_ID=learn-clerk
-ENV WHISPER_MODEL_PATH=/app/models/whisper-large-v3
 
 CMD ["./entrypoint.sh"]
