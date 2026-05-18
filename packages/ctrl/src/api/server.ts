@@ -40,7 +40,6 @@ import { registerContextRoutes } from "./routes/context.js";
 import { registerStewardRoutes } from "./routes/steward.js";
 import { registerVexaRoutes } from "./routes/vexa.js";
 import { registerAttentionRoutes } from "./routes/attention.js";
-import { registerBriefRoutes } from "./routes/brief.js";
 import { registerBriefingsRoutes } from "./routes/briefings.js";
 import { registerMatterRoutes } from "./routes/matters.js";
 import { registerDecisionRoutes } from "./routes/decisions.js";
@@ -144,7 +143,6 @@ export function createApiServer(): http.Server {
   registerStewardRoutes();
   registerVexaRoutes();
   registerAttentionRoutes();
-  registerBriefRoutes();
   registerBriefingsRoutes();
   registerMatterRoutes();
   registerDecisionRoutes();

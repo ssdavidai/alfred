@@ -64,16 +64,22 @@ Alfred Black uses butler-appropriate language.
 
 ## Workflows
 
-All six workflows run on the `alfred-learn` Temporal task queue.
+All workflows run on the `alfred-learn` Temporal task queue.
 
 | Schedule ID | Workflow | Interval | Purpose |
 |-------------|----------|----------|---------|
 | `al-event-processor` | EventProcessorWorkflow | Every 2 min | Classifies stream events and writes vault records |
 | `al-session-tracker` | SessionTrackerWorkflow | Every 5 min | Detects conversation session boundaries and groups records |
-| `al-daily-digest` | DailyDigestWorkflow | Daily 6 pm | Generates end-of-day summary and writes it to the vault |
+| `chore-briefing-morning` | BriefingWorkflow (slot=morning) | `0 5 * * *` tenant-local | Visits every active matter through `state_mutator.apply_state_change_v2`, composes the morning brief, writes `briefing/<YYYY-MM-DD>-morning.md` |
+| `chore-briefing-evening` | BriefingWorkflow (slot=evening) | `0 17 * * *` tenant-local | Same workflow, evening slot, writes `briefing/<YYYY-MM-DD>-evening.md` |
 | `al-learning` | LearningWorkflow | Every 5 min | Captures observations from routing decisions and hint files |
 | `al-reflection` | ReflectionWorkflow | Daily 2 am | Reviews observations, creates/updates/merges/deprecates instincts |
 | `al-judgment` | JudgmentWorkflow | Every 2 min | Scores inputs against instincts and routes or escalates |
+
+`BriefingWorkflow` replaced the deleted `DailyMorningBriefingWorkflow`,
+`DailyEveningDigestWorkflow`, and `DailyDigestWorkflow` (commit f20556d).
+The SaaS `/brief` page reads each snapshot through the `getBriefing`
+operation — there is no separate notification step.
 
 ---
 
@@ -241,7 +247,7 @@ alfred-learn/
 │   ├── workflows/
 │   │   ├── event_processor.py     Stream events → classified vault records
 │   │   ├── session_tracker.py     Detects session boundaries
-│   │   ├── daily_digest.py        End-of-day summary
+│   │   ├── briefing.py            Morning + evening brief composer (BriefingWorkflow)
 │   │   ├── learning.py            Observation capture from queue and hints
 │   │   ├── reflection.py          Nightly instinct refinement
 │   │   └── judgment.py            Scores inputs, routes or escalates

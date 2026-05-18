@@ -33,14 +33,14 @@ Alfred Learn is a Python + Temporal Docker container that provides Alfred Black'
 ## 6 Workflows
 1. EventProcessorWorkflow — schedule: every 2 min. Simplified: fetch events → drop raw content to inbox → mark processed. No LLM classification — the curator handles everything.
 2. SessionTrackerWorkflow — schedule: every 5 min
-3. DailyDigestWorkflow — schedule: daily 6pm
+3. BriefingWorkflow — schedules: `chore-briefing-morning` (cron `0 5 * * *`, tenant-local) and `chore-briefing-evening` (cron `0 17 * * *`, tenant-local). Same workflow class, dispatched with `slot="morning"` or `slot="evening"`. Visits every active matter through `state_mutator.apply_state_change_v2`, then composes the brief body from the freshly-written `current_state` paragraphs and writes a snapshot to `briefing/<YYYY-MM-DD>-<slot>.md`. The SaaS `/brief` page reads those records via the `getBriefing` operation. (Replaced the old `DailyDigestWorkflow` / `DailyMorningBriefingWorkflow` / `DailyEveningDigestWorkflow` trio in commit f20556d.)
 4. LearningWorkflow — schedule: every 5 min
 5. ReflectionWorkflow — schedule: daily 2am
 6. JudgmentWorkflow — schedule: every 2 min
 
 ## Build Order (phases in SPEC.md)
 Phase 1: Core infrastructure (config, clients, validators, worker, Dockerfile)
-Phase 2: Processor layer (event processor, session tracker, daily digest)
+Phase 2: Processor layer (event processor, session tracker, briefing composer)
 Phase 3: Intuition engine (learning, reflection, judgment)
 Phase 4: Integration hooks + scripts
 Phase 5: Dashboard (`packages/saas` changes)

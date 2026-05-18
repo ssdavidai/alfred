@@ -73,7 +73,7 @@ Alfred sees ONLY the prompt — claude.ai conversation context does NOT carry ov
 
 ### "Kick off / check on a workflow"
 
-1. `list_workflows({query: "WorkflowType=\"DailyDigestWorkflow\""})` — find the run, get its `workflow_id`.
+1. `list_workflows({query: "WorkflowType=\"BriefingWorkflow\""})` — find the run, get its `workflow_id`.
 2. `describe_workflow({wfId: "<id>"})` — read status, last failure, pending activities.
 3. To start one: `start_workflow({workflow_type: "OnboardingPipelineWorkflow", task_queue: "alfred-learn", input: {user_id: "david"}})`.
 4. To advance an awaiting workflow: `signal_workflow({wfId: "<id>", signal_name: "corrections_received", input: {...}})`.

@@ -303,42 +303,63 @@ class SessionTrackerWorkflow:
         return SessionResult(sessions=len(sessions_created))
 ```
 
-### Workflow 3: Daily Digest
+### Workflow 3: Briefing (Morning + Evening)
 
-**Schedule:** `al-daily-digest` — daily at 6pm tenant timezone (configurable)
-**What:** End-of-day summary written to vault.
+**Schedules:**
+- `chore-briefing-morning` — cron `0 5 * * *` tenant-local, dispatches `slot="morning"`
+- `chore-briefing-evening` — cron `0 17 * * *` tenant-local, dispatches `slot="evening"`
+
+**What:** Visits every active matter through the state mutator (clerk-driven
+propose + apply), then composes the brief body from the freshly-written
+`current_state` paragraphs and writes a snapshot to
+`briefing/<YYYY-MM-DD>-<slot>.md`. The SaaS `/brief` page reads each snapshot
+via the `getBriefing` operation — there is no separate notification step.
 
 ```python
-@workflow.defn(name="DailyDigestWorkflow")
-class DailyDigestWorkflow:
+@workflow.defn(name="BriefingWorkflow")
+class BriefingWorkflow:
     @workflow.run
-    async def run(self) -> DigestResult:
-        # 1. Collect today's vault activity
-        activity = await workflow.execute_activity(
-            collect_daily_activity,
+    async def run(self, slot: Literal["morning", "evening"]) -> BriefingResult:
+        # 1. Window anchor — prior briefing for this slot, if any
+        prior = await workflow.execute_activity(
+            get_prior_briefing, args=[slot],
             start_to_close_timeout=timedelta(seconds=30),
         )
-        
-        # 2. Ask Clerk to summarize
-        digest = await workflow.execute_activity(
-            clerk_daily_digest, args=[activity],
-            start_to_close_timeout=timedelta(seconds=60),
+
+        # 2. Enumerate every active matter
+        matters = await workflow.execute_activity(
+            list_active_matters_for_briefing,
+            start_to_close_timeout=timedelta(seconds=30),
         )
-        
-        # 3. Write event record
+
+        # 3. Phase 1 — per-matter mutator pass (propose + apply via clerk)
+        for matter in matters:
+            await workflow.execute_activity(
+                briefing_visit_matter, args=[matter, slot, prior],
+                start_to_close_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+
+        # 4. Phase 2 — re-read every matter post-mutation, compose the brief
         path = await workflow.execute_activity(
-            write_digest_record, args=[digest],
-            start_to_close_timeout=timedelta(seconds=30),
+            compose_and_write_briefing, args=[slot, prior],
+            start_to_close_timeout=timedelta(minutes=3),
         )
-        
-        # 4. Notify main Alfred agent (optional — if user has notifications enabled)
+
+        # 5. Record the chore run for the audit ledger
         await workflow.execute_activity(
-            notify_digest_ready, args=[path, digest.summary],
+            record_chore_run, args=[f"briefing-{slot}", path],
             start_to_close_timeout=timedelta(seconds=15),
         )
-        
-        return DigestResult(path=path)
+
+        return BriefingResult(slot=slot, path=path)
 ```
+
+> **History note:** `BriefingWorkflow` replaced three earlier workflows —
+> `DailyMorningBriefingWorkflow`, `DailyEveningDigestWorkflow`, and
+> `DailyDigestWorkflow` — in commit f20556d. The earlier design pushed
+> briefings out via `/agents/main/task`; the new design writes them as
+> vault records and lets the SaaS `/brief` page pull them via `getBriefing`.
 
 ---
 
@@ -796,7 +817,7 @@ alfred-learn/
 │   │   ├── __init__.py
 │   │   ├── event_processor.py         # Workflow 1
 │   │   ├── session_tracker.py         # Workflow 2
-│   │   ├── daily_digest.py            # Workflow 3
+│   │   ├── briefing.py                # Workflow 3 (BriefingWorkflow — morning + evening)
 │   │   ├── learning.py                # Workflow 4
 │   │   ├── reflection.py              # Workflow 5
 │   │   └── judgment.py                # Workflow 6
@@ -855,7 +876,8 @@ Registered by `scripts/register_schedules.py` on container first boot:
 |-------------|----------|----------|---------|
 | `al-event-processor` | EventProcessorWorkflow | every 2 min | Process stream events → vault |
 | `al-session-tracker` | SessionTrackerWorkflow | every 5 min | Detect session boundaries |
-| `al-daily-digest` | DailyDigestWorkflow | daily 6pm | End-of-day summary |
+| `chore-briefing-morning` | BriefingWorkflow (slot=morning) | `0 5 * * *` tenant-local | Morning brief → `briefing/<YYYY-MM-DD>-morning.md` |
+| `chore-briefing-evening` | BriefingWorkflow (slot=evening) | `0 17 * * *` tenant-local | Evening brief → `briefing/<YYYY-MM-DD>-evening.md` |
 | `al-learning` | LearningWorkflow | every 5 min | Capture observations |
 | `al-reflection` | ReflectionWorkflow | daily 2am | Nightly instinct refinement |
 | `al-judgment` | JudgmentWorkflow | every 2 min | Route unrouted inputs |
@@ -1076,7 +1098,7 @@ File: `hooks/alfred-learn-observer/handler.js` (maintained with Alfred Learn cha
 15. `activities/session.py` — session boundary detection
 16. `workflows/session_tracker.py` — Workflow 2
 17. `activities/notify.py` — notifications
-18. `workflows/daily_digest.py` — Workflow 3
+18. `workflows/briefing.py` — Workflow 3 (BriefingWorkflow — morning + evening composer)
 
 ### Phase 3: Intuition Engine
 19. `hooks/alfred-learn-observer/handler.js` — chat observation hook

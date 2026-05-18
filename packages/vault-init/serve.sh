@@ -63,6 +63,11 @@ while [ -z "$BW_USER" ] || [ -z "$BW_PASSWORD" ] || [ -z "$BW_SERVER_URL" ]; do
 done
 
 log "Configuring bw → $BW_SERVER_URL"
+# Bitwarden CLI refuses `bw config server` while a session is logged in. After
+# a container restart the previous session's state can survive on disk
+# (~/.config/Bitwarden CLI), so we proactively logout first. `|| true` defangs
+# set -e on a fresh container where there's nothing to log out of.
+bw logout >/dev/null 2>&1 || true
 bw config server "$BW_SERVER_URL" >/dev/null
 
 # Keep stderr separate from stdout — see vault-init.sh for the full

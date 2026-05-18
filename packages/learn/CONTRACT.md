@@ -15,10 +15,16 @@ Self-improving intelligence layer: observation → instinct → reflection cycle
 |----------|----------|---------|
 | `EventProcessorWorkflow` | every 2 min | Classify and route stream events to vault |
 | `SessionTrackerWorkflow` | every 5 min | Group observations into user sessions |
-| `DailyDigestWorkflow` | daily 6pm | Summarize day's activity |
+| `BriefingWorkflow` (slot=morning) | `0 5 * * *` tenant-local (`chore-briefing-morning`) | Visit every active matter through state_mutator, compose the morning brief, write `briefing/<YYYY-MM-DD>-morning.md` |
+| `BriefingWorkflow` (slot=evening) | `0 17 * * *` tenant-local (`chore-briefing-evening`) | Same composer, evening slot, writes `briefing/<YYYY-MM-DD>-evening.md` |
 | `LearningWorkflow` | every 5 min | Extract instincts from observations |
 | `ReflectionWorkflow` | daily 2am | Synthesize cross-instinct patterns |
 | `JudgmentWorkflow` | every 2 min | Route inputs using learned instincts |
+
+> `BriefingWorkflow` replaced the deleted `DailyMorningBriefingWorkflow`,
+> `DailyEveningDigestWorkflow`, and `DailyDigestWorkflow` in commit f20556d.
+> Briefing snapshots are read by the SaaS `/brief` page via the `getBriefing`
+> operation (no notification step — the page polls the vault).
 
 ### Activities
 

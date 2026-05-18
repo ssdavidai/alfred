@@ -226,7 +226,7 @@ const workflowTools: ToolDef[] = [
       "List Temporal workflow executions (running + recently closed) on the tenant's Temporal server. Optional `query` is a Temporal visibility query string — e.g. `WorkflowType=\"OnboardingPipelineWorkflow\"`, `ExecutionStatus=\"Running\"`, `StartTime > '2026-05-01T00:00:00Z'`. Returns one JSON object per execution with workflow_id, run_id, type, status, start_time, etc. Use when Sir asks 'is anything running?', 'did the morning briefing fire?', or before describe_workflow when you need the workflow_id. Bounded result set — Temporal applies its own pagination cap. Backing: docker exec into temporal container, `temporal workflow list --output json`.",
     inputSchema: z.object({
       query: z.string().optional().describe(
-        "Temporal visibility query (SQL-ish). Omit to list everything recent. Examples: `WorkflowType=\"DailyDigestWorkflow\"`, `ExecutionStatus=\"Failed\"`.",
+        "Temporal visibility query (SQL-ish). Omit to list everything recent. Examples: `WorkflowType=\"BriefingWorkflow\"`, `ExecutionStatus=\"Failed\"`.",
       ),
     }),
     buildRequest: ({ query }) => ({
@@ -252,10 +252,10 @@ const workflowTools: ToolDef[] = [
   {
     name: "start_workflow",
     description:
-      "Start a new Temporal workflow execution. `workflow_type` is the registered class name (e.g. `OnboardingPipelineWorkflow`, `DailyDigestWorkflow`, `TaskRunnerWorkflow`); `task_queue` is usually `alfred-learn` for learn-package workflows. Pass `input` as the JSON-serialisable arg the workflow expects (a single positional arg — wrap multi-arg shapes in an object). Optional `workflow_id` for caller-supplied id; otherwise Temporal generates one. Returns 201 with `workflow_id` + `run_id`. NOT idempotent unless you pass a stable `workflow_id` and use Temporal's reuse-policy semantics on the worker side. Use describe_workflow afterwards to confirm it landed. Pre-req: list the available workflow types in the codebase or ask Sir; spawning an unknown type returns a Temporal error. Backing: temporal workflow start.",
+      "Start a new Temporal workflow execution. `workflow_type` is the registered class name (e.g. `OnboardingPipelineWorkflow`, `BriefingWorkflow`, `TaskRunnerWorkflow`); `task_queue` is usually `alfred-learn` for learn-package workflows. Pass `input` as the JSON-serialisable arg the workflow expects (a single positional arg — wrap multi-arg shapes in an object). `BriefingWorkflow` takes a positional `slot` string (`\"morning\"` or `\"evening\"`). Optional `workflow_id` for caller-supplied id; otherwise Temporal generates one. Returns 201 with `workflow_id` + `run_id`. NOT idempotent unless you pass a stable `workflow_id` and use Temporal's reuse-policy semantics on the worker side. Use describe_workflow afterwards to confirm it landed. Pre-req: list the available workflow types in the codebase or ask Sir; spawning an unknown type returns a Temporal error. Backing: temporal workflow start.",
     inputSchema: z.object({
       workflow_type: z.string().min(1).describe(
-        "Registered workflow class name. Common ones on alfred-learn: OnboardingPipelineWorkflow, DailyDigestWorkflow, EventProcessorWorkflow, ReflectionWorkflow, JudgmentWorkflow, TaskRunnerWorkflow.",
+        "Registered workflow class name. Common ones on alfred-learn: OnboardingPipelineWorkflow, BriefingWorkflow, EventProcessorWorkflow, ReflectionWorkflow, JudgmentWorkflow, TaskRunnerWorkflow. (`DailyDigestWorkflow`, `DailyMorningBriefingWorkflow`, and `DailyEveningDigestWorkflow` were deleted in commit f20556d and folded into `BriefingWorkflow`.)",
       ),
       task_queue: z.string().min(1).describe(
         "Worker task queue. `alfred-learn` for learn-package workflows; `plane-sync` for plane mirror workflows.",

@@ -283,6 +283,13 @@ This gives you a proper activity log throughout the day. By 6pm, you have a time
 
 ## Fix 7: Daily Digest → Interactive EOD (match NeoTerra UTS)
 
+> **Historical note (2026-05-18):** This fix described the original
+> `DailyDigestWorkflow` end-of-day behaviour. `DailyDigestWorkflow` was
+> deleted in commit f20556d and replaced by `BriefingWorkflow`, which
+> writes `briefing/<YYYY-MM-DD>-<slot>.md` records that the SaaS `/brief`
+> page reads via `getBriefing` — the interactive prompt-the-user path is
+> gone. The text below is retained as a historical record of the v2 plan.
+
 The DailyDigestWorkflow should:
 
 1. Compile the day's sessions, tasks, events

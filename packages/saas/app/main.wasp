@@ -619,19 +619,6 @@ query getVaultTitleIndex {
   entities: [Instance]
 }
 
-// M3 #857 — letterpress /brief page. Wraps tenant ctrl-api
-// GET /api/v1/brief/today which renders today's digest record
-// (DailyDigestWorkflow output) into sections + small_matter.
-//
-// As of STATE-MUTATION Phase E (#893), /brief reads the most-recent
-// briefing record via getBriefings({limit:1}) and only falls back to
-// getDailyBrief when no briefing/* records exist on the tenant yet.
-// Phase H retires DailyDigestWorkflow and removes the fallback.
-query getDailyBrief {
-  fn: import { getDailyBrief } from "@src/dashboard/operations",
-  entities: [Instance]
-}
-
 // STATE-MUTATION Phase E (#893) — briefings index + single. Wraps the
 // ctrl-api endpoints written by the alfred-learn BriefingWorkflow.
 // Powers /brief (most-recent) and /briefings (chronological list).

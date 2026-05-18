@@ -1573,53 +1573,6 @@ export const getChoreDetail2 = async (
   return { chore: null };
 };
 
-// ============================================================
-// Daily brief (#857) — proxies GET /api/v1/brief/today on the tenant-
-// side ctrl-api. The endpoint reads today's most-recent vault digest
-// record (DailyDigestWorkflow output) and returns sections + small_matter
-// for the letterpress /brief page. Empty/no-digest-yet returns
-// `{ sections: [] }` rather than 404 so the page renders a polite empty
-// state.
-// ============================================================
-
-export const getDailyBrief = async (
-  _args: void,
-  context: any,
-): Promise<{
-  date: string;
-  subject: string;
-  sections: Array<{
-    title: string;
-    items: Array<{ id: string; line: string; reasoning: string }>;
-  }>;
-  small_matter: string | null;
-}> => {
-  if (!context.user) throw new HttpError(401, "Not authenticated");
-  try {
-    const instance = await getUserInstance(context);
-    const data: any = await proxyToTenant(instance, {
-      path: "/api/v1/brief/today",
-    });
-    return {
-      date: String(data?.date ?? new Date().toISOString().slice(0, 10)),
-      subject: String(data?.subject ?? "Your Brief."),
-      sections: Array.isArray(data?.sections) ? data.sections : [],
-      small_matter: data?.small_matter ?? null,
-    };
-  } catch (err) {
-    console.warn(
-      "[getDailyBrief] proxyToTenant failed:",
-      (err as Error)?.message,
-    );
-    return {
-      date: new Date().toISOString().slice(0, 10),
-      subject: "Your Brief.",
-      sections: [],
-      small_matter: null,
-    };
-  }
-};
-
 export const getVaultTitleIndex = async (
   _args: void,
   context: any,

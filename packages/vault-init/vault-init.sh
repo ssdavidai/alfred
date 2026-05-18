@@ -40,6 +40,11 @@ fatal() { log "FATAL: $*"; exit 3; }
 # 2. Configure bw CLI server and probe reachability. If vaultwarden is wedged,
 #    exit 1 immediately — leaves last-good .env in place.
 log "Configuring bw to point at $BW_SERVER_URL"
+# Bitwarden CLI refuses `bw config server` while a session is logged in. After
+# a container restart the previous session's state can survive on disk
+# (~/.config/Bitwarden CLI), so we proactively logout first. `|| true` defangs
+# set -e on a fresh container where there's nothing to log out of.
+bw logout >/dev/null 2>&1 || true
 bw config server "$BW_SERVER_URL" >/dev/null
 
 PROBE_HTTP=$(curl -sS -o /dev/null -w '%{http_code}' "$BW_SERVER_URL/alive" || true)
