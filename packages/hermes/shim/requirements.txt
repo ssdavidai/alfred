@@ -1,0 +1,5 @@
+# hermes-shim — OpenClaw /tools/invoke → Hermes /v1 translator.
+# Pinned exact (matching the Hermes supply-chain hygiene policy: no ranges).
+fastapi==0.136.1
+uvicorn[standard]==0.47.0
+httpx==0.28.1
