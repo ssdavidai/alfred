@@ -25,6 +25,7 @@ import {
   getIntuitionInstincts,
   getIntuitionStatus,
   getObservations,
+  getObservationsForInstinct,
   enableIntuition,
   disableIntuition,
   updateInstinct,
@@ -186,6 +187,49 @@ function observationProse(o: any): string {
   return "—";
 }
 
+// STORE-P3-6 adapter — the SQL `observation` table row shape
+// (id, ts decimal-string ns, signal_id, instinct_id, confidence,
+// embedding_id) is materially thinner than the legacy markdown record
+// shape (frontmatter.fact / sender / intent / created). Render it
+// gracefully: surface confidence as the badge, format ts → relative
+// day, and use the signal_id as the prose line. Once signal records
+// land in the SQL store (STORE-P3-3) and we have a per-signal lookup,
+// we can replace the signal_id with the upstream display_headline.
+function adaptSqlObservation(row: any): any {
+  if (!row || typeof row !== "object") return row;
+  // Legacy records carry `frontmatter.*` — those go through unchanged.
+  if (row.frontmatter) return row;
+  // SQL row → synthetic frontmatter shaped like the legacy renderer
+  // expects. ts is a decimal nanosecond string; ÷ 1e6 → ms.
+  const tsRaw = String(row.ts ?? "");
+  let createdIso = "";
+  if (/^-?\d+$/.test(tsRaw)) {
+    try {
+      const ms = Number(BigInt(tsRaw) / 1_000_000n);
+      if (Number.isFinite(ms)) createdIso = new Date(ms).toISOString();
+    } catch {
+      /* leave blank */
+    }
+  }
+  const conf =
+    typeof row.confidence === "number"
+      ? `${Math.round(row.confidence * 100)}%`
+      : "";
+  return {
+    path: String(row.id ?? ""),
+    name: String(row.id ?? ""),
+    frontmatter: {
+      created: createdIso,
+      // Use signal_id as a stand-in for `fact`; the page's observationProse
+      // falls back to name when fact is empty.
+      fact: row.signal_id ? `Signal ${row.signal_id}` : "",
+      source_kind: "signal",
+      source_type: conf,
+    },
+    __sqlSourced: true,
+  };
+}
+
 function ObservationRow({ obs }: { obs: any }) {
   const fm = obs?.frontmatter ?? {};
   const when = fmtRelativeDay(fm.created);
@@ -239,6 +283,105 @@ function fmtDate(value: unknown): string {
   } catch {
     return s;
   }
+}
+
+// STORE-P3-6: per-instinct observation feed. Fan-out one SQL query per
+// expanded instinct row. The legacy `getObservations` (markdown-walking)
+// stays on the page as a soak-period fallback — both feeds are merged
+// with a 15-second-bucket dedupe key (mirrors P2-4's pattern), so the
+// "What I've seen" panel surfaces evidence from whichever path wrote
+// the record first.
+function dedupeKey(obs: any): string {
+  const ts = String(
+    obs?.frontmatter?.created ??
+      obs?.ts ??
+      "",
+  );
+  const tsMs = Date.parse(ts);
+  const bucket = Number.isFinite(tsMs) ? Math.floor(tsMs / 15_000) : ts;
+  const signal =
+    String(obs?.frontmatter?.signal_id ?? obs?.signal_id ?? obs?.path ?? "");
+  return `${bucket}::${signal}`;
+}
+
+function InstinctObservationsPanel({
+  instinctPath,
+  legacyObs,
+}: {
+  instinctPath: string;
+  legacyObs: any[];
+}) {
+  // SQL-backed observations for this specific instinct (STORE-P3-6).
+  // The query is intentionally bounded; the page only shows the first 25.
+  const { data: sqlData } = useQuery(
+    getObservationsForInstinct,
+    { instinctId: instinctPath, limit: 50 },
+    { refetchInterval: 60_000, retry: false, enabled: Boolean(instinctPath) },
+  );
+  const sqlRows = useMemo(
+    () => (Array.isArray(sqlData?.results) ? sqlData.results : []),
+    [sqlData],
+  );
+
+  // Merge SQL + legacy, dedupe by 15-second bucket + signal id. SQL rows
+  // win on collision (newer canonical store).
+  const merged = useMemo(() => {
+    const out: any[] = [];
+    const seen = new Set<string>();
+    for (const row of sqlRows) {
+      const adapted = adaptSqlObservation(row);
+      const k = dedupeKey(adapted);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(adapted);
+    }
+    for (const o of legacyObs) {
+      const k = dedupeKey(o);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(o);
+    }
+    // Sort newest-first by created/ts.
+    out.sort((a, b) => {
+      const ta = Date.parse(String(a?.frontmatter?.created ?? "")) || 0;
+      const tb = Date.parse(String(b?.frontmatter?.created ?? "")) || 0;
+      return tb - ta;
+    });
+    return out;
+  }, [sqlRows, legacyObs]);
+
+  return (
+    <div className="mt-10">
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-4 pb-2 border-b border-rule"
+        style={{ color: "var(--brass)" }}
+      >
+        What I've seen ({merged.length})
+      </div>
+      {merged.length === 0 ? (
+        <p
+          className="font-body italic text-[15px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Nothing matching this pattern has come through yet.
+        </p>
+      ) : (
+        <ul className="divide-y divide-rule">
+          {merged.slice(0, 25).map((o, i) => (
+            <ObservationRow key={`${o?.path ?? o?.id ?? i}`} obs={o} />
+          ))}
+          {merged.length > 25 && (
+            <li
+              className="pt-3 font-mono text-[10px] uppercase tracking-[0.22em]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              · {merged.length - 25} earlier omitted
+            </li>
+          )}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 export default function InstinctsPage() {
@@ -535,40 +678,15 @@ export default function InstinctsPage() {
                         </button>
                       </div>
 
-                      {/* Observations — full-width feed, ledger-style */}
-                      <div className="mt-10">
-                        <div
-                          className="font-mono text-[10px] uppercase tracking-[0.22em] mb-4 pb-2 border-b border-rule"
-                          style={{ color: "var(--brass)" }}
-                        >
-                          What I've seen ({obs.length})
-                        </div>
-                        {obs.length === 0 ? (
-                          <p
-                            className="font-body italic text-[15px]"
-                            style={{ color: "var(--marginalia)" }}
-                          >
-                            Nothing matching this pattern has come through yet.
-                          </p>
-                        ) : (
-                          <ul className="divide-y divide-rule">
-                            {obs.slice(0, 25).map((o, i) => (
-                              <ObservationRow
-                                key={`${o?.path ?? i}`}
-                                obs={o}
-                              />
-                            ))}
-                            {obs.length > 25 && (
-                              <li
-                                className="pt-3 font-mono text-[10px] uppercase tracking-[0.22em]"
-                                style={{ color: "var(--marginalia)" }}
-                              >
-                                · {obs.length - 25} earlier omitted
-                              </li>
-                            )}
-                          </ul>
-                        )}
-                      </div>
+                      {/* Observations — full-width feed, ledger-style.
+                          Wired to the SQL `observation` table via
+                          getObservationsForInstinct (STORE-P3-6); the
+                          legacy markdown-walking observations stay merged
+                          in as a soak-period fallback. */}
+                      <InstinctObservationsPanel
+                        instinctPath={path}
+                        legacyObs={obs}
+                      />
                     </div>
                   )}
                 </li>

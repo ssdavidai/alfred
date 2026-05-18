@@ -737,6 +737,25 @@ query getAuditFeed2 {
   entities: [User, Instance]
 }
 
+// STORE-P3-6: SQL-backed reads of the signal + observation tables
+// (migration 004). The legacy markdown-walking ops on the timeline
+// composer (`getMatterDetail`) and `getObservations` in intuition/
+// operations stay as soak-period fallbacks; STORE-P6-1 retires them.
+query getSignalsForMatter {
+  fn: import { getSignalsForMatter } from "@src/dashboard/operations",
+  entities: [User, Instance]
+}
+
+query getObservationsForInstinct {
+  fn: import { getObservationsForInstinct } from "@src/dashboard/operations",
+  entities: [User, Instance]
+}
+
+query getObservationVecNeighbors {
+  fn: import { getObservationVecNeighbors } from "@src/dashboard/operations",
+  entities: [User, Instance]
+}
+
 query getCredentials {
   fn: import { getCredentials } from "@src/dashboard/operations",
   entities: [Instance]

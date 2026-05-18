@@ -12,6 +12,7 @@ import { Link, useParams } from "react-router-dom";
 import {
   useQuery,
   getMatterDetail,
+  getSignalsForMatter,
   getVaultRecord,
   createVaultRecord,
 } from "wasp/client/operations";
@@ -212,6 +213,48 @@ function truncateLine(s: string, limit = 90): string {
   return flat.slice(0, limit - 1).trimEnd() + "…";
 }
 
+// STORE-P3-6: adapt a SQL `signal` row from /api/v1/signals into the
+// timeline-entry shape the existing renderer expects. The legacy timeline
+// is composed by ctrl-api on the matter-detail endpoint; this new feed is
+// merged in additively (mirrors P2-4's getAuditFeed2 pattern). The 15-second
+// bucket dedupe key drops collisions when both feeds reference the same
+// underlying event (legacy markdown signal + SQL row written by the same
+// SignalExtractWorkflow run).
+function sqlSignalToTimelineEntry(row: any): TimelineEntry | null {
+  if (!row || typeof row !== "object") return null;
+  const tsRaw = String(row.ts ?? "");
+  let when = "";
+  if (/^-?\d+$/.test(tsRaw)) {
+    try {
+      const ms = Number(BigInt(tsRaw) / 1_000_000n);
+      if (Number.isFinite(ms)) when = new Date(ms).toISOString();
+    } catch {
+      /* leave blank */
+    }
+  }
+  if (!when) return null;
+  const headline =
+    String(row.display_headline ?? "").trim() ||
+    String(row.source_event ?? "").trim() ||
+    String(row.source_type ?? "").trim() ||
+    `Signal ${row.id ?? ""}`;
+  // The SQL signal doesn't carry a vault path. Surface the id so the
+  // renderer can fall back to non-linked text rendering — empty `path`
+  // collapses the Link to plain text.
+  return {
+    when,
+    kind: "signal",
+    headline,
+    path: "",
+  };
+}
+
+function signalDedupeKey(entry: TimelineEntry): string {
+  const tsMs = Date.parse(entry.when) || 0;
+  const bucket = Math.floor(tsMs / 15_000);
+  return `${entry.kind}::${bucket}::${entry.headline}`;
+}
+
 export default function MatterDetailPage() {
   const { id } = useParams<{ id: string }>();
   const safeId = id ?? "";
@@ -221,6 +264,27 @@ export default function MatterDetailPage() {
     { enabled: Boolean(safeId) },
   );
   const matter = (data?.matter ?? null) as MatterDetail | null;
+
+  // STORE-P3-6: SQL-backed signals scoped to this matter. The legacy
+  // timeline assembled by ctrl-api (in getMatterDetail) stays as the
+  // primary feed; this additively merges newly-shaped SQL signal rows
+  // alongside, dedupe-keyed by 15-second bucket + headline. STORE-P6-1
+  // retires the markdown side.
+  const matterPath = safeId
+    ? `matter/${safeId.replace(/^matter\//, "").replace(/\.md$/, "")}.md`
+    : "";
+  const { data: sqlSignalsData } = useQuery(
+    getSignalsForMatter,
+    { matterPath, limit: 100 },
+    {
+      enabled: Boolean(matterPath),
+      refetchInterval: 60_000,
+      retry: false,
+    },
+  );
+  const sqlSignals = Array.isArray(sqlSignalsData?.results)
+    ? sqlSignalsData.results
+    : [];
 
   const [asking, setAsking] = useState(false);
   const [draft, setDraft] = useState("");
@@ -284,9 +348,30 @@ export default function MatterDetailPage() {
   const tasks = Array.isArray(matter.tasks) ? matter.tasks : [];
   const timeline = Array.isArray(matter.timeline) ? matter.timeline : [];
   const statusPill = deriveStatusPill(tasks);
+  // STORE-P3-6: additive merge of SQL signal rows into the legacy timeline.
+  // ctrl-api's matter-detail aggregator already includes signal entries
+  // sourced from the markdown side; both can coexist during soak, so we
+  // dedupe by 15-second bucket + headline (any collision means the same
+  // upstream event — both paths name it identically).
+  const mergedTimeline: TimelineEntry[] = (() => {
+    const out: TimelineEntry[] = [...timeline];
+    const seen = new Set<string>();
+    for (const entry of out) {
+      if (entry.kind === "signal") seen.add(signalDedupeKey(entry));
+    }
+    for (const row of sqlSignals) {
+      const entry = sqlSignalToTimelineEntry(row);
+      if (!entry) continue;
+      const k = signalDedupeKey(entry);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(entry);
+    }
+    return out;
+  })();
   // Newest-first; the server _should_ already sort, but enforce here so the
   // UI doesn't depend on it.
-  const sortedTimeline = [...timeline].sort((a, b) =>
+  const sortedTimeline = [...mergedTimeline].sort((a, b) =>
     a.when < b.when ? 1 : a.when > b.when ? -1 : 0,
   );
   const visibleTimeline = sortedTimeline.slice(0, timelineCap);

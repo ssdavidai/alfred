@@ -507,6 +507,108 @@ export const getAuditFeed2 = async (
 };
 
 // ============================================================
+// STORE-P3-6: SQL-backed signal + observation reads.
+//
+// Read side of the unified working-memory store. ctrl-api exposes three
+// endpoints (STORE-P3-2, migration 004 on every tenant):
+//   GET  /api/v1/signals?target_matter=…       — signals scoped to a matter
+//   GET  /api/v1/observations?instinct_id=…    — observations for an instinct
+//   POST /api/v1/observations/vec-search       — kNN over the embedding table
+//
+// Each Wasp op is a thin proxy to its ctrl-api counterpart. Tenant writers
+// (alfred-learn P3-3) populate the tables; the existing
+// markdown-walking ops (`getObservations` in intuition/operations, the
+// timeline composer inside `getMatterDetail`) stay in place as soak-period
+// fallbacks. STORE-P6-1 retires them.
+//
+// Wire shape returned by ctrl-api (decimal-string bigints, same convention
+// as audit/getAuditFeed2):
+//
+//   /api/v1/signals  → { results: SignalRow[], count: number }
+//     SignalRow = {
+//       id, ts, source_type, source_event, target_matter, target_kind,
+//       actor, decision_required (0|1), display_headline, display_body,
+//       body, processed_at, classified_noise (0|1)
+//     }
+//
+//   /api/v1/observations → { results: ObservationRow[], count: number }
+//     ObservationRow = {
+//       id, ts, signal_id, instinct_id, confidence, embedding_id
+//     }
+//
+//   /api/v1/observations/vec-search → { results: VecSearchResult[] }
+// ============================================================
+
+export const getSignalsForMatter = async (
+  args: {
+    matterPath: string;
+    since?: string;
+    until?: string;
+    limit?: number;
+  },
+  context: any,
+) => {
+  if (!context.user) {
+    throw new HttpError(401, "Not authenticated");
+  }
+  if (!args?.matterPath) {
+    throw new HttpError(400, "matterPath required");
+  }
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {
+    target_matter: args.matterPath,
+  };
+  if (args.since) query.since = args.since;
+  if (args.until) query.until = args.until;
+  query.limit = args.limit !== undefined ? String(args.limit) : "100";
+  return proxyToTenant(instance, {
+    path: "/api/v1/signals",
+    query,
+  });
+};
+
+export const getObservationsForInstinct = async (
+  args: { instinctId: string; limit?: number },
+  context: any,
+) => {
+  if (!context.user) {
+    throw new HttpError(401, "Not authenticated");
+  }
+  if (!args?.instinctId) {
+    throw new HttpError(400, "instinctId required");
+  }
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {
+    instinct_id: args.instinctId,
+  };
+  query.limit = args.limit !== undefined ? String(args.limit) : "50";
+  return proxyToTenant(instance, {
+    path: "/api/v1/observations",
+    query,
+  });
+};
+
+export const getObservationVecNeighbors = async (
+  args: { vec: number[]; k?: number },
+  context: any,
+) => {
+  if (!context.user) {
+    throw new HttpError(401, "Not authenticated");
+  }
+  if (!Array.isArray(args?.vec)) {
+    throw new HttpError(400, "vec required (number[])");
+  }
+  const instance = await getUserInstance(context);
+  const body: { vec: number[]; k?: number } = { vec: args.vec };
+  if (args.k !== undefined) body.k = args.k;
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/observations/vec-search",
+    body,
+  });
+};
+
+// ============================================================
 // Container Logs
 // ============================================================
 export const getContainerLogs: GetContainerLogs<
