@@ -42,8 +42,14 @@ export function openStateDb(dbPath?: string): DatabaseSync {
   // won't exist yet — tolerate that for now so existing CLI/TUI flows
   // (provision, list, health, migrate-status) keep working. Once P3-2
   // ships the embedding table, this should become a fatal error.
+  // File is `vec.so` (not `sqlite-vec.so`) on purpose: node:sqlite
+  // derives the init symbol from the filename, looking for
+  // `sqlite3_<basename>_init`. sqlite-vec exports
+  // `sqlite3_vec_init`, so the file must be named `vec.so`. P3-1
+  // originally shipped it as sqlite-vec.so, which crashed ctrl-api
+  // on every tenant (incident: revert fbcb553).
   const sqliteVecPath =
-    process.env.SQLITE_VEC_PATH ?? "/mnt/encrypted/alfred/sqlite-vec.so";
+    process.env.SQLITE_VEC_PATH ?? "/mnt/encrypted/alfred/vec.so";
   try {
     stateDb.enableLoadExtension(true);
     // node:sqlite derives the init symbol from the filename

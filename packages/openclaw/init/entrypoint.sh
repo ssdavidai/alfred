@@ -507,10 +507,10 @@ done
 # the bundled binary reaches the runtime. Hash-gated so re-running init
 # on every container restart is cheap.
 SQLITE_VEC_SRC=/usr/local/lib/sqlite-vec.so
-SQLITE_VEC_DST=/alfred-data/sqlite-vec.so
+SQLITE_VEC_DST=/alfred-data/vec.so
 if [[ -f "$SQLITE_VEC_SRC" ]]; then
     VEC_HASH=$(md5sum "$SQLITE_VEC_SRC" | cut -d' ' -f1)
-    VEC_HASH_FILE=/alfred-data/.sqlite-vec.so.content-hash
+    VEC_HASH_FILE=/alfred-data/.vec.so.content-hash
     if [[ -f "$VEC_HASH_FILE" && "$(cat "$VEC_HASH_FILE")" == "$VEC_HASH" && -f "$SQLITE_VEC_DST" ]]; then
         echo "[init] sqlite-vec.so unchanged, skipping copy"
     else
