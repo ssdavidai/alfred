@@ -54,10 +54,11 @@ REQUIRED=(
 	DOMAIN
 	ACME_EMAIL
 	OWNER_NAME
-	ANTHROPIC_API_KEY
 	OPENROUTER_API_KEY
 	COMPOSIO_API_KEY
 )
+# ANTHROPIC_API_KEY is optional — Hermes routes LLM traffic through
+# OpenRouter by default; set it only if you want a direct Anthropic route.
 
 bold "Validating required fields in .env ..."
 MISSING=()
