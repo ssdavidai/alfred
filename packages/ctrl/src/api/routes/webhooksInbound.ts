@@ -26,6 +26,7 @@ import {
   syncVaultIndexFromContent,
   deleteVaultIndexRow,
 } from "../vault_index_sync.js";
+import { appendStreamLogEntry, getEnforcementMode } from "../stream_jsonl.js";
 
 const VAULT_ROOT = "/mnt/encrypted/vault";
 const WEBHOOK_ENDPOINT_DIR = path.join(VAULT_ROOT, "webhook_endpoint");
@@ -268,13 +269,42 @@ export function registerInboundWebhookRoutes(): void {
 
     const eventFilename = `webhook-${safeIdent(token).slice(0, 12)}-${ts}-${shortUuid}.md`;
     const eventPath = path.join(STREAM_EVENT_DIR, eventFilename);
-    fs.writeFileSync(eventPath, eventBody, "utf-8");
-    // STORE-P1-3: index the new stream_event row.
-    syncVaultIndexFromContent({
-      vaultPath: VAULT_ROOT,
-      relPath: `stream_event/${eventFilename}`,
-      content: eventBody,
-    });
+
+    // STORE-P4-1: authoritative write goes to /vault/_raw/<date>.jsonl.
+    // The legacy markdown write under /vault/stream_event/ stays during
+    // the shadow soak so existing alfred-learn consumers (which still
+    // scan stream_event/*.md) keep functioning. STREAM_LOG_ENFORCEMENT
+    // controls the legacy path:
+    //   shadow (default): both writes happen
+    //   warn:             JSONL only, warn on missed markdown writes
+    //   reject:           JSONL only, skip markdown entirely
+    const enforcement = getEnforcementMode();
+    try {
+      appendStreamLogEntry({
+        id: `${token}:${shortUuid}`,
+        ts_ns: (BigInt(now.getTime()) * 1_000_000n).toString(),
+        source_type: sourceType,
+        source_id: sourceRef,
+        received_at: iso,
+        headers: { token, label: fm.label },
+        payload: body ?? {},
+      });
+    } catch (err) {
+      // Stream log is the new source of truth — surface failures, but
+      // don't block the webhook from succeeding when the legacy markdown
+      // path is still in shadow mode.
+      console.warn(`stream_jsonl.append failed: ${(err as Error).message}`);
+    }
+
+    if (enforcement !== "reject") {
+      fs.writeFileSync(eventPath, eventBody, "utf-8");
+      // STORE-P1-3: index the new stream_event row.
+      syncVaultIndexFromContent({
+        vaultPath: VAULT_ROOT,
+        relPath: `stream_event/${eventFilename}`,
+        content: eventBody,
+      });
+    }
 
     // Bump counters on the webhook_endpoint record. Best-effort — a failure
     // here MUST NOT lose the stream_event we just wrote, so we swallow.

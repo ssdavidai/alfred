@@ -52,6 +52,7 @@ from src.workflows.signal_router import (
     mark_signal_status,
 )
 from src.workflows.stream_event_purge import StreamEventPurgeWorkflow
+from src.workflows.stream_raw_compact import StreamRawCompactWorkflow
 from src.workflows.reversal_calibration import ReversalCalibrationWorkflow
 from src.workflows.briefing import BriefingWorkflow
 
@@ -259,6 +260,7 @@ from src.activities.omi_audio import (
 # Activities — stream log
 from src.activities.stream_log import append_to_stream_log
 from src.activities.maintenance import (
+    compact_stream_raw_jsonl,
     purge_old_stream_events,
     run_distiller_batch,
     run_janitor_scan_and_fix,
@@ -687,6 +689,7 @@ _STATIC_WORKFLOWS = [
     SignalExtractWorkflow,
     SignalRouterWorkflow,
     StreamEventPurgeWorkflow,
+    StreamRawCompactWorkflow,
     ReversalCalibrationWorkflow,
     BriefingWorkflow,
     *ALL_CHORE_TEMPLATES,
@@ -819,6 +822,9 @@ ALL_ACTIVITIES = [
     # set. Gated on STEWARD_STREAM_EVENT_PURGE_ENABLED at both
     # registration time AND activity-invocation time.
     purge_old_stream_events,
+    # STORE-P4-1: daily compaction of /vault/_raw/<date>.jsonl. Soft-compacts
+    # files >7d (drops processed events), hard-deletes files >30d.
+    compact_stream_raw_jsonl,
     # Behavioral profiler + packs
     run_behavioral_profiler,
     generate_stream_pack,

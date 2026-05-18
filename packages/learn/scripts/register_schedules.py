@@ -112,6 +112,14 @@ SIGNAL_ROUTER_INTERVAL = timedelta(minutes=2)
 STREAM_EVENT_PURGE_SCHEDULE_ID = "al-stream-event-purge"
 STREAM_EVENT_PURGE_WORKFLOW = "StreamEventPurgeWorkflow"
 
+# STORE-P4-1 — daily compaction of /vault/_raw/<date>.jsonl. Drops events
+# >7d that are already in stream_event_processed; hard-deletes whole
+# partitions >30d. Always-on (no env gate) because the operation is
+# safe even when no JSONL files exist yet — the activity simply returns
+# zero counts. The schedule arms a tenant before it produces any JSONL.
+STREAM_RAW_COMPACT_SCHEDULE_ID = "al-stream-raw-compact"
+STREAM_RAW_COMPACT_WORKFLOW = "StreamRawCompactWorkflow"
+
 # Steward Phase 6 (RFC #842 / T6.7.5) — reversal-driven negative
 # calibration. Polls the vault every 10 minutes for new
 # ``event/steward-action-reversed-*.md`` (and signal-action-reversed-)
@@ -1057,6 +1065,69 @@ async def register_stream_event_purge(client: Client, task_queue: str) -> None:
         raise
 
 
+async def register_stream_raw_compact(client: Client, task_queue: str) -> None:
+    """Create ``al-stream-raw-compact`` — STORE-P4-1 daily JSONL compactor.
+
+    Calendar schedule at 03:30 UTC daily (offset 30m from the legacy
+    stream-event-purge to avoid both touching ctrl-api simultaneously
+    during the soak). SKIP overlap so a long run doesn't pile on.
+    """
+    handle = client.get_schedule_handle(STREAM_RAW_COMPACT_SCHEDULE_ID)
+    action = ScheduleActionStartWorkflow(
+        STREAM_RAW_COMPACT_WORKFLOW,
+        id=f"{STREAM_RAW_COMPACT_SCHEDULE_ID}-run",
+        task_queue=task_queue,
+        execution_timeout=timedelta(minutes=15),
+        run_timeout=timedelta(minutes=15),
+    )
+    spec = ScheduleSpec(
+        calendars=[
+            ScheduleCalendarSpec(
+                hour=[ScheduleRange(start=3)],
+                minute=[ScheduleRange(start=30)],
+            )
+        ],
+        time_zone_name="UTC",
+    )
+    policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
+
+    try:
+        await client.create_schedule(
+            STREAM_RAW_COMPACT_SCHEDULE_ID,
+            Schedule(action=action, spec=spec, policy=policy),
+        )
+        logger.info(
+            "Created schedule: %s → %s (daily 03:30 UTC, SKIP overlap)",
+            STREAM_RAW_COMPACT_SCHEDULE_ID,
+            STREAM_RAW_COMPACT_WORKFLOW,
+        )
+    except RPCError as e:
+        if e.status == RPCStatusCode.ALREADY_EXISTS:
+            logger.info(
+                "Schedule already exists: %s (skipping)",
+                STREAM_RAW_COMPACT_SCHEDULE_ID,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s",
+            STREAM_RAW_COMPACT_SCHEDULE_ID, e,
+        )
+        raise
+    except Exception as e:  # noqa: BLE001 — parity with sibling helpers
+        err = str(e).lower()
+        if "already" in err or "exists" in err:
+            logger.info(
+                "Schedule already exists: %s (skipping)",
+                STREAM_RAW_COMPACT_SCHEDULE_ID,
+            )
+            return
+        logger.error(
+            "Failed to create schedule %s: %s",
+            STREAM_RAW_COMPACT_SCHEDULE_ID, e,
+        )
+        raise
+
+
 # ---------------------------------------------------------------------------
 # Steward (#835) — per-matter schedule registration
 # ---------------------------------------------------------------------------
@@ -1373,6 +1444,10 @@ async def register_all() -> None:
     # non-lossy. Gated on ``STEWARD_STREAM_EVENT_PURGE_ENABLED=true``
     # — david-only at T6.6.4, fleet rollout post-Phase-6.7.
     await register_stream_event_purge(client, config.task_queue)
+    # STORE-P4-1 — daily compaction of /vault/_raw/<date>.jsonl.
+    # Drops events older than 7d that are processed, hard-deletes
+    # partitions older than 30d. Always-on (no env gate).
+    await register_stream_raw_compact(client, config.task_queue)
     # Steward Phase 6 (RFC #842 / T6.7.5) — reversal-driven negative
     # calibration. 10-min sweep over ``event/steward-action-reversed-*``
     # / ``event/signal-action-reversed-*`` records. Gated on

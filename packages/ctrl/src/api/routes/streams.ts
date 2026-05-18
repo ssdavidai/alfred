@@ -2,7 +2,23 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { addRoute } from "../server.js";
-import { sendJson, ValidationError, ConflictError, NotFoundError } from "../errors.js";
+import { sendJson, ValidationError, ConflictError, NotFoundError, ApiError } from "../errors.js";
+import {
+  appendStreamLogEntry,
+  readStreamLogSlice,
+  listPartitionDates,
+  getEnforcementMode,
+  type StreamLogEntry,
+} from "../stream_jsonl.js";
+import { openStateDb } from "../../db/state.js";
+import {
+  getConsumerOffset,
+  setConsumerOffset,
+  markEventProcessed as sqlMarkEventProcessed,
+  getEventProcessed,
+} from "../../db/stream_queries.js";
+
+const DEFAULT_CONSUMER = "event_processor";
 
 const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
 const VAULT_PATH = "/mnt/encrypted/vault";
@@ -895,12 +911,181 @@ export function registerStreamRoutes(): void {
   });
 
   // GET /api/v1/streams/events — MUST be before /:id to avoid matching "events" as an ID
+  //
+  // STORE-P4-1: when `consumer=<name>` is set, this becomes a consume-and-advance
+  // read against the date-partitioned JSONL log at /vault/_raw/YYYY-MM-DD.jsonl.
+  // The endpoint atomically:
+  //   1. Picks up where stream_consumer_offset(consumer, date) left off
+  //   2. Reads up to `max` lines from the current date partition
+  //   3. If the current partition is exhausted, advances to the next date
+  //      with unread content
+  //   4. Writes the new offset back to stream_consumer_offset
+  //
+  // The consumer is expected to call POST /streams/events/:id/processed for
+  // every event it successfully handles. Events left un-marked-processed
+  // beyond 7 days fire the stuck-pipeline alert (STORE-P4-2).
+  //
+  // Without `consumer`, falls back to the legacy stream-id-keyed scan over
+  // /mnt/encrypted/alfred/streams/*.jsonl (used by dashboard "Recent Events").
   addRoute("GET", "/api/v1/streams/events", async ({ res, query }) => {
+    const consumer = query.get("consumer");
+
+    if (consumer) {
+      const max = Math.min(
+        Math.max(1, parseInt(query.get("max") || query.get("limit") || "200", 10)),
+        500,
+      );
+      const db = openStateDb();
+      const dates = listPartitionDates();
+      const out: StreamLogEntry[] = [];
+      let advanced = false;
+      let lastDate: string | undefined;
+      let lastOffset = 0;
+      let remaining = max;
+
+      // Walk forward across day boundaries until we hit `max` or exhaust
+      // every partition. Today's file is always the last one (lex sort on
+      // YYYY-MM-DD); older partitions take precedence so the consumer
+      // drains oldest-first and the stuck-pipeline alert can spot a
+      // backlog by date.
+      for (const date of dates) {
+        if (remaining <= 0) break;
+        const offset = getConsumerOffset(db, consumer, date);
+        const { entries, nextOffset, reachedEnd } = readStreamLogSlice(
+          date,
+          offset,
+          remaining,
+        );
+        if (entries.length === 0 && reachedEnd) {
+          continue;
+        }
+        out.push(...entries);
+        remaining -= entries.length;
+        if (nextOffset !== offset) {
+          setConsumerOffset(db, consumer, date, nextOffset);
+          advanced = true;
+          lastDate = date;
+          lastOffset = nextOffset;
+        }
+      }
+
+      sendJson(res, 200, {
+        events: out,
+        count: out.length,
+        consumer,
+        // Surface the last (date, offset) we wrote so a debug client can
+        // verify forward progress.
+        last_date: advanced ? lastDate : undefined,
+        last_offset: advanced ? lastOffset : undefined,
+      });
+      return;
+    }
+
     const status = query.get("status") as "unprocessed" | "processed" | "quarantined" | undefined;
     const limit = parseInt(query.get("limit") || "100", 10);
 
     const events = getAllEvents(status, Math.min(limit, 500));
     sendJson(res, 200, { events, count: events.length });
+  });
+
+  // POST /api/v1/streams/events — STORE-P4-1 writer-side append.
+  //
+  // Replaces the legacy "write one .md per event under /vault/stream_event/"
+  // pattern with an append to /vault/_raw/YYYY-MM-DD.jsonl.
+  //
+  // The body shape mirrors the StreamLogEntry contract:
+  //   { id, ts_ns?, source_type, source_id?, received_at?, headers?, payload }
+  //
+  // `id` MUST be the upstream provider's stable event id (gmail message id,
+  // gcal event id, composio event id) so a re-delivery is idempotent. If the
+  // caller omits it we synthesise a UUIDv4, but downstream dedup is then
+  // best-effort only.
+  //
+  // Shadow-write (STREAM_LOG_ENFORCEMENT=shadow, default): writes the JSONL
+  // line AND also emits a legacy /mnt/encrypted/alfred/streams/<stream_id>.jsonl
+  // event when `stream_id` is supplied, so the existing dashboard "Recent
+  // Events" surface keeps working during the soak.
+  addRoute("POST", "/api/v1/streams/events", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    if (!b || typeof b.source_type !== "string") {
+      throw new ValidationError("source_type is required");
+    }
+
+    const id =
+      typeof b.id === "string" && b.id
+        ? (b.id as string)
+        : typeof b.source_id === "string" && b.source_id
+          ? (b.source_id as string)
+          : crypto.randomUUID();
+
+    const nowNs = (BigInt(Date.now()) * 1_000_000n).toString();
+    const tsNs =
+      typeof b.ts_ns === "string"
+        ? b.ts_ns
+        : typeof b.ts_ns === "number"
+          ? String(Math.trunc(b.ts_ns))
+          : nowNs;
+
+    const receivedAt =
+      typeof b.received_at === "string" ? b.received_at : new Date().toISOString();
+
+    const entry: StreamLogEntry = {
+      id,
+      ts_ns: tsNs,
+      source_type: b.source_type as string,
+      source_id: typeof b.source_id === "string" ? (b.source_id as string) : id,
+      received_at: receivedAt,
+      headers:
+        typeof b.headers === "object" && b.headers !== null
+          ? (b.headers as Record<string, unknown>)
+          : undefined,
+      payload: b.payload ?? {},
+    };
+
+    const written = appendStreamLogEntry(entry);
+
+    // Shadow-write the legacy stream-id JSONL when the caller supplied a
+    // stream_id so /api/v1/streams/:id/events keeps returning rows.
+    const enforcement = getEnforcementMode();
+    let legacyAppended = false;
+    const streamId = typeof b.stream_id === "string" ? (b.stream_id as string) : undefined;
+    if (enforcement === "shadow" && streamId) {
+      const legacy: StreamEvent = {
+        id,
+        stream_id: streamId,
+        stream_type:
+          typeof b.stream_type === "string" ? (b.stream_type as string) : entry.source_type,
+        received_at: receivedAt,
+        source_ref: typeof b.source_ref === "string" ? (b.source_ref as string) : undefined,
+        raw: entry.payload,
+        summary: typeof b.summary === "string" ? (b.summary as string) : undefined,
+      };
+      try {
+        appendEvent(streamId, legacy);
+        legacyAppended = true;
+        const streams = loadStreamsMeta();
+        const idx = streams.findIndex((s) => s.id === streamId);
+        if (idx >= 0) {
+          streams[idx].last_event_at = receivedAt;
+          streams[idx].event_count = (streams[idx].event_count || 0) + 1;
+          saveStreamsMeta(streams);
+        }
+      } catch {
+        // Shadow write is best-effort — the JSONL line is the source of truth.
+      }
+    } else if (enforcement === "reject" && streamId) {
+      // In `reject` mode callers must use the new endpoint shape; we still
+      // accept the write but don't shadow-mirror it.
+    }
+
+    sendJson(res, 201, {
+      status: "appended",
+      event_id: id,
+      date: written.date,
+      bytes: written.bytes,
+      legacy_shadow_written: legacyAppended,
+      enforcement,
+    });
   });
 
   // GET /api/v1/streams/:id — get full stream config by ID
@@ -1113,21 +1298,57 @@ export function registerStreamRoutes(): void {
   });
 
   // POST /api/v1/streams/events/:id/processed — mark event as processed
+  //
+  // STORE-P4-1: this now writes to BOTH:
+  //   * stream_event_processed (state.db) — authoritative for the JSONL
+  //     compactor and idempotency on next consume
+  //   * processed-events.json (legacy) — kept during soak so the existing
+  //     "Recent Events" dashboard filter still works
   addRoute("POST", "/api/v1/streams/events/:id/processed", async ({ res, params, body }) => {
     const eventId = params.id;
     const b = body as Record<string, unknown> | undefined;
 
-    const processedData = loadProcessedEvents();
-    processedData.events[eventId] = {
-      event_id: eventId,
-      status: "processed",
-      processed_at: new Date().toISOString(),
-      vault_path: typeof b?.vault_path === "string" ? b.vault_path : undefined,
-      classification: typeof b?.classification === "string" ? b.classification : undefined,
-    };
+    // Authoritative: record in SQLite. `date` defaults to today UTC if the
+    // caller doesn't know which partition the event came from — the
+    // compactor cross-checks the JSONL anyway.
+    const date =
+      typeof b?.date === "string" ? (b.date as string) : new Date().toISOString().slice(0, 10);
+    const consumer =
+      typeof b?.consumer === "string" ? (b.consumer as string) : DEFAULT_CONSUMER;
+    try {
+      const db = openStateDb();
+      sqlMarkEventProcessed(db, eventId, date, consumer);
+    } catch (err) {
+      // Surface as a 500 — losing this row would let the compactor keep
+      // the event forever, which defeats the 7d TTL.
+      throw new ApiError(
+        500,
+        "STREAM_PROCESSED_WRITE_FAILED",
+        `failed to record processed event: ${(err as Error).message}`,
+      );
+    }
 
-    saveProcessedEvents(processedData);
-    sendJson(res, 200, { status: "marked_processed", event_id: eventId });
+    // Legacy mirror — best-effort.
+    try {
+      const processedData = loadProcessedEvents();
+      processedData.events[eventId] = {
+        event_id: eventId,
+        status: "processed",
+        processed_at: new Date().toISOString(),
+        vault_path: typeof b?.vault_path === "string" ? b.vault_path : undefined,
+        classification: typeof b?.classification === "string" ? b.classification : undefined,
+      };
+      saveProcessedEvents(processedData);
+    } catch {
+      /* ignore — SQL row is the source of truth */
+    }
+
+    sendJson(res, 200, {
+      status: "marked_processed",
+      event_id: eventId,
+      date,
+      consumer,
+    });
   });
 
   // POST /api/v1/streams/events/:id/quarantine — mark event as quarantined
@@ -1214,6 +1435,80 @@ export function registerStreamRoutes(): void {
       stale_tracking_removed: staleIds.length,
       bytes_reclaimed: bytesReclaimed,
       retention_days: retentionDays,
+    });
+  });
+
+  // POST /api/v1/streams/raw/compact — STORE-P4-1 daily compactor.
+  //
+  // For each /vault/_raw/YYYY-MM-DD.jsonl partition:
+  //   * If date is older than `hard_delete_days` (default 30): drop the
+  //     whole file, drop matching stream_event_processed rows.
+  //   * Else if date is older than `soft_compact_days` (default 7):
+  //     rewrite the file keeping only lines whose id is NOT marked
+  //     processed. If the slim file is empty, delete it.
+  //   * Today and recent files are untouched.
+  //
+  // Runs as a one-shot activity from the daily maintenance workflow.
+  // Returns counts so the workflow can surface them in Temporal UI.
+  addRoute("POST", "/api/v1/streams/raw/compact", async ({ res, body }) => {
+    const b = body as Record<string, unknown> | undefined;
+    const softDays = Math.max(
+      1,
+      Number(b?.soft_compact_days ?? b?.retention_days ?? 7),
+    );
+    const hardDays = Math.max(softDays, Number(b?.hard_delete_days ?? 30));
+    const today = new Date().toISOString().slice(0, 10);
+
+    const dates = listPartitionDates();
+    const db = openStateDb();
+
+    // Lazy-load: heavy modules deferred so the route handler stays cold-startable.
+    const { compactPartition, deletePartition } = await import("../stream_jsonl.js");
+    const { listProcessedIdsForDate, deleteProcessedOlderThan } = await import(
+      "../../db/stream_queries.js"
+    );
+
+    const ageDays = (date: string): number => {
+      const partition = new Date(`${date}T00:00:00Z`).getTime();
+      const now = new Date(`${today}T00:00:00Z`).getTime();
+      return Math.floor((now - partition) / 86_400_000);
+    };
+
+    const summary: Array<{
+      date: string;
+      action: "delete" | "compact" | "skip";
+      kept: number;
+      dropped: number;
+      removed: boolean;
+    }> = [];
+
+    for (const date of dates) {
+      const age = ageDays(date);
+      if (age >= hardDays) {
+        const removed = deletePartition(date);
+        summary.push({ date, action: "delete", kept: 0, dropped: 0, removed });
+        continue;
+      }
+      if (age >= softDays) {
+        const dropIds = listProcessedIdsForDate(db, date);
+        const { kept, dropped, removed } = compactPartition(date, dropIds);
+        summary.push({ date, action: "compact", kept, dropped, removed });
+        continue;
+      }
+      summary.push({ date, action: "skip", kept: 0, dropped: 0, removed: false });
+    }
+
+    // GC the processed-events table for rows older than the hard cutoff so
+    // it doesn't accumulate forever. ns precision: cutoff is hardDays ago.
+    const cutoffNs =
+      (BigInt(Date.now()) - BigInt(hardDays) * 86_400_000n) * 1_000_000n;
+    const droppedRows = deleteProcessedOlderThan(db, cutoffNs);
+
+    sendJson(res, 200, {
+      soft_compact_days: softDays,
+      hard_delete_days: hardDays,
+      partitions: summary,
+      processed_rows_pruned: droppedRows,
     });
   });
 }

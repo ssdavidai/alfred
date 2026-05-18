@@ -195,12 +195,29 @@ class VaultClient:
 
     # --- Streams API -------------------------------------------------------
 
-    async def fetch_unprocessed_events(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Fetch unprocessed stream events."""
-        resp = await self._client.get(
-            "/api/v1/streams/events",
-            params={"status": "unprocessed", "limit": limit},
-        )
+    async def fetch_unprocessed_events(
+        self,
+        limit: int = 20,
+        consumer: str | None = "event_processor",
+    ) -> list[dict[str, Any]]:
+        """Fetch unprocessed stream events.
+
+        STORE-P4-1: when ``consumer`` is set (default), reads from the
+        date-partitioned JSONL log at /vault/_raw/<date>.jsonl via the
+        consumer-aware endpoint, which atomically advances the
+        per-consumer offset in state.db. The returned entries follow the
+        new StreamLogEntry shape ({id, ts_ns, source_type, source_id,
+        received_at, headers?, payload}).
+
+        When ``consumer`` is None, falls back to the legacy status-keyed
+        scan over /mnt/encrypted/alfred/streams/*.jsonl.
+        """
+        params: dict[str, Any]
+        if consumer:
+            params = {"consumer": consumer, "max": limit}
+        else:
+            params = {"status": "unprocessed", "limit": limit}
+        resp = await self._client.get("/api/v1/streams/events", params=params)
         resp.raise_for_status()
         return resp.json().get("events", [])
 
@@ -209,11 +226,29 @@ class VaultClient:
         event_id: str,
         vault_path: str,
         classification: str,
+        *,
+        date: str | None = None,
+        consumer: str = "event_processor",
     ) -> None:
-        """Mark a stream event as processed."""
+        """Mark a stream event as processed.
+
+        STORE-P4-1: writes both to stream_event_processed (state.db,
+        authoritative for the JSONL compactor) and to the legacy
+        processed-events.json mirror. ``date`` is the YYYY-MM-DD
+        partition the event came from — pass through from the event's
+        own ``received_at`` if known, otherwise the server defaults to
+        today UTC.
+        """
+        body: dict[str, Any] = {
+            "vault_path": vault_path,
+            "classification": classification,
+            "consumer": consumer,
+        }
+        if date:
+            body["date"] = date
         resp = await self._client.post(
             f"/api/v1/streams/events/{event_id}/processed",
-            json={"vault_path": vault_path, "classification": classification},
+            json=body,
         )
         resp.raise_for_status()
 

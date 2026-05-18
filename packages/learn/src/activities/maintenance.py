@@ -306,3 +306,70 @@ async def purge_old_stream_events() -> dict[str, Any]:
         "errors": errors,
         "error_messages": error_messages,
     }
+
+
+# ---------------------------------------------------------------------------
+# STORE-P4-1: daily compactor for /vault/_raw/<date>.jsonl
+# ---------------------------------------------------------------------------
+
+
+@activity.defn
+async def compact_stream_raw_jsonl(
+    soft_compact_days: int = 7,
+    hard_delete_days: int = 30,
+) -> dict[str, Any]:
+    """Tell ctrl-api to compact /vault/_raw/<date>.jsonl partitions.
+
+    Defers to POST /api/v1/streams/raw/compact (server-side does the
+    filesystem work — alfred-learn does not own the vault filesystem).
+    Returns the per-partition summary so the workflow can surface counts
+    in the Temporal UI.
+
+    Per STORAGE-ARCHITECTURE.md §5 "Lifecycle":
+      * Files older than soft_compact_days where every event is marked
+        processed are rewritten to drop those events; if the slim file
+        is empty, it is deleted.
+      * Files older than hard_delete_days are dropped wholesale.
+    """
+    config = load_config()
+    base = config.alfred_ctrl_url
+    api_key = __import__("os").environ.get("AAS_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+    async with httpx.AsyncClient(
+        base_url=base, timeout=300.0, headers=headers
+    ) as client:
+        resp = await client.post(
+            "/api/v1/streams/raw/compact",
+            json={
+                "soft_compact_days": int(soft_compact_days),
+                "hard_delete_days": int(hard_delete_days),
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    partitions = data.get("partitions", []) or []
+    deleted = sum(1 for p in partitions if p.get("action") == "delete")
+    compacted = sum(1 for p in partitions if p.get("action") == "compact")
+    skipped = sum(1 for p in partitions if p.get("action") == "skip")
+    dropped_events = sum(int(p.get("dropped", 0)) for p in partitions)
+    kept_events = sum(int(p.get("kept", 0)) for p in partitions)
+
+    activity.logger.info(
+        "compact_stream_raw_jsonl: partitions=%d deleted=%d compacted=%d "
+        "skipped=%d dropped_events=%d kept_events=%d processed_rows_pruned=%d",
+        len(partitions), deleted, compacted, skipped, dropped_events,
+        kept_events, int(data.get("processed_rows_pruned", 0)),
+    )
+    return {
+        "soft_compact_days": int(data.get("soft_compact_days", soft_compact_days)),
+        "hard_delete_days": int(data.get("hard_delete_days", hard_delete_days)),
+        "partition_count": len(partitions),
+        "deleted": deleted,
+        "compacted": compacted,
+        "skipped": skipped,
+        "dropped_events": dropped_events,
+        "kept_events": kept_events,
+        "processed_rows_pruned": int(data.get("processed_rows_pruned", 0)),
+    }
