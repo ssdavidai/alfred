@@ -114,6 +114,12 @@ services:
       - alfred_data:/alfred-data
     env_file:
       - .env
+    environment:
+      # hermes_data is mounted at /hermes-state; the init container writes
+      # the rendered Hermes profile configs under /hermes-state/profiles/<p>/
+      # and the hermes runtime sees the same volume at the same path.
+      - HERMES_DATA_DIR=/hermes-state
+      - HERMES_RUNTIME_HOME=/hermes-state
 
   # ── temporal — workflow engine for alfred-learn ─────────────────────
   temporal:
@@ -211,6 +217,7 @@ services:
       - /tmp:size=256m
     environment:
       - HERMES_API_SERVER_KEY=${HERMES_API_SERVER_KEY}
+      - HERMES_HOME=/hermes-state
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
@@ -296,6 +303,10 @@ services:
       - NODE_ENV=production
       - COMPOSE_PROJECT_NAME=alfred-black
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
+      # ctrl-api reads/writes Hermes profile config.yaml at ${dir}/<profile>/;
+      # point it at the profiles parent so paths resolve to
+      # /hermes-state/profiles/{main,workers}/config.yaml
+      - HERMES_CONFIG_DIR=/hermes-state/profiles
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3100/api/v1/learning/status -H \"Authorization: Bearer $AAS_API_KEY\" || exit 1"]
       interval: 10s
@@ -340,7 +351,7 @@ services:
       # container has no writable $HOME, so pin both to /tmp.
       - COMPOSIO_CACHE_DIR=/tmp/composio
       - HOME=/tmp
-      - WORKERS_OPENCLAW_CONFIG=/hermes-state/workers/config.yaml
+      - WORKERS_OPENCLAW_CONFIG=/hermes-state/profiles/workers/config.yaml
       # Vexa transcript intake — gated by VEXA_ENABLED. When false the
       # meeting_capture + transcript_intake schedules are not registered.
       - VEXA_ENABLED=${VEXA_ENABLED:-false}
