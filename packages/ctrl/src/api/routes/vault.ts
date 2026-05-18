@@ -20,6 +20,37 @@ import {
   classifyTarget,
   stateFieldsFor,
 } from "../stateFields.js";
+import { openStateDb } from "../../db/state.js";
+import {
+  listByType as vaultIndexListByType,
+  listAll as vaultIndexListAll,
+  type VaultIndexRow,
+} from "../../db/vault_queries.js";
+
+// ---------------------------------------------------------------------------
+// STORE-P1-4: serve list endpoints from the `vault_index` SQLite table
+// instead of recursively walking /mnt/encrypted/vault. Set
+// VAULT_LIST_USE_INDEX=0 to revert every rewired endpoint to the
+// legacy walkMd path — that's the rollback handle.
+// ---------------------------------------------------------------------------
+const VAULT_LIST_USE_INDEX = process.env.VAULT_LIST_USE_INDEX !== "0";
+
+// Indexer caps body_first_n at this many chars. Requests for a longer
+// preview (?preview=) can't be served from the index losslessly, so
+// they fall through to the legacy walkMd path.
+const VAULT_INDEX_BODY_FIRST_N = 500;
+
+function parseIndexFrontmatter(raw: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Fall through.
+  }
+  return {};
+}
 
 export const VAULT_PATH = "/mnt/encrypted/vault";
 const INBOX_PATH = `${VAULT_PATH}/inbox`;
@@ -556,22 +587,44 @@ export function registerVaultRoutes(): void {
       return;
     }
 
-    const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
     const titles: Array<{ title: string; slug: string; type: string }> = [];
-    for (const relPath of files) {
-      const rec = readRecord(relPath);
-      if (!rec) continue;
-      // slug = path under vault root, no .md, forward-slash normalized
-      const slug = relPath.replace(/\\/g, "/").replace(/\.md$/, "");
-      // Prefer frontmatter title; fall back to name/subject; then stem.
-      const title = String(
-        rec.fm.title ?? rec.fm.name ?? rec.fm.subject ?? rec.stem,
+
+    if (VAULT_LIST_USE_INDEX) {
+      const t0 = Date.now();
+      const rows = vaultIndexListAll(openStateDb());
+      for (const row of rows) {
+        const slug = row.path.replace(/\\/g, "/").replace(/\.md$/, "");
+        const stem = path.basename(row.path, ".md");
+        const fm = parseIndexFrontmatter(row.frontmatter);
+        const title = String(
+          fm.title ?? fm.name ?? fm.subject ?? stem,
+        );
+        const type = String(fm.type ?? "");
+        if (!title) continue;
+        titles.push({ title, slug, type });
+      }
+      titles.sort((a, b) => a.title.localeCompare(b.title));
+      console.log(
+        "[vault.list.sql] index rows=%d titles=%d elapsed_ms=%d",
+        rows.length, titles.length, Date.now() - t0,
       );
-      const type = String(rec.fm.type ?? "");
-      if (!title) continue;
-      titles.push({ title, slug, type });
+    } else {
+      const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+      for (const relPath of files) {
+        const rec = readRecord(relPath);
+        if (!rec) continue;
+        // slug = path under vault root, no .md, forward-slash normalized
+        const slug = relPath.replace(/\\/g, "/").replace(/\.md$/, "");
+        // Prefer frontmatter title; fall back to name/subject; then stem.
+        const title = String(
+          rec.fm.title ?? rec.fm.name ?? rec.fm.subject ?? rec.stem,
+        );
+        const type = String(rec.fm.type ?? "");
+        if (!title) continue;
+        titles.push({ title, slug, type });
+      }
+      titles.sort((a, b) => a.title.localeCompare(b.title));
     }
-    titles.sort((a, b) => a.title.localeCompare(b.title));
 
     const body = { titles };
     _vaultIndexCache.set(VAULT_INDEX_CACHE_KEY, { at: now, body });
@@ -579,22 +632,45 @@ export function registerVaultRoutes(): void {
   });
 
   addRoute("GET", "/api/v1/vault/context", async ({ res }) => {
-    const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
     const byType: Record<string, Array<{ path: string; name: string; status: string }>> = {};
 
-    for (const relPath of files) {
-      const rec = readRecord(relPath);
-      if (!rec) continue;
-      const recType = String(rec.fm.type || "");
-      if (!recType) continue;
+    if (VAULT_LIST_USE_INDEX) {
+      const t0 = Date.now();
+      const rows = vaultIndexListAll(openStateDb());
+      for (const row of rows) {
+        const fm = parseIndexFrontmatter(row.frontmatter);
+        // Match legacy: filter on frontmatter type, not directory.
+        const recType = String(fm.type || "");
+        if (!recType) continue;
+        const display = row.path.replace(/\\/g, "/").replace(/\.md$/, "");
+        const stem = path.basename(row.path, ".md");
+        byType[recType] = byType[recType] || [];
+        byType[recType].push({
+          path: display,
+          name: stem,
+          status: String(fm.status || ""),
+        });
+      }
+      console.log(
+        "[vault.list.sql] context rows=%d types=%d elapsed_ms=%d",
+        rows.length, Object.keys(byType).length, Date.now() - t0,
+      );
+    } else {
+      const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+      for (const relPath of files) {
+        const rec = readRecord(relPath);
+        if (!rec) continue;
+        const recType = String(rec.fm.type || "");
+        if (!recType) continue;
 
-      const display = relPath.replace(/\\/g, "/").replace(/\.md$/, "");
-      byType[recType] = byType[recType] || [];
-      byType[recType].push({
-        path: display,
-        name: rec.stem,
-        status: String(rec.fm.status || ""),
-      });
+        const display = relPath.replace(/\\/g, "/").replace(/\.md$/, "");
+        byType[recType] = byType[recType] || [];
+        byType[recType].push({
+          path: display,
+          name: rec.stem,
+          status: String(rec.fm.status || ""),
+        });
+      }
     }
     sendJson(res, 200, {
       records_by_type: byType,
@@ -691,11 +767,16 @@ export function registerVaultRoutes(): void {
     );
 
     const cacheKey = `${type}:${previewLen}`;
-    const payload = await vaultListCache.get(cacheKey, () => {
+
+    // STORE-P1-4: serve from the SQLite vault_index when the requested
+    // preview length is within the indexed body_first_n cap. The index
+    // bypasses the in-memory TTL cache entirely — the SQL hit is sub-ms
+    // and the index IS the cache. The legacy walkMd path is kept below
+    // as the fallback so VAULT_LIST_USE_INDEX=0 reverts the rollout.
+    let payload: { results: any[]; count: number };
+    if (VAULT_LIST_USE_INDEX && previewLen <= VAULT_INDEX_BODY_FIRST_N) {
       const t0 = Date.now();
-      // Scope walk to /vault/<type> — david's vault has ~88k files;
-      // full-vault walk takes 6–7s vs <100ms scoped.
-      const files = walkMd(path.join(VAULT_PATH, type), VAULT_PATH, IGNORE_DIRS);
+      const rows = vaultIndexListByType(openStateDb(), type, { sortBy: "path" });
       const results: Array<{
         path: string;
         name: string;
@@ -704,30 +785,87 @@ export function registerVaultRoutes(): void {
         body_preview: string;
         created: string;
       }> = [];
-      for (const relPath of files) {
-        const rec = readRecord(relPath);
-        if (!rec) continue;
-        if (rec.fm.type !== type) continue;
+      for (const row of rows) {
+        const fm = parseIndexFrontmatter(row.frontmatter);
+        // Defence in depth: indexer derives record_type from the
+        // top-level directory, not frontmatter. The legacy handler
+        // filters on `fm.type === type` and we preserve that filter
+        // so a stale row whose frontmatter disagrees doesn't leak in.
+        if (fm.type !== type) continue;
 
-        // Truncate body to preview length for list rendering — the full
-        // body is available via GET /api/v1/vault/records/:path
-        const bodyPreview = rec.body.length > previewLen
-          ? rec.body.slice(0, previewLen) + "…"
-          : rec.body;
+        const stem = path.basename(row.path, ".md");
+        const bodyRaw = row.body_first_n ?? "";
+        // body_first_n is stored capped at VAULT_INDEX_BODY_FIRST_N
+        // chars with no truncation marker. If we hit the cap, assume
+        // it was truncated and append the legacy ellipsis so the
+        // response shape is observably identical when previewLen ==
+        // VAULT_INDEX_BODY_FIRST_N. previewLen < cap gets a fresh
+        // slice + marker.
+        let bodyPreview: string;
+        if (bodyRaw.length === 0) {
+          bodyPreview = "";
+        } else if (bodyRaw.length > previewLen) {
+          bodyPreview = bodyRaw.slice(0, previewLen) + "…";
+        } else if (bodyRaw.length === VAULT_INDEX_BODY_FIRST_N) {
+          bodyPreview = bodyRaw + "…";
+        } else {
+          bodyPreview = bodyRaw;
+        }
 
         results.push({
-          path: relPath.replace(/\\/g, "/"),
-          name: String(rec.fm.name || rec.fm.subject || rec.stem),
-          status: String(rec.fm.status || ""),
-          frontmatter: rec.fm,
+          path: row.path.replace(/\\/g, "/"),
+          name: String(fm.name || fm.subject || stem),
+          status: String(fm.status || ""),
+          frontmatter: fm,
           body_preview: bodyPreview,
-          created: String(rec.fm.created || ""),
+          created: String(fm.created || ""),
         });
       }
       results.sort((a, b) => a.name.localeCompare(b.name));
-      console.log("[vault.list] type=%s files=%d results=%d elapsed_ms=%d", type, files.length, results.length, Date.now() - t0);
-      return { results, count: results.length };
-    });
+      console.log(
+        "[vault.list.sql] type=%s rows=%d results=%d elapsed_ms=%d",
+        type, rows.length, results.length, Date.now() - t0,
+      );
+      payload = { results, count: results.length };
+    } else {
+      payload = await vaultListCache.get(cacheKey, () => {
+        const t0 = Date.now();
+        // Scope walk to /vault/<type> — david's vault has ~88k files;
+        // full-vault walk takes 6–7s vs <100ms scoped.
+        const files = walkMd(path.join(VAULT_PATH, type), VAULT_PATH, IGNORE_DIRS);
+        const results: Array<{
+          path: string;
+          name: string;
+          status: string;
+          frontmatter: Record<string, unknown>;
+          body_preview: string;
+          created: string;
+        }> = [];
+        for (const relPath of files) {
+          const rec = readRecord(relPath);
+          if (!rec) continue;
+          if (rec.fm.type !== type) continue;
+
+          // Truncate body to preview length for list rendering — the full
+          // body is available via GET /api/v1/vault/records/:path
+          const bodyPreview = rec.body.length > previewLen
+            ? rec.body.slice(0, previewLen) + "…"
+            : rec.body;
+
+          results.push({
+            path: relPath.replace(/\\/g, "/"),
+            name: String(rec.fm.name || rec.fm.subject || rec.stem),
+            status: String(rec.fm.status || ""),
+            frontmatter: rec.fm,
+            body_preview: bodyPreview,
+            created: String(rec.fm.created || ""),
+          });
+        }
+        results.sort((a, b) => a.name.localeCompare(b.name));
+        console.log("[vault.list] type=%s files=%d results=%d elapsed_ms=%d", type, files.length, results.length, Date.now() - t0);
+        return { results, count: results.length };
+      });
+    }
     // For instincts only: enrich each record with the live observation
     // count (decision-sourced only). signal_actions._instinct_threshold
     // reads this field to apply the obs-count discretion formula
@@ -1624,16 +1762,35 @@ export function getVaultContextData(): {
   records_by_type: Record<string, Array<{ path: string; name: string; status: string }>>;
   total: number;
 } {
-  const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
   const byType: Record<string, Array<{ path: string; name: string; status: string }>> = {};
-  for (const relPath of files) {
-    const rec = readRecord(relPath);
-    if (!rec) continue;
-    const recType = String(rec.fm.type || "");
-    if (!recType) continue;
-    const display = relPath.replace(/\\/g, "/").replace(/\.md$/, "");
-    byType[recType] = byType[recType] || [];
-    byType[recType].push({ path: display, name: rec.stem, status: String(rec.fm.status || "") });
+
+  if (VAULT_LIST_USE_INDEX) {
+    const t0 = Date.now();
+    const rows = vaultIndexListAll(openStateDb());
+    for (const row of rows) {
+      const fm = parseIndexFrontmatter(row.frontmatter);
+      const recType = String(fm.type || "");
+      if (!recType) continue;
+      const display = row.path.replace(/\\/g, "/").replace(/\.md$/, "");
+      const stem = path.basename(row.path, ".md");
+      byType[recType] = byType[recType] || [];
+      byType[recType].push({ path: display, name: stem, status: String(fm.status || "") });
+    }
+    console.log(
+      "[vault.list.sql] getVaultContextData rows=%d types=%d elapsed_ms=%d",
+      rows.length, Object.keys(byType).length, Date.now() - t0,
+    );
+  } else {
+    const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+    for (const relPath of files) {
+      const rec = readRecord(relPath);
+      if (!rec) continue;
+      const recType = String(rec.fm.type || "");
+      if (!recType) continue;
+      const display = relPath.replace(/\\/g, "/").replace(/\.md$/, "");
+      byType[recType] = byType[recType] || [];
+      byType[recType].push({ path: display, name: rec.stem, status: String(rec.fm.status || "") });
+    }
   }
   return {
     records_by_type: byType,

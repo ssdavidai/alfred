@@ -316,12 +316,48 @@ flag, not a comms exercise.
 
 ---
 
-## 9. References
+## 9. Backup verification (STORE-X-1)
+
+Per-tenant restic backups must include the SQLite `state.db` that
+Phase 1 introduces, and the backup → restore loop must be exercised
+on a real tenant — not just assumed. The cross-cutting work is
+tracked in STORE-X-1 (#925).
+
+- The snapshot helper is `scripts/sqlite-snapshot.sh` (wraps
+  `VACUUM INTO`). The tenant `/opt/alfred/backup.sh` runs the
+  equivalent inside `compose-ctrl-api-1` via `docker exec` +
+  `node:sqlite`, drops the snap at `/opt/alfred/state.db.snap`
+  (host-visible bind mount), restic includes it, and an `EXIT`
+  trap deletes the file once `restic backup` returns.
+- `/vault/_archive/` is added to the restic path list now so future
+  STORE-P5 cold-tier writes are covered without re-touching backup.sh.
+- The drill runbook is `deploy/RESTORE-DRILL.md`. Run it once per
+  tenant immediately after STORE-X-1 ships there, and once per
+  storage-phase rollout (P1 onward) before promoting to the next
+  tenant.
+
+### Drilled tenants
+
+| Tenant | Date | Result | Notes |
+|---|---|---|---|
+| raj313 | 2026-05-18 | PASS | Initial STORE-X-1 verification. Repo had to be `restic init`-ed (bucket was missing); `AWS_DEFAULT_REGION=fsn1` added to `/opt/alfred/restic.env`. 844 vault_index rows round-tripped cleanly. |
+| miguel | — | pending | backup.sh deployed; needs first run + drill. |
+| rapali | — | pending | backup.sh deployed; needs first run + drill. |
+| david | — | pending | backup.sh deployed; needs first run + drill. |
+
+A tenant counts as **backup-verified** only after a green row above.
+A red row blocks any Phase 1+ work from promoting onto that tenant.
+
+---
+
+## 10. References
 
 - `STORAGE-ARCHITECTURE.md` — the proposal this runbook ships
 - `deploy/CUTOVER.md` — precedent for this style of runbook
+- `deploy/RESTORE-DRILL.md` — the backup-verification runbook
 - `packages/learn/docs/STATE-MUTATION.md` — the enforcement-flag
   rollout pattern that phases 1-6 each re-use
+- `scripts/sqlite-snapshot.sh` — local SQLite consistent-snapshot helper
 - `scripts/smoke-storage.sh` — the smoke gate
 - `scripts/audit-rescue.sh` — Phase 0 (P0-2) bulk-mv script
 - `MEMORY: zombie-workflow-cleanup-playbook.md` — the kind of
