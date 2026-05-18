@@ -128,6 +128,10 @@ services:
     # history — driven by composio_pull returning full-HTML Gmail bodies
     # that hit Temporal's 4MB blob limit on a busy mailbox.
     image: temporalio/temporal:latest
+    # start-dev writes its SQLite DB to the temporal_data volume; Docker
+    # creates named volumes root-owned, and the image's default user cannot
+    # write there (SQLITE_CANTOPEN). Run as root so the DB file is created.
+    user: "0:0"
     command:
       - "server"
       - "start-dev"
