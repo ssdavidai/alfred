@@ -46,7 +46,12 @@ export function openStateDb(dbPath?: string): DatabaseSync {
     process.env.SQLITE_VEC_PATH ?? "/mnt/encrypted/alfred/sqlite-vec.so";
   try {
     stateDb.enableLoadExtension(true);
-    stateDb.loadExtension(sqliteVecPath);
+    // node:sqlite derives the init symbol from the filename
+    // (sqlite-vec.so → sqlite3_sqlitevec_init) but sqlite-vec exports
+    // sqlite3_vec_init. Pass the entry point explicitly so the
+    // automatic derivation doesn't undefined-symbol on us. See
+    // the P3-2 outage incident (revert fbcb553).
+    stateDb.loadExtension(sqliteVecPath, "sqlite3_vec_init");
     // Re-disable after load: defence-in-depth against attacker-controlled
     // SQL trying to dlopen() arbitrary paths through the same connection.
     stateDb.enableLoadExtension(false);
