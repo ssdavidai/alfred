@@ -40,16 +40,20 @@ jobs:
           export PATH="$HOME/.local/bin:$PATH"
           wasp build
 
-      - name: Inspect web-app build layout (diagnostic)
-        working-directory: packages/web/.wasp/build
+      - name: Build the Wasp SPA client
+        # The Wasp client is an npm-workspace project — building it inside a
+        # standalone Docker stage is fragile (the `wasp/*` SDK + hoisted
+        # node_modules don't resolve). Build it here on the runner, where the
+        # Wasp toolchain works natively, then the client image just packages
+        # the static output. REACT_APP_API_URL is a placeholder substituted
+        # at container start (keeps the image domain-agnostic).
+        working-directory: packages/web/.wasp/build/web-app
         run: |
-          echo "=== .wasp/build ==="; ls -la
-          echo "=== web-app/ ==="; ls -la web-app
-          echo "=== web-app/package.json ==="; cat web-app/package.json
-          echo "=== web-app Dockerfile? ==="; ls -la web-app/Dockerfile* 2>/dev/null || echo "(none)"
-          echo "=== sdk/ ==="; ls -la sdk 2>/dev/null || echo "(none)"
-          echo "=== reference client build (cd web-app && npm install && npm run build) ==="
-          ( cd web-app && npm install --no-audit --no-fund && npm run build && echo "REFERENCE BUILD OK" ) || echo "REFERENCE BUILD FAILED"
+          npm install --no-audit --no-fund
+          REACT_APP_API_URL=__ALFRED_API_URL__ npm run build
+          test -d build
+          rm -rf "$GITHUB_WORKSPACE/packages/web/web-app-build"
+          cp -r build "$GITHUB_WORKSPACE/packages/web/web-app-build"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -76,8 +80,9 @@ jobs:
       - name: Build and push alfred-web-client (SPA)
         uses: docker/build-push-action@v6
         with:
-          # context is packages/web so the Dockerfile reaches the freshly
-          # built .wasp/build/web-app/ alongside nginx-spa.conf etc.
+          # context is packages/web — the Dockerfile packages the static
+          # bundle staged at web-app-build/ above, plus nginx-spa.conf and
+          # the entrypoint. No build step inside Docker → fast multi-arch.
           context: packages/web
           file: packages/web/Dockerfile.client
           platforms: linux/amd64,linux/arm64

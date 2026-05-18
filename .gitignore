@@ -20,3 +20,6 @@ __pycache__/
 
 # os
 .DS_Store
+
+# staged Wasp SPA bundle (CI build artifact)
+web-app-build/
