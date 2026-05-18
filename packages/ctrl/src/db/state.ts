@@ -23,9 +23,39 @@ export function openStateDb(dbPath?: string): DatabaseSync {
     dbPath ?? process.env.ALFRED_STATE_DB ?? "/var/lib/alfred/state.db";
   fs.mkdirSync(path.dirname(resolved), { recursive: true });
 
-  stateDb = new DatabaseSync(resolved);
+  // STORE-P3-1: allowExtension is a constructor-time flag for node:sqlite
+  // — without it, db.loadExtension() throws "extension loading is not
+  // allowed". We unconditionally open with allowExtension:true so the
+  // tenant runtime can load sqlite-vec for the Phase 3 embedding table;
+  // see comment below about how the .so reaches the runtime.
+  stateDb = new DatabaseSync(resolved, { allowExtension: true });
   stateDb.exec("PRAGMA journal_mode = WAL");
   stateDb.exec("PRAGMA synchronous = NORMAL");
+
+  // STORE-P3-1: load sqlite-vec extension. The .so is bundled into the
+  // alfred-init image at /usr/local/lib/sqlite-vec.so (pinned version,
+  // see packages/openclaw/init/Dockerfile) and staged onto the shared
+  // /mnt/encrypted/alfred volume by the init container's entrypoint.
+  // ctrl-api sees that path as /mnt/encrypted/alfred/sqlite-vec.so via
+  // its bind mount. Required for the Phase 3 `embedding` vec0 virtual
+  // table that P3-2 introduces. On a laptop dev box the file usually
+  // won't exist yet — tolerate that for now so existing CLI/TUI flows
+  // (provision, list, health, migrate-status) keep working. Once P3-2
+  // ships the embedding table, this should become a fatal error.
+  const sqliteVecPath =
+    process.env.SQLITE_VEC_PATH ?? "/mnt/encrypted/alfred/sqlite-vec.so";
+  try {
+    stateDb.enableLoadExtension(true);
+    stateDb.loadExtension(sqliteVecPath);
+    // Re-disable after load: defence-in-depth against attacker-controlled
+    // SQL trying to dlopen() arbitrary paths through the same connection.
+    stateDb.enableLoadExtension(false);
+  } catch (err) {
+    console.warn(
+      `sqlite-vec load failed (${sqliteVecPath}): ${(err as Error).message}`,
+    );
+  }
+
   return stateDb;
 }
 

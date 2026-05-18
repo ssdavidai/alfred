@@ -24,8 +24,33 @@ RUN npm run build
 FROM python:3.11-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    rsync gettext-base git && \
+    rsync gettext-base git curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
+
+# ─────────────────────────────────────────────────────────────────────────
+# sqlite-vec — vector-search extension for SQLite. Bundled into the init
+# image so each tenant's ctrl-api can load it on every state.db open
+# (Phase 3 of the Storage Architecture migration: signal / observation /
+# embedding tables). Pinned to a specific release — never track latest.
+# entrypoint.sh copies /usr/local/lib/sqlite-vec.so to /alfred-data/
+# sqlite-vec.so so ctrl-api (which has /mnt/encrypted/alfred bind-mounted)
+# can dlopen() it.
+# ─────────────────────────────────────────────────────────────────────────
+ARG SQLITE_VEC_VERSION=v0.1.6
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) suffix="linux-x86_64" ;; \
+      arm64) suffix="linux-aarch64" ;; \
+      *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
+    esac; \
+    ver="${SQLITE_VEC_VERSION#v}"; \
+    cd /tmp; \
+    curl -fsSL -o vec.tar.gz \
+      "https://github.com/asg017/sqlite-vec/releases/download/${SQLITE_VEC_VERSION}/sqlite-vec-${ver}-loadable-${suffix}.tar.gz"; \
+    tar -xzf vec.tar.gz; \
+    install -D -m 0644 vec0.so /usr/local/lib/sqlite-vec.so; \
+    rm -f vec.tar.gz vec0.so
 
 WORKDIR /setup
 

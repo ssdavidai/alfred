@@ -56,6 +56,14 @@ jobs:
           tags: ssdavidai00/alfred-init:latest
           cache-from: type=gha,scope=alfred-init
           cache-to: type=gha,mode=max,scope=alfred-init
+      - name: Smoke — sqlite-vec is bundled (STORE-P3-1)
+        # The .so must exist inside the image so entrypoint.sh can stage
+        # it onto /alfred-data for ctrl-api to dlopen. If this step ever
+        # starts failing the Dockerfile drift is the cause — likely a
+        # broken upstream release URL or arch mismatch.
+        run: |
+          docker run --rm --entrypoint sh ssdavidai00/alfred-init:latest \
+            -c 'ls -l /usr/local/lib/sqlite-vec.so && [ -s /usr/local/lib/sqlite-vec.so ]'
 
   build-worker:
     runs-on: ubuntu-latest

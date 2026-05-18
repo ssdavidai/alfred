@@ -493,6 +493,36 @@ for agent in learn-clerk vault-curator vault-janitor vault-distiller vault-surve
     fi
 done
 
+# --- 8b. Stage sqlite-vec extension for ctrl-api ---
+#
+# STORE-P3-1: ctrl-api opens state.db via DatabaseSync (node:sqlite) and
+# loads the sqlite-vec loadable extension on every connection so the
+# Phase 3 `embedding` vec0 virtual table works. The .so is baked into
+# THIS init image (see Dockerfile, pinned SQLITE_VEC_VERSION) at
+# /usr/local/lib/sqlite-vec.so. We copy it onto the shared
+# /alfred-data volume here so ctrl-api can mmap it from
+# /mnt/encrypted/alfred/sqlite-vec.so inside its own container — there
+# is no ctrl-api Docker image of our own (it runs vanilla node:22-slim
+# with a bind-mounted /opt/alfred/api.mjs), so this staging step is how
+# the bundled binary reaches the runtime. Hash-gated so re-running init
+# on every container restart is cheap.
+SQLITE_VEC_SRC=/usr/local/lib/sqlite-vec.so
+SQLITE_VEC_DST=/alfred-data/sqlite-vec.so
+if [[ -f "$SQLITE_VEC_SRC" ]]; then
+    VEC_HASH=$(md5sum "$SQLITE_VEC_SRC" | cut -d' ' -f1)
+    VEC_HASH_FILE=/alfred-data/.sqlite-vec.so.content-hash
+    if [[ -f "$VEC_HASH_FILE" && "$(cat "$VEC_HASH_FILE")" == "$VEC_HASH" && -f "$SQLITE_VEC_DST" ]]; then
+        echo "[init] sqlite-vec.so unchanged, skipping copy"
+    else
+        cp "$SQLITE_VEC_SRC" "$SQLITE_VEC_DST"
+        echo "$VEC_HASH" > "$VEC_HASH_FILE"
+        chmod 644 "$SQLITE_VEC_DST" 2>/dev/null || true
+        echo "[init] Staged sqlite-vec.so to $SQLITE_VEC_DST ($(wc -c < "$SQLITE_VEC_DST") bytes)"
+    fi
+else
+    echo "[init] WARNING: $SQLITE_VEC_SRC missing from image — ctrl-api will fail to load the sqlite-vec extension."
+fi
+
 # --- 9. Fix permissions ---
 # OpenClaw runs as uid 1000 (node user).  The alfred container runs as root
 # with cap_add: DAC_OVERRIDE so it can access uid-1000-owned files.

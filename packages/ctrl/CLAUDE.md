@@ -40,6 +40,7 @@ esbuild bundles everything into a single `dist/index.mjs`. Key build details:
 - `ssh2` is external (native addon); optional deps like `react-devtools-core` and `yoga-wasm-web` are stubbed
 - A banner injects `createRequire` for CJS compatibility in the ESM bundle
 - Path aliases: `@/*` maps to `src/*` (in tsconfig, but esbuild handles resolution via bundling)
+- sqlite-vec extension (STORE-P3-1) is bundled into the **alfred-init** image at `/usr/local/lib/sqlite-vec.so` (pinned version, see `packages/openclaw/init/Dockerfile`); init stages it to `/alfred-data/sqlite-vec.so` on every boot, and `state.ts` loads it from `/mnt/encrypted/alfred/sqlite-vec.so` (override with `SQLITE_VEC_PATH`) on every state.db open. There is no ctrl-api Dockerfile — ctrl-api runs vanilla `node:22-slim` with a bind-mounted `api.mjs`, so the extension travels via the init container's shared volume rather than a custom image layer.
 
 ## Architecture
 
