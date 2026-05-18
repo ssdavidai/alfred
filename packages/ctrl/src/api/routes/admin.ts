@@ -7,6 +7,7 @@ import { parseActivityFeed } from "../activity.js";
 import { ttlCache } from "../cache.js";
 import { openStateDb, listMigrations } from "../../db/state.js";
 import { getRequestLatencies } from "../metrics.js";
+import { syncVaultIndexFromContent } from "../vault_index_sync.js";
 
 // Activity feed is the most expensive read on the Desk page — it spawns
 // `docker compose logs --tail=N alfred` which forks a process per call.
@@ -683,7 +684,14 @@ export function registerAdminRoutes(): void {
         const fmBlock = content.slice(0, end);
         const rest = content.slice(end);
         const updated = fmBlock.replace(/^status:\s*.*$/m, "status: paused");
-        fs.writeFileSync(fp, updated + rest, "utf-8");
+        const pausedContent = updated + rest;
+        fs.writeFileSync(fp, pausedContent, "utf-8");
+        // STORE-P1-3: refresh the chore row after the status flip.
+        syncVaultIndexFromContent({
+          vaultPath: VAULT_PATH,
+          relPath: `chore/${filename}`,
+          content: pausedContent,
+        });
 
         paused.push(slug);
       } catch (err) {

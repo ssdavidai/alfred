@@ -5,6 +5,10 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { dockerComposeCmd, dockerExec, ALFRED_CMD } from "../helpers.js";
 import { getInstinctCounts } from "../instinctCounts.js";
+import {
+  syncVaultIndexFromContent,
+  deleteVaultIndexRow,
+} from "../vault_index_sync.js";
 
 const VAULT_PATH = "/mnt/encrypted/vault";
 const ALFRED_DATA = "/mnt/encrypted/alfred";
@@ -362,7 +366,14 @@ function writeRoutingObservation(
     );
   }
 
-  fs.writeFileSync(path.join(obsDir, `${obsName}.md`), obsMd.join("\n") + "\n", "utf-8");
+  const obsContent = obsMd.join("\n") + "\n";
+  fs.writeFileSync(path.join(obsDir, `${obsName}.md`), obsContent, "utf-8");
+  // STORE-P1-3: index the new observation row.
+  syncVaultIndexFromContent({
+    vaultPath: VAULT_PATH,
+    relPath: `observation/${obsName}.md`,
+    content: obsContent,
+  });
   return `observation/${obsName}.md`;
 }
 
@@ -598,6 +609,17 @@ export function registerLearningRoutes(): void {
         fs.mkdirSync(destDir, { recursive: true });
         const destPath = path.join(destDir, path.basename(inputPath));
         fs.renameSync(fullInputPath, destPath);
+        // STORE-P1-3: move semantics — drop the old row, insert at new path.
+        try {
+          deleteVaultIndexRow(undefined, inputPath);
+          const destRel = path.join(destination, path.basename(inputPath));
+          const movedContent = fs.readFileSync(destPath, "utf-8");
+          syncVaultIndexFromContent({
+            vaultPath: VAULT_PATH,
+            relPath: destRel,
+            content: movedContent,
+          });
+        } catch { /* reconciler will catch */ }
         curatorResult = {
           processed: false,
           note_path: path.join(destination, path.basename(inputPath)),
@@ -674,6 +696,16 @@ export function registerLearningRoutes(): void {
         fs.mkdirSync(destDir, { recursive: true });
         const destPath = path.join(destDir, path.basename(inputId));
         fs.renameSync(inputPath, destPath);
+        // STORE-P1-3: drop old, insert at new path.
+        try {
+          deleteVaultIndexRow(undefined, inputId);
+          const destRel = path.join(destination, path.basename(inputId));
+          syncVaultIndexFromContent({
+            vaultPath: VAULT_PATH,
+            relPath: destRel,
+            content,
+          });
+        } catch { /* reconciler will catch */ }
         void content; // validated file existed
       } catch {
         // File may have already been moved or cleaned up

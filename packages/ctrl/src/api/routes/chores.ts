@@ -6,6 +6,7 @@ import { dockerExec, dockerComposeCmd } from "../helpers.js";
 import { VAULT_PATH, walkMd, readRecord, IGNORE_DIRS } from "./vault.js";
 import { CHORE_ACTION_MANIFEST, lookupChoreActions, type ChoreActionSpec } from "./chore_manifest_data.js";
 import { nextFireTime } from "../cron.js";
+import { syncVaultIndexFromContent, deleteVaultIndexRow } from "../vault_index_sync.js";
 
 const USER_CHORES_DIR = "/mnt/encrypted/alfred/user-chores";
 const VALIDATE_STAGING_DIR = "/mnt/encrypted/alfred/.chore-validate";
@@ -658,7 +659,14 @@ export function registerChoreRoutes(): void {
     fs.writeFileSync(sourcePath, pythonSource, "utf-8");
 
     fs.mkdirSync(CHORE_DIR, { recursive: true });
-    fs.writeFileSync(vaultPath, recordLines.join("\n"), "utf-8");
+    const choreContent = recordLines.join("\n");
+    fs.writeFileSync(vaultPath, choreContent, "utf-8");
+    // STORE-P1-3: index the new chore/<slug>.md row.
+    syncVaultIndexFromContent({
+      vaultPath: VAULT_PATH,
+      relPath: `chore/${slug}.md`,
+      content: choreContent,
+    });
 
     try {
       await dockerExec("temporal", [
@@ -676,6 +684,8 @@ export function registerChoreRoutes(): void {
       // inert until a schedule fires them, so removing them is safe.
       try { fs.unlinkSync(sourcePath); } catch { /* ignore */ }
       try { fs.unlinkSync(vaultPath); } catch { /* ignore */ }
+      // STORE-P1-3: drop the rolled-back chore from the index too.
+      deleteVaultIndexRow(undefined, `chore/${slug}.md`);
       throw err;
     }
 
@@ -873,6 +883,12 @@ export function registerChoreRoutes(): void {
     const newRecord = fmLines.join("\n") + existing.body.replace(/^\s*#[^\n]*\n?/, `# ${resolvedName}\n`);
     const vaultBackup = fs.readFileSync(vaultPath, "utf-8");
     fs.writeFileSync(vaultPath, newRecord, "utf-8");
+    // STORE-P1-3: refresh the chore row after frontmatter rewrite.
+    syncVaultIndexFromContent({
+      vaultPath: VAULT_PATH,
+      relPath: `chore/${slug}.md`,
+      content: newRecord,
+    });
 
     // Rewrite the Temporal schedule if cron or workflow_class changed.
     const scheduleChanged = newCron !== null || newWorkflowClass !== null;
@@ -909,6 +925,14 @@ export function registerChoreRoutes(): void {
           try { fs.writeFileSync(sourcePath, sourceBackup, "utf-8"); } catch { /* ignore */ }
         }
         try { fs.writeFileSync(vaultPath, vaultBackup, "utf-8"); } catch { /* ignore */ }
+        // STORE-P1-3: re-sync after rollback so the index matches disk.
+        try {
+          syncVaultIndexFromContent({
+            vaultPath: VAULT_PATH,
+            relPath: `chore/${slug}.md`,
+            content: vaultBackup,
+          });
+        } catch { /* ignore */ }
         throw err;
       }
     }
@@ -1090,6 +1114,9 @@ export function registerChoreRoutes(): void {
       fs.unlinkSync(fp);
       vaultRecordDeleted = true;
     } catch { /* swallow */ }
+    // STORE-P1-3: drop the chore row regardless of whether the unlink
+    // succeeded (it may have already been removed out-of-band).
+    deleteVaultIndexRow(undefined, `chore/${slug}.md`);
 
     // 4. User-chore template (.py + any .bak siblings written by chore_authoring)
     let templateDeleted = false;
@@ -1536,7 +1563,14 @@ export function registerChoreRoutes(): void {
         results.push({ slug, template, tier: "standard-library", action: "skipped", detail: "frontmatter has no `generated:` line to replace" });
         continue;
       }
-      fs.writeFileSync(fp, updated + rest, "utf-8");
+      const flippedContent = updated + rest;
+      fs.writeFileSync(fp, flippedContent, "utf-8");
+      // STORE-P1-3: refresh the row after the frontmatter flip.
+      syncVaultIndexFromContent({
+        vaultPath: VAULT_PATH,
+        relPath: `chore/${slug}.md`,
+        content: flippedContent,
+      });
       changed += 1;
       results.push({ slug, template, tier: "standard-library", action: "flipped-to-builtin" });
     }
@@ -1652,7 +1686,14 @@ export function registerChoreRoutes(): void {
         ].join("\n");
 
     fs.mkdirSync(CHORE_DIR, { recursive: true });
-    fs.writeFileSync(vaultPath, recordLines.join("\n") + bodyText, "utf-8");
+    const installedContent = recordLines.join("\n") + bodyText;
+    fs.writeFileSync(vaultPath, installedContent, "utf-8");
+    // STORE-P1-3: index the freshly installed standard-library chore.
+    syncVaultIndexFromContent({
+      vaultPath: VAULT_PATH,
+      relPath: `chore/${slug}.md`,
+      content: installedContent,
+    });
 
     sendJson(res, 200, {
       slug,

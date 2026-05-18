@@ -22,6 +22,10 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
+import {
+  syncVaultIndexFromContent,
+  deleteVaultIndexRow,
+} from "../vault_index_sync.js";
 
 const VAULT_ROOT = "/mnt/encrypted/vault";
 const WEBHOOK_ENDPOINT_DIR = path.join(VAULT_ROOT, "webhook_endpoint");
@@ -128,6 +132,12 @@ function writeWebhookRecord(fm: WebhookFrontmatter): void {
     last_event_at: fm.last_event_at,
   });
   fs.writeFileSync(recordPath(fm.token), body, "utf-8");
+  // STORE-P1-3: index the webhook_endpoint row.
+  syncVaultIndexFromContent({
+    vaultPath: VAULT_ROOT,
+    relPath: `webhook_endpoint/${fm.token}.md`,
+    content: body,
+  });
 }
 
 // Sanitise a token-ish identifier (filename-safe component) — used so that
@@ -203,6 +213,8 @@ export function registerInboundWebhookRoutes(): void {
     const file = recordPath(token);
     if (!fs.existsSync(file)) throw new NotFoundError("webhook not found");
     fs.unlinkSync(file);
+    // STORE-P1-3: drop the webhook_endpoint row.
+    deleteVaultIndexRow(undefined, `webhook_endpoint/${token}.md`);
     res.statusCode = 204;
     res.end();
   });
@@ -257,6 +269,12 @@ export function registerInboundWebhookRoutes(): void {
     const eventFilename = `webhook-${safeIdent(token).slice(0, 12)}-${ts}-${shortUuid}.md`;
     const eventPath = path.join(STREAM_EVENT_DIR, eventFilename);
     fs.writeFileSync(eventPath, eventBody, "utf-8");
+    // STORE-P1-3: index the new stream_event row.
+    syncVaultIndexFromContent({
+      vaultPath: VAULT_ROOT,
+      relPath: `stream_event/${eventFilename}`,
+      content: eventBody,
+    });
 
     // Bump counters on the webhook_endpoint record. Best-effort — a failure
     // here MUST NOT lose the stream_event we just wrote, so we swallow.

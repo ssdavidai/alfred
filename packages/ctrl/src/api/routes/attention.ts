@@ -32,6 +32,7 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { VAULT_PATH } from "./vault.js";
 import { attentionCache, invalidateVaultCachesForType } from "../vaultCache.js";
+import { syncVaultIndexFromContent } from "../vault_index_sync.js";
 
 const NEEDS_ATTENTION_DIR = path.join(VAULT_PATH, "needs_attention");
 const EVENTS_DIR = path.join(VAULT_PATH, "event");
@@ -127,6 +128,14 @@ export function writeFrontmatterPatch(
   }
   const next = `---\n${out.join("\n")}\n---${rest}`;
   fs.writeFileSync(fullPath, next, "utf-8");
+  // STORE-P1-3: status field just changed (pending → done / dispatched /
+  // skipped). Mirror into vault_index so the Desk list reflects the
+  // status flip on the very next poll.
+  syncVaultIndexFromContent({
+    vaultPath: VAULT_PATH,
+    relPath: rec.path,
+    content: next,
+  });
   // Bust the needs_attention-specific read caches; do not touch the
   // signal/matter/event caches that the Desk reads from every poll.
   invalidateVaultCachesForType("needs_attention");
@@ -173,6 +182,12 @@ export function emitResolutionEvent(
     .filter((s) => s !== "")
     .join("\n");
   fs.writeFileSync(auditPath, yaml + "\n", "utf-8");
+  // STORE-P1-3: new event/ audit record.
+  syncVaultIndexFromContent({
+    vaultPath: VAULT_PATH,
+    relPath: `event/${auditId}.md`,
+    content: yaml + "\n",
+  });
   return `event/${auditId}.md`;
 }
 
@@ -227,6 +242,14 @@ async function dispatchSignalToAgent(
   }
   const newRaw = `---\n${newFm}\n---${m[2] ?? ""}`;
   fs.writeFileSync(sigResolved, newRaw, "utf-8");
+  // STORE-P1-3: source signal status flipped (and possibly decision_origin
+  // stamped). The signal record's vault_index row needs refreshing so the
+  // router pick-up query sees status=unrouted.
+  syncVaultIndexFromContent({
+    vaultPath: VAULT_PATH,
+    relPath: sourceSignal,
+    content: newRaw,
+  });
   return { outcome_signal_path: sourceSignal, error: null };
 }
 
@@ -450,6 +473,12 @@ export function registerAttentionRoutes(): void {
       .filter((s) => s !== "")
       .join("\n");
     fs.writeFileSync(auditPath, yaml + "\n", "utf-8");
+    // STORE-P1-3: index the new desk-action audit row.
+    syncVaultIndexFromContent({
+      vaultPath: VAULT_PATH,
+      relPath: `event/${auditId}.md`,
+      content: yaml + "\n",
+    });
     sendJson(res, 200, {
       ok: true,
       source,

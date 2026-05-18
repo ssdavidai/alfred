@@ -34,6 +34,7 @@ import {
   writeFrontmatterPatch,
   emitResolutionEvent,
 } from "./attention.js";
+import { syncVaultIndexFromContent } from "../vault_index_sync.js";
 
 const DECISIONS_DIR = path.join(VAULT_PATH, "decision");
 
@@ -381,11 +382,16 @@ export function registerDecisionRoutes(): void {
                   return line;
                 });
               if (!foundStatus) next.push(`status: "${nextStatus}"`);
-              fs.writeFileSync(
-                fullPpPath,
-                `---\n${next.join("\n")}\n---${rest}`,
-                "utf-8",
-              );
+              const ppContent = `---\n${next.join("\n")}\n---${rest}`;
+              fs.writeFileSync(fullPpPath, ppContent, "utf-8");
+              // STORE-P1-3: synchronous status flip on pattern_proposal —
+              // mirror the write into vault_index so the next desk list
+              // reflects the new status.
+              syncVaultIndexFromContent({
+                vaultPath: VAULT_PATH,
+                relPath: sourceRecord,
+                content: ppContent,
+              });
               synchronousActions.push(`pattern_proposal.${nextStatus}`);
               synchronousFlipOk = (intent !== "delegate"); // workflow still needs to write the instinct
             }
@@ -415,11 +421,14 @@ export function registerDecisionRoutes(): void {
                 return line;
               });
               if (!foundStatus) next.push(`status: "${nextStatus}"`);
-              fs.writeFileSync(
-                fullApPath,
-                `---\n${next.join("\n")}\n---${rest}`,
-                "utf-8",
-              );
+              const apContent = `---\n${next.join("\n")}\n---${rest}`;
+              fs.writeFileSync(fullApPath, apContent, "utf-8");
+              // STORE-P1-3: index the approval status flip.
+              syncVaultIndexFromContent({
+                vaultPath: VAULT_PATH,
+                relPath: sourceRecord,
+                content: apContent,
+              });
               synchronousActions.push(`approval.${nextStatus}`);
               synchronousFlipOk = (intent !== "delegate");
             }
@@ -451,11 +460,14 @@ export function registerDecisionRoutes(): void {
                 return line;
               });
               if (!foundStatus) next.push(`status: "${nextStatus}"`);
-              fs.writeFileSync(
-                fullJuPath,
-                `---\n${next.join("\n")}\n---${rest}`,
-                "utf-8",
-              );
+              const juContent = `---\n${next.join("\n")}\n---${rest}`;
+              fs.writeFileSync(fullJuPath, juContent, "utf-8");
+              // STORE-P1-3: index the judgment status flip.
+              syncVaultIndexFromContent({
+                vaultPath: VAULT_PATH,
+                relPath: sourceRecord,
+                content: juContent,
+              });
               synchronousActions.push(`judgment.${nextStatus}`);
               synchronousFlipOk = true;
             }
@@ -541,6 +553,12 @@ export function registerDecisionRoutes(): void {
       .join("\n");
 
     fs.writeFileSync(fullPath, renderDecisionRecord(fields, bodyText), "utf-8");
+    // STORE-P1-3: index the brand-new decision row.
+    syncVaultIndexFromContent({
+      vaultPath: VAULT_PATH,
+      relPath: `decision/${id}.md`,
+      content: renderDecisionRecord(fields, bodyText),
+    });
 
     sendJson(res, 201, {
       ok: true,
@@ -711,7 +729,14 @@ export function registerDecisionRoutes(): void {
       next.state = s;
     }
     const fullPath = path.join(DECISIONS_DIR, `${rec.id}.md`);
-    fs.writeFileSync(fullPath, renderDecisionRecord(next, rec.body), "utf-8");
+    const patchedContent = renderDecisionRecord(next, rec.body);
+    fs.writeFileSync(fullPath, patchedContent, "utf-8");
+    // STORE-P1-3: index the patched decision row.
+    syncVaultIndexFromContent({
+      vaultPath: VAULT_PATH,
+      relPath: rec.path,
+      content: patchedContent,
+    });
     sendJson(res, 200, {
       ok: true,
       id: rec.id,
@@ -822,7 +847,14 @@ export function registerDecisionRoutes(): void {
     next.state = "reversed";
     next.reversed_at = new Date().toISOString();
     const fullPath = path.join(DECISIONS_DIR, `${rec.id}.md`);
-    fs.writeFileSync(fullPath, renderDecisionRecord(next, rec.body), "utf-8");
+    const reversedContent = renderDecisionRecord(next, rec.body);
+    fs.writeFileSync(fullPath, reversedContent, "utf-8");
+    // STORE-P1-3: index the reversed decision row.
+    syncVaultIndexFromContent({
+      vaultPath: VAULT_PATH,
+      relPath: rec.path,
+      content: reversedContent,
+    });
     sendJson(res, 200, {
       ok: true,
       id: rec.id,

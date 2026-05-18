@@ -29,6 +29,7 @@ import { dockerExec, ALFRED_CMD } from "../helpers.js";
 import { VAULT_PATH, VAULT_ENV, readRecord, walkMd, IGNORE_DIRS } from "./vault.js";
 import { revertStewardAction, postStewardAction } from "./plane.js";
 import { vaultWalkCache } from "../vaultCache.js";
+import { syncVaultIndexFromContent } from "../vault_index_sync.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -632,6 +633,12 @@ export function registerStewardRoutes(): void {
       }
       throw err;
     }
+    // STORE-P1-3: index the new reversal audit row.
+    syncVaultIndexFromContent({
+      vaultPath: VAULT_PATH,
+      relPath: reversalRel,
+      content: reversalContent,
+    });
 
     sendJson(res, 200, {
       ok: true,
@@ -902,6 +909,12 @@ export function registerStewardRoutes(): void {
         }
         throw err;
       }
+      // STORE-P1-3: index the new confirm follow-up audit row.
+      syncVaultIndexFromContent({
+        vaultPath: VAULT_PATH,
+        relPath: followUpRel,
+        content: followUpContent,
+      });
 
       sendJson(res, 200, {
         ok: true,
@@ -1046,6 +1059,12 @@ export function registerStewardRoutes(): void {
         }
         throw err;
       }
+      // STORE-P1-3: index the new dismiss follow-up audit row.
+      syncVaultIndexFromContent({
+        vaultPath: VAULT_PATH,
+        relPath: followUpRel,
+        content: followUpContent,
+      });
 
       sendJson(res, 200, {
         ok: true,

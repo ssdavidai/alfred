@@ -42,6 +42,7 @@ import {
   stateFieldsFor,
   type StateFieldTarget,
 } from "../stateFields.js";
+import { syncVaultIndexRow } from "../vault_index_sync.js";
 
 // ---------------------------------------------------------------------------
 // Source identifier regex (spec §5.1 step 3).
@@ -577,10 +578,32 @@ export function registerStateChangeRoutes(): void {
         fs.writeFileSync(auditFullPath, auditContent, "utf-8");
         emitVaultEditSignal(targetPath, "edit");
         emitVaultEditSignal(auditRelPath, "create");
+        // STORE-P1-3: target frontmatter changed (state field + as_of +
+        // timeline append) — refresh its vault_index row. Audit record is
+        // new — index it.
+        syncVaultIndexRow({
+          vaultPath: VAULT_PATH,
+          relPath: targetPath,
+          frontmatter: nextFm,
+          body: targetBody,
+        });
+        syncVaultIndexRow({
+          vaultPath: VAULT_PATH,
+          relPath: auditRelPath,
+          frontmatter: auditPayload,
+          body: narrativeLines.join("\n") + "\n",
+        });
       } else {
         // Shadow: audit only. Target untouched.
         fs.writeFileSync(auditFullPath, auditContent, "utf-8");
         emitVaultEditSignal(auditRelPath, "create");
+        // STORE-P1-3: shadow audit record is a brand-new event/ file.
+        syncVaultIndexRow({
+          vaultPath: VAULT_PATH,
+          relPath: auditRelPath,
+          frontmatter: auditPayload,
+          body: narrativeLines.join("\n") + "\n",
+        });
       }
 
       return {

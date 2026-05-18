@@ -5,6 +5,7 @@ import { addRoute } from "../server.js";
 import { sendJson, NotFoundError } from "../errors.js";
 import { VAULT_PATH, IGNORE_DIRS, walkMd, readRecord } from "./vault.js";
 import { vaultWalkCache } from "../vaultCache.js";
+import { syncVaultIndexFromContent } from "../vault_index_sync.js";
 
 /**
  * Patch frontmatter fields in a vault record by reading the file,
@@ -37,6 +38,13 @@ function patchFrontmatter(
 
   content = content.replace(/^---\n[\s\S]*?\n---/, `---\n${fm}\n---`);
   fs.writeFileSync(absPath, content, "utf-8");
+  // STORE-P1-3: frontmatter just changed (approval flip on a task/*.md).
+  // Refresh the row so the pending-approvals list reflects the toggle.
+  syncVaultIndexFromContent({
+    vaultPath: VAULT_PATH,
+    relPath: recordPath,
+    content,
+  });
 }
 
 export function registerApprovalRoutes(): void {

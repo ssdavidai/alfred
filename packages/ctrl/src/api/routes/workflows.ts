@@ -3,12 +3,14 @@ import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, ApiError, ValidationError } from "../errors.js";
 import { dockerExec, parseJsonLines } from "../helpers.js";
+import { syncVaultIndexFromContent } from "../vault_index_sync.js";
 
 const ONBOARD_JSON_PATH = "/mnt/encrypted/alfred/onboard.json";
 
 // Vault chore record dir. Kept in sync with VAULT_PATH from vault.ts (which we
 // don't import here because the user-set file boundaries for #144 forbid
 // editing other route files; chore lookup is read-only and the path is stable).
+const VAULT_ROOT = "/mnt/encrypted/vault";
 const CHORE_RECORD_DIR = "/mnt/encrypted/vault/chore";
 
 export function registerWorkflowRoutes(): void {
@@ -520,7 +522,17 @@ export function _maybeUpdateChoreFrontmatterSchedule(
       // successful update so callers see vault_updated: true and don't retry.
       return { attempted: true, ok: true, vaultPath };
     }
-    fs.writeFileSync(vaultPath, updatedFm + rest, "utf-8");
+    const updatedContent = updatedFm + rest;
+    fs.writeFileSync(vaultPath, updatedContent, "utf-8");
+    // STORE-P1-3: chore frontmatter schedule changed — refresh the row.
+    try {
+      const rel = path.relative(VAULT_ROOT, vaultPath);
+      syncVaultIndexFromContent({
+        vaultPath: VAULT_ROOT,
+        relPath: rel,
+        content: updatedContent,
+      });
+    } catch { /* reconciler will catch */ }
     return { attempted: true, ok: true, vaultPath };
   } catch (err) {
     return {

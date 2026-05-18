@@ -26,6 +26,11 @@ import {
   listAll as vaultIndexListAll,
   type VaultIndexRow,
 } from "../../db/vault_queries.js";
+import {
+  syncVaultIndexRow,
+  syncVaultIndexFromContent,
+  deleteVaultIndexRow,
+} from "../vault_index_sync.js";
 
 // ---------------------------------------------------------------------------
 // STORE-P1-4: serve list endpoints from the `vault_index` SQLite table
@@ -918,6 +923,13 @@ export function registerVaultRoutes(): void {
       // Ensure parent directories exist
       await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
       await fs.promises.writeFile(fullPath, b.content, "utf-8");
+      // STORE-P1-3: keep vault_index in lockstep with the on-disk write.
+      // Best-effort — the reconciler is the fail-safe.
+      syncVaultIndexFromContent({
+        vaultPath: VAULT_PATH,
+        relPath: filePath,
+        content: b.content as string,
+      });
       sendJson(res, 201, { path: filePath });
       scheduleNudgeForPath(filePath);
       emitVaultEditSignal(filePath, "create");
@@ -947,6 +959,21 @@ export function registerVaultRoutes(): void {
         ? (b.name as string)
         : `${b.type as string}/${(b.name as string)}.md`;
       emitVaultEditSignal(namePart, "create");
+      // STORE-P1-3: read-back-and-sync after the CLI write. The CLI may
+      // have sanitized the slug differently — if the path we computed
+      // doesn't resolve we leave the row absent and let the reconciler
+      // pick it up (the CLI doesn't surface the actual filename it chose).
+      try {
+        const full = path.resolve(VAULT_PATH, namePart);
+        const content = await fs.promises.readFile(full, "utf-8");
+        syncVaultIndexFromContent({
+          vaultPath: VAULT_PATH,
+          relPath: namePart,
+          content,
+        });
+      } catch {
+        // File slug mismatch / vanished; reconciler will catch it.
+      }
     }
   });
 
@@ -1222,6 +1249,22 @@ export function registerVaultRoutes(): void {
     }
     scheduleNudgeForPath(recordPath);
     emitVaultEditSignal(recordPath, "edit");
+    // STORE-P1-3: read-back-and-sync after every PATCH so vault_index
+    // never lags behind the on-disk file. The PATCH may have come via
+    // the alfred CLI (which we can't observe directly) and/or via the
+    // json_set / body_set yaml-rewrite branches above — either way the
+    // file is in its final state on disk now.
+    try {
+      const full = path.resolve(VAULT_PATH, recordPath);
+      const content = await fs.promises.readFile(full, "utf-8");
+      syncVaultIndexFromContent({
+        vaultPath: VAULT_PATH,
+        relPath: recordPath,
+        content,
+      });
+    } catch {
+      // File may have been deleted between PATCH and sync; reconciler picks up.
+    }
   });
 
   // Move vault record
@@ -1243,6 +1286,22 @@ export function registerVaultRoutes(): void {
     scheduleNudgeForPath(b.to as string);
     emitVaultEditSignal(b.from as string, "delete");
     emitVaultEditSignal(b.to as string, "create");
+    // STORE-P1-3: move semantics — drop the old row, insert the new one.
+    // Used by matter-closure (matter/foo.md → matter/_closed/foo.md);
+    // without this the index would carry a row whose `path` no longer
+    // resolves on disk.
+    try {
+      deleteVaultIndexRow(undefined, b.from as string);
+      const full = path.resolve(VAULT_PATH, b.to as string);
+      const content = await fs.promises.readFile(full, "utf-8");
+      syncVaultIndexFromContent({
+        vaultPath: VAULT_PATH,
+        relPath: b.to as string,
+        content,
+      });
+    } catch {
+      // Reconciler picks up any mismatch.
+    }
   });
 
   // Delete vault record
@@ -1293,6 +1352,8 @@ export function registerVaultRoutes(): void {
     // the removal up on its next pass.
     scheduleNudgeForPath(recordPath);
     emitVaultEditSignal(recordPath, "delete");
+    // STORE-P1-3: drop the vault_index row for this path.
+    deleteVaultIndexRow(undefined, recordPath);
   });
 
   // Promote triage → task (errand)
@@ -1351,11 +1412,29 @@ export function registerVaultRoutes(): void {
     const taskPath = `task/${taskSlug}.md`;
     const fullTaskPath = path.resolve(VAULT_PATH, taskPath);
     await fs.promises.writeFile(fullTaskPath, taskContent, "utf-8");
+    // STORE-P1-3: index the freshly-promoted task.
+    syncVaultIndexFromContent({
+      vaultPath: VAULT_PATH,
+      relPath: taskPath,
+      content: taskContent,
+    });
 
     // 3. Mark triage as resolved
     const resolvedArgs = [...ALFRED_CMD, "vault", "edit", triagePath, "--set", "status=resolved"];
     try {
       await dockerExec("alfred", resolvedArgs, VAULT_ENV);
+      // STORE-P1-3: re-sync the triage row to reflect status=resolved.
+      try {
+        const fullTriage = path.resolve(VAULT_PATH, triagePath);
+        const triageContent = await fs.promises.readFile(fullTriage, "utf-8");
+        syncVaultIndexFromContent({
+          vaultPath: VAULT_PATH,
+          relPath: triagePath,
+          content: triageContent,
+        });
+      } catch {
+        // Reconciler will pick up.
+      }
     } catch {
       // Non-fatal: task was created even if triage update fails
     }

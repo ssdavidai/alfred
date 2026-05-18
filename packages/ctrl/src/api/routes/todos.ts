@@ -27,6 +27,7 @@ import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { VAULT_PATH } from "./vault.js";
+import { syncVaultIndexRow } from "../vault_index_sync.js";
 
 const TODOS_DIR = path.join(VAULT_PATH, "to_do");
 
@@ -162,6 +163,13 @@ export function registerTodoRoutes(): void {
       .join("\n");
 
     fs.writeFileSync(fullPath, renderTodoRecord(fields, bodyText), "utf-8");
+    // STORE-P1-3: index the new to_do row.
+    syncVaultIndexRow({
+      vaultPath: VAULT_PATH,
+      relPath: `to_do/${id}.md`,
+      frontmatter: fields,
+      body: bodyText,
+    });
     sendJson(res, 201, {
       ok: true,
       id,
@@ -255,6 +263,13 @@ export function registerTodoRoutes(): void {
     }
     const fullPath = path.join(TODOS_DIR, `${rec.id}.md`);
     fs.writeFileSync(fullPath, renderTodoRecord(next, rec.body), "utf-8");
+    // STORE-P1-3: refresh the to_do row after the state PATCH.
+    syncVaultIndexRow({
+      vaultPath: VAULT_PATH,
+      relPath: rec.path,
+      frontmatter: next,
+      body: rec.body,
+    });
     sendJson(res, 200, {
       ok: true,
       id: rec.id,
