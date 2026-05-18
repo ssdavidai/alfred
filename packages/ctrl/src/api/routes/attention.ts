@@ -33,6 +33,7 @@ import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { VAULT_PATH } from "./vault.js";
 import { attentionCache, invalidateVaultCachesForType } from "../vaultCache.js";
 import { syncVaultIndexFromContent } from "../vault_index_sync.js";
+import { emitAuditSafe } from "./audit_helpers.js";
 
 const NEEDS_ATTENTION_DIR = path.join(VAULT_PATH, "needs_attention");
 const EVENTS_DIR = path.join(VAULT_PATH, "event");
@@ -187,6 +188,29 @@ export function emitResolutionEvent(
     vaultPath: VAULT_PATH,
     relPath: `event/${auditId}.md`,
     content: yaml + "\n",
+  });
+  // STORE-P2-2b: also insert the audit row into the unified `audit` table
+  // (state.db, migration 003). Shadow mode by default — the markdown
+  // write above is still authoritative; this is fire-and-forget mirror.
+  emitAuditSafe({
+    actor: "desk",
+    action_type: "needs_attention_action",
+    target_type: "needs_attention",
+    target_id: rec.path,
+    decision_origin: sourceSignal || null,
+    reasoning: reason || null,
+    payload: {
+      type: "needs_attention_action",
+      created: new Date().toISOString(),
+      action,
+      target: rec.path,
+      source_signal_path: sourceSignal,
+      original_decision_reason: reason,
+      note: note || null,
+      audit_record_path: `event/${auditId}.md`,
+    },
+    reversible: false,
+    wroteLegacyMarkdown: true,
   });
   return `event/${auditId}.md`;
 }
@@ -478,6 +502,26 @@ export function registerAttentionRoutes(): void {
       vaultPath: VAULT_PATH,
       relPath: `event/${auditId}.md`,
       content: yaml + "\n",
+    });
+    // STORE-P2-2b: mirror into the unified `audit` table. The legacy
+    // markdown remains authoritative during the shadow soak; this row
+    // is best-effort and never fails the request on its own.
+    emitAuditSafe({
+      actor: "desk",
+      action_type: "desk_action",
+      target_type: source,
+      target_id: sourceId,
+      payload: {
+        type: "desk_action",
+        created: nowIso,
+        source,
+        source_id: sourceId,
+        action,
+        note: note || null,
+        audit_record_path: `event/${auditId}.md`,
+      },
+      reversible: false,
+      wroteLegacyMarkdown: true,
     });
     sendJson(res, 200, {
       ok: true,
