@@ -457,6 +457,55 @@ export const getAuditFeed: GetAuditFeed<void, any> = async (_args, context) => {
   });
 };
 
+// STORE-P2-4: SQL-backed audit feed reading the new `audit` table on
+// every tenant (migration 003 in alfred-ctrl). This is the read side of
+// the unified audit trail — writers in alfred-learn (STORE-P2-2) and the
+// bulk migrator (STORE-P2-3) populate it; the legacy markdown-walking
+// `getAuditFeed` above stays as a soak fallback and is retired in
+// STORE-P2-5.
+//
+// Shape returned by ctrl-api (/api/v1/audit):
+//   { results: AuditRow[], count: number }
+// where each AuditRow has:
+//   { id, ts (decimal ns as string), actor, action_type, target_type,
+//     target_id, decision_origin, reasoning, payload (JSON string),
+//     reversible (0|1), reversed_by }
+export const getAuditFeed2 = async (
+  args: {
+    actor?: string;
+    action_type?: string;
+    target_type?: string;
+    target_id?: string;
+    since?: string;
+    until?: string;
+    limit?: number;
+    offset?: number;
+  },
+  context: any,
+) => {
+  // Admin-only — match the access posture of the legacy /api/v1/admin/audit
+  // route. The principal is also the admin on a single-tenant VM, so this
+  // gate keeps the same surface as getAuditFeed.
+  if (!context.user) {
+    throw new HttpError(401, "Not authenticated");
+  }
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args?.actor) query.actor = args.actor;
+  if (args?.action_type) query.action_type = args.action_type;
+  if (args?.target_type) query.target_type = args.target_type;
+  if (args?.target_id) query.target_id = args.target_id;
+  if (args?.since) query.since = args.since;
+  if (args?.until) query.until = args.until;
+  if (args?.limit !== undefined) query.limit = String(args.limit);
+  if (args?.offset !== undefined) query.offset = String(args.offset);
+  if (query.limit === undefined) query.limit = "50";
+  return proxyToTenant(instance, {
+    path: "/api/v1/audit",
+    query,
+  });
+};
+
 // ============================================================
 // Container Logs
 // ============================================================

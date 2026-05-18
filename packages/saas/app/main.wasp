@@ -728,6 +728,15 @@ query getAuditFeed {
   entities: [Instance]
 }
 
+// STORE-P2-4: SQL-backed audit feed. Proxies to ctrl-api's /api/v1/audit
+// (migration 003). Coexists with the legacy getAuditFeed above during
+// the soak period; STORE-P2-5 retires the legacy op after the bulk
+// migrator (STORE-P2-3) finishes its backfill on every tenant.
+query getAuditFeed2 {
+  fn: import { getAuditFeed2 } from "@src/dashboard/operations",
+  entities: [User, Instance]
+}
+
 query getCredentials {
   fn: import { getCredentials } from "@src/dashboard/operations",
   entities: [Instance]

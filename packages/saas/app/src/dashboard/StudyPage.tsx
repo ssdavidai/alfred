@@ -7,7 +7,7 @@
 //   • Account     — billing portal + identity.
 //   • API keys    — listApiKeys / createApiKey / revokeApiKey for
 //                   programmatic SaaS access.
-//   • Audit       — getAuditFeed paginated 50.
+//   • Audit       — getAuditFeed2 paginated 50 (SQL-backed, STORE-P2-4).
 //   • Theme       — light / dark toggle via the existing theme context.
 //
 // Credentials (LLM/provider API keys) was retired as user-facing surface:
@@ -42,7 +42,7 @@ import {
   listApiKeys,
   createApiKey,
   revokeApiKey,
-  getAuditFeed,
+  getAuditFeed2,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { useTheme } from "../client/lib/theme";
@@ -538,20 +538,76 @@ function ApiKeysSection() {
 // Audit
 // ---------------------------------------------------------------------------
 
+// STORE-P2-4: adapter from the new SQL audit row shape (results[]) to
+// the {id, path, created, kind, summary} shape this section's renderer
+// already understands. Keeps the table layout untouched — only the
+// transport changes.
+type StudyAuditItem = {
+  id: string;
+  path: string;
+  created: string;
+  kind: string;
+  summary: string;
+};
+
+function mapAuditRowForStudy(row: any): StudyAuditItem {
+  // `ts` is a decimal-string of ns since the epoch — Number is safe for
+  // ms precision through year 2200ish, which is fine for display.
+  let createdIso = "";
+  try {
+    const ns = BigInt(String(row?.ts ?? "0"));
+    const ms = Number(ns / 1_000_000n);
+    createdIso = new Date(ms).toISOString();
+  } catch {
+    createdIso = String(row?.ts ?? "");
+  }
+  // `target_id` often holds a vault path (event/foo.md, matter/bar.md);
+  // surface it as the display path so deep links keep working.
+  const path = String(row?.target_id ?? "");
+  const kind = String(row?.action_type ?? "event");
+  // Best-effort summary: reasoning > payload.summary > payload.title >
+  // target_id stem. Payload is a JSON string in the wire format.
+  let summary = String(row?.reasoning ?? "").trim();
+  if (!summary && row?.payload) {
+    try {
+      const p =
+        typeof row.payload === "string"
+          ? JSON.parse(row.payload)
+          : row.payload;
+      summary = String(
+        p?.summary ?? p?.title ?? p?.act ?? p?.description ?? "",
+      ).trim();
+    } catch {
+      // ignore — payload may not be JSON
+    }
+  }
+  if (!summary) {
+    summary =
+      path.replace(/^[a-z_]+\//, "").replace(/\.md$/, "") || kind;
+  }
+  return {
+    id: String(row?.id ?? ""),
+    path,
+    created: createdIso,
+    kind,
+    summary,
+  };
+}
+
 function AuditSection() {
-  const { data } = useQuery(getAuditFeed, undefined, {
-    retry: false,
-    refetchInterval: 60_000,
-  });
-  // Backend returns {items: [{id, path, created, kind, summary}], total}.
-  const items = Array.isArray((data as any)?.items)
-    ? ((data as any).items as Array<{
-        id: string;
-        path: string;
-        created: string;
-        kind: string;
-        summary: string;
-      }>)
+  const { data } = useQuery(
+    getAuditFeed2,
+    { limit: 50 },
+    {
+      retry: false,
+      refetchInterval: 60_000,
+    },
+  );
+  // New backend returns {results: AuditRow[], count}. Adapt to the
+  // existing renderer's {items: [{id, path, created, kind, summary}]}
+  // shape so the table stays the same.
+  const items: StudyAuditItem[] = Array.isArray((data as any)?.results)
+    ? ((data as any).results as any[]).map(mapAuditRowForStudy)
     : [];
 
   return (

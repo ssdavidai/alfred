@@ -20,6 +20,7 @@ import {
   getRecentDecisions,
   getStateChanges,
   getStateChangeSources,
+  getAuditFeed2,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 
@@ -64,6 +65,99 @@ function classifyOutcome(item: any): Outcome {
     return "Held";
   }
   return "Handled";
+}
+
+// STORE-P2-4: adapter from the SQL audit row shape into the page's Row
+// type. Outcome classification (HANDLED / HELD / ASKED) follows the
+// mapping in the issue:
+//   HANDLED → action_type ∈ {steward_action, auto_task_created, desk_action}
+//   HELD    → action_type = state_change AND prior_state ≠ new_state
+//   ASKED   → action_type = needs_attention_action AND payload has a
+//             needs_attention_path
+// Anything else is dropped — the ledger only surfaces decisions the
+// principal would care to scan.
+function classifyAuditOutcome(row: any): Outcome | null {
+  const actionType = String(row?.action_type ?? "");
+  let payload: any = null;
+  if (row?.payload) {
+    try {
+      payload =
+        typeof row.payload === "string"
+          ? JSON.parse(row.payload)
+          : row.payload;
+    } catch {
+      payload = null;
+    }
+  }
+  if (
+    actionType === "steward_action" ||
+    actionType === "auto_task_created" ||
+    actionType === "desk_action"
+  ) {
+    return "Handled";
+  }
+  if (actionType === "state_change") {
+    const prior = String(
+      payload?.prior_state ?? payload?.from ?? payload?.previous ?? "",
+    );
+    const next = String(
+      payload?.new_state ?? payload?.to ?? payload?.state ?? "",
+    );
+    if (prior && next && prior !== next) return "Held";
+    // Bare state-change records without a delta surface as Held anyway —
+    // the principal still wants to see that something held.
+    return "Held";
+  }
+  if (actionType === "needs_attention_action") {
+    if (payload && (payload.needs_attention_path || payload.target_path)) {
+      return "Asked";
+    }
+    return "Asked";
+  }
+  return null;
+}
+
+function mapAuditRowForDecisions(row: any): Row | null {
+  const outcome = classifyAuditOutcome(row);
+  if (!outcome) return null;
+  let when = "";
+  try {
+    const ns = BigInt(String(row?.ts ?? "0"));
+    const ms = Number(ns / 1_000_000n);
+    if (Number.isFinite(ms) && ms > 0) {
+      when = new Date(ms).toISOString();
+    }
+  } catch {
+    when = "";
+  }
+  if (!when) return null;
+  let payload: any = null;
+  if (row?.payload) {
+    try {
+      payload =
+        typeof row.payload === "string"
+          ? JSON.parse(row.payload)
+          : row.payload;
+    } catch {
+      payload = null;
+    }
+  }
+  const targetId = String(row?.target_id ?? "");
+  const input =
+    String(payload?.summary ?? payload?.title ?? payload?.headline ?? "")
+      .trim() ||
+    String(row?.reasoning ?? "").trim() ||
+    targetId.replace(/^[a-z_]+\//, "").replace(/\.md$/, "") ||
+    String(row?.action_type ?? "—");
+  return {
+    key: `a:${String(row?.id ?? `${row?.action_type}:${targetId}:${when}`)}`,
+    when,
+    whenDisplay: fmtWhen(when),
+    input,
+    conf: null,
+    path: outcome.toUpperCase(),
+    outcome,
+  };
 }
 
 function fmtWhen(value: string): string {
@@ -118,6 +212,19 @@ export default function DecisionsPage() {
     { limit: 200 },
     {
       refetchInterval: 15_000,
+      retry: false,
+    },
+  );
+  // STORE-P2-4: SQL-backed audit feed. Adds steward_action /
+  // auto_task_created / state_change / needs_attention_action rows so
+  // the ledger reflects every alfred-learn writer the new audit table
+  // captures. Dupes with the markdown-walking sources are expected
+  // until STORE-P2-5 retires them; we dedupe by a coarse key below.
+  const { data: auditSql } = useQuery(
+    getAuditFeed2,
+    { limit: 200 },
+    {
+      refetchInterval: 60_000,
       retry: false,
     },
   );
@@ -209,9 +316,25 @@ export default function DecisionsPage() {
         executeAt: executeAt || undefined,
       });
     }
+    // STORE-P2-4: SQL audit rows. Merge alongside the legacy sources;
+    // dedupe by (outcome, input, ts-bucket-15s) so a steward action that
+    // ALSO exists in vault/event/*.md doesn't surface twice.
+    const seenAuditKey = new Set<string>();
+    const auditRows = Array.isArray((auditSql as any)?.results)
+      ? ((auditSql as any).results as any[])
+      : [];
+    for (const r of auditRows) {
+      const row = mapAuditRowForDecisions(r);
+      if (!row) continue;
+      const bucketMs = Math.floor(Date.parse(row.when) / 15_000);
+      const dedupeKey = `${row.outcome}|${row.input}|${bucketMs}`;
+      if (seenAuditKey.has(dedupeKey)) continue;
+      seenAuditKey.add(dedupeKey);
+      out.push(row);
+    }
     out.sort((a, b) => (a.when < b.when ? 1 : a.when > b.when ? -1 : 0));
     return out;
-  }, [judgments, steward, decisions]);
+  }, [judgments, steward, decisions, auditSql]);
 
   const filtered = useMemo(
     () => (filter === "All" ? rows : rows.filter((r) => r.outcome === filter)),

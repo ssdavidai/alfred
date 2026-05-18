@@ -31,6 +31,7 @@ import {
   getPendingApprovals,
   getRecentJudgments,
   getActivityFeed,
+  getAuditFeed2,
   getRecentStewardActions,
   getMatterDetail,
   resolveNeedsAttentionDispatch,
@@ -178,6 +179,95 @@ interface AuditRow {
   reversible: boolean;
 }
 
+// STORE-P2-4: adapter from the SQL audit row (ctrl-api /api/v1/audit)
+// to the AuditRow shape this ledger already renders. We treat the new
+// rows as ADDITIVE — they slot alongside the existing activity/steward
+// rows in the merged sort. The audit_writers in alfred-learn write to
+// both vault/event/*.md AND the audit table during the soak, so dupes
+// can sneak in until STORE-P2-5 retires the legacy markdown trail; we
+// dedupe by best-effort key (action_type + target_id + truncated ts).
+function mapAuditRowForDesk(row: any): AuditRow | null {
+  if (!row) return null;
+  let createdIso = "";
+  let atSortKey = "";
+  try {
+    const ns = BigInt(String(row?.ts ?? "0"));
+    const ms = Number(ns / 1_000_000n);
+    if (Number.isFinite(ms) && ms > 0) {
+      createdIso = new Date(ms).toISOString();
+      atSortKey = createdIso;
+    }
+  } catch {
+    // ignore — fall through to empty timestamp
+  }
+  if (!atSortKey) return null;
+  const actionType = String(row?.action_type ?? "event");
+  const targetId = String(row?.target_id ?? "");
+  // Same hygiene as the existing ledger: drop steward "still_active"
+  // heartbeats — they're audit truth, but noise on the principal's
+  // desk.
+  let payload: any = null;
+  if (row?.payload) {
+    try {
+      payload =
+        typeof row.payload === "string"
+          ? JSON.parse(row.payload)
+          : row.payload;
+    } catch {
+      payload = null;
+    }
+  }
+  const decision = String(payload?.decision ?? "").toLowerCase();
+  if (
+    actionType === "steward_action" &&
+    decision === "still_active" &&
+    !payload?.action
+  ) {
+    return null;
+  }
+  const verb = formatAuditVerb(actionType);
+  const headline =
+    String(payload?.summary ?? payload?.title ?? payload?.headline ?? "")
+      .trim() ||
+    targetId
+      .replace(/^[a-z_]+\//, "")
+      .replace(/\.md$/, "")
+      .replace(/^[a-f0-9]{8}-/, "") ||
+    actionType;
+  return {
+    key: `audit:${String(row?.id ?? `${actionType}:${targetId}:${atSortKey}`)}`,
+    at: atSortKey,
+    atDisplay: fmtArrived(atSortKey),
+    act: `${verb} — ${headline}`,
+    actionId: undefined,
+    // The reverse path is /api/v1/audit/:id/reverse — wiring an Undo
+    // button to it is a follow-up. For the Desk's ledger panel, surface
+    // as informational.
+    reversible: false,
+  };
+}
+
+function formatAuditVerb(actionType: string): string {
+  switch (actionType) {
+    case "steward_action":
+      return "Steward";
+    case "signal_action":
+      return "Signal";
+    case "auto_task_created":
+      return "Auto-task";
+    case "state_change":
+      return "State";
+    case "needs_attention_action":
+      return "Attention";
+    case "desk_action":
+      return "Desk";
+    case "reverse":
+      return "Reversed";
+    default:
+      return actionType.replace(/_/g, " ");
+  }
+}
+
 // --------------------------------------------------------------------------
 // Page
 // --------------------------------------------------------------------------
@@ -201,6 +291,15 @@ export default function DeskPage() {
   );
   const { data: activity } = useQuery(getActivityFeed);
   const { data: steward } = useQuery(getRecentStewardActions);
+  // STORE-P2-4: SQL-backed audit feed. Same surface the Audit section in
+  // /study reads; here it joins activity + steward so the ledger reflects
+  // every alfred-learn writer (steward, signal, state_change, auto-task,
+  // transcript) without us having to wire each one separately.
+  const { data: auditSql } = useQuery(
+    getAuditFeed2,
+    { limit: 50 },
+    { refetchInterval: 60_000, retry: false },
+  );
   // Persistent personal queue — replaces the in-React Backstage tray.
   // The DecisionRouterWorkflow spawns to_do/<ts>.md records when the
   // principal clicks Do; this query reads them so they survive reloads.
@@ -494,9 +593,31 @@ export default function DeskPage() {
         reversible,
       });
     }
+    // STORE-P2-4: SQL audit rows from the new endpoint. Merge alongside
+    // the existing legacy sources; the soak overlap means dupes are
+    // expected until STORE-P2-5. We dedupe by a coarse key on
+    // (verb, headline-stem, ts-bucket-15s) so a steward action that
+    // exists in BOTH the markdown trail and the audit table doesn't
+    // appear twice on the principal's ledger.
+    const seenAuditKey = new Set<string>();
+    const auditRows = Array.isArray((auditSql as any)?.results)
+      ? ((auditSql as any).results as any[])
+      : [];
+    for (const r of auditRows) {
+      const row = mapAuditRowForDesk(r);
+      if (!row) continue;
+      // Build a coarse dedupe key — bucket ts to nearest 15 s so a
+      // legacy markdown row and a SQL row written from the same
+      // workflow collapse to one ledger entry.
+      const bucketMs = Math.floor(Date.parse(row.at) / 15_000);
+      const dedupeKey = `${row.act}|${bucketMs}`;
+      if (seenAuditKey.has(dedupeKey)) continue;
+      seenAuditKey.add(dedupeKey);
+      out.push(row);
+    }
     out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
     return out.slice(0, 80);
-  }, [recentDecisions, activity, steward]);
+  }, [recentDecisions, activity, steward, auditSql]);
 
   // ------------------------------------------------------------------------
   // Action dispatch — maps the UI's four buttons to the right tenant op.
