@@ -217,9 +217,11 @@ export default function DecisionsPage() {
   );
   // STORE-P2-4: SQL-backed audit feed. Adds steward_action /
   // auto_task_created / state_change / needs_attention_action rows so
-  // the ledger reflects every alfred-learn writer the new audit table
-  // captures. Dupes with the markdown-walking sources are expected
-  // until STORE-P2-5 retires them; we dedupe by a coarse key below.
+  // the ledger reflects every alfred-learn writer the audit table
+  // captures. STORE-P2-5 retired the legacy markdown-walking sources;
+  // this is now additive against the markdown-only judgments/steward
+  // queries (which read non-audit record types like vault/event/ items
+  // that haven't been migrated to the SQL audit trail).
   const { data: auditSql } = useQuery(
     getAuditFeed2,
     { limit: 200 },
@@ -316,20 +318,16 @@ export default function DecisionsPage() {
         executeAt: executeAt || undefined,
       });
     }
-    // STORE-P2-4: SQL audit rows. Merge alongside the legacy sources;
-    // dedupe by (outcome, input, ts-bucket-15s) so a steward action that
-    // ALSO exists in vault/event/*.md doesn't surface twice.
-    const seenAuditKey = new Set<string>();
+    // STORE-P2-4: SQL audit rows. The legacy markdown audit sources were
+    // retired in STORE-P2-5 (vault/event/ migration moved to the SQL
+    // audit table), so this loop no longer needs to dedupe against
+    // markdown-walking rows — it just appends.
     const auditRows = Array.isArray((auditSql as any)?.results)
       ? ((auditSql as any).results as any[])
       : [];
     for (const r of auditRows) {
       const row = mapAuditRowForDecisions(r);
       if (!row) continue;
-      const bucketMs = Math.floor(Date.parse(row.when) / 15_000);
-      const dedupeKey = `${row.outcome}|${row.input}|${bucketMs}`;
-      if (seenAuditKey.has(dedupeKey)) continue;
-      seenAuditKey.add(dedupeKey);
       out.push(row);
     }
     out.sort((a, b) => (a.when < b.when ? 1 : a.when > b.when ? -1 : 0));

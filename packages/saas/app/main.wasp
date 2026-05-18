@@ -721,17 +721,10 @@ query getActivityFeed {
   entities: [Instance]
 }
 
-// Durable audit feed read from vault/event/ records — what the /study#audit
-// section reads. getActivityFeed remains for the LogsPage container-log view.
-query getAuditFeed {
-  fn: import { getAuditFeed } from "@src/dashboard/operations",
-  entities: [Instance]
-}
-
-// STORE-P2-4: SQL-backed audit feed. Proxies to ctrl-api's /api/v1/audit
-// (migration 003). Coexists with the legacy getAuditFeed above during
-// the soak period; STORE-P2-5 retires the legacy op after the bulk
-// migrator (STORE-P2-3) finishes its backfill on every tenant.
+// STORE-P2-4 / STORE-P2-5: SQL-backed audit feed proxying ctrl-api's
+// /api/v1/audit (migration 003). Sole audit read path — the legacy
+// markdown-walking getAuditFeed op was retired in STORE-P2-5 once the
+// bulk migrator (STORE-P2-3) finished its backfill on every tenant.
 query getAuditFeed2 {
   fn: import { getAuditFeed2 } from "@src/dashboard/operations",
   entities: [User, Instance]

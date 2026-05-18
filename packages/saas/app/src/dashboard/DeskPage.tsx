@@ -593,26 +593,19 @@ export default function DeskPage() {
         reversible,
       });
     }
-    // STORE-P2-4: SQL audit rows from the new endpoint. Merge alongside
-    // the existing legacy sources; the soak overlap means dupes are
-    // expected until STORE-P2-5. We dedupe by a coarse key on
-    // (verb, headline-stem, ts-bucket-15s) so a steward action that
-    // exists in BOTH the markdown trail and the audit table doesn't
-    // appear twice on the principal's ledger.
-    const seenAuditKey = new Set<string>();
+    // STORE-P2-4: SQL audit rows from the new endpoint. STORE-P2-5
+    // retired the legacy markdown-walking audit source (vault/event/
+    // migrated into the SQL audit table), so we no longer dedupe — the
+    // SQL feed is now the only source of audit-typed rows. The
+    // co-existing `activity` (docker logs) and `steward` (markdown
+    // recentStewardActions) feeds read non-audit data, so duplicates
+    // across feeds are impossible here.
     const auditRows = Array.isArray((auditSql as any)?.results)
       ? ((auditSql as any).results as any[])
       : [];
     for (const r of auditRows) {
       const row = mapAuditRowForDesk(r);
       if (!row) continue;
-      // Build a coarse dedupe key — bucket ts to nearest 15 s so a
-      // legacy markdown row and a SQL row written from the same
-      // workflow collapse to one ledger entry.
-      const bucketMs = Math.floor(Date.parse(row.at) / 15_000);
-      const dedupeKey = `${row.act}|${bucketMs}`;
-      if (seenAuditKey.has(dedupeKey)) continue;
-      seenAuditKey.add(dedupeKey);
       out.push(row);
     }
     out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));

@@ -10,7 +10,6 @@ import type {
   GetDevices,
   GetContainerLogs,
   GetActivityFeed,
-  GetAuditFeed,
   GetCredentials,
   GetAgentConfig,
   GetModelCatalog,
@@ -445,24 +444,13 @@ export const getActivityFeed: GetActivityFeed<void, any> = async (
   });
 };
 
-// Audit feed — reads vault/event/ records (durable trail of every act
-// Alfred has taken on the principal's behalf). Distinct from
-// getActivityFeed, which scrapes the alfred container's docker-compose
-// logs (debug-ops surface).
-export const getAuditFeed: GetAuditFeed<void, any> = async (_args, context) => {
-  const instance = await getUserInstance(context);
-  return proxyToTenant(instance, {
-    path: "/api/v1/admin/audit",
-    query: { limit: "50" },
-  });
-};
-
-// STORE-P2-4: SQL-backed audit feed reading the new `audit` table on
-// every tenant (migration 003 in alfred-ctrl). This is the read side of
-// the unified audit trail — writers in alfred-learn (STORE-P2-2) and the
-// bulk migrator (STORE-P2-3) populate it; the legacy markdown-walking
-// `getAuditFeed` above stays as a soak fallback and is retired in
-// STORE-P2-5.
+// STORE-P2-4 / STORE-P2-5: SQL-backed audit feed reading the `audit` table
+// on every tenant (migration 003 in alfred-ctrl). This is the sole audit
+// read path now — STORE-P2-5 retired the legacy markdown-walking
+// getAuditFeed op (proxying /api/v1/admin/audit) once the bulk migrator
+// finished its backfill and the per-tenant /vault/_migrated_audit/ source
+// trees were removed. Writers in alfred-learn (STORE-P2-2) populate the
+// table going forward.
 //
 // Shape returned by ctrl-api (/api/v1/audit):
 //   { results: AuditRow[], count: number }
@@ -483,9 +471,7 @@ export const getAuditFeed2 = async (
   },
   context: any,
 ) => {
-  // Admin-only — match the access posture of the legacy /api/v1/admin/audit
-  // route. The principal is also the admin on a single-tenant VM, so this
-  // gate keeps the same surface as getAuditFeed.
+  // Admin-only — single-tenant VM, the principal is also the admin.
   if (!context.user) {
     throw new HttpError(401, "Not authenticated");
   }
