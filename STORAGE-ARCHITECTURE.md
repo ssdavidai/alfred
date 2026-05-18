@@ -1,13 +1,26 @@
 # Storage Architecture — Vault + SQLite + Cold Archive
 
-> Status: **Proposal (not accepted)**. Drafted 2026-05-18 in response to
-> the david-tenant degradation: 87,847 vault files, 6–7s list latency,
-> /brief rendering as "quiet morning" fallback, al-session-tracker and
-> al-judgment workflows looping on timeouts.
+> Status: **Accepted and shipped 2026-05-18**. Originally drafted in
+> response to the david-tenant degradation: 87,847 vault files, 6–7s
+> list latency, /brief rendering as "quiet morning" fallback,
+> al-session-tracker and al-judgment workflows looping on timeouts.
 >
-> This document is meant to be read, slept on, edited, and only then
-> turned into work. No code touches the new architecture until this is
-> accepted.
+> Epic [#898](https://github.com/ssdavidai/alfred-platform/issues/898)
+> shipped all six phases in a single session. Outcome on david:
+>
+> - vault file count: **88,312 → 6,981** (-92%)
+> - ctrl-api list endpoint p95: **6–7s → 4–7ms** (~1000×)
+> - audit table in state.db: 73,691 rows (migrated + live shadow)
+> - all 4 tenants on persistent state.db (`/opt/alfred/state`), restic
+>   backups verified, canonical-path enforcement in `warn` mode
+>
+> The remaining followups (see GH issues #477, #478) are:
+> - migrate 4 stragglers (pattern_proposal, signal markdown,
+>   needs_attention, event writers) off legacy vault types so
+>   `CANONICAL_PATH_ENFORCEMENT` can default to `enforce`
+> - chown `/opt/alfred/state` to 1000:1000 + add the alfred-learn
+>   bind on live tenants so `archival_sweep` can compact state.db
+>   directly (currently short-circuits with `state_db_missing`)
 
 ---
 

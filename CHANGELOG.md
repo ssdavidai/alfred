@@ -2,7 +2,54 @@
 
 All notable changes to the alfred-platform monorepo.
 
-## [Unreleased] — Alfred Black 1.0
+## [Unreleased] — Storage Architecture Migration
+
+Epic [#898](https://github.com/ssdavidai/alfred-platform/issues/898): the
+vault stops being the system's database. Machine bookkeeping (audits,
+signals, observations, raw stream events) moves into a per-tenant
+`state.db` SQLite with sqlite-vec, plus a JSONL stream log with 7d TTL
+and a DuckDB+Parquet cold archive at 90d. The principal's vault is
+locked to 12 canonical record types (matter, task, note, person, org,
+place, asset, chore, instinct, briefing, daybook, decision). Full
+proposal in `STORAGE-ARCHITECTURE.md`.
+
+**Headline outcome on the principal-facing tenant ("david"):**
+
+- vault file count: **88,312 → 6,981** (-92%)
+- ctrl-api list endpoint p95: **6–7s → 4–7ms** (~1000×)
+- audit table in state.db: **73,691 rows** (bulk-migrated + live shadow)
+- restic backups working on all 4 tenants (previously silently failing for weeks)
+- state.db persisted across container restarts via `/opt/alfred/state` bind
+
+### Phases shipped
+
+- **Phase 0** — stop the bleeding: walkMd scoped to type subdir (#899), httpx error logging (#900), bulk-mv ~80k mis-filed audit records into typed dirs (#901), disabled ORPHAN janitor sweep (#902).
+- **Phase 1** — vault_index read accelerator: state.db migration runner (#903), vault_index schema + boot scan (#904), write-through sync (#905), list endpoints serve from SQL (#906), reconciler + `alfred-ctrl reindex` CLI (#907).
+- **Phase 2** — audit table: schema + endpoints (#908), 6 alfred-learn + ctrl-api writers migrated (shadow mode) (#909 #476), bulk migration of ~80k legacy markdown records (#910), SaaS audit feed → SQL (#911), cleanup + legacy ops retired (#912).
+- **Phase 3** — signal/observation/embedding: sqlite-vec bundled (#913), schema + endpoints (#914), alfred-learn writers migrated (workflow.patched-safe) (#915), bulk migration of trace data (#916), alfred-learn readers (briefing + pattern detection + nightly_narrative) migrated (#917), SaaS readers (`/instincts` + `/matters/:id` timeline) migrated (#918).
+- **Phase 4** — stream log + 7d TTL: JSONL stream log + EventProcessor `processed_at` tracking + daily compactor + bulk migration of ~9,700 stream events (#919), stuck-pipeline alert workflow (#920).
+- **Phase 5** — cold archive: archival_sweep workflow rolls audit/signal/observation rows older than 90d to `_archive/<YYYY-MM>/<table>.parquet` via pyarrow (#921), tier-spanning audit reads via DuckDB CLI (#922).
+- **Phase 6** — lock-down: canonical-path enforcement middleware in `warn` mode (#923), this docs lock-down (#924).
+- **Cross-cutting**: restic backup config + restore drill (#925), per-tenant rollout runbook + smoke gates (#926), observability metrics + admin storage dashboard (#927).
+- **Ops follow-ups discovered along the way**: fix S3 bucket initialization for restic on 3 tenants (#474), bind-mount state.db for persistence across container restarts (#475), Desk action handlers in ctrl-api also write audit rows (#476).
+
+### Packages changed
+
+- `packages/ctrl` — `state.db` migration runner + 5 migrations (vault_index, audit, signal/observation/embedding, stream), new in-process metrics collector, ~13 new routes (`/audit`, `/signals`, `/observations`, `/observations/vec-search`, `/streams/events`, `/streams/raw/compact`, `/streams/stuck-report`, `/admin/storage-metrics`), canonical-path enforcement middleware, vault_index write-through hooks on every mutation, sqlite-vec extension loaded at boot, DuckDB CLI fetched for cold reads.
+- `packages/learn` — 4 audit writers (state_mutator, steward, signal_router, task_creation) + 2 new signal/observation writers + 6 read sites (briefing × 3, pattern_detection, nightly_narrative) migrated to SQL via env-gated enforcement. New workflows: `StreamRawCompactWorkflow` (daily 03:30 UTC), `StuckPipelineAlertWorkflow` (hourly), `ArchivalSweepWorkflow` (daily 03:00 UTC). pyarrow + httpx + temporalio + pyyaml deps unchanged.
+- `packages/saas` — 4 new Wasp ops (`getAuditFeed2`, `getSignalsForMatter`, `getObservationsForInstinct`, `getObservationVecNeighbors`, `getStorageMetrics`), new `/admin/storage` page, `/decisions` + `/study#audit` + `/desk` audit ledger + `/instincts` + `/matters/:id` timeline migrated to read SQL via adapters with 15-second-bucket dedupe.
+- `packages/openclaw/init` — bundles + stages sqlite-vec extension to `/alfred-data/vec.so` on every boot.
+- `deploy/` — `STORAGE-ROLLOUT.md` runbook, `RESTORE-DRILL.md`, restic backup script updated to snapshot state.db.
+- `scripts/` — `audit-rescue.sh`, `migrate-audits-to-sql.py`, `migrate-trace-to-sql.py`, `migrate-stream-events-to-jsonl.py`, `sqlite-snapshot.sh`, `smoke-storage.sh`, `setup-state-mount.sh`.
+
+### Open follow-ups
+
+- #477 — chown `/opt/alfred/state` to 1000:1000 + add alfred-learn bind mount on live tenants so `archival_sweep` can compact state.db directly (today short-circuits with `state_db_missing`).
+- #478 — migrate 4 remaining alfred-learn writers (pattern_proposal, signal markdown, needs_attention, event) off legacy vault types so `CANONICAL_PATH_ENFORCEMENT` can default to `enforce`.
+
+---
+
+## [Earlier] — Alfred Black 1.0
 
 The Alfred Black 1.0 rollout: a full visual + IA redesign of the SaaS surface
 into the Door + manifesto wool aesthetic, the canonical home moves from

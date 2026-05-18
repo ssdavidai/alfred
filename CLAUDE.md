@@ -153,8 +153,64 @@ Python + Temporal Docker container providing Alfred Black's self-improving intel
 ## Engineering References
 
 - `TOPOLOGY.md` — service connection map (ports, protocols, env vars)
+- `STORAGE-ARCHITECTURE.md` — the four-store model (vault / SQLite / cold / stream log) and the promotion contract
 - Each package has a `CONTRACT.md` — what it provides and requires
 - `scripts/smoke-test.sh` — post-deploy tenant verification
+
+---
+
+## Storage Architecture (the promotion contract)
+
+The vault is the **principal's persistent knowledge surface**, not the
+system's database. Machine bookkeeping lives in `state.db`. See
+`STORAGE-ARCHITECTURE.md` for the full model; this is the short version.
+
+**Four stores:**
+
+| Store | Backend | Lives at | Purpose |
+|---|---|---|---|
+| 1 · Vault | markdown | `/vault/` | the principal's surface |
+| 2 · SQLite | sqlite-vec | `/var/lib/alfred/state.db` | machine working memory |
+| 3 · Cold | DuckDB + Parquet | `/vault/_archive/<YYYY-MM>/` | forensic long tail (>90d) |
+| 4 · Stream | JSONL (later NATS) | `/vault/_raw/YYYY-MM-DD.jsonl` | raw inbound, 7d TTL |
+
+**The 12 canonical vault types** (anything else gets a 400 from ctrl-api when `CANONICAL_PATH_ENFORCEMENT=enforce`):
+
+```
+matter, task, note, person, org, place, asset, chore,
+instinct, briefing, daybook, decision
+```
+
+Plus operator-tooling paths that bypass: `_templates/`, `_archive/`, `_migrated*/`, `_rescue/`, `_raw/`, `_migrate/`, `inbox/`, `SOUL.md`, `RULES.md`, `CLAUDE.md`.
+
+**The rule for adding new persistence:**
+
+```
+Does the principal read or edit this directly?
+├── yes → vault record (must be one of the 12 types)
+└── no  → does the UI read a derived view?
+          ├── yes → SQLite table (audit / signal / observation / ...)
+          └── no  → SQLite or stream log (ephemeral)
+```
+
+Anything not in the vault's 12 types belongs in SQLite. Specifically:
+
+- **audit trails** (`signal-action`, `steward-action`, `desk-action`,
+  `needs_attention_action`, `auto-task-created`, `state-change`,
+  `steward-source-pruned`) → `POST /api/v1/audit`
+- **decision-grade signals** (`signal`) → `POST /api/v1/signals`
+- **learning observations** (`observation`) → `POST /api/v1/observations`
+- **raw inbound stream events** → `POST /api/v1/streams/events`
+  (becomes a line in `/vault/_raw/<date>.jsonl`)
+
+ctrl-api enforces this at ingress via
+`packages/ctrl/src/api/middleware/canonical_path.ts`. Rejection includes
+a `suggestion` field pointing at the right endpoint.
+
+state.db migrations live in `packages/ctrl/src/db/migrations/` — numbered
+SQL files, applied transactionally on ctrl-api boot. Never edit a
+migration after it has merged; append a new one. See
+`packages/ctrl/CLAUDE.md` § state.db migrations for the rules.
 
 ---
 

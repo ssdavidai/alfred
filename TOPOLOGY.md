@@ -77,9 +77,16 @@ cascading to ctrl-api.
 |-------------------|----------------|---------|
 | `/mnt/encrypted/vault` | `/vault` (ro for learn) | init, openclaw, alfred, alfred-learn |
 | `/mnt/encrypted/openclaw` | `/home/node/.openclaw` (openclaw), `/openclaw-state` (init), `/root/.openclaw` (alfred) | init, openclaw, alfred |
-| `/mnt/encrypted/alfred` | `/alfred-data` (init, openclaw, alfred-learn), `/app/data` (alfred) | init, openclaw, alfred, alfred-learn |
+| `/mnt/encrypted/alfred` | `/alfred-data` (init, openclaw, alfred-learn), `/app/data` (alfred), `/mnt/encrypted/alfred` (ctrl-api — holds the staged sqlite-vec `vec.so`) | init, openclaw, alfred, alfred-learn, ctrl-api |
 | `/mnt/encrypted/temporal` | `/data` | temporal |
+| `/opt/alfred/state` | `/var/lib/alfred` | ctrl-api, alfred-learn — holds the machine working-memory `state.db` (vault_index + audit + signal + observation + embedding + link + stream_consumer_offset + stream_event_processed) |
 | `shared_tmp` (Docker volume) | `/tmp` | openclaw, alfred |
+
+**Storage layout** — see `STORAGE-ARCHITECTURE.md` for the full model:
+- `/vault/<12 canonical types>/` — markdown, principal-facing
+- `/vault/_raw/<YYYY-MM-DD>.jsonl` — Store 4, raw inbound stream events with 7d TTL
+- `/vault/_archive/<YYYY-MM>/<table>.parquet` — Store 3, cold audit/signal/observation rows > 90d
+- `/var/lib/alfred/state.db` — Store 2, working memory (migrations 1–5 applied)
 
 **Source files:** `packages/ctrl/src/templates/docker-compose.yaml.njk`
 
