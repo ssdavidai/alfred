@@ -13,15 +13,11 @@ To add a new template:
 4. Add a matching entry in src/activities/assign_chores.py (PR 4) so
    assign_initial_chores knows when to instantiate it for a user.
 """
-from src.workflows.chores.daily_morning_briefing import DailyMorningBriefingWorkflow
-from src.workflows.chores.daily_evening_digest import DailyEveningDigestWorkflow
 from src.workflows.chores.subscription_watcher import SubscriptionWatcherWorkflow
 from src.workflows.chores.weekly_matter_digest import WeeklyMatterDigestWorkflow
 from src.workflows.chores.weekly_money_day import WeeklyMoneyDayBriefWorkflow
 
 ALL_CHORE_TEMPLATES = [
-    DailyMorningBriefingWorkflow,
-    DailyEveningDigestWorkflow,
     SubscriptionWatcherWorkflow,
     WeeklyMatterDigestWorkflow,
     WeeklyMoneyDayBriefWorkflow,
@@ -29,8 +25,6 @@ ALL_CHORE_TEMPLATES = [
 
 __all__ = [
     "ALL_CHORE_TEMPLATES",
-    "DailyMorningBriefingWorkflow",
-    "DailyEveningDigestWorkflow",
     "SubscriptionWatcherWorkflow",
     "WeeklyMatterDigestWorkflow",
     "WeeklyMoneyDayBriefWorkflow",

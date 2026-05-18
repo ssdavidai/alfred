@@ -13,7 +13,6 @@ from src.config import load_config
 # Workflows
 from src.workflows.event_processor import EventProcessorWorkflow
 from src.workflows.session_tracker import SessionTrackerWorkflow
-from src.workflows.daily_digest import DailyDigestWorkflow
 from src.workflows.learning import LearningWorkflow
 from src.workflows.reflection import ReflectionWorkflow
 from src.workflows.judgment import JudgmentWorkflow
@@ -96,7 +95,6 @@ from src.activities.first_brief_email import send_first_brief_email
 # Activities — chore actions
 from src.activities.chore_actions import (
     ask_alfred_to_judge_anomalies,
-    build_daily_briefing_v2,
     call_composio,
     call_self,
     diff_subscriptions,
@@ -115,7 +113,6 @@ from src.activities.chore_actions import (
 from src.activities.clerk import (
     clerk_classify,
     clerk_compare_topics,
-    clerk_daily_digest,
     clerk_execute_instructions,
     clerk_extract_braindump,
     clerk_extract_hint_observation,
@@ -446,16 +443,6 @@ from src.activities.steward import (
     update_matter_cadence as steward_update_matter_cadence,
 )
 
-# Steward Phase 5 (#841) — briefing-cache helpers used by the daily
-# morning briefing chore. Activity surface only; the rate-guard's
-# core API is invoked from within the steward.evaluate_task activity
-# (no @activity.defn export needed because it isn't called by a
-# workflow directly).
-from src.activities.briefing_cache import (
-    compute_briefing_context as briefing_compute_briefing_context,
-    stamp_brief_completed as briefing_stamp_brief_completed,
-)
-
 # State-mutation Phase A (#889) — universal state-mutator primitive.
 # ``apply_state_change_v2`` is the read-reason-write-log entry point
 # every state writer routes through. ``read_target`` + ``gather_observed``
@@ -668,7 +655,6 @@ logger = logging.getLogger("alfred-learn")
 _STATIC_WORKFLOWS = [
     EventProcessorWorkflow,
     SessionTrackerWorkflow,
-    DailyDigestWorkflow,
     LearningWorkflow,
     ReflectionWorkflow,
     JudgmentWorkflow,
@@ -710,7 +696,6 @@ ALL_ACTIVITIES = [
     # Clerk
     clerk_classify,
     clerk_compare_topics,
-    clerk_daily_digest,
     clerk_execute_instructions,
     clerk_extract_braindump,
     clerk_extract_hint_observation,
@@ -886,8 +871,6 @@ ALL_ACTIVITIES = [
     call_self,
     call_composio,
     spawn_subagent,
-    # daily_morning_briefing v2 — multi-subagent orchestration on workers
-    build_daily_briefing_v2,
     # Chore promotion (Step 5)
     scan_user_chores_directory,
     identify_promotion_candidates,
@@ -983,10 +966,6 @@ ALL_ACTIVITIES = [
     apply_state_change_v2,
     state_mutator_read_target,
     state_mutator_gather_observed,
-    # Steward Phase 5 (#841): briefing-cache activities used by the
-    # daily morning briefing chore for Steward-aware filtering.
-    briefing_compute_briefing_context,
-    briefing_stamp_brief_completed,
     # Steward Phase 4 (#840) — Vexa transcript intake activities.
     find_upcoming_meet_events,
     vexa_join_meeting,

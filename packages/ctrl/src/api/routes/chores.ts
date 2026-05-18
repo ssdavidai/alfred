@@ -254,8 +254,8 @@ function composeChoreDetail(
  * `template:` frontmatter field.
  */
 const STANDARD_LIBRARY_CHORE_TEMPLATES: ReadonlySet<string> = new Set([
-  "daily_morning_briefing",
-  "daily_evening_digest",
+  "briefing_morning",
+  "briefing_evening",
   "subscription_watcher",
   "weekly_matter_digest",
 ]);
@@ -263,28 +263,31 @@ const STANDARD_LIBRARY_CHORE_TEMPLATES: ReadonlySet<string> = new Set([
 /**
  * Default schedule + display metadata for each standard-library chore,
  * used by `POST /api/v1/admin/chores/install-standard` when the caller
- * doesn't override. Times are in UTC. Local-time impact:
- *   - daily_morning_briefing: 06:30 CET / 06:30 CEST (the agent reads
- *     local time at run-time, so the message says "good morning")
- *   - daily_evening_digest: 19:00 CET / 20:00 CEST
+ * doesn't override. Schedules below use a tenant-local timezone supplied
+ * by the schedule creator (Temporal `timeZoneName`), not UTC. Tenants are
+ * expected to set their own tz at provision time; the cron strings here
+ * read literally — "5am" means 5am tenant-local.
+ *
+ * Both briefing slots run the same BriefingWorkflow with a "morning" or
+ * "evening" slot argument. See packages/learn/src/workflows/briefing.py.
  */
 const STANDARD_LIBRARY_DEFAULTS: Record<
   string,
   { name: string; schedule: string; description: string; workflow_class_name: string }
 > = {
-  daily_morning_briefing: {
-    name: "Daily morning briefing",
-    schedule: "30 4 * * *",
-    workflow_class_name: "DailyMorningBriefingWorkflow",
+  briefing_morning: {
+    name: "Morning briefing",
+    schedule: "0 5 * * *",
+    workflow_class_name: "BriefingWorkflow",
     description:
-      "Every morning, your butler walks in with the coffee and brings you up to speed. Reads last night's digest, checks what changed across your active matters overnight, and writes a short note led by the matters that moved.",
+      "Every morning at 5am, your butler walks in with the coffee and brings you up to speed. Reads last night's digest, checks what changed across your active matters overnight, and writes a short note led by the matters that moved.",
   },
-  daily_evening_digest: {
-    name: "Daily evening digest",
-    schedule: "0 18 * * *",
-    workflow_class_name: "DailyEveningDigestWorkflow",
+  briefing_evening: {
+    name: "Evening briefing",
+    schedule: "0 17 * * *",
+    workflow_class_name: "BriefingWorkflow",
     description:
-      "End of day wrap. Reads this morning's brief, checks what actually happened today versus what we expected, and writes the hand-off note for tomorrow's brief. Closes the daily loop.",
+      "End of day wrap at 5pm. Reads this morning's brief, checks what actually happened today versus what we expected, and writes the hand-off note for tomorrow's brief. Closes the daily loop.",
   },
   subscription_watcher: {
     name: "Subscription watcher",
@@ -1548,9 +1551,9 @@ export function registerChoreRoutes(): void {
   // updates the schedule + frontmatter to match the requested values.
   //
   // Body: {
-  //   template: "daily_evening_digest",          // required, must be in STANDARD_LIBRARY_CHORE_TEMPLATES
-  //   schedule?: "0 18 * * *",                    // override default; falls back to STANDARD_LIBRARY_DEFAULTS
-  //   name?: "Daily evening digest",              // override default
+  //   template: "briefing_evening",               // required, must be in STANDARD_LIBRARY_CHORE_TEMPLATES
+  //   schedule?: "0 17 * * *",                    // override default; falls back to STANDARD_LIBRARY_DEFAULTS
+  //   name?: "Evening briefing",                  // override default
   //   user_facing_description?: "...",            // override default
   //   params?: {channel: "slack:default"}         // merged with {chore_slug} envelope
   // }

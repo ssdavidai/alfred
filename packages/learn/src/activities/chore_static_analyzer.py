@@ -47,7 +47,6 @@ _LLM_ACTIVITIES = frozenset({
     "clerk_extract_observation",
     "clerk_extract_instruction_observation",
     "clerk_session_boundary",
-    "clerk_daily_digest",
     "clerk_compare_topics",
     "clerk_match_session_context",
     "clerk_reflect",

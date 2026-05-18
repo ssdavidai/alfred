@@ -244,7 +244,7 @@ class BriefingWorkflow:
         # 5. Run-log entry. Best-effort — record_chore_run already
         # swallows failures so a vault hiccup here doesn't mask a
         # successful briefing.
-        chore_slug = f"daily-{slot_norm}-briefing"
+        chore_slug = f"briefing-{slot_norm}"
         try:
             await workflow.execute_activity(
                 record_chore_run,

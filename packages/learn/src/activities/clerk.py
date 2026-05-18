@@ -106,36 +106,6 @@ Return JSON only:
 
 
 @activity.defn
-async def clerk_daily_digest(activity_data: dict[str, Any]) -> dict[str, Any]:
-    """Ask the Clerk to produce a daily digest summary."""
-    prompt = f"""You are a butler's clerk preparing the end-of-day briefing for your master.
-
-Summarize today's activity into a concise daily digest.
-
-TODAY'S ACTIVITY:
-{json.dumps(activity_data, indent=2)}
-
-Return JSON only:
-{{
-  "title": "Daily Digest — YYYY-MM-DD",
-  "summary": "2-3 sentence overview",
-  "highlights": ["Key event 1", "Key event 2"],
-  "tasks_created": 0,
-  "tasks_completed": 0,
-  "tasks_open": 0,
-  "events_processed": 0,
-  "sessions_detected": 0,
-  "orphan_records": 0,
-  "action_items": ["Pending item 1"],
-  "open_tasks_carrying_forward": ["task description 1"],
-  "body": "Full markdown digest body",
-  "eod_prompt": "Interactive end-of-day message for the user"
-}}"""
-
-    return await _call_clerk(prompt)
-
-
-@activity.defn
 async def clerk_extract_observation(item: dict[str, Any]) -> dict[str, Any]:
     """Ask the Clerk to extract a structured observation from a chat interaction.
 

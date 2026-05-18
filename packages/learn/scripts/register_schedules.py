@@ -262,14 +262,6 @@ INTERVAL_SCHEDULES = [
 
 CALENDAR_SCHEDULES = [
     {
-        "id": "al-daily-digest",
-        "workflow": "DailyDigestWorkflow",
-        "calendar": ScheduleCalendarSpec(
-            hour=[ScheduleRange(start=18)],
-            minute=[ScheduleRange(start=0)],
-        ),
-    },
-    {
         "id": "al-reflection",
         "workflow": "ReflectionWorkflow",
         "calendar": ScheduleCalendarSpec(
