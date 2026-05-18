@@ -1209,12 +1209,14 @@ def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
     input_patterns = instinct.get("input_patterns") or {}
     routing_rule = instinct.get("routing_rule") or {}
     confidence = float(instinct.get("confidence_score", 0.85))
-    # Note: discretion_threshold is intentionally NOT pre-seeded. A seeded
-    # pattern starts at "Asking" — the runtime falls back to the obs-count
-    # formula in src/matching/discretion.py (0.95 for <5 obs), so the
-    # principal gets asked until the pattern has earned trust through
-    # repetition. See should_route_autonomously: it only consults the
-    # field when explicitly set; absence is the signal "use the formula."
+    # discretion_threshold is optional in the writer contract — when the
+    # caller includes it, we surface it on the record. When absent, the
+    # runtime falls back to the obs-count formula in
+    # src/matching/discretion.py (0.95 for <5 obs) so the principal is
+    # asked until the pattern earns trust through repetition. See
+    # should_route_autonomously: it only consults the field when set.
+    threshold_raw = instinct.get("discretion_threshold")
+    threshold: float | None = float(threshold_raw) if threshold_raw is not None else None
 
     # Encode the structured nested fields as JSON-scalar strings so the
     # flat parser on the read side can round-trip them via json.loads.
@@ -1236,6 +1238,8 @@ def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
         f"input_patterns: {_escape_yaml_scalar(input_patterns_json)}",
         f"routing_rule: {_escape_yaml_scalar(routing_rule_json)}",
     ]
+    if threshold is not None:
+        fm_lines.append(f"discretion_threshold: {threshold}")
 
     # Persist execution block if the LLM included one
     execution = instinct.get("execution")
@@ -1284,9 +1288,13 @@ def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
         if process:
             body_parts.append(f"- **Process:** {process}")
 
+    summary_bits = []
+    if threshold is not None:
+        summary_bits.append(f"**Discretion threshold:** {threshold:.2f}")
+    summary_bits.append(f"**Confidence:** {confidence:.2f}")
     body_parts += [
         "",
-        f"**Discretion threshold:** {threshold:.2f}  |  **Confidence:** {confidence:.2f}",
+        "  |  ".join(summary_bits),
         "",
         "---",
         "",
