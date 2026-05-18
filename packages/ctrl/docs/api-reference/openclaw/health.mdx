@@ -1,0 +1,47 @@
+---
+title: "Gateway Health"
+description: "Check OpenClaw gateway health status"
+api: "GET /api/v1/openclaw/health"
+---
+
+Returns the current health status of the OpenClaw gateway, including uptime, system resources, and service availability.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/openclaw/health \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "healthy",
+  "uptime": 345672,
+  "version": "0.2.1",
+  "checks": {
+    "database": "ok",
+    "filesystem": "ok",
+    "agents": "ok",
+    "devices": "ok"
+  },
+  "system": {
+    "cpuUsage": 12.4,
+    "memoryUsage": 384.2,
+    "memoryTotal": 2048.0,
+    "diskUsage": 45.6,
+    "diskTotal": 100.0
+  },
+  "timestamp": "2026-02-26T14:35:42Z"
+}
+```
+
+</ResponseExample>

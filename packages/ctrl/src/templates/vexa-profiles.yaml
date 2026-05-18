@@ -1,0 +1,58 @@
+# Vexa runtime-api container profiles.
+#
+# Upstream's vexaai/runtime-api:0.10.6 ships with a profiles.yaml that
+# only defines demo profiles (web-server, worker, sandbox, gpu-compute) —
+# NO "meeting" profile, which is the one Vexa's own meeting-api requests
+# whenever it dispatches a transcription bot. Without this file mounted
+# at /app/profiles.yaml, every POST /bots returns
+#   `{"detail":"Unknown profile: meeting"}`
+# and the dashboard / alfred-learn auto-dispatch both 500.
+#
+# These profiles are copied verbatim from upstream's
+# services/runtime-api/profiles.yaml in the Vexa-ai/vexa repo (the file
+# present in the source tree that the published image ships WITHOUT).
+# Resource ceilings reflect upstream's measured p95 + headroom.
+#
+# Hot-reload: `kill -HUP` the runtime-api process to reload without
+# a container restart.
+
+profiles:
+  meeting:
+    image: "${BROWSER_IMAGE}"
+    command: ["/app/vexa-bot/entrypoint.sh"]
+    working_dir: "/app/vexa-bot"
+    resources:
+      cpu_request: "1000m"
+      cpu_limit: "1500m"
+      memory_request: "1100Mi"
+      memory_limit: "2560Mi"
+      shm_size: 2147483648
+    idle_timeout: 0
+    auto_remove: false
+    env:
+      DISPLAY: "${DISPLAY:-:99}"
+      NODE_ENV: "production"
+      REDIS_URL: "${REDIS_URL}"
+      TRANSCRIPTION_SERVICE_URL: "${TRANSCRIPTION_SERVICE_URL:-}"
+      TRANSCRIPTION_SERVICE_TOKEN: "${TRANSCRIPTION_SERVICE_TOKEN:-}"
+    ports:
+      "9222/tcp": {}
+
+  browser-session:
+    image: "${BROWSER_IMAGE}"
+    command: ["/app/vexa-bot/entrypoint.sh"]
+    working_dir: "/app/vexa-bot"
+    resources:
+      cpu_request: "1000m"
+      cpu_limit: "1500m"
+      memory_request: "1100Mi"
+      memory_limit: "1536Mi"
+      shm_size: 2147483648
+    idle_timeout: 3600
+    auto_remove: false
+    env:
+      DISPLAY: "${DISPLAY:-:99}"
+      NODE_ENV: "production"
+      REDIS_URL: "${REDIS_URL}"
+    ports:
+      "9222/tcp": {}

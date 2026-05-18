@@ -1,0 +1,349 @@
+#cloud-config
+
+users:
+  - name: deploy
+    groups: sudo, docker
+    shell: /bin/bash
+    sudo:
+      - "ALL=(ALL) NOPASSWD: /usr/bin/systemctl *"
+      - "ALL=(ALL) NOPASSWD: /usr/bin/tailscale *"
+      - "ALL=(ALL) NOPASSWD: /usr/bin/cloudflared *"
+      - "ALL=(ALL) NOPASSWD: /usr/local/bin/cloudflared *"
+      - "ALL=(ALL) NOPASSWD: /usr/bin/chown *"
+      - "ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /opt/alfred/*"
+      - "ALL=(ALL) NOPASSWD: /usr/bin/bash /opt/alfred/*.sh"
+      - "ALL=(ALL) NOPASSWD: /usr/bin/bash -c set -a && source /opt/alfred/*.env *"
+    ssh_authorized_keys:
+      - {{ ssh_public_key }}
+
+ssh_pwauth: false
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - fail2ban
+  - ufw
+  - cryptsetup
+  - unattended-upgrades
+  - jq
+  - curl
+  - restic
+  - ca-certificates
+  - gnupg
+
+runcmd:
+  # --- Install Docker from official repo (Ubuntu docker.io lacks compose plugin) ---
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - |
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+  - apt-get update
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+  # --- Raise per-user process limit (nproc / ulimit -u) ---
+  # Ubuntu 24.04's default for interactive sessions is 2048, which is the
+  # actual ceiling that docker's container-level pids_limit can draw from
+  # when the parent process (dockerd's child of the deploy shell for
+  # docker-cli exec calls) shares the deploy user's limit. Bump to 32k to
+  # give the whole fleet's per-container pids_limits plenty of headroom.
+  # Applies to both soft and hard limits for root and deploy.
+  - |
+    cat > /etc/security/limits.d/99-alfred.conf << 'LIMITS'
+    root    soft    nproc   32768
+    root    hard    nproc   32768
+    deploy  soft    nproc   32768
+    deploy  hard    nproc   32768
+    LIMITS
+
+  # --- Harden SSH ---
+  - |
+    cat > /etc/ssh/sshd_config.d/99-alfred-hardening.conf << 'SSHD'
+    PermitRootLogin no
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    MaxAuthTries 3
+    MaxSessions 3
+    X11Forwarding no
+    AllowTcpForwarding no
+    ClientAliveInterval 300
+    ClientAliveCountMax 2
+    LoginGraceTime 30
+    SSHD
+  - systemctl restart sshd
+
+  # --- UFW firewall ---
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow 22/tcp
+  - ufw allow 41641/udp comment 'Tailscale WireGuard'
+  - ufw --force enable
+
+  # --- Fail2ban ---
+  - |
+    cat > /etc/fail2ban/jail.local << 'JAIL'
+    [sshd]
+    enabled = true
+    port = 22
+    maxretry = 3
+    bantime = 3600
+    findtime = 600
+    JAIL
+  - systemctl enable fail2ban
+  - systemctl restart fail2ban
+
+  # --- Install Node.js 22 (for tenant API) ---
+  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  - apt-get install -y nodejs
+
+  # --- Install Tailscale via APT ---
+  - curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.noarmor.gpg -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+  - curl -fsSL https://pkgs.tailscale.com/stable/ubuntu/noble.tailscale-keyring.list -o /etc/apt/sources.list.d/tailscale.list
+  - apt-get update
+  - apt-get install -y tailscale
+
+  # --- Install cloudflared via APT ---
+  - curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg
+  - |
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(. /etc/os-release && echo "$VERSION_CODENAME") main" > /etc/apt/sources.list.d/cloudflared.list
+  - apt-get update
+  - apt-get install -y cloudflared
+  - mkdir -p /etc/cloudflared
+  - chown deploy:deploy /etc/cloudflared
+
+  # --- Enable Docker ---
+  - systemctl enable docker
+  - systemctl start docker
+  - usermod -aG docker deploy
+
+  # --- Setup encrypted volume ---
+  - mkdir -p /mnt/encrypted
+  - |
+    if [ -b /dev/disk/by-id/scsi-0HC_Volume_{{ volume_id }} ]; then
+      VOLUME_DEV="/dev/disk/by-id/scsi-0HC_Volume_{{ volume_id }}"
+
+      # Generate LUKS keyfile
+      mkdir -p /opt/alfred
+      dd if=/dev/urandom of=/opt/alfred/luks.key bs=4096 count=1
+      chmod 600 /opt/alfred/luks.key
+
+      # Format with LUKS2 if not already encrypted
+      if ! cryptsetup isLuks "$VOLUME_DEV" 2>/dev/null; then
+        cryptsetup luksFormat --type luks2 --batch-mode --key-file /opt/alfred/luks.key "$VOLUME_DEV"
+      fi
+
+      # Open and mount
+      cryptsetup luksOpen --key-file /opt/alfred/luks.key "$VOLUME_DEV" alfred-data
+      if ! blkid /dev/mapper/alfred-data; then
+        mkfs.ext4 /dev/mapper/alfred-data
+      fi
+      mount /dev/mapper/alfred-data /mnt/encrypted
+
+      # Create data directories — all owned by deploy (uid 1000)
+      # temporal image also runs as uid 1000 (temporal user)
+      # /mnt/encrypted/vexa is created unconditionally — the cost of an
+      # empty directory is zero, and creating it lazily would mean a
+      # tenant-flip to vexa_enabled would also need a re-run of
+      # cloud-init (or a manual mkdir) before the Vexa stack could
+      # start. Same rationale as /mnt/encrypted/vaultwarden +
+      # /mnt/encrypted/mcp-server above (both unconditional even when
+      # the corresponding compose blocks are gated behind a flag).
+      mkdir -p /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden /mnt/encrypted/mcp-server /mnt/encrypted/vexa
+      chown -R deploy:deploy /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden /mnt/encrypted/mcp-server /mnt/encrypted/vexa
+    fi
+
+  # --- Setup auto-unlock on boot ---
+  - |
+    cat > /etc/systemd/system/alfred-luks.service << 'LUKS_SVC'
+    [Unit]
+    Description=Open LUKS volume for Alfred
+    Before=docker.service
+    After=local-fs.target
+
+    [Service]
+    Type=oneshot
+    RemainAfterExit=yes
+    ExecStart=/bin/bash -c 'cryptsetup luksOpen --key-file /opt/alfred/luks.key /dev/disk/by-id/scsi-0HC_Volume_{{ volume_id }} alfred-data && mount /dev/mapper/alfred-data /mnt/encrypted'
+    ExecStop=/bin/bash -c 'umount /mnt/encrypted && cryptsetup luksClose alfred-data'
+
+    [Install]
+    WantedBy=multi-user.target
+    LUKS_SVC
+  - systemctl enable alfred-luks.service
+
+  # --- Docker compose auto-update timer ---
+  - mkdir -p /opt/alfred/compose
+  - chown deploy:deploy /opt/alfred /opt/alfred/compose
+  - |
+    cat > /etc/systemd/system/alfred-update.service << 'UPDATE_SVC'
+    [Unit]
+    Description=Pull latest Alfred Docker images
+    After=docker.service
+
+    [Service]
+    Type=oneshot
+    WorkingDirectory=/opt/alfred/compose
+    ExecStart=/usr/bin/docker compose pull --quiet
+    ExecStartPost=/usr/bin/docker compose up -d --remove-orphans
+    ExecStartPost=/usr/bin/docker image prune -f
+    User=deploy
+    UPDATE_SVC
+  - |
+    cat > /etc/systemd/system/alfred-update.timer << 'UPDATE_TIMER'
+    [Unit]
+    Description=Auto-update Alfred every 15 minutes
+
+    [Timer]
+    OnBootSec=5min
+    OnUnitActiveSec=15min
+
+    [Install]
+    WantedBy=timers.target
+    UPDATE_TIMER
+  - systemctl enable alfred-update.timer
+  - systemctl start alfred-update.timer
+
+  # --- Health check script ---
+  - |
+    cat > /opt/alfred/healthcheck.sh << 'HEALTH'
+    #!/bin/bash
+    set -e
+
+    cd /opt/alfred/compose
+
+    containers=$(docker compose ps --format json 2>/dev/null | jq -s . 2>/dev/null || echo '[]')
+    disk_pct=$(df /mnt/encrypted 2>/dev/null | awk 'NR==2 {gsub(/%/,""); print $5}' || echo '-1')
+    mem_total=$(free -m | awk 'NR==2{print $2}')
+    mem_used=$(free -m | awk 'NR==2{print $3}')
+    mem_pct=$((mem_used * 100 / mem_total))
+
+    # Check cloudflared tunnel status
+    cf_status="inactive"
+    if systemctl is-active --quiet cloudflared 2>/dev/null; then
+      cf_status="active"
+    fi
+
+    jq -n \
+      --argjson containers "$containers" \
+      --argjson disk_percent "${disk_pct}" \
+      --argjson memory_percent "${mem_pct}" \
+      --arg cloudflared_status "$cf_status" \
+      '{containers: $containers, disk_percent: $disk_percent, memory_percent: $memory_percent, cloudflared_status: $cloudflared_status}'
+    HEALTH
+  - chmod +x /opt/alfred/healthcheck.sh
+  - chown deploy:deploy /opt/alfred/healthcheck.sh
+
+  # --- Alfred tenant API systemd service (legacy fallback) ---
+  # Primary API now runs as ctrl-api Docker service (same compose network
+  # as alfred-learn and alfred-worker). Systemd service kept as fallback
+  # for direct host access and existing tenant compatibility.
+  - |
+    cat > /etc/systemd/system/alfred-api.service << 'API_SVC'
+    [Unit]
+    Description=Alfred Tenant API (legacy fallback)
+    After=docker.service alfred-luks.service
+    Wants=docker.service
+    # Disabled by default on new provisions — ctrl-api Docker service is primary
+    ConditionPathExists=!/opt/alfred/compose/docker-compose.yaml
+
+    [Service]
+    Type=simple
+    User=deploy
+    WorkingDirectory=/opt/alfred/compose
+    ExecStart=/usr/bin/node /opt/alfred/api.mjs
+    Restart=always
+    RestartSec=5
+    Environment=NODE_ENV=production
+    EnvironmentFile=-/opt/alfred/compose/.env
+    StandardOutput=journal
+    StandardError=journal
+
+    [Install]
+    WantedBy=multi-user.target
+    API_SVC
+
+  # --- Restic backup script ---
+  - |
+    cat > /opt/alfred/backup.sh << 'BACKUP'
+    #!/bin/bash
+    set -euo pipefail
+
+    ENV_FILE="/opt/alfred/restic.env"
+    if [ ! -f "$ENV_FILE" ]; then
+      echo "No restic config found, skipping backup"
+      exit 0
+    fi
+
+    set -a
+    source "$ENV_FILE"
+    set +a
+
+    # Stop containers for consistent snapshot
+    cd /opt/alfred/compose
+    docker compose stop alfred openclaw temporal 2>/dev/null || true
+
+    # Run backup
+    restic backup /mnt/encrypted \
+      --exclude='/mnt/encrypted/temporal' \
+      --tag "automated" \
+      --tag "$(hostname)" \
+      2>&1
+
+    # Restart containers
+    docker compose start temporal openclaw alfred 2>/dev/null || true
+
+    # Prune old backups: keep 7 daily, 4 weekly, 6 monthly
+    restic forget \
+      --keep-daily 7 \
+      --keep-weekly 4 \
+      --keep-monthly 6 \
+      --prune \
+      2>&1
+
+    echo "Backup complete at $(date -Iseconds)"
+    BACKUP
+  - chmod +x /opt/alfred/backup.sh
+
+  # --- Restic backup systemd service + timer (daily at 3am) ---
+  - |
+    cat > /etc/systemd/system/alfred-backup.service << 'BACKUP_SVC'
+    [Unit]
+    Description=Restic backup of Alfred data to Acme Cloud Object Storage
+    After=docker.service alfred-luks.service
+
+    [Service]
+    Type=oneshot
+    ExecStart=/opt/alfred/backup.sh
+    StandardOutput=journal
+    StandardError=journal
+    BACKUP_SVC
+  - |
+    cat > /etc/systemd/system/alfred-backup.timer << 'BACKUP_TIMER'
+    [Unit]
+    Description=Daily Alfred backup at 3am
+
+    [Timer]
+    OnCalendar=*-*-* 03:00:00
+    RandomizedDelaySec=1800
+    Persistent=true
+
+    [Install]
+    WantedBy=timers.target
+    BACKUP_TIMER
+
+  # --- Unattended upgrades ---
+  - |
+    cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UNATTENDED'
+    Unattended-Upgrade::Allowed-Origins {
+        "${distro_id}:${distro_codename}-security";
+    };
+    Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+    Unattended-Upgrade::Remove-Unused-Dependencies "true";
+    Unattended-Upgrade::Automatic-Reboot "false";
+    UNATTENDED
+
+  # --- Signal completion ---
+  - touch /opt/alfred/.cloud-init-complete
+
+final_message: "Alfred cloud-init complete after $UPTIME seconds"

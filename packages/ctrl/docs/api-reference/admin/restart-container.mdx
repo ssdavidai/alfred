@@ -1,0 +1,41 @@
+---
+title: "Restart Container"
+description: "Restart a specific Docker Compose service container"
+api: "POST /api/v1/admin/containers/{service}/restart"
+---
+
+Restart a specific container in the Alfred stack. The container will be stopped and then started again.
+
+## Path Parameters
+
+<ParamField path="service" type="string" required>
+  The service name to restart (e.g., "worker", "openclaw", "temporal"). Must contain only alphanumeric characters, hyphens, or underscores.
+</ParamField>
+
+<RequestExample>
+
+```bash curl
+# Restart the Alfred worker
+curl -X POST -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/containers/worker/restart
+
+# Restart OpenClaw gateway
+curl -X POST -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/containers/openclaw/restart
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "message": "Container worker restarted"
+}
+```
+
+</ResponseExample>
+
+<Warning>
+  Restarting the worker container will interrupt any active agent operations. Restarting temporal may briefly disrupt workflow execution.
+</Warning>

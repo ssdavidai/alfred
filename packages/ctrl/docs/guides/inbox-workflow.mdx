@@ -1,0 +1,356 @@
+---
+title: "Inbox Workflow"
+description: "Complete guide to the inbox-to-vault pipeline"
+icon: "inbox"
+---
+
+The inbox workflow is Alfred's primary ingestion pipeline. Drop raw content into the inbox, and Curator automatically processes it into structured vault records.
+
+## Overview
+
+The inbox workflow has three stages:
+
+<Steps>
+  <Step title="Upload">
+    Upload raw files or text snippets to the inbox via API
+  </Step>
+  <Step title="Processing">
+    Curator watches the inbox and processes new content automatically
+  </Step>
+  <Step title="Verification">
+    Check the vault for newly created structured records
+  </Step>
+</Steps>
+
+## Supported Formats
+
+Curator accepts the following file types:
+
+- **Text**: `.txt`, `.md`, `.mdx`
+- **Documents**: `.pdf`, `.docx`, `.odt`
+- **Web**: `.html`, `.mhtml`
+- **Code**: `.py`, `.js`, `.ts`, `.json`, `.yaml`
+- **Data**: `.csv`, `.tsv`
+
+All filenames are sanitized automatically (spaces → underscores, special chars removed).
+
+## Single File Upload
+
+Upload a single file to the inbox:
+
+<CodeGroup>
+
+```bash Basic Upload
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/inbox/upload \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -F "file=@meeting-notes.md"
+```
+
+```bash With Custom Filename
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/inbox/upload \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -F "file=@transcript.txt" \
+  -F "filename=weekly-standup-2026-02-26.md"
+```
+
+</CodeGroup>
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "file": "meeting_notes.md",
+  "path": "/mnt/encrypted/vault/inbox/meeting_notes.md"
+}
+```
+
+<Tip>
+The API automatically sanitizes filenames. `Meeting Notes (2026).md` becomes `Meeting_Notes_2026_.md`.
+</Tip>
+
+## Bulk Upload
+
+Upload multiple files at once:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/inbox/upload/bulk \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -F "files=@notes1.md" \
+  -F "files=@notes2.md" \
+  -F "files=@transcript.txt"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "uploaded": [
+    {
+      "file": "notes1.md",
+      "path": "/mnt/encrypted/vault/inbox/notes1.md"
+    },
+    {
+      "file": "notes2.md",
+      "path": "/mnt/encrypted/vault/inbox/notes2.md"
+    },
+    {
+      "file": "transcript.txt",
+      "path": "/mnt/encrypted/vault/inbox/transcript.txt"
+    }
+  ]
+}
+```
+
+## Text Snippet Upload
+
+Upload raw text without a file:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/inbox/text \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Met with Alice and Bob to discuss Q1 roadmap. Key decisions: migrate to microservices, hire 2 engineers.",
+    "filename": "q1-planning-meeting.md"
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "file": "q1_planning_meeting.md",
+  "path": "/mnt/encrypted/vault/inbox/q1_planning_meeting.md"
+}
+```
+
+<Note>
+If you omit `filename`, Alfred generates one using timestamp: `snippet_20260226_143022.md`
+</Note>
+
+## Listing Inbox Contents
+
+Check what's in the inbox:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/inbox \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "files": [
+    {
+      "name": "meeting_notes.md",
+      "size": 2048,
+      "modified": "2026-02-26T14:30:22Z"
+    },
+    {
+      "name": "transcript.txt",
+      "size": 15360,
+      "modified": "2026-02-26T15:12:45Z"
+    }
+  ]
+}
+```
+
+## Automatic Processing
+
+Curator watches the inbox directory and processes new files automatically (default interval: 60 seconds).
+
+To check if Curator is running:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/status \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "status": "running",
+  "uptime_seconds": 3600,
+  "last_run": "2026-02-26T15:30:00Z",
+  "processed_count": 12
+}
+```
+
+## Manual Processing
+
+Trigger immediate processing without waiting for the next sweep:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/process \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "message": "Curator processing triggered",
+  "processed": 3,
+  "created_records": [
+    "person/Alice Johnson",
+    "project/Q1 Microservices Migration",
+    "decision/Hire Two Engineers Q1 2026"
+  ]
+}
+```
+
+<Warning>
+Manual processing runs synchronously and may take 30-60 seconds for large files or multiple items. The API will wait for completion.
+</Warning>
+
+## Checking Results
+
+After Curator processes inbox files, check the vault for new records:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/vault/list?type=person \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "records": [
+    {
+      "title": "Alice Johnson",
+      "type": "person",
+      "path": "person/Alice Johnson.md",
+      "created": "2026-02-26T15:31:00Z"
+    }
+  ]
+}
+```
+
+## Example Workflows
+
+### Meeting Notes
+
+<Steps>
+  <Step title="Record the meeting">
+    Take notes in Markdown or export from Zoom/Meet
+  </Step>
+  <Step title="Upload to inbox">
+    ```bash
+    curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/inbox/upload \
+      -H "X-API-Key: YOUR_API_KEY" \
+      -F "file=@weekly-standup-2026-02-26.md"
+    ```
+  </Step>
+  <Step title="Wait for processing">
+    Curator extracts attendees as `person` records, action items as `task` records, and decisions as `decision` records
+  </Step>
+  <Step title="Review results">
+    ```bash
+    curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/vault/list?type=task \
+      -H "X-API-Key: YOUR_API_KEY"
+    ```
+  </Step>
+</Steps>
+
+### Conversation Dump
+
+Upload a chat transcript:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/inbox/text \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "Alice: We need to migrate the database by Q2.\nBob: Agreed. Let'\''s use Postgres.\nAlice: I'\''ll create the migration plan.",
+    "filename": "db-migration-chat.md"
+  }'
+```
+
+Curator extracts:
+- **Decision**: "Migrate database to Postgres by Q2"
+- **Task**: "Create database migration plan" (assigned to Alice)
+- **Person**: "Alice", "Bob" (if not already in vault)
+
+### Document Batch Processing
+
+Upload multiple PDFs from a project folder:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/inbox/upload/bulk \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -F "files=@requirements.pdf" \
+  -F "files=@architecture.pdf" \
+  -F "files=@timeline.pdf"
+```
+
+Curator processes all three documents and extracts relevant entities (projects, decisions, constraints, people).
+
+## Troubleshooting
+
+### File Not Processing
+
+Check Curator status:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/status \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+If stopped, start it:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/start \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+### File Rejected
+
+Check Curator logs:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/logs/stream?service=curator&tail=50 \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+Common issues:
+- **Unsupported format**: Only text-based formats are supported
+- **Empty file**: Files must contain content
+- **Encoding issues**: Ensure UTF-8 encoding
+
+### Duplicate Records
+
+Curator uses content hashing to avoid re-processing the same file. If you upload the same content twice, it will be skipped. To force re-processing, delete the state file:
+
+```bash
+# Not exposed via API — requires SSH access
+ssh deploy@alfred-acme.tailnet.ts.net
+rm /mnt/encrypted/data/curator_state.json
+```
+
+Then restart Curator:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/restart \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Vault Management" icon="vault" href="/guides/vault-management">
+    Learn CRUD operations on structured records
+  </Card>
+  <Card title="Worker Operations" icon="gears" href="/guides/worker-operations">
+    Manage Curator, Janitor, and Distiller
+  </Card>
+</CardGroup>

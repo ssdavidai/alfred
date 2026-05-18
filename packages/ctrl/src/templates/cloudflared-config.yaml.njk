@@ -1,0 +1,54 @@
+tunnel: {{ tunnel_id }}
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  - hostname: {{ subdomain }}.{{ domain }}
+    path: /api/v1/*
+    service: http://localhost:3100
+  - hostname: {{ subdomain }}.{{ domain }}
+    path: /terminal
+    service: http://localhost:3100
+  # alfred-mcp-server — per-app MCP endpoints + OAuth surface.
+  # `path:` uses regex; this single rule captures /<app>/mcp under any path
+  # plus all OAuth and .well-known endpoints. MUST come BEFORE the
+  # openclaw catch-all so MCP traffic doesn't leak through to the agent.
+  - hostname: {{ subdomain }}.{{ domain }}
+    path: ^/(sure/mcp|plane/mcp|alfred/mcp|vaultwarden/mcp|execute/mcp|authorize|token|register|approve|\.well-known)(/.*)?$
+    service: http://localhost:8787
+  - hostname: {{ subdomain }}.{{ domain }}
+    service: http://localhost:18789
+{%- if plane_enabled %}
+  - hostname: {{ subdomain }}-plane.{{ domain }}
+    service: http://localhost:8080
+{%- endif %}
+{%- if sure_enabled %}
+  - hostname: {{ subdomain }}-sure.{{ domain }}
+    service: http://localhost:3001
+{%- endif %}
+{%- if vaultwarden_enabled %}
+  - hostname: {{ subdomain }}-vault.{{ domain }}
+    service: http://localhost:18080
+{%- endif %}
+{%- if vexa_enabled %}
+  # Vexa Dashboard live-transcript WebSocket — served by api-gateway at
+  # :18056/ws. Path rule MUST come before the dashboard catch-all
+  # below; cloudflared evaluates ingress top-to-bottom, so without
+  # this the browser would fall through to :18057 (dashboard) which
+  # has no /ws handler, the WS upgrade fails, and live transcripts
+  # stop streaming. Browsers also block ws:// from https:// pages
+  # (Mixed Content) — exposing /ws under the same hostname makes the
+  # client connect over wss:// transparently.
+  - hostname: {{ subdomain }}-vexa.{{ domain }}
+    path: ^/ws
+    service: http://localhost:18056
+  # Vexa Dashboard (forked from Synapsr/Vexa-Dashboard — see
+  # packages/vexa-dashboard/ for the patches we apply on top).
+  # The container in the standalone vexa compose project at
+  # /opt/alfred/vexa/ publishes 127.0.0.1:18057 → 3000 so cloudflared can
+  # reach it without needing to share the alfred_default network on the
+  # host side. (alfred-learn / ctrl-api still reach the api-gateway over
+  # the shared compose network at http://vexa-api-gateway:8000.)
+  - hostname: {{ subdomain }}-vexa.{{ domain }}
+    service: http://localhost:18057
+{%- endif %}
+  - service: http_status:404

@@ -1,0 +1,165 @@
+---
+title: "Get Extraction History"
+description: "Retrieve distiller extraction run history"
+api: "GET /api/v1/workers/distiller/history"
+---
+
+Returns a chronological history of distiller extraction runs, including both automatic daemon runs and manual API-triggered operations.
+
+<ParamField query="limit" type="number" default={10}>
+  Maximum number of run records to return. Maximum allowed: 100.
+</ParamField>
+
+<RequestExample>
+
+```bash Default Limit
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/distiller/history \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+```bash Custom Limit
+curl -X GET "https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/distiller/history?limit=25" \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "total_runs": 52,
+  "returned": 10,
+  "runs": [
+    {
+      "run_id": "run_20260226_090000",
+      "timestamp": "2026-02-26T09:00:00Z",
+      "type": "auto",
+      "duration_seconds": 142.5,
+      "records_scanned": 423,
+      "candidates_found": 8,
+      "learnings_extracted": 12,
+      "learnings_by_type": {
+        "assumption": 3,
+        "decision": 5,
+        "constraint": 2,
+        "contradiction": 1,
+        "synthesis": 1
+      },
+      "project_filter": null
+    },
+    {
+      "run_id": "run_20260225_183012",
+      "timestamp": "2026-02-25T18:30:12Z",
+      "type": "manual",
+      "duration_seconds": 37.3,
+      "records_scanned": 47,
+      "candidates_found": 3,
+      "learnings_extracted": 6,
+      "learnings_by_type": {
+        "assumption": 2,
+        "decision": 3,
+        "constraint": 1
+      },
+      "project_filter": "acme-redesign",
+      "triggered_by": "api"
+    },
+    {
+      "run_id": "run_20260225_090000",
+      "timestamp": "2026-02-25T09:00:00Z",
+      "type": "auto",
+      "duration_seconds": 98.2,
+      "records_scanned": 421,
+      "candidates_found": 5,
+      "learnings_extracted": 8,
+      "learnings_by_type": {
+        "assumption": 2,
+        "decision": 3,
+        "constraint": 2,
+        "synthesis": 1
+      },
+      "project_filter": null
+    },
+    {
+      "run_id": "run_20260224_090000",
+      "timestamp": "2026-02-24T09:00:00Z",
+      "type": "auto",
+      "duration_seconds": 115.7,
+      "records_scanned": 418,
+      "candidates_found": 6,
+      "learnings_extracted": 9,
+      "learnings_by_type": {
+        "assumption": 3,
+        "decision": 4,
+        "constraint": 1,
+        "contradiction": 1
+      },
+      "project_filter": null
+    }
+  ],
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Response status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="total_runs" type="number">
+  Total number of extraction runs in history
+</ResponseField>
+
+<ResponseField name="returned" type="number">
+  Number of run records returned in this response
+</ResponseField>
+
+<ResponseField name="runs" type="object[]">
+  List of extraction run records, most recent first
+
+  <ResponseField name="run_id" type="string">
+    Unique identifier for the extraction run
+  </ResponseField>
+
+  <ResponseField name="timestamp" type="string">
+    ISO 8601 timestamp when run started
+  </ResponseField>
+
+  <ResponseField name="type" type="string">
+    Run type: `auto` (daemon), `manual` (API), or `cli`
+  </ResponseField>
+
+  <ResponseField name="duration_seconds" type="number">
+    Time taken to complete the extraction
+  </ResponseField>
+
+  <ResponseField name="records_scanned" type="number">
+    Number of vault records scanned
+  </ResponseField>
+
+  <ResponseField name="candidates_found" type="number">
+    Number of extraction candidates identified
+  </ResponseField>
+
+  <ResponseField name="learnings_extracted" type="number">
+    Number of learning records created
+  </ResponseField>
+
+  <ResponseField name="learnings_by_type" type="object">
+    Breakdown of extracted learnings by type
+  </ResponseField>
+
+  <ResponseField name="project_filter" type="string | null">
+    Project filter applied (null if no filter)
+  </ResponseField>
+
+  <ResponseField name="triggered_by" type="string" optional>
+    Trigger source for manual runs: `api`, `cli`, or username
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of history retrieval
+</ResponseField>

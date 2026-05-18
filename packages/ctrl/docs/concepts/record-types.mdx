@@ -1,0 +1,719 @@
+---
+title: "Record Types"
+description: "Detailed reference for all 25 vault record types"
+icon: "shapes"
+---
+
+## Overview
+
+Alfred supports 25 distinct record types organized into two categories: **Entity Types** (20) for operational records and **Learning Types** (5) for extracted knowledge.
+
+## Entity Types
+
+Operational records representing people, projects, tasks, and other tangible entities.
+
+<AccordionGroup>
+
+<Accordion title="person - People and Contacts" icon="user">
+**Directory**: `vault/person/`
+
+**Purpose**: Represents individuals, contacts, team members, or stakeholders.
+
+**Required Fields**:
+- `type`: `person`
+- `role`: Job title or role
+
+**Optional Fields**:
+- `org`: Organization (wikilink to org record)
+- `email`: Contact email address
+- `phone`: Phone number
+- `tags`: Array of tags
+- `related`: Related records
+
+**Example**:
+```yaml
+---
+type: person
+role: Senior Software Engineer
+org: "[[org/Acme Corp]]"
+email: alice@acme.com
+tags: [engineering, backend]
+---
+```
+</Accordion>
+
+<Accordion title="org - Organizations" icon="building">
+**Directory**: `vault/org/`
+
+**Purpose**: Represents companies, teams, departments, or organizational entities.
+
+**Required Fields**:
+- `type`: `org`
+
+**Optional Fields**:
+- `website`: Organization website
+- `industry`: Industry sector
+- `size`: Organization size
+- `location`: Physical location
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: org
+industry: Technology
+website: https://acme.com
+location: "[[location/San Francisco]]"
+---
+```
+</Accordion>
+
+<Accordion title="project - Projects and Initiatives" icon="diagram-project">
+**Directory**: `vault/project/`
+
+**Purpose**: Represents projects, initiatives, or multi-task efforts.
+
+**Required Fields**:
+- `type`: `project`
+- `status`: One of `active`, `paused`, `complete`, `archived`
+
+**Optional Fields**:
+- `owner`: Project owner (wikilink to person)
+- `priority`: Priority level (e.g., high, medium, low)
+- `start_date`: Project start date
+- `end_date`: Project end date
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: project
+status: active
+owner: "[[person/Alice Smith]]"
+priority: high
+start_date: 2026-01-15
+tags: [q1, infrastructure]
+---
+```
+</Accordion>
+
+<Accordion title="task - Tasks and Action Items" icon="check">
+**Directory**: `vault/task/`
+
+**Purpose**: Represents individual tasks, action items, or todos.
+
+**Required Fields**:
+- `type`: `task`
+- `status`: One of `backlog`, `active`, `done`, `dropped`
+
+**Optional Fields**:
+- `owner`: Task assignee (wikilink to person)
+- `priority`: Priority level
+- `project`: Parent project (wikilink)
+- `due_date`: Due date
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: task
+status: active
+owner: "[[person/Alice Smith]]"
+project: "[[project/Q1 Launch]]"
+priority: high
+due_date: 2026-03-01
+---
+```
+</Accordion>
+
+<Accordion title="event - Events and Occurrences" icon="calendar">
+**Directory**: `vault/event/`
+
+**Purpose**: Represents one-time events, conferences, launches, or occurrences.
+
+**Required Fields**:
+- `type`: `event`
+
+**Optional Fields**:
+- `status`: One of `upcoming`, `past`
+- `date`: Event date
+- `location`: Event location (wikilink or string)
+- `attendees`: List of attendees (wikilinks to person)
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: event
+status: upcoming
+date: 2026-04-10
+location: "[[location/Conference Center]]"
+attendees:
+  - "[[person/Alice Smith]]"
+  - "[[person/Bob Jones]]"
+---
+```
+</Accordion>
+
+<Accordion title="meeting - Meetings and Discussions" icon="users">
+**Directory**: `vault/meeting/`
+
+**Purpose**: Represents recurring or one-off meetings and discussions.
+
+**Required Fields**:
+- `type`: `meeting`
+
+**Optional Fields**:
+- `status`: One of `scheduled`, `completed`, `cancelled`
+- `date`: Meeting date/time
+- `attendees`: List of attendees (wikilinks)
+- `project`: Related project (wikilink)
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: meeting
+status: scheduled
+date: 2026-02-28T10:00:00
+attendees:
+  - "[[person/Alice Smith]]"
+  - "[[person/Bob Jones]]"
+project: "[[project/Q1 Launch]]"
+---
+```
+</Accordion>
+
+<Accordion title="note - General Notes" icon="note-sticky">
+**Directory**: `vault/note/`
+
+**Purpose**: General-purpose notes, observations, or freeform content.
+
+**Required Fields**:
+- `type`: `note`
+
+**Optional Fields**:
+- `tags`: Array of tags
+- `related`: Related records (wikilinks)
+- `date`: Note creation date
+
+**Example**:
+```yaml
+---
+type: note
+date: 2026-02-26
+tags: [brainstorm, architecture]
+related:
+  - "[[project/Q1 Launch]]"
+---
+```
+</Accordion>
+
+<Accordion title="resource - External Resources" icon="link">
+**Directory**: `vault/resource/`
+
+**Purpose**: External resources, references, documentation, or links.
+
+**Required Fields**:
+- `type`: `resource`
+
+**Optional Fields**:
+- `url`: Resource URL
+- `author`: Resource author
+- `tags`: Array of tags
+- `related`: Related records
+
+**Example**:
+```yaml
+---
+type: resource
+url: https://example.com/guide
+author: Jane Doe
+tags: [documentation, best-practices]
+---
+```
+</Accordion>
+
+<Accordion title="tool - Tools and Software" icon="wrench">
+**Directory**: `vault/tool/`
+
+**Purpose**: Software tools, platforms, services, or utilities.
+
+**Required Fields**:
+- `type`: `tool`
+
+**Optional Fields**:
+- `url`: Tool website
+- `category`: Tool category
+- `tags`: Array of tags
+- `related`: Related tools or systems
+
+**Example**:
+```yaml
+---
+type: tool
+url: https://github.com/owner/repo
+category: DevOps
+tags: [infrastructure, automation]
+---
+```
+</Accordion>
+
+<Accordion title="concept - Concepts and Ideas" icon="lightbulb">
+**Directory**: `vault/concept/`
+
+**Purpose**: Abstract concepts, ideas, theories, or mental models.
+
+**Required Fields**:
+- `type`: `concept`
+
+**Optional Fields**:
+- `tags`: Array of tags
+- `related`: Related concepts
+
+**Example**:
+```yaml
+---
+type: concept
+tags: [architecture, design-patterns]
+related:
+  - "[[concept/Microservices]]"
+---
+```
+</Accordion>
+
+<Accordion title="location - Locations" icon="location-dot">
+**Directory**: `vault/location/`
+
+**Purpose**: Physical or virtual locations.
+
+**Required Fields**:
+- `type`: `location`
+
+**Optional Fields**:
+- `address`: Physical address
+- `city`: City
+- `country`: Country
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: location
+address: 123 Main St
+city: San Francisco
+country: USA
+---
+```
+</Accordion>
+
+<Accordion title="goal - Goals and Objectives" icon="bullseye">
+**Directory**: `vault/goal/`
+
+**Purpose**: Goals, objectives, or desired outcomes.
+
+**Required Fields**:
+- `type`: `goal`
+
+**Optional Fields**:
+- `status`: One of `active`, `achieved`, `abandoned`
+- `owner`: Goal owner (wikilink)
+- `target_date`: Target completion date
+- `metrics`: Related metrics (wikilinks)
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: goal
+status: active
+owner: "[[person/Alice Smith]]"
+target_date: 2026-06-30
+metrics:
+  - "[[metric/User Growth]]"
+---
+```
+</Accordion>
+
+<Accordion title="metric - Metrics and Measurements" icon="chart-line">
+**Directory**: `vault/metric/`
+
+**Purpose**: Quantitative metrics, KPIs, or measurements.
+
+**Required Fields**:
+- `type`: `metric`
+
+**Optional Fields**:
+- `unit`: Measurement unit
+- `target`: Target value
+- `current`: Current value
+- `owner`: Metric owner (wikilink)
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: metric
+unit: users
+target: 10000
+current: 8500
+owner: "[[person/Alice Smith]]"
+---
+```
+</Accordion>
+
+<Accordion title="process - Processes and Workflows" icon="diagram-next">
+**Directory**: `vault/process/`
+
+**Purpose**: Defined processes, workflows, or procedures.
+
+**Required Fields**:
+- `type`: `process`
+
+**Optional Fields**:
+- `owner`: Process owner (wikilink)
+- `tags`: Array of tags
+- `related`: Related processes or systems
+
+**Example**:
+```yaml
+---
+type: process
+owner: "[[person/Alice Smith]]"
+tags: [deployment, automation]
+related:
+  - "[[system/CI/CD Pipeline]]"
+---
+```
+</Accordion>
+
+<Accordion title="system - Systems and Architectures" icon="server">
+**Directory**: `vault/system/`
+
+**Purpose**: Technical systems, architectures, or infrastructure.
+
+**Required Fields**:
+- `type`: `system`
+
+**Optional Fields**:
+- `owner`: System owner (wikilink)
+- `status`: System status
+- `tags`: Array of tags
+- `related`: Related systems or tools
+
+**Example**:
+```yaml
+---
+type: system
+owner: "[[person/Alice Smith]]"
+status: production
+tags: [infrastructure, critical]
+related:
+  - "[[tool/Kubernetes]]"
+---
+```
+</Accordion>
+
+<Accordion title="artifact - Artifacts and Deliverables" icon="file">
+**Directory**: `vault/artifact/`
+
+**Purpose**: Deliverables, documents, or produced artifacts.
+
+**Required Fields**:
+- `type`: `artifact`
+
+**Optional Fields**:
+- `url`: Artifact location
+- `owner`: Artifact owner (wikilink)
+- `project`: Related project (wikilink)
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: artifact
+url: https://drive.google.com/file/d/abc123
+owner: "[[person/Alice Smith]]"
+project: "[[project/Q1 Launch]]"
+tags: [design, specification]
+---
+```
+</Accordion>
+
+<Accordion title="channel - Communication Channels" icon="hashtag">
+**Directory**: `vault/channel/`
+
+**Purpose**: Communication channels (Slack, Discord, email lists, etc.).
+
+**Required Fields**:
+- `type`: `channel`
+
+**Optional Fields**:
+- `platform`: Platform name (Slack, Discord, etc.)
+- `url`: Channel URL
+- `tags`: Array of tags
+- `related`: Related projects or teams
+
+**Example**:
+```yaml
+---
+type: channel
+platform: Slack
+url: https://workspace.slack.com/archives/C123456
+tags: [engineering, team]
+---
+```
+</Accordion>
+
+<Accordion title="tag - Tags and Categories" icon="tag">
+**Directory**: `vault/tag/`
+
+**Purpose**: Tags, labels, or categories for organizing records.
+
+**Required Fields**:
+- `type`: `tag`
+
+**Optional Fields**:
+- `color`: Display color
+- `parent`: Parent tag (wikilink)
+- `related`: Related tags
+
+**Example**:
+```yaml
+---
+type: tag
+color: blue
+parent: "[[tag/Engineering]]"
+---
+```
+</Accordion>
+
+<Accordion title="view - Saved Views and Queries" icon="eye">
+**Directory**: `vault/view/`
+
+**Purpose**: Saved Dataview queries or custom views.
+
+**Required Fields**:
+- `type`: `view`
+
+**Optional Fields**:
+- `query`: Dataview query string
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: view
+tags: [dashboard, tasks]
+---
+
+```dataview
+TABLE status, owner, priority
+FROM "task"
+WHERE status = "active"
+SORT priority DESC
+```
+```
+</Accordion>
+
+<Accordion title="template - Templates and Scaffolds" icon="file-lines">
+**Directory**: `vault/template/`
+
+**Purpose**: Templates for creating new records.
+
+**Required Fields**:
+- `type`: `template`
+
+**Optional Fields**:
+- `for_type`: Target record type
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: template
+for_type: project
+tags: [scaffold]
+---
+
+# {{title}}
+
+**Status**: {{status}}
+**Owner**: {{owner}}
+
+## Overview
+
+## Goals
+
+## Timeline
+```
+</Accordion>
+
+</AccordionGroup>
+
+## Learning Types
+
+Meta-records that capture latent knowledge extracted from operational records by the Distiller tool.
+
+<AccordionGroup>
+
+<Accordion title="assumption - Implicit Assumptions" icon="thought-bubble">
+**Directory**: `vault/_learn/assumption/`
+
+**Purpose**: Captures implicit assumptions found in operational records.
+
+**Required Fields**:
+- `type`: `assumption`
+
+**Optional Fields**:
+- `source`: Source records (wikilinks)
+- `confidence`: Confidence level
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: assumption
+source:
+  - "[[project/Q1 Launch]]"
+  - "[[meeting/Planning Session]]"
+confidence: medium
+---
+
+# Users prefer mobile-first design
+
+Based on project discussions, we're assuming users primarily access the platform via mobile devices, though this hasn't been validated with data.
+```
+</Accordion>
+
+<Accordion title="decision - Decisions and Rationale" icon="scale-balanced">
+**Directory**: `vault/_learn/decision/`
+
+**Purpose**: Captures decisions and their rationale.
+
+**Required Fields**:
+- `type`: `decision`
+
+**Optional Fields**:
+- `source`: Source records (wikilinks)
+- `date`: Decision date
+- `owner`: Decision maker (wikilink)
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: decision
+source:
+  - "[[meeting/Architecture Review]]"
+date: 2026-02-15
+owner: "[[person/Alice Smith]]"
+---
+
+# Use PostgreSQL for primary database
+
+We've decided to use PostgreSQL instead of MySQL due to better support for JSONB and full-text search, which are critical for our use case.
+```
+</Accordion>
+
+<Accordion title="constraint - Constraints and Limitations" icon="triangle-exclamation">
+**Directory**: `vault/_learn/constraint/`
+
+**Purpose**: Captures constraints, limitations, or boundaries.
+
+**Required Fields**:
+- `type`: `constraint`
+
+**Optional Fields**:
+- `source`: Source records (wikilinks)
+- `category`: Constraint category (technical, business, regulatory, etc.)
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: constraint
+source:
+  - "[[project/Q1 Launch]]"
+category: technical
+---
+
+# Must support legacy API until Q3
+
+We cannot deprecate the v1 API until Q3 2026 due to existing client contracts, which constrains our ability to refactor the backend.
+```
+</Accordion>
+
+<Accordion title="contradiction - Contradictions and Conflicts" icon="circle-exclamation">
+**Directory**: `vault/_learn/contradiction/`
+
+**Purpose**: Captures contradictions or conflicts found across records.
+
+**Required Fields**:
+- `type`: `contradiction`
+
+**Optional Fields**:
+- `source`: Source records (wikilinks)
+- `severity`: Severity level
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: contradiction
+source:
+  - "[[goal/Launch by Q2]]"
+  - "[[task/Complete Security Audit]]"
+severity: high
+---
+
+# Timeline conflict between launch goal and security requirements
+
+The Q2 launch goal conflicts with the security audit task, which requires 6 weeks and hasn't started yet. This makes the Q2 timeline infeasible.
+```
+</Accordion>
+
+<Accordion title="synthesis - Syntheses and Connections" icon="diagram-venn">
+**Directory**: `vault/_learn/synthesis/`
+
+**Purpose**: Captures synthesized insights connecting multiple records.
+
+**Required Fields**:
+- `type`: `synthesis`
+
+**Optional Fields**:
+- `source`: Source records (wikilinks)
+- `tags`: Array of tags
+
+**Example**:
+```yaml
+---
+type: synthesis
+source:
+  - "[[project/Q1 Launch]]"
+  - "[[project/Platform Redesign]]"
+  - "[[goal/Improve User Retention]]"
+---
+
+# Cross-project pattern: user onboarding is critical
+
+Across Q1 Launch and Platform Redesign, both projects identified poor onboarding as a blocker to the user retention goal. This suggests a shared opportunity for a dedicated onboarding improvement initiative.
+```
+</Accordion>
+
+</AccordionGroup>
+
+<Note>
+Learning types are automatically extracted by the Distiller tool. You typically don't create them manually via the API.
+</Note>
+
+## Type Naming Conventions
+
+- Type identifiers use lowercase, singular form (e.g., `person`, not `Person` or `people`)
+- Directory names match type names (e.g., `person` → `vault/person/`)
+- Learning types are prefixed with `_learn/` directory to distinguish them
+- Record filenames use title case with spaces (e.g., `Alice Smith.md`)
+
+<Tip>
+Use the `GET /api/v1/vault/schema` endpoint to retrieve the complete, up-to-date schema programmatically. The schema is the source of truth for all validation rules.
+</Tip>

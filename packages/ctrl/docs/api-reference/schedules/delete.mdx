@@ -1,0 +1,29 @@
+---
+title: "Delete Schedule"
+description: "Permanently delete a workflow schedule"
+api: "DELETE https://alfred-acme.tailnet.ts.net:3100/api/v1/schedules/{schId}"
+---
+
+Permanently deletes a workflow schedule. This does not affect workflows that have already been started by the schedule.
+
+<ParamField path="schId" type="string" required>
+  The schedule ID to delete
+</ParamField>
+
+<RequestExample>
+```bash cURL
+curl -X DELETE \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/schedules/surveyor-daily
+```
+</RequestExample>
+
+<ResponseExample>
+```json 200 OK
+{
+  "success": true,
+  "scheduleId": "surveyor-daily",
+  "deleted": true
+}
+```
+</ResponseExample>

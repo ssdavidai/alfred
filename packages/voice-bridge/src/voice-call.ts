@@ -1,0 +1,369 @@
+// VoiceCall — one bridge session for one phone call.
+//
+// Lifecycle:
+//   1. ctor: stash WS + tenantId
+//   2. start(): wire Twilio WS listeners; return immediately.
+//   3. onTwilioMessage 'start': verify sig from customParameters; if valid,
+//      fetch tenant context + open OpenAI Realtime. If invalid, dispose
+//      immediately — no tenant lookup, no OpenAI minutes burned.
+//   4. bidirectional bridge until either side closes.
+//   5. on Twilio `stop` or hard cap: dispose.
+//
+// Sig lives in customParameters (not query string) because Twilio <Stream>
+// silently strips `?k=v` from stream URLs — see ../../saas/app/src/server/
+// twilio/webhooks.ts and ./server.ts for the matching emission + verify.
+
+import type { WebSocket as WsSocket } from "ws";
+import {
+  parseTwilioMessage,
+  sendTwilioMark,
+  sendTwilioMedia,
+} from "./twilio-stream.js";
+import { OpenAIRealtimeClient } from "./openai-realtime.js";
+import {
+  fetchTenantContext,
+  fetchVoiceContext,
+  postCallTranscript,
+  type TenantContext,
+  type TranscriptTurn,
+  type VoiceContextBundle,
+} from "./tenant.js";
+import { buildInstructions } from "./instructions.js";
+import { config } from "./config.js";
+import { verifySig, bumpMetric } from "./server.js";
+import {
+  ALL_TOOLS,
+  dispatchComposioExecute,
+  dispatchSelf,
+  serializeToolResult,
+} from "./tools.js";
+
+export interface VoiceCallOpts {
+  tenantId: string;
+  initiator: "user" | "alfred";
+  intent?: string; // present when initiator === "alfred"
+}
+
+export class VoiceCall {
+  private twilioWs: WsSocket;
+  private opts: VoiceCallOpts;
+  private callId: string;
+  private streamSid: string | null = null;
+  private callerNumber: string | null = null;
+  private tenantCtx: TenantContext | null = null;
+  private voiceCtx: VoiceContextBundle | null = null;
+  private realtime: OpenAIRealtimeClient | null = null;
+  private hardCapTimer: NodeJS.Timeout | null = null;
+  private idleTimer: NodeJS.Timeout | null = null;
+  private _startDeadline: NodeJS.Timeout | null = null;
+  private disposed = false;
+  private startedAt: string;
+  private transcript: TranscriptTurn[] = [];
+  private currentAssistantText = "";
+
+  constructor(twilioWs: WsSocket, opts: VoiceCallOpts) {
+    this.twilioWs = twilioWs;
+    this.opts = opts;
+    this.callId = `${opts.tenantId.slice(0, 8)}-${Date.now()}`;
+    this.startedAt = new Date().toISOString();
+  }
+
+  async start(): Promise<void> {
+    // Wire up Twilio listeners and return. We intentionally do NOT fetch the
+    // tenant or open OpenAI Realtime yet — sig verification happens on the
+    // first `start` Twilio event (which carries customParameters.sig), and
+    // we don't want to burn tenant-lookup or OpenAI connect cost on a call
+    // that fails the sig check.
+    this.twilioWs.on("message", (data: Buffer) => this.onTwilioMessage(data));
+    this.twilioWs.on("close", () => this.dispose("twilio-closed"));
+    this.twilioWs.on("error", (err) => {
+      console.error(`[call ${this.callId}] twilio WS error`, err);
+      this.dispose("twilio-error");
+    });
+
+    // Safety net: if Twilio never sends `start`, dispose after 10s so we don't
+    // hold an idle WS indefinitely.
+    const startDeadline = setTimeout(() => {
+      if (!this.streamSid && !this.disposed) {
+        console.log(
+          `[call ${this.callId}] never received Twilio start event; disposing`,
+        );
+        this.dispose("no-twilio-start");
+      }
+    }, 10_000);
+    // Clear the deadline once we're running.
+    this._startDeadline = startDeadline;
+  }
+
+  // Runs after sig verification on the Twilio `start` event.
+  private async initialise(): Promise<void> {
+    try {
+      this.tenantCtx = await fetchTenantContext(this.opts.tenantId);
+    } catch (err) {
+      console.error(
+        `[call ${this.callId}] tenant lookup failed for ${this.opts.tenantId}`,
+        err,
+      );
+      this.dispose("tenant-lookup-failed");
+      return;
+    }
+
+    // Best-effort cross-channel context fetch (≤3.5s timeout). Missing context
+    // is recoverable — the bridge falls back to baseline persona.
+    this.voiceCtx = await fetchVoiceContext(this.tenantCtx);
+
+    // Open OpenAI Realtime and wire its events.
+    this.realtime = new OpenAIRealtimeClient(this.callId);
+    this.realtime.on((event) => this.onRealtimeEvent(event));
+    try {
+      await this.realtime.connect({
+        instructions: buildInstructions({
+          tenantPhoneNumber: this.tenantCtx.phoneNumber,
+          callerNumber: this.callerNumber,
+          initiator: this.opts.initiator,
+          intent: this.opts.intent,
+          voiceContext: this.voiceCtx,
+        }),
+        tools: ALL_TOOLS,
+      });
+    } catch (err) {
+      console.error(`[call ${this.callId}] OpenAI Realtime connect failed`, err);
+      this.dispose("openai-connect-failed");
+      return;
+    }
+
+    // Hard cap to prevent runaway-cost calls.
+    this.hardCapTimer = setTimeout(() => {
+      console.log(
+        `[call ${this.callId}] hard cap (${config.maxCallSeconds}s) reached`,
+      );
+      this.dispose("hard-cap");
+    }, config.maxCallSeconds * 1_000);
+
+    this.resetIdleTimer();
+
+    // Trigger Alfred to speak first so we don't have dead air after pickup.
+    // Semantic VAD would otherwise wait for user audio.
+    this.realtime?.triggerGreeting();
+
+    console.log(
+      `[call ${this.callId}] bridge started for tenant ${this.opts.tenantId} (${this.opts.initiator})`,
+    );
+  }
+
+  private onTwilioMessage(data: Buffer): void {
+    if (this.disposed) return;
+    const event = parseTwilioMessage(data);
+    if (!event) return;
+
+    switch (event.event) {
+      case "connected":
+        // No-op; Twilio acks the WS.
+        break;
+      case "start": {
+        this.streamSid = event.streamSid;
+        if (this._startDeadline) {
+          clearTimeout(this._startDeadline);
+          this._startDeadline = null;
+        }
+        // Verify sig from customParameters BEFORE any billable work.
+        // SaaS emits <Parameter name="sig" value="<hmac>"/> in the <Stream>;
+        // it arrives as event.start.customParameters.sig.
+        const params = (event as any).start?.customParameters ?? {};
+        const sig: string | undefined = params.sig;
+        if (!verifySig(this.opts.tenantId, sig)) {
+          bumpMetric("callsRejectedBadSig");
+          console.warn(
+            `[call ${this.callId}] sig verification failed — disposing`,
+          );
+          this.dispose("bad-sig");
+          return;
+        }
+        // Capture caller number if SaaS included it as a parameter (optional).
+        if (typeof params.from === "string") {
+          this.callerNumber = params.from;
+        }
+        // Sig is valid → fetch tenant + connect OpenAI. Fire-and-forget; the
+        // `start` handler itself returns synchronously.
+        this.initialise().catch((err) => {
+          console.error(`[call ${this.callId}] initialise failed`, err);
+          this.dispose("initialise-failed");
+        });
+        break;
+      }
+      case "media":
+        this.resetIdleTimer();
+        // Forward μ-law bytes verbatim. Barge-in is handled by the OpenAI
+        // server-side VAD (`interrupt_response: true`), NOT by cancelling on
+        // every media packet — the preview API required client-side cancellation
+        // which in GA causes `status: "cancelled"` responses with zero tokens.
+        this.realtime?.appendAudio(event.media.payload);
+        break;
+      case "mark":
+        // Twilio acked one of our marks. Could use this for finer playback
+        // tracking; not needed in Phase 2.
+        break;
+      case "stop":
+        this.dispose("twilio-stop");
+        break;
+    }
+  }
+
+  private onRealtimeEvent(event: any): void {
+    if (this.disposed || !this.streamSid) return;
+
+    switch (event.type) {
+      case "response.created":
+        this.currentAssistantText = "";
+        break;
+      case "response.output_audio.delta":
+        // GA event name (was `response.audio.delta` in the preview API).
+        if (event.delta) {
+          sendTwilioMedia(this.twilioWs, this.streamSid, event.delta);
+        }
+        break;
+      case "response.output_audio_transcript.delta":
+        // Assistant's TTS transcript streamed as we speak — accumulate.
+        if (typeof event.delta === "string") {
+          this.currentAssistantText += event.delta;
+        }
+        break;
+      case "response.output_audio.done":
+        // Mark playback so we know when Twilio finishes the buffer.
+        sendTwilioMark(this.twilioWs, this.streamSid, `seg-${Date.now()}`);
+        break;
+      case "response.done":
+        if (this.currentAssistantText.trim()) {
+          this.transcript.push({
+            role: "assistant",
+            text: this.currentAssistantText.trim(),
+            ts: new Date().toISOString(),
+          });
+        }
+        this.currentAssistantText = "";
+        break;
+      case "conversation.item.input_audio_transcription.completed":
+        // User speech finished + transcribed.
+        if (typeof event.transcript === "string" && event.transcript.trim()) {
+          this.transcript.push({
+            role: "user",
+            text: event.transcript.trim(),
+            ts: new Date().toISOString(),
+          });
+        }
+        break;
+      case "response.function_call_arguments.done":
+        // Tool dispatch. The model has finished emitting JSON-encoded args
+        // for a function call; parse, run, return the result, ask for the
+        // next response cycle.
+        this.handleToolCall(event).catch((err) => {
+          console.error(`[call ${this.callId}] tool dispatch error`, err);
+        });
+        break;
+      case "error":
+        // logged inside the client; nothing extra here
+        break;
+    }
+  }
+
+  private async handleToolCall(event: any): Promise<void> {
+    if (!this.tenantCtx || !this.realtime) return;
+    // Metrics bump — best-effort import to avoid circular type deps at compile
+    // time in case server.ts is not yet built when this is loaded.
+    try {
+      const { bumpMetric } = await import("./server.js");
+      bumpMetric("toolDispatches");
+    } catch {
+      /* ignore */
+    }
+    const { name, call_id: callId, arguments: argsRaw } = event;
+    let args: Record<string, unknown> = {};
+    try {
+      args = argsRaw ? JSON.parse(argsRaw) : {};
+    } catch (err) {
+      const errStr = (err as Error)?.message ?? String(err);
+      this.realtime.submitToolResult(
+        callId,
+        serializeToolResult({
+          ok: false,
+          error: `Failed to parse tool arguments: ${errStr}`,
+        }),
+      );
+      return;
+    }
+
+    let result;
+    if (name === "self") {
+      result = await dispatchSelf(this.tenantCtx, args);
+    } else if (name === "composio_execute") {
+      result = await dispatchComposioExecute(this.tenantCtx, args);
+    } else {
+      result = { ok: false, error: `Unknown tool: ${name}` };
+    }
+    this.realtime.submitToolResult(callId, serializeToolResult(result));
+  }
+
+  private resetIdleTimer(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      console.log(`[call ${this.callId}] idle hangup`);
+      this.dispose("idle");
+    }, config.idleHangupSeconds * 1_000);
+  }
+
+  dispose(reason: string): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    if (this.hardCapTimer) clearTimeout(this.hardCapTimer);
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    if (this._startDeadline) clearTimeout(this._startDeadline);
+    bumpMetric("callsDisposed");
+
+    // Fire-and-forget transcript write-back BEFORE closing the OpenAI WS,
+    // so we still have the captured text in scope.
+    this.flushTranscript(reason);
+
+    try {
+      this.realtime?.close();
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (this.twilioWs.readyState === this.twilioWs.OPEN) {
+        this.twilioWs.close();
+      }
+    } catch {
+      /* ignore */
+    }
+    console.log(`[call ${this.callId}] disposed (${reason})`);
+  }
+
+  private flushTranscript(reason: string): void {
+    if (!this.tenantCtx) return;
+    if (this.transcript.length === 0) return;
+    const summary = this.buildSummary(reason);
+    void postCallTranscript(this.tenantCtx, {
+      callId: this.callId,
+      from: this.callerNumber ?? "",
+      to: this.tenantCtx.phoneNumber ?? "",
+      direction: this.opts.initiator === "alfred" ? "outbound" : "inbound",
+      started_at: this.startedAt,
+      ended_at: new Date().toISOString(),
+      transcript: this.transcript,
+      summary,
+    });
+  }
+
+  private buildSummary(reason: string): string {
+    const userTurns = this.transcript.filter((t) => t.role === "user").length;
+    const assistantTurns = this.transcript.filter(
+      (t) => t.role === "assistant",
+    ).length;
+    const lastUser = [...this.transcript]
+      .reverse()
+      .find((t) => t.role === "user");
+    const head = lastUser?.text?.slice(0, 100);
+    const base = `Phone call, ${userTurns} user turn(s) / ${assistantTurns} reply turn(s)`;
+    return head ? `${base}. Last user: ${head}` : `${base} (${reason})`;
+  }
+}

@@ -1,0 +1,110 @@
+---
+title: "Layer 6 — Interface"
+description: "Every way you interact with Alfred: API, devices, and access channels."
+icon: "display"
+---
+
+<Note>
+This is **Layer 6** of Alfred's [six-layer architecture](/architecture). The Interface layer is where you and Alfred meet.
+</Note>
+
+## Every way you interact with Alfred
+
+Alfred exposes multiple interfaces, but they all flow through the same secure path: your Tailscale mesh network, authenticated with your API key, encrypted end-to-end.
+
+## REST API
+
+The primary interface. A complete REST API with 80+ endpoints across 8 domains:
+
+| Domain | Endpoints | What you can do |
+|--------|-----------|----------------|
+| **Vault** | 12 | Create, read, edit, move, delete records. Search by glob or grep. Upload files to inbox. |
+| **Workers** | 15 | Start, stop, restart the Curator, Janitor, and Distiller. Trigger scans and processing. |
+| **Workflows** | 7 | List, start, terminate, signal, and cancel Temporal workflows. |
+| **Schedules** | 7 | Create, delete, pause, unpause, and trigger cron schedules. |
+| **Devices** | 7 | Approve, reject, rotate, and revoke OpenClaw device access. |
+| **OpenClaw** | 13 | Gateway health, sessions, agents, skills, plugins, security. |
+| **Logs** | 1 | Real-time SSE log streaming from any service. |
+| **Admin** | 18 | Containers, environment config, Tailscale, backups, system health. |
+
+All endpoints use the `/api/v1/` prefix and require Bearer token authentication.
+
+```bash
+curl -H "Authorization: Bearer $AAS_API_KEY" \
+  https://<instance>.ts.net/api/v1/vault/context
+```
+
+## OpenClaw devices
+
+Mobile, desktop, and web clients connect to your Alfred instance through OpenClaw's device pairing system:
+
+<Steps>
+  <Step title="Device initiates pairing">
+    Client sends a pairing request with device info (name, platform, model)
+  </Step>
+  <Step title="Admin reviews the request">
+    Pending requests appear in the device list via the API
+  </Step>
+  <Step title="Admin approves or rejects">
+    Approval grants a unique access token; rejection discards the request
+  </Step>
+  <Step title="Device connects">
+    Client uses the token for all subsequent interactions with Alfred
+  </Step>
+</Steps>
+
+Tokens can be rotated periodically (recommended every 90 days) or revoked immediately if a device is lost or compromised.
+
+## Tailscale Serve — HTTPS endpoints
+
+Tailscale Serve provides HTTPS access to localhost-bound services with automatically provisioned TLS certificates:
+
+| URL | Service |
+|-----|---------|
+| `https://<instance>.ts.net` | Tenant API (port 3100) |
+| `https://<instance>.ts.net:8443` | Temporal UI (port 8233) |
+| `https://<instance>.ts.net:8000` | OpenClaw Gateway |
+
+Certificates rotate automatically. No manual TLS configuration required. Access is restricted to members of your Tailscale network.
+
+## SSH access
+
+Direct SSH access to the instance is available for debugging and administration:
+
+- **Ed25519 keys only** — generated per-instance during provisioning
+- **Password authentication disabled** — key-based only
+- **Root login disabled** — use the `deploy` user
+- **fail2ban enabled** — brute-force protection
+
+## Log streaming
+
+Real-time log access via Server-Sent Events (SSE):
+
+```bash
+# Stream all logs
+curl -N https://<instance>.ts.net/api/v1/logs/stream \
+  -H "Authorization: Bearer $AAS_API_KEY"
+
+# Filter by service
+curl -N https://<instance>.ts.net/api/v1/logs/stream?service=curator \
+  -H "Authorization: Bearer $AAS_API_KEY"
+```
+
+Available services: `curator`, `janitor`, `distiller`, `openclaw`, `aas`, `temporal`.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running in 5 minutes
+  </Card>
+  <Card title="Device Pairing" icon="mobile" href="/guides/device-pairing">
+    Manage OpenClaw device access
+  </Card>
+  <Card title="API Reference" icon="code" href="/api-reference/introduction">
+    Full endpoint documentation
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/guides/monitoring">
+    Health checks and log streaming
+  </Card>
+</CardGroup>

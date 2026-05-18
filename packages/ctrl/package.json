@@ -1,0 +1,36 @@
+{
+  "name": "alfred-ctrl",
+  "version": "0.1.0",
+  "description": "Mission Control for Alfred Fleet Management",
+  "type": "module",
+  "main": "dist/index.mjs",
+  "bin": {
+    "aas": "dist/index.mjs"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "start": "node dist/index.mjs",
+    "test": "node --experimental-test-module-mocks --import tsx/esm --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "ink": "^5.1.0",
+    "ink-spinner": "^5.0.0",
+    "js-yaml": "^4.1.1",
+    "nunjucks": "^3.2.4",
+    "react": "^18.3.1",
+    "ssh2": "^1.16.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/nunjucks": "^3.2.6",
+    "@types/react": "^18.3.12",
+    "@types/ssh2": "^1.15.4",
+    "@types/ws": "^8.5.13",
+    "esbuild": "^0.24.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

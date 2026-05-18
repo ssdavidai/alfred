@@ -1,0 +1,85 @@
+---
+title: "Get Worker Status"
+description: "Retrieve the overall status of all Alfred daemon workers"
+api: "GET /api/v1/workers/status"
+---
+
+Returns the current operational status of all Alfred workers (curator, janitor, distiller, surveyor). This endpoint provides raw status text from the Alfred daemon manager.
+
+<RequestExample>
+
+```bash cURL
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/status \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "workers": {
+    "curator": {
+      "running": true,
+      "pid": 1234,
+      "uptime": "2h 15m",
+      "restarts": 0
+    },
+    "janitor": {
+      "running": true,
+      "pid": 1235,
+      "uptime": "2h 15m",
+      "restarts": 1
+    },
+    "distiller": {
+      "running": false,
+      "pid": null,
+      "uptime": null,
+      "restarts": 0
+    },
+    "surveyor": {
+      "running": true,
+      "pid": 1237,
+      "uptime": "2h 15m",
+      "restarts": 0
+    }
+  },
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Overall system status: `ok`, `degraded`, or `down`
+</ResponseField>
+
+<ResponseField name="workers" type="object">
+  Per-worker status information
+
+  <ResponseField name="curator" type="object">
+    Curator daemon status
+
+    <ResponseField name="running" type="boolean">
+      Whether the worker is currently running
+    </ResponseField>
+
+    <ResponseField name="pid" type="number | null">
+      Process ID if running, null otherwise
+    </ResponseField>
+
+    <ResponseField name="uptime" type="string | null">
+      Human-readable uptime duration
+    </ResponseField>
+
+    <ResponseField name="restarts" type="number">
+      Number of automatic restarts since last manual start
+    </ResponseField>
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of status check
+</ResponseField>

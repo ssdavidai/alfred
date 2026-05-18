@@ -1,0 +1,109 @@
+---
+title: "Ignore File"
+description: "Add a file to the janitor ignore list"
+api: "POST /api/v1/workers/janitor/ignore"
+---
+
+Adds a file to the janitor's ignore list, preventing it from being scanned or fixed in future sweeps. Useful for archived files, intentionally broken links, or legacy records.
+
+<ParamField body="file" type="string" required>
+  Vault-relative path to the file to ignore. Must be an existing vault file.
+
+  Example: `"projects/archive/legacy-project.md"`
+</ParamField>
+
+<ParamField body="reason" type="string" optional>
+  Human-readable reason for ignoring this file. Recommended for documentation.
+
+  Example: `"Archived project with intentional broken links"`
+</ParamField>
+
+<RequestExample>
+
+```bash With Reason
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/janitor/ignore \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file": "projects/archive/legacy-integration.md",
+    "reason": "Archived project, broken links are intentional"
+  }'
+```
+
+```bash Without Reason
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/janitor/ignore \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "file": "notes/scratch-pad.md"
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "message": "File added to ignore list",
+  "file": "projects/archive/legacy-integration.md",
+  "reason": "Archived project, broken links are intentional",
+  "added_at": "2026-02-26T10:30:00Z",
+  "total_ignored": 3
+}
+```
+
+```json Error - File Not Found
+{
+  "status": "error",
+  "message": "File not found in vault",
+  "file": "projects/nonexistent.md",
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+```json Error - Already Ignored
+{
+  "status": "error",
+  "message": "File is already in ignore list",
+  "file": "projects/archive/legacy-integration.md",
+  "existing_reason": "Previous reason",
+  "added_at": "2026-02-20T14:30:00Z",
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Operation status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message
+</ResponseField>
+
+<ResponseField name="file" type="string">
+  Vault-relative path to the ignored file
+</ResponseField>
+
+<ResponseField name="reason" type="string | null">
+  Reason for ignoring (null if not provided)
+</ResponseField>
+
+<ResponseField name="added_at" type="string">
+  ISO 8601 timestamp when file was added to ignore list
+</ResponseField>
+
+<ResponseField name="total_ignored" type="number">
+  Total number of files currently in the ignore list
+</ResponseField>
+
+<ResponseField name="existing_reason" type="string" optional>
+  Previous reason if file was already ignored (error response only)
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of operation
+</ResponseField>

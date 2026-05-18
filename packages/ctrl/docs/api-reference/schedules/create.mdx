@@ -1,0 +1,79 @@
+---
+title: "Create Schedule"
+description: "Create a new workflow schedule"
+api: "POST https://alfred-acme.tailnet.ts.net:3100/api/v1/schedules"
+---
+
+Creates a new workflow schedule with the specified configuration. The schedule will begin executing immediately unless created in a paused state.
+
+<ParamField body="schedule_id" type="string" required>
+  Unique identifier for this schedule. Must not conflict with existing schedules.
+</ParamField>
+
+<ParamField body="workflow_type" type="string" required>
+  The workflow type to execute on each schedule trigger.
+
+  Common types: `CuratorWorkflow`, `JanitorWorkflow`, `DistillerWorkflow`, `SurveyorWorkflow`
+</ParamField>
+
+<ParamField body="task_queue" type="string" required>
+  The task queue where scheduled workflows will be executed.
+
+  Common queues: `alfred-curator`, `alfred-janitor`, `alfred-distiller`, `alfred-surveyor`
+</ParamField>
+
+<ParamField body="cron" type="string" required>
+  Cron expression defining the schedule timing. Uses standard 5-field format: `minute hour day month weekday`
+
+  Examples:
+  - `0 * * * *` - Every hour at minute 0
+  - `0 2 * * *` - Daily at 2:00 AM
+  - `0 3 * * 0` - Weekly on Sunday at 3:00 AM
+  - `*/15 * * * *` - Every 15 minutes
+</ParamField>
+
+<ParamField body="input" type="any" optional>
+  Input data passed to each scheduled workflow execution. Structure depends on workflow type.
+</ParamField>
+
+<ParamField body="overlap_policy" type="string" optional>
+  Policy for handling overlapping executions when a new run is scheduled while a previous run is still active.
+
+  Values:
+  - `Skip` - Skip the new run (default)
+  - `BufferOne` - Buffer one run, start when current completes
+  - `BufferAll` - Buffer all runs
+  - `CancelOther` - Cancel the running execution and start the new one
+  - `TerminateOther` - Terminate the running execution and start the new one
+  - `AllowAll` - Allow concurrent executions
+</ParamField>
+
+<RequestExample>
+```bash cURL
+curl -X POST \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "schedule_id": "surveyor-daily",
+    "workflow_type": "SurveyorWorkflow",
+    "task_queue": "alfred-surveyor",
+    "cron": "0 4 * * *",
+    "input": {
+      "vault_path": "/app/data/vault",
+      "full_reindex": false
+    },
+    "overlap_policy": "Skip"
+  }' \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/schedules
+```
+</RequestExample>
+
+<ResponseExample>
+```json 201 Created
+{
+  "scheduleId": "surveyor-daily",
+  "created": true,
+  "nextRunTime": "2026-02-27T04:00:00.000Z"
+}
+```
+</ResponseExample>

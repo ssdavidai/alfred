@@ -1,0 +1,565 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer utilities {
+  /* Chrome, Safari and Opera */
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .no-scrollbar {
+    -ms-overflow-style: none; /* IE and Edge */
+    scrollbar-width: none; /* Firefox */
+  }
+
+  .chat-height {
+    @apply h-[calc(100vh_-_8.125rem)] lg:h-[calc(100vh_-_5.625rem)];
+  }
+  .inbox-height {
+    @apply h-[calc(100vh_-_8.125rem)] lg:h-[calc(100vh_-_5.625rem)];
+  }
+}
+
+/* third-party libraries CSS */
+
+.tableCheckbox:checked ~ div span {
+  @apply opacity-100;
+}
+.tableCheckbox:checked ~ div {
+  @apply bg-primary border-primary;
+}
+
+.apexcharts-legend-text {
+  @apply !text-muted-foreground;
+}
+.apexcharts-text {
+  @apply !fill-muted-foreground;
+}
+.apexcharts-xcrosshairs {
+  @apply !fill-border;
+}
+.apexcharts-gridline {
+  @apply !stroke-border;
+}
+.apexcharts-series.apexcharts-pie-series path {
+  @apply !stroke-transparent;
+}
+.apexcharts-legend-series {
+  @apply !inline-flex gap-1.5;
+}
+.apexcharts-tooltip.apexcharts-theme-light {
+  @apply !bg-card !border-border;
+}
+.apexcharts-tooltip.apexcharts-theme-light .apexcharts-tooltip-title {
+  @apply !bg-muted !border-border;
+}
+.apexcharts-xaxistooltip,
+.apexcharts-yaxistooltip {
+  @apply !bg-muted !border-muted !text-muted-foreground;
+}
+.apexcharts-xaxistooltip-bottom:after {
+  @apply !border-b-muted;
+}
+.apexcharts-xaxistooltip-bottom:before {
+  @apply !border-b-muted;
+}
+
+/*
+ * Alfred Black — design tokens.
+ * Wool black, ivory paper, ink, a single brass accent. No second accent. Ever.
+ * Type: Playfair Display (Didone-adjacent), EB Garamond (body), JetBrains Mono (marginalia).
+ */
+
+:root {
+  --radius: 0px;
+
+  /* Material */
+  --paper: oklch(0.953 0.018 80);          /* #F4EFE6 ivory */
+  --wool: oklch(0.16 0.005 60);            /* #0B0B0B wool black */
+  --ink: oklch(0.22 0.004 60);             /* #1A1A1A */
+  --brass: oklch(0.62 0.09 75);            /* #A8843A — used once per screen */
+  --rule: oklch(0.22 0.004 60 / 0.55);
+  --marginalia: oklch(0.40 0.005 60);
+
+  /* Semantic — light/paper mode is default */
+  --background: var(--paper);
+  --foreground: var(--ink);
+  --card: var(--paper);
+  --card-foreground: var(--ink);
+  --card-accent: var(--paper);
+  --card-accent-foreground: var(--ink);
+  --card-subtle: var(--paper);
+  --card-subtle-foreground: var(--ink);
+  --popover: var(--paper);
+  --popover-foreground: var(--ink);
+  --primary: var(--ink);
+  --primary-foreground: var(--paper);
+  --secondary: oklch(0.92 0.014 80);
+  --secondary-foreground: var(--ink);
+  --secondary-muted: oklch(0.85 0.012 80);
+  --secondary-muted-foreground: var(--ink);
+  --muted: oklch(0.92 0.014 80);
+  --muted-foreground: var(--marginalia);
+  --accent: var(--brass);
+  --accent-foreground: var(--paper);
+  --destructive: oklch(0.42 0.12 30);
+  --destructive-foreground: var(--paper);
+  --success: oklch(0.55 0.13 150);
+  --success-foreground: var(--paper);
+  --warning: oklch(0.72 0.14 75);
+  --warning-foreground: var(--paper);
+  --border: oklch(0.22 0.004 60 / 0.18);
+  --input: oklch(0.22 0.004 60 / 0.25);
+  --ring: var(--brass);
+  --sidebar: var(--paper);
+  --sidebar-foreground: var(--ink);
+  --sidebar-primary: var(--ink);
+  --sidebar-primary-foreground: var(--paper);
+  --sidebar-accent: oklch(0.92 0.014 80);
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: oklch(0.22 0.004 60 / 0.18);
+  --sidebar-ring: var(--brass);
+  --chart-1: var(--ink);
+  --chart-2: var(--marginalia);
+  --chart-3: var(--brass);
+  --chart-4: oklch(0.5 0.005 60);
+  --chart-5: oklch(0.7 0.005 60);
+}
+
+.dark {
+  /* Re-tune material so ink/paper invert but brass stays the same */
+  --paper: oklch(0.16 0.005 60);          /* wool becomes the page */
+  --ink: oklch(0.94 0.012 80);            /* ivory becomes the type */
+  /* --wool stays the same dark wool — .wool surfaces are always dark by design */
+  --rule: oklch(0.94 0.012 80 / 0.22);
+  --marginalia: oklch(0.70 0.008 80);
+
+  --background: var(--paper);
+  --foreground: var(--ink);
+  --card: oklch(0.20 0.005 60);
+  --card-foreground: var(--ink);
+  --card-accent: oklch(0.22 0.005 60);
+  --card-accent-foreground: var(--ink);
+  --card-subtle: oklch(0.18 0.005 60);
+  --card-subtle-foreground: var(--ink);
+  --popover: oklch(0.20 0.005 60);
+  --popover-foreground: var(--ink);
+  --primary: var(--ink);
+  --primary-foreground: var(--paper);
+  --secondary: oklch(0.22 0.005 60);
+  --secondary-foreground: var(--ink);
+  --secondary-muted: oklch(0.28 0.005 60);
+  --secondary-muted-foreground: var(--ink);
+  --muted: oklch(0.22 0.005 60);
+  --muted-foreground: var(--marginalia);
+  --border: oklch(0.94 0.012 80 / 0.18);
+  --input: oklch(0.94 0.012 80 / 0.25);
+  --sidebar: var(--paper);
+  --sidebar-foreground: var(--ink);
+  --sidebar-accent: oklch(0.22 0.005 60);
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: oklch(0.94 0.012 80 / 0.18);
+}
+
+/* Re-grain paper for dark — lighter speckle on dark surface */
+.dark .paper {
+  background-color: var(--paper);
+  background-image:
+    radial-gradient(oklch(0.94 0.012 80 / 0.04) 1px, transparent 1px),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' seed='3'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.06 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  background-size: 4px 4px, 240px 240px;
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  html, body {
+    background-color: var(--background);
+    color: var(--foreground);
+  }
+  body {
+    font-family: var(--font-body, "EB Garamond", Georgia, serif);
+    font-feature-settings: "kern", "liga", "onum";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+  ::selection {
+    background: var(--brass);
+    color: var(--paper);
+  }
+}
+
+/* ─── Alfred Black surfaces ──────────────────────────── */
+
+/* Paper grain — SVG noise, not raster */
+.paper {
+  background-color: var(--paper);
+  background-image:
+    radial-gradient(oklch(0.22 0.004 60 / 0.025) 1px, transparent 1px),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' seed='3'/><feColorMatrix values='0 0 0 0 0.10  0 0 0 0 0.10  0 0 0 0 0.10  0 0 0 0.10 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  background-size: 4px 4px, 240px 240px;
+}
+.wool {
+  background-color: oklch(0.16 0.005 60);
+  color: oklch(0.953 0.018 80);
+  background-image:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='1.2' numOctaves='2' seed='7'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.05 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+.wool .btn-brass,
+.wool .btn-ghost,
+.wool .btn-link,
+.wool .btn-instruction { color: oklch(0.953 0.018 80); }
+
+/* Letterpress hairline */
+.rule {
+  border: 0;
+  border-top: 1px solid var(--rule);
+  margin: 0;
+}
+.rule-double {
+  border: 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  height: 4px;
+}
+
+.font-display { font-family: var(--font-display, "Playfair Display", "Didot", "Bodoni 72", serif); font-feature-settings: "kern", "liga"; }
+.font-body { font-family: var(--font-body, "EB Garamond", Garamond, Georgia, serif); }
+.font-mono { font-family: var(--font-mono, "JetBrains Mono", ui-monospace, "SF Mono", monospace); }
+
+/* Caret + typewriter */
+@keyframes ab-caret { 0%,49%{opacity:1} 50%,100%{opacity:0} }
+.caret::after {
+  content: "";
+  display: inline-block;
+  width: 0.5ch;
+  height: 1em;
+  background: currentColor;
+  margin-left: 2px;
+  vertical-align: -0.12em;
+  animation: ab-caret 1s steps(1) infinite;
+}
+
+/* Flip-board character */
+@keyframes ab-flip {
+  0% { transform: rotateX(90deg); opacity: 0; }
+  100% { transform: rotateX(0deg); opacity: 1; }
+}
+.flip > span {
+  display: inline-block;
+  transform-origin: 50% 100%;
+  animation: ab-flip 320ms cubic-bezier(.2,.7,.2,1) both;
+}
+
+/* Long-press marginalia */
+.marginalia {
+  font-family: var(--font-mono, "JetBrains Mono", ui-monospace, "SF Mono", monospace);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--marginalia);
+  letter-spacing: 0.01em;
+}
+
+/* Forbidden glyphs guard — visual-only reminder used in voice & tone page */
+.struck { text-decoration: line-through; text-decoration-thickness: 1px; color: var(--marginalia); }
+
+/* Interactive affordances — make buttons and links feel clickable */
+button:not(:disabled),
+[role="button"]:not(:disabled),
+a[href],
+summary,
+label[for],
+[data-clickable] {
+  cursor: pointer;
+}
+
+button:disabled,
+[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+/* Subtle hover for anchor links — brass underline glow */
+a[href]:not(.no-hover) {
+  transition: color 160ms ease, opacity 160ms ease, border-color 160ms ease, background-color 160ms ease;
+}
+a[href]:not(.no-hover):hover {
+  color: var(--brass);
+  opacity: 1;
+}
+
+/* Focus visible ring in brass — keyboard users get a clear cue */
+:focus-visible {
+  outline: 1px solid var(--brass);
+  outline-offset: 3px;
+}
+
+/* ─── Button utilities ─────────────────────────────── */
+
+/* Primary CTA — brass border, ink text, fills with brass on hover. Works on paper or wool. */
+.btn-brass {
+  font-family: var(--font-display, "Playfair Display", serif);
+  font-style: italic;
+  font-size: 1.5rem;
+  line-height: 1;
+  padding: 0.55em 1.1em;
+  border: 1px solid var(--brass);
+  background: transparent;
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6em;
+  transition: background-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+.btn-brass:hover,
+.btn-brass:hover * {
+  background: var(--brass);
+  color: var(--paper);
+  box-shadow: 0 1px 0 var(--brass);
+}
+.btn-brass:hover svg { color: var(--paper); }
+/* On dark surfaces */
+.wool .btn-brass { color: var(--paper); }
+.wool .btn-brass:hover,
+.wool .btn-brass:hover * { background: var(--brass); color: var(--wool); }
+.wool .btn-brass:hover svg { color: var(--wool); }
+
+.btn-brass:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* Small ghost action — uppercase mono, brass on hover */
+.btn-ghost {
+  font-family: var(--font-mono, "JetBrains Mono", monospace);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 6px 10px;
+  border: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink);
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+.btn-ghost:hover {
+  background: color-mix(in oklab, var(--brass) 12%, transparent);
+  border-color: var(--brass);
+  color: var(--brass);
+}
+.wool .btn-ghost { color: var(--paper); border-color: color-mix(in oklab, var(--paper) 25%, transparent); }
+.wool .btn-ghost:hover { color: var(--brass); border-color: var(--brass); }
+
+/* Cards / list rows that link somewhere */
+.card-hover {
+  transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+.card-hover:hover {
+  background: color-mix(in oklab, var(--brass) 6%, transparent);
+  border-color: var(--brass);
+}
+/* Disable global a:hover brass shift inside card-hover targets so children don't flash */
+.card-hover a:hover { color: inherit; }
+
+/* Pill (status / step indicator) */
+.pill-brass {
+  display: inline-block;
+  font-family: var(--font-mono, "JetBrains Mono", monospace);
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  font-weight: 800;
+  padding: 3px 8px;
+  background: var(--brass);
+  color: var(--paper);
+}
+
+/* Underlined text action — minimal, no border */
+.btn-link {
+  font-family: var(--font-mono, "JetBrains Mono", monospace);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  padding: 6px 0;
+  margin-right: 24px;
+  background: transparent;
+  color: var(--ink);
+  border: 0;
+  border-bottom: 1px solid transparent;
+  transition: color 160ms ease, border-color 160ms ease;
+}
+.btn-link:hover {
+  color: var(--brass);
+  border-bottom-color: var(--brass);
+}
+.wool .btn-link { color: var(--paper); }
+.wool .btn-link:hover { color: var(--brass); border-bottom-color: var(--brass); }
+
+/* ─── Cinematic utilities ───────────────────────────── */
+
+/* Letterpress impression — a 1px inset shadow on display type over wool */
+.press {
+  text-shadow:
+    0 1px 0 color-mix(in oklab, var(--wool) 70%, transparent),
+    0 -1px 0 color-mix(in oklab, var(--paper) 12%, transparent);
+}
+
+/* Gilt — hairline brass rule with a soft glow. Use ONCE per page. */
+.gilt {
+  height: 1px;
+  background: var(--brass);
+  box-shadow: 0 0 6px color-mix(in oklab, var(--brass) 35%, transparent);
+}
+
+/* Italic display action — Delegate · Defer · Delete · Do */
+.btn-instruction {
+  font-family: var(--font-display, "Playfair Display", serif);
+  font-style: italic;
+  font-weight: 400;
+  font-size: 26px;
+  line-height: 1;
+  background: transparent;
+  border: 0;
+  padding: 4px 2px;
+  color: var(--ink);
+  transition: color 200ms ease;
+}
+.btn-instruction:hover { color: var(--brass); }
+.wool .btn-instruction { color: var(--paper); }
+.wool .btn-instruction:hover { color: var(--brass); }
+
+/* Hanging numerals + small caps for ledger-style tables */
+.tabular { font-variant-numeric: tabular-nums lining-nums; }
+.smallcaps {
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.12em;
+}
+
+/* Scroll-snap container for the marketing home (multiple full-screen panels) */
+.snap-y-mandatory { scroll-snap-type: y mandatory; }
+.snap-start { scroll-snap-align: start; }
+
+/* Scroll-reveal animation */
+.reveal {
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 1.2s ease, transform 1.2s ease;
+}
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ===== Wasp auth form overrides =====
+   Wasp uses CSS modules with hashed class names (e.g. formInput_abc123).
+   Target via [class*="..."] to match the module class name pattern.
+   Wasp's own rules use !important, so ours must too. */
+
+/* Form container */
+[class*="form_"] {
+  font-family: 'EB Garamond', Garamond, Georgia, serif !important;
+}
+
+/* Text inputs — double selector for specificity over Wasp's auth CSS modules */
+[class*="formInput"],
+input[class*="formInput"],
+form input[type="email"],
+form input[type="password"],
+form input[type="text"] {
+  background: #0A0A0A !important;
+  background-color: #0A0A0A !important;
+  border: none !important;
+  border-bottom: 1px solid rgba(184, 151, 106, 0.3) !important;
+  border-radius: 0 !important;
+  color: #E8E4DE !important;
+  -webkit-text-fill-color: #E8E4DE !important;
+  caret-color: #E8E4DE !important;
+  color-scheme: dark !important;
+  font-family: 'EB Garamond', Garamond, Georgia, serif !important;
+  font-weight: 300 !important;
+  padding: 0.75rem 0 !important;
+  font-size: 0.875rem !important;
+  box-shadow: none !important;
+  transition: border-color 0.3s ease !important;
+}
+[class*="formInput"]:focus {
+  border-bottom-color: #B8976A !important;
+  box-shadow: none !important;
+  outline: none !important;
+}
+[class*="formInput"]::placeholder {
+  color: #8A8680 !important;
+}
+[class*="formInput"]:-webkit-autofill,
+[class*="formInput"]:-webkit-autofill:hover,
+[class*="formInput"]:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px #0A0A0A inset !important;
+  -webkit-text-fill-color: #E8E4DE !important;
+  caret-color: #E8E4DE !important;
+}
+
+/* Labels */
+[class*="formLabel"] {
+  font-family: 'JetBrains Mono', monospace !important;
+  font-size: 0.62rem !important;
+  letter-spacing: 0.3em !important;
+  text-transform: uppercase !important;
+  color: #8A8680 !important;
+  font-weight: 300 !important;
+}
+
+/* Submit button */
+[class*="submitButton"] {
+  background: #0A0A0A !important;
+  color: #F5F1EB !important;
+  border: 1px solid rgba(184, 151, 106, 0.3) !important;
+  border-radius: 2px !important;
+  font-family: 'JetBrains Mono', monospace !important;
+  font-size: 0.62rem !important;
+  letter-spacing: 0.35em !important;
+  text-transform: uppercase !important;
+  font-weight: 300 !important;
+  padding: 1rem 2rem !important;
+  box-shadow: none !important;
+  transition: border-color 0.3s ease !important;
+}
+[class*="submitButton"]:hover {
+  border-color: #B8976A !important;
+}
+
+/* Hide Wasp's default auth header ("Log in to your account", etc.) */
+[class*="headerText"] {
+  display: none !important;
+}
+
+/* Error messages — dark-theme red */
+[class*="messageError"] {
+  background: rgba(220, 38, 38, 0.1) !important;
+  color: #fa3838 !important;
+  border: 1px solid rgba(184, 151, 106, 0.15) !important;
+  border-radius: 2px !important;
+  font-family: 'EB Garamond', Garamond, Georgia, serif !important;
+  font-weight: 300 !important;
+  font-size: 0.875rem !important;
+}
+
+/* Success messages — dark-theme teal */
+[class*="messageSuccess"] {
+  background: rgba(107, 168, 184, 0.1) !important;
+  color: #6BA8B8 !important;
+  border: 1px solid rgba(184, 151, 106, 0.15) !important;
+  border-radius: 2px !important;
+  font-family: 'EB Garamond', Garamond, Georgia, serif !important;
+  font-weight: 300 !important;
+  font-size: 0.875rem !important;
+}
+
+/* Inline form validation errors */
+[class*="formError"] {
+  color: #fa3838 !important;
+  font-family: 'EB Garamond', Garamond, Georgia, serif !important;
+  font-weight: 300 !important;
+  font-size: 0.75rem !important;
+}

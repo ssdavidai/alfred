@@ -1,0 +1,1584 @@
+app AlfredSaaS {
+  wasp: {
+    version: "^0.19.0"
+  },
+
+  title: "Alfred Black — Agentic Butler",
+
+  head: [
+    "<link rel='icon' type='image/svg+xml' href='/favicon.svg' />",
+    "<link rel='icon' href='/favicon.ico' />",
+    "<link rel='apple-touch-icon' href='/images/alfred-logo-192.png' />",
+    "<meta charset='utf-8' />",
+    "<meta name='description' content='Alfred Black is an agentic butler for people who have too many tabs open in their head. Calendar, email, finances, health data, family logistics — Alfred manages it all.' />",
+    "<meta name='author' content='Alfred Black' />",
+    "<meta name='keywords' content='alfred black, agentic butler, ai assistant, personal ai, life management, automation' />",
+
+    "<meta property='og:type' content='website' />",
+    "<meta property='og:title' content='Alfred Black — Agentic Butler' />",
+    "<meta property='og:site_name' content='Alfred Black' />",
+    "<meta property='og:url' content='https://alfred.black' />",
+    "<meta property='og:description' content='Agentic butler for people who have too many tabs open in their head.' />",
+    "<meta property='og:image' content='/images/alfred-logo-512.png' />",
+
+    // Alfred Black theme boot — sets the `dark` class on <html> before paint,
+    // avoiding a flash of incorrect theme. Source of truth for the body lives
+    // in src/client/lib/theme.tsx (export `themeBootScript`); keep these two
+    // copies in sync.
+    "<script>(function(){try{var t=localStorage.getItem('ab-theme');if(!t){t=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}var r=document.documentElement;if(t==='dark')r.classList.add('dark');r.style.colorScheme=t;}catch(e){}})();</script>",
+
+    "<link rel='preconnect' href='https://fonts.googleapis.com' />",
+    "<link rel='preconnect' href='https://fonts.gstatic.com' crossorigin />",
+    "<link href='https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;0,900;1,400&family=EB+Garamond:ital,wght@0,400;0,500;1,400&family=JetBrains+Mono:wght@400;500;700;800&display=swap' rel='stylesheet' />",
+
+    "<script defer data-domain='alfred.black' src='https://plausible.alfred.black/js/script.js'></script>",
+  ],
+
+  auth: {
+    userEntity: User,
+    methods: {
+      email: {
+        fromField: {
+          name: "Alfred",
+          email: "noreply@alfred.black"
+        },
+        emailVerification: {
+          clientRoute: EmailVerificationRoute,
+          getEmailContentFn: import { getVerificationEmailContent } from "@src/auth/email-and-pass/emails",
+        },
+        passwordReset: {
+          clientRoute: PasswordResetRoute,
+          getEmailContentFn: import { getPasswordResetEmailContent } from "@src/auth/email-and-pass/emails",
+        },
+        userSignupFields: import { getEmailUserFields } from "@src/auth/userSignupFields",
+      },
+      google: {
+        userSignupFields: import { getGoogleUserFields } from "@src/auth/userSignupFields",
+        configFn: import { getGoogleAuthConfig } from "@src/auth/userSignupFields",
+      },
+    },
+    onAuthFailedRedirectTo: "/login",
+    // Intermediate landing: if the user just signed in with Google but the
+    // Wasp/Arctic OAuth flow didn't hand us a refresh_token (Arctic 1.x
+    // silently drops `accessType: "offline"` + `prompt: "consent"`, so
+    // Google only issues a 1h access token), PostSignupPage bounces them
+    // through /auth/oauth2/google/start for a proper consent screen that
+    // does return a refresh_token. Non-Google signups + already-reconnected
+    // users fall through immediately to /dashboard.
+    onAuthSucceededRedirectTo: "/post-signup",
+    onAfterSignup: import { onAfterSignup } from "@src/auth/hooks",
+    onAfterLogin: import { onAfterLogin } from "@src/auth/hooks",
+  },
+
+  db: {
+    seeds: [
+      import { seedMockUsers } from "@src/server/scripts/dbSeeds",
+    ]
+  },
+
+  client: {
+    rootComponent: import App from "@src/client/App",
+  },
+
+  emailSender: {
+    provider: Mailgun,
+    defaultFrom: {
+      name: "Alfred",
+      email: "noreply@mg.alfred.black"
+    },
+  },
+
+  server: {
+    setupFn: import { serverSetup } from "@src/server/setup",
+    middlewareConfigFn: import { serverMiddlewareFn } from "@src/server/middleware",
+  },
+}
+
+// ============================================================
+// Landing & Marketing
+// ============================================================
+route LandingPageRoute { path: "/", to: LandingPage }
+page LandingPage {
+  component: import LandingPage from "@src/landing-page/LandingPage"
+}
+
+// Public marketing — the small staff of specialists (#848). No authRequired.
+route StaffRoute { path: "/staff", to: StaffPage }
+page StaffPage {
+  component: import StaffPage from "@src/landing-page/StaffPage"
+}
+
+// Public marketing — companion / voice / sms / voice-and-tone (#849). No authRequired.
+route CompanionRoute { path: "/companion", to: CompanionPage }
+page CompanionPage {
+  component: import CompanionPage from "@src/landing-page/CompanionPage"
+}
+
+route VoiceRoute { path: "/voice", to: VoicePage }
+page VoicePage {
+  component: import VoicePage from "@src/landing-page/VoicePage"
+}
+
+route SmsRoute { path: "/sms", to: SmsPage }
+page SmsPage {
+  component: import SmsPage from "@src/landing-page/SmsPage"
+}
+
+route VoiceAndToneRoute { path: "/voice-and-tone", to: VoiceAndTonePage }
+page VoiceAndTonePage {
+  component: import VoiceAndTonePage from "@src/landing-page/VoiceAndTonePage"
+}
+
+// ============================================================
+// Auth Pages
+// ============================================================
+route LoginRoute { path: "/login", to: LoginPage }
+page LoginPage {
+  component: import Login from "@src/auth/LoginPage"
+}
+
+route SignupRoute { path: "/signup", to: SignupPage }
+page SignupPage {
+  component: import { Signup } from "@src/auth/SignupPage"
+}
+
+// Intermediate post-auth landing. See src/auth/PostSignupPage.tsx header for
+// the Wasp/Arctic refresh-token bug this works around.
+route PostSignupRoute { path: "/post-signup", to: PostSignupPage }
+page PostSignupPage {
+  authRequired: true,
+  component: import PostSignupPage from "@src/auth/PostSignupPage"
+}
+
+query getGoogleRefreshTokenStatus {
+  fn: import { getGoogleRefreshTokenStatus } from "@src/auth/operations",
+  entities: [OAuthCredential]
+}
+
+route RequestPasswordResetRoute { path: "/request-password-reset", to: RequestPasswordResetPage }
+page RequestPasswordResetPage {
+  component: import { RequestPasswordResetPage } from "@src/auth/email-and-pass/RequestPasswordResetPage",
+}
+
+route PasswordResetRoute { path: "/password-reset", to: PasswordResetPage }
+page PasswordResetPage {
+  component: import { PasswordResetPage } from "@src/auth/email-and-pass/PasswordResetPage",
+}
+
+route EmailVerificationRoute { path: "/email-verification", to: EmailVerificationPage }
+page EmailVerificationPage {
+  component: import { EmailVerificationPage } from "@src/auth/email-and-pass/EmailVerificationPage",
+}
+
+// ============================================================
+// User Account
+// ============================================================
+route AccountRoute { path: "/account", to: AccountPage }
+page AccountPage {
+  authRequired: true,
+  component: import Account from "@src/user/AccountPage"
+}
+
+query getPaginatedUsers {
+  fn: import { getPaginatedUsers } from "@src/user/operations",
+  entities: [User]
+}
+
+action updateIsUserAdminById {
+  fn: import { updateIsUserAdminById } from "@src/user/operations",
+  entities: [User]
+}
+
+action deleteUserById {
+  fn: import { deleteUserById } from "@src/user/operations",
+  entities: [User, Instance, ProvisioningJob, ApiKey, ContactFormMessage]
+}
+
+action adminUpdateUser {
+  fn: import { adminUpdateUser } from "@src/user/operations",
+  entities: [User]
+}
+
+action adminCreateInstance {
+  fn: import { adminCreateInstance } from "@src/admin/instanceOperations",
+  entities: [Instance, User, ProvisioningJob]
+}
+
+// ============================================================
+// Payment / Pricing
+// ============================================================
+route PricingPageRoute { path: "/pricing", to: PricingPage }
+page PricingPage {
+  component: import PricingPage from "@src/payment/PricingPage"
+}
+
+route CheckoutResultRoute { path: "/checkout", to: CheckoutResultPage }
+page CheckoutResultPage {
+  authRequired: true,
+  component: import CheckoutResultPage from "@src/payment/CheckoutResultPage"
+}
+
+query getCustomerPortalUrl {
+  fn: import { getCustomerPortalUrl } from "@src/payment/operations",
+  entities: [User]
+}
+
+action generateCheckoutSession {
+  fn: import { generateCheckoutSession } from "@src/payment/operations",
+  entities: [User, AdminSetting]
+}
+
+api paymentsWebhook {
+  fn: import { paymentsWebhook } from "@src/payment/webhook",
+  entities: [User, Instance, ProvisioningJob],
+  middlewareConfigFn: import { paymentsMiddlewareConfigFn } from "@src/payment/webhook",
+  httpRoute: (POST, "/payments-webhook")
+}
+
+// ============================================================
+// Provisioning
+// ============================================================
+route SetupRoute { path: "/setup", to: SetupPage }
+page SetupPage {
+  authRequired: true,
+  component: import SetupPage from "@src/provisioning/SetupPage"
+}
+
+query getProvisioningStatus {
+  fn: import { getProvisioningStatus } from "@src/provisioning/operations",
+  entities: [Instance, ProvisioningJob, OAuthCredential]
+}
+
+action reprovisionInstance {
+  fn: import { reprovisionInstance } from "@src/provisioning/operations",
+  entities: [Instance, ProvisioningJob]
+}
+
+action provisionNewUser {
+  fn: import { provisionNewUser } from "@src/provisioning/operations",
+  entities: [Instance, ProvisioningJob]
+}
+
+job provisionInstance {
+  executor: PgBoss,
+  perform: {
+    fn: import { provisionInstanceJob } from "@src/provisioning/worker"
+  },
+  schedule: {
+    cron: "*/1 * * * *" // poll for pending jobs every minute (backup)
+  },
+  // `User` is read by worker.ts to source `TENANT_OWNER_EMAIL` (fed through
+  // to ctrl provisioner → tenant .env → init container for
+  // authorized_senders.json seeding + AgentMail defaults). Omitting it made
+  // every tenant signup after #446 landed crash at the first location-retry
+  // with `Cannot read properties of undefined (reading 'findUnique')` —
+  // Wasp only populates `context.entities.X` for X declared here.
+  entities: [Instance, ProvisioningJob, User]
+}
+
+job destroyInstance {
+  executor: PgBoss,
+  perform: {
+    fn: import { destroyInstanceJob } from "@src/lifecycle/worker"
+  },
+  entities: [Instance]
+}
+
+// ============================================================
+// Onboarding — ritual (#852). The legacy /onboarding and /onboarding/orb
+// pages now redirect to /awaken; their wasp routes stay so post-signup
+// hooks and old emails still resolve.
+// ============================================================
+route OnboardingRoute { path: "/onboarding", to: OnboardingPage }
+page OnboardingPage {
+  authRequired: true,
+  component: import OnboardingPage from "@src/onboarding/OnboardingPage"
+}
+
+route OnboardingOrbRoute { path: "/onboarding/orb", to: OnboardingOrbPage }
+page OnboardingOrbPage {
+  authRequired: true,
+  component: import OnboardingOrbPage from "@src/onboarding/OnboardingOrbPage"
+}
+
+route AwakenRoute { path: "/awaken", to: AwakenPage }
+page AwakenPage {
+  authRequired: true,
+  component: import AwakenPage from "@src/onboarding/AwakenPage"
+}
+
+route ReadingTheRoomRoute { path: "/reading-the-room", to: ReadingTheRoomPage }
+page ReadingTheRoomPage {
+  authRequired: true,
+  component: import ReadingTheRoomPage from "@src/onboarding/ReadingTheRoomPage"
+}
+
+route VerifyRoute { path: "/verify", to: VerifyPage }
+page VerifyPage {
+  authRequired: true,
+  component: import VerifyPage from "@src/onboarding/VerifyPage"
+}
+
+// SOUL preset chooser (#853) — sits between /verify and /composing.
+route SoulPresetRoute { path: "/soul", to: SoulPresetPage }
+page SoulPresetPage {
+  authRequired: true,
+  component: import SoulPresetPage from "@src/onboarding/SoulPresetPage"
+}
+
+route ComposingRoute { path: "/composing", to: ComposingPage }
+page ComposingPage {
+  authRequired: true,
+  component: import ComposingPage from "@src/onboarding/ComposingPage"
+}
+
+route PreparingRoute { path: "/preparing", to: PreparingPage }
+page PreparingPage {
+  authRequired: true,
+  component: import PreparingPage from "@src/onboarding/PreparingPage"
+}
+
+route FirstBriefRoute { path: "/first-brief", to: FirstBriefPage }
+page FirstBriefPage {
+  authRequired: true,
+  component: import FirstBriefPage from "@src/onboarding/FirstBriefPage"
+}
+
+// Household editor — sits at the seam between /first-brief and /desk (#854).
+route HouseholdRoute { path: "/household", to: HouseholdPage }
+page HouseholdPage {
+  authRequired: true,
+  component: import HouseholdPage from "@src/onboarding/HouseholdPage"
+}
+
+// ============================================================
+// Dashboard
+// ============================================================
+// /desk — canonical home (M3 #855). Decision queue + audit ledger.
+route DeskRoute { path: "/desk", to: DeskPage }
+page DeskPage {
+  authRequired: true,
+  component: import DeskPage from "@src/dashboard/DeskPage"
+}
+
+// /brief — letterpress daily missive (M3 #857).
+route BriefRoute { path: "/brief", to: BriefPage }
+page BriefPage {
+  authRequired: true,
+  component: import BriefPage from "@src/dashboard/BriefPage"
+}
+
+// /briefings — chronological feed of every briefing the composer has
+// written (STATE-MUTATION Phase E, #893). Expandable rows reveal the
+// full body; pill filters by slot (Morning / Evening / All).
+route BriefingsRoute { path: "/briefings", to: BriefingsPage }
+page BriefingsPage {
+  authRequired: true,
+  component: import BriefingsPage from "@src/briefings/BriefingsPage"
+}
+
+// /study — unified back office (M6 #867 + #868).
+route StudyRoute { path: "/study", to: StudyPage }
+page StudyPage {
+  authRequired: true,
+  component: import StudyPage from "@src/dashboard/StudyPage"
+}
+
+// Legacy /back-office redirect (CommandCenterPage no longer canonical).
+route BackOfficeRoute { path: "/back-office", to: BackOfficePage }
+page BackOfficePage {
+  authRequired: true,
+  component: import BackOfficePage from "@src/dashboard/BackOfficeRedirect"
+}
+
+// /claude — Claude Setup, restyled (M5 #866).
+route ClaudeRoute { path: "/claude", to: ClaudePage }
+page ClaudePage {
+  authRequired: true,
+  component: import ClaudePage from "@src/dashboard/ClaudePage"
+}
+
+// /channels — live channels (M5 #864).
+route ChannelsRoute { path: "/channels", to: ChannelsPage }
+page ChannelsPage {
+  authRequired: true,
+  component: import ChannelsPage from "@src/dashboard/ChannelsPage"
+}
+
+// /connections + /connect — Composio catalogue, restyled (M5 #863).
+route ConnectionsRoute { path: "/connections", to: ConnectionsPage }
+page ConnectionsPage {
+  authRequired: true,
+  component: import ConnectionsPage from "@src/integrations/ConnectionsPage"
+}
+
+route ConnectRedirectRoute { path: "/connect", to: ConnectionsPage }
+
+// /chores + /chores/:slug — recurring workflows (M4 #862).
+route ChoresRoute { path: "/chores", to: ChoresPage }
+page ChoresPage {
+  authRequired: true,
+  component: import ChoresPage from "@src/intelligence/ChoresPage"
+}
+
+route ChoreDetailRoute2 { path: "/chores/:slug", to: ChoreDetailPage2 }
+page ChoreDetailPage2 {
+  authRequired: true,
+  component: import ChoreDetailPage2 from "@src/intelligence/ChoreDetailPage2"
+}
+
+// /decisions — audit feed of every decision Alfred has made (M4 #861).
+route DecisionsRoute { path: "/decisions", to: DecisionsPage }
+page DecisionsPage {
+  authRequired: true,
+  component: import DecisionsPage from "@src/dashboard/DecisionsPage"
+}
+
+// /instincts — patterns Alfred has learned (M4 #860).
+route InstinctsRoute { path: "/instincts", to: InstinctsPage }
+page InstinctsPage {
+  authRequired: true,
+  component: import InstinctsPage from "@src/intuition/InstinctsPage"
+}
+
+// /vault — three-pane Obsidian view (M4 #858).
+route VaultRoute { path: "/vault", to: VaultPage }
+page VaultPage {
+  authRequired: true,
+  component: import VaultPage from "@src/dashboard/VaultPage"
+}
+
+// /matters + /matters/:id — long-running concerns (M4 #859).
+route MattersRoute { path: "/matters", to: MattersPage }
+page MattersPage {
+  authRequired: true,
+  component: import MattersPage from "@src/dashboard/MattersPage"
+}
+
+route MatterDetailRoute { path: "/matters/:id", to: MatterDetailPage }
+page MatterDetailPage {
+  authRequired: true,
+  component: import MatterDetailPage from "@src/dashboard/MatterDetailPage"
+}
+
+route DashboardRoute { path: "/dashboard", to: DashboardPage }
+page DashboardPage {
+  authRequired: true,
+  component: import DashboardPage from "@src/dashboard/DashboardPage"
+}
+
+route CommandCenterRoute { path: "/dashboard/command-center", to: CommandCenterPage }
+page CommandCenterPage {
+  authRequired: true,
+  component: import CommandCenterPage from "@src/dashboard/CommandCenterPage"
+}
+
+route InboxRoute { path: "/dashboard/inbox", to: InboxPage }
+page InboxPage {
+  authRequired: true,
+  component: import InboxPage from "@src/dashboard/InboxPage"
+}
+
+route VaultBrowserRoute { path: "/dashboard/vault", to: VaultBrowserPage }
+page VaultBrowserPage {
+  authRequired: true,
+  component: import VaultBrowserPage from "@src/dashboard/VaultBrowserPage"
+}
+
+route VaultRecordRoute { path: "/dashboard/vault/*", to: VaultRecordPage }
+page VaultRecordPage {
+  authRequired: true,
+  component: import VaultRecordPage from "@src/dashboard/VaultRecordPage"
+}
+
+route AssistantsRoute { path: "/dashboard/assistants", to: AssistantsPage }
+page AssistantsPage {
+  authRequired: true,
+  component: import AssistantsPage from "@src/dashboard/AssistantsPage"
+}
+
+route DevicesRoute { path: "/dashboard/devices", to: DevicesPage }
+page DevicesPage {
+  authRequired: true,
+  component: import DevicesPage from "@src/dashboard/DevicesPage"
+}
+
+route CredentialsRoute { path: "/dashboard/credentials", to: CredentialsPage }
+page CredentialsPage {
+  authRequired: true,
+  component: import CredentialsPage from "@src/dashboard/CredentialsPage"
+}
+
+route PhoneRoute { path: "/dashboard/phone", to: PhonePage }
+page PhonePage {
+  authRequired: true,
+  component: import PhonePage from "@src/dashboard/PhonePage"
+}
+
+route StreamsRoute { path: "/dashboard/streams", to: StreamsPage }
+page StreamsPage {
+  authRequired: true,
+  component: import StreamsPage from "@src/streams/StreamsPage"
+}
+
+route LogsRoute { path: "/dashboard/logs", to: LogsPage }
+page LogsPage {
+  authRequired: true,
+  component: import LogsPage from "@src/dashboard/LogsPage"
+}
+
+route WorkspaceRoute { path: "/dashboard/workspace", to: WorkspacePage }
+page WorkspacePage {
+  authRequired: true,
+  component: import WorkspacePage from "@src/dashboard/WorkspacePage"
+}
+
+route SettingsRoute { path: "/dashboard/settings", to: SettingsPage }
+page SettingsPage {
+  authRequired: true,
+  component: import SettingsPage from "@src/dashboard/SettingsPage"
+}
+
+route ApiDocsRoute { path: "/dashboard/api-docs", to: ApiDocsPage }
+page ApiDocsPage {
+  authRequired: true,
+  component: import ApiDocsPage from "@src/dashboard/ApiDocsPage"
+}
+
+route TerminalRoute { path: "/dashboard/terminal", to: TerminalPage }
+page TerminalPage {
+  authRequired: true,
+  component: import TerminalPage from "@src/dashboard/TerminalPage"
+}
+
+// API Key management
+query listApiKeys {
+  fn: import { listApiKeys } from "@src/apikeys/operations",
+  entities: [ApiKey]
+}
+
+action createApiKey {
+  fn: import { createApiKey } from "@src/apikeys/operations",
+  entities: [ApiKey]
+}
+
+action revokeApiKey {
+  fn: import { revokeApiKey } from "@src/apikeys/operations",
+  entities: [ApiKey]
+}
+
+// User API proxy (Bearer token auth with user API keys)
+api userApiProxy {
+  fn: import { userApiProxy } from "@src/apikeys/proxy",
+  entities: [ApiKey, Instance],
+  middlewareConfigFn: import { apiProxyMiddleware } from "@src/apikeys/proxy",
+  httpRoute: (ALL, "/user-api")
+}
+
+// Dashboard queries and actions (proxy to tenant API)
+query getDashboardData {
+  fn: import { getDashboardData } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getInstalledApps {
+  fn: import { getInstalledApps } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getClaudeSetup {
+  fn: import { getClaudeSetup } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getInboxItems {
+  fn: import { getInboxItems } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action submitInboxItem {
+  fn: import { submitInboxItem } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getVaultRecords {
+  fn: import { getVaultRecords } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getVaultRecord {
+  fn: import { getVaultRecord } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// XC #873 — title-index for live wikilink resolution in the Markdown
+// component. Wraps tenant ctrl-api GET /api/v1/vault/index (60s in-memory
+// cached on the tenant side).
+query getVaultTitleIndex {
+  fn: import { getVaultTitleIndex } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// STATE-MUTATION Phase E (#893) — briefings index + single. Wraps the
+// ctrl-api endpoints written by the alfred-learn BriefingWorkflow.
+// Powers /brief (most-recent) and /briefings (chronological list).
+query getBriefings {
+  fn: import { getBriefings } from "@src/briefings/operations",
+  entities: [Instance]
+}
+
+query getBriefing {
+  fn: import { getBriefing } from "@src/briefings/operations",
+  entities: [Instance]
+}
+
+// Account-level "I have read this briefing" pointer. Stored on the User
+// row (lastDismissedBriefingSlugDate). /desk shows the brief envelope
+// only when the most-recent briefing.slug_date differs from this.
+query getLastDismissedBriefing {
+  fn: import { getLastDismissedBriefing } from "@src/briefings/operations",
+  entities: [User]
+}
+
+action dismissBriefing {
+  fn: import { dismissBriefing } from "@src/briefings/operations",
+  entities: [User]
+}
+
+// M4 #859 — matters aggregator. The /matters index + /matters/:id
+// detail surfaces, plus the /household placeholder backfill. Both
+// queries proxy to the new GET /api/v1/matters[/<id>] endpoints in
+// ctrl-api. Note: the existing tasks/operations.ts already exports
+// a `getMatters` wrapping a triage-style endpoint — we use a distinct
+// dashboard.getMatters here that hits the new /api/v1/matters route.
+// To avoid Wasp name collision, this query is named `getMattersIndex`
+// and the detail is `getMatterDetail`.
+query getMattersIndex {
+  fn: import { getMattersIndex } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getMatterDetail {
+  fn: import { getMatterDetail } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// RFC #884 — living-narrative per-chore detail. Distinct from `getChoreSource`
+// (which returns generated Python). Returns current_state + as_of + timeline
+// keyed off a task vault record.
+query getChoreDetail2 {
+  fn: import { getChoreDetail2 } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getVaultGraph {
+  fn: import { getVaultGraph } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getNebulaData {
+  fn: import { getNebulaData } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getWorkerStatus {
+  fn: import { getWorkerStatus } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action triggerWorker {
+  fn: import { triggerWorker } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getDevices {
+  fn: import { getDevices } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action approveDevice {
+  fn: import { approveDevice } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action rejectDevice {
+  fn: import { rejectDevice } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action removeDevice {
+  fn: import { removeDevice } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getContainerLogs {
+  fn: import { getContainerLogs } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getActivityFeed {
+  fn: import { getActivityFeed } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// Durable audit feed read from vault/event/ records — what the /study#audit
+// section reads. getActivityFeed remains for the LogsPage container-log view.
+query getAuditFeed {
+  fn: import { getAuditFeed } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getCredentials {
+  fn: import { getCredentials } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action updateCredentials {
+  fn: import { updateCredentials } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// Vexa meeting-bot auto-join toggle
+query getVexaAutoJoin {
+  fn: import { getVexaAutoJoin } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action setVexaAutoJoin {
+  fn: import { setVexaAutoJoin } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// AgentPhone (Phase 8)
+query getPhoneConfig {
+  fn: import { getPhoneConfig } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action addAuthorizedNumber {
+  fn: import { addAuthorizedNumber } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action removeAuthorizedNumber {
+  fn: import { removeAuthorizedNumber } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getAgentConfig {
+  fn: import { getAgentConfig } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action updateAgentConfig {
+  fn: import { updateAgentConfig } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action updateAgentModel {
+  fn: import { updateAgentModel } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getModelCatalog {
+  fn: import { getModelCatalog } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getWorkspaceFile {
+  fn: import { getWorkspaceFile } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action updateWorkspaceFile {
+  fn: import { updateWorkspaceFile } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getFirstBrief {
+  fn: import { getFirstBrief } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action startOnboarding {
+  fn: import { startOnboarding } from "@src/dashboard/operations",
+  entities: [Instance, Stream, OAuthCredential]
+}
+
+query getOnboardingProgress {
+  fn: import { getOnboardingProgress } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// ============================================================
+// Tasks
+// ============================================================
+route IntelligenceRoute { path: "/dashboard/tasks", to: IntelligencePage }
+page IntelligencePage {
+  authRequired: true,
+  component: import IntelligencePage from "@src/intelligence/IntelligencePage"
+}
+
+// C.3: per-chore detail page
+route ChoreDetailRoute { path: "/dashboard/chores/:slug", to: ChoreDetailPage }
+page ChoreDetailPage {
+  authRequired: true,
+  component: import ChoreDetailPage from "@src/intelligence/ChoreDetailPage"
+}
+
+query getTasks {
+  fn: import { getTasks } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+query getTaskDetail {
+  fn: import { getTaskDetail } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action updateTask {
+  fn: import { updateTask } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action updateTaskStatus {
+  fn: import { updateTaskStatus } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+query getTriage {
+  fn: import { getTriage } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+query getMatters {
+  fn: import { getMatters } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+query getQuarantine {
+  fn: import { getQuarantine } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action retryQuarantine {
+  fn: import { retryQuarantine } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action dismissQuarantine {
+  fn: import { dismissQuarantine } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+query getLedgerEntries {
+  fn: import { getLedgerEntries } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+// Approval queue
+query getPendingApprovals {
+  fn: import { getPendingApprovals } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action approveAction {
+  fn: import { approveAction } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action rejectAction {
+  fn: import { rejectAction } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action promoteTriage {
+  fn: import { promoteTriage } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action createVaultRecord {
+  fn: import { createVaultRecord } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action triggerErrandExecution {
+  fn: import { triggerErrandExecution } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+query getSchedules {
+  fn: import { getSchedules } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action triggerSchedule {
+  fn: import { triggerSchedule } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action pauseSchedule {
+  fn: import { pauseSchedule } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action resumeSchedule {
+  fn: import { resumeSchedule } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+// Steward (#836 Phase 0.5) — recent-actions list + undo proxy.
+// Both wrap ctrl-api endpoints in packages/ctrl/src/api/routes/steward.ts.
+query getRecentStewardActions {
+  fn: import { getRecentStewardActions } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+action undoStewardAction {
+  fn: import { undoStewardAction } from "@src/tasks/operations",
+  entities: [Instance]
+}
+
+// ============================================================
+// Chores (Plan C — generated chore lifecycle)
+// ============================================================
+
+query getChores {
+  fn: import { getChores } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+query getChore {
+  fn: import { getChore } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+query getChoreSource {
+  fn: import { getChoreSource } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+query getChoreRuns {
+  fn: import { getChoreRuns } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+action pauseChore {
+  fn: import { pauseChore } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+action resumeChore {
+  fn: import { resumeChore } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+action deleteChore {
+  fn: import { deleteChore } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+action triggerChore {
+  fn: import { triggerChore } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+// ============================================================
+// State-mutation observability (#897 Phase I)
+// ============================================================
+//
+// Wraps the ctrl-api endpoints shipped in Phase A (#889):
+//   GET /api/v1/state-changes          — cross-target feed
+//   GET /api/v1/state-changes/sources  — 30-day source histogram
+//   GET /api/v1/cron/preview           — next-N firing times for a cron
+//
+// Powers /decisions State Changes tab, /matters/:id timeline expansion,
+// /chores/:slug Schedule editor, and /admin observability panels.
+
+query getStateChanges {
+  fn: import { getStateChanges } from "@src/state/operations",
+  entities: [Instance]
+}
+
+query getStateChangeSources {
+  fn: import { getStateChangeSources } from "@src/state/operations",
+  entities: [Instance]
+}
+
+query getChoreScheduleFires {
+  fn: import { getChoreScheduleFires } from "@src/state/operations",
+  entities: [Instance]
+}
+
+// Manual vault edits to matter/task state fields flow through this action
+// (Phase F · #894). Sends a POST /api/v1/state-changes envelope to ctrl-api
+// with source=manual.<currentUserId>; the principal supplies an optional
+// reason which is persisted into both the timeline entry and the audit
+// record. Non-state-field edits continue to use the legacy PATCH path
+// (updateTask / createVaultRecord upsert) — this action is only for the
+// declared state-field allowlist on matter/* and task/* records.
+action applyManualStateChange {
+  fn: import { applyManualStateChange } from "@src/state/operations",
+  entities: [Instance]
+}
+
+// Patch a chore record's mutable fields (schedule / name / description /
+// python_source / etc.). Wraps PATCH /api/v1/chores/:slug. The Schedule
+// editor on /chores/:slug only ever patches the `schedule` field.
+action patchChore {
+  fn: import { patchChore } from "@src/chores/operations",
+  entities: [Instance]
+}
+
+// ============================================================
+// Connected Apps (Composio Integration Marketplace)
+// ============================================================
+route IntegrationsRoute { path: "/dashboard/integrations", to: IntegrationsPage }
+page IntegrationsPage {
+  authRequired: true,
+  component: import IntegrationsPage from "@src/integrations/IntegrationsPage"
+}
+
+query getIntegrationCatalog {
+  fn: import { getIntegrationCatalog } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+query getConnectedIntegrations {
+  fn: import { getConnectedIntegrations } from "@src/integrations/operations",
+  entities: [Instance, ComposioConnection]
+}
+
+query getIntegrationCapabilities {
+  fn: import { getIntegrationCapabilities } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action initiateConnect {
+  fn: import { initiateConnect } from "@src/integrations/operations",
+  entities: [Instance, ComposioConnection]
+}
+
+action initiateApiKeyConnect {
+  fn: import { initiateApiKeyConnect } from "@src/integrations/operations",
+  entities: [Instance, ComposioConnection]
+}
+
+action disconnectIntegration {
+  fn: import { disconnectIntegration } from "@src/integrations/operations",
+  entities: [Instance, ComposioConnection]
+}
+
+action enableIntegrationStream {
+  fn: import { enableIntegrationStream } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action disableIntegrationStream {
+  fn: import { disableIntegrationStream } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action migrateIntegrationStream {
+  fn: import { migrateIntegrationStream } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action enableIntegrationTool {
+  fn: import { enableIntegrationTool } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action disableIntegrationTool {
+  fn: import { disableIntegrationTool } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action autoConfigIntegration {
+  fn: import { autoConfigIntegration } from "@src/integrations/operations",
+  entities: [Instance, ComposioConnection]
+}
+
+action finalizeComposioConnections {
+  fn: import { finalizeComposioConnections } from "@src/integrations/operations",
+  entities: [Instance, ComposioConnection]
+}
+
+query getOpenclawReadiness {
+  fn: import { getOpenclawReadiness } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+// Per-connection scope (read/write action lists) — feeds the "Where I am
+// authorised to act" table on /connections.
+query getIntegrationScope {
+  fn: import { getIntegrationScope } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+// Inbound custom-webhook endpoints — first-class stream sources alongside
+// Composio toolkits + Omi. Each row is a private URL the principal POSTs
+// arbitrary JSON to; each POST lands as a stream_event for the curator.
+action createInboundWebhook {
+  fn: import { createInboundWebhook } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+action deleteInboundWebhook {
+  fn: import { deleteInboundWebhook } from "@src/integrations/operations",
+  entities: [Instance]
+}
+
+// Reconciler — closes the gap between "Composio reports ACTIVE" and
+// "tenant has its stream/skill/schedule wired up". Runs every minute and
+// picks up any ComposioConnection where Composio is ACTIVE but our
+// auto-config state is `pending` or `error` (with backoff). See
+// reconcileWorker.ts for the full rationale; this exists because the
+// frontend auto-fire effect in IntegrationsPage breaks down whenever the
+// user closes the popup or navigates away mid-OAuth.
+job reconcileComposioAutoConfig {
+  executor: PgBoss,
+  perform: {
+    fn: import { reconcileComposioAutoConfigJob } from "@src/integrations/reconcileWorker"
+  },
+  schedule: {
+    cron: "*/1 * * * *"
+  },
+  entities: [Instance, ComposioConnection, User]
+}
+
+// ============================================================
+// Tools (Gateway Allowlist Inspector)
+// ============================================================
+// /tools — restyled in the AB design language (M5 #865). The legacy
+// /dashboard/tools page redirects here.
+route ToolsRoute2 { path: "/tools", to: ToolsPage2 }
+page ToolsPage2 {
+  authRequired: true,
+  component: import ToolsPage2 from "@src/tools/ToolsPage2"
+}
+
+route ToolsRoute { path: "/dashboard/tools", to: ToolsPage }
+page ToolsPage {
+  authRequired: true,
+  component: import ToolsPage from "@src/tools/ToolsPage"
+}
+
+query getAllowedTools {
+  fn: import { getAllowedTools } from "@src/tools/operations",
+  entities: [Instance, ComposioConnection]
+}
+
+// ============================================================
+// Intuition (Learning Engine)
+// ============================================================
+route IntuitionRoute { path: "/dashboard/intuition", to: IntuitionPage }
+page IntuitionPage {
+  authRequired: true,
+  component: import IntuitionPage from "@src/intuition/IntuitionPage"
+}
+
+query getIntuitionStatus {
+  fn: import { getIntuitionStatus } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+query getIntuitionInstincts {
+  fn: import { getIntuitionInstincts } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+query getIntuitionQueue {
+  fn: import { getIntuitionQueue } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+query getObservations {
+  fn: import { getObservations } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+query getRecentJudgments {
+  fn: import { getRecentJudgments } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+action routeInput {
+  fn: import { routeInput } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+action enableIntuition {
+  fn: import { enableIntuition } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+action disableIntuition {
+  fn: import { disableIntuition } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+query getSessions {
+  fn: import { getSessions } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+action updateInstinct {
+  fn: import { updateInstinct } from "@src/intuition/operations",
+  entities: [Instance]
+}
+
+// ============================================================
+// Streams
+// ============================================================
+query getStreams {
+  fn: import { getStreams } from "@src/streams/operations",
+  entities: [Stream, StreamEvent, Instance, ComposioConnection]
+}
+
+query getStreamEvents {
+  fn: import { getStreamEvents } from "@src/streams/operations",
+  entities: [Instance]
+}
+
+action createStream {
+  fn: import { createStream } from "@src/streams/operations",
+  entities: [Stream, Instance]
+}
+
+action updateStream {
+  fn: import { updateStream } from "@src/streams/operations",
+  entities: [Stream]
+}
+
+action deleteStream {
+  fn: import { deleteStream } from "@src/streams/operations",
+  entities: [Stream, StreamEvent, Instance]
+}
+
+action pauseStream {
+  fn: import { pauseStream } from "@src/streams/operations",
+  entities: [Stream, Instance]
+}
+
+action resumeStream {
+  fn: import { resumeStream } from "@src/streams/operations",
+  entities: [Stream, Instance]
+}
+
+action regenerateWebhookToken {
+  fn: import { regenerateWebhookToken } from "@src/streams/operations",
+  entities: [Stream]
+}
+
+// A.2: auto-create suggested streams from onboarding (gmail today,
+// extensible to other auth-already-granted sources later)
+action applyStreamSuggestions {
+  fn: import { applyStreamSuggestions } from "@src/streams/operations",
+  entities: [Instance, Stream]
+}
+
+// A.3: list unresolved suggestions for the Streams page UI cards
+query getStreamSuggestions {
+  fn: import { getStreamSuggestions } from "@src/streams/operations",
+  entities: [Instance, Stream]
+}
+
+action storeIntegrationToken {
+  fn: import { storeIntegrationToken } from "@src/streams/operations",
+  entities: [OAuthCredential]
+}
+
+action submitFactCorrections {
+  fn: import { submitFactCorrections } from "@src/dashboard/operations",
+  entities: [Instance, Stream]
+}
+
+// ============================================================
+// Phase 6 — NeedsAttention dashboard surface (#160)
+// ============================================================
+// Wraps ctrl-api /api/v1/admin/needs-attention* (attention.ts).
+// Empty/error responses degrade silently to an empty card on the
+// homepage — older tenants without the route shouldn't break.
+query getNeedsAttention {
+  fn: import { getNeedsAttention } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action resolveNeedsAttentionDone {
+  fn: import { resolveNeedsAttentionDone } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action resolveNeedsAttentionDispatch {
+  fn: import { resolveNeedsAttentionDispatch } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action resolveNeedsAttentionSkip {
+  fn: import { resolveNeedsAttentionSkip } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// Generic Desk-card audit. Every click on Delegate / Defer / Delete /
+// Do — across all source types — writes a permanent audit event via
+// ctrl-api so the activity ledger never loses an action. Additive to
+// the per-source endpoints; the only server call for "Do".
+action recordDeskAction {
+  fn: import { recordDeskAction } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// Decisions — first-class records of every Desk click. Every click
+// writes one; the DecisionRouterWorkflow (alfred-learn, 60s cadence)
+// fans out the side effects. See packages/ctrl/src/api/routes/decisions.ts.
+action recordDecision {
+  fn: import { recordDecision } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getRecentDecisions {
+  fn: import { getRecentDecisions } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action reverseDecision {
+  fn: import { reverseDecision } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// to_do — the principal's persistent personal queue. Spawned by the
+// DecisionRouterWorkflow when intent=take_mine. Replaces the
+// in-React Backstage tray.
+query getMyTodos {
+  fn: import { getMyTodos } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+action completeMyTodo {
+  fn: import { completeMyTodo } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// Pattern proposals — proposed standing rules extracted from the
+// principal's recent decisions. Surfaced on /desk as a new card type
+// so adopting / rejecting a rule is itself a Decision.
+// In-flight decisions — for the "What Alfred is doing now" Desk strip.
+// Returns decisions in state=open/scheduled/executing so the page can
+// poll every ~10s and show live progress.
+query getInFlightDecisions {
+  fn: import { getInFlightDecisions } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+query getPatternProposals {
+  fn: import { getPatternProposals } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+// ============================================================
+// Phase 6 — Steward feed page (#160)
+// ============================================================
+// Aggregates vault/event/ records — the page filters client-side
+// for steward-action-/signal-action-/auto-task-created-/
+// needs_attention_action- prefixes.
+query getStewardFeed {
+  fn: import { getStewardFeed } from "@src/dashboard/operations",
+  entities: [Instance]
+}
+
+route StewardFeedRoute { path: "/dashboard/command-center/steward-feed", to: StewardFeedPage }
+page StewardFeedPage {
+  authRequired: true,
+  component: import StewardFeedPage from "@src/dashboard/StewardFeedPage"
+}
+
+action submitAccessRequest {
+  // Keep landing page enquiry submissions public (no auth required)
+  fn: import { submitAccessRequest } from "@src/landing-page/operations",
+  entities: [],
+  auth: false
+}
+
+// ============================================================
+// Monitoring & Operations
+// ============================================================
+job healthMonitor {
+  executor: PgBoss,
+  perform: {
+    fn: import { healthMonitorJob } from "@src/monitoring/worker"
+  },
+  schedule: {
+    cron: "*/2 * * * *" // every 2 minutes
+  },
+  entities: [Instance]
+}
+
+job syncSubscriptions {
+  executor: PgBoss,
+  perform: {
+    fn: import { syncSubscriptionsJob } from "@src/lifecycle/worker"
+  },
+  schedule: {
+    cron: "0 * * * *" // every hour
+  },
+  entities: [User, Instance]
+}
+
+job suspendedCleanup {
+  executor: PgBoss,
+  perform: {
+    fn: import { suspendedCleanupJob } from "@src/lifecycle/worker"
+  },
+  schedule: {
+    cron: "0 4 * * *" // daily at 4am
+  },
+  entities: [Instance]
+}
+
+// ============================================================
+// Analytics (kept from OpenSaaS template)
+// ============================================================
+query getDailyStats {
+  fn: import { getDailyStats } from "@src/analytics/operations",
+  entities: [User, DailyStats]
+}
+
+job dailyStatsJob {
+  executor: PgBoss,
+  perform: {
+    fn: import { calculateDailyStats } from "@src/analytics/stats"
+  },
+  schedule: {
+    cron: "0 * * * *"
+  },
+  entities: [User, DailyStats, Logs, PageViewSource]
+}
+
+// ============================================================
+// Internal Admin Dashboard
+// ============================================================
+route AdminRoute { path: "/admin", to: AdminDashboardPage }
+page AdminDashboardPage {
+  authRequired: true,
+  component: import AdminDashboardPage from "@src/admin/dashboards/analytics/AnalyticsDashboardPage"
+}
+
+route AdminUsersRoute { path: "/admin/users", to: AdminUsersPage }
+page AdminUsersPage {
+  authRequired: true,
+  component: import AdminUsers from "@src/admin/dashboards/users/UsersDashboardPage"
+}
+
+route AdminInstancesRoute { path: "/admin/instances", to: AdminInstancesPage }
+page AdminInstancesPage {
+  authRequired: true,
+  component: import AdminInstances from "@src/admin/dashboards/instances/InstancesDashboardPage"
+}
+
+query getAdminInstances {
+  fn: import { getAdminInstances } from "@src/admin/operations",
+  entities: [Instance, User]
+}
+
+route AdminInstanceDetailRoute { path: "/admin/instances/:instanceId", to: AdminInstanceDetailPage }
+page AdminInstanceDetailPage {
+  authRequired: true,
+  component: import AdminInstanceDetail from "@src/admin/dashboards/instances/InstanceDetailPage"
+}
+
+route AdminProvisioningJobsRoute { path: "/admin/provisioning", to: AdminProvisioningJobsPage }
+page AdminProvisioningJobsPage {
+  authRequired: true,
+  component: import AdminProvisioningJobs from "@src/admin/dashboards/instances/ProvisioningJobsPage"
+}
+
+query getAdminInstanceDetail {
+  fn: import { getAdminInstanceDetail } from "@src/admin/instanceOperations",
+  entities: [Instance, User, ProvisioningJob]
+}
+
+query getAdminInstanceHealth {
+  fn: import { getAdminInstanceHealth } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+query getAdminInstanceDevices {
+  fn: import { getAdminInstanceDevices } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+query getAdminProvisioningJobs {
+  fn: import { getAdminProvisioningJobs } from "@src/admin/instanceOperations",
+  entities: [ProvisioningJob, User]
+}
+
+action adminDestroyInstance {
+  fn: import { adminDestroyInstance } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+action adminProvisionInstance {
+  fn: import { adminProvisionInstance } from "@src/admin/instanceOperations",
+  entities: [Instance, ProvisioningJob]
+}
+
+action adminTriggerWorker {
+  fn: import { adminTriggerWorker } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+action adminApproveDevice {
+  fn: import { adminApproveDevice } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+action adminRejectDevice {
+  fn: import { adminRejectDevice } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+action adminPatchAllInstanceConfigs {
+  fn: import { adminPatchAllInstanceConfigs } from "@src/admin/instanceOperations",
+  entities: [Instance]
+}
+
+// ============================================================
+// Waitlist / Closed Beta
+// ============================================================
+route WaitlistRoute { path: "/waitlist", to: WaitlistPage }
+page WaitlistPage {
+  authRequired: true,
+  component: import WaitlistPage from "@src/payment/WaitlistPage"
+}
+
+query getAdminSettings {
+  fn: import { getAdminSettings } from "@src/admin/settingsOperations",
+  entities: [AdminSetting]
+}
+
+action updateAdminSetting {
+  fn: import { updateAdminSetting } from "@src/admin/settingsOperations",
+  entities: [AdminSetting]
+}
+
+query getClosedBetaStatus {
+  fn: import { getClosedBetaStatus } from "@src/admin/settingsOperations",
+  entities: [AdminSetting]
+}
+
+
+route TermsOfServiceRoute { path: "/tos", to: TermsOfServicePage }
+page TermsOfServicePage {
+  component: import TermsOfServicePage from "@src/legal/TermsOfServicePage"
+}
+
+route PrivacyPolicyRoute { path: "/pp", to: PrivacyPolicyPage }
+page PrivacyPolicyPage {
+  component: import PrivacyPolicyPage from "@src/legal/PrivacyPolicyPage"
+}
+
+route NotFoundRoute { path: "*", to: NotFoundPage }
+page NotFoundPage {
+  component: import { NotFoundPage } from "@src/client/components/NotFoundPage"
+}

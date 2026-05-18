@@ -1,0 +1,139 @@
+---
+title: "Scan for Issues"
+description: "Run a janitor structural scan"
+api: "POST /api/v1/workers/janitor/scan"
+---
+
+Performs a one-time structural scan of the vault without attempting to fix any issues. Returns a detailed report of all detected problems.
+
+<Info>
+  This is a scan-only operation. To scan and fix issues, use the [fix endpoint](/api-reference/workers/janitor-fix) instead.
+</Info>
+
+<RequestExample>
+
+```bash cURL
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/janitor/scan \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json"
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "message": "Scan completed successfully",
+  "scan_id": "scan_20260226_103000",
+  "duration_seconds": 7.2,
+  "files_scanned": 423,
+  "issues_found": 12,
+  "issues_by_category": {
+    "broken_links": 3,
+    "invalid_frontmatter": 2,
+    "orphaned_files": 4,
+    "missing_required_fields": 3
+  },
+  "issues": [
+    {
+      "category": "broken_links",
+      "severity": "warning",
+      "file": "projects/acme-redesign.md",
+      "line": 42,
+      "message": "Link target does not exist: [[person/Jane Smith]]",
+      "details": {
+        "broken_link": "[[person/Jane Smith]]",
+        "link_text": "Jane Smith"
+      }
+    },
+    {
+      "category": "invalid_frontmatter",
+      "severity": "error",
+      "file": "tasks/implement-auth.md",
+      "line": 3,
+      "message": "Invalid status value 'completed' for type 'task'",
+      "details": {
+        "field": "status",
+        "value": "completed",
+        "expected": ["todo", "in-progress", "done", "blocked"]
+      }
+    },
+    {
+      "category": "orphaned_files",
+      "severity": "info",
+      "file": "notes/meeting-notes-2026-01-15.md",
+      "line": null,
+      "message": "File has no incoming links from other vault records",
+      "details": {
+        "type": "note",
+        "created": "2026-01-15"
+      }
+    }
+  ],
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Operation status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message
+</ResponseField>
+
+<ResponseField name="scan_id" type="string">
+  Unique identifier for this scan
+</ResponseField>
+
+<ResponseField name="duration_seconds" type="number">
+  Time taken to complete the scan
+</ResponseField>
+
+<ResponseField name="files_scanned" type="number">
+  Number of vault files scanned
+</ResponseField>
+
+<ResponseField name="issues_found" type="number">
+  Total number of issues detected
+</ResponseField>
+
+<ResponseField name="issues_by_category" type="object">
+  Issue count breakdown by category
+</ResponseField>
+
+<ResponseField name="issues" type="object[]">
+  Detailed list of all detected issues
+
+  <ResponseField name="category" type="string">
+    Issue category: `broken_links`, `invalid_frontmatter`, `orphaned_files`, `missing_required_fields`
+  </ResponseField>
+
+  <ResponseField name="severity" type="string">
+    Severity level: `error`, `warning`, or `info`
+  </ResponseField>
+
+  <ResponseField name="file" type="string">
+    Vault-relative path to the file with the issue
+  </ResponseField>
+
+  <ResponseField name="line" type="number | null">
+    Line number where issue occurs (null for file-level issues)
+  </ResponseField>
+
+  <ResponseField name="message" type="string">
+    Human-readable issue description
+  </ResponseField>
+
+  <ResponseField name="details" type="object">
+    Category-specific additional information
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of operation
+</ResponseField>

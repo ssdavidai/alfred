@@ -1,0 +1,67 @@
+---
+title: "Get Workflow History"
+description: "Retrieve the complete event history for a workflow execution"
+api: "GET https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows/{wfId}/history"
+---
+
+Returns the complete event history for a workflow execution. History events include workflow start, activity scheduling, task completion, signals, and more.
+
+<ParamField path="wfId" type="string" required>
+  The workflow ID to retrieve history for
+</ParamField>
+
+<ParamField query="run_id" type="string" optional>
+  Specific run ID to retrieve history for. If omitted, returns history for the most recent run.
+</ParamField>
+
+<RequestExample>
+```bash cURL
+curl -X GET \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows/curator-sweep-20260226-143022/history
+```
+</RequestExample>
+
+<ResponseExample>
+```json 200 OK
+{
+  "workflowId": "curator-sweep-20260226-143022",
+  "runId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "events": [
+    {
+      "eventId": 1,
+      "eventType": "WorkflowExecutionStarted",
+      "timestamp": "2026-02-26T14:30:22.154Z",
+      "attributes": {
+        "workflowType": "CuratorWorkflow",
+        "taskQueue": "alfred-curator",
+        "input": {
+          "vault_path": "/app/data/vault",
+          "inbox_path": "/app/data/vault/inbox"
+        }
+      }
+    },
+    {
+      "eventId": 2,
+      "eventType": "WorkflowTaskScheduled",
+      "timestamp": "2026-02-26T14:30:22.160Z"
+    },
+    {
+      "eventId": 3,
+      "eventType": "WorkflowTaskStarted",
+      "timestamp": "2026-02-26T14:30:22.205Z"
+    },
+    {
+      "eventId": 4,
+      "eventType": "ActivityTaskScheduled",
+      "timestamp": "2026-02-26T14:30:22.312Z",
+      "attributes": {
+        "activityId": "process-inbox-item-1",
+        "activityType": "ProcessInboxItemActivity"
+      }
+    }
+  ],
+  "totalEvents": 4
+}
+```
+</ResponseExample>

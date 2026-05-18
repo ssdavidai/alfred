@@ -1,0 +1,99 @@
+#cloud-config
+# Minimal cloud-init for snapshot-based provisioning.
+# OS packages, Docker, Node, Tailscale, cloudflared, systemd units, and
+# scripts are all pre-baked in the snapshot. This only handles:
+#   1. SSH key injection for the deploy user
+#   2. LUKS volume setup (per-tenant volume ID)
+#   3. SSH host key regeneration (snapshot wipes them)
+
+# users: block is intentionally omitted — cloud-init skips user config
+# when the user already exists in the snapshot. SSH key + sudo rules are
+# injected explicitly in runcmd below.
+
+ssh_pwauth: false
+
+# Regenerate SSH host keys (snapshot has none)
+ssh_deletekeys: true
+ssh_genkeytypes: [ed25519, rsa]
+
+runcmd:
+  # --- Re-apply sudo rules (cloud-init skips user config when user already exists in snapshot) ---
+  - |
+    cat > /etc/sudoers.d/90-deploy-alfred << 'SUDOERS'
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/systemctl *
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/tailscale *
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/cloudflared *
+    deploy ALL=(ALL) NOPASSWD: /usr/local/bin/cloudflared *
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/chown *
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/mkdir -p /opt/alfred/*
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/bash /opt/alfred/*.sh
+    deploy ALL=(ALL) NOPASSWD: /usr/bin/bash -c set -a && source /opt/alfred/*.env *
+    SUDOERS
+  - chmod 440 /etc/sudoers.d/90-deploy-alfred
+
+  # --- Inject SSH key for deploy user (snapshot has no authorized_keys) ---
+  - |
+    mkdir -p /home/deploy/.ssh
+    echo '{{ ssh_public_key }}' > /home/deploy/.ssh/authorized_keys
+    chmod 700 /home/deploy/.ssh
+    chmod 600 /home/deploy/.ssh/authorized_keys
+    chown -R deploy:deploy /home/deploy/.ssh
+
+  # --- Setup encrypted volume ---
+  - mkdir -p /mnt/encrypted
+  - |
+    if [ -b /dev/disk/by-id/scsi-0HC_Volume_{{ volume_id }} ]; then
+      VOLUME_DEV="/dev/disk/by-id/scsi-0HC_Volume_{{ volume_id }}"
+
+      # Generate LUKS keyfile
+      mkdir -p /opt/alfred
+      dd if=/dev/urandom of=/opt/alfred/luks.key bs=4096 count=1
+      chmod 600 /opt/alfred/luks.key
+
+      # Format with LUKS2 if not already encrypted
+      if ! cryptsetup isLuks "$VOLUME_DEV" 2>/dev/null; then
+        cryptsetup luksFormat --type luks2 --batch-mode --key-file /opt/alfred/luks.key "$VOLUME_DEV"
+      fi
+
+      # Open and mount
+      cryptsetup luksOpen --key-file /opt/alfred/luks.key "$VOLUME_DEV" alfred-data
+      if ! blkid /dev/mapper/alfred-data; then
+        mkfs.ext4 /dev/mapper/alfred-data
+      fi
+      mount /dev/mapper/alfred-data /mnt/encrypted
+
+      # Create data directories — all owned by deploy (uid 1000).
+      # /mnt/encrypted/vexa is created unconditionally even on tenants
+      # without the Vexa stack — empty directory cost is zero and
+      # creating it lazily would mean a flag flip also requires a
+      # mkdir. See cloud-init.yaml.njk for the full rationale.
+      mkdir -p /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden /mnt/encrypted/mcp-server /mnt/encrypted/vexa
+      chown -R deploy:deploy /mnt/encrypted/vault /mnt/encrypted/openclaw /mnt/encrypted/alfred /mnt/encrypted/temporal /mnt/encrypted/vaultwarden /mnt/encrypted/mcp-server /mnt/encrypted/vexa
+    fi
+
+  # --- Update LUKS auto-unlock service with this tenant's volume ID ---
+  - |
+    cat > /etc/systemd/system/alfred-luks.service << 'LUKS_SVC'
+    [Unit]
+    Description=Open LUKS volume for Alfred
+    Before=docker.service
+    After=local-fs.target
+
+    [Service]
+    Type=oneshot
+    RemainAfterExit=yes
+    ExecStart=/bin/bash -c 'cryptsetup luksOpen --key-file /opt/alfred/luks.key /dev/disk/by-id/scsi-0HC_Volume_{{ volume_id }} alfred-data && mount /dev/mapper/alfred-data /mnt/encrypted'
+    ExecStop=/bin/bash -c 'umount /mnt/encrypted && cryptsetup luksClose alfred-data'
+
+    [Install]
+    WantedBy=multi-user.target
+    LUKS_SVC
+  - systemctl daemon-reload
+  - systemctl enable alfred-luks.service
+
+  # --- Reset machine-id so each tenant gets unique DHCP/logging identity ---
+  - rm -f /etc/machine-id /var/lib/dbus/machine-id
+  - systemd-machine-id-setup
+
+  # --- Signal completion ---
+  - touch /opt/alfred/.cloud-init-complete

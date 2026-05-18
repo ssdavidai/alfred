@@ -1,0 +1,67 @@
+---
+title: "Describe Temporal Task Queue"
+description: "Get information about a specific Temporal task queue"
+api: "GET /api/v1/admin/temporal/task-queues/{name}"
+---
+
+Retrieve detailed information about a Temporal task queue, including active pollers, task statistics, and backlog information.
+
+## Path Parameters
+
+<ParamField path="name" type="string" required>
+  The name of the task queue to describe (e.g., "alfred-workflows", "curator-tasks").
+</ParamField>
+
+<RequestExample>
+
+```bash curl
+# Describe the main Alfred workflow task queue
+curl -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/temporal/task-queues/alfred-workflows
+
+# Describe a specific service task queue
+curl -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/temporal/task-queues/curator-tasks
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "taskQueueName": "alfred-workflows",
+  "taskQueueType": "Workflow",
+  "pollers": [
+    {
+      "identity": "worker@alfred-acme-worker-1",
+      "lastAccessTime": "2026-02-26T10:15:30Z",
+      "ratePerSecond": 100
+    }
+  ],
+  "taskQueueStatus": {
+    "backlogCountHint": 0,
+    "approximateBacklogAge": "0s",
+    "tasksAddRate": 2.5,
+    "tasksDispatchRate": 2.5
+  },
+  "taskIdBlock": {
+    "startId": 1000,
+    "endId": 2000
+  }
+}
+```
+
+</ResponseExample>
+
+<Note>
+  Active pollers indicate healthy workers. A `backlogCountHint` of 0 means all tasks are being processed in real-time. If the backlog grows, consider scaling workers or investigating slow task execution.
+</Note>
+
+<Tip>
+  Common task queues in Alfred:
+  - `alfred-workflows` - Main workflow task queue
+  - `curator-tasks` - Curator daemon activities
+  - `janitor-tasks` - Janitor daemon activities
+  - `distiller-tasks` - Distiller daemon activities
+</Tip>

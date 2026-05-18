@@ -1,0 +1,44 @@
+---
+title: "Get Tailscale Serve Configuration"
+description: "Retrieve the Tailscale Serve proxy configuration"
+api: "GET /api/v1/admin/tailscale/serve"
+---
+
+Get the current Tailscale Serve configuration, which shows which local ports are being proxied and exposed via HTTPS on the Tailscale network.
+
+<RequestExample>
+
+```bash curl
+curl -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/tailscale/serve
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "TCP": {
+    "443": {
+      "HTTPS": true
+    }
+  },
+  "Web": {
+    "alfred-acme.tailnet.ts.net:443": {
+      "Handlers": {
+        "/": {
+          "Proxy": "http://127.0.0.1:3100"
+        }
+      }
+    }
+  },
+  "AllowFunnel": {}
+}
+```
+
+</ResponseExample>
+
+<Note>
+  Alfred uses Tailscale Serve to expose the AAS API (port 3100) over HTTPS on the Tailscale network. This configuration is set up automatically during provisioning and should not normally need modification.
+</Note>

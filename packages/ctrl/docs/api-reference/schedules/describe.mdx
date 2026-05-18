@@ -1,0 +1,66 @@
+---
+title: "Describe Schedule"
+description: "Get detailed information about a specific schedule"
+api: "GET https://alfred-acme.tailnet.ts.net:3100/api/v1/schedules/{schId}"
+---
+
+Returns comprehensive details about a workflow schedule, including configuration, state, and recent execution history.
+
+<ParamField path="schId" type="string" required>
+  The schedule ID to describe
+</ParamField>
+
+<RequestExample>
+```bash cURL
+curl -X GET \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/schedules/curator-hourly
+```
+</RequestExample>
+
+<ResponseExample>
+```json 200 OK
+{
+  "scheduleId": "curator-hourly",
+  "spec": {
+    "cron": "0 * * * *",
+    "timezone": "UTC"
+  },
+  "action": {
+    "workflowType": "CuratorWorkflow",
+    "taskQueue": "alfred-curator",
+    "input": {
+      "vault_path": "/app/data/vault",
+      "inbox_path": "/app/data/vault/inbox",
+      "sweep_interval": 3600
+    }
+  },
+  "state": {
+    "paused": false,
+    "notes": "",
+    "remainingActions": null
+  },
+  "info": {
+    "createdAt": "2026-01-15T10:00:00.000Z",
+    "lastUpdatedAt": "2026-02-20T14:30:00.000Z",
+    "nextRunTime": "2026-02-26T15:00:00.000Z",
+    "recentRuns": 142,
+    "lastRunTime": "2026-02-26T14:00:00.000Z"
+  },
+  "recentActions": [
+    {
+      "workflowId": "curator-hourly-2026-02-26T14:00:00Z",
+      "runId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "startTime": "2026-02-26T14:00:00.123Z",
+      "status": "Completed"
+    },
+    {
+      "workflowId": "curator-hourly-2026-02-26T13:00:00Z",
+      "runId": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+      "startTime": "2026-02-26T13:00:00.089Z",
+      "status": "Completed"
+    }
+  ]
+}
+```
+</ResponseExample>

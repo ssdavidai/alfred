@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""
+openclaw-wrapper — runs OpenClaw agents via the gateway sessions_spawn HTTP API.
+
+Replaces the previous bash script that ran a local OpenClaw CLI inside the
+alfred container.  Now calls the gateway directly over HTTP, which gives
+agents full tool access (read, write, exec) and avoids the ws:// security
+check, version mismatch warnings, and TCP proxy hacks.
+
+Alfred calls:  openclaw-wrapper [--agent <id>] [--workspace <path>] <prompt>
+We call:        POST http://openclaw:18789/tools/invoke  (sessions_spawn)
+Then poll:      POST http://openclaw:18789/tools/invoke  (sessions_history)
+"""
+
+import glob
+import json
+import os
+import re
+import sys
+import time
+import urllib.request
+import urllib.error
+
+
+def resolve_gateway():
+    """Resolve gateway URL and auth token from environment."""
+    url = os.environ.get("OPENCLAW_GATEWAY_URL", "http://openclaw:18789")
+    # Normalize ws:// to http:// for HTTP API calls
+    url = url.replace("ws://", "http://").replace("wss://", "https://")
+
+    # Always read the token directly from the file on disk.
+    # Do NOT trust the env var — the entrypoint's export may not propagate
+    # correctly through the daemon's subprocess chain, and docker-compose
+    # env_file values can interfere.
+    token = ""
+    for path in ["/app/data/.gateway-token", "/alfred-data/.gateway-token"]:
+        if os.path.exists(path):
+            token = open(path).read().strip()
+            if token:
+                break
+    if not token:
+        # Last resort: try env vars
+        token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+        if not token:
+            token_file = os.environ.get("OPENCLAW_GATEWAY_TOKEN_FILE", "")
+            if token_file and os.path.exists(token_file):
+                token = open(token_file).read().strip()
+
+    return url, token
+
+
+def invoke_tool(gateway_url, token, tool, args, timeout=30):
+    """Call POST /tools/invoke on the OpenClaw gateway."""
+    payload = json.dumps({"tool": tool, "args": args}).encode()
+    req = urllib.request.Request(
+        f"{gateway_url}/tools/invoke",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def extract_session_key(spawn_data):
+    """Extract childSessionKey from sessions_spawn response."""
+    result = spawn_data.get("result", {})
+    content_list = result.get("content", [])
+    for item in content_list:
+        if isinstance(item, dict) and item.get("type") == "text":
+            try:
+                inner = json.loads(item["text"])
+                key = inner.get("childSessionKey")
+                if key:
+                    return key
+            except (json.JSONDecodeError, KeyError):
+                pass
+    return None
+
+
+def _get_messages(hist_data):
+    """Parse messages list from sessions_history response."""
+    result = hist_data.get("result", {})
+    content_list = result.get("content", [])
+    messages = []
+    for item in content_list:
+        if isinstance(item, dict) and item.get("type") == "text":
+            try:
+                parsed = json.loads(item["text"])
+                messages = parsed.get("messages", [])
+            except (json.JSONDecodeError, TypeError):
+                pass
+    return messages
+
+
+def extract_last_assistant_message(hist_data):
+    """Extract the last assistant message text from sessions_history response."""
+    messages = _get_messages(hist_data)
+
+    # Walk messages in reverse to find the last assistant message
+    for msg in reversed(messages):
+        if msg.get("role") == "assistant":
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        return part["text"]
+            elif isinstance(content, str):
+                return content
+    return None
+
+
+def _extract_entities_json(text):
+    """Find a JSON object with an "entities" array anywhere in text.
+
+    Uses brace-depth tracking to handle nested objects.
+    Returns the JSON string if found, else None.
+    """
+    for m in re.finditer(r'\{[^{}]*"entities"\s*:\s*\[', text):
+        start = m.start()
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    try:
+                        data = json.loads(candidate)
+                        if isinstance(data.get("entities"), list):
+                            return candidate
+                    except json.JSONDecodeError:
+                        continue
+                    break
+    return None
+
+
+def extract_manifest_from_history(hist_data):
+    """Try to extract manifest JSON from the conversation history.
+
+    Searches three sources in tool-use calls and message text:
+    1. Write tool calls (content field contains the JSON)
+    2. Bash tool calls (command field contains cat/heredoc with JSON)
+    3. Assistant message text (model may include JSON in response)
+    """
+    messages = _get_messages(hist_data)
+    manifest_pattern = re.compile(r'/alfred-data/alfred-curator-[0-9a-f]+-manifest\.json')
+
+    # Pass 1: Search tool_use blocks (Write tool, Bash tool)
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "tool_use":
+                continue
+            inp = part.get("input", {})
+            tool_name = part.get("name", "")
+
+            # Write tool: input has "file_path" and "content" fields
+            if tool_name in ("Write", "write") and isinstance(inp, dict):
+                file_path = inp.get("file_path", "")
+                file_content = inp.get("content", "")
+                if manifest_pattern.search(file_path) and '"entities"' in file_content:
+                    result = _extract_entities_json(file_content)
+                    if result:
+                        return result
+
+            # Bash tool: input has "command" field (heredoc or echo)
+            cmd_text = ""
+            if isinstance(inp, dict):
+                cmd_text = inp.get("command", "") or inp.get("content", "") or str(inp)
+            elif isinstance(inp, str):
+                cmd_text = inp
+
+            if cmd_text and '"entities"' in cmd_text:
+                if manifest_pattern.search(cmd_text):
+                    result = _extract_entities_json(cmd_text)
+                    if result:
+                        return result
+
+    # Pass 2: Search assistant message text for JSON code blocks or inline JSON
+    for msg in reversed(messages):
+        if msg.get("role") != "assistant":
+            continue
+        text = ""
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text = " ".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            )
+        if '"entities"' not in text:
+            continue
+
+        # Try markdown code blocks first (```json ... ```)
+        for block_match in re.finditer(r'```(?:json)?\s*\n(.*?)\n```', text, re.DOTALL):
+            block = block_match.group(1).strip()
+            if '"entities"' in block:
+                result = _extract_entities_json(block)
+                if result:
+                    return result
+
+        # Try raw JSON anywhere in text
+        result = _extract_entities_json(text)
+        if result:
+            return result
+
+    return None
+
+
+_MANIFEST_DELIMITER = "\n---ALFRED_MANIFEST_JSON---\n"
+
+
+def collect_manifest_files(explicit_path=None):
+    """Read curator manifest JSON files from /tmp and return their contents.
+
+    If *explicit_path* is given (via --manifest-path), read only that file.
+    Otherwise fall back to globbing /alfred-data/alfred-curator-*-manifest.json for
+    backwards compatibility.
+
+    The pipeline generates a unique manifest_path and embeds it in the
+    prompt.  The agent writes the JSON there inside the openclaw container.
+    Both containers share a Docker volume at /tmp, so the file is visible
+    here.  We read it and relay the contents on stdout so the pipeline can
+    parse it even if the direct file read fails (e.g. due to sandbox
+    isolation or a race condition).
+
+    Does NOT delete the file — the pipeline handles its own cleanup.
+    """
+    paths = []
+    if explicit_path:
+        paths = [explicit_path]
+    else:
+        paths = sorted(glob.glob("/alfred-data/alfred-curator-*-manifest.json"))
+
+    results = []
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content:
+                results.append(content)
+                print(f"[openclaw-wrapper] read manifest: {path} ({len(content)} bytes)", file=sys.stderr)
+        except OSError:
+            pass
+    return results
+
+
+def main():
+    agent_id = ""
+    workspace = ""
+    session_id = ""
+    prompt = ""
+    manifest_path = ""
+
+    # The alfred Python code calls:
+    #   openclaw-wrapper agent --agent <id> --session-id <sid> --message "<prompt>" --local --json
+    # We need to parse all these flags properly.
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--agent":
+            agent_id = args[i + 1]
+            i += 2
+        elif args[i] == "--workspace":
+            workspace = args[i + 1]
+            i += 2
+        elif args[i] == "--message":
+            prompt = args[i + 1]
+            i += 2
+        elif args[i] == "--session-id":
+            session_id = args[i + 1]
+            i += 2
+        elif args[i] == "--manifest-path":
+            manifest_path = args[i + 1]
+            i += 2
+        elif args[i] in ("--local", "--json", "agent"):
+            # Flags we accept but don't use (handled by gateway)
+            i += 1
+        else:
+            # Fallback: treat as prompt if --message wasn't used
+            if not prompt:
+                prompt = args[i]
+            i += 1
+
+    if not prompt:
+        print("Error: no prompt provided", file=sys.stderr)
+        sys.exit(1)
+
+    # The curator pipeline writes the prompt to a temp file and passes
+    # "--message 'Follow the instructions in /tmp/...'". Since sessions_spawn
+    # runs in the openclaw container (different filesystem), we need to read
+    # the file and pass the content directly.
+    if prompt.startswith("Follow the instructions in "):
+        file_path = prompt.split("Follow the instructions in ", 1)[1].strip()
+        try:
+            prompt = open(file_path).read()
+        except FileNotFoundError:
+            print(f"Error: prompt file not found: {file_path}", file=sys.stderr)
+            sys.exit(1)
+
+    # If no explicit --manifest-path, try to extract it from the prompt text.
+    # The pipeline embeds a line like:
+    #   **Write the JSON to this exact file path:** `/alfred-data/alfred-curator-<id>-manifest.json`
+    if not manifest_path:
+        m = re.search(r'/alfred-data/alfred-curator-[0-9a-f]+-manifest\.json', prompt)
+        if m:
+            manifest_path = m.group(0)
+            print(f"[openclaw-wrapper] extracted manifest_path from prompt: {manifest_path}", file=sys.stderr)
+
+    gateway_url, token = resolve_gateway()
+
+    # Debug: log what we resolved (visible in alfred container logs)
+    token_preview = f"{token[:8]}...{token[-4:]}" if len(token) > 12 else "(empty)"
+    print(f"[openclaw-wrapper] gateway={gateway_url} token={token_preview} agent={agent_id} prompt_len={len(prompt)}", file=sys.stderr)
+
+    if not token:
+        print("Error: no gateway token found", file=sys.stderr)
+        sys.exit(1)
+
+    # Step 1: Spawn the agent session (with retry for gateway startup)
+    spawn_data = None
+    last_error = None
+    for attempt in range(6):  # 6 attempts, ~30s total
+        try:
+            spawn_data = invoke_tool(
+                gateway_url,
+                token,
+                "sessions_spawn",
+                {
+                    "task": prompt,
+                    "agentId": agent_id or "main",
+                    "mode": "run",
+                    "cleanup": "keep",
+                    "sandbox": "inherit",
+                    "runTimeoutSeconds": 480,
+                },
+                timeout=30,
+            )
+            break  # success
+        except urllib.error.HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            # Retry on 401/503 — gateway may still be initializing auth
+            if e.code in (401, 503) and attempt < 5:
+                print(f"[openclaw-wrapper] retry {attempt+1}/5: HTTP {e.code}", file=sys.stderr)
+                time.sleep(5)
+                continue
+            print(f"sessions_spawn failed ({e.code}): {body}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            last_error = e
+            if attempt < 5:
+                print(f"[openclaw-wrapper] retry {attempt+1}/5: {e}", file=sys.stderr)
+                time.sleep(5)
+            else:
+                print(f"sessions_spawn error after 6 attempts: {e}", file=sys.stderr)
+                sys.exit(1)
+
+    if spawn_data is None:
+        print(f"sessions_spawn failed: {last_error}", file=sys.stderr)
+        sys.exit(1)
+
+    session_key = extract_session_key(spawn_data)
+    if not session_key:
+        # Spawn returned but no session key — soft failure.  Exit 0 so the
+        # curator daemon still marks the file as processed (issue #107).
+        print(f"No session key in response: {json.dumps(spawn_data)}", file=sys.stderr)
+        print('{"error": "no_session_key", "message": "sessions_spawn did not return a childSessionKey"}')
+        sys.exit(0)
+
+    # Step 2: Poll sessions_history for the result
+    max_attempts = 60  # 60 * 10s = 600s max (matches wrapper timeout)
+    for attempt in range(max_attempts):
+        time.sleep(10)
+        try:
+            hist_data = invoke_tool(
+                gateway_url,
+                token,
+                "sessions_history",
+                {"sessionKey": session_key, "limit": 10},
+                timeout=15,
+            )
+        except Exception:
+            continue
+
+        text = extract_last_assistant_message(hist_data)
+        if text:
+            # Return the agent's response on stdout
+            print(text)
+
+            # Append manifest JSON so the pipeline can parse it from stdout.
+            # Three sources, in priority order:
+            #
+            # 1. The manifest FILE on the shared /tmp volume (agent wrote it
+            #    via cat/Write tool; visible because shared_tmp Docker volume)
+            # 2. The manifest JSON extracted from the agent's tool-use calls
+            #    in the conversation history (works even when the file write
+            #    landed in an isolated sandbox and is not on the shared volume)
+            # 3. Nothing — the pipeline will attempt its own regex parse of
+            #    stdout, which may or may not succeed.
+            manifests = collect_manifest_files(manifest_path or None)
+            if not manifests:
+                # Fallback: extract from conversation history tool calls
+                hist_manifest = extract_manifest_from_history(hist_data)
+                if hist_manifest:
+                    manifests = [hist_manifest]
+                    print("[openclaw-wrapper] manifest extracted from conversation history", file=sys.stderr)
+
+            for m in manifests:
+                print(_MANIFEST_DELIMITER, end="")
+                print(m)
+
+            sys.exit(0)
+
+    # Timeout is a soft failure — the agent may have done useful work (created
+    # files, written to the vault) even though we never got a final response.
+    # Exit 0 so the curator daemon does NOT skip mark_processed.  If we exit 1
+    # here, the daemon's pipeline sees a non-zero exit, the pipeline may raise,
+    # and the file stays in inbox forever (issue #107).
+    print("Timed out waiting for agent response", file=sys.stderr)
+    print('{"error": "timeout", "message": "Agent session timed out before returning a response"}')
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,45 @@
+---
+title: "Approve Device"
+description: "Approve a pending device pairing request"
+api: "POST /api/v1/devices/{requestId}/approve"
+---
+
+Approves a pending device pairing request, allowing the device to connect to the OpenClaw gateway.
+
+<ParamField path="requestId" type="string" required>
+  The unique identifier of the pending pairing request to approve.
+</ParamField>
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<ParamField body="latest" type="boolean" default={false}>
+  If true, approve only if this is the most recent request from this device. Prevents approval of stale requests.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/req_7k9m3p2q1/approve \
+  --header 'Authorization: Bearer YOUR_API_KEY' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "latest": true
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "message": "Device approved successfully",
+  "deviceId": "dev_n5m4k3j2h1",
+  "requestId": "req_7k9m3p2q1"
+}
+```
+
+</ResponseExample>

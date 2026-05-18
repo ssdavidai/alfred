@@ -1,0 +1,80 @@
+---
+title: "Run Diagnostics"
+description: "Run health checks and auto-fixes for OpenClaw gateway"
+api: "POST /api/v1/openclaw/doctor"
+---
+
+Runs comprehensive health checks across the OpenClaw gateway and attempts to auto-fix any detected issues. Returns a detailed diagnostic report.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/openclaw/doctor \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "healthy",
+  "timestamp": "2026-02-26T14:40:15Z",
+  "checksRun": 12,
+  "checksPassed": 11,
+  "checksWarning": 1,
+  "checksFailed": 0,
+  "issuesFixed": 2,
+  "results": [
+    {
+      "check": "database_integrity",
+      "status": "passed",
+      "message": "Database integrity verified"
+    },
+    {
+      "check": "filesystem_permissions",
+      "status": "passed",
+      "message": "All filesystem permissions correct"
+    },
+    {
+      "check": "device_token_expiry",
+      "status": "warning",
+      "message": "1 device token expires within 7 days",
+      "details": {
+        "deviceId": "dev_a1b2c3d4e5",
+        "expiresAt": "2026-03-02T09:15:42Z"
+      }
+    },
+    {
+      "check": "orphaned_sessions",
+      "status": "fixed",
+      "message": "Cleaned up 2 orphaned sessions",
+      "details": {
+        "sessionsRemoved": 2
+      }
+    },
+    {
+      "check": "agent_states",
+      "status": "passed",
+      "message": "All agent states consistent"
+    },
+    {
+      "check": "disk_space",
+      "status": "passed",
+      "message": "Sufficient disk space available (54.4% free)"
+    }
+  ],
+  "recommendations": [
+    "Consider rotating device token for dev_a1b2c3d4e5 before expiry",
+    "Schedule regular doctor runs via cron for proactive maintenance"
+  ]
+}
+```
+
+</ResponseExample>

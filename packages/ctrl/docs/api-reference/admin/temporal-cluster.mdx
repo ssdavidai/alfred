@@ -1,0 +1,46 @@
+---
+title: "Describe Temporal Cluster"
+description: "Get Temporal cluster information and configuration"
+api: "GET /api/v1/admin/temporal/cluster"
+---
+
+Retrieve information about the Temporal cluster, including cluster metadata, configuration, and health. Returns the output of `temporal operator cluster describe`.
+
+<RequestExample>
+
+```bash curl
+curl -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/temporal/cluster
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "clusterName": "alfred-temporal",
+  "historyShardCount": 4,
+  "clusterId": "abc123-def456-ghi789",
+  "versionInfo": {
+    "current": {
+      "version": "1.24.2",
+      "buildDate": "2024-01-15T12:00:00Z"
+    }
+  },
+  "persistenceStore": "sqlite",
+  "visibilityStore": "sqlite",
+  "supportedClients": {
+    "go": "1.24.0",
+    "java": "1.23.0",
+    "python": "1.4.0",
+    "typescript": "1.9.0"
+  }
+}
+```
+
+</ResponseExample>
+
+<Note>
+  The Alfred Temporal instance runs in development mode with SQLite persistence. This is suitable for single-node deployments but should be migrated to PostgreSQL for production workloads or high-volume operations.
+</Note>

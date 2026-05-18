@@ -1,0 +1,50 @@
+// Tailscale ACL Policy for Alfred Fleet
+//
+// Deploy this policy at: https://login.tailscale.com/admin/acls/file
+//
+// Architecture:
+//   - tag:admin     = Control plane VM (alfred-control, runs SaaS app + alfred-ctrl)
+//   - tag:tenant    = All tenant VMs (alfred-{customer_name})
+//
+// Access model:
+//   - Admin can access all tenant VMs (SSH, API, Temporal UI)
+//   - Tenant VMs CANNOT reach each other (implicit deny)
+//   - Tenant VMs CANNOT initiate connections to admin
+//   - User-facing access goes through Cloudflare Tunnel (not Tailscale)
+//
+{
+  "tagOwners": {
+    "tag:admin": ["autogroup:admin"],
+    "tag:tenant": ["tag:admin"]
+  },
+
+  "acls": [
+    // Admin (control plane) can access all services on tenant VMs
+    {
+      "action": "accept",
+      "src": ["tag:admin"],
+      "dst": ["tag:tenant:*"]
+    },
+
+    // Admin can access other admin devices (for multi-admin setups)
+    {
+      "action": "accept",
+      "src": ["tag:admin"],
+      "dst": ["tag:admin:*"]
+    }
+
+    // No tenant-to-tenant or tenant-to-admin rules = implicit deny
+    // Tailscale's stateful firewall allows return traffic for
+    // admin-initiated connections automatically
+  ],
+
+  "ssh": [
+    // Admin can SSH to tenant VMs as deploy user
+    {
+      "action": "accept",
+      "src": ["tag:admin"],
+      "dst": ["tag:tenant"],
+      "users": ["deploy"]
+    }
+  ]
+}

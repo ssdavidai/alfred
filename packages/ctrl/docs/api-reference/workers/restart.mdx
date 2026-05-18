@@ -1,0 +1,68 @@
+---
+title: "Restart Container"
+description: "Restart the Alfred Docker container"
+api: "POST /api/v1/workers/restart"
+---
+
+Restarts the entire Alfred Docker container. This is a hard restart that stops all workers, terminates the container, and starts it fresh. Use this for applying configuration changes or recovering from severe errors.
+
+<Info>
+  This operation will cause brief downtime (typically 10-30 seconds) while the container restarts.
+</Info>
+
+<RequestExample>
+
+```bash cURL
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/restart \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json"
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "message": "Alfred container restarted successfully",
+  "container_id": "a1b2c3d4e5f6",
+  "restart_time_ms": 15432,
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+```json Error Response
+{
+  "status": "error",
+  "message": "Container restart failed",
+  "error": "Container failed to start: health check timeout",
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Operation status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message
+</ResponseField>
+
+<ResponseField name="container_id" type="string">
+  Docker container ID (short format)
+</ResponseField>
+
+<ResponseField name="restart_time_ms" type="number">
+  Total time taken to restart in milliseconds
+</ResponseField>
+
+<ResponseField name="error" type="string" optional>
+  Detailed error message (only present on error)
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of operation
+</ResponseField>

@@ -1,0 +1,56 @@
+---
+title: "Describe Workflow"
+description: "Get detailed information about a specific workflow execution"
+api: "GET https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows/{wfId}"
+---
+
+Returns comprehensive details about a workflow execution, including status, timing, and current state.
+
+<ParamField path="wfId" type="string" required>
+  The workflow ID to describe
+</ParamField>
+
+<ParamField query="run_id" type="string" optional>
+  Specific run ID to describe. If omitted, describes the most recent run of this workflow ID.
+</ParamField>
+
+<RequestExample>
+```bash cURL
+# Describe latest run
+curl -X GET \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows/curator-sweep-20260226-143022
+
+# Describe specific run
+curl -X GET \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  "https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows/curator-sweep-20260226-143022?run_id=f47ac10b-58cc-4372-a567-0e02b2c3d479"
+```
+</RequestExample>
+
+<ResponseExample>
+```json 200 OK
+{
+  "workflowId": "curator-sweep-20260226-143022",
+  "runId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "type": "CuratorWorkflow",
+  "status": "Running",
+  "startTime": "2026-02-26T14:30:22.154Z",
+  "executionTime": "PT2M15S",
+  "taskQueue": "alfred-curator",
+  "input": {
+    "vault_path": "/app/data/vault",
+    "inbox_path": "/app/data/vault/inbox",
+    "sweep_interval": 300
+  },
+  "pendingActivities": [
+    {
+      "activityId": "process-inbox-item-1",
+      "activityType": "ProcessInboxItemActivity",
+      "state": "Started",
+      "attempt": 1
+    }
+  ]
+}
+```
+</ResponseExample>

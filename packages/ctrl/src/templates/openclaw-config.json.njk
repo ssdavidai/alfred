@@ -1,0 +1,113 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openrouter/x-ai/grok-4.1-fast"
+      },
+      "contextLimits": {
+        "toolResultMaxChars": 160000
+      },
+      "bootstrapMaxChars": 40000,
+      "bootstrapTotalMaxChars": 200000,
+      "heartbeat": {
+        "every": "4h",
+        "prompt": "Read HEARTBEAT.md if it exists. Follow it strictly. Additionally: scan recent conversation for any new people, pets, places, or organizations not yet in MEMORY.md — add them as one-line entity facts now. If nothing needs attention and no new entities, reply HEARTBEAT_OK."
+      },
+      "compaction": {
+        "memoryFlush": {
+          "enabled": true,
+          "softThresholdTokens": 60000,
+          "prompt": "CRITICAL: Do ALL of the following before compaction:\n1. Write detailed conversation summary to memory/YYYY-MM-DD.md\n2. Write memory/current-task.md with current task breakdown\n3. Save last ~20 human+assistant messages to memory/pre-compact-dialogue.md\n4. Update MEMORY.md with any NEW entity facts from this session\nReply with NO_REPLY after writing all files."
+        }
+      },
+      "subagents": {
+        "model": "openrouter/x-ai/grok-4.1-fast"
+      }
+    },
+    "list": [
+      {
+        "id": "main",
+        "name": "Alfred",
+        "model": {"primary": "openrouter/x-ai/grok-4.1-fast"},
+        "workspace": "/home/node/.openclaw/workspace",
+        "subagents": { "allowAgents": ["*"] }
+      }
+    ]
+  },
+  "memory": {
+    "backend": "qmd",
+    "citations": "auto",
+    "qmd": {
+      "searchMode": "search",
+      "includeDefaultMemory": true,
+      "paths": [
+        {"path": "{{ vault_path }}", "name": "vault", "pattern": "**/*.md"}
+      ],
+      "update": {"interval": "5m", "debounceMs": 15000, "onBoot": true},
+      "limits": {"maxResults": 8, "timeoutMs": 5000}
+    }
+  },
+  "hooks": {
+    "internal": {
+      "enabled": true,
+      "entries": {
+        "alfred-inbox": {
+          "enabled": true,
+          "flushTurns": 10,
+          "flushIdleMs": 300000
+        },
+        "alfred-learn-observer": {
+          "enabled": true
+        },
+        "alfred-learn-media": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "gateway": {
+    "port": 18789,
+    "bind": "lan",
+    "auth": {
+      "mode": "token",
+      {% if gateway_token %}"token": "{{ gateway_token }}",{% endif %}
+      "allowTailscale": true
+    },
+    "controlUi": {
+      "enabled": true,
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": { "enabled": true },
+        "responses": { "enabled": true }
+      }
+    },
+    "tools": {
+      "allow": ["message", "sessions_send", "sessions_spawn", "sessions_history", "sessions_list", "ctrl_vault_read", "ctrl_vault_create", "ctrl_vault_update", "ctrl_vault_search", "ctrl_vault_list", "ctrl_stream_ingest"]
+    }
+  },
+  "tools": {
+    "sessions": {
+      "visibility": "all"
+    },
+    "agentToAgent": {
+      "enabled": true,
+      "allow": ["*"]
+    }
+  },
+  "plugins": {
+    "entries": {
+      "memory-core": {
+        "enabled": true,
+        "config": {
+          "dreaming": {
+            "enabled": true,
+            "frequency": "0 3 * * *",
+            "timezone": "UTC"
+          }
+        }
+      }
+    }
+  }
+}

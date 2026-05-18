@@ -1,0 +1,2455 @@
+# Phase 6.7 regression fixture for the signal extractor.
+#
+# 100 hand-crafted stream-event examples grounded in real shapes from
+# david's vault (under /mnt/encrypted/vault/stream_event/) and a few
+# synthetic edge cases. Each example carries:
+#
+#   id, description, stream_event_frontmatter, stream_event_body,
+#   expected.{should_produce_signal, effect, target_kind,
+#             target_path_contains, mutation_decision,
+#             target_confidence_min, effect_confidence_min, notes}
+#
+# Distribution (positives first, then negatives):
+#
+#   POSITIVES (60)
+#     gmail            10   (ex_001..ex_010)
+#     slack             8   (ex_011..ex_018)
+#     omi               6   (ex_019..ex_024)
+#     openclaw-chat     8   (ex_025..ex_032)
+#     vexa              6   (ex_033..ex_038)
+#     sure              6   (ex_039..ex_044)
+#     gcal              6   (ex_045..ex_050)
+#     plane             6   (ex_051..ex_056)
+#     vault_edit        4   (ex_057..ex_060)
+#
+#   NEGATIVES (40)
+#     newsletters       8   (ex_061..ex_068)
+#     questions         4   (ex_069..ex_072)
+#     hypotheticals     4   (ex_073..ex_076)
+#     narrations        5   (ex_077..ex_081)
+#     auto-replies      3   (ex_082..ex_084)
+#     domestic-chatter  3   (ex_085..ex_087)
+#     short/empty       3   (ex_088..ex_090)
+#     informational     5   (ex_091..ex_095)
+#     gcal-noise        2   (ex_096..ex_097)
+#     plane-self-echo   3   (ex_098..ex_100)
+#
+# Synthetic-vs-real:
+#   Most positives are derived from real david records (shape, sender
+#   patterns, language); a handful (vexa, sure, vault_edit) are
+#   plausible-construction because david has no live records on those
+#   source types yet — those are flagged with synthetic: true.
+#
+# Schema rules every fixture follows:
+#   - should_produce_signal: bool. True when the LLM output's effect is
+#     "mutation" or "action". False when effect == "none".
+#   - effect: "mutation" | "action" | "none".
+#   - target_kind: "task" | "matter" | null.
+#   - target_path_contains: list[str] of substring hints — at least one
+#     must appear in the resolved target_path. null when no specific
+#     target is expected.
+#   - mutation_decision: substring hint into mutation_proposal.decision
+#     when effect=mutation; null otherwise.
+#   - target_confidence_min / effect_confidence_min: floats; the
+#     extractor's stamped values must be >= these.
+#   - notes: human-readable note explaining the case (also surfaced in
+#     test failure output).
+
+# ===========================================================================
+# POSITIVES — gmail (10)
+# ===========================================================================
+
+- id: ex_001_gmail_payment_failed_anthropic
+  description: "Real shape — repeat-failure billing email from Anthropic. Should produce action."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    source_ref: "composio:19daf0305fb819be"
+    from: '"Anthropic, PBC" <failed-payments@mail.anthropic.com>'
+    subject: "Anthropic, PBC: $200.00 payment to Anthropic, PBC was unsuccessful again"
+    created: "2026-04-21T09:18:14Z"
+  stream_event_body: |
+    **From**: "Anthropic, PBC" <failed-payments@mail.anthropic.com>
+    **To**: alfred@example.com
+
+    We weren't able to charge the credit card you provided for your
+    Anthropic Max subscription. Please update your payment method to
+    keep the subscription active.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Failed-payment email — clear external action required."
+
+- id: ex_002_gmail_invoice_hungarian
+  description: "Real shape — Hungarian medical invoice with payment deadline. Action."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: '"Acme Clinic Kft." <villanyi.medical@invoicing.example.com>'
+    subject: "Számla és köszönetnyilvánítás"
+    created: "2026-05-05T08:00:00Z"
+  stream_event_body: |
+    **From**: "Acme Clinic Kft." <villanyi.medical@invoicing.example.com>
+    **To**: owner@example.com
+
+    Tisztelt Páciensünk! Mellékelten küldjük a kórházi vizsgálathoz
+    tartozó számlát. Kérjük, hogy a fizetést a megadott határidőig
+    teljesítse.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Real invoice with deadline → action."
+
+- id: ex_003_gmail_student_loan_arrears
+  description: "Real shape — Example Loans arrears notice. Action."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: noreply@example-loans.com
+    subject: "Értesítés hátralékos tartozásról"
+    created: "2026-04-22T17:38:29Z"
+  stream_event_body: |
+    **From**: noreply@example-loans.com
+    **To**: OWNER@example.com
+
+    Tisztelt Ügyfelünk! Tájékoztatjuk, hogy hátralékos tartozása van
+    a Example Loans1 termékből. Kérjük, hogy a tartozást mielőbb rendezze,
+    különben behajtási eljárást indítunk.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Arrears notice with collection threat — clear action."
+
+- id: ex_004_gmail_github_pr_failure
+  description: "Real shape — GitHub PR run failed notification."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: Jane Doe <notifications@github.com>
+    subject: "[ssdavidai/alfred-platform] PR run failed: CI Build + Test (PR)"
+    created: "2026-05-04T10:45:12Z"
+  stream_event_body: |
+    **From**: Jane Doe <notifications@github.com>
+    **To**: "ssdavidai/alfred-platform" <alfred-platform@noreply.github.com>
+
+    Run failed at startup for branch fix(learn): graceful fallthrough.
+    The CI Build + Test (PR) workflow exited with status code 1 in
+    the test step. Please review the logs.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "CI failure — work to do; either fix or auto-create."
+
+- id: ex_005_gmail_business_partner_request
+  description: "Real shape — direct email from business partner asking for company data."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: '"ATROX_Sam Lee" <vendor@example.com>'
+    subject: "Re: cegadatok"
+    created: "2026-05-06T08:23:50Z"
+  stream_event_body: |
+    **From**: "ATROX_Sam Lee" <vendor@example.com>
+    **To**: Jane Doe <owner@example.com>
+
+    Szia Dávid! A Example Kft. cégbejegyzéséhez kérlek küldd át
+    a tulajdonosi struktúrát és a TAJ számokat. Sürgős, mert a
+    határidő holnap.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Direct human ask with deadline — clearly an action."
+
+- id: ex_006_gmail_calendar_meeting_request
+  description: "Real shape — gcal-style invite via gmail. Action."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: invitations@google.com
+    subject: "Invitation: Strategy review @ Mon May 10, 2026 4pm (CEST)"
+    created: "2026-05-06T09:00:00Z"
+  stream_event_body: |
+    **From**: Alex Kim via Google Calendar <invitations@google.com>
+    **To**: owner@example.com
+
+    Alex Kim has invited you to "Strategy review" on Monday May 10, 2026
+    from 4:00pm to 5:00pm. Please respond yes/no/maybe.
+
+    Other attendees: maya@example.com, owner@example.com.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Calendar invite needing RSVP — action."
+
+- id: ex_007_gmail_account_security_alert
+  description: "Real shape — security alert that requires Sir confirm or revoke."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: "no-reply@accounts.google.com"
+    subject: "Security alert: new sign-in on your Google Account"
+    created: "2026-05-04T22:05:00Z"
+  stream_event_body: |
+    **From**: Google <no-reply@accounts.google.com>
+    **To**: owner@example.com
+
+    A new sign-in to your Google Account owner@example.com from a
+    Linux device in Berlin, Germany. If this wasn't you, secure your
+    account immediately.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Security alert that needs confirm or revoke — action."
+
+- id: ex_008_gmail_outbound_send_with_decision
+  description: "Sir's own outbound mail confirming a task is done. Mutation."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: owner@example.com
+    subject: "Re: deposit transfer"
+    created: "2026-05-03T14:12:00Z"
+  stream_event_body: |
+    **From**: Jane Doe <owner@example.com>
+    **To**: user@example.com
+
+    Confirmed — sent the EUR 12,300 deposit to the Acme Cloud account
+    today. We can now mark the cluster-bringup task as done. I'll
+    update the project tracker tonight.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: null
+    mutation_decision: likely_done
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Sir's outbound confirms an existing task is done."
+
+- id: ex_009_gmail_legal_doc_review_request
+  description: "Lawyer asks Sir to review a contract attachment. Action."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: '"Dr. Smith" <lawyer@example.com>'
+    subject: "Munkaszerződés-tervezet áttekintésre"
+    created: "2026-04-30T11:00:00Z"
+  stream_event_body: |
+    **From**: Dr. Smith <lawyer@example.com>
+    **To**: owner@example.com
+
+    Mellékelten küldöm a Example Kft. munkaszerződés-tervezetét.
+    Kérlek, hogy a héten nézd át és jelezd vissza, ha bármi
+    módosítást kérsz a 3. és 5. paragrafus körül.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Lawyer asks Sir to review and reply — action."
+
+- id: ex_010_gmail_subscription_cancellation_confirm
+  description: "Email confirming Sir cancelled an old subscription. Mutation."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: "support@acme-notes.ai"
+    subject: "Your Acme Notes subscription has been cancelled"
+    created: "2026-05-02T10:30:00Z"
+  stream_event_body: |
+    **From**: Acme Notes Support <support@acme-notes.ai>
+    **To**: owner@example.com
+
+    Hi Sir, this confirms that your Acme Notes Pro subscription has
+    been cancelled per your request. You'll retain access until the
+    end of your current billing cycle (May 28, 2026).
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-notes"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Confirmation that Sir-driven cancellation happened — closes a renew/cancel-decision task."
+
+# ===========================================================================
+# POSITIVES — slack (8) (synthetic-construction; david has no slack live yet)
+# ===========================================================================
+
+- id: ex_011_slack_dm_direct_ask
+  synthetic: true
+  description: "Slack DM from co-founder asking Sir to make a decision."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: slack
+    channel: dm-anna
+    from: "Anna"
+    created: "2026-05-05T09:00:00Z"
+  stream_event_body: |
+    **Channel**: dm-anna
+    **From**: Anna
+
+    Hey, can you sign off on the Acme Cloud cluster sizing doc by EOD?
+    I need it for the Wednesday board pre-read.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Direct DM ask with deadline — action."
+
+- id: ex_012_slack_dm_decision_confirm
+  synthetic: true
+  description: "Slack DM where Sir confirms a task is done."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: slack
+    channel: dm-anna
+    from: "david"
+    created: "2026-05-05T17:30:00Z"
+  stream_event_body: |
+    **Channel**: dm-anna
+    **From**: david
+
+    Done — pushed the cluster sizing doc to confluence. The
+    cluster-bringup matter is closed from my side.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Sir says the matter is closed."
+
+- id: ex_013_slack_explicit_dismissal
+  synthetic: true
+  description: "Sir says drop a workstream entirely."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: slack
+    channel: dm-team
+    from: "david"
+    created: "2026-05-04T10:00:00Z"
+  stream_event_body: |
+    **Channel**: dm-team
+    **From**: david
+
+    Drop the Acme Video billing automation track entirely — we're cancelling
+    that subscription this month, no point automating it.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-video"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Explicit dismissal — kill the task."
+
+- id: ex_014_slack_blocked_on_someone
+  synthetic: true
+  description: "Sir says a task is waiting on counterparty."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: slack
+    channel: dm-anna
+    from: "david"
+    created: "2026-05-03T15:20:00Z"
+  stream_event_body: |
+    **Channel**: dm-anna
+    **From**: david
+
+    The Acme Clinic invoice payment is blocked until we get the IBAN
+    confirmation from their accountant. Parking it for now.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-clinic"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Task is blocked on external party."
+
+- id: ex_015_slack_reframing
+  synthetic: true
+  description: "Sir says a task is about something else than its title."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: slack
+    channel: dm-team
+    from: "david"
+    created: "2026-05-02T11:00:00Z"
+  stream_event_body: |
+    **Channel**: dm-team
+    **From**: david
+
+    The "investigate Acme Shop duplicate orders" task isn't really
+    about duplicates — it's about webhook retries firing twice. Let's
+    rename and rescope.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-shop"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Reframing existing task."
+
+- id: ex_016_slack_matter_membership
+  synthetic: true
+  description: "Sir says a task belongs under a different matter."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: slack
+    channel: dm-team
+    from: "david"
+    created: "2026-05-01T14:00:00Z"
+  stream_event_body: |
+    **Channel**: dm-team
+    **From**: david
+
+    The "configure CloudFront for assets" task should live under the
+    Alfred product launch matter, not under the cost-cutting matter.
+    Re-parent it.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["cloudfront"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Sir reparents an existing task."
+
+- id: ex_017_slack_pay_request_with_amount
+  synthetic: true
+  description: "Slack DM with a Splitwise-style pay request."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: slack
+    channel: dm-anna
+    from: "Anna"
+    created: "2026-05-05T19:00:00Z"
+  stream_event_body: |
+    **Channel**: dm-anna
+    **From**: Anna
+
+    Can you Example Bank me €312 for the joint Acme Cloud bill this month?
+    No rush, just before Friday.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Direct pay request with amount + deadline — action."
+
+- id: ex_018_slack_status_update_done
+  synthetic: true
+  description: "Counterparty confirms a Sir-relevant task is done — mutation on Sir's side."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: slack
+    channel: dm-anna
+    from: "Anna"
+    created: "2026-05-04T16:00:00Z"
+  stream_event_body: |
+    **Channel**: dm-anna
+    **From**: Anna
+
+    All set — I shipped the cloud-init revision and tested it against
+    the tenant-a tenant. The "validate cloud-init" task on your side
+    can be closed.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["cloud-init"]
+    mutation_decision: likely_done
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Counterparty confirms work is done — Sir-side task closes."
+
+# ===========================================================================
+# POSITIVES — omi (6)
+# ===========================================================================
+
+- id: ex_019_omi_explicit_decision
+  description: "OMI capture of Sir making an explicit decision out loud."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-04-29 — 10:14"
+    speaker_attribution: ambient
+    created: "2026-04-29T10:14:00Z"
+  stream_event_body: |
+    Okay so I've decided — we're not pursuing the Acme Notes integration.
+    Cancel the trial subscription and close that whole track. Move on
+    to the Acme Audio evaluation instead.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-notes"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.4
+    notes: "Explicit out-loud decision to dismiss + a follow-on. Acceptable as either mutation or action; we accept mutation."
+
+- id: ex_020_omi_meeting_action_capture
+  description: "Sir narrates an action item he agreed to during a meeting."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-04-30 — 14:30"
+    speaker_attribution: ambient
+    created: "2026-04-30T14:35:00Z"
+  stream_event_body: |
+    Right — so I committed to send Anna the cluster sizing doc by
+    Wednesday. Need to actually do that. Also told her I'd review the
+    legal entity restructure draft from Smith by end of week.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.4
+    notes: "Sir captured a commitment — should produce action."
+
+- id: ex_021_omi_resolution
+  description: "Sir says a problem is now resolved."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-05-01 — 09:00"
+    speaker_attribution: ambient
+    created: "2026-05-01T09:01:00Z"
+  stream_event_body: |
+    Okay, the Acme Cloud billing issue from last week — that's resolved.
+    They confirmed the credit, account is back active. We can close
+    that task.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-cloud"]
+    mutation_decision: likely_done
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.4
+    notes: "Sir explicitly closes a task."
+
+- id: ex_022_omi_create_matter
+  description: "Sir says a topic deserves its own matter."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-05-02 — 11:00"
+    speaker_attribution: ambient
+    created: "2026-05-02T11:01:00Z"
+  stream_event_body: |
+    The Berlin office relocation thing — that should be its own
+    matter. It's bleeding into household-life and conflating two
+    really different threads. Spin one up.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: create_matter
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.4
+    notes: "Sir asks for a new matter — matter_creation."
+
+- id: ex_023_omi_park_matter
+  description: "Sir says park a matter for now."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-05-03 — 18:00"
+    speaker_attribution: ambient
+    created: "2026-05-03T18:01:00Z"
+  stream_event_body: |
+    Park the openclaw billing-automation matter for now. We're not
+    investing in that until Q3 at the earliest. Drop everything
+    underneath it from active.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: matter
+    target_path_contains: ["openclaw", "billing"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.4
+    notes: "matter_state_change — park."
+
+- id: ex_024_omi_blocked
+  description: "Sir says a task is blocked on something."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-05-04 — 08:00"
+    speaker_attribution: ambient
+    created: "2026-05-04T08:00:00Z"
+  stream_event_body: |
+    The cap-table cleanup is blocked on Smith sending the updated
+    tulajdonosi struktúra PDF. Mark it as waiting; we can't move
+    forward until that lands.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["cap-table"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.4
+    notes: "task_blocked_on."
+
+# ===========================================================================
+# POSITIVES — openclaw-chat (8)
+# ===========================================================================
+
+- id: ex_025_openclaw_chat_create_matter
+  description: "Sir directly tells Alfred to spin up a matter."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: openclaw-chat
+    session_id: "phase6-7-test-1"
+    created: "2026-05-06T09:00:00Z"
+  stream_event_body: |
+    **Channel**: dashboard
+    **Session**: phase6-7-test-1
+
+    ### Sir
+    Hey Alfred — the Berlin trip planning conversations should be their
+    own matter, not buried under household-life. Spin one up.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: create_matter
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Direct Sir → Alfred command, matter_creation."
+
+- id: ex_026_openclaw_chat_resolve_task
+  description: "Sir tells Alfred a task is done."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: openclaw-chat
+    session_id: "phase6-7-test-2"
+    created: "2026-05-06T09:05:00Z"
+  stream_event_body: |
+    **Channel**: dashboard
+
+    ### Sir
+    Alfred — the Acme Cloud billing dispute is resolved, they credited the
+    account. Close that task.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-cloud"]
+    mutation_decision: likely_done
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Direct task_resolution."
+
+- id: ex_027_openclaw_chat_dismiss_task
+  description: "Sir tells Alfred to drop a workstream."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: openclaw-chat
+    session_id: "phase6-7-test-3"
+    created: "2026-05-06T09:10:00Z"
+  stream_event_body: |
+    **Channel**: dashboard
+
+    ### Sir
+    Drop the whole Acme Video migration thing. Cancel the subscription, close
+    every task underneath it.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-video"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "task_dismissal."
+
+- id: ex_028_openclaw_chat_reframe_task
+  description: "Sir tells Alfred a task is really about X."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: openclaw-chat
+    session_id: "phase6-7-test-4"
+    created: "2026-05-06T09:15:00Z"
+  stream_event_body: |
+    **Channel**: dashboard
+
+    ### Sir
+    The "Acme Shop duplicate orders" task isn't really about duplicates —
+    it's about webhook retries firing twice. Rename and rescope it.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-shop"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "task_reframing via direct chat."
+
+- id: ex_029_openclaw_chat_park_matter
+  description: "Sir tells Alfred to park a matter."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: openclaw-chat
+    session_id: "phase6-7-test-5"
+    created: "2026-05-06T09:20:00Z"
+  stream_event_body: |
+    **Channel**: dashboard
+
+    ### Sir
+    Park the openclaw billing-automation matter for the rest of Q2. Move
+    it to inactive, no work happening there.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: matter
+    target_path_contains: ["openclaw"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "matter_state_change — park."
+
+- id: ex_030_openclaw_chat_action_request
+  description: "Sir asks Alfred to do something specific."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: openclaw-chat
+    session_id: "phase6-7-test-6"
+    created: "2026-05-06T09:25:00Z"
+  stream_event_body: |
+    **Channel**: dashboard
+
+    ### Sir
+    Alfred — please send the Acme Clinic invoice IBAN confirmation request
+    to their accountant. Use the templated email under the household
+    cash-flow matter.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: matter
+    target_path_contains: ["acme-clinic"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Direct action assignment."
+
+- id: ex_031_openclaw_chat_blocked_on
+  description: "Sir tells Alfred a task is blocked."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: openclaw-chat
+    session_id: "phase6-7-test-7"
+    created: "2026-05-06T09:30:00Z"
+  stream_event_body: |
+    **Channel**: dashboard
+
+    ### Sir
+    The cap-table cleanup task is blocked on Smith sending the updated
+    tulajdonosi struktúra PDF. Mark it waiting until that lands.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["cap-table"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "task_blocked_on."
+
+- id: ex_032_openclaw_chat_membership
+  description: "Sir tells Alfred a task belongs under a different matter."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: openclaw-chat
+    session_id: "phase6-7-test-8"
+    created: "2026-05-06T09:35:00Z"
+  stream_event_body: |
+    **Channel**: dashboard
+
+    ### Sir
+    The "configure CloudFront" task belongs under the Alfred product
+    launch matter, not under cost-cutting. Re-parent it.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["cloudfront"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "matter_membership."
+
+# ===========================================================================
+# POSITIVES — vexa (6) (synthetic — no live vexa stream events on david)
+# ===========================================================================
+
+- id: ex_033_vexa_sir_commitment
+  synthetic: true
+  description: "Vexa transcript — Sir commits to send something."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: vexa
+    name: "Vexa transcript — Strategy review 2026-05-04"
+    created: "2026-05-04T16:00:00Z"
+  stream_event_body: |
+    [Sir]: Yeah, I'll send the cluster sizing doc to Anna by EOD
+    Wednesday. I have it 80% drafted already.
+    [Anna]: Perfect, I'll wait for it.
+    [Sir]: And I'll loop in Alex Kim on the legal entity question.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Sir committed in meeting → action."
+
+- id: ex_034_vexa_sir_decision
+  synthetic: true
+  description: "Vexa — Sir decides on the call to drop a workstream."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: vexa
+    name: "Vexa — leadership sync 2026-05-05"
+    created: "2026-05-05T14:00:00Z"
+  stream_event_body: |
+    [Anna]: Should we keep investing in the Acme Notes integration?
+    [Sir]: No — let's drop it. We'll go with Acme Audio instead. Close
+    the Acme Notes track.
+    [Anna]: Got it.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-notes"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Sir decision in meeting → task_dismissal."
+
+- id: ex_035_vexa_sir_resolves
+  synthetic: true
+  description: "Vexa — Sir notes a task is done."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: vexa
+    name: "Vexa — eng standup 2026-05-04"
+    created: "2026-05-04T09:30:00Z"
+  stream_event_body: |
+    [Sir]: The Acme Cloud billing dispute — they credited us yesterday,
+    so that's closed out. Account is back active.
+    [Alex Kim]: Good. Moving on.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-cloud"]
+    mutation_decision: likely_done
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "task_resolution from meeting."
+
+- id: ex_036_vexa_counterparty_only
+  synthetic: true
+  description: "Vexa — Sir agrees to counterparty's ask. Action."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: vexa
+    name: "Vexa — partner sync 2026-05-03"
+    created: "2026-05-03T15:00:00Z"
+  stream_event_body: |
+    [Alex Kim]: Could you have the financial model draft ready by Friday?
+    [Sir]: Yeah, I can do that. I'll send it Friday morning your time.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Sir agreed → action commitment."
+
+- id: ex_037_vexa_blocked_on_external
+  synthetic: true
+  description: "Vexa — Sir notes blocking dependency."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: vexa
+    name: "Vexa — board prep 2026-05-02"
+    created: "2026-05-02T17:00:00Z"
+  stream_event_body: |
+    [Sir]: The cap-table cleanup is stuck — Smith hasn't sent the
+    updated tulajdonosi struktúra PDF. We can't move forward on it.
+    Park it for now.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["cap-table"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "task_blocked_on."
+
+- id: ex_038_vexa_matter_creation
+  synthetic: true
+  description: "Vexa — Sir says spin up a new matter."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: vexa
+    name: "Vexa — strategy 2026-05-01"
+    created: "2026-05-01T11:00:00Z"
+  stream_event_body: |
+    [Sir]: The Berlin office relocation is its own beast — let's
+    spin it up as a separate matter rather than keep tucking it under
+    household-life.
+    [Anna]: Agreed.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: create_matter
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "matter_creation from meeting."
+
+# ===========================================================================
+# POSITIVES — sure (6) (synthetic — no live sure events on david)
+# ===========================================================================
+
+- id: ex_039_sure_large_unusual_charge
+  synthetic: true
+  description: "Sure event — unusual large charge needing Sir's review."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: sure
+    name: "Sure transaction — €4,820 to Acme Insurance"
+    created: "2026-05-04T08:00:00Z"
+  stream_event_body: |
+    Transaction: -€4,820.00
+    Counterparty: Acme Insurance Hungary
+    Category: uncategorized
+    Posted: 2026-05-04
+    Note: First time this counterparty appears in 12mo history.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Unusual large charge → action: review/categorize."
+
+- id: ex_040_sure_recurring_match_disagreement
+  synthetic: true
+  description: "Sure flagged a category disagreement on recurring charge."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: sure
+    name: "Sure — category disagreement: Anthropic"
+    created: "2026-05-03T22:00:00Z"
+  stream_event_body: |
+    Recurring match disagreement: this Anthropic charge ($200) is
+    normally categorized as "ai-tools" but the rule engine assigned
+    "household". Please confirm or override.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Categorization needs Sir confirmation → action."
+
+- id: ex_041_sure_failed_payment
+  synthetic: true
+  description: "Sure — failed scheduled payment."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: sure
+    name: "Sure — failed payment: Acme Cloud"
+    created: "2026-05-02T05:00:00Z"
+  stream_event_body: |
+    Scheduled payment failed: -€312 to Acme Cloud. Bank
+    response: insufficient funds. Status: retry_in_24h.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Failed payment → action."
+
+- id: ex_042_sure_double_charge
+  synthetic: true
+  description: "Sure — duplicate charge detected."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: sure
+    name: "Sure — duplicate charge alert"
+    created: "2026-05-01T09:00:00Z"
+  stream_event_body: |
+    Duplicate transaction detected: -€32.40 to "Example Grocer Berlin Mitte"
+    appears twice within 4 minutes today. Likely a POS retry bug.
+    Please review.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Duplicate charge → action."
+
+- id: ex_043_sure_overdraft_warning
+  synthetic: true
+  description: "Sure — overdraft warning."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: sure
+    name: "Sure — account balance alert"
+    created: "2026-04-30T18:00:00Z"
+  stream_event_body: |
+    Account "EUR Operations" projected to overdraft within 3 days
+    based on scheduled outflows (€8,200 vs €6,400 balance). Please
+    fund or reschedule.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Overdraft projection → action."
+
+- id: ex_044_sure_subscription_cancel_followup
+  synthetic: true
+  description: "Sure — confirms subscription cancellation went through."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: sure
+    name: "Sure — recurring removed: Acme Notes"
+    created: "2026-04-29T20:00:00Z"
+  stream_event_body: |
+    Recurring charge ended: Acme Notes Pro ($30/mo). Last charge
+    2026-04-15; no new charge in past 14 days. Marked as cancelled.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-notes"]
+    mutation_decision: likely_done
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Confirms a Sir-driven cancellation completed → task_resolution."
+
+# ===========================================================================
+# POSITIVES — gcal (6)
+# ===========================================================================
+
+- id: ex_045_gcal_invite_with_attendees
+  description: "Real shape — gcal invite with attendees, needs RSVP."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gcal
+    name: "Strategy review w/ Alex Kim"
+    created: "2026-05-06T09:00:00Z"
+  stream_event_body: |
+    Event: Strategy review w/ Alex Kim
+    Time: Mon May 12, 2026, 4:00pm-5:00pm CEST
+    Attendees: owner@example.com, user@example.com, user@example.com
+    Status: not yet responded
+    Description: Quarterly strategy alignment.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Invite needs RSVP — action."
+
+- id: ex_046_gcal_event_canceled
+  description: "Real shape — meeting was canceled by counterparty."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gcal
+    name: "Canceled: Q2 board prep"
+    created: "2026-05-05T14:00:00Z"
+  stream_event_body: |
+    Event: Canceled: Q2 board prep
+    Time: was Wed May 14, 2026, 10:00am
+    Organizer: user@example.com
+    Status: cancelled
+    Description: This event has been cancelled by the organizer. The
+    board prep is being rescheduled to the following week.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Cancelled meeting requires reschedule — action."
+
+- id: ex_047_gcal_invite_decline_request
+  description: "Counterparty asks Sir to confirm or decline."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gcal
+    name: "Re-invite: Investor coffee Tue 9am"
+    created: "2026-05-05T18:00:00Z"
+  stream_event_body: |
+    Event: Re-invite: Investor coffee Tue 9am
+    Time: Tue May 13, 2026, 9:00am-9:30am CEST
+    Attendees: owner@example.com, alex@vc.com
+    Status: needs_response
+    Description: Quick coffee to discuss the seed round timeline.
+    Please confirm by EOD Monday.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Needs explicit RSVP."
+
+- id: ex_048_gcal_conflict_alert
+  description: "Calendar event with a conflict — needs reschedule."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gcal
+    name: "Schedule conflict alert"
+    created: "2026-05-04T09:00:00Z"
+  stream_event_body: |
+    Event: Schedule conflict — "1:1 with Anna" overlaps "Strategy review".
+    Both at Wed May 7, 2026, 4:00pm-5:00pm CEST.
+    Description: One needs to move. Please reschedule one of the two.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Conflict requires rescheduling action."
+
+- id: ex_049_gcal_focus_block_with_owner
+  description: "Sir-set focus block with deadline — reminder of an action."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gcal
+    name: "Block: ship Phase 6.7 by EOD"
+    created: "2026-05-06T09:00:00Z"
+  stream_event_body: |
+    Event: Block: ship Phase 6.7 by EOD
+    Time: Tue May 6, 2026, 1:00pm-7:00pm CEST
+    Attendees: owner@example.com (only)
+    Description: Ship Phase 6.7 (signal extractor regression gate) by
+    end of day. This blocks the fleet rollout.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Sir-set block with explicit deliverable — action."
+
+- id: ex_050_gcal_invite_accepted_by_other_party
+  description: "Counterparty just accepted Sir's invite — informational, but counts as mutation on hosted task."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gcal
+    name: "Anna accepted: Strategy review"
+    created: "2026-05-06T08:00:00Z"
+  stream_event_body: |
+    Jane Smith <user@example.com> has accepted your invite for
+    "Strategy review" on Mon May 12, 2026, 4:00pm. The "schedule
+    strategy review" task can be marked complete.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["strategy"]
+    mutation_decision: likely_done
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Other party accepted → schedule-it task is done."
+
+# ===========================================================================
+# POSITIVES — plane (6)
+# ===========================================================================
+
+- id: ex_051_plane_comment_asking_for_input
+  description: "Real shape — counterparty comments on plane issue asking Sir to weigh in."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: plane
+    name: "Plane comment: ALFRED-128"
+    related_matters: ["matter/alfred-product-development-launch.md"]
+    created: "2026-05-05T13:00:00Z"
+  stream_event_body: |
+    Plane issue ALFRED-128: "Validate cloud-init on tenant-a"
+    New comment from Alex Kim:
+
+    > Sir — can you confirm the encrypted-mount path for vaultwarden?
+    > Should it be /mnt/encrypted/vaultwarden or /mnt/encrypted/data/vaultwarden?
+    > Need this before merging.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: matter
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Sir explicitly asked → action."
+
+- id: ex_052_plane_assignee_change_to_sir
+  description: "Plane issue reassigned to Sir — needs his attention."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: plane
+    name: "Plane: ALFRED-200 reassigned to Sir"
+    created: "2026-05-05T15:00:00Z"
+  stream_event_body: |
+    Plane issue ALFRED-200: "Configure CloudFront for assets" reassigned
+    from Jane Smith to Jane Doe. Priority: high. Due: Friday
+    May 9, 2026.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Reassign to Sir → action (do or delegate back)."
+
+- id: ex_053_plane_blocked_label_added
+  description: "Plane issue marked blocked → mutation on the task."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: plane
+    name: "Plane: ALFRED-150 blocked"
+    created: "2026-05-04T12:00:00Z"
+  stream_event_body: |
+    Plane issue ALFRED-150: "Cap-table cleanup" status changed to
+    blocked by reporter Jane Smith. Reason: waiting on legal
+    documents from Sam Jones.
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["cap-table"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Plane status change → task_blocked_on."
+
+- id: ex_054_plane_issue_closed_by_other
+  description: "Counterparty closed Plane issue → corresponding task likely done."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: plane
+    name: "Plane: ALFRED-99 closed"
+    created: "2026-05-03T16:00:00Z"
+  stream_event_body: |
+    Plane issue ALFRED-99: "Validate cloud-init on tenant-a" closed by
+    Jane Smith with status "completed". Last comment: "Verified end-
+    to-end on tenant-a; closing."
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: null
+    mutation_decision: likely_done
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Counterparty closed in plane → task_resolution on Sir's mirror."
+
+- id: ex_055_plane_due_date_alarm
+  description: "Plane reminder on overdue Sir-owned issue."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: plane
+    name: "Plane: ALFRED-180 overdue"
+    created: "2026-05-06T08:00:00Z"
+  stream_event_body: |
+    Plane issue ALFRED-180: "Ship Phase 6.7 fixture" assigned to Sir
+    Szabo-Stuban is now 2 days overdue. Status: in_progress. Last
+    update: 2026-05-04. Please update or push the deadline.
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Overdue Sir-owned → action."
+
+- id: ex_056_plane_label_change_to_priority_high
+  description: "Plane issue priority bumped — likely mutation."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: plane
+    name: "Plane: ALFRED-210 priority changed"
+    created: "2026-05-05T11:00:00Z"
+  stream_event_body: |
+    Plane issue ALFRED-210: "Run migration on miguel/tenant-a/tenant-c"
+    priority changed from "normal" to "high" by Jane Smith. Comment:
+    "Need this done before fleet rollout this week."
+  expected:
+    should_produce_signal: true
+    effect: action
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Priority bump indicates urgency — action review."
+
+# ===========================================================================
+# POSITIVES — vault_edit (4) (synthetic — no live vault_edit events yet)
+# ===========================================================================
+
+- id: ex_057_vault_edit_status_done
+  synthetic: true
+  description: "Sir hand-edits a task to status=done."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: vault_edit
+    name: "Vault edit: task/acme-notes-renew-decision.md"
+    created: "2026-05-04T22:00:00Z"
+  stream_event_body: |
+    Sir hand-edited frontmatter on task/acme-notes-renew-decision.md:
+      status: active → done
+      resolution_notes: "cancelled per Acme Notes support email of 2026-05-02"
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["acme-notes"]
+    mutation_decision: likely_done
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Direct vault edit by Sir."
+
+- id: ex_058_vault_edit_matter_archived
+  synthetic: true
+  description: "Sir hand-archives a matter."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: vault_edit
+    name: "Vault edit: matter/openclaw-billing-automation.md"
+    created: "2026-05-03T18:30:00Z"
+  stream_event_body: |
+    Sir hand-edited frontmatter on matter/openclaw-billing-automation.md:
+      status: active → parked
+      parked_until: 2026-Q3
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: matter
+    target_path_contains: ["openclaw"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Sir parks a matter via vault edit."
+
+- id: ex_059_vault_edit_create_matter
+  synthetic: true
+  description: "Sir creates a brand-new matter via vault edit."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: vault_edit
+    name: "Vault edit: matter/berlin-relocation.md (new)"
+    created: "2026-05-02T16:00:00Z"
+  stream_event_body: |
+    Sir created matter/berlin-relocation.md:
+      status: active
+      created_by: human
+      summary: "Relocation of household + workshop from Budapest to Berlin
+      over Q3 2026; covers logistics, paperwork, schools."
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: matter
+    target_path_contains: ["berlin"]
+    mutation_decision: create_matter
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "matter_creation."
+
+- id: ex_060_vault_edit_reparent_task
+  synthetic: true
+  description: "Sir hand-edits a task's parent matter."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: vault_edit
+    name: "Vault edit: task/configure-cloudfront.md"
+    created: "2026-05-01T15:00:00Z"
+  stream_event_body: |
+    Sir hand-edited frontmatter on task/configure-cloudfront.md:
+      parent_matter: matter/cost-cutting.md → matter/alfred-product-launch.md
+  expected:
+    should_produce_signal: true
+    effect: mutation
+    target_kind: task
+    target_path_contains: ["cloudfront"]
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "matter_membership change."
+
+# ===========================================================================
+# NEGATIVES — newsletters (8)
+# ===========================================================================
+
+- id: ex_061_gmail_newsletter_pulse_of_ai
+  description: "Real shape — weekly AI newsletter. Pre-filter or LLM rejects."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: Evolution Unleashed VIP <bingo@patreon.com>
+    subject: "Evolution Unleashed VIP: Pulse of AI - 22 Feb 2026"
+    created: "2026-02-24T05:46:13Z"
+  stream_event_body: |
+    **From**: Evolution Unleashed VIP <bingo@patreon.com>
+    **To**: owner@example.com
+
+    Hello! Welcome to your weekly Pulse of AI digest. This week's
+    headlines: model releases from major labs, new evals from Stanford
+    HELM, and a roundup of agent frameworks. Read more at our blog.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Newsletter — pre-filter or LLM should drop."
+
+- id: ex_062_gmail_marketing_stan_store
+  description: "Marketing email from a SaaS — should drop."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: Pat Store <newsletter@stan.store>
+    subject: "5 ways to grow your creator income"
+    created: "2026-04-20T10:00:00Z"
+  stream_event_body: |
+    **From**: Pat Store <newsletter@stan.store>
+    **To**: owner@example.com
+
+    Hey there! Here are five ways top creators in our community grew
+    their monthly income last quarter. Click below to read the full
+    article and get your free playbook.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Marketing email."
+
+- id: ex_063_gmail_substack_digest
+  description: "Substack daily digest — pure newsletter."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: '"Stratechery" <noreply@substack.com>'
+    subject: "Stratechery Daily Update — 2026-05-04"
+    created: "2026-05-04T11:00:00Z"
+  stream_event_body: |
+    **From**: Stratechery <noreply@substack.com>
+    **To**: owner@example.com
+
+    Today's update: Apple's quarterly earnings, NVIDIA's new launch,
+    and a long-form essay on aggregation theory in the AI era. Read
+    the full piece on our blog.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Daily content digest."
+
+- id: ex_064_gmail_promotional_offer
+  description: "Promotional discount email."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: '"Linear" <hello@linear.app>'
+    subject: "Save 25% on Linear Plus this month"
+    created: "2026-05-01T09:00:00Z"
+  stream_event_body: |
+    **From**: Linear <hello@linear.app>
+    **To**: owner@example.com
+
+    Hi Sir, get 25% off Linear Plus this month! Upgrade now to
+    unlock advanced workflows, sub-issues, and custom views.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Promotional offer."
+
+- id: ex_065_gmail_event_invitation_marketing
+  description: "Conference / webinar marketing invite."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: events@aiconference.io
+    subject: "You're invited: AI Engineer Summit 2026 — Early bird ends Friday"
+    created: "2026-04-28T09:00:00Z"
+  stream_event_body: |
+    **From**: AI Engineer Summit <events@aiconference.io>
+    **To**: owner@example.com
+
+    The AI Engineer Summit 2026 takes place in San Francisco from
+    June 8-10. Don't miss top speakers from OpenAI, Anthropic, and
+    Google DeepMind. Early bird tickets end Friday — register now.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Mass-email invite, not personal — noise."
+
+- id: ex_066_gmail_recruiter_blast
+  description: "Cold recruiter spam."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: jane@talenthouse.io
+    subject: "Senior AI Engineer roles for you"
+    created: "2026-04-25T14:00:00Z"
+  stream_event_body: |
+    **From**: Jane Smith <jane@talenthouse.io>
+    **To**: owner@example.com
+
+    Hi Sir! I'm reaching out because we've got several Senior AI
+    Engineer openings at Series-B startups in your area. Would you
+    have 15 minutes this week to chat?
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Cold recruiter spam — noise (Sir runs his own company)."
+
+- id: ex_067_gmail_product_release_notes
+  description: "SaaS product release notes — informational."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: notifications@temporal.io
+    subject: "Temporal v1.28 release notes"
+    created: "2026-04-29T15:00:00Z"
+  stream_event_body: |
+    **From**: Temporal Updates <notifications@temporal.io>
+    **To**: owner@example.com
+
+    Temporal v1.28 is now available! Highlights include nexus calls,
+    versioning improvements, and SDK updates for Python and Go. Read
+    the full release notes on our docs site.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Release notes — informational."
+
+- id: ex_068_gmail_referral_invite
+  description: "Friend referral invite — promo, no action."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: noreply@superhuman.com
+    subject: "Your friend Alex Kim has invited you to Superhuman"
+    created: "2026-04-22T08:00:00Z"
+  stream_event_body: |
+    **From**: Superhuman <noreply@superhuman.com>
+    **To**: owner@example.com
+
+    Alex Kim thinks you'd love Superhuman. Use this referral
+    link to skip the waitlist and get one month free.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Promotional referral spam."
+
+# ===========================================================================
+# NEGATIVES — questions (4)
+# ===========================================================================
+
+- id: ex_069_openclaw_chat_question_status
+  description: "Sir asks Alfred a question — no signal."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: openclaw-chat
+    session_id: "neg-question-1"
+    created: "2026-05-06T10:00:00Z"
+  stream_event_body: |
+    **Channel**: dashboard
+
+    ### Sir
+    What's on my plate today? Anything urgent for the Acme Clinic invoice?
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Question — answered in-session, NEVER a signal."
+
+- id: ex_070_openclaw_chat_question_recall
+  description: "Sir asks Alfred to recall something — no signal."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: openclaw-chat
+    session_id: "neg-question-2"
+    created: "2026-05-06T10:05:00Z"
+  stream_event_body: |
+    **Channel**: dashboard
+
+    ### Sir
+    Can you show me everything I told Anna about the cluster sizing
+    last week?
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Recall query — never a signal."
+
+- id: ex_071_omi_question_aloud
+  description: "Sir asks himself a question on OMI — no signal."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-05-05 — 09:00"
+    speaker_attribution: ambient
+    created: "2026-05-05T09:00:00Z"
+  stream_event_body: |
+    Hmm — should I actually keep paying for Acme Notes? Is it worth the
+    $30/month? I should think about that.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Self-questioning — NOT a decision."
+
+- id: ex_072_slack_dm_open_question
+  synthetic: true
+  description: "Sir asks Anna an open question — no decision."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: slack
+    channel: dm-anna
+    from: "david"
+    created: "2026-05-05T13:00:00Z"
+  stream_event_body: |
+    **Channel**: dm-anna
+    **From**: david
+
+    Quick question — is there a cleaner way to model the multi-currency
+    cash flow than what we have today? Just thinking out loud.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Open question, no decision committed."
+
+# ===========================================================================
+# NEGATIVES — hypotheticals (4)
+# ===========================================================================
+
+- id: ex_073_omi_what_if_outsource
+  description: "Sir hypothesizes about outsourcing on OMI."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-05-04 — 14:00"
+    speaker_attribution: ambient
+    created: "2026-05-04T14:00:00Z"
+  stream_event_body: |
+    I keep thinking — what if we just dropped the whole billing
+    automation track and outsourced it. In theory it would free up a
+    quarter of a head. Maybe. I don't know.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Hypothetical — 'what if' / 'in theory' / 'maybe'."
+
+- id: ex_074_openclaw_chat_what_if
+  description: "Sir asks Alfred to roleplay a hypothetical."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: openclaw-chat
+    session_id: "neg-hypo-1"
+    created: "2026-05-06T10:30:00Z"
+  stream_event_body: |
+    **Channel**: dashboard
+
+    ### Sir
+    What if we moved everything off Acme Cloud and onto Fly.io? Just
+    walk me through what that would mean — I'm not committing to it.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Hypothetical exploration — explicitly 'not committing'."
+
+- id: ex_075_omi_could_consider
+  description: "Sir musing 'we could consider'."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-05-03 — 16:00"
+    speaker_attribution: ambient
+    created: "2026-05-03T16:00:00Z"
+  stream_event_body: |
+    We could consider moving the office to Berlin sooner — like over
+    summer instead of waiting for Q4. There are tradeoffs. Worth
+    thinking about, but no rush to decide.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Speculation — 'could consider' / 'worth thinking about'."
+
+- id: ex_076_slack_im_thinking
+  synthetic: true
+  description: "Sir says 'I'm thinking' but doesn't commit."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: slack
+    channel: dm-team
+    from: "david"
+    created: "2026-05-02T11:30:00Z"
+  stream_event_body: |
+    **Channel**: dm-team
+    **From**: david
+
+    I'm thinking we should drop Acme Notes. Maybe. Let me sleep on it
+    and decide tomorrow.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Hypothetical preface — 'I'm thinking … maybe … sleep on it'."
+
+# ===========================================================================
+# NEGATIVES — narrations / ambient (5)
+# ===========================================================================
+
+- id: ex_077_omi_narration_essay
+  description: "Real shape — Sir essay-drafting on OMI."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-04-02 — 11:48"
+    speaker_attribution: ambient
+    created: "2026-04-02T11:48:00Z"
+  stream_event_body: |
+    The recording goes somewhere he doesn't have to think about. His
+    AI butler receives it, processes it, and acts on it if needed. He
+    didn't configure this. He didn't read documentation. The
+    onboarding tax is something I've felt for years without having a
+    name for it.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Sir thinking out loud — narration, not assertion."
+
+- id: ex_078_omi_reading_aloud
+  description: "Sir reading article aloud."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-04-30 — 19:00"
+    speaker_attribution: ambient
+    created: "2026-04-30T19:00:00Z"
+  stream_event_body: |
+    "...as the model scales, we observe emergent behaviors not present
+    in smaller variants. This phenomenon, first documented by Wei et
+    al, suggests that capability gains are non-linear in parameter
+    count..." Hmm, interesting.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Reading aloud — not Sir's assertion."
+
+- id: ex_079_omi_silence_with_filler
+  description: "Mostly silence with mumbling — noise."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-04-29 — 06:30"
+    speaker_attribution: ambient
+    created: "2026-04-29T06:30:00Z"
+  stream_event_body: |
+    Mhm. Yeah. Hmm... Okay. ... yeah I don't know. Mhm. Okay so...
+    yeah. Hmm.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Filler / mumbling — noise."
+
+- id: ex_080_omi_ambient_radio
+  description: "Background radio / podcast captured."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-04-28 — 08:00"
+    speaker_attribution: ambient
+    created: "2026-04-28T08:00:00Z"
+  stream_event_body: |
+    ...and now over to traffic. Eastbound on the M3 we've got a
+    backup at exit 7 due to roadworks. Westbound is clear through to
+    the city centre. Weather: 14 degrees, light rain expected by
+    afternoon. This was Magyar Rádió...
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.8
+    notes: "Captured radio broadcast — noise."
+
+- id: ex_081_omi_third_party_speakers
+  description: "OMI captured someone else's conversation, no Sir voice."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-04-27 — 12:00"
+    speaker_attribution: ambient
+    created: "2026-04-27T12:00:00Z"
+  stream_event_body: |
+    [other voice 1]: ...so I told her I'd be home by 8.
+    [other voice 2]: Yeah, well, did she believe you?
+    [other voice 1]: Probably not. She knows me too well.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Third-party conversation — not Sir."
+
+# ===========================================================================
+# NEGATIVES — auto-replies / OOO / system (3)
+# ===========================================================================
+
+- id: ex_082_gmail_ooo_autoreply
+  description: "Out-of-office auto-reply."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: user@example.com
+    subject: "Out of office: I'm on vacation until May 12"
+    created: "2026-05-04T08:00:00Z"
+  stream_event_body: |
+    **From**: Jane Smith <user@example.com>
+    **To**: owner@example.com
+
+    Auto-reply: I'm on vacation through May 12, 2026, with limited
+    email access. For urgent matters, please contact Alex Kim at
+    user@example.com. I'll respond when I'm back.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "OOO auto-reply — informational."
+
+- id: ex_083_gmail_vacation_reply
+  description: "Different OOO/vacation phrasing."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: lawyer@example.com
+    subject: "Re: Munkaszerződés — automatikus válasz"
+    created: "2026-05-02T07:00:00Z"
+  stream_event_body: |
+    **From**: Dr. Smith <lawyer@example.com>
+    **To**: owner@example.com
+
+    Automatikus válasz: szabadságon vagyok 2026. május 10-ig.
+    Sürgős esetben kérlek hívd Helga kollégát a +15555550100
+    számon.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Hungarian auto-reply (szabadságon)."
+
+- id: ex_084_gmail_delivery_failure
+  description: "Mailer-daemon bounce notification."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: mailer-daemon@google.com
+    subject: "Delivery Status Notification (Failure)"
+    created: "2026-05-03T11:00:00Z"
+  stream_event_body: |
+    **From**: Mail Delivery Subsystem <mailer-daemon@google.com>
+
+    Address not found. Your message wasn't delivered to typo@example.cmo
+    because the address couldn't be found. Check for typos and try
+    again.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Bounce notification — system noise."
+
+# ===========================================================================
+# NEGATIVES — domestic chatter (3)
+# ===========================================================================
+
+- id: ex_085_omi_grocery_chatter
+  description: "Real shape — domestic grocery talk."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-04-02 — 13:06"
+    speaker_attribution: ambient
+    created: "2026-04-02T13:06:00Z"
+  stream_event_body: |
+    Mondta, hogy vigyünk szőlőt, meg áfonyát, de hogy amúgy nagyon
+    sok minden más lesz, úgyhogy nagyon más ne vegyünk, de hogy
+    vigyünk még baguettet, és akkor úgy voltam vele, hogy ha már
+    úgyis sütök kalácsot, akkor sütök baguettet is.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Domestic chatter (Hungarian) — noise."
+
+- id: ex_086_omi_kid_chatter
+  description: "Sir interacting with toddler."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-04-25 — 17:00"
+    speaker_attribution: ambient
+    created: "2026-04-25T17:00:00Z"
+  stream_event_body: |
+    Gyere, Kiddo! Hova mész? Ne, ne menj oda. Édesanyához. Igen,
+    pont oda. Szia! Szépen kérünk. Mit szeretnél? Tejet? Igen,
+    rendben.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Sir talking to his child — noise."
+
+- id: ex_087_omi_morning_greeting
+  description: "Real shape — short morning greeting in Hungarian."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-04-15 — 06:21"
+    speaker_attribution: ambient
+    created: "2026-04-15T06:21:49Z"
+  stream_event_body: |
+    Sziasztok! Oké, de... ...már lehet, hogy én nem tudom, hogy
+    felrúgáljak. Ne! Szia, Kiddo! Hogy jönnél te? Jól van? De reggelt!
+    Szia, Kiddo!
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Domestic morning greeting in Hungarian."
+
+# ===========================================================================
+# NEGATIVES — short / empty / pre-filterable (3)
+# ===========================================================================
+
+- id: ex_088_slack_empty_reaction
+  synthetic: true
+  description: "Slack reaction-only message — body is too short."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: slack
+    channel: dm-anna
+    from: "Anna"
+    created: "2026-05-05T10:00:00Z"
+  stream_event_body: |
+    👍
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Body too short — pre-filter must drop."
+
+- id: ex_089_omi_empty_short_transcript
+  synthetic: true
+  description: "Stub OMI transcript with almost no content."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: omi
+    name: "Omi conversation — 2026-04-26 — 22:00"
+    speaker_attribution: ambient
+    created: "2026-04-26T22:00:00Z"
+  stream_event_body: |
+    Ah.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Body too short — pre-filter."
+
+- id: ex_090_unknown_source
+  synthetic: true
+  description: "Unknown source_type — pre-filter rejects."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: zapier
+    name: "Zapier event"
+    created: "2026-05-04T10:00:00Z"
+  stream_event_body: |
+    Some long Zapier webhook payload that doesn't matter because the
+    source type is not in the allowlist. Pre-filter will drop it.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Source type not in PRE_FILTER_ALLOWLIST."
+
+# ===========================================================================
+# NEGATIVES — informational receipts (5)
+# ===========================================================================
+
+- id: ex_091_gmail_receipt_googleplay
+  description: "Real shape — Google Play subscription receipt."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: Google Play <googleplay-noreply@google.com>
+    subject: "Your Google Play Order Receipt from Apr 11, 2026"
+    created: "2026-04-11T11:00:00Z"
+  stream_event_body: |
+    **From**: Google Play <googleplay-noreply@google.com>
+    **To**: owner@example.com
+
+    Google Play Thank you. Your subscription from Google Commerce
+    Limited on Google Play continues and you've been charged. Manage
+    your subscriptions in your Google account.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Routine subscription receipt — informational."
+
+- id: ex_092_gmail_receipt_stripe
+  description: "Stripe payment confirmation — informational."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: receipts+acct_xxxx@stripe.com
+    subject: "Your receipt from Anthropic, PBC #2854-1923"
+    created: "2026-05-01T08:00:00Z"
+  stream_event_body: |
+    **From**: Stripe <receipts+acct_xxxx@stripe.com>
+    **To**: alfred@example.com
+
+    Receipt for $200.00 payment to Anthropic, PBC. Thank you for your
+    purchase. Date: May 1, 2026. View this receipt online at the link
+    below.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Successful charge — informational; no action."
+
+- id: ex_093_gmail_account_login_normal
+  description: "Routine non-suspicious login notification."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: no-reply@accounts.google.com
+    subject: "New sign-in on your usual device"
+    created: "2026-05-02T09:00:00Z"
+  stream_event_body: |
+    **From**: Google <no-reply@accounts.google.com>
+    **To**: owner@example.com
+
+    You signed in on your usual MacBook Pro from Budapest. If this
+    was you, no action needed.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Explicitly says 'no action needed' — informational."
+
+- id: ex_094_gmail_status_update_routine
+  description: "Status update — no action."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: notifications@acme-cloud.com
+    subject: "Server vm-1 maintenance window completed"
+    created: "2026-05-04T03:00:00Z"
+  stream_event_body: |
+    **From**: Acme Cloud Online <notifications@acme-cloud.com>
+    **To**: owner@example.com
+
+    The scheduled maintenance window for server vm-1 has been
+    completed successfully. Your server is fully operational. No
+    action is required.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Routine maintenance complete — no action."
+
+- id: ex_095_gmail_calendar_routine_accepted
+  description: "Notification of own previously-accepted meeting starting soon."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gmail
+    from: calendar-noreply@google.com
+    subject: "Reminder: 1:1 with Anna in 15 minutes"
+    created: "2026-05-04T13:45:00Z"
+  stream_event_body: |
+    **From**: Google Calendar <calendar-noreply@google.com>
+    **To**: owner@example.com
+
+    Reminder: your "1:1 with Anna" meeting starts in 15 minutes at
+    14:00. You previously accepted this invite. No action required.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.7
+    notes: "Routine calendar reminder for already-accepted meeting."
+
+# ===========================================================================
+# NEGATIVES — gcal noise (2)
+# ===========================================================================
+
+- id: ex_096_gcal_routine_focus_block_recurring
+  description: "Recurring weekly focus block reminder — no new action."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gcal
+    name: "Recurring: Weekly review (Sun 8pm)"
+    created: "2026-05-05T20:00:00Z"
+  stream_event_body: |
+    Event: Recurring weekly review (Sun 8pm)
+    Time: Sun May 12, 2026, 8:00pm-9:00pm CEST
+    Attendees: owner@example.com (only)
+    Status: accepted (recurring)
+    Description: Weekly self-review block. No agenda; just routine.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "Routine recurring slot, no signal."
+
+- id: ex_097_gcal_no_attendees_self_block
+  description: "Solo time-block with no specific deliverable."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: gcal
+    name: "Lunch break"
+    created: "2026-05-05T11:00:00Z"
+  stream_event_body: |
+    Event: Lunch break
+    Time: Mon May 11, 2026, 12:00pm-1:00pm CEST
+    Attendees: owner@example.com (only)
+    Description: (none)
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.6
+    notes: "No attendees, no agenda — calendar noise."
+
+# ===========================================================================
+# NEGATIVES — plane self-echo (3)
+# ===========================================================================
+
+- id: ex_098_plane_sir_own_state_change
+  description: "Sir himself moved a Plane issue to in_progress — don't echo as signal."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: plane
+    name: "Plane: ALFRED-180 status changed by Sir"
+    created: "2026-05-06T08:00:00Z"
+  stream_event_body: |
+    Plane issue ALFRED-180: "Ship Phase 6.7 fixture" status changed
+    from "todo" to "in_progress" by Jane Doe (the assignee
+    himself).
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Sir's own upstream action — informational, don't re-mutate."
+
+- id: ex_099_plane_sir_own_comment
+  description: "Sir's own plane comment — don't echo."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: plane
+    name: "Plane comment: Sir on ALFRED-180"
+    created: "2026-05-06T08:30:00Z"
+  stream_event_body: |
+    Plane issue ALFRED-180. New comment by Jane Doe
+    (assignee himself):
+
+    > Working on the fixture YAML right now. ETA EOD today.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Sir's own progress comment — informational."
+
+- id: ex_100_plane_routine_label_add
+  description: "Label-only routine change with no relevance."
+  stream_event_frontmatter:
+    type: stream_event
+    source_type: plane
+    name: "Plane: ALFRED-180 label added"
+    created: "2026-05-06T08:35:00Z"
+  stream_event_body: |
+    Plane issue ALFRED-180: label "infra" added by automation. No
+    other change. Issue still in_progress, still assigned to Sir.
+  expected:
+    should_produce_signal: false
+    effect: none
+    target_kind: null
+    target_path_contains: null
+    mutation_decision: null
+    target_confidence_min: 0.0
+    effect_confidence_min: 0.5
+    notes: "Routine automation label — noise."

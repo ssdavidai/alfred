@@ -1,0 +1,275 @@
+---
+title: "Extract Learnings"
+description: "Scan vault and extract learnings using the agent"
+api: "POST /api/v1/workers/distiller/run"
+---
+
+Performs a scan for extraction candidates followed by agent-based learning extraction. The distiller agent will analyze candidate records and create new learning records (assumptions, decisions, constraints, contradictions, synthesis) for each piece of latent knowledge discovered.
+
+<ParamField body="project" type="string" optional>
+  Filter extraction to a specific project. If omitted, extracts from all candidates.
+
+  Example: `"acme-redesign"`
+</ParamField>
+
+<RequestExample>
+
+```bash Extract All Candidates
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/distiller/run \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json"
+```
+
+```bash Extract from Specific Project
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/distiller/run \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project": "acme-redesign"
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "message": "Extraction completed successfully",
+  "scan_id": "scan_20260226_103000",
+  "run_id": "run_20260226_103015",
+  "scan_duration_seconds": 12.4,
+  "extraction_duration_seconds": 98.6,
+  "total_duration_seconds": 111.0,
+  "records_scanned": 423,
+  "candidates_found": 8,
+  "candidates_processed": 8,
+  "learnings_extracted": 18,
+  "learnings_by_type": {
+    "assumption": 5,
+    "decision": 7,
+    "constraint": 4,
+    "contradiction": 1,
+    "synthesis": 1
+  },
+  "extractions": [
+    {
+      "source_file": "projects/acme-redesign.md",
+      "source_type": "project",
+      "learnings_created": 4,
+      "learnings": [
+        {
+          "type": "decision",
+          "title": "Use React instead of Vue",
+          "file": "learnings/decisions/use-react-for-acme.md",
+          "rationale": "Team expertise and ecosystem maturity"
+        },
+        {
+          "type": "constraint",
+          "title": "Must support IE11",
+          "file": "learnings/constraints/ie11-support-required.md",
+          "rationale": "Client requirement for legacy browser support"
+        },
+        {
+          "type": "assumption",
+          "title": "API will be RESTful",
+          "file": "learnings/assumptions/rest-api-pattern.md",
+          "rationale": "Backend team preference and existing patterns"
+        },
+        {
+          "type": "assumption",
+          "title": "Design system exists",
+          "file": "learnings/assumptions/design-system-available.md",
+          "rationale": "Referenced in project requirements"
+        }
+      ]
+    },
+    {
+      "source_file": "issues/performance-regression.md",
+      "source_type": "issue",
+      "learnings_created": 2,
+      "learnings": [
+        {
+          "type": "contradiction",
+          "title": "ORM abstraction causes N+1 queries",
+          "file": "learnings/contradictions/orm-performance-issues.md",
+          "rationale": "Contradicts previous assumption that ORM would be performant"
+        },
+        {
+          "type": "decision",
+          "title": "Use raw SQL for complex queries",
+          "file": "learnings/decisions/raw-sql-for-performance.md",
+          "rationale": "Bypass ORM for performance-critical paths"
+        }
+      ]
+    }
+  ],
+  "deduplication": {
+    "checked": 18,
+    "duplicates_found": 2,
+    "duplicates_merged": 2
+  },
+  "project_filter": null,
+  "mutations_logged": 18,
+  "timestamp": "2026-02-26T10:31:51Z"
+}
+```
+
+```json Project-Filtered Response
+{
+  "status": "ok",
+  "message": "Extraction completed successfully",
+  "scan_id": "scan_20260226_103000",
+  "run_id": "run_20260226_103015",
+  "scan_duration_seconds": 3.2,
+  "extraction_duration_seconds": 34.1,
+  "total_duration_seconds": 37.3,
+  "records_scanned": 47,
+  "candidates_found": 3,
+  "candidates_processed": 3,
+  "learnings_extracted": 6,
+  "learnings_by_type": {
+    "assumption": 2,
+    "decision": 3,
+    "constraint": 1
+  },
+  "extractions": [
+    {
+      "source_file": "projects/acme-redesign.md",
+      "source_type": "project",
+      "learnings_created": 4,
+      "learnings": [
+        {
+          "type": "decision",
+          "title": "Use React instead of Vue",
+          "file": "learnings/decisions/use-react-for-acme.md",
+          "rationale": "Team expertise and ecosystem maturity"
+        }
+      ]
+    }
+  ],
+  "deduplication": {
+    "checked": 6,
+    "duplicates_found": 0,
+    "duplicates_merged": 0
+  },
+  "project_filter": "acme-redesign",
+  "mutations_logged": 6,
+  "timestamp": "2026-02-26T10:31:51Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Operation status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable status message
+</ResponseField>
+
+<ResponseField name="scan_id" type="string">
+  Unique identifier for the scan phase
+</ResponseField>
+
+<ResponseField name="run_id" type="string">
+  Unique identifier for the extraction phase
+</ResponseField>
+
+<ResponseField name="scan_duration_seconds" type="number">
+  Time taken for the scan phase
+</ResponseField>
+
+<ResponseField name="extraction_duration_seconds" type="number">
+  Time taken for the extraction phase
+</ResponseField>
+
+<ResponseField name="total_duration_seconds" type="number">
+  Total operation time
+</ResponseField>
+
+<ResponseField name="records_scanned" type="number">
+  Number of vault records scanned
+</ResponseField>
+
+<ResponseField name="candidates_found" type="number">
+  Number of extraction candidates identified
+</ResponseField>
+
+<ResponseField name="candidates_processed" type="number">
+  Number of candidates actually processed by agent
+</ResponseField>
+
+<ResponseField name="learnings_extracted" type="number">
+  Total number of learning records created
+</ResponseField>
+
+<ResponseField name="learnings_by_type" type="object">
+  Breakdown of extracted learnings by type
+</ResponseField>
+
+<ResponseField name="extractions" type="object[]">
+  Detailed list of extractions per source record
+
+  <ResponseField name="source_file" type="string">
+    Vault-relative path to the source record
+  </ResponseField>
+
+  <ResponseField name="source_type" type="string">
+    Source record type
+  </ResponseField>
+
+  <ResponseField name="learnings_created" type="number">
+    Number of learnings extracted from this source
+  </ResponseField>
+
+  <ResponseField name="learnings" type="object[]">
+    List of learnings created
+
+    <ResponseField name="type" type="string">
+      Learning type: `assumption`, `decision`, `constraint`, `contradiction`, `synthesis`
+    </ResponseField>
+
+    <ResponseField name="title" type="string">
+      Learning title
+    </ResponseField>
+
+    <ResponseField name="file" type="string">
+      Vault-relative path to created learning record
+    </ResponseField>
+
+    <ResponseField name="rationale" type="string">
+      Brief explanation of the learning
+    </ResponseField>
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="deduplication" type="object">
+  Deduplication statistics
+
+  <ResponseField name="checked" type="number">
+    Number of learnings checked for duplicates
+  </ResponseField>
+
+  <ResponseField name="duplicates_found" type="number">
+    Number of duplicates detected
+  </ResponseField>
+
+  <ResponseField name="duplicates_merged" type="number">
+    Number of duplicates merged into existing records
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="project_filter" type="string | null">
+  Project filter applied (null if extracting from all candidates)
+</ResponseField>
+
+<ResponseField name="mutations_logged" type="number">
+  Number of vault mutations written to audit log
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of operation completion
+</ResponseField>

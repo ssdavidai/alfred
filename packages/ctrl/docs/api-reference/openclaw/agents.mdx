@@ -1,0 +1,71 @@
+---
+title: "List Agents"
+description: "List all managed OpenClaw agents"
+api: "GET /api/v1/openclaw/agents"
+---
+
+Returns a list of all agents managed by the OpenClaw gateway, including their configuration, status, and activity metrics.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/openclaw/agents \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "agents": [
+    {
+      "agentId": "agent_curator",
+      "name": "Vault Curator",
+      "skill": "vault-curator",
+      "status": "running",
+      "mode": "daemon",
+      "config": {
+        "scope": "curator",
+        "vaultPath": "/mnt/encrypted/vault",
+        "autoRestart": true,
+        "maxRetries": 5
+      },
+      "activity": {
+        "lastRun": "2026-02-26T14:35:42Z",
+        "totalRuns": 342,
+        "successRate": 0.98
+      }
+    },
+    {
+      "agentId": "agent_janitor",
+      "name": "Vault Janitor",
+      "skill": "vault-janitor",
+      "status": "idle",
+      "mode": "scheduled",
+      "config": {
+        "scope": "janitor",
+        "vaultPath": "/mnt/encrypted/vault",
+        "schedule": "0 */6 * * *"
+      },
+      "activity": {
+        "lastRun": "2026-02-26T12:00:15Z",
+        "nextRun": "2026-02-26T18:00:00Z",
+        "totalRuns": 87,
+        "successRate": 1.0
+      }
+    }
+  ],
+  "total": 2,
+  "running": 1,
+  "idle": 1
+}
+```
+
+</ResponseExample>

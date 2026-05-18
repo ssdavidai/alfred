@@ -1,0 +1,38 @@
+---
+title: "Pause Schedule"
+description: "Pause a workflow schedule"
+api: "POST https://alfred-acme.tailnet.ts.net:3100/api/v1/schedules/{schId}/pause"
+---
+
+Pauses a workflow schedule. No new workflow executions will be started until the schedule is unpaused. Currently running workflows are not affected.
+
+<ParamField path="schId" type="string" required>
+  The schedule ID to pause
+</ParamField>
+
+<ParamField body="reason" type="string" optional>
+  Human-readable reason for pausing. Will be stored in schedule metadata.
+</ParamField>
+
+<RequestExample>
+```bash cURL
+curl -X POST \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "reason": "Paused during vault migration"
+  }' \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/schedules/curator-hourly/pause
+```
+</RequestExample>
+
+<ResponseExample>
+```json 200 OK
+{
+  "success": true,
+  "scheduleId": "curator-hourly",
+  "paused": true,
+  "reason": "Paused during vault migration"
+}
+```
+</ResponseExample>

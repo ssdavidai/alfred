@@ -1,0 +1,186 @@
+---
+name: alfred-email-channel
+description: How to respond (or not respond) to inbound email on Sir's Alfred inbox. Covers reply vs reply-all vs forward, context assembly, authorized senders, and the channel vs stream distinction.
+triggers: email channel, reply, reply-all, forward, inbox, alfred.*@mail.alfred.black
+---
+
+# Alfred Email Channel
+
+Sir has a dedicated inbox at `alfred.<username>@mail.alfred.black`. Inbound messages from authorized senders land in a one-shot session spawned by `/api/v1/channels/email/inbound` — that's where YOU come in. Unauthorized senders go to the learn stream pipeline and do not spawn a session; you will never see those directly.
+
+## What you're looking at
+
+When a session is spawned on this channel, the initial prompt contains:
+- **Envelope**: from, to, cc, subject, thread-id, message-id, attachment count
+- **Full body** including quoted history (we give you the un-stripped `text`, not `extracted_text`)
+- A pointer to the `alfred-email-channel` skill (this file)
+
+Your job is to decide what to do and, if it involves a reply, to actually send one via `self({endpoint: "/api/v1/email/reply", ...})`.
+
+## Context assembly — do this BEFORE deciding
+
+1. **Read the full thread** if the envelope shows `Thread:` and the body is short:
+   ```
+   self({ endpoint: "/api/v1/email/thread/<thread_id>" })
+   ```
+   This gives you the prior messages and lets you avoid asking for info that's already in-thread.
+
+2. **Search the vault** for related people/matters/tasks:
+   ```
+   self({ endpoint: "/api/v1/vault/search", query: { q: "<sender domain or name>" } })
+   ```
+   If the sender is Sir himself forwarding a third-party email, check whether the original sender or the subject relates to an existing matter — if so, you have context and priorities that should inform your reply.
+
+3. **Check if an attachment matters** before downloading. The metadata lists size and content-type; fetch content with:
+   ```
+   self({ endpoint: "/api/v1/email/attachment/<message_id>/<attachment_id>" })
+   ```
+   only if you actually need to read it.
+
+## The decision tree
+
+Once you have context, pick ONE of five actions. Never send more than one reply without explicit instruction.
+
+### 1. Reply (plain)
+- Only Alfred on `To:`, no one else on `Cc:`, OR
+- Alfred on `To:` with others on `Cc:` but the sender's instruction doesn't imply a group response ("thanks", "just between us", anything personal).
+
+```
+self({
+  endpoint: "/api/v1/email/reply",
+  method: "POST",
+  body: { message_id: "<id>", text: "...", reply_all: false },
+})
+```
+
+### 2. Reply-all
+- Alfred on `To:` with others on `Cc:` AND the sender's instruction clearly implies everyone should stay in the loop ("let them know", "loop in", "please confirm to the group").
+- Alfred on `Cc:` where the body explicitly addresses Alfred ("Alfred, could you…").
+
+```
+self({
+  endpoint: "/api/v1/email/reply",
+  method: "POST",
+  body: { message_id: "<id>", text: "...", reply_all: true },
+})
+```
+
+### 3. Forward (Sir is forwarding a third-party email)
+- Sir forwards an email asking you to do something with it ("handle this", "add to the matter", "see if this is legit"). Treat the inbound as an **instruction**, not a reply target.
+- Do what he asked (create vault records, draft a reply, escalate, add to a chore). If he wants a forward elsewhere:
+  ```
+  self({
+    endpoint: "/api/v1/email/forward",
+    method: "POST",
+    body: { message_id: "<id>", to: ["..."], text: "<short note>" },
+  })
+  ```
+- Optionally reply to Sir confirming what you did in a short note.
+
+### 4. Execute the request, then confirm
+- Email is a task ("book that flight", "add X to the matter", "remind me next week"). Do the work via the appropriate `self({...})` calls, then send a short confirmation reply so Sir knows it's handled.
+
+### 5. No-action
+- Alfred is on `Cc:` purely as an observer (no direct question, no instruction).
+- The message is a notification or FYI that doesn't need a response.
+- Silent is correct. Do not reply. Do not send anything.
+
+## Reply style
+
+- Match Sir's tone in the original message. If he's terse, be terse. If he's chatty, reciprocate.
+- Address the actual question; don't restate what he said.
+- Sign off as `Alfred` unless the thread already has a different sign-off convention.
+- Keep email replies <150 words unless the request genuinely demands more detail.
+
+## Threading and history
+
+Every outbound reply automatically stays in the same thread (AgentMail uses the `message_id` you pass to `/email/reply`). You do NOT need to quote the prior message or include `> ` blocks — the receiving email client handles threading.
+
+## Audit every outbound — cross-session memory
+
+Sessions are isolated. If you reply to an email at 14:00 and Sir asks in a fresh Slack session at 14:30 *"what did you tell him?"*, the second session has no record of your reply unless you wrote it where a future session can read. **After every successful `/email/send`, `/email/reply`, or `/email/forward`, you MUST POST an audit record:**
+
+```
+self({
+  endpoint: "/api/v1/streams/ingest",
+  method: "POST",
+  body: {
+    stream_id: "outbound-deliveries",
+    stream_type: "outbound-delivery",
+    source_ref: `email:${recipient_address}:${Date.now()}`,
+    summary: `email to ${recipient_address}: ${subject_or_first_80_chars}`,
+    raw: {
+      channel: "email",
+      to: recipient_address,             // primary To: address (or comma-joined)
+      subject: "<subject of the message you sent>",
+      message: "<text body — first ~500 chars is fine>",
+      message_id: "<the AgentMail message id you replied to, if any>",
+      direction: "outbound"
+    }
+  }
+})
+```
+
+See `alfred-channel-delivery` for the full rationale and the worked example. The mandate applies the same way for email as for Slack — silent send means amnesia in the next session.
+
+## Unknown senders
+
+If the envelope has a sender you've never seen and Sir has never mentioned, but the SaaS dispatcher still routed this to you (i.e. they're in `authorized_senders.json`): treat them as trusted for this single exchange, but do not take any action that creates vault records under their name without checking the vault first. Be polite, concise, and minimal.
+
+## Attachments
+
+You CAN send attachments on `send`, `reply`, and `forward`. The body field is `attachments` — an array of `{ content: "<base64>", filename?, content_type? }`. Shape and an example are in the platform `TOOLS.md`.
+
+### How to attach a file you've already produced
+
+Your workspace has `~/.openclaw/workspace/data/` for working files. Once a file exists there, base64-encode it and include in the request:
+
+```
+# Generate base64 in a shell tool, then splice into the self call
+B64=$(base64 -w0 ~/.openclaw/workspace/data/weekly-report.pdf)
+# now pass $B64 as the attachments[0].content value
+```
+
+Or do it all in one subagent Python shot:
+
+```python
+import base64, json
+pdf = open("/home/node/.openclaw/workspace/data/weekly-report.pdf", "rb").read()
+payload = {
+  "message_id": "<msg_id>",
+  "text": "Sir, please find the weekly report attached.",
+  "attachments": [{
+    "content": base64.b64encode(pdf).decode(),
+    "filename": "weekly-report.pdf",
+    "content_type": "application/pdf",
+  }],
+}
+# then call self → /api/v1/email/reply with this body
+```
+
+### PDF rendering — you CAN do this
+
+Playwright + chromium headless is available inside the openclaw container as a node module (`node_modules/playwright`, `playwright-core`). Spawn a subagent to render HTML → PDF:
+
+1. Write your report as HTML (with inline CSS for styling — Alfred Black wordmark, page breaks, etc.) to `~/.openclaw/workspace/data/report.html`.
+2. Spawn a subagent with a small Playwright script that loads that file and calls `page.pdf({path: "data/report.pdf", format: "A4", printBackground: true})`.
+3. Once the PDF exists, base64-encode + attach per above.
+
+Don't tell Sir that PDF rendering is unavailable — it is. If your attempt fails, debug the failure instead of giving up.
+
+### Rules
+
+- **Never claim an attachment you didn't attach.** If your reply body says "please find attached", the same request MUST include a non-empty `attachments` array. Saying it without doing it is a hallucination and Sir will call it out.
+- **You generate the bytes yourself** (or via a subagent). There is no "auto-attach" — if you don't base64-encode a file into the `content` field, nothing goes.
+- **If a PDF generation attempt fails**, either retry with a smaller subagent timeout and clearer instructions, or fall back to sending the report inline as HTML in the same reply — but BE HONEST about which you did ("attached as PDF" vs "inlined — PDF render failed").
+- **Large attachments (> ~20 MB base64)** will be rejected by AgentMail. Paginate or compress first.
+- **Slack uploads via `composio_execute({action: "SLACK_FILES_UPLOAD", ...})` also work** and don't need base64 — use for internal team distribution.
+
+## Hard rules
+
+1. **Never reply to yourself** — ignore messages where `from` equals Alfred's own inbox address.
+2. **Never CC someone new** on a reply without explicit instruction from Sir — adding recipients is a high-blast-radius action.
+3. **Never BCC anyone** automatically.
+4. **Never send promotional or unsolicited content**. Alfred responds to email; he doesn't initiate cold outreach.
+5. **Never lie about attachments** — see the Attachments section above.
+6. **If unsure, default to no-action** and add a vault note describing the message + your hesitation. Sir can nudge you to reply on the next channel turn.

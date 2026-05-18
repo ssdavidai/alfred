@@ -1,0 +1,119 @@
+---
+title: "API Reference"
+description: "Complete reference for the Alfred tenant API — 80 endpoints across 8 domains."
+icon: "code"
+---
+
+## Overview
+
+The Alfred tenant API provides programmatic access to all Alfred functionality. Each instance exposes a REST API secured by Tailscale networking and Bearer token authentication.
+
+<Note>
+  The base URL for all API requests is `https://<your-tailscale-hostname>:3100`. Replace
+  `<your-tailscale-hostname>` with your instance's Tailscale hostname (e.g., `alfred-acme.tailnet.ts.net`).
+</Note>
+
+## Request format
+
+All requests that send data must use `application/json` as the `Content-Type`.
+
+```bash
+curl https://alfred-acme.tailnet.ts.net:3100/api/vault/context \
+  -H "Authorization: Bearer your_api_key_here" \
+  -H "Content-Type: application/json"
+```
+
+## Authentication
+
+<Warning>
+  Every request (except OPTIONS for CORS preflight) requires a Bearer token in the `Authorization` header. See the [Authentication](/api-reference/authentication) page for details.
+</Warning>
+
+## Response format
+
+All responses return JSON. Successful responses have a structure specific to each endpoint. Error responses follow a consistent format:
+
+```json
+{
+  "error": {
+    "code": "ERROR_CODE",
+    "message": "Human-readable message",
+    "details": {
+      "additional": "context"
+    }
+  }
+}
+```
+
+## Error codes
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| `UNAUTHORIZED` | 401 | Missing, malformed, or invalid API key |
+| `VALIDATION_ERROR` | 400 | Request body failed validation (missing required fields, invalid types) |
+| `NOT_FOUND` | 404 | Requested resource does not exist |
+| `CONFLICT` | 409 | Operation conflicts with current state (e.g., record already exists) |
+| `EXEC_ERROR` | 500 | Command execution failed (stderr included in details) |
+| `INTERNAL_ERROR` | 500 | Unexpected server error |
+
+## CORS
+
+All origins are allowed (`Access-Control-Allow-Origin: *`). The API responds to OPTIONS requests for CORS preflight without requiring authentication.
+
+## Endpoint groups
+
+The API is organized into 8 functional groups:
+
+<Columns cols={2}>
+  <Card title="Vault (12 endpoints)" icon="vault" href="/api-reference/vault/get-context">
+    Record CRUD, search, inbox management, schema inspection. Core vault operations.
+  </Card>
+  <Card title="Workers (15 endpoints)" icon="gears" href="/api-reference/workers/status">
+    Daemon control, curator/janitor/distiller operations. Start, stop, scan, process.
+  </Card>
+  <Card title="Workflows (7 endpoints)" icon="diagram-project" href="/api-reference/workflows/list">
+    Temporal workflow management. List, start, terminate, signal, cancel, view history.
+  </Card>
+  <Card title="Schedules (7 endpoints)" icon="calendar" href="/api-reference/schedules/list">
+    Cron-style recurring workflows. Create, pause, unpause, trigger, delete schedules.
+  </Card>
+  <Card title="Devices (7 endpoints)" icon="mobile" href="/api-reference/devices/list">
+    OpenClaw device pairing. Approve, reject, remove, rotate keys, revoke access.
+  </Card>
+  <Card title="OpenClaw (13 endpoints)" icon="claw-marks" href="/api-reference/openclaw/health">
+    Gateway management. Health checks, skills, sessions, agents, cron, plugins, hooks, secrets.
+  </Card>
+  <Card title="Logs (1 endpoint)" icon="scroll" href="/api-reference/logs/stream">
+    SSE log streaming from Docker Compose services. Real-time output with auto-reconnect.
+  </Card>
+  <Card title="Admin (18 endpoints)" icon="server" href="/api-reference/admin/list-containers">
+    Containers, config, Tailscale, backups, system info. Full instance administration.
+  </Card>
+</Columns>
+
+## Rate limits
+
+There are no rate limits. The API is designed for single-user or team use within a private Tailscale network.
+
+## Versioning
+
+The API is unversioned. Changes will be documented in the changelog and deployment notes.
+
+## SDK & tooling
+
+<Tip>
+  Use the control plane CLI (`aas`) to manage fleet-wide operations. The tenant API is designed for direct integration into custom workflows, automation scripts, and third-party tools.
+</Tip>
+
+No official SDK is provided. The API follows REST conventions and can be consumed from any HTTP client.
+
+## Next steps
+
+<Columns cols={2}>
+  <Card title="Authentication" icon="key" href="/api-reference/authentication">
+    Learn how to authenticate API requests
+  </Card>
+  <Card title="Vault endpoints" icon="vault" href="/api-reference/vault/get-context">
+    Start with vault operations
+  </Card>
+</Columns>

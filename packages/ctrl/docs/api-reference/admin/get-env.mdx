@@ -1,0 +1,44 @@
+---
+title: "Get Environment Variables"
+description: "Retrieve current environment configuration"
+api: "GET /api/v1/admin/config/env"
+---
+
+Read the current environment variables from the Alfred instance's `.env` file.
+
+<RequestExample>
+
+```bash curl
+curl -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/config/env
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "env": {
+    "OPENROUTER_API_KEY": "sk-or-v1-abc123...",
+    "HETZNER_S3_ENDPOINT": "https://fsn1.your-objectstorage.com",
+    "HETZNER_S3_ACCESS_KEY_ID": "ABC123DEF456",
+    "HETZNER_S3_SECRET_ACCESS_KEY": "secret456",
+    "HETZNER_S3_BUCKET": "alfred-backups-acme",
+    "RESTIC_PASSWORD": "secure-password-here",
+    "TAILSCALE_AUTHKEY": "tskey-auth-abc123...",
+    "ALERT_WEBHOOK_URL": "https://hooks.slack.com/services/...",
+    "ALERT_WEBHOOK_TYPE": "slack"
+  }
+}
+```
+
+</ResponseExample>
+
+<Warning>
+  The `AAS_API_KEY` (Alfred API key) is always filtered from the response for security reasons and will never be returned by this endpoint.
+</Warning>
+
+<Note>
+  Environment variables are loaded by containers on startup. After updating the `.env` file, restart affected containers to apply changes.
+</Note>
