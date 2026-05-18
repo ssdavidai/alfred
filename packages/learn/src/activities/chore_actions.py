@@ -499,6 +499,7 @@ async def _workers_spawn_subagent(
                     "cleanup": "auto",
                     "sandbox": "inherit",
                     "runTimeoutSeconds": run_timeout_s,
+                    "expectsCompletionMessage": False,
                 },
             },
         )

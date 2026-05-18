@@ -582,6 +582,13 @@ async def _call_clerk(
                     # mid-plan. The whole point of the workers gateway
                     # is that it's async — there's no human watching.
                     "runTimeoutSeconds": 900,
+                    # We poll sessions_history for the result; we are not
+                    # a persistent channel-bound parent. Without this,
+                    # the gateway queues an "announce" retry to a
+                    # nonexistent listener — on error, the retry loop
+                    # accumulates in subagents/runs.json and eventually
+                    # saturates the V8 event loop (rapali 2026-05-18).
+                    "expectsCompletionMessage": False,
                 },
             },
         )

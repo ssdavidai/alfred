@@ -38,7 +38,7 @@ async def _call_clerk_voice(prompt: str) -> dict | None:
     base = cfg.openclaw_workers_gateway_url
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
+    async with httpx.AsyncClient(timeout=300.0) as client:
         spawn = await client.post(
             f"{base}/tools/invoke",
             headers=headers,
@@ -50,7 +50,8 @@ async def _call_clerk_voice(prompt: str) -> dict | None:
                     "mode": "run",
                     "cleanup": "auto",
                     "sandbox": "inherit",
-                    "runTimeoutSeconds": 180,
+                    "runTimeoutSeconds": 300,
+                    "expectsCompletionMessage": False,
                 },
             },
         )
@@ -115,7 +116,9 @@ async def _call_clerk_voice(prompt: str) -> dict | None:
                             return json.loads(m.group(0))
                         except json.JSONDecodeError:
                             pass
+                    logger.info("UNPARSEABLE assistant text (first 800 chars): %r", text[:800])
                     return None
+    logger.info("NO ASSISTANT MESSAGE after 40 polls (session %s)", session_key)
     return None
 
 
@@ -123,13 +126,21 @@ VOICE_PROMPT = """You are Alfred, the principal's agentic butler.
 
 A signal already passed through the upstream extractor and produced a "needs attention" card. You now have to write the two surface fields Sir actually reads on his desk: `display_headline` and `display_body`. The card itself, plus its source quote, is below.
 
-Voice — grounded in SOUL.md:
+## Who Sir is (USER.md)
+
+```
+{user_md}
+```
+
+Sir = the person identified in USER.md above. When the source snippet's `**To**:` or `**From**:` lines name Sir directly (e.g. an email addressed to him, or one he forwarded), Sir is "you" in the body — NEVER a third-party name. Only treat someone as a third party if they are not Sir per USER.md.
+
+## Voice — grounded in SOUL.md
 
 - Genuinely helpful, not performatively helpful. No "Great question!", no "I noticed…!", no apologies. Skip filler.
 - Have an opinion. Suggest the thing. If there's a real tradeoff, name it in a phrase, then recommend.
 - Proactive: frame what happened as you noticing on Sir's behalf and what you'd suggest doing. First person sparingly ("I'd update the card", "I'd skip this").
 - Concise. Headline ≤ 9 words, fragment OK, verb-driven. Body 1-2 sentences, ≤ 240 chars total. Em dashes welcome.
-- Refer to Sir as "you" in the body.
+- Refer to Sir as "you" in the body. NEVER refer to Sir by his own name.
 - No jargon, no decision codes, no confidence scores, no record IDs.
 
 Existing card fields (machine output, do not echo verbatim):
@@ -160,7 +171,41 @@ Emit STRICT JSON, no preamble, no code fences:
 """
 
 
-async def voice_one(client: VaultClient, rec_path: str) -> dict | None:
+async def _load_user_md(cfg) -> str:
+    """Fetch USER.md from ctrl-api so the voicer knows who Sir is.
+
+    The voicing prompt cannot use "you" correctly without identifying the
+    principal. Without this, the model treats Sir's own name in email
+    `**To**:` / `**From**:` fields as a third party and writes "Zsolt
+    Rapali forwarded the FAVO NDA for your review" (where Zsolt IS
+    Sir). Loading USER.md per-tenant fixes that.
+    """
+    base_url = getattr(cfg, "alfred_ctrl_url", None)
+    if not base_url:
+        return "(USER.md not configured — refer to Sir generically as 'you' and avoid third-party framing entirely)"
+    import os
+    api_key = os.environ.get("AAS_API_KEY", "")
+    if not api_key:
+        return "(USER.md not reachable — refer to Sir generically as 'you')"
+    try:
+        async with httpx.AsyncClient(
+            base_url=base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=10.0,
+        ) as http:
+            resp = await http.get("/api/v1/admin/workspace/USER.md")
+            resp.raise_for_status()
+            payload = resp.json()
+            content = payload.get("content") if isinstance(payload, dict) else None
+            if isinstance(content, str) and content.strip():
+                return content.strip()[:6000]
+            return "(USER.md is empty)"
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.info("USER.md fetch degraded: %s", exc)
+        return "(USER.md fetch failed — refer to Sir generically as 'you')"
+
+
+async def voice_one(client: VaultClient, rec_path: str, user_md: str) -> dict | None:
     """Fetch one needs-attention record, voice it, patch it back."""
     try:
         rec = await client.read_record(rec_path)
@@ -178,6 +223,7 @@ async def voice_one(client: VaultClient, rec_path: str) -> dict | None:
         return {"skipped": True}
 
     prompt = VOICE_PROMPT.format(
+        user_md=user_md,
         action_what=str(fm.get("action_what") or "").strip() or "(no action text)",
         decision_reason=str(fm.get("decision_reason") or "").strip() or "(none)",
         target_path=str(fm.get("target_path") or "").strip() or "(none)",
@@ -235,6 +281,8 @@ async def voice_one(client: VaultClient, rec_path: str) -> dict | None:
 
 async def main() -> int:
     cfg = load_config()
+    user_md = await _load_user_md(cfg)
+    logger.info("USER.md loaded: %d chars", len(user_md))
     client = VaultClient(cfg)
     try:
         try:
@@ -248,7 +296,7 @@ async def main() -> int:
             path = r.get("path") if isinstance(r, dict) else None
             if not path:
                 continue
-            out = await voice_one(client, path)
+            out = await voice_one(client, path, user_md)
             if out is None:
                 failed += 1
             elif out.get("skipped"):

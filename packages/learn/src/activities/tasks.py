@@ -280,6 +280,7 @@ CRITICAL: Your final message must contain ONLY the JSON object above."""
                     "cleanup": "auto",
                     "sandbox": "inherit",
                     "runTimeoutSeconds": 240,
+                    "expectsCompletionMessage": False,
                 },
             },
         )
@@ -661,6 +662,7 @@ If no follow-ups are needed, return: {{"follow_up_tasks": []}}"""
                     "cleanup": "auto",
                     "sandbox": "inherit",
                     "runTimeoutSeconds": 60,
+                    "expectsCompletionMessage": False,
                 },
             },
         )
