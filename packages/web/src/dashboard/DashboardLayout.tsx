@@ -19,6 +19,7 @@ import {
   FolderTree,
   Puzzle,
   Wrench,
+  LayoutDashboard,
 } from "lucide-react";
 import { cn } from "../client/utils";
 import VaultNebula from "../components/nebula/VaultNebula";
