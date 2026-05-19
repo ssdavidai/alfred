@@ -303,7 +303,7 @@ function LegacyToolsPage() {
           <ToolList
             icon={<Terminal className="h-3.5 w-3.5 text-[#C9A84C]" />}
             title="Built-in Tools"
-            description="Core openclaw gateway tools (always available)"
+            description="Core Hermes runtime tools (always available)"
             items={filtered.builtin_tools.map((t) => ({
               primary: t.name,
               secondary: t.description ?? "",

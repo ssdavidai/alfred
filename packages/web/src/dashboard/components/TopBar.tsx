@@ -3,7 +3,6 @@ import { motion } from "framer-motion";
 import { Button } from "../../client/components/ui/button";
 import {
   Upload,
-  ExternalLink,
   CheckCircle,
   AlertCircle,
   FolderOpen,
@@ -14,6 +13,7 @@ import {
   Wallet,
   Kanban,
   KeyRound,
+  MessageSquare,
 } from "lucide-react";
 import FileUploadDialog from "./FileUploadDialog";
 import AnimatedCounter from "../../components/ui/AnimatedCounter";
@@ -60,7 +60,6 @@ export default function TopBar({
 
   const subdomainUrl = data.instance?.subdomainUrl ?? null;
   const agentmailAddress = (data.instance as any)?.agentmailInboxAddress ?? null;
-  const gatewayToken = data.gatewayToken ?? null;
 
   // Sidecar URL derivation. Tenants live at https://<sub>.alfred.black; each
   // sidecar gets a single-level subdomain prefix (matches the wildcard cert
@@ -250,27 +249,19 @@ export default function TopBar({
             Upload
           </Button>
 
-          {subdomainUrl && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="gap-1.5 font-mono text-[0.65rem] text-muted-foreground hover:text-[#F0EDE8]"
-              asChild
-            >
-              <a
-                href={
-                  gatewayToken
-                    ? `${subdomainUrl}/?token=${gatewayToken}`
-                    : subdomainUrl
-                }
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <ExternalLink className="h-3 w-3" />
-                OpenClaw
-              </a>
-            </Button>
-          )}
+          {/* Chat — Hermes is HTTP/SSE; the in-dashboard chat widget
+              replaces the legacy OpenClaw raw-WebSocket window. */}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="gap-1.5 font-mono text-[0.65rem] text-muted-foreground hover:text-[#F0EDE8]"
+            asChild
+          >
+            <a href="/chat">
+              <MessageSquare className="h-3 w-3" />
+              Chat
+            </a>
+          </Button>
 
           {sureUrl && (
             <Button

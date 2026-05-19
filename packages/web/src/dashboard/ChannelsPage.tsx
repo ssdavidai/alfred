@@ -117,13 +117,18 @@ export default function ChannelsPage() {
           {/* Web */}
           <ChannelCard
             name="Web app"
-            address="alfred.black/desk"
+            address="alfred.black/chat"
             note="The long thread, in the browser."
             status="active"
           >
-            <Link to="/desk" className="btn-ghost mt-4 inline-block">
-              Open the desk →
-            </Link>
+            <div className="mt-4 flex gap-4">
+              <Link to="/chat" className="btn-ghost inline-block">
+                Open chat →
+              </Link>
+              <Link to="/desk" className="btn-ghost inline-block">
+                Open the desk →
+              </Link>
+            </div>
           </ChannelCard>
 
           {/* Email */}
@@ -236,28 +241,38 @@ export default function ChannelsPage() {
             </Link>
           </ChannelCard>
 
-          {/* Slack — soon */}
+          {/* Slack — native Hermes adapter */}
           <ChannelCard
             name="Slack"
-            address="Soon"
+            address="Native adapter"
             note="DMs and mentions, in your team's workspace."
-            status="soon"
+            status="available"
           >
-            <button disabled className="btn-ghost mt-4 opacity-50 cursor-not-allowed">
-              Coming soon — will configure your OpenClaw channel
-            </button>
+            <p
+              className="font-body italic text-[13px] mt-4"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Built into the Hermes runtime. Add a Slack bot token to the
+              Hermes config and Alfred answers in your workspace — same
+              memory as the desk.
+            </p>
           </ChannelCard>
 
-          {/* Telegram — soon */}
+          {/* Telegram — native Hermes adapter */}
           <ChannelCard
             name="Telegram"
-            address="Soon"
+            address="Native adapter"
             note="For when you're abroad."
-            status="soon"
+            status="available"
           >
-            <button disabled className="btn-ghost mt-4 opacity-50 cursor-not-allowed">
-              Coming soon — will configure your OpenClaw channel
-            </button>
+            <p
+              className="font-body italic text-[13px] mt-4"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Built into the Hermes runtime. Pair a Telegram bot token in
+              the Hermes config; first contact is confirmed by DM pairing
+              on the Devices page.
+            </p>
           </ChannelCard>
         </div>
       </section>

@@ -4,6 +4,7 @@ import { registerWebhookReceiver } from "./webhookReceiver";
 import { registerAgentMailReceiver } from "./agentmailReceiver";
 import { registerOAuth2Routes } from "./oauth2";
 import { attachTerminalProxy, registerTerminalStatusRoute } from "./terminalProxy";
+import { registerChatProxy } from "./chatProxy";
 
 export const serverSetup: ServerSetupFn = async ({ app, server }) => {
   app.use("/api/v1", v1ApiProxy);
@@ -22,5 +23,13 @@ export const serverSetup: ServerSetupFn = async ({ app, server }) => {
     console.log("[setup] Terminal proxy attached successfully");
   } catch (err) {
     console.error("[setup] Failed to attach terminal proxy:", err);
+  }
+  try {
+    // Hermes HTTP/SSE chat proxy — replaces the OpenClaw raw-WebSocket
+    // dashboard chat widget. Mounts /api/chat/{status,turn,run,stream}.
+    registerChatProxy(app);
+    console.log("[setup] Chat proxy registered successfully");
+  } catch (err) {
+    console.error("[setup] Failed to register chat proxy:", err);
   }
 };

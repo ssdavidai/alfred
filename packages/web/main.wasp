@@ -297,6 +297,15 @@ page ChannelsPage {
   component: import ChannelsPage from "@src/dashboard/ChannelsPage"
 }
 
+// /chat — the dashboard chat surface (#29). Replaces the OpenClaw raw
+// WebSocket widget; talks to the Hermes runtime over HTTP/SSE via the
+// chat proxy registered in src/server/setup.ts.
+route ChatRoute { path: "/chat", to: ChatPage }
+page ChatPage {
+  authRequired: true,
+  component: import ChatPage from "@src/dashboard/ChatPage"
+}
+
 // /connections + /connect — Composio catalogue, restyled (M5 #863).
 route ConnectionsRoute { path: "/connections", to: ConnectionsPage }
 page ConnectionsPage {

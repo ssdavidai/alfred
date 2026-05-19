@@ -1,9 +1,10 @@
-// ToolsPage2 — gateway allowlist viewer, restyled (#865).
+// ToolsPage2 — Hermes tool allowlist viewer, restyled (#865, #31).
 //
 // Reads getAllowedTools (the same op the legacy ToolsPage uses). Renders
-// a flat audit of every tool the OpenClaw gateway will currently let
+// a flat audit of every tool the Hermes runtime will currently let
 // through: per-app actions/streams + built-in primitives + MCP servers.
-// Visual restyle only — no logic or data changes.
+// Also surfaces Hermes **command approval** — a parity gain over the old
+// OpenClaw allowlist, where privileged commands now ask before running.
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, getAllowedTools } from "wasp/client/operations";
@@ -128,12 +129,41 @@ export default function ToolsPage2() {
           What I'm permitted to do.
         </h1>
         <p
-          className="font-body text-[16px] max-w-[60ch] mb-10"
+          className="font-body text-[16px] max-w-[60ch] mb-6"
           style={{ color: "var(--marginalia)" }}
         >
-          Every tool, stream, and MCP endpoint the gateway will currently
-          let through. {totalCount > 0 ? `${totalCount} entries.` : ""}
+          Every tool, stream, and MCP endpoint the Hermes runtime will
+          currently let through. {totalCount > 0 ? `${totalCount} entries.` : ""}
         </p>
+
+        {/* Command approval — a Hermes parity gain over the OpenClaw
+            allowlist. The allowlist below says what Alfred *may* reach;
+            command approval governs what runs *without asking first*. */}
+        <div className="border border-rule p-5 mb-10">
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+            style={{ color: "var(--brass)" }}
+          >
+            Command approval
+          </div>
+          <p
+            className="font-body text-[14px] max-w-[68ch]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            The allowlist below is what Alfred is <em>permitted</em> to
+            reach. Hermes adds a second gate the OpenClaw gateway never
+            had: a privileged command — a shell action, a write, a
+            sensitive tool call — pauses for your approval before it runs.
+            Pending approvals arrive on the{" "}
+            <Link
+              to="/dashboard/devices"
+              style={{ color: "var(--brass)" }}
+            >
+              Devices
+            </Link>{" "}
+            page and on whichever channel raised them.
+          </p>
+        </div>
 
         <input
           value={search}

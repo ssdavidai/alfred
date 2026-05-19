@@ -71,13 +71,16 @@ export const getIntegrationCatalog: GetIntegrationCatalog<
 };
 
 /**
- * Fast readiness probe for the tenant's openclaw gateway. Used by the
- * dashboard's `ReconfiguringBanner` to detect the ~40s restart window that
- * follows a `gateway.tools.allow` change (e.g. first Composio connect).
+ * Fast readiness probe for the tenant's Hermes runtime. Used by the
+ * dashboard's `ReconfiguringBanner` to detect the restart window that
+ * follows a tool-enable config change (e.g. first Composio connect).
  * Returns:
  *   { ready: bool,
  *     last_config_touch_at: iso | null,
  *     restart_expected_until: iso | null }
+ *
+ * The runtime is Hermes — the Phase-1 `/api/v1/openclaw/*` alias was
+ * retired (ctrl-api issue #25), so this reads `/api/v1/hermes/ready`.
  */
 export const getOpenclawReadiness: GetOpenclawReadiness<void, any> = async (
   _args,
@@ -85,7 +88,7 @@ export const getOpenclawReadiness: GetOpenclawReadiness<void, any> = async (
 ) => {
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, {
-    path: "/api/v1/openclaw/ready",
+    path: "/api/v1/hermes/ready",
     timeoutMs: 3000, // probe itself is bounded to 1.5s inside ctrl-api
   });
 };

@@ -77,9 +77,11 @@ export const getAllowedTools: GetAllowedTools<void, any> = async (
   if (!context.user) throw new HttpError(401, "Not authenticated");
   const instance = await getUserInstance(context);
 
-  // 1. Builtin + MCP tools from the tenant
+  // 1. Builtin + MCP tools from the tenant. The runtime is Hermes — the
+  //    Phase-1 `/api/v1/openclaw/*` alias was retired (ctrl-api issue #25),
+  //    so this reads the canonical `/api/v1/hermes/allowed-tools` route.
   const builtinMcpResp = await proxyToTenant(instance, {
-    path: "/api/v1/openclaw/allowed-tools",
+    path: "/api/v1/hermes/allowed-tools",
   });
   const builtin_tools: Array<{ name: string; description: string | null }> =
     Array.isArray(builtinMcpResp?.builtin_tools) ? builtinMcpResp.builtin_tools : [];
