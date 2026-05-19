@@ -28,11 +28,11 @@
 >   SQL now. `CANONICAL_PATH_ENFORCEMENT` default flipped to
 >   `enforce` — the four-store lockdown is in effect.
 >
-> The only remaining open issue from this session is the
-> pre-existing **#479** openclaw `.gateway-token` permission bug
-> (root:root mode 600 keeps getting rewritten; blocks all
-> alfred-learn clerk/LLM calls). That predates and is independent
-> of this epic.
+> **#479 also closed** in commit `f60cff5`: gateway-token writes
+> now chown 0:1000 + chmod 0640 so alfred-learn's gid 1000 can
+> read via group. First full-prose brief in 5 days verified on
+> david (3,463 bytes; was rendering as a 455-byte stub since
+> 2026-05-14).
 
 ---
 
