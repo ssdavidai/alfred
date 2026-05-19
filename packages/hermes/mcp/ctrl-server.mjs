@@ -44,12 +44,24 @@
  *   }
  */
 
-import { Server } from "/app/node_modules/@modelcontextprotocol/sdk/dist/esm/server/index.js";
-import { StdioServerTransport } from "/app/node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js";
+// Relative imports into the sibling mcp-stdio bundle's node_modules.
+// The init container deploys this file to <profile>/mcp/ctrl-server.mjs
+// and the stdio bundle (with its node_modules) to <profile>/mcp-stdio/ —
+// siblings — so ../mcp-stdio/node_modules/... is a stable relative path.
+//
+// Previously these were hardcoded /app/node_modules/... absolute paths
+// to a directory that does not exist in the hermes container, so the
+// stdio child crashed on first import and the alfred-ctrl MCP server
+// never connected. A bare specifier would NOT fix it: Node's ESM loader
+// does not honour NODE_PATH (only the legacy CJS resolver does), and no
+// node_modules is reachable by walking up from mcp/. A relative path is
+// the only form that resolves here.
+import { Server } from "../mcp-stdio/node_modules/@modelcontextprotocol/sdk/dist/esm/server/index.js";
+import { StdioServerTransport } from "../mcp-stdio/node_modules/@modelcontextprotocol/sdk/dist/esm/server/stdio.js";
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
-} from "/app/node_modules/@modelcontextprotocol/sdk/dist/esm/types.js";
+} from "../mcp-stdio/node_modules/@modelcontextprotocol/sdk/dist/esm/types.js";
 
 const CTRL_URL = process.env.CTRL_API_URL || "http://ctrl-api:3100";
 const API_KEY = process.env.AAS_API_KEY || "";
