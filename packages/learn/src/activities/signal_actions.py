@@ -613,64 +613,64 @@ async def _emit_signal_action_audit(
         "---\n" + "\n".join(fm_lines) + "\n---\n\n" + "\n".join(body_lines) + "\n"
     )
 
-    cfg = load_config()
-    client = VaultClient(cfg)
-    try:
-        try:
-            written_path = await client.write_record(
-                record_type="event", name=name, content=content,
-            )
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "signal_actions._emit_signal_action_audit: write failed "
-                "name=%s err=%s",
-                name, exc,
-            )
-            raise
+    # STORE-P6-1f-D: legacy /vault/event/ markdown write (signal-action audit) removed; SQL is now authoritative (via write_audit_safe).
+    # The previous shadow audit-row emit (STORE-P2-2) is the only
+    # persistence path. Replay-safe — inside an @activity.defn body
+    # (``route_signal_action``), so no ``workflow.patched()`` gate is
+    # required per packages/learn/CLAUDE.md.
+    from src.activities.audit_writer import (
+        current_enforcement_mode,
+        write_audit_safe,
+    )
 
-        # STORE-P2-2 — emit the matching row in the unified audit table.
-        # Inside an @activity.defn body (route_signal_action), so no
-        # workflow.patched() gate is required (activity-internal changes
-        # are replay-safe — see packages/learn/CLAUDE.md). Shadow mode by
-        # default: the markdown above remains the source of truth until
-        # STATE_AUDIT_ENFORCEMENT flips.
-        from src.activities.audit_writer import (
-            current_enforcement_mode,
-            write_audit_safe,
+    # Best-effort target — prefer the resolved target_path on the
+    # signal frontmatter; fall back to chosen_path / signal_path so
+    # the audit row is always anchored to something queryable.
+    target_id_for_audit = (
+        str(signal_fm.get("target_path") or "").strip()
+        or chosen_path
+        or signal_path
+    )
+    target_kind_for_audit = (
+        str(signal_fm.get("target_kind") or "").strip() or "signal"
+    )
+
+    sql_resp = await write_audit_safe(
+        actor="signal_router",
+        action_type="signal_action",
+        target_type=target_kind_for_audit,
+        target_id=target_id_for_audit,
+        payload={
+            **payload,
+            "audit_name": name,
+            "body": content,
+        },
+        decision_origin=signal_path or None,
+        reasoning=decision_reason or None,
+        reversible=False,
+    )
+    _ = current_enforcement_mode()  # plumbed for future warn/reject
+
+    if not sql_resp:
+        # write_audit_safe swallowed an error and returned None. Surface
+        # the failure to the caller — emitting an audit row is now load-
+        # bearing (no markdown twin to fall back on).
+        logger.warning(
+            "signal_actions._emit_signal_action_audit: audit SQL emit "
+            "returned None name=%s — audit row NOT persisted",
+            name,
+        )
+        raise RuntimeError(
+            f"signal_action audit emit failed for {signal_path}"
         )
 
-        # Best-effort target — prefer the resolved target_path on the
-        # signal frontmatter; fall back to chosen_path / signal_path so
-        # the audit row is always anchored to something queryable.
-        target_id_for_audit = (
-            str(signal_fm.get("target_path") or "").strip()
-            or chosen_path
-            or signal_path
-        )
-        target_kind_for_audit = (
-            str(signal_fm.get("target_kind") or "").strip() or "signal"
-        )
-
-        await write_audit_safe(
-            actor="signal_router",
-            action_type="signal_action",
-            target_type=target_kind_for_audit,
-            target_id=target_id_for_audit,
-            payload={
-                **payload,
-                "audit_record_path": written_path,
-                "audit_name": name,
-                "body": content,
-            },
-            decision_origin=signal_path or None,
-            reasoning=decision_reason or None,
-            reversible=False,
-        )
-        _ = current_enforcement_mode()  # plumbed for future warn/reject
-
-        return written_path
-    finally:
-        await client.close()
+    # Synthesise a pseudo-path so callers that stamp ``audit_record_path``
+    # onto the signal frontmatter keep a stable identifier. The SQL row
+    # id is the canonical reference; Phase 6 readers query /api/v1/audit.
+    row_id = (
+        str(sql_resp.get("id") or "") if isinstance(sql_resp, dict) else ""
+    )
+    return f"audit/{row_id}" if row_id else ""
 
 
 # ---------------------------------------------------------------------------
@@ -1024,113 +1024,115 @@ async def write_needs_attention_record(
     if source_event_path:
         body_lines.append(f"- Event: `{source_event_path}`")
 
-    content = "\n".join(fm_lines) + "\n".join(body_lines) + "\n"
+    # content kept for SQL payload's ``body`` field below (was previously
+    # serialised into the markdown record).
+    content = "\n".join(fm_lines) + "\n".join(body_lines) + "\n"  # noqa: F841
 
-    cfg = load_config()
-    client = VaultClient(cfg)
+    # STORE-P6-1f-D: legacy /vault/needs_attention/ markdown write removed; SQL is now authoritative (via write_needs_attention_safe).
+    # The previous shadow needs_attention emit (Round 1) is the only
+    # persistence path. Replay-safe — inside an @activity.defn body, so
+    # no ``workflow.patched()`` gate is required per packages/learn/CLAUDE.md.
     try:
-        try:
-            written = await client.write_record(
-                record_type="needs_attention", name=name, content=content,
-            )
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "signal_actions.write_needs_attention_record: write failed "
-                "name=%s err=%s",
-                name, exc,
-            )
-            raise
-        logger.info(
-            "signal_actions.write_needs_attention_record: wrote path=%s "
-            "reason=%s confidence=%.2f matched=%s",
-            written, decision_reason, combined_confidence,
-            matched_instinct_path or "none",
+        from src.activities.needs_attention_writer import (
+            write_needs_attention_safe,
         )
 
-        # STORE-P6-1 followup shadow write — emit a corresponding row to
-        # state.db's ``needs_attention`` table via ctrl-api. The markdown
-        # record remains authoritative during the soak; failures here are
-        # logged + swallowed (never starve the primary write that already
-        # landed). Replay-safe: this is inside an ``@activity.defn`` body,
-        # so no ``workflow.patched()`` gate is required per
-        # packages/learn/CLAUDE.md.
-        try:
-            from src.activities.needs_attention_writer import (
-                write_needs_attention_safe,
-            )
+        # Prefer the explicit voiced headline when present; else
+        # fall back to the actionable summary; finally the
+        # ``Needs Attention: ...`` body label.
+        shadow_headline = (
+            display_headline
+            or action_what
+            or f"Needs Attention: {decision_reason}"
+        )[:500]
 
-            # Prefer the explicit voiced headline when present; else
-            # fall back to the actionable summary; finally the
-            # ``Needs Attention: ...`` body label.
-            shadow_headline = (
-                display_headline
-                or action_what
-                or f"Needs Attention: {decision_reason}"
-            )[:500]
+        # body = the rendered markdown body (without frontmatter)
+        shadow_body = "\n".join(body_lines)
 
-            # body = the rendered markdown body (without frontmatter)
-            shadow_body = "\n".join(body_lines)
+        # target_matter: only stamp when the binding is matter-prefixed.
+        shadow_target_matter: str | None = None
+        if isinstance(target_path, str) and target_path.strip().startswith(
+            "matter/"
+        ):
+            shadow_target_matter = target_path.strip()
 
-            # target_matter: only stamp when the binding is matter-prefixed.
-            shadow_target_matter: str | None = None
-            if isinstance(target_path, str) and target_path.strip().startswith(
-                "matter/"
-            ):
-                shadow_target_matter = target_path.strip()
+        shadow_target_kind: str | None = None
+        if isinstance(target_kind, str) and target_kind.strip():
+            shadow_target_kind = target_kind.strip()
 
-            shadow_target_kind: str | None = None
-            if isinstance(target_kind, str) and target_kind.strip():
-                shadow_target_kind = target_kind.strip()
+        shadow_source_signal: str | None = (
+            source_signal_path.strip() if source_signal_path else None
+        )
 
-            shadow_source_signal: str | None = (
-                source_signal_path.strip() if source_signal_path else None
-            )
+        # Forensic payload — the full card frontmatter (mirrors the
+        # YAML the legacy markdown file carried).
+        shadow_payload: dict[str, Any] = {
+            "source_signal_path": source_signal_path,
+            "source_event_path": source_event_path,
+            "action_what": action_what,
+            "suggested_actor": suggested_actor,
+            "due_at": due_at,
+            "target_path": target_path,
+            "target_kind": target_kind,
+            "matched_instinct": matched_instinct_path,
+            "decision_reason": decision_reason,
+            "confidence": round(combined_confidence, 4),
+            "target_confidence": round(target_confidence, 4),
+            "effect_confidence": round(effect_confidence, 4),
+            "status": "pending",
+            "raw_quote": raw_quote,
+            "reasoning": reasoning,
+            "display_headline": display_headline or None,
+            "display_body": display_body or None,
+        }
 
-            # Forensic payload — the full card frontmatter (mirrors the
-            # YAML we wrote into the markdown file).
-            shadow_payload: dict[str, Any] = {
-                "source_signal_path": source_signal_path,
-                "source_event_path": source_event_path,
-                "action_what": action_what,
-                "suggested_actor": suggested_actor,
-                "due_at": due_at,
-                "target_path": target_path,
-                "target_kind": target_kind,
-                "matched_instinct": matched_instinct_path,
-                "decision_reason": decision_reason,
-                "confidence": round(combined_confidence, 4),
-                "target_confidence": round(target_confidence, 4),
-                "effect_confidence": round(effect_confidence, 4),
-                "status": "pending",
-                "raw_quote": raw_quote,
-                "reasoning": reasoning,
-                "display_headline": display_headline or None,
-                "display_body": display_body or None,
-                "vault_path": written,
-            }
+        sql_resp = await write_needs_attention_safe(
+            headline=shadow_headline,
+            body=shadow_body,
+            source_signal_id=shadow_source_signal,
+            target_matter=shadow_target_matter,
+            target_kind=shadow_target_kind,
+            payload=shadow_payload,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Programming error in the kwargs mapping above (or transport
+        # error not swallowed by write_needs_attention_safe) surfaces
+        # here. Re-raise so Temporal's retry policy fires — this write
+        # is now load-bearing (no markdown twin).
+        logger.warning(
+            "signal_actions.write_needs_attention_record: SQL emit "
+            "failed name=%s err=%r",
+            name, exc,
+        )
+        raise
 
-            await write_needs_attention_safe(
-                headline=shadow_headline,
-                body=shadow_body,
-                source_signal_id=shadow_source_signal,
-                target_matter=shadow_target_matter,
-                target_kind=shadow_target_kind,
-                payload=shadow_payload,
-            )
-        except Exception as exc:  # noqa: BLE001
-            # Defence in depth — write_needs_attention_safe already
-            # swallows transport errors, but a programming error in the
-            # kwargs mapping above would surface here. Never sink the
-            # primary markdown write because of a shadow-mode bug.
-            logger.warning(
-                "signal_actions.write_needs_attention_record: "
-                "shadow SQL emit failed path=%s err=%r",
-                written, exc,
-            )
+    if not sql_resp:
+        # write_needs_attention_safe swallowed an error and returned
+        # None. Surface the failure to the caller so the workflow
+        # counter increments rather than silently dropping the card.
+        logger.warning(
+            "signal_actions.write_needs_attention_record: SQL emit "
+            "returned None name=%s — card NOT persisted",
+            name,
+        )
+        raise RuntimeError(
+            f"needs_attention emit failed for {source_signal_path}"
+        )
 
-        return written
-    finally:
-        await client.close()
+    # Synthesise a pseudo-path so the audit emitter / route_signal_action
+    # bookkeeping keeps a stable identifier. The SQL row id is the
+    # canonical reference; Phase 6 readers query /api/v1/needs-attention.
+    row_id = (
+        str(sql_resp.get("id") or "") if isinstance(sql_resp, dict) else ""
+    )
+    written = f"needs_attention/{row_id}" if row_id else ""
+    logger.info(
+        "signal_actions.write_needs_attention_record: wrote SQL row id=%s "
+        "reason=%s confidence=%.2f matched=%s",
+        row_id, decision_reason, combined_confidence,
+        matched_instinct_path or "none",
+    )
+    return written
 
 
 # ---------------------------------------------------------------------------

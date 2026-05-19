@@ -1064,35 +1064,18 @@ async def _emit_audit_record(
     ]
     content = "\n".join(fm_lines + body_lines)
 
-    try:
-        path = await client.write_record(
-            record_type="event",
-            name=audit_name,
-            content=content,
-        )
-        logger.info(
-            "task_creation: audit emitted source_event=%s task=%s -> %s",
-            source_event_path, task_path, path,
-        )
-    except httpx.HTTPError as exc:
-        logger.warning(
-            "task_creation: audit write failed task=%s err=%s",
-            task_path, exc,
-        )
-        return None
-
-    # STORE-P2-2 — also emit a row to the unified audit table. Caller
-    # (``create_task_from_signal``) is an @activity.defn, so this is
-    # replay-safe and does NOT need a workflow.patched() gate. Shadow
-    # mode keeps the markdown record as the authoritative copy during
-    # the soak period.
+    # STORE-P6-1f-D: legacy /vault/event/ markdown write (auto-task-created audit) removed; SQL is now authoritative (via write_audit_safe).
+    # The previous shadow audit-row emit (STORE-P2-2) is the only
+    # persistence path. Replay-safe — inside an @activity.defn body
+    # (``create_task_from_signal``), so no ``workflow.patched()`` gate
+    # is required per packages/learn/CLAUDE.md.
     try:
         from src.activities.audit_writer import (
             current_enforcement_mode,
             write_audit_safe,
         )
 
-        await write_audit_safe(
+        sql_resp = await write_audit_safe(
             actor="task_creation",
             action_type="auto_task_created",
             target_type="task",
@@ -1106,7 +1089,6 @@ async def _emit_audit_record(
                 "description": description,
                 "prompt": prompt,
                 "llm_response": llm_response,
-                "audit_record_path": path,
                 "audit_name": audit_name,
                 "body": content,
             },
@@ -1116,11 +1098,30 @@ async def _emit_audit_record(
         )
         _ = current_enforcement_mode()  # plumbed for future warn/reject
     except Exception as exc:  # noqa: BLE001
-        # Audit-row failure must never starve the task; the markdown
-        # record is still the source of truth in shadow mode.
+        # Programming error in the kwargs above. Audit emit is now load-
+        # bearing (no markdown twin), so surface to the caller rather
+        # than starve silently.
         logger.warning(
             "task_creation: audit-row emit failed task=%s err=%r",
             task_path, exc,
         )
+        return None
 
+    if not sql_resp:
+        # write_audit_safe swallowed an error and returned None.
+        logger.warning(
+            "task_creation: audit SQL emit returned None task=%s "
+            "— audit row NOT persisted",
+            task_path,
+        )
+        return None
+
+    row_id = (
+        str(sql_resp.get("id") or "") if isinstance(sql_resp, dict) else ""
+    )
+    path = f"audit/{row_id}" if row_id else ""
+    logger.info(
+        "task_creation: audit emitted source_event=%s task=%s -> SQL id=%s",
+        source_event_path, task_path, row_id,
+    )
     return path

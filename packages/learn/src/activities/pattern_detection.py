@@ -586,40 +586,16 @@ async def detect_pattern_proposals() -> dict[str, Any]:
                 )
                 continue
 
-            try:
-                resp = await client.post(
-                    "/api/v1/vault/records",
-                    json={
-                        "type": "pattern_proposal",
-                        "name": record_name,
-                        "content": content,
-                    },
-                )
-                resp.raise_for_status()
-            except httpx.HTTPError as exc:
-                counters["errors"] += 1
-                counters["error_messages"].append(
-                    f"write {record_name}: {exc}"[:300]
-                )
-                continue
-
-            path = (resp.json() or {}).get("path") or ""
-            counters["proposals_written"] += 1
-            counters["proposal_paths"].append(path)
-            logger.info(
-                "pattern_detection: wrote %s (sender=%s intent=%s n=%d agree=%.2f)",
-                path, cluster["sender"][:40], cluster["intent"],
-                cluster["cluster_size"], cluster["agreement"],
-            )
-
-            # STORE-P6-1 followup shadow write — emit a corresponding row
-            # to state.db's ``pattern_proposal`` table via ctrl-api. The
-            # markdown record remains authoritative during the soak;
-            # failures here are logged + swallowed (never starve the
-            # primary write that already landed). Replay-safe: this is
-            # inside an ``@activity.defn`` body, so no
-            # ``workflow.patched()`` gate is required per
-            # packages/learn/CLAUDE.md.
+            # STORE-P6-1f-D: legacy /vault/pattern_proposal/ markdown write removed; SQL is now authoritative (via write_pattern_proposal_safe).
+            # The previous shadow SQL emit (Round 1) is the only
+            # persistence path. ``write_pattern_proposal_safe`` still
+            # swallows transport errors → returns None on failure; we
+            # promote that None into the ``errors`` counter so a stuck
+            # writer surfaces in the workflow result instead of silently
+            # eating proposals. Replay-safe — this is inside an
+            # ``@activity.defn`` body, so no ``workflow.patched()``
+            # gate is required per packages/learn/CLAUDE.md.
+            sql_resp: dict[str, Any] | None = None
             try:
                 from src.activities.pattern_proposal_writer import (
                     write_pattern_proposal_safe,
@@ -631,7 +607,7 @@ async def detect_pattern_proposals() -> dict[str, Any]:
                     if isinstance(observation_refs, list)
                     else None
                 )
-                await write_pattern_proposal_safe(
+                sql_resp = await write_pattern_proposal_safe(
                     proposed_name=str(fm.get("name") or record_name),
                     proposed_body=content,
                     cluster_size=int(fm.get("cluster_size") or 0),
@@ -639,15 +615,36 @@ async def detect_pattern_proposals() -> dict[str, Any]:
                     payload=fm,
                 )
             except Exception as exc:  # noqa: BLE001
-                # Defence in depth — write_pattern_proposal_safe already
-                # swallows transport errors, but a programming error in
-                # the kwargs mapping above would surface here. Never
-                # sink the primary markdown write because of a
-                # shadow-mode bug.
-                logger.warning(
-                    "pattern_detection: shadow SQL emit failed name=%s err=%r",
-                    record_name, exc,
+                # Programming error in the kwargs mapping above would
+                # surface here. write_pattern_proposal_safe itself
+                # already swallows transport errors and returns None.
+                counters["errors"] += 1
+                counters["error_messages"].append(
+                    f"write {record_name}: {exc}"[:300]
                 )
+                continue
+
+            if not sql_resp:
+                counters["errors"] += 1
+                counters["error_messages"].append(
+                    f"write {record_name}: SQL emit returned None"[:300]
+                )
+                continue
+
+            # Synthesise a pseudo-path so callers that expected a vault
+            # path keep working. The SQL row id is the canonical
+            # identifier; Phase 6 readers query /api/v1/pattern-proposals.
+            row_id = (
+                str(sql_resp.get("id") or "") if isinstance(sql_resp, dict) else ""
+            )
+            path = f"pattern_proposal/{row_id}" if row_id else ""
+            counters["proposals_written"] += 1
+            counters["proposal_paths"].append(path)
+            logger.info(
+                "pattern_detection: wrote SQL row id=%s (sender=%s intent=%s n=%d agree=%.2f)",
+                row_id, cluster["sender"][:40], cluster["intent"],
+                cluster["cluster_size"], cluster["agreement"],
+            )
 
             # Also add to skip set so a duplicate cluster later in the
             # same pass doesn't double-write.
