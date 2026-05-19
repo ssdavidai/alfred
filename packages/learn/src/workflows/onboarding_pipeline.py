@@ -477,25 +477,18 @@ class OnboardingPipelineWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
-            # If any templates were generated, we need to restart the
-            # alfred-learn worker so load_user_chore_templates picks
-            # them up on next boot. This activity kills its own worker
-            # mid-flight — Temporal's retry policy handles reconnection
-            # automatically when the new worker comes online.
-            if isinstance(chore_result, dict) and chore_result.get("generated", 0) > 0:
-                workflow.logger.info(
-                    "Stage 7.5 generated %d templates — triggering worker restart",
-                    chore_result["generated"],
-                )
-                await workflow.execute_activity(
-                    restart_learn_worker,
-                    start_to_close_timeout=timedelta(minutes=3),
-                    heartbeat_timeout=timedelta(seconds=60),
-                    retry_policy=RetryPolicy(
-                        maximum_attempts=2,
-                        initial_interval=timedelta(seconds=30),
-                    ),
-                )
+            # Stash the chore_result for the post-done worker-restart
+            # bookkeeping below — we want to mark onboarding DONE and
+            # email the brief BEFORE the activity that kills its own
+            # worker, so a restart-activity failure cannot fail the
+            # whole workflow and leave the user stuck at "chores" with
+            # the brief sitting unread on disk.
+            templates_generated = (
+                isinstance(chore_result, dict)
+                and chore_result.get("generated", 0) > 0
+            )
+        else:
+            templates_generated = False
 
         # -----------------------------------------------------------------
         # Mark done BEFORE background processing
@@ -526,6 +519,48 @@ class OnboardingPipelineWorkflow:
                 "send_first_brief_email failed, continuing with background: %s",
                 err,
             )
+
+        # -----------------------------------------------------------------
+        # Pick up newly generated chore templates by restarting the
+        # alfred-learn worker. This activity KILLS its own worker
+        # mid-flight: the ctrl-api restart endpoint stops the container
+        # the activity is running in, so the HTTP response never returns
+        # and Temporal sees a heartbeat timeout. Two reasons it can't
+        # fail the workflow:
+        #
+        #   1) Done-stage + brief email have ALREADY completed above —
+        #      the user-visible outcome is in place.
+        #   2) The restart only loads new dynamic chore TEMPLATES; the
+        #      brief, matter/instinct/errand packs, and the 6 default
+        #      chores were already written by the activities that ran
+        #      before this point.
+        #
+        # We wrap the call in try/except so any failure (heartbeat
+        # timeout, retries exhausted) is downgraded to a warning. The
+        # activity-side already handles the common ConnectError case by
+        # returning ok=True; heartbeat_timeout is bumped to 180s (longer
+        # than the observed ~150s killing window) so the FIRST attempt
+        # has a real chance to land. Retries are capped at 1 — a second
+        # attempt on the restarted worker just trips the 30-second
+        # ctrl-api rate limiter or kills the worker again.
+        # -----------------------------------------------------------------
+        if templates_generated:
+            workflow.logger.info(
+                "Stage 7.5 generated chore templates — triggering worker restart"
+            )
+            try:
+                await workflow.execute_activity(
+                    restart_learn_worker,
+                    start_to_close_timeout=timedelta(minutes=3),
+                    heartbeat_timeout=timedelta(seconds=180),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            except Exception as err:  # pragma: no cover — advisory
+                workflow.logger.warning(
+                    "restart_learn_worker failed (templates load on next "
+                    "scheduled restart): %s",
+                    err,
+                )
 
         # -----------------------------------------------------------------
         # Background: full email backfill → batch to inbox → curator
