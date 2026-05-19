@@ -344,6 +344,28 @@ CALENDAR_SCHEDULES = [
             minute=[ScheduleRange(start=0)],
         ),
     },
+    {
+        # Init-image drift check — daily pull of the manifest for
+        # ``ssdavidai00/alfred-init:latest`` from DockerHub + scan for
+        # the OPS-TOKEN-1 entrypoint marker. Catches the 2026-05-19
+        # 11:14Z failure mode where an out-of-band push overwrote CI's
+        # freshly-built image with stale content carrying ``chmod 600``,
+        # which alfred-learn cannot read. Posts an ``image-drift`` audit
+        # row on a positive detection — the same surface a Desk
+        # operator sees on /decisions.
+        #
+        # Daily cadence (04:00 tenant-local) is sufficient: the CI smoke
+        # step is the primary gate, this is the long-tail net. 04:00
+        # sits between the 03:00 nightly_maintenance/archival batch and
+        # the 05:00 morning briefing so it competes with nothing live.
+        # SKIP overlap is inherited from ``register_all``.
+        "id": "al-init-image-drift",
+        "workflow": "InitImageDriftWorkflow",
+        "calendar": ScheduleCalendarSpec(
+            hour=[ScheduleRange(start=4)],
+            minute=[ScheduleRange(start=0)],
+        ),
+    },
 ]
 
 

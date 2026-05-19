@@ -64,6 +64,39 @@ jobs:
         run: |
           docker run --rm --entrypoint sh ssdavidai00/alfred-init:latest \
             -c 'ls -l /usr/local/lib/sqlite-vec.so && [ -s /usr/local/lib/sqlite-vec.so ]'
+      - name: Smoke — token chmod is 0640 (OPS-TOKEN-1)
+        # Guards against the failure mode observed in the 11:14Z incident
+        # (commit f60cff5 + 41e7db6): an out-of-band push to DockerHub
+        # overwrote CI's freshly-built image with stale content where
+        # /alfred-data/.gateway-token was chmod 600 — unreadable by
+        # alfred-learn (uid 1000) since the token is owned root:1000.
+        # alfred-learn cannot read the gateway token → briefs and every
+        # other LLM call silently fail. This step pulls the JUST-PUSHED
+        # image back from DockerHub (so we observe what tenants will pull,
+        # not the local layer cache) and asserts the entrypoint contains
+        # the OPS-TOKEN-1 fix and does NOT contain the regressed chmod
+        # 600. Failing this step means either CI ran on stale source, or
+        # something raced our push and clobbered it — either way the
+        # image is bad and the deploy should not proceed.
+        run: |
+          set -euo pipefail
+          docker pull ssdavidai00/alfred-init:latest
+          docker run --rm --entrypoint /bin/cat ssdavidai00/alfred-init:latest \
+            /setup/entrypoint.sh | tee /tmp/ep.sh > /dev/null
+          # grep -F: literal-string match. ``$`` in ``$TOKEN_FILE`` is a
+          # regex end-of-line anchor under default grep, so an extended-
+          # regex match would always be false even when the line is
+          # present. The fixed-string flag is load-bearing — don't drop it.
+          if ! grep -qF 'chmod 0640 "$TOKEN_FILE"' /tmp/ep.sh; then
+            echo "ERROR: chmod 0640 missing — OPS-TOKEN-1 fix not present in pushed image"
+            echo "ERROR: the freshly-pushed ssdavidai00/alfred-init:latest is stale"
+            exit 1
+          fi
+          if grep -qF 'chmod 600 "$TOKEN_FILE"' /tmp/ep.sh; then
+            echo "ERROR: chmod 600 present — regressed entrypoint shipped to DockerHub"
+            exit 1
+          fi
+          echo "OK: OPS-TOKEN-1 fix present (chmod 0640) and no regressed chmod 600"
 
   build-worker:
     runs-on: ubuntu-latest

@@ -57,6 +57,7 @@ from src.workflows.stuck_pipeline_alert import StuckPipelineAlertWorkflow
 from src.workflows.reversal_calibration import ReversalCalibrationWorkflow
 from src.workflows.briefing import BriefingWorkflow
 from src.workflows.archival import ArchivalSweepWorkflow
+from src.workflows.init_image_drift import InitImageDriftWorkflow
 
 # Chore template workflows (static + dynamic)
 from src.workflows.chores import ALL_CHORE_TEMPLATES
@@ -276,6 +277,19 @@ from src.activities.maintenance import (
 from src.activities.stuck_pipeline import (
     check_stuck_pipeline,
     post_stuck_pipeline_alert,
+)
+
+# Init-image drift detector — daily check that
+# ``ssdavidai00/alfred-init:latest`` on DockerHub still carries the
+# OPS-TOKEN-1 fix (``chmod 0640`` on the gateway token). Catches the
+# 2026-05-19 11:14Z failure mode where an out-of-band push overwrote
+# CI's freshly-built image with stale content carrying ``chmod 600``,
+# which alfred-learn (uid 1000) cannot read. Posts an audit row when
+# drift is detected — same surface a Desk operator sees on
+# ``/decisions``.
+from src.activities.init_image_drift import (
+    check_init_image_drift,
+    emit_init_image_drift_audit,
 )
 
 # Activities — behavioral profiler + packs (#283, #284)
@@ -712,6 +726,7 @@ _STATIC_WORKFLOWS = [
     ReversalCalibrationWorkflow,
     BriefingWorkflow,
     ArchivalSweepWorkflow,
+    InitImageDriftWorkflow,
     *ALL_CHORE_TEMPLATES,
 ]
 
@@ -851,6 +866,14 @@ ALL_ACTIVITIES = [
     # forwards to ALERT_WEBHOOK_URL when the report is non-zero.
     check_stuck_pipeline,
     post_stuck_pipeline_alert,
+    # Init-image drift pair (post-2026-05-19 incident). The check pulls
+    # ``ssdavidai00/alfred-init:latest`` from DockerHub via the registry
+    # HTTP API (alfred-learn has no docker socket) and asserts the
+    # entrypoint still carries the OPS-TOKEN-1 ``chmod 0640`` marker on
+    # the gateway token. emit_init_image_drift_audit forwards a positive
+    # drift report to ctrl-api's audit ledger.
+    check_init_image_drift,
+    emit_init_image_drift_audit,
     # Behavioral profiler + packs
     run_behavioral_profiler,
     generate_stream_pack,
