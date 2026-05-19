@@ -193,7 +193,7 @@ INTERVAL_SCHEDULES = [
         # unified observation pool. Clusters by (sender, intent) and
         # writes pattern_proposal records for surviving clusters. The
         # detector is cheap (one ctrl-api list call + in-memory work)
-        # but uses overlap=SKIP via the default schedule policy so two
+        # and ``register_all`` applies overlap=SKIP fleet-wide so two
         # ticks can't race on the skip-set.
         "id": "al-pattern-detection",
         "workflow": "PatternDetectionWorkflow",
@@ -211,10 +211,9 @@ INTERVAL_SCHEDULES = [
         # guarantees cleanup eventually fires even if ctrl-api restarts
         # before the in-process timer (1h grace) elapses. 15-minute cadence
         # matches the other low-priority interval workflows; ledger
-        # semantics are idempotent so overlap is harmless but we still
-        # SKIP for hygiene (see the schedule policy below — interval
-        # schedules in this list don't currently set an explicit policy,
-        # so overlap defaults to ALLOW which is fine here).
+        # semantics are idempotent so overlap would be harmless but
+        # ``register_all`` applies overlap=SKIP to every interval schedule
+        # so a wedged run can't accumulate.
         "id": "al-composio-reconnect-cleanup",
         "workflow": "ComposioReconnectCleanupWorkflow",
         "interval": timedelta(minutes=15),
@@ -1527,6 +1526,18 @@ async def register_all() -> None:
 
     schedules = _build_schedule_entries(timezone)
 
+    # All interval + calendar schedules ship with overlap=SKIP. The Temporal
+    # SDK's default is ALLOW, which turns "one broken workflow" into "fleet-
+    # wide accumulation" (every tick stacks another wedged copy on top of
+    # the previous one — see the JudgmentWorkflow / extract_input_metadata
+    # incident note for the worked example). SKIP converts a broken workflow
+    # into ONE noticeable stuck run that a human can spot, instead of N+1
+    # per-cadence zombies. The singleton schedules registered further down
+    # (plane sync, signal extract, Vexa, etc.) already follow this pattern;
+    # this loop is the catch-all for the INTERVAL_SCHEDULES + CALENDAR_SCHEDULES
+    # lists declared at the top of the file.
+    default_policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
+
     for sched in schedules:
         schedule_id = sched["id"]
         workflow_name = sched["workflow"]
@@ -1537,20 +1548,56 @@ async def register_all() -> None:
             id=f"{schedule_id}-run",
             task_queue=config.task_queue,
         )
+        new_schedule = Schedule(action=action, spec=spec, policy=default_policy)
+
+        # Upsert: existing tenants already have the schedule created with
+        # the implicit-ALLOW policy. ``create_schedule`` is a no-op when
+        # the schedule exists, so we describe-then-update to migrate
+        # existing tenants on the next deploy. Fresh tenants take the
+        # create-then-log path.
+        handle = client.get_schedule_handle(schedule_id)
+        try:
+            await handle.describe()
+        except RPCError as e:
+            if e.status != RPCStatusCode.NOT_FOUND:
+                logger.error(
+                    "Failed to describe schedule %s: %s", schedule_id, e,
+                )
+                raise
+            try:
+                await client.create_schedule(schedule_id, new_schedule)
+                logger.info(
+                    "Created schedule: %s → %s (SKIP overlap)",
+                    schedule_id, workflow_name,
+                )
+            except Exception as e:  # noqa: BLE001
+                err = str(e).lower()
+                if "already" in err or "running" in err or "exists" in err:
+                    logger.info(
+                        "Schedule already exists: %s (skipping)", schedule_id,
+                    )
+                else:
+                    logger.error(
+                        "Failed to create schedule %s: %s", schedule_id, e,
+                    )
+                    raise
+            continue
+
+        async def _updater(
+            inp: ScheduleUpdateInput,
+            _new_schedule: Schedule = new_schedule,
+        ) -> ScheduleUpdate:
+            return ScheduleUpdate(schedule=_new_schedule)
 
         try:
-            await client.create_schedule(
-                schedule_id,
-                Schedule(action=action, spec=spec),
+            await handle.update(_updater)
+            logger.info(
+                "Updated schedule: %s → %s (SKIP overlap)",
+                schedule_id, workflow_name,
             )
-            logger.info("Created schedule: %s → %s", schedule_id, workflow_name)
-        except Exception as e:
-            err = str(e).lower()
-            if "already" in err or "running" in err or "exists" in err:
-                logger.info("Schedule already exists: %s (skipping)", schedule_id)
-            else:
-                logger.error("Failed to create schedule %s: %s", schedule_id, e)
-                raise
+        except Exception as e:  # noqa: BLE001
+            logger.error("Failed to update schedule %s: %s", schedule_id, e)
+            raise
 
     # Plane two-way sync (#536) — registration-time feature-gated.
     await register_plane_sync(client, config.task_queue)
