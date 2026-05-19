@@ -44,9 +44,30 @@ interface SignalRowOut {
   body: string;
   processed_at: string | null;
   classified_noise: number;
+  // Round 2.7: forensic JSON payload (effect, action_proposal,
+  // confidences, raw_quote, reasoning, target_*). Returned as a parsed
+  // object so callers don't have to JSON.parse again; null when the
+  // row predates migration 007 or no payload was supplied.
+  payload: Record<string, unknown> | null;
 }
 
 function rowToWire(row: SignalRow): SignalRowOut {
+  let parsedPayload: Record<string, unknown> | null = null;
+  if (row.payload !== null && row.payload !== "") {
+    try {
+      const v = JSON.parse(row.payload);
+      // We only emit objects; arrays / scalars should never appear here
+      // (the route validates), but defend against legacy / hand-edited
+      // rows by collapsing anything non-object to null.
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        parsedPayload = v as Record<string, unknown>;
+      }
+    } catch {
+      // Malformed JSON in storage — surface as null rather than
+      // crashing the whole list response.
+      parsedPayload = null;
+    }
+  }
   return {
     id: row.id,
     ts: row.ts.toString(),
@@ -61,6 +82,7 @@ function rowToWire(row: SignalRow): SignalRowOut {
     body: row.body,
     processed_at: row.processed_at === null ? null : row.processed_at.toString(),
     classified_noise: row.classified_noise,
+    payload: parsedPayload,
   };
 }
 
@@ -78,6 +100,7 @@ interface InsertBody {
   body?: unknown;
   processed_at?: unknown;
   classified_noise?: unknown;
+  payload?: unknown;
 }
 
 function requireString(value: unknown, name: string): string {
@@ -100,6 +123,36 @@ function normaliseBoolInt(value: unknown, name: string): number {
   if (typeof value === "boolean") return value ? 1 : 0;
   if (typeof value === "number") return value ? 1 : 0;
   throw new ValidationError(`${name} must be a boolean or 0/1`);
+}
+
+// Mirrors the audit route's normalisePayload: accept either a parsed
+// object or a pre-stringified JSON string. We always store as text so
+// SQLite stays JSON1-free; rowToWire JSON.parse()s on read. Returning
+// `null` is explicit (caller passed null) → clear the column.
+function normalisePayload(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === "string") {
+    if (value === "") return null;
+    try {
+      const parsed = JSON.parse(value);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new ValidationError("payload must be a JSON object");
+      }
+    } catch (err) {
+      if (err instanceof ValidationError) throw err;
+      throw new ValidationError("payload string must be valid JSON");
+    }
+    return value;
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      throw new ValidationError("payload object is not JSON-serialisable");
+    }
+  }
+  throw new ValidationError("payload must be a JSON object or stringified JSON");
 }
 
 function normaliseTs(value: unknown, name = "ts"): bigint | undefined {
@@ -182,6 +235,11 @@ export function registerSignalRoutes(): void {
     const classified_noise = normaliseBoolInt(b.classified_noise, "classified_noise");
     const processed_at = normaliseTs(b.processed_at, "processed_at");
     const ts = normaliseTs(b.ts, "ts");
+    const payloadRaw = normalisePayload(b.payload);
+    // normalisePayload returns `undefined` when the caller omitted the
+    // field; for INSERT we collapse that to `null` so the column has a
+    // value-or-null write rather than being skipped.
+    const payload = payloadRaw === undefined ? null : payloadRaw;
     const id =
       b.id === undefined || b.id === null
         ? undefined
@@ -205,6 +263,7 @@ export function registerSignalRoutes(): void {
         body: body_text,
         processed_at: processed_at ?? null,
         classified_noise,
+        payload,
       });
     } catch (err) {
       const msg = (err as Error).message || "";
@@ -243,6 +302,7 @@ export function registerSignalRoutes(): void {
     const b = (body ?? {}) as {
       processed_at?: unknown;
       classified_noise?: unknown;
+      payload?: unknown;
     };
     const update: Parameters<typeof updateSignal>[2] = {};
     if (b.processed_at !== undefined) {
@@ -255,6 +315,12 @@ export function registerSignalRoutes(): void {
     }
     if (b.classified_noise !== undefined) {
       update.classified_noise = normaliseBoolInt(b.classified_noise, "classified_noise");
+    }
+    if (b.payload !== undefined) {
+      // normalisePayload returns `undefined` only when the field was
+      // omitted entirely; PATCH only enters this branch when the caller
+      // supplied it explicitly, so we get back string | null.
+      update.payload = normalisePayload(b.payload) ?? null;
     }
     if (Object.keys(update).length === 0) {
       throw new ValidationError("no updatable fields supplied");

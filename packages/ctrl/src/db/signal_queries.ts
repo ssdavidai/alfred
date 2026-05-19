@@ -29,6 +29,14 @@ export interface SignalRow {
   body: string;
   processed_at: bigint | null;
   classified_noise: number;
+  // Round 2.7 (migration 007): JSON-serialised forensic payload
+  // capturing the richer frontmatter fields the legacy markdown record
+  // used to carry (effect, action_proposal, target_confidence,
+  // effect_confidence, target_candidates, raw_quote, reasoning,
+  // decision_origin, target_matter_path, …). Stored as a string so
+  // SQLite doesn't need a JSON1 dependency; callers JSON.parse() before
+  // use. Old rows from before migration 007 will have payload=null.
+  payload: string | null;
 }
 
 // `ts` and `processed_at` are nanosecond values that exceed
@@ -53,6 +61,7 @@ interface SignalRowRaw {
   body: string;
   processed_at: bigint | null;
   classified_noise: number | bigint;
+  payload: string | null;
 }
 
 function toRow(raw: SignalRowRaw): SignalRow {
@@ -75,13 +84,14 @@ function toRow(raw: SignalRowRaw): SignalRow {
           ? raw.processed_at
           : BigInt(raw.processed_at),
     classified_noise: Number(raw.classified_noise),
+    payload: raw.payload,
   };
 }
 
 const SELECT_COLS =
   "id, ts, source_type, source_event, target_matter, target_kind, " +
   "actor, decision_required, display_headline, display_body, body, " +
-  "processed_at, classified_noise";
+  "processed_at, classified_noise, payload";
 
 export function insertSignal(
   db: DatabaseSync,
@@ -93,8 +103,8 @@ export function insertSignal(
     `INSERT INTO signal
        (id, ts, source_type, source_event, target_matter, target_kind,
         actor, decision_required, display_headline, display_body, body,
-        processed_at, classified_noise)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        processed_at, classified_noise, payload)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
   stmt.run(
     id,
@@ -110,6 +120,7 @@ export function insertSignal(
     row.body,
     row.processed_at,
     row.classified_noise,
+    row.payload,
   );
   return id;
 }
@@ -232,6 +243,10 @@ export function markProcessed(
 export interface UpdateSignalOpts {
   processed_at?: bigint | null;
   classified_noise?: number;
+  // Round 2.7: callers may rewrite the JSON payload (e.g. after a
+  // re-classification pass adds richer fields). Pass `null` to clear,
+  // a serialised JSON string to overwrite. The route validates it.
+  payload?: string | null;
 }
 
 export function updateSignal(
@@ -248,6 +263,10 @@ export function updateSignal(
   if (opts.classified_noise !== undefined) {
     sets.push("classified_noise = ?");
     params.push(opts.classified_noise);
+  }
+  if (opts.payload !== undefined) {
+    sets.push("payload = ?");
+    params.push(opts.payload);
   }
   if (!sets.length) return false;
   params.push(id);

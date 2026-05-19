@@ -606,13 +606,20 @@ async def reverse_decision(decision: dict[str, Any]) -> dict[str, Any]:
 async def check_decision_outcomes() -> dict[str, Any]:
     """Scan executing decisions and stamp outcome_record when one lands.
 
-    Strategy: for each executing decision, the source signal carries a
-    ``decision_origin`` field pointing back to our decision path.
-    Outcome signals written by completed agent runs reference the
-    original signal via ``source_signal_path``. We list recent
-    ``signal/*.md`` records, filter to those with a fresh outcome
-    field, and match by source_signal_path or by direct decision_origin
-    chain.
+    Round 2.7 (#485): the legacy ``vault/list/signal`` scan no longer
+    finds agent outcomes — STORE-P6-1f-F moved the
+    ``signal-action / agent-outcome`` markdown writes into the audit
+    table as ``action_type=agent_outcome`` rows. We now query
+    ``/api/v1/audit?action_type=agent_outcome`` and match rows whose
+    ``decision_origin`` (or payload's ``source_signal_path``) points
+    back at the executing decisions' source signals.
+
+    For each executing decision, ``side_effects.re_routed_signal``
+    carries the path of the source signal the principal saw on /desk
+    when they clicked Delegate. The matching agent-outcome audit row
+    carries the same path in ``decision_origin``. When one lands, we
+    stamp ``outcome_record`` on the decision and flip state to
+    ``completed``.
 
     Returns ``{checked, matched, matches}`` where ``matches`` is a list
     of dicts shaped for SM-D-W7's downstream task-outcome linkage. Each
@@ -622,6 +629,8 @@ async def check_decision_outcomes() -> dict[str, Any]:
     ``apply_state_change_v2`` under its patched gate. Older callers
     that only read ``checked`` / ``matched`` keep working unchanged.
     """
+    from src.utils.vault_client import VaultClient
+
     matched = 0
     match_records: list[dict[str, Any]] = []
     async with _http() as client:
@@ -632,27 +641,64 @@ async def check_decision_outcomes() -> dict[str, Any]:
         if not executing:
             return {"checked": 0, "matched": 0, "matches": []}
 
-        # 2. Get recent signals — outcomes are written as signals and
-        # tagged with `source_signal_path` referencing the upstream.
-        sigs_resp = await client.get(
-            "/api/v1/vault/list/signal?preview=200",
+    # 2. Pull recent agent-outcome audit rows. We don't bound on
+    # ``since`` here because the outcome can land hours after the
+    # delegate (long-running ephemeral agents); 500 rows back is
+    # generous on the 2-min tick cadence and the audit list is sorted
+    # ts DESC so we always see the freshest matches first.
+    cfg = load_config()
+    vc = VaultClient(cfg)
+    try:
+        outcome_rows = await vc.list_audit(
+            action_type="agent_outcome",
+            limit=500,
         )
-        if sigs_resp.status_code >= 400:
-            return {"checked": len(executing), "matched": 0, "matches": []}
-        signals = sigs_resp.json().get("results", []) or []
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "decision_router.check_decision_outcomes: list_audit "
+            "failed err=%s — skipping this tick", exc,
+        )
+        return {"checked": len(executing), "matched": 0, "matches": []}
+    finally:
+        await vc.close()
 
-        # Build a quick map: source_signal_path → outcome signal path.
-        outcome_by_source: dict[str, str] = {}
-        for s in signals:
-            fm = s.get("frontmatter") if isinstance(s, dict) else None
-            if not isinstance(fm, dict):
-                continue
-            ssp = fm.get("source_signal_path")
-            if isinstance(ssp, str) and ssp.strip():
-                # Newer signal that points back to an older one — treat
-                # the newer one as a potential outcome.
-                outcome_by_source[ssp] = str(s.get("path") or "")
+    # Build a map: source_signal_path → outcome audit row id (as a
+    # synthetic "audit/<id>" path so downstream readers — including
+    # ``apply_decision_outcome_link_v2``'s ObservedWindow — get a
+    # navigable reference rather than a raw uuid).
+    outcome_by_source: dict[str, str] = {}
+    for row in outcome_rows:
+        if not isinstance(row, dict):
+            continue
+        # ``decision_origin`` is the first-class signal pointer
+        # (P6-1f-F stamps it explicitly on the row). Fall through to
+        # the payload's ``source_signal_path`` for back-compat if a
+        # writer skipped the column.
+        ssp = row.get("decision_origin")
+        if not (isinstance(ssp, str) and ssp.strip()):
+            payload_raw = row.get("payload")
+            payload_obj: Any = None
+            if isinstance(payload_raw, dict):
+                payload_obj = payload_raw
+            elif isinstance(payload_raw, str) and payload_raw.strip():
+                try:
+                    import json as _json
+                    payload_obj = _json.loads(payload_raw)
+                except (ValueError, TypeError):
+                    payload_obj = None
+            if isinstance(payload_obj, dict):
+                ssp = payload_obj.get("source_signal_path")
+        if not (isinstance(ssp, str) and ssp.strip()):
+            continue
+        row_id = str(row.get("id") or "").strip()
+        if not row_id:
+            continue
+        outcome_path = f"audit/{row_id}"
+        # First write wins (rows arrive newest-first; older retries
+        # shouldn't overwrite a fresher outcome pointer).
+        outcome_by_source.setdefault(ssp, outcome_path)
 
+    async with _http() as client:
         # 3. For each executing decision, locate its source signal,
         # check for an outcome.
         for d in executing:

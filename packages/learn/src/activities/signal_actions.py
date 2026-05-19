@@ -1263,16 +1263,35 @@ async def dispatch_action_to_agent(
       )
       if use_ephemeral:
         # Infer Composio slug hints from the source signal's source_type.
+        # Round 2.7 (#485): read the SQL row (``get_signal``) rather
+        # than the legacy markdown — the latter no longer exists once
+        # CANONICAL_PATH_ENFORCEMENT flips to enforce. Fall through
+        # gracefully when the row also returns None (signal vanished,
+        # transport hiccup) — source_type stays empty and the hint
+        # resolution degrades to "no hints", which the executor handles.
         source_type = ""
         if source_signal_path:
             try:
                 sig_client = VaultClient(cfg)
                 try:
-                    sig_rec = await sig_client.read_record(source_signal_path)
-                    sig_fm = (sig_rec or {}).get("frontmatter") or {}
-                    source_type = str(
-                        sig_fm.get("source_type") or ""
-                    ).strip().lower()
+                    sig_id = source_signal_path.split("/", 1)[-1]
+                    if sig_id.endswith(".md"):
+                        sig_id = sig_id[:-3]
+                    sql_row = await sig_client.get_signal(sig_id)
+                    if sql_row:
+                        # Prefer the SQL column; fall back to the
+                        # forensic payload (older rows pre-007 didn't
+                        # carry payload, but they always carry the
+                        # narrow source_type column).
+                        source_type = str(
+                            sql_row.get("source_type") or ""
+                        ).strip().lower()
+                        if not source_type:
+                            payload_obj = sql_row.get("payload")
+                            if isinstance(payload_obj, dict):
+                                source_type = str(
+                                    payload_obj.get("source_type") or ""
+                                ).strip().lower()
                 finally:
                     await sig_client.close()
             except Exception as exc:  # noqa: BLE001
@@ -1550,6 +1569,8 @@ async def route_signal_action(
         }
     """
     import httpx
+    import json
+    from datetime import datetime, timezone
     from src.config import load_config
     from src.utils.vault_client import VaultClient
 
@@ -1579,59 +1600,137 @@ async def route_signal_action(
     client = VaultClient(cfg)
     try:
         # 1. Read the signal record.
+        #
+        # Round 2.7 (#485): the legacy ``vault/signal/<id>.md`` markdown
+        # is gone once CANONICAL_PATH_ENFORCEMENT flips to enforce, so
+        # we read the SQL row via ``GET /api/v1/signals/<id>`` and
+        # rebuild the ``record / frontmatter`` shape the rest of this
+        # function already understood. The richer frontmatter fields
+        # (effect, action_proposal, target_confidence, effect_confidence,
+        # target_candidates, raw_quote, reasoning, decision_origin,
+        # target_matter_path) ride on the row's JSON ``payload`` column
+        # (migration 007). Top-level SQL columns (source_type,
+        # source_event, target_matter, target_kind, actor,
+        # decision_required, display_headline, display_body, body,
+        # processed_at, classified_noise) seed the frontmatter directly.
+        signal_id = signal_path.split("/", 1)[-1]
+        if signal_id.endswith(".md"):
+            signal_id = signal_id[:-3]
         try:
-            record = await client.read_record(signal_path)
-        except httpx.HTTPStatusError as exc:
-            if exc.response is not None and exc.response.status_code == 404:
-                logger.warning(
-                    "signal_actions.route_signal_action: 404 path=%s "
-                    "— signal vanished",
-                    signal_path,
-                )
-                return {
-                    "signal_path": signal_path,
-                    "signal_status": "skipped",
-                    "skip_reason": "signal_not_found",
-                    "chosen_path": "skipped",
-                }
+            sql_row = await client.get_signal(signal_id)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "signal_actions.route_signal_action: get_signal "
+                "transport failure id=%s err=%s — re-raising for "
+                "Temporal retry",
+                signal_id, exc,
+            )
             raise
-        if not isinstance(record, dict):
-            return {
-                "signal_path": signal_path,
-                "signal_status": "skipped",
-                "skip_reason": "bad_record_shape",
-                "chosen_path": "skipped",
-            }
-
-        fm = record.get("frontmatter") or {}
-        if not isinstance(fm, dict):
-            fm = {}
-
-        # Idempotency guard. If the signal is already routed, return a
-        # skip — the activity is being retried (likely because a prior
-        # attempt's PATCH step failed and Temporal re-ran the whole
-        # function from the top). Without this gate, every retry calls
-        # `write_needs_attention_record` again, leaving duplicate
-        # pending cards on the Desk. Symptom on david 2026-05-12:
-        # 38 needs_attention cards from a single signal, all created
-        # in clusters of 3 every ~2 min as the workflow ticked + the
-        # retry chain fired. With the guard: re-entry returns early,
-        # no duplicate write, no duplicate audit, signal stays at its
-        # already-set status.
-        existing_status = str(fm.get("status") or "").strip().lower()
-        if existing_status in ("routed_human", "routed_agent"):
-            logger.info(
-                "signal_actions.route_signal_action: idempotency skip "
-                "path=%s already_status=%s",
-                signal_path, existing_status,
+        if not sql_row:
+            logger.warning(
+                "signal_actions.route_signal_action: get_signal=None "
+                "id=%s path=%s — signal vanished",
+                signal_id, signal_path,
             )
             return {
                 "signal_path": signal_path,
-                "signal_status": existing_status,
+                "signal_status": "skipped",
+                "skip_reason": "signal_not_found",
+                "chosen_path": "skipped",
+            }
+
+        # Map SQL row + payload into the frontmatter-shaped dict the
+        # downstream helpers consume. Keep payload values authoritative
+        # when both sides carry the same key (e.g. ``target_kind`` lives
+        # on both the SQL row and the payload; the row's narrowed view
+        # is what the writer pulled out, the payload's value is the
+        # original frontmatter literal — for routing the writer's view
+        # is fine, but for forensic / display we keep the original).
+        payload_obj: dict[str, Any] = {}
+        raw_payload = sql_row.get("payload")
+        if isinstance(raw_payload, dict):
+            payload_obj = raw_payload
+        elif isinstance(raw_payload, str) and raw_payload.strip():
+            # ctrl-api's rowToWire parses the JSON before returning,
+            # but tolerate stringified payloads too (FakeVaultClients
+            # in tests sometimes round-trip the raw column).
+            try:
+                parsed = json.loads(raw_payload)
+                if isinstance(parsed, dict):
+                    payload_obj = parsed
+            except (ValueError, TypeError):
+                payload_obj = {}
+
+        # Translate processed_at (ns string) → ISO timestamp string for
+        # any frontmatter reader expecting ``applied_at`` semantics.
+        processed_at_raw = sql_row.get("processed_at")
+        applied_at_iso: str | None = None
+        if processed_at_raw not in (None, ""):
+            try:
+                ns = int(processed_at_raw)
+                applied_at_iso = datetime.fromtimestamp(
+                    ns / 1_000_000_000, tz=timezone.utc,
+                ).isoformat()
+            except (TypeError, ValueError):
+                applied_at_iso = None
+
+        # Synthesise the frontmatter dict. Payload-sourced keys come
+        # second so they override the SQL row's narrower view when both
+        # carry the same field (e.g. payload's ``target_path`` is the
+        # original frontmatter literal; the SQL ``target_matter`` is
+        # the writer's projected matter binding).
+        fm: dict[str, Any] = {
+            "id": sql_row.get("id"),
+            "source_type": sql_row.get("source_type") or "",
+            "source_event_path": sql_row.get("source_event") or "",
+            "target_matter": sql_row.get("target_matter"),
+            "target_kind": sql_row.get("target_kind"),
+            "actor": sql_row.get("actor"),
+            "decision_required": bool(sql_row.get("decision_required")),
+            "display_headline": sql_row.get("display_headline") or "",
+            "display_body": sql_row.get("display_body") or "",
+            "classified_noise": bool(sql_row.get("classified_noise")),
+            "processed_at": processed_at_raw,
+            "applied_at": applied_at_iso,
+        }
+        for k, v in payload_obj.items():
+            fm[k] = v
+        # Re-stamp ``processed_at`` (audit ledger fact, not frontmatter
+        # under principal control) after the payload merge so a stale
+        # ``processed_at`` baked into payload at write-time can't
+        # masquerade as the current SQL truth.
+        fm["processed_at"] = processed_at_raw
+        fm["applied_at"] = applied_at_iso
+
+        # ``record`` is the shape ``write_needs_attention_record`` and
+        # other helpers expected from ``read_record``: ``{"path",
+        # "frontmatter", "body"}``.
+        record: dict[str, Any] = {
+            "path": signal_path,
+            "frontmatter": fm,
+            "body": sql_row.get("body") or "",
+        }
+
+        # Idempotency guard. Round 2.7: read ``processed_at`` from the
+        # SQL row instead of ``fm["status"]`` from the (now-gone)
+        # markdown. ``processed_at`` is stamped by the audit chain when
+        # routing completes; if it's already set, the activity is a
+        # retry and we must not re-route. Symptom pre-guard on david
+        # 2026-05-12 was 38 needs_attention cards from a single signal;
+        # the new guard preserves that fix verbatim.
+        if processed_at_raw not in (None, ""):
+            logger.info(
+                "signal_actions.route_signal_action: idempotency skip "
+                "path=%s processed_at=%s",
+                signal_path, processed_at_raw,
+            )
+            return {
+                "signal_path": signal_path,
+                "signal_status": "already_processed",
                 "skip_reason": "already_routed",
                 "chosen_path": "skipped",
                 "decision_reason": "idempotency_guard",
-                "audit_record_path": str(fm.get("audit_record_path") or ""),
+                "audit_record_path": "",
                 "needs_attention_path": None,
                 "outcome_signal_path": None,
             }

@@ -95,6 +95,7 @@ async def write_signal_safe(
     display_headline: str | None = None,
     display_body: str | None = None,
     classified_noise: bool = False,
+    payload: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Best-effort POST to ``/api/v1/signals``.
 
@@ -105,6 +106,11 @@ async def write_signal_safe(
     legacy markdown signal is still the authoritative record during
     the soak period, so a missing row here is recoverable by re-running
     the P3-4 backfill once the SQL table is the single source of truth.
+
+    ``payload`` (Round 2.7, migration 007) is a JSON-serialisable dict
+    capturing the legacy markdown frontmatter (effect, action_proposal,
+    confidences, raw_quote, reasoning, target_*). Downstream routers
+    read those fields out of the SQL row's payload column.
     """
     cfg = load_config()
     client = VaultClient(cfg)
@@ -120,6 +126,7 @@ async def write_signal_safe(
             display_headline=display_headline,
             display_body=display_body,
             classified_noise=classified_noise,
+            payload=payload,
         )
     except httpx.HTTPError as exc:
         logger.warning(

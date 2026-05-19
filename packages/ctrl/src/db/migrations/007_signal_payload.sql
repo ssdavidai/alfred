@@ -1,0 +1,21 @@
+-- 007_signal_payload.sql
+--
+-- Round 2.7 of the Storage Architecture migration (epic #478, ticket
+-- #485). Adds a ``payload`` JSON column to the ``signal`` table so the
+-- richer frontmatter fields the legacy ``vault/signal/*.md`` records
+-- used to carry (effect, action_proposal, target_path,
+-- target_confidence, effect_confidence, target_candidates, raw_quote,
+-- reasoning, decision_origin, target_matter_path, …) survive the
+-- markdown-write cutover.
+--
+-- ``route_signal_action`` and ``dispatch_action_to_agent`` in
+-- alfred-learn read these fields when routing one ``effect=action``
+-- signal to agent dispatch or to a needs_attention card. Without the
+-- column, every signal-routing tick under CANONICAL_PATH_ENFORCEMENT
+-- =enforce would land on the ``signal_not_found`` early-return and
+-- routing would break.
+--
+-- Layout follows STORAGE-ARCHITECTURE.md §5: payload is a JSON object
+-- (text-serialised), keyed alongside the existing signal row.
+
+ALTER TABLE signal ADD COLUMN payload TEXT;

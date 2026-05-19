@@ -8,6 +8,7 @@ import m003 from "./migrations/003_audit.sql";
 import m004 from "./migrations/004_signal_observation_embedding.sql";
 import m005 from "./migrations/005_stream.sql";
 import m006 from "./migrations/006_pattern_proposal_needs_attention.sql";
+import m007 from "./migrations/007_signal_payload.sql";
 
 // Append new migrations here. Files are SQL text loaded by esbuild.
 // Never reorder; never edit a migration after it has shipped.
@@ -18,6 +19,7 @@ const MIGRATIONS: { version: number; name: string; sql: string }[] = [
   { version: 4, name: "004_signal_observation_embedding", sql: m004 },
   { version: 5, name: "005_stream", sql: m005 },
   { version: 6, name: "006_pattern_proposal_needs_attention", sql: m006 },
+  { version: 7, name: "007_signal_payload", sql: m007 },
 ];
 
 let stateDb: DatabaseSync | null = null;

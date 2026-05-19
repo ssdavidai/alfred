@@ -382,37 +382,64 @@ async def apply_signal_mutation(
     cfg = load_config()
     client = VaultClient(cfg)
     try:
-        # 1. Read the signal record.
+        # 1. Read the signal record from SQL (STORE-P6-1f-G follow-up:
+        # signal markdown writes are off; the SQL signal table is
+        # authoritative. Synthesise the legacy {path, frontmatter, body}
+        # envelope so the rest of this function stays unchanged.)
+        sig_id = signal_path.removeprefix("signal/").removesuffix(".md")
         try:
-            record = await client.read_record(signal_path)
-        except httpx.HTTPStatusError as exc:
-            if exc.response is not None and exc.response.status_code == 404:
-                logger.warning(
-                    "signal_mutations.apply_signal_mutation: 404 on path=%s "
-                    "— signal vanished",
-                    signal_path,
-                )
-                return {
-                    "signal_path": signal_path,
-                    "signal_status": "skipped",
-                    "skip_reason": "signal_not_found",
-                }
-            raise
-        if not isinstance(record, dict):
+            sig_row = await client.get_signal(sig_id)
+        except httpx.HTTPError as exc:
             logger.warning(
-                "signal_mutations.apply_signal_mutation: unexpected record "
-                "shape path=%s type=%s",
-                signal_path, type(record).__name__,
+                "signal_mutations.apply_signal_mutation: get_signal failed "
+                "path=%s err=%s",
+                signal_path, repr(exc),
             )
             return {
                 "signal_path": signal_path,
                 "signal_status": "skipped",
-                "skip_reason": "bad_record_shape",
+                "skip_reason": "signal_fetch_failed",
+            }
+        if not isinstance(sig_row, dict):
+            logger.warning(
+                "signal_mutations.apply_signal_mutation: signal not found "
+                "in SQL path=%s",
+                signal_path,
+            )
+            return {
+                "signal_path": signal_path,
+                "signal_status": "skipped",
+                "skip_reason": "signal_not_found",
             }
 
-        fm = record.get("frontmatter") or {}
-        if not isinstance(fm, dict):
-            fm = {}
+        # Synthesise the legacy frontmatter envelope from SQL columns + payload.
+        payload_raw = sig_row.get("payload")
+        if isinstance(payload_raw, str) and payload_raw:
+            try:
+                payload_dict = json.loads(payload_raw)
+            except (ValueError, TypeError):
+                payload_dict = {}
+        elif isinstance(payload_raw, dict):
+            payload_dict = payload_raw
+        else:
+            payload_dict = {}
+        fm = {
+            "source_type": sig_row.get("source_type") or "",
+            "source_event_path": sig_row.get("source_event") or "",
+            "target_matter": sig_row.get("target_matter") or "",
+            "target_kind": sig_row.get("target_kind") or "",
+            "actor": sig_row.get("actor") or "",
+            "decision_required": bool(sig_row.get("decision_required")),
+            "display_headline": sig_row.get("display_headline") or "",
+            "display_body": sig_row.get("display_body") or "",
+            "classified_noise": bool(sig_row.get("classified_noise")),
+            **payload_dict,
+        }
+        record = {
+            "path": signal_path,
+            "frontmatter": fm,
+            "body": sig_row.get("body") or "",
+        }
 
         # 2. Validate effect.
         effect = str(fm.get("effect") or "").strip().lower()

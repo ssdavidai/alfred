@@ -327,6 +327,49 @@ class VaultClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def list_audit(
+        self,
+        *,
+        action_type: str | None = None,
+        actor: str | None = None,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        since_ns: int | None = None,
+        until_ns: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """GET /api/v1/audit with filters. Returns the raw JSON rows.
+
+        Round 2.7 helper: ``check_decision_outcomes`` uses this to find
+        ``action_type='agent_outcome'`` rows whose ``decision_origin``
+        points back at the executing decisions' source signals — the
+        replacement for the legacy ``vault/list/signal`` scan that no
+        longer finds the outcome (post-Round 2 the outcome lives in the
+        audit table, not as a ``vault/signal/`` markdown).
+
+        Each row carries the SQL columns ``{id, ts, actor, action_type,
+        target_type, target_id, decision_origin, reasoning, payload,
+        reversible, reversed_by}`` — ``ts`` is a decimal string for the
+        same nanosecond-precision reason as ``list_signals``. ``payload``
+        is a JSON-serialised string; callers ``json.loads`` before use.
+        """
+        params: dict[str, Any] = {"limit": int(limit)}
+        if action_type is not None:
+            params["action_type"] = action_type
+        if actor is not None:
+            params["actor"] = actor
+        if target_type is not None:
+            params["target_type"] = target_type
+        if target_id is not None:
+            params["target_id"] = target_id
+        if since_ns is not None:
+            params["since"] = str(int(since_ns))
+        if until_ns is not None:
+            params["until"] = str(int(until_ns))
+        resp = await self._client.get("/api/v1/audit", params=params)
+        resp.raise_for_status()
+        return resp.json().get("results", []) or []
+
     # --- Signal + Observation rows (STORE-P3-3) ---------------------------
 
     async def write_signal(
@@ -342,6 +385,7 @@ class VaultClient:
         display_headline: str | None = None,
         display_body: str | None = None,
         classified_noise: bool = False,
+        payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """POST one row to the signal table via ctrl-api.
 
@@ -350,27 +394,38 @@ class VaultClient:
         so nanosecond precision survives JSON's ``Number.MAX_SAFE_INTEGER``
         ceiling).
 
+        ``payload`` (Round 2.7, migration 007) carries the richer
+        frontmatter fields the legacy ``vault/signal/*.md`` records used
+        to surface (effect, action_proposal, target_path,
+        target_confidence, effect_confidence, target_candidates,
+        raw_quote, reasoning, decision_origin, target_matter_path, …).
+        Downstream readers (``route_signal_action``,
+        ``dispatch_action_to_agent``) pull these out of the JSON
+        ``payload`` column.
+
         Returns ``{"id": "<uuid>", "ts": "<unix-ns-string>"}``.
         """
-        payload: dict[str, Any] = {
+        body_payload: dict[str, Any] = {
             "source_type": source_type,
             "body": body,
             "decision_required": bool(decision_required),
             "classified_noise": bool(classified_noise),
         }
         if source_event is not None:
-            payload["source_event"] = source_event
+            body_payload["source_event"] = source_event
         if target_matter is not None:
-            payload["target_matter"] = target_matter
+            body_payload["target_matter"] = target_matter
         if target_kind is not None:
-            payload["target_kind"] = target_kind
+            body_payload["target_kind"] = target_kind
         if actor is not None:
-            payload["actor"] = actor
+            body_payload["actor"] = actor
         if display_headline is not None:
-            payload["display_headline"] = display_headline
+            body_payload["display_headline"] = display_headline
         if display_body is not None:
-            payload["display_body"] = display_body
-        resp = await self._client.post("/api/v1/signals", json=payload)
+            body_payload["display_body"] = display_body
+        if payload is not None:
+            body_payload["payload"] = payload
+        resp = await self._client.post("/api/v1/signals", json=body_payload)
         resp.raise_for_status()
         return resp.json()
 

@@ -2472,6 +2472,52 @@ async def write_signal_record(
         display_body_v = signal.get("display_body")
         actor_v = signal.get("actor")
 
+        # Round 2.7 (migration 007): forensic payload captures the
+        # richer frontmatter fields the legacy ``vault/signal/*.md``
+        # records used to surface. ``route_signal_action`` and
+        # ``dispatch_action_to_agent`` read these out of the SQL row's
+        # ``payload`` column instead of round-tripping via the
+        # markdown read that no longer exists under
+        # CANONICAL_PATH_ENFORCEMENT=enforce.
+        #
+        # Field names mirror the markdown frontmatter so the downstream
+        # readers don't have to re-key. We coerce non-JSON-native types
+        # (e.g. lists / nested dicts via ``target_candidates``,
+        # ``action_proposal``) by passing the raw value through — ctrl-
+        # api's normalisePayload only requires the top-level object is
+        # JSON-serialisable.
+        payload_for_sql: dict[str, Any] = {
+            "effect": signal.get("effect"),
+            "action_proposal": signal.get("action_proposal"),
+            "mutation_proposal": signal.get("mutation_proposal"),
+            "target_path": signal.get("target_path"),
+            "target_kind": signal.get("target_kind"),
+            "target_matter_path": signal.get("target_matter_path"),
+            "target_confidence": signal.get("target_confidence"),
+            "target_candidates": signal.get("target_candidates") or [],
+            "target_ambiguous": bool(signal.get("target_ambiguous")),
+            "effect_confidence": signal.get("effect_confidence"),
+            "effect_confidence_raw": signal.get("effect_confidence_raw"),
+            "effect_confidence_prior_key": signal.get(
+                "effect_confidence_prior_key"
+            ),
+            "raw_quote": signal.get("raw_quote"),
+            "reasoning": signal.get("reasoning"),
+            "decision_origin": signal.get("decision_origin"),
+            "created": signal.get("created_at"),
+            "origin_at": signal.get("origin_at"),
+            "extracted_via": signal.get("extracted_via"),
+            "extraction_idx": signal.get("extraction_idx"),
+            "extraction_count": signal.get("extraction_count"),
+        }
+        # Strip None values so the JSON column stays tight (and so a
+        # downstream ``fm.get("effect") or "missing"`` keeps working —
+        # an explicit None on the dict would otherwise round-trip as
+        # JSON null, which ``str(...).strip()`` then coerces to "None".
+        payload_for_sql = {
+            k: v for k, v in payload_for_sql.items() if v is not None
+        }
+
         sql_resp = await write_signal_safe(
             source_type=str(signal.get("source_type") or ""),
             body=body,
@@ -2504,6 +2550,7 @@ async def write_signal_record(
                 else None
             ),
             classified_noise=False,
+            payload=payload_for_sql,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
