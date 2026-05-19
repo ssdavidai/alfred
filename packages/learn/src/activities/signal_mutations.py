@@ -50,7 +50,6 @@ from temporalio import activity
 
 from src.activities.steward import apply_state_change
 from src.config import load_config
-from src.utils.vault_client import VaultClient
 
 logger = logging.getLogger("alfred-learn")
 
@@ -170,134 +169,37 @@ async def list_unrouted_signals(
     limit: int = DEFAULT_LIST_LIMIT,
     since: str | None = None,
 ) -> list[str]:
-    """Return vault paths of signal records whose status is unrouted.
+    """Return ``state.db`` ids of signals whose status is ``unrouted``.
+
+    Storage cutover (#27): signals live in Store 2 (``state.db``), not
+    ``vault/signal/``. This queries ctrl-api's ``/api/v1/state/signals``
+    endpoint with ``status=unrouted`` — the status filter is an indexed
+    column query, replacing the old "list every markdown signal +
+    filter frontmatter client-side" walk. The returned strings are
+    ``state.db`` ULIDs (the cross-record key), not markdown paths.
 
     Args:
-      limit: max paths to return; oldest-first by ``created`` field.
-      since: ISO8601 timestamp lower bound on ``frontmatter.created``.
+      limit: max ids to return; oldest-first by ``ts``.
+      since: ISO8601 timestamp lower bound on the signal's ``ts``.
         ``None`` means no lower bound.
-
-    Filtering rules (per record):
-      * ``frontmatter.status == "unrouted"`` (or null/missing —
-        defensively counted as unrouted so a pre-#142 signal that
-        doesn't carry the status field still drains).
-      * ``frontmatter.created >= since`` when provided.
 
     Errors: a ctrl-api connection failure is logged and treated as
     "no signals this tick" (returns ``[]``). The 2-min workflow cadence
     retries naturally — raising would mark the activity failed and
     trigger Temporal exponential backoff which we don't want for
     transient blips.
-
-    Implementation:
-      1. ``GET /api/v1/vault/list/signal?preview=2000``. We do NOT use
-         ``preview=0`` because the workflow doesn't need the body — but
-         we keep the default ``preview`` for forward compatibility with
-         tools that introspect signal bodies.
-      2. Filter results client-side per the rules above.
-      3. Sort ascending by ``frontmatter.created`` so the oldest
-         backlog drains in chronological order.
-      4. Slice to ``limit``.
     """
     cfg = load_config()
-    api_key = os.environ.get("AAS_API_KEY", "")
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    from src.utils.signal_state import list_unrouted_signal_refs
 
-    since_dt: datetime | None = None
-    if since:
-        try:
-            s = since.strip()
-            if s.endswith("Z"):
-                s = s[:-1] + "+00:00"
-            since_dt = datetime.fromisoformat(s)
-            if since_dt.tzinfo is None:
-                since_dt = since_dt.replace(tzinfo=timezone.utc)
-        except (ValueError, AttributeError):
-            since_dt = None
-
-    filtered: list[tuple[datetime | None, str]] = []
+    safe_limit = max(0, int(limit) if limit is not None else DEFAULT_LIST_LIMIT)
     try:
-        async with httpx.AsyncClient(
-            base_url=cfg.alfred_ctrl_url,
-            timeout=30.0,
-            headers=headers,
-        ) as client:
-            try:
-                resp = await client.get(
-                    "/api/v1/vault/list/signal",
-                    params={"preview": "2000"},
-                )
-                resp.raise_for_status()
-            except httpx.HTTPError as exc:
-                logger.warning(
-                    "signal_mutations.list_unrouted_signals: list signal "
-                    "failed err=%s", exc,
-                )
-                return []
-
-            try:
-                payload = resp.json()
-            except (ValueError, json.JSONDecodeError) as exc:
-                logger.warning(
-                    "signal_mutations.list_unrouted_signals: bad JSON err=%s",
-                    exc,
-                )
-                return []
-
-            results = (
-                payload.get("results") if isinstance(payload, dict) else None
-            )
-            if not isinstance(results, list):
-                return []
-
-            for rec in results:
-                if not isinstance(rec, dict):
-                    continue
-                fm = rec.get("frontmatter") or {}
-                if not isinstance(fm, dict):
-                    fm = {}
-
-                # Status filter — accept null/missing as unrouted for
-                # defensive backward compatibility with any signal
-                # written before the status field was schemed.
-                status_raw = fm.get("status")
-                status_str = (
-                    str(status_raw).strip().lower() if status_raw else ""
-                )
-                if status_str and status_str != "unrouted":
-                    continue
-
-                # since lower bound.
-                created_raw = (
-                    rec.get("created") or fm.get("created") or ""
-                )
-                created_dt: datetime | None = None
-                created_str = str(created_raw).strip()
-                if created_str:
-                    s = created_str
-                    if s.endswith("Z"):
-                        s = s[:-1] + "+00:00"
-                    try:
-                        created_dt = datetime.fromisoformat(s)
-                        if created_dt.tzinfo is None:
-                            created_dt = created_dt.replace(
-                                tzinfo=timezone.utc
-                            )
-                    except ValueError:
-                        created_dt = None
-
-                if since_dt is not None:
-                    if created_dt is None or created_dt < since_dt:
-                        continue
-
-                path = str(rec.get("path") or "").strip()
-                if not path:
-                    continue
-
-                filtered.append((created_dt, path))
+        return await list_unrouted_signal_refs(
+            limit=safe_limit, since=since, config=cfg
+        )
     except httpx.HTTPError as exc:
         logger.warning(
-            "signal_mutations.list_unrouted_signals: ctrl-api connect "
+            "signal_mutations.list_unrouted_signals: state.db query "
             "failed err=%s", exc,
         )
         return []
@@ -307,12 +209,6 @@ async def list_unrouted_signals(
             "err=%s", exc,
         )
         return []
-
-    sentinel_max = datetime.max.replace(tzinfo=timezone.utc)
-    filtered.sort(key=lambda pair: pair[0] or sentinel_max)
-
-    safe_limit = max(0, int(limit) if limit is not None else DEFAULT_LIST_LIMIT)
-    return [path for _, path in filtered[:safe_limit]]
 
 
 # ---------------------------------------------------------------------------
@@ -380,215 +276,215 @@ async def apply_signal_mutation(
         effective_mode = mode
 
     cfg = load_config()
-    client = VaultClient(cfg)
-    try:
-        # 1. Read the signal record.
-        try:
-            record = await client.read_record(signal_path)
-        except httpx.HTTPStatusError as exc:
-            if exc.response is not None and exc.response.status_code == 404:
-                logger.warning(
-                    "signal_mutations.apply_signal_mutation: 404 on path=%s "
-                    "— signal vanished",
-                    signal_path,
-                )
-                return {
-                    "signal_path": signal_path,
-                    "signal_status": "skipped",
-                    "skip_reason": "signal_not_found",
-                }
-            raise
-        if not isinstance(record, dict):
-            logger.warning(
-                "signal_mutations.apply_signal_mutation: unexpected record "
-                "shape path=%s type=%s",
-                signal_path, type(record).__name__,
-            )
-            return {
-                "signal_path": signal_path,
-                "signal_status": "skipped",
-                "skip_reason": "bad_record_shape",
-            }
+    from src.utils.signal_state import (
+        normalise_signal_ref,
+        read_signal_record,
+        set_signal_status,
+    )
 
-        fm = record.get("frontmatter") or {}
-        if not isinstance(fm, dict):
-            fm = {}
-
-        # 2. Validate effect.
-        effect = str(fm.get("effect") or "").strip().lower()
-        if effect != "mutation":
-            logger.warning(
-                "signal_mutations.apply_signal_mutation: signal effect=%r "
-                "is not 'mutation' path=%s — defensive no-op",
-                effect, signal_path,
-            )
-            return {
-                "signal_path": signal_path,
-                "signal_status": "skipped",
-                "skip_reason": f"effect_is_{effect or 'missing'}",
-            }
-
-        target_path = fm.get("target_path")
-        target_kind = fm.get("target_kind")
-        if not target_path or not isinstance(target_path, str):
-            # Ambiguous / unresolved-target signals can't be applied —
-            # mark skipped so we don't re-process.
-            logger.info(
-                "signal_mutations.apply_signal_mutation: signal has no "
-                "target_path path=%s — skipping",
-                signal_path,
-            )
-            await _mark_signal_skipped(
-                client, signal_path, reason="no_target_path",
-            )
-            return {
-                "signal_path": signal_path,
-                "signal_status": "skipped",
-                "skip_reason": "no_target_path",
-            }
-        target_kind_str = str(target_kind or "").strip().lower()
-        if target_kind_str not in ("task", "matter"):
-            logger.warning(
-                "signal_mutations.apply_signal_mutation: signal has "
-                "unsupported target_kind=%r path=%s — skipping",
-                target_kind, signal_path,
-            )
-            await _mark_signal_skipped(
-                client, signal_path, reason=f"bad_target_kind_{target_kind_str}",
-            )
-            return {
-                "signal_path": signal_path,
-                "signal_status": "skipped",
-                "skip_reason": f"bad_target_kind_{target_kind_str}",
-            }
-
-        proposal = _parse_proposal(fm.get("mutation_proposal"))
-        if not proposal or not isinstance(proposal, dict):
-            logger.warning(
-                "signal_mutations.apply_signal_mutation: signal has no "
-                "valid mutation_proposal path=%s — skipping",
-                signal_path,
-            )
-            await _mark_signal_skipped(
-                client, signal_path, reason="no_mutation_proposal",
-            )
-            return {
-                "signal_path": signal_path,
-                "signal_status": "skipped",
-                "skip_reason": "no_mutation_proposal",
-            }
-
-        decision_label = str(proposal.get("decision") or "").strip()
-        if not decision_label:
-            logger.warning(
-                "signal_mutations.apply_signal_mutation: mutation_proposal "
-                "missing 'decision' path=%s — skipping",
-                signal_path,
-            )
-            await _mark_signal_skipped(
-                client, signal_path, reason="no_decision_label",
-            )
-            return {
-                "signal_path": signal_path,
-                "signal_status": "skipped",
-                "skip_reason": "no_decision_label",
-            }
-
-        # 3. Build the Steward-shaped decision dict. Combined confidence
-        # is min(target, effect) — the weakest link gates the action.
-        target_confidence = _coerce_float(fm.get("target_confidence"), 0.0)
-        effect_confidence = _coerce_float(fm.get("effect_confidence"), 0.0)
-        combined_confidence = min(target_confidence, effect_confidence)
-        source_type = str(fm.get("source_type") or "").strip()
-        raw_quote = str(fm.get("raw_quote") or "")[:200]
-        reasoning = str(fm.get("reasoning") or "")
-        source_event_path = str(fm.get("source_event_path") or "")
-
-        evidence_entry: dict[str, Any] = {
-            "source": source_type or "signal",
-            "ref": source_event_path,
-            "note": raw_quote,
-        }
-        decision: dict[str, Any] = {
-            "decision": decision_label,
-            "confidence": combined_confidence,
-            "evidence": [evidence_entry],
-            "reasoning": reasoning,
-            "source_contributions": {
-                f"signal:{source_type or 'unknown'}": effect_confidence,
-            },
-            "no_signal_skip": False,
-        }
-        signals_summary: dict[str, Any] = {
-            "signals": [evidence_entry],
-            "evaluated_sources": [source_type] if source_type else [],
-        }
-
-        logger.info(
-            "signal_mutations.apply_signal_mutation: routing path=%s "
-            "target=%s kind=%s decision=%s combined_conf=%.2f mode=%s "
-            "(env_mode=%s)",
-            signal_path, target_path, target_kind_str, decision_label,
-            combined_confidence, effective_mode, env_mode,
+    signal_ref = normalise_signal_ref(signal_path)
+    # 1. Read the signal row from state.db (storage cutover #27).
+    record = await read_signal_record(signal_ref, config=cfg)
+    if record is None:
+        logger.warning(
+            "signal_mutations.apply_signal_mutation: signal id=%s not "
+            "found — signal vanished",
+            signal_ref,
         )
-
-        # 4. Apply through Steward's existing path. NOTE: we pass
-        # ``mode=effective_mode`` — apply_state_change runs its OWN env
-        # gate against STEWARD_LIVE_MODE which can independently
-        # downgrade live→shadow. That's a defence-in-depth feature, not
-        # a bug: the operator can pin the entire Steward stack to
-        # shadow via STEWARD_LIVE_MODE without touching the signal-
-        # router env.
-        result = await apply_state_change(
-            target_path,
-            decision,
-            signals_summary,
-            mode=effective_mode,
-            target_kind=target_kind_str,
-        )
-        if not isinstance(result, dict):
-            logger.error(
-                "signal_mutations.apply_signal_mutation: unexpected "
-                "apply_state_change return type=%s path=%s",
-                type(result).__name__, signal_path,
-            )
-            raise RuntimeError(
-                "apply_state_change returned non-dict; signal stays unrouted "
-                "for retry"
-            )
-
-        audit_record_path = str(result.get("path") or "")
-
-        # 5. Mark the signal applied. We patch the structured fields
-        # via patch_frontmatter_structured so the scalar set semantics
-        # stay consistent with the rest of the steward / signal vault
-        # writers. Errors raise — Temporal retry handles the transient
-        # case; a permanent vault outage rightly bubbles up.
-        await client.patch_frontmatter_structured(
-            signal_path,
-            scalar_updates={
-                "status": "applied",
-                "applied_at": _now_utc_iso(),
-                "audit_record_path": audit_record_path,
-            },
-        )
-
-        logger.info(
-            "signal_mutations.apply_signal_mutation: applied path=%s "
-            "audit=%s mode=%s pending=%s live_action=%s",
-            signal_path, audit_record_path, result.get("mode"),
-            result.get("pending_confirmation"),
-            result.get("live_action_taken"),
-        )
-
         return {
-            **result,
             "signal_path": signal_path,
-            "signal_status": "applied",
-            "skip_reason": "",
+            "signal_status": "skipped",
+            "skip_reason": "signal_not_found",
         }
-    finally:
-        await client.close()
+    if not isinstance(record, dict):
+        logger.warning(
+            "signal_mutations.apply_signal_mutation: unexpected record "
+            "shape id=%s type=%s",
+            signal_ref, type(record).__name__,
+        )
+        return {
+            "signal_path": signal_path,
+            "signal_status": "skipped",
+            "skip_reason": "bad_record_shape",
+        }
+
+    fm = record.get("frontmatter") or {}
+    if not isinstance(fm, dict):
+        fm = {}
+
+    # 2. Validate effect.
+    effect = str(fm.get("effect") or "").strip().lower()
+    if effect != "mutation":
+        logger.warning(
+            "signal_mutations.apply_signal_mutation: signal effect=%r "
+            "is not 'mutation' path=%s — defensive no-op",
+            effect, signal_path,
+        )
+        return {
+            "signal_path": signal_path,
+            "signal_status": "skipped",
+            "skip_reason": f"effect_is_{effect or 'missing'}",
+        }
+
+    target_path = fm.get("target_path")
+    target_kind = fm.get("target_kind")
+    if not target_path or not isinstance(target_path, str):
+        # Ambiguous / unresolved-target signals can't be applied —
+        # mark skipped so we don't re-process.
+        logger.info(
+            "signal_mutations.apply_signal_mutation: signal has no "
+            "target_path path=%s — skipping",
+            signal_path,
+        )
+        await _mark_signal_skipped(
+            signal_ref, reason="no_target_path", config=cfg,
+        )
+        return {
+            "signal_path": signal_path,
+            "signal_status": "skipped",
+            "skip_reason": "no_target_path",
+        }
+    target_kind_str = str(target_kind or "").strip().lower()
+    if target_kind_str not in ("task", "matter"):
+        logger.warning(
+            "signal_mutations.apply_signal_mutation: signal has "
+            "unsupported target_kind=%r path=%s — skipping",
+            target_kind, signal_path,
+        )
+        await _mark_signal_skipped(
+            signal_ref, reason=f"bad_target_kind_{target_kind_str}",
+            config=cfg,
+        )
+        return {
+            "signal_path": signal_path,
+            "signal_status": "skipped",
+            "skip_reason": f"bad_target_kind_{target_kind_str}",
+        }
+
+    proposal = _parse_proposal(fm.get("mutation_proposal"))
+    if not proposal or not isinstance(proposal, dict):
+        logger.warning(
+            "signal_mutations.apply_signal_mutation: signal has no "
+            "valid mutation_proposal path=%s — skipping",
+            signal_path,
+        )
+        await _mark_signal_skipped(
+            signal_ref, reason="no_mutation_proposal", config=cfg,
+        )
+        return {
+            "signal_path": signal_path,
+            "signal_status": "skipped",
+            "skip_reason": "no_mutation_proposal",
+        }
+
+    decision_label = str(proposal.get("decision") or "").strip()
+    if not decision_label:
+        logger.warning(
+            "signal_mutations.apply_signal_mutation: mutation_proposal "
+            "missing 'decision' path=%s — skipping",
+            signal_path,
+        )
+        await _mark_signal_skipped(
+            signal_ref, reason="no_decision_label", config=cfg,
+        )
+        return {
+            "signal_path": signal_path,
+            "signal_status": "skipped",
+            "skip_reason": "no_decision_label",
+        }
+
+    # 3. Build the Steward-shaped decision dict. Combined confidence
+    # is min(target, effect) — the weakest link gates the action.
+    target_confidence = _coerce_float(fm.get("target_confidence"), 0.0)
+    effect_confidence = _coerce_float(fm.get("effect_confidence"), 0.0)
+    combined_confidence = min(target_confidence, effect_confidence)
+    source_type = str(fm.get("source_type") or "").strip()
+    raw_quote = str(fm.get("raw_quote") or "")[:200]
+    reasoning = str(fm.get("reasoning") or "")
+    source_event_path = str(fm.get("source_event_path") or "")
+
+    evidence_entry: dict[str, Any] = {
+        "source": source_type or "signal",
+        "ref": source_event_path,
+        "note": raw_quote,
+    }
+    decision: dict[str, Any] = {
+        "decision": decision_label,
+        "confidence": combined_confidence,
+        "evidence": [evidence_entry],
+        "reasoning": reasoning,
+        "source_contributions": {
+            f"signal:{source_type or 'unknown'}": effect_confidence,
+        },
+        "no_signal_skip": False,
+    }
+    signals_summary: dict[str, Any] = {
+        "signals": [evidence_entry],
+        "evaluated_sources": [source_type] if source_type else [],
+    }
+
+    logger.info(
+        "signal_mutations.apply_signal_mutation: routing path=%s "
+        "target=%s kind=%s decision=%s combined_conf=%.2f mode=%s "
+        "(env_mode=%s)",
+        signal_path, target_path, target_kind_str, decision_label,
+        combined_confidence, effective_mode, env_mode,
+    )
+
+    # 4. Apply through Steward's existing path. NOTE: we pass
+    # ``mode=effective_mode`` — apply_state_change runs its OWN env
+    # gate against STEWARD_LIVE_MODE which can independently
+    # downgrade live→shadow. That's a defence-in-depth feature, not
+    # a bug: the operator can pin the entire Steward stack to
+    # shadow via STEWARD_LIVE_MODE without touching the signal-
+    # router env.
+    result = await apply_state_change(
+        target_path,
+        decision,
+        signals_summary,
+        mode=effective_mode,
+        target_kind=target_kind_str,
+    )
+    if not isinstance(result, dict):
+        logger.error(
+            "signal_mutations.apply_signal_mutation: unexpected "
+            "apply_state_change return type=%s path=%s",
+            type(result).__name__, signal_path,
+        )
+        raise RuntimeError(
+            "apply_state_change returned non-dict; signal stays unrouted "
+            "for retry"
+        )
+
+    audit_record_path = str(result.get("path") or "")
+
+    # 5. Mark the signal applied in state.db (storage cutover #27).
+    # ``set_signal_status`` PATCHes the indexed ``status`` column +
+    # folds applied_at / audit_record_path into the signal payload.
+    # Errors raise — Temporal retry handles the transient case; a
+    # permanent ctrl-api outage rightly bubbles up.
+    await set_signal_status(
+        signal_ref,
+        "applied",
+        applied_at=_now_utc_iso(),
+        audit_record_ref=audit_record_path,
+        config=cfg,
+    )
+
+    logger.info(
+        "signal_mutations.apply_signal_mutation: applied id=%s "
+        "audit=%s mode=%s pending=%s live_action=%s",
+        signal_ref, audit_record_path, result.get("mode"),
+        result.get("pending_confirmation"),
+        result.get("live_action_taken"),
+    )
+
+    return {
+        **result,
+        "signal_path": signal_path,
+        "signal_status": "applied",
+        "skip_reason": "",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -596,13 +492,13 @@ async def apply_signal_mutation(
 # ---------------------------------------------------------------------------
 
 async def _mark_signal_skipped(
-    client: VaultClient,
-    signal_path: str,
+    signal_ref: str,
     *,
     reason: str,
+    config: Any = None,
 ) -> None:
-    """Patch a malformed signal record to ``status=skipped`` so we don't
-    keep re-processing it on every tick.
+    """Mark a malformed signal row ``status=skipped`` in ``state.db`` so we
+    don't keep re-processing it on every tick.
 
     Failures here are logged but NOT raised — the signal is malformed
     by definition; failing the activity over a bookkeeping write would
@@ -610,24 +506,22 @@ async def _mark_signal_skipped(
     stays at ``unrouted`` and gets retried; the next pass will hit the
     same validation gate and try again to mark it skipped.
     """
+    from src.utils.signal_state import set_signal_status
+
     try:
-        await client.patch_frontmatter_structured(
-            signal_path,
-            scalar_updates={
-                "status": "skipped",
-                "applied_at": _now_utc_iso(),
-                "audit_record_path": "",
-            },
+        await set_signal_status(
+            signal_ref, "skipped", applied_at=_now_utc_iso(),
+            audit_record_ref="", config=config,
         )
     except httpx.HTTPError as exc:
         logger.warning(
-            "signal_mutations._mark_signal_skipped: PATCH failed path=%s "
+            "signal_mutations._mark_signal_skipped: PATCH failed id=%s "
             "reason=%s err=%s",
-            signal_path, reason, exc,
+            signal_ref, reason, exc,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "signal_mutations._mark_signal_skipped: unexpected error "
-            "path=%s reason=%s err=%s",
-            signal_path, reason, exc,
+            "id=%s reason=%s err=%s",
+            signal_ref, reason, exc,
         )

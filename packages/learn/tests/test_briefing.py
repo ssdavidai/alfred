@@ -95,13 +95,63 @@ class FakeVaultClient:
         return path
 
 
+class FakeStateClient:
+    """In-memory StateClient — serves signals from the FakeVaultClient.
+
+    Storage cutover (#27): the briefing + state_mutator gatherers read
+    signals from state.db, not vault/signal/. This stub serves whatever
+    the test placed in ``fake_vault.records_by_type["signal"]`` as
+    state.db rows (payload = frontmatter), so existing tests keep
+    feeding signals through the familiar ``records_by_type`` channel.
+    """
+
+    def __init__(self, fake_vault: "FakeVaultClient") -> None:
+        self._fv = fake_vault
+
+    async def close(self) -> None:
+        pass
+
+    async def __aenter__(self) -> "FakeStateClient":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        pass
+
+    async def list_signals(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for rec in self._fv.records_by_type.get("signal", []):
+            fm = rec.get("frontmatter") or {}
+            rows.append({
+                "id": rec.get("path") or rec.get("id") or "",
+                "kind": fm.get("effect"),
+                "source": fm.get("source_type"),
+                "ts": fm.get("created") or fm.get("applied_at"),
+                "entity_ref": fm.get("target_path"),
+                "matter_ref": (
+                    fm.get("target_matter_path") or fm.get("target_path")
+                ),
+                "status": fm.get("status"),
+                "payload": fm,
+            })
+        return rows
+
+    async def list_observations(self, **_kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+
 @pytest.fixture
 def fake_vault():
-    """Patch VaultClient on the briefing module + state_mutator."""
+    """Patch VaultClient on the briefing module + state_mutator, and
+    StateClient (signals are state.db rows after the storage cutover #27)."""
     fake = FakeVaultClient()
+    fake_state = FakeStateClient(fake)
     patches = [
         patch("src.activities.briefing.VaultClient", return_value=fake),
         patch("src.activities.state_mutator.VaultClient", return_value=fake),
+        patch(
+            "src.utils.signal_state.StateClient",
+            lambda *_a, **_kw: fake_state,
+        ),
     ]
     for p in patches:
         p.start()

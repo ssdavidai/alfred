@@ -2409,19 +2409,34 @@ def _build_signal_body(signal: dict[str, Any]) -> str:
 async def write_signal_record(
     signal: dict[str, Any] | None,
 ) -> str:
-    """Persist a signal proposal as a vault ``signal/`` record.
+    """Persist an extracted signal to ``state.db`` (storage cutover #26).
 
-    Input: the dict returned by ``extract_signal_from_event`` (or
+    Input: the dict returned by ``extract_signals_from_event`` (or
     ``None`` — the workflow should never call us with None, but be
     defensive: a None signal means "noise, drop", and we return the
     empty string so the workflow can detect it without raising).
 
-    Returns the relative vault path written (e.g.,
-    ``"signal/2026-05-06T12-30-15Z-abc12345.md"``). Idempotent: the
-    slug derives deterministically from ``source_event_path`` +
-    ``raw_quote`` + ``created_at`` so a Temporal retry that re-runs
-    this activity overwrites the same path with the same content
-    rather than producing a duplicate record.
+    A ``signal`` is machine bookkeeping, not a principal-facing vault
+    record (PLAN.md Part I — the promotion contract). It is written to
+    Store 2 (``state.db``) through ctrl-api's ``/api/v1/state/signals``
+    endpoint via ``StateClient``, NOT to ``vault/signal/`` markdown.
+
+    Returns the ``state.db`` row id (a ULID assigned by ctrl-api). That
+    ULID is the cross-record key threaded through the rest of the
+    pipeline (router → mutations → actions → briefing) — it replaces
+    the old markdown ``signal/<ts>-<hash>.md`` path.
+
+    Idempotency note: the legacy markdown writer was idempotent via a
+    deterministic slug. ``state.db`` inserts assign a fresh ULID, so a
+    Temporal retry of a *partially* succeeded write could in principle
+    duplicate a row. In practice ``write_signal_record`` is a single
+    HTTP POST with no interleaved await — it either fully succeeds
+    (the workflow records the ULID) or fully fails (Temporal retries
+    the whole activity, which never observed a ULID). The 15s activity
+    timeout + 3-attempt retry policy bounds the rare double-insert
+    window; a duplicate signal is harmless (routed independently, same
+    terminal state) and far cheaper than the markdown YAML-parse
+    failure modes the cutover removes.
     """
     # Defensive — the SignalExtractWorkflow (T6.0.5) skips activity
     # invocation when the upstream extract returned None, but if a
@@ -2439,42 +2454,29 @@ async def write_signal_record(
         )
         return ""
 
-    slug = _build_signal_slug(signal)
-    frontmatter = _build_signal_frontmatter(signal)
-    body = _build_signal_body(signal)
-    content = frontmatter + body
+    from src.utils.signal_state import write_signal
 
     cfg = load_config()
-    client = VaultClient(cfg)
     try:
-        try:
-            path = await client.write_record(
-                record_type="signal",
-                name=slug,
-                content=content,
-            )
-        except httpx.HTTPError as exc:
-            # Re-raise so Temporal's activity retry policy handles a
-            # transient ctrl-api outage. Idempotency is guaranteed by
-            # the deterministic slug — a retried call writes the same
-            # path with the same body.
-            logger.warning(
-                "signals.write_signal_record: write failed slug=%s err=%s",
-                slug, exc,
-            )
-            raise
-
-        logger.info(
-            "signals.write_signal_record: wrote path=%s effect=%s "
-            "target_path=%s effect_confidence=%.2f",
-            path,
-            signal.get("effect"),
-            signal.get("target_path"),
-            float(signal.get("effect_confidence") or 0.0),
+        signal_id = await write_signal(signal, config=cfg)
+    except httpx.HTTPError as exc:
+        # Re-raise so Temporal's activity retry policy handles a
+        # transient ctrl-api outage.
+        logger.warning(
+            "signals.write_signal_record: state.db write failed err=%s",
+            exc,
         )
-        return path
-    finally:
-        await client.close()
+        raise
+
+    logger.info(
+        "signals.write_signal_record: wrote signal id=%s effect=%s "
+        "target_path=%s effect_confidence=%.2f",
+        signal_id,
+        signal.get("effect"),
+        signal.get("target_path"),
+        float(signal.get("effect_confidence") or 0.0),
+    )
+    return signal_id
 
 
 # ---------------------------------------------------------------------------
@@ -2894,6 +2896,11 @@ async def mark_stream_event_processed(
     for compatibility (still written as ``null`` by ``stream_vault``
     on ingest) but no longer maintained by this activity. Reads
     consult the sidecar.
+
+    Storage cutover (#26): ``signal_path`` is now the ``state.db``
+    signal id (a ULID), not a ``signal/*.md`` path — the extractor
+    writes signals to Store 2, not the vault. The sidecar stores it
+    verbatim as a diagnostic backref; nothing reads it as a path.
     """
     if not stream_event_path or not isinstance(stream_event_path, str):
         logger.warning(

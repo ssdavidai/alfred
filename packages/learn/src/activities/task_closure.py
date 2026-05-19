@@ -368,16 +368,20 @@ async def list_recent_signals(lookback_min: int = DEFAULT_SIGNAL_LOOKBACK_MIN) -
     We don't pre-filter by matter here — the workflow does the per-matter
     pair-up after collecting both halves. This way a single GET fetches
     the signal slice and the workflow does the join in memory.
+
+    Storage cutover (#27): signals are state.db rows — query ctrl-api's
+    /api/v1/state/signals (windowed via ``since``) instead of walking
+    vault/signal/. ``path`` / ``stem`` are now the state.db signal ULID
+    (the cross-record key), not a markdown path.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=lookback_min)
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(
-            f"{_ctrl_base()}/api/v1/vault/list/signal?preview=2000",
-            headers=_ctrl_headers(),
-        )
-        resp.raise_for_status()
-    data = resp.json()
-    results = data.get("results", []) or []
+    from src.config import load_config
+    from src.utils.signal_state import StateClient, signal_row_to_record
+
+    cfg = load_config()
+    async with StateClient(cfg) as sc:
+        rows = await sc.list_signals(since=cutoff.isoformat(), limit=10_000)
+    results = [signal_row_to_record(r) for r in rows]
     out: list[dict[str, Any]] = []
     for r in results:
         fm = r.get("frontmatter", {}) or {}
@@ -392,7 +396,7 @@ async def list_recent_signals(lookback_min: int = DEFAULT_SIGNAL_LOOKBACK_MIN) -
             created = created.replace(tzinfo=timezone.utc)
         if created < cutoff:
             continue
-        path = r.get("path") or r.get("relPath") or ""
+        path = r.get("id") or r.get("path") or ""
         if not path:
             continue
         # Per-signal matter targets: target_candidates is the canonical
@@ -408,8 +412,9 @@ async def list_recent_signals(lookback_min: int = DEFAULT_SIGNAL_LOOKBACK_MIN) -
                     matters.append(tp if tp.endswith(".md") else tp + ".md")
         out.append({
             "path": path,
-            "stem": r.get("stem")
-                or path.removeprefix("signal/").removesuffix(".md"),
+            # ``stem`` is the cross-record key — now the state.db
+            # signal ULID, identical to ``path``.
+            "stem": path,
             "headline": str(fm.get("display_headline") or "").strip(),
             "body": str(fm.get("display_body") or fm.get("raw_quote") or "")[:1000],
             "kind": str(fm.get("source_type") or "").strip(),
@@ -540,9 +545,10 @@ async def write_closure_decision(
             f"{assessment.get('reasoning', '')}"[:500]
         ),
         "matter_ref": task.get("matter_ref", "") or None,
-        # Provenance — fields the new ARCH-11 schema accepts.
-        "decision_origin": f"signal/{signal.get('stem', '')}.md",
-        "evidence": f"signal/{signal.get('stem', '')}.md",
+        # Provenance — the cross-record key is the state.db signal id
+        # (storage cutover #27), not a vault path.
+        "decision_origin": str(signal.get("stem", "")),
+        "evidence": str(signal.get("stem", "")),
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(

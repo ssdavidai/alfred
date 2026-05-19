@@ -460,18 +460,31 @@ async def detect_pattern_proposals() -> dict[str, Any]:
     }
 
     async with _http() as client:
-        # 1. Pull observations. ``preview=2000`` returns frontmatter only,
-        # which is exactly what the clusterer needs.
+        # 1. Pull observations from state.db (storage cutover #27).
+        # Observations are Store 2 rows now — query ctrl-api's
+        # /api/v1/state/observations (windowed to WINDOW_DAYS via the
+        # ``since`` param) instead of walking vault/observation/. The
+        # rows are rehydrated into the {path, frontmatter} record shape
+        # the clusterer expects.
+        from datetime import timedelta as _td
+
+        from src.utils.signal_state import list_observation_records
+
+        since_iso = (
+            datetime.now(timezone.utc) - _td(days=WINDOW_DAYS)
+        ).isoformat()
         try:
-            resp = await client.get(
-                "/api/v1/vault/list/observation?preview=2000",
+            observations = await list_observation_records(
+                since=since_iso, limit=20_000,
             )
-            resp.raise_for_status()
         except httpx.HTTPError as exc:
             counters["errors"] += 1
             counters["error_messages"].append(f"list obs: {exc}"[:300])
             return counters
-        observations = resp.json().get("results", []) or []
+        except Exception as exc:  # noqa: BLE001
+            counters["errors"] += 1
+            counters["error_messages"].append(f"list obs: {exc}"[:300])
+            return counters
         counters["scanned"] = len(observations)
 
         # 2. Cluster.

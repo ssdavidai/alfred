@@ -396,38 +396,77 @@ async def _gather_observed_for_matter(
     signal_paths: list[str] = []
     decision_paths: list[str] = []
 
+    # Signals are state.db rows now (storage cutover #27) — query
+    # ctrl-api's /api/v1/state/signals scoped to this matter instead of
+    # walking vault/signal/. ctrl-api filters on the indexed
+    # ``matter_ref`` column. Decisions stay canonical vault markdown.
     try:
-        for record_type, sink in (
-            ("signal", signal_paths),
-            ("decision", decision_paths),
-        ):
+        from src.utils.signal_state import StateClient, signal_row_to_record
+
+        async with StateClient(config) as sc:
             try:
-                records = await vault.list_records(record_type, limit=10_000)
-            except httpx.HTTPError as exc:
+                sig_rows = await sc.list_signals(
+                    matter=target_path,
+                    since=_iso(window_start),
+                    limit=10_000,
+                )
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "briefing.gather_observed: %s list failed target=%s err=%s",
-                    record_type, target_path, exc,
+                    "briefing.gather_observed: state.db signal query "
+                    "failed target=%s err=%s", target_path, exc,
                 )
+                sig_rows = []
+        for row in sig_rows:
+            rec = signal_row_to_record(row)
+            fm = rec.get("frontmatter") or {}
+            # matter filter is server-side, but a signal can also touch
+            # the matter via target_candidates / related_matters — keep
+            # the structural check for those.
+            if not _record_targets_matter(fm, target_path):
+                # ``matter_ref`` matched server-side; trust it.
+                if str(fm.get("target_matter_path") or "").strip() != target_path:
+                    continue
+            ts_raw = fm.get("applied_at") or fm.get("created") or rec.get("created")
+            ts = _parse_iso_or_none(ts_raw)
+            if ts is None or ts < window_start or ts > window_end:
                 continue
-            for rec in records:
-                if not isinstance(rec, dict):
-                    continue
-                fm = rec.get("frontmatter") or rec
-                if not isinstance(fm, dict):
-                    fm = {}
-                if not _record_targets_matter(fm, target_path):
-                    continue
-                ts_raw = (
-                    fm.get("applied_at")
-                    or fm.get("created")
-                    or rec.get("created")
-                )
-                ts = _parse_iso_or_none(ts_raw)
-                if ts is None or ts < window_start or ts > window_end:
-                    continue
-                path = str(rec.get("path") or fm.get("path") or "").strip()
-                if path:
-                    sink.append(path)
+            sid = str(rec.get("id") or "").strip()
+            if sid:
+                signal_paths.append(sid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "briefing.gather_observed: signal gather failed target=%s err=%s",
+            target_path, exc,
+        )
+
+    try:
+        try:
+            records = await vault.list_records("decision", limit=10_000)
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "briefing.gather_observed: decision list failed target=%s "
+                "err=%s", target_path, exc,
+            )
+            records = []
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            fm = rec.get("frontmatter") or rec
+            if not isinstance(fm, dict):
+                fm = {}
+            if not _record_targets_matter(fm, target_path):
+                continue
+            ts_raw = (
+                fm.get("applied_at")
+                or fm.get("created")
+                or rec.get("created")
+            )
+            ts = _parse_iso_or_none(ts_raw)
+            if ts is None or ts < window_start or ts > window_end:
+                continue
+            path = str(rec.get("path") or fm.get("path") or "").strip()
+            if path:
+                decision_paths.append(path)
     finally:
         await vault.close()
 
@@ -1296,11 +1335,22 @@ async def _gather_signal_anomalies(
     window_end: dt.datetime,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Signals classified as anomaly/system_error inside the window."""
+    """Signals classified as anomaly/system_error inside the window.
+
+    Storage cutover (#27): signals are state.db rows — query ctrl-api's
+    /api/v1/state/signals (windowed via ``since``) instead of walking
+    vault/signal/. The ``vault`` argument is kept for signature
+    stability but is no longer used here.
+    """
     try:
-        records = await vault.list_records("signal", limit=400)
-    except httpx.HTTPError as exc:
-        logger.warning("_gather_signal_anomalies: list failed err=%s", exc)
+        from src.utils.signal_state import StateClient, signal_row_to_record
+
+        config = load_config()
+        async with StateClient(config) as sc:
+            rows = await sc.list_signals(since=_iso(window_start), limit=400)
+        records = [signal_row_to_record(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("_gather_signal_anomalies: state.db query failed err=%s", exc)
         return []
     out: list[dict[str, Any]] = []
     for rec in records or []:
@@ -1388,11 +1438,21 @@ async def _gather_window_signals(
     The compose prompt needs to see what actually came in (what Sir asked,
     what other people said, what the world surfaced) so the brief can
     reference real movement rather than counters.
+
+    Storage cutover (#27): signals are state.db rows — query ctrl-api's
+    /api/v1/state/signals (windowed via ``since``) instead of walking
+    vault/signal/. The ``vault`` argument is kept for signature
+    stability but is no longer used here.
     """
     try:
-        records = await vault.list_records("signal", limit=600)
-    except httpx.HTTPError as exc:
-        logger.warning("_gather_window_signals: list failed err=%s", exc)
+        from src.utils.signal_state import StateClient, signal_row_to_record
+
+        config = load_config()
+        async with StateClient(config) as sc:
+            rows = await sc.list_signals(since=_iso(window_start), limit=600)
+        records = [signal_row_to_record(r) for r in rows]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("_gather_window_signals: state.db query failed err=%s", exc)
         return []
     out: list[dict[str, Any]] = []
     for rec in records or []:
@@ -1879,36 +1939,52 @@ async def compose_and_write_briefing(
             })
 
         # Best-effort signal/decision count over the window — purely for
-        # the briefing frontmatter's ``observed.signals_count`` / ``decisions_count``
-        # fields. Not load-bearing for the prose itself.
-        for record_type, counter_setter in (
-            ("signal", "signals"),
-            ("decision", "decisions"),
-        ):
-            try:
-                records = await vault.list_records(record_type, limit=10_000)
-            except httpx.HTTPError:
-                continue
-            count = 0
-            for rec in records:
-                if not isinstance(rec, dict):
-                    continue
-                fm = rec.get("frontmatter") or rec
-                if not isinstance(fm, dict):
-                    fm = {}
-                ts_raw = (
-                    fm.get("applied_at")
-                    or fm.get("created")
-                    or rec.get("created")
+        # the briefing frontmatter's ``observed.signals_count`` /
+        # ``decisions_count`` fields. Not load-bearing for the prose
+        # itself. Storage cutover (#27): the signal count comes from
+        # state.db (windowed query); the decision count still walks the
+        # canonical vault ``decision/`` type.
+        try:
+            from src.utils.signal_state import StateClient as _SC
+
+            async with _SC(config) as _sc_cnt:
+                _sig_rows = await _sc_cnt.list_signals(
+                    since=_iso(window_start), limit=10_000,
                 )
-                ts = _parse_iso_or_none(ts_raw)
+            sig_count = 0
+            for row in _sig_rows:
+                ts = _parse_iso_or_none(row.get("ts"))
                 if ts is None or ts < window_start or ts > window_end:
                     continue
-                count += 1
-            if counter_setter == "signals":
-                signals_count_total = count
-            else:
-                decisions_count_total = count
+                sig_count += 1
+            signals_count_total = sig_count
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "compose_and_write_briefing: signal count query failed "
+                "err=%s", exc,
+            )
+
+        try:
+            records = await vault.list_records("decision", limit=10_000)
+        except httpx.HTTPError:
+            records = []
+        dcount = 0
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            fm = rec.get("frontmatter") or rec
+            if not isinstance(fm, dict):
+                fm = {}
+            ts_raw = (
+                fm.get("applied_at")
+                or fm.get("created")
+                or rec.get("created")
+            )
+            ts = _parse_iso_or_none(ts_raw)
+            if ts is None or ts < window_start or ts > window_end:
+                continue
+            dcount += 1
+        decisions_count_total = dcount
 
         # Phase 2a' — Chief-of-staff context: what Sir must rule on, what
         # broke, what Alfred handled, plus the full signal + decision

@@ -614,11 +614,14 @@ async def collect_living_brief_data() -> dict[str, Any]:
             })
 
         # 4. Quiet Notes — observations the intuition layer surfaced
-        # since the last brief. Kept unchanged from the prior behaviour
-        # except for the size cap so the prompt stays compact.
+        # since the last brief. Storage cutover (#27): observations are
+        # state.db rows now — query ctrl-api's /api/v1/state/observations
+        # instead of walking vault/observation/.
         try:
-            observations = await client.list_records("observation", limit=20)
-        except Exception:
+            from src.utils.signal_state import list_observation_records
+
+            observations = await list_observation_records(limit=20)
+        except Exception:  # noqa: BLE001
             observations = []
         quiet_notes: list[dict[str, Any]] = []
         for rec in observations[:10]:
@@ -629,8 +632,12 @@ async def collect_living_brief_data() -> dict[str, Any]:
                 continue
             quiet_notes.append({
                 "path": str(rec.get("path") or ""),
-                "reasoning": str(fm.get("reasoning") or "")[:240],
-                "input_type": str(fm.get("input_type") or ""),
+                "reasoning": str(
+                    fm.get("reasoning") or fm.get("fact") or ""
+                )[:240],
+                "input_type": str(
+                    fm.get("input_type") or fm.get("source_kind") or ""
+                ),
             })
 
         return {
@@ -744,13 +751,26 @@ Reason: {'; '.join(errors)}
 
 @activity.defn
 async def fetch_unprocessed_observations() -> list[dict[str, Any]]:
-    """Fetch observations with status 'unprocessed'."""
+    """Fetch observations with status 'unprocessed' from state.db.
+
+    Storage cutover (#27): observations are Store 2 rows — query
+    ctrl-api's /api/v1/state/observations (status filter) instead of
+    walking vault/observation/. Returns rehydrated record dicts so the
+    ReflectionWorkflow's frontmatter access is unchanged.
+    """
+    from src.utils.signal_state import list_observation_records
+
     config = load_config()
-    client = VaultClient(config)
     try:
-        return await client.list_records("observation", status="unprocessed")
-    finally:
-        await client.close()
+        # ``list_observations`` filters on the indexed ``status`` column;
+        # list_observation_records doesn't expose it, so query directly.
+        from src.utils.signal_state import StateClient, observation_row_to_record
+
+        async with StateClient(config) as sc:
+            rows = await sc.list_observations(status="unprocessed", limit=200)
+        return [observation_row_to_record(r) for r in rows]
+    except Exception:  # noqa: BLE001
+        return []
 
 
 @activity.defn

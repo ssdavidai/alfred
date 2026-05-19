@@ -1,7 +1,18 @@
-"""Initialize vault folders and initial files for alfred-learn.
+"""Initialize vault folders for alfred-learn.
 
 Run on first boot:
     python -m scripts.init_vault
+
+Storage cutover (#26/#27, PLAN.md Part I): the vault holds only the ~12
+canonical, principal-facing record types. The "intuition index" is
+*machine state* — Alfred's accumulated instincts/observations are
+tracked in ``state.db`` (Store 2), not as a markdown record. ctrl-api's
+promotion contract rejects writes to non-canonical vault paths, so the
+old ``client.write_record("index", "intuition-index", ...)`` call
+returned HTTP 422. That write is removed: there is no ``intuition/``
+directory and no index record. The /instincts dashboard page reads
+instincts directly (canonical ``instinct/`` vault type) and observation
+state from ``state.db`` — no index file is needed.
 """
 
 from __future__ import annotations
@@ -11,33 +22,23 @@ import logging
 import os
 
 from src.config import load_config
-from src.utils.vault_client import VaultClient
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("init-vault")
 
-INTUITION_INDEX_CONTENT = """---
-type: index
-name: Intuition Index
----
-
-# Intuition Index
-
-Alfred's accumulated intuition about how the household runs.
-
-No instincts developed yet. As observations accumulate and nightly reflection
-runs, instincts will appear here automatically.
-"""
-
 
 async def init_vault() -> None:
     config = load_config()
-    client = VaultClient(config)
 
-    # Ensure all required vault directories exist on the mounted volume
+    # Ensure the canonical on-disk vault directories exist on the
+    # mounted volume. ``intuition/`` is deliberately NOT created — the
+    # intuition index is machine state in state.db, not a vault record
+    # (promotion contract, PLAN.md Part I). ``observation/`` likewise no
+    # longer receives markdown (observations are state.db rows), but the
+    # directory is harmless to pre-create for any legacy reader; we drop
+    # it from the required set to stay strictly aligned with the 12
+    # canonical types.
     required_dirs = [
-        config.vault_observation_dir,
-        config.vault_intuition_dir,
         config.vault_instincts_dir,
         config.vault_reflection_dir,
         os.path.join(config.vault_path, "session"),
@@ -47,20 +48,13 @@ async def init_vault() -> None:
         os.makedirs(directory, exist_ok=True)
         logger.info("Ensured directory exists: %s", directory)
 
-    try:
-        # Create the intuition index
-        try:
-            await client.write_record("index", "intuition-index", INTUITION_INDEX_CONTENT)
-            logger.info("Created intuition/index.md")
-        except Exception as e:
-            if "already exists" in str(e).lower() or "409" in str(e):
-                logger.info("intuition/index.md already exists")
-            else:
-                logger.warning("Could not create intuition index: %s", e)
-
-        logger.info("Vault initialization complete.")
-    finally:
-        await client.close()
+    # No intuition-index markdown record is written. Instincts surface
+    # from the canonical ``instinct/`` vault type; the machine's
+    # accumulated intuition (observations, patterns) lives in state.db.
+    logger.info(
+        "Vault initialization complete "
+        "(intuition index is state.db machine state — no vault record)."
+    )
 
 
 def main() -> None:

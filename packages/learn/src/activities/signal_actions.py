@@ -498,38 +498,31 @@ async def _emit_signal_action_audit(
     effective_mode: str,
     env_mode: str,
 ) -> str:
-    """Write ``event/signal-action-<ts>-<id>.md`` audit record.
+    """Append a ``signal-action`` audit row to ``state.db``.
+
+    Storage cutover (#26): the audit trail used to be an
+    ``event/signal-action-<ts>-<id>.md`` markdown record. ``signal-action``
+    is an audit-class record — demoted to the ``audit`` table in Store 2
+    by the promotion contract (PLAN.md Part I). It is written through
+    ctrl-api's ``/api/v1/state/audit`` endpoint via ``StateClient``.
 
     Captures the full decision context so the router's choices stay
-    auditable even after the source signal is purged. Mirrors the
-    layout of ``event/steward-action-*.md`` (top-level scalars first,
-    then JSON-as-YAML nested fields) so dashboard frontmatter scans
-    keep working.
+    auditable even after the source signal is purged.
 
-    Returns the written vault path. Errors propagate so Temporal retry
-    handles transient ctrl-api failures.
+    Returns the ``state.db`` audit row id (a ULID). That ref is stored
+    on the signal as ``audit_record_path`` — an opaque cross-record
+    ref now, not a filesystem path.
     """
-    import json
-
     import httpx
     from src.config import load_config
-    from src.utils.vault_client import VaultClient
+    from src.utils.state_client import StateClient
 
     ts_iso = _now_utc_iso()
-    ts_part = _ts_filename(ts_iso)
-    # Pick a stable per-record suffix so retries land on the same path.
-    # The signal_path uniquely identifies the signal we're auditing;
-    # hash a short slice of it.
-    import hashlib
 
-    suffix_input = (signal_path or "").encode("utf-8", errors="replace")
-    suffix = hashlib.sha256(suffix_input).hexdigest()[:8]
-    name = f"signal-action-{ts_part}-{suffix}"
-
-    payload: dict[str, Any] = {
-        "type": "signal-action",
-        "timestamp": ts_iso,
-        "signal_path": signal_path,
+    # The rich decision context — everything the old markdown record's
+    # frontmatter carried — rides in the audit row's ``payload`` blob.
+    audit_payload: dict[str, Any] = {
+        "signal_ref": signal_path,
         "chosen_path": chosen_path,
         "decision_reason": decision_reason,
         "matched_instinct": matched_instinct_path,
@@ -547,88 +540,42 @@ async def _emit_signal_action_audit(
         "agent_outcome": agent_outcome,
     }
 
-    # Render as JSON-as-YAML — same trick steward._render_audit_yaml uses.
-    # YAML 1.2 is a strict superset of JSON for the structures we emit,
-    # so json.dumps with indentation parses cleanly through js-yaml on
-    # the read side.
-    SCALAR_KEYS = (
-        "type", "timestamp", "signal_path", "chosen_path",
-        "decision_reason", "matched_instinct", "matched_instinct_name",
-        "match_score", "threshold", "combined_confidence",
-        "effective_mode", "env_mode", "needs_attention_path",
-        "source_event_path", "source_type", "target_path", "target_kind",
-    )
-    NESTED_KEYS = ("agent_outcome",)
-
-    def _scalar(v: Any) -> str:
-        if v is None:
-            return "null"
-        if isinstance(v, bool):
-            return "true" if v else "false"
-        if isinstance(v, (int, float)):
-            return str(v)
-        s = str(v).replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{s}"'
-
-    fm_lines: list[str] = []
-    for k in SCALAR_KEYS:
-        if k in payload:
-            fm_lines.append(f"{k}: {_scalar(payload[k])}")
-    for k in NESTED_KEYS:
-        if k in payload:
-            blob = json.dumps(payload[k], ensure_ascii=False, indent=2, default=str)
-            fm_lines.append(f"{k}: {blob}")
-
-    # Body — short human-readable summary.
-    body_lines: list[str] = []
-    body_lines.append(f"# signal-action: {chosen_path}")
-    body_lines.append("")
-    body_lines.append(f"- Reason: **{decision_reason}**")
-    body_lines.append(f"- Source signal: `{signal_path}`")
-    if matched_instinct_path:
-        body_lines.append(
-            f"- Matched instinct: `{matched_instinct_path}` "
-            f"(score={match_score:.2f}, threshold={threshold:.2f})"
-        )
-    else:
-        body_lines.append(
-            f"- No matching instinct (best score={match_score:.2f}, "
-            f"floor={MATCH_FLOOR:.2f})"
-        )
-    body_lines.append(
-        f"- Combined confidence: {combined_confidence:.2f} "
-        f"(mode={effective_mode}, env={env_mode})"
-    )
-    if needs_attention_path:
-        body_lines.append(f"- Needs-attention card: `{needs_attention_path}`")
-    if agent_outcome and isinstance(agent_outcome, dict):
-        summary = str(agent_outcome.get("agent_response_summary") or "")
-        if summary:
-            body_lines.append(f"- Agent response: {summary}")
-        outcome_path = str(agent_outcome.get("outcome_signal_path") or "")
-        if outcome_path:
-            body_lines.append(f"- Outcome signal: `{outcome_path}`")
-
-    content = (
-        "---\n" + "\n".join(fm_lines) + "\n---\n\n" + "\n".join(body_lines) + "\n"
+    summary = (
+        f"signal-action: {chosen_path} ({decision_reason}) — "
+        f"conf={combined_confidence:.2f} mode={effective_mode}"
     )
 
     cfg = load_config()
-    client = VaultClient(cfg)
     try:
-        try:
-            return await client.write_record(
-                record_type="event", name=name, content=content,
+        async with StateClient(cfg) as sc:
+            return await sc.append_audit(
+                action_type="signal-action",
+                actor="signal_router",
+                summary=summary,
+                ts=ts_iso,
+                source=str(signal_fm.get("source_type") or "signal"),
+                target_path=(
+                    str(signal_fm.get("target_path"))
+                    if signal_fm.get("target_path")
+                    else None
+                ),
+                target_kind=(
+                    str(signal_fm.get("target_kind"))
+                    if signal_fm.get("target_kind")
+                    else None
+                ),
+                subject_ref=signal_path,
+                mode=effective_mode,
+                confidence=round(combined_confidence, 4),
+                payload=audit_payload,
             )
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "signal_actions._emit_signal_action_audit: write failed "
-                "name=%s err=%s",
-                name, exc,
-            )
-            raise
-    finally:
-        await client.close()
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "signal_actions._emit_signal_action_audit: state.db write "
+            "failed err=%s",
+            exc,
+        )
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -1322,80 +1269,52 @@ async def dispatch_action_to_agent(
     if len(agent_text) > 500:
         summary = summary + "…"
 
-    # Write the outcome as a follow-up signal record. We use the existing
-    # signal/ record_type so the same dashboard / audit views surface it.
+    # Write the outcome as a follow-up signal in state.db (storage
+    # cutover #26). It is still a ``signal`` row — leaf record, the
+    # agent has spoken — so it goes to Store 2, not ``vault/signal/``.
+    # ``effect="agent_outcome"`` keeps it out of the router's
+    # ``status=unrouted`` query (it is born ``status=agent_responded``).
     ts_iso = _now_utc_iso()
-    ts_part = _ts_filename(ts_iso)
-    digest_input = f"{matched_instinct_path}\x00{what}\x00{ts_iso}".encode(
-        "utf-8", errors="replace",
-    )
-    short_id = hashlib.sha256(digest_input).hexdigest()[:8]
-    outcome_name = f"{ts_part}-agent-outcome-{short_id}"
 
-    def _scalar(v: Any) -> str:
-        if v is None:
-            return "null"
-        if isinstance(v, bool):
-            return "true" if v else "false"
-        if isinstance(v, (int, float)):
-            return str(v)
-        s = str(v).replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{s}"'
+    # The full outcome shape rides in the signal payload so
+    # ``check_decision_outcomes`` (which matches outcomes back to the
+    # originating decision via ``source_signal_path``) keeps working.
+    outcome_signal_dict: dict[str, Any] = {
+        "type": "signal",
+        "created_at": ts_iso,
+        "created": ts_iso,
+        "source_type": "agent_outcome",
+        "source_event_path": "",
+        "source_signal_path": source_signal_path,
+        "matched_instinct": matched_instinct_path,
+        "matched_instinct_name": instinct_name,
+        "target_path": target_path or None,
+        "action_what": what,
+        "suggested_actor": suggested_actor,
+        "effect": "agent_outcome",
+        "agent_response": agent_text,
+        "display_headline": f"Agent outcome for: {what}"[:200],
+        "display_body": (agent_text or "(empty response)")[:2000],
+    }
 
-    fm_lines = [
-        "---",
-        f"type: {_scalar('signal')}",
-        f"created: {_scalar(ts_iso)}",
-        f"source_type: {_scalar('agent_outcome')}",
-        f"source_event_path: {_scalar('')}",
-        # source_signal_path is the upstream signal this outcome is FOR.
-        # check_decision_outcomes uses this field to match outcomes back
-        # to the originating decision (decision.side_effects.re_routed_signal
-        # == outcome.source_signal_path). Without this the executing →
-        # completed transition never fires and decisions stay stuck.
-        f"source_signal_path: {_scalar(source_signal_path)}",
-        f"matched_instinct: {_scalar(matched_instinct_path)}",
-        f"matched_instinct_name: {_scalar(instinct_name)}",
-        f"target_path: {_scalar(target_path) if target_path else 'null'}",
-        f"action_what: {_scalar(what)}",
-        f"suggested_actor: {_scalar(suggested_actor)}",
-        f"effect: {_scalar('agent_outcome')}",
-        # The router-managed status fields stay at their terminal values;
-        # this is a leaf record (the agent has spoken).
-        f"status: {_scalar('agent_responded')}",
-        f"agent_response: {json.dumps(agent_text, ensure_ascii=False)}",
-        "---",
-        "",
-    ]
-    body_lines = [
-        f"# Agent outcome for: {what}",
-        "",
-        f"**Instinct:** `{matched_instinct_path}` ({instinct_name})",
-        f"**Target:** {target_clause}",
-        "",
-        "## Agent response",
-        "",
-        agent_text or "(empty response)",
-        "",
-    ]
-    content = "\n".join(fm_lines) + "\n".join(body_lines) + "\n"
+    from src.utils.signal_state import write_signal as _write_signal
+    from src.utils.signal_state import set_signal_status as _set_status
 
     cfg = load_config()
-    client = VaultClient(cfg)
     try:
-        try:
-            outcome_path = await client.write_record(
-                record_type="signal", name=outcome_name, content=content,
-            )
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "signal_actions.dispatch_action_to_agent: outcome record "
-                "write failed name=%s err=%s",
-                outcome_name, exc,
-            )
-            raise
-    finally:
-        await client.close()
+        outcome_path = await _write_signal(outcome_signal_dict, config=cfg)
+        # Born as a terminal leaf — not routable. Move it off
+        # ``unrouted`` immediately so the router never picks it up.
+        await _set_status(
+            outcome_path, "agent_responded", applied_at=ts_iso, config=cfg,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "signal_actions.dispatch_action_to_agent: outcome signal "
+            "write failed err=%s",
+            exc,
+        )
+        raise
 
     logger.info(
         "signal_actions.dispatch_action_to_agent: dispatched + recorded "
@@ -1457,6 +1376,11 @@ async def route_signal_action(
     import httpx
     from src.config import load_config
     from src.utils.vault_client import VaultClient
+    from src.utils.signal_state import (
+        normalise_signal_ref,
+        read_signal_record,
+        set_signal_status,
+    )
 
     if not signal_path or not isinstance(signal_path, str):
         raise ValueError(
@@ -1481,25 +1405,27 @@ async def route_signal_action(
         effective_mode = mode
 
     cfg = load_config()
+    # ``signal_ref`` is the state.db signal id (storage cutover #27).
+    # ``client`` (VaultClient) is still needed for reads of *canonical*
+    # vault records this activity touches — e.g. the ``decision/`` record
+    # at ``decision_origin``, which stays markdown.
+    signal_ref = normalise_signal_ref(signal_path)
     client = VaultClient(cfg)
     try:
-        # 1. Read the signal record.
-        try:
-            record = await client.read_record(signal_path)
-        except httpx.HTTPStatusError as exc:
-            if exc.response is not None and exc.response.status_code == 404:
-                logger.warning(
-                    "signal_actions.route_signal_action: 404 path=%s "
-                    "— signal vanished",
-                    signal_path,
-                )
-                return {
-                    "signal_path": signal_path,
-                    "signal_status": "skipped",
-                    "skip_reason": "signal_not_found",
-                    "chosen_path": "skipped",
-                }
-            raise
+        # 1. Read the signal row from state.db (storage cutover #27).
+        record = await read_signal_record(signal_ref, config=cfg)
+        if record is None:
+            logger.warning(
+                "signal_actions.route_signal_action: signal id=%s not "
+                "found — signal vanished",
+                signal_ref,
+            )
+            return {
+                "signal_path": signal_path,
+                "signal_status": "skipped",
+                "skip_reason": "signal_not_found",
+                "chosen_path": "skipped",
+            }
         if not isinstance(record, dict):
             return {
                 "signal_path": signal_path,
@@ -1579,56 +1505,34 @@ async def route_signal_action(
             actor_for_log = str(fm.get("actor") or "unknown").strip()
             target_matter_path = str(fm.get("target_matter_path") or "").strip()
             target_path = str(fm.get("target_path") or "").strip()
-            # Inline PATCH the signal's status so the router doesn't
-            # keep picking it up. We don't go through the
-            # mark_signal_status activity because (a) it whitelists
-            # only "action_pending"/"skipped"; (b) calling another
-            # @activity.defn directly from an activity skips the
-            # workflow scheduler. Mirroring the same ctrl-api call
-            # shape used by mark_signal_status keeps the wire
-            # behaviour identical.
-            import os
-            import httpx
+            # Mark the signal's status in state.db so the router doesn't
+            # keep picking it up (storage cutover #27). ``status`` is a
+            # free-text column on the ``signal`` table, so
+            # ``routed_bookkeeping`` is accepted directly — no enum gate.
             from datetime import datetime, timezone
 
-            cfg_local = load_config()
-            api_key = os.environ.get("AAS_API_KEY", "")
+            now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
             patched_ok = False
-            if api_key:
-                now_iso = datetime.now(timezone.utc).isoformat(
-                    timespec="seconds"
+            try:
+                await set_signal_status(
+                    signal_ref,
+                    "routed_bookkeeping",
+                    applied_at=now_iso,
+                    audit_record_ref="",
+                    config=cfg,
                 )
-                try:
-                    async with httpx.AsyncClient(
-                        base_url=cfg_local.alfred_ctrl_url,
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        timeout=10.0,
-                    ) as patch_client:
-                        resp = await patch_client.patch(
-                            f"/api/v1/vault/records/{signal_path}",
-                            json={
-                                "frontmatter": {
-                                    "status": "routed_bookkeeping",
-                                    "applied_at": now_iso,
-                                }
-                            },
-                        )
-                        resp.raise_for_status()
-                        patched_ok = True
-                except httpx.HTTPError as exc:
-                    logger.warning(
-                        "signal_actions.route_signal_action: "
-                        "bookkeeping PATCH failed path=%s err=%s",
-                        signal_path, exc,
-                    )
+                patched_ok = True
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "signal_actions.route_signal_action: "
+                    "bookkeeping status write failed id=%s err=%s",
+                    signal_ref, exc,
+                )
             logger.info(
                 "signal_actions.route_signal_action: BOOKKEEPING "
-                "path=%s actor=%s target_matter=%s target=%s "
+                "id=%s actor=%s target_matter=%s target=%s "
                 "patched=%s (no card, no dispatch)",
-                signal_path, actor_for_log,
+                signal_ref, actor_for_log,
                 target_matter_path or "(none)",
                 target_path or "(none)",
                 patched_ok,
@@ -1845,33 +1749,33 @@ async def route_signal_action(
             env_mode=env_mode,
         )
 
-        # 9. Mark the signal record. The audit record path goes into
-        # ``audit_record_path``; ``status`` is the routing outcome.
+        # 9. Mark the signal in state.db (storage cutover #27). The
+        # audit record ref goes into ``audit_record_path``; ``status``
+        # is the routing outcome.
         signal_status = (
             "routed_agent" if chosen_path == "agent" else "routed_human"
         )
         try:
-            await client.patch_frontmatter_structured(
-                signal_path,
-                scalar_updates={
-                    "status": signal_status,
-                    "applied_at": _now_utc_iso(),
-                    "audit_record_path": audit_path,
-                },
+            await set_signal_status(
+                signal_ref,
+                signal_status,
+                applied_at=_now_utc_iso(),
+                audit_record_ref=audit_path,
+                config=cfg,
             )
         except httpx.HTTPError as exc:
             logger.warning(
-                "signal_actions.route_signal_action: status PATCH failed "
-                "path=%s status=%s err=%s",
-                signal_path, signal_status, exc,
+                "signal_actions.route_signal_action: status write failed "
+                "id=%s status=%s err=%s",
+                signal_ref, signal_status, exc,
             )
             raise
 
         logger.info(
-            "signal_actions.route_signal_action: routed path=%s "
+            "signal_actions.route_signal_action: routed id=%s "
             "chosen=%s reason=%s instinct=%s score=%.2f conf=%.2f "
             "threshold=%.2f mode=%s audit=%s",
-            signal_path, chosen_path, decision_reason,
+            signal_ref, chosen_path, decision_reason,
             matched_path or "none", match_score, combined_confidence,
             threshold, effective_mode, audit_path,
         )

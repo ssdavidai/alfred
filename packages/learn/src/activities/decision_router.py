@@ -632,26 +632,36 @@ async def check_decision_outcomes() -> dict[str, Any]:
         if not executing:
             return {"checked": 0, "matched": 0, "matches": []}
 
-        # 2. Get recent signals — outcomes are written as signals and
-        # tagged with `source_signal_path` referencing the upstream.
-        sigs_resp = await client.get(
-            "/api/v1/vault/list/signal?preview=200",
-        )
-        if sigs_resp.status_code >= 400:
-            return {"checked": len(executing), "matched": 0, "matches": []}
-        signals = sigs_resp.json().get("results", []) or []
+        # 2. Get recent agent-outcome signals from state.db (storage
+        # cutover #27). Outcomes are ``signal`` rows with
+        # ``source="agent_outcome"`` that carry ``source_signal_path``
+        # in their payload, referencing the upstream signal. Replaces
+        # the old ``GET /api/v1/vault/list/signal`` markdown walk.
+        from src.config import load_config
+        from src.utils.signal_state import StateClient, signal_row_to_record
 
-        # Build a quick map: source_signal_path → outcome signal path.
+        cfg = load_config()
         outcome_by_source: dict[str, str] = {}
-        for s in signals:
-            fm = s.get("frontmatter") if isinstance(s, dict) else None
-            if not isinstance(fm, dict):
-                continue
+        try:
+            async with StateClient(cfg) as sc:
+                outcome_rows = await sc.list_signals(
+                    source="agent_outcome", limit=200,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "decision_router.check_decision_outcomes: state.db signal "
+                "query failed err=%s", exc,
+            )
+            return {"checked": len(executing), "matched": 0, "matches": []}
+
+        # Build a quick map: source_signal_path → outcome signal id.
+        for s in outcome_rows:
+            rec = signal_row_to_record(s)
+            fm = rec.get("frontmatter") or {}
             ssp = fm.get("source_signal_path")
             if isinstance(ssp, str) and ssp.strip():
-                # Newer signal that points back to an older one — treat
-                # the newer one as a potential outcome.
-                outcome_by_source[ssp] = str(s.get("path") or "")
+                # Newer outcome signal that points back to an older one.
+                outcome_by_source[ssp] = rec.get("id") or ""
 
         # 3. For each executing decision, locate its source signal,
         # check for an outcome.

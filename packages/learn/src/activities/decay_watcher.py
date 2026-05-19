@@ -527,8 +527,45 @@ async def _collect_observed_paths(
     other_refs: list[str] = []
 
     try:
+        # Signals are state.db rows (storage cutover #27) — query
+        # ctrl-api's /api/v1/state/signals scoped to this matter
+        # instead of walking vault/signal/.
+        try:
+            from src.utils.signal_state import (
+                StateClient,
+                signal_row_to_record,
+            )
+
+            async with StateClient(config) as sc:
+                sig_rows = await sc.list_signals(
+                    matter=target_path,
+                    since=cutoff.isoformat(),
+                    limit=10_000,
+                )
+            for row in sig_rows:
+                rec = signal_row_to_record(row)
+                fm = rec.get("frontmatter") or {}
+                if not _record_targets_matter(fm, target_path):
+                    if str(fm.get("target_matter_path") or "").strip() != target_path:
+                        continue
+                ts_raw = (
+                    fm.get("applied_at")
+                    or fm.get("created")
+                    or rec.get("created")
+                )
+                ts = _parse_iso_aware(ts_raw)
+                if ts is None or ts < cutoff:
+                    continue
+                sid = str(rec.get("id") or "").strip()
+                if sid:
+                    signal_paths.append(sid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "decay_watcher.collect: state.db signal query failed "
+                "target=%s err=%s", target_path, exc,
+            )
+
         for record_type, sink in (
-            ("signal", signal_paths),
             ("decision", decision_paths),
             ("event", other_refs),
         ):

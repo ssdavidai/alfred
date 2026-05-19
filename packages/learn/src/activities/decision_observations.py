@@ -408,43 +408,53 @@ async def extract_observation_from_decision(
         source_kind="decision",
     )
 
-    fm_lines = [
-        "---",
-        'type: "observation"',
-        f"name: {json.dumps(name_label)}",
-        f'created: "{now_iso}"',
-        f"subject: {json.dumps(subject)}",
-        f"fact: {json.dumps(fact_clean)}",
-        f"topic: {json.dumps(topic)}",
-        'source_kind: "decision"',
-        f'source_path: "decision/{decision_id}.md"',
-        f"matter_ref: {json.dumps(matter_ref) if matter_ref else 'null'}",
-        f"intent: {json.dumps(intent) if intent else 'null'}",
-        f"sender: {json.dumps(sender) if sender else 'null'}",
-        f"instinct: {json.dumps(instinct_path) if instinct_path else 'null'}",
-        "confidence: 1.0",
-        'status: "open"',
-        "---",
-        "",
-        f"Extracted from decision `decision/{decision_id}.md` at {now_iso}.",
-    ]
-    content = "\n".join(line for line in fm_lines if line != "") + "\n"
+    # Storage cutover (#26): an observation is machine bookkeeping —
+    # it goes to Store 2 (``state.db``), not ``vault/observation/``.
+    # The full canonical observation shape (subject/fact/topic/
+    # source_kind/sender/intent/matter_ref/instinct/...) that pattern
+    # detection clusters on rides in the ``payload`` JSON blob.
+    decision_ref = f"decision/{decision_id}.md"
+    payload: dict[str, Any] = {
+        "type": "observation",
+        "name": name_label,
+        "created": now_iso,
+        "subject": subject,
+        "fact": fact_clean,
+        "topic": topic,
+        "source_kind": "decision",
+        # ``source_path`` keeps the canonical decision/ vault ref —
+        # decisions remain markdown; only the observation moves.
+        "source_path": decision_ref,
+        "matter_ref": matter_ref or None,
+        "intent": intent or None,
+        "sender": sender or None,
+        "instinct": instinct_path or None,
+        "confidence": 1.0,
+        "status": "open",
+    }
 
-    from src.utils.vault_client import VaultClient
+    from src.utils.signal_state import StateClient
     cfg = load_config()
-    client = VaultClient(cfg)
     try:
-        path = await client.write_record(
-            record_type="observation", name=name, content=content,
-        )
+        async with StateClient(cfg) as sc:
+            path = await sc.create_observation(
+                subject=subject,
+                kind="decision",
+                summary=fact_clean,
+                detail=f"Extracted from decision {decision_ref} at {now_iso}.",
+                ts=now_iso,
+                decision_ref=decision_ref,
+                instinct_ref=instinct_path or None,
+                confidence=1.0,
+                status="open",
+                payload=payload,
+            )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("extract_observation: vault write failed: %s", exc)
+        logger.warning("extract_observation: state.db write failed: %s", exc)
         return {"observation_path": None, "reason": f"write error: {exc}"}
-    finally:
-        await client.close()
 
     logger.info(
-        "extract_observation: decision=%s -> %s (intent=%s sender=%s)",
+        "extract_observation: decision=%s -> observation %s (intent=%s sender=%s)",
         decision_id, path, intent, sender or "-",
     )
     return {"observation_path": path, "fact": fact_clean, "topic": topic}

@@ -273,54 +273,31 @@ async def _gather_for_target(
         )
 
     cfg = load_config()
-    api_key = os.environ.get("AAS_API_KEY", "")
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
-    # We pull frontmatter + a 2KB body preview so reasoning / raw_quote
-    # are both reachable without a second per-record fetch. The list
-    # endpoint doesn't support frontmatter filtering, so we pull the
-    # whole signal/ namespace and filter in Python.
+    # Signals are state.db rows (storage cutover #27) — query ctrl-api's
+    # /api/v1/state/signals scoped to ``target_path`` (the indexed
+    # ``entity_ref`` column) instead of walking vault/signal/ and
+    # filtering in Python. The rows are rehydrated into the legacy
+    # {frontmatter} record shape so the downstream filter/collect loop
+    # is untouched.
     raw_results: list[dict[str, Any]] = []
     try:
-        async with httpx.AsyncClient(
-            base_url=cfg.alfred_ctrl_url,
-            timeout=30.0,
-            headers=headers,
-        ) as client:
-            try:
-                resp = await client.get(
-                    "/api/v1/vault/list/signal",
-                    params={"preview": "2000"},
-                )
-                resp.raise_for_status()
-            except httpx.HTTPError as exc:
-                logger.warning(
-                    "signal_gather: list signal failed target=%s err=%s",
-                    target_path, exc,
-                )
-                return {
-                    "signals": [],
-                    "snapshots_path": "",
-                    "evaluated_sources": [],
-                }
-            try:
-                payload = resp.json()
-            except (ValueError, json.JSONDecodeError) as exc:
-                logger.warning(
-                    "signal_gather: bad JSON listing signal target=%s err=%s",
-                    target_path, exc,
-                )
-                return {
-                    "signals": [],
-                    "snapshots_path": "",
-                    "evaluated_sources": [],
-                }
-            results = payload.get("results") if isinstance(payload, dict) else None
-            if isinstance(results, list):
-                raw_results = [r for r in results if isinstance(r, dict)]
+        from src.utils.signal_state import StateClient, signal_row_to_record
+
+        # The steward/brief gather matches signals by ``target_path``
+        # equality (task OR matter). ``list_signals`` has no entity
+        # filter, and the Python ``target_path`` filter below is the
+        # load-bearing one, so a single windowed pull (since=window)
+        # is sufficient — the in-Python filter selects the matches.
+        async with StateClient(cfg) as sc:
+            sig_rows = await sc.list_signals(
+                since=since if since_dt is not None else None,
+                limit=10_000,
+            )
+        raw_results = [signal_row_to_record(r) for r in sig_rows]
     except httpx.HTTPError as exc:
         logger.warning(
-            "signal_gather: ctrl-api connect failed target=%s err=%s",
+            "signal_gather: state.db signal query failed target=%s err=%s",
             target_path, exc,
         )
         return {"signals": [], "snapshots_path": "", "evaluated_sources": []}

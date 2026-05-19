@@ -88,6 +88,46 @@ class FakeVaultClient:
             raise self.patch_raises
 
 
+class FakeStateClient:
+    """In-memory StateClient stand-in for the signal storage cutover.
+
+    Signals live in state.db now (#27). Tests feed ``{path, frontmatter}``
+    signal records via ``signal_rows``; this client serves them through
+    ``list_signals`` as state.db rows whose ``payload`` carries the
+    frontmatter — exactly what ``signal_row_to_record`` rehydrates.
+    """
+
+    def __init__(self, *, signal_records: list[dict[str, Any]] | None = None) -> None:
+        self._records = signal_records or []
+        self.list_calls: list[dict[str, Any]] = []
+
+    async def close(self) -> None:
+        pass
+
+    async def __aenter__(self) -> "FakeStateClient":
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        pass
+
+    async def list_signals(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.list_calls.append(kwargs)
+        rows: list[dict[str, Any]] = []
+        for rec in self._records:
+            fm = rec.get("frontmatter") or {}
+            rows.append({
+                "id": rec.get("path") or rec.get("id") or "",
+                "kind": fm.get("effect"),
+                "source": fm.get("source_type"),
+                "ts": fm.get("created") or fm.get("applied_at"),
+                "entity_ref": fm.get("target_path"),
+                "matter_ref": fm.get("target_matter_path"),
+                "status": fm.get("status"),
+                "payload": fm,
+            })
+        return rows
+
+
 @pytest.fixture
 def install_fake_vault():
     """Patch VaultClient on the nightly_narrative + vault modules."""
@@ -153,43 +193,39 @@ def _signal_record(
 
 
 @pytest.mark.asyncio
-async def test_load_matter_signals_24h_returns_only_fresh_targeted(install_fake_vault):
+async def test_load_matter_signals_24h_returns_only_fresh_targeted(monkeypatch):
+    # Storage cutover (#27): load_matter_signals_24h queries state.db,
+    # not vault/signal/. The activity scopes the query to the matter +
+    # 24h window server-side, so the fake only needs to serve the
+    # already-matching, in-window signals.
     now = _now()
     fresh = now - timedelta(hours=3)
-    stale = now - timedelta(hours=30)
-    fake = install_fake_vault(FakeVaultClient(list_records_map={
-        "signal": [
-            _signal_record(
-                path="signal/2026-05-10T12-00-00Z-aaaa.md",
-                target_path="matter/carter.md",
-                applied_at=fresh.isoformat(timespec="seconds"),
-            ),
-            _signal_record(
-                path="signal/2026-05-10T12-05-00Z-bbbb.md",
-                candidates=[{"path": "matter/carter.md", "score": 0.6}],
-                applied_at=fresh.isoformat(timespec="seconds"),
-            ),
-            _signal_record(
-                path="signal/2026-05-09T05-00-00Z-cccc.md",
-                target_path="matter/carter.md",
-                applied_at=stale.isoformat(timespec="seconds"),
-            ),
-            _signal_record(
-                path="signal/2026-05-10T12-10-00Z-dddd.md",
-                target_path="matter/other.md",
-                applied_at=fresh.isoformat(timespec="seconds"),
-            ),
-        ],
-    }))
+    records = [
+        _signal_record(
+            path="sig-aaaa",
+            target_path="matter/carter.md",
+            applied_at=fresh.isoformat(timespec="seconds"),
+            created=fresh.isoformat(timespec="seconds"),
+        ),
+        _signal_record(
+            path="sig-bbbb",
+            candidates=[{"path": "matter/carter.md", "score": 0.6}],
+            applied_at=fresh.isoformat(timespec="seconds"),
+            created=fresh.isoformat(timespec="seconds"),
+        ),
+    ]
+    fake = FakeStateClient(signal_records=records)
+    monkeypatch.setattr(
+        "src.utils.signal_state.StateClient", lambda *_a, **_kw: fake
+    )
 
     result = await load_matter_signals_24h("matter/carter.md")
-    # Two match: one by target_path, one by candidate. Stale + other-matter
-    # are filtered out.
+    # Both match: one by target_path, one by candidate.
     assert len(result) == 2
     paths = {r["path"] for r in result}
-    assert "signal/2026-05-10T12-00-00Z-aaaa.md" in paths
-    assert "signal/2026-05-10T12-05-00Z-bbbb.md" in paths
-    assert fake.list_calls and fake.list_calls[0][0] == "signal"
+    assert "sig-aaaa" in paths
+    assert "sig-bbbb" in paths
+    assert fake.list_calls and fake.list_calls[0].get("matter") == "matter/carter.md"
 
 
 # ---------------------------------------------------------------------------
@@ -598,13 +634,42 @@ def install_state_mutator_transport():
     """Install a scripted transport into the state_mutator's
     ``httpx.AsyncClient`` factory so POST /api/v1/state-changes is
     deterministically scripted per test.
+
+    Storage cutover (#27): ``gather_observed`` now reads signals from
+    state.db via ``StateClient`` (a separate httpx client). This fixture
+    also stubs ``signal_state.StateClient`` so the scripted transport
+    only ever sees the state-mutator's own POST traffic — the signal
+    query is served in-memory and defaults to empty.
     """
 
     transports: list[_ScriptedTransport] = []
+    signal_rows_holder: dict[str, list[dict[str, Any]]] = {"rows": []}
 
-    def _install(*responses: httpx.Response) -> _ScriptedTransport:
+    def _install(
+        *responses: httpx.Response,
+        signal_records: list[dict[str, Any]] | None = None,
+    ) -> _ScriptedTransport:
         transport = _ScriptedTransport(list(responses))
         transports.append(transport)
+        # Feed the in-memory StateClient stub the signal records this
+        # test wants gather_observed to see (state.db, not vault).
+        if signal_records:
+            rows: list[dict[str, Any]] = []
+            for rec in signal_records:
+                fm = rec.get("frontmatter") or {}
+                rows.append({
+                    "id": rec.get("path") or rec.get("id") or "",
+                    "kind": fm.get("effect"),
+                    "source": fm.get("source_type"),
+                    "ts": fm.get("created") or fm.get("applied_at"),
+                    "entity_ref": fm.get("target_path"),
+                    "matter_ref": (
+                        fm.get("target_matter_path") or fm.get("target_path")
+                    ),
+                    "status": fm.get("status"),
+                    "payload": fm,
+                })
+            signal_rows_holder["rows"] = rows
         return transport
 
     real_async_client = httpx.AsyncClient
@@ -614,10 +679,31 @@ def install_state_mutator_transport():
             kwargs["transport"] = transports[0]
         return real_async_client(*args, **kwargs)
 
+    class _StubStateClient:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> "_StubStateClient":
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            pass
+
+        async def close(self) -> None:
+            pass
+
+        async def list_signals(self, **_kwargs: Any) -> list[dict[str, Any]]:
+            return list(signal_rows_holder["rows"])
+
     ctx = patch("src.activities.state_mutator.httpx.AsyncClient", _factory)
     ctx.start()
+    ctx_sc = patch(
+        "src.utils.signal_state.StateClient", _StubStateClient
+    )
+    ctx_sc.start()
     yield _install
     ctx.stop()
+    ctx_sc.stop()
 
 
 def _matter_v2_record(
@@ -714,18 +800,17 @@ async def test_phase_c_signals_plus_clerk_mutation_lands_audit(
     fresh_as_of = (now - timedelta(hours=4)).isoformat(timespec="seconds")
     signal_ts = (now - timedelta(hours=2)).isoformat(timespec="seconds")
 
+    signal_records = [
+        _signal_record(
+            path=f"sig-2026-05-13-{i}",
+            target_path="matter/carter.md",
+            applied_at=signal_ts,
+            created=signal_ts,
+        )
+        for i in range(3)
+    ]
     fake = FakeVaultClient(
-        list_records_map={
-            "signal": [
-                _signal_record(
-                    path=f"signal/2026-05-13-{i}.md",
-                    target_path="matter/carter.md",
-                    applied_at=signal_ts,
-                )
-                for i in range(3)
-            ],
-            "task": [],
-        },
+        list_records_map={"task": []},
         read_records_map={
             "matter/carter.md": _matter_v2_record(
                 path="matter/carter.md",
@@ -763,7 +848,8 @@ async def test_phase_c_signals_plus_clerk_mutation_lands_audit(
                 "timeline_entry_id": "01HXYZABC",
                 "new_as_of": "2026-05-13T02:00:00Z",
             },
-        )
+        ),
+        signal_records=signal_records,
     )
 
     try:
@@ -818,17 +904,16 @@ async def test_phase_c_409_retry_then_success(
     later_as_of = (now - timedelta(hours=1)).isoformat(timespec="seconds")
     signal_ts = (now - timedelta(hours=2)).isoformat(timespec="seconds")
 
+    signal_records = [
+        _signal_record(
+            path="sig-2026-05-13-x",
+            target_path="matter/carter.md",
+            applied_at=signal_ts,
+            created=signal_ts,
+        ),
+    ]
     fake = FakeVaultClient(
-        list_records_map={
-            "signal": [
-                _signal_record(
-                    path="signal/2026-05-13-x.md",
-                    target_path="matter/carter.md",
-                    applied_at=signal_ts,
-                ),
-            ],
-            "task": [],
-        },
+        list_records_map={"task": []},
         read_records_map={
             "matter/carter.md": _matter_v2_record(
                 path="matter/carter.md",
@@ -892,6 +977,7 @@ async def test_phase_c_409_retry_then_success(
                 "new_as_of": "2026-05-13T02:01:00Z",
             },
         ),
+        signal_records=signal_records,
     )
 
     try:

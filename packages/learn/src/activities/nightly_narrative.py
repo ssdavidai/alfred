@@ -235,21 +235,28 @@ async def load_matter_signals_24h(matter_path: str) -> list[dict[str, Any]]:
     if not canonical:
         return []
 
-    config = load_config()
-    client = VaultClient(config)
-    try:
-        try:
-            records = await client.list_records("signal", limit=10_000)
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "nightly_narrative.load_matter_signals_24h: list failed matter=%s err=%s",
-                canonical, exc,
-            )
-            return []
-    finally:
-        await client.close()
-
     cutoff = _now_utc() - LOOKBACK_WINDOW
+
+    # Signals are state.db rows (storage cutover #27) — query ctrl-api's
+    # /api/v1/state/signals scoped to this matter + 24h window instead
+    # of walking vault/signal/.
+    config = load_config()
+    try:
+        from src.utils.signal_state import StateClient, signal_row_to_record
+
+        async with StateClient(config) as sc:
+            sig_rows = await sc.list_signals(
+                matter=canonical,
+                since=cutoff.isoformat(),
+                limit=10_000,
+            )
+        records = [signal_row_to_record(r) for r in sig_rows]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "nightly_narrative.load_matter_signals_24h: state.db query "
+            "failed matter=%s err=%s", canonical, exc,
+        )
+        return []
 
     out: list[dict[str, Any]] = []
     for rec in records:

@@ -100,9 +100,15 @@ async def mark_signal_status(
     signal_path: str,
     status: str,
 ) -> None:
-    """Patch a signal record's status field to one of the terminal
-    values: ``"action_pending"`` (effect=action — Phase 6.4 will pick
-    up) or ``"skipped"`` (effect=none/informational).
+    """Mark a signal's routing status in ``state.db`` (storage cutover #27).
+
+    Terminal values: ``"action_pending"`` (effect=action — Phase 6.4
+    will pick up) or ``"skipped"`` (effect=none/informational).
+
+    ``signal_path`` is now the ``state.db`` signal id (a ULID), not a
+    ``signal/*.md`` path — signals are Store 2 records, not vault
+    markdown. The status PATCH goes through ctrl-api's
+    ``/api/v1/state/signals/{id}`` endpoint.
 
     Errors propagate so Temporal's retry policy handles a transient
     ctrl-api outage. The workflow's per-signal try/except records the
@@ -117,47 +123,42 @@ async def mark_signal_status(
             f"mark_signal_status: invalid status={status!r}"
         )
 
-    # Lazy imports — keep the module-level surface light and match
-    # apply_signal_mutation's pattern (config + client constructed
-    # inside the activity body). httpx in particular MUST be lazy
-    # because Temporal's workflow sandbox can't proxy its C-extension
-    # subclasses; importing it at module top crashes worker validation.
+    # Lazy imports — keep the module-level surface light. httpx in
+    # particular MUST be lazy because Temporal's workflow sandbox can't
+    # proxy its C-extension subclasses; importing it at module top
+    # crashes worker validation.
     import logging
     from datetime import datetime, timezone
 
     import httpx
     from src.config import load_config
-    from src.utils.vault_client import VaultClient
+    from src.utils.signal_state import normalise_signal_ref, set_signal_status
 
     logger = logging.getLogger("alfred-learn")
 
     cfg = load_config()
-    client = VaultClient(cfg)
+    signal_ref = normalise_signal_ref(signal_path)
     try:
-        try:
-            await client.patch_frontmatter_structured(
-                signal_path,
-                scalar_updates={
-                    "status": status,
-                    "applied_at": datetime.now(timezone.utc).isoformat(
-                        timespec="seconds"
-                    ),
-                    "audit_record_path": "",
-                },
-            )
-            logger.info(
-                "signal_router.mark_signal_status: path=%s status=%s",
-                signal_path, status,
-            )
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "signal_router.mark_signal_status: PATCH failed path=%s "
-                "status=%s err=%s",
-                signal_path, status, exc,
-            )
-            raise
-    finally:
-        await client.close()
+        await set_signal_status(
+            signal_ref,
+            status,
+            applied_at=datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            ),
+            audit_record_ref="",
+            config=cfg,
+        )
+        logger.info(
+            "signal_router.mark_signal_status: id=%s status=%s",
+            signal_ref, status,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "signal_router.mark_signal_status: PATCH failed id=%s "
+            "status=%s err=%s",
+            signal_ref, status, exc,
+        )
+        raise
 
 
 # ---------------------------------------------------------------------------

@@ -30,8 +30,6 @@ every signal we observe was, by definition, not already filtered.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -290,32 +288,45 @@ async def _read_record(client: httpx.AsyncClient, path: str) -> dict[str, Any]:
 
 @activity.defn
 async def extract_observation_from_signal(signal_path: str) -> dict[str, Any]:
-    """Write observation/<ts>.md from a signal record. Deterministic.
+    """Write an ``observation`` row to ``state.db`` from a signal. Deterministic.
 
-    Reads the signal's frontmatter from ctrl-api, follows
-    ``source_event_path`` to the underlying stream event for sender
+    Storage cutover (#26): both ``signal`` and ``observation`` are
+    machine bookkeeping (PLAN.md Part I — the promotion contract), so
+    they live in Store 2 (``state.db``), not the markdown vault. The
+    ``signal_path`` argument is now the ``state.db`` signal id (a
+    ULID), not a ``signal/*.md`` path; the observation is written
+    through ctrl-api's ``/api/v1/state/observations`` endpoint.
+
+    Reads the signal row from ``state.db``, follows
+    ``source_event_path`` to the underlying stream event (still a vault
+    record — stream events are not part of this cutover) for sender
     enrichment, derives sender/topic/event_kind/matter_ref, and writes
-    the observation record with source_kind=signal.
+    the observation row with ``kind=signal``.
 
-    Returns ``{"observation_path": <path>, ...}`` on success or
-    ``{"observation_path": None, "reason": ...}`` on read/write
-    failure. No clerk gate — every signal that wasn't already noise-
-    suppressed becomes an observation.
+    Returns ``{"observation_path": <observation-ulid>, ...}`` on
+    success or ``{"observation_path": None, "reason": ...}`` on
+    read/write failure. No clerk gate — every signal that wasn't
+    already noise-suppressed becomes an observation.
     """
+    from src.utils.signal_state import (
+        normalise_signal_ref,
+        read_signal_record,
+    )
+
     if not signal_path or not isinstance(signal_path, str):
-        return {"observation_path": None, "reason": "no signal path"}
-    signal_path = signal_path.strip()
-    if not signal_path.startswith("signal/"):
-        return {"observation_path": None, "reason": "not a signal path"}
+        return {"observation_path": None, "reason": "no signal ref"}
+    signal_ref = normalise_signal_ref(signal_path)
+    if not signal_ref:
+        return {"observation_path": None, "reason": "not a signal ref"}
+
+    signal_rec = await read_signal_record(signal_ref)
+    if not signal_rec:
+        return {"observation_path": None, "reason": "signal not readable"}
+    signal_fm = signal_rec.get("frontmatter") or {}
+    if not isinstance(signal_fm, dict):
+        signal_fm = {}
 
     async with _http() as client:
-        signal_rec = await _read_record(client, signal_path)
-        if not signal_rec:
-            return {"observation_path": None, "reason": "signal not readable"}
-        signal_fm = signal_rec.get("frontmatter") or {}
-        if not isinstance(signal_fm, dict):
-            signal_fm = {}
-
         source_event_path = str(signal_fm.get("source_event_path") or "").strip()
         event_fm: dict[str, Any] = {}
         if source_event_path:
@@ -358,11 +369,6 @@ async def extract_observation_from_signal(signal_path: str) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         when_dt = datetime.now(timezone.utc)
     now_iso = when_dt.isoformat()
-    ts = now_iso.replace(":", "-").replace(".", "-")[:19] + "Z"
-    short = hashlib.sha256(
-        f"{signal_path}\x00{fact_clean}".encode("utf-8")
-    ).hexdigest()[:8]
-    name = f"{ts}-{short}"
     name_label = fact_clean if len(fact_clean) <= 90 else fact_clean[:87] + "..."
 
     # Match observation → instinct so /instincts can list the
@@ -384,49 +390,62 @@ async def extract_observation_from_signal(signal_path: str) -> dict[str, Any]:
         event_fm=event_fm,
     )
 
-    fm_lines = [
-        "---",
-        'type: "observation"',
-        f"name: {json.dumps(name_label)}",
-        f'created: "{now_iso}"',
-        'subject: "principal"',
-        f"fact: {json.dumps(fact_clean)}",
-        f"topic: {json.dumps(topic)}",
-        'source_kind: "signal"',
-        f"source_path: {json.dumps(signal_path)}",
-        f"source_event_path: {json.dumps(source_event_path) if source_event_path else 'null'}",
-        f"matter_ref: {json.dumps(matter_ref) if matter_ref else 'null'}",
-        f"sender: {json.dumps(sender) if sender else 'null'}",
-        f"event_kind: {json.dumps(event_kind)}",
-        f"source_type: {json.dumps(norm_source)}",
-        f"instinct: {json.dumps(instinct_path) if instinct_path else 'null'}",
-        "confidence: 1.0",
-        'status: "open"',
-        "---",
-        "",
-        f"Extracted from signal `{signal_path}` at {now_iso}.",
-    ]
-    content = "\n".join(line for line in fm_lines if line != "") + "\n"
+    # Storage cutover (#26): an observation is machine bookkeeping —
+    # it goes to Store 2 (``state.db``), not ``vault/observation/``.
+    # The full canonical observation shape (subject/fact/topic/
+    # source_kind/sender/intent/...) that pattern detection clusters on
+    # is carried in the ``payload`` JSON blob; the typed columns
+    # (subject/kind/summary/instinct_ref/...) make it queryable.
+    payload: dict[str, Any] = {
+        "type": "observation",
+        "name": name_label,
+        "created": now_iso,
+        "subject": "principal",
+        "fact": fact_clean,
+        "topic": topic,
+        "source_kind": "signal",
+        # ``source_path`` is the cross-record key back to the signal —
+        # now a state.db ULID, not a markdown path.
+        "source_path": signal_ref,
+        "source_ref": signal_ref,
+        "source_event_path": source_event_path or None,
+        "matter_ref": matter_ref or None,
+        "sender": sender or None,
+        "event_kind": event_kind,
+        "source_type": norm_source,
+        "instinct": instinct_path or None,
+        "confidence": 1.0,
+        "status": "open",
+        # signal observations carry no intent — pattern detection v1
+        # only clusters decision observations (see pattern_detection).
+        "intent": None,
+    }
 
-    from src.utils.vault_client import VaultClient
+    from src.utils.signal_state import StateClient
     cfg = load_config()
-    client_v = VaultClient(cfg)
     try:
-        path = await client_v.write_record(
-            record_type="observation", name=name, content=content,
-        )
+        async with StateClient(cfg) as sc:
+            observation_id = await sc.create_observation(
+                subject="principal",
+                kind="signal",
+                summary=fact_clean,
+                detail=f"Extracted from signal {signal_ref} at {now_iso}.",
+                ts=now_iso,
+                instinct_ref=instinct_path or None,
+                confidence=1.0,
+                status="open",
+                payload=payload,
+            )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("extract_obs_from_signal: vault write failed: %s", exc)
+        logger.warning("extract_obs_from_signal: state.db write failed: %s", exc)
         return {"observation_path": None, "reason": f"write error: {exc}"}
-    finally:
-        await client_v.close()
 
     logger.info(
-        "extract_obs_from_signal: %s -> %s (sender=%s topic=%s)",
-        signal_path, path, sender or "-", topic,
+        "extract_obs_from_signal: %s -> observation %s (sender=%s topic=%s)",
+        signal_ref, observation_id, sender or "-", topic,
     )
     return {
-        "observation_path": path,
+        "observation_path": observation_id,
         "fact": fact_clean,
         "topic": topic,
         "sender": sender,
