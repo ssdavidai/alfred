@@ -494,21 +494,22 @@ const briefDecisionTools: ToolDef[] = [
 
 // ─── channels (notify the principal via main openclaw) ──────────────────────
 
-// Outbound channels (Telegram, Slack, …) belong to the MAIN openclaw
-// runtime — its gateway holds the bot tokens, its `message` tool dispatches
-// into them. Workers-side agents (learn-clerk, ephemeral exec-*) live on a
-// different gateway and can't invoke main's `message` tool directly.
+// Outbound channels (Telegram, Slack, …) belong to the MAIN Hermes profile
+// — its gateway holds the channel bindings + bot tokens. Workers-side agents
+// (learn-clerk, ephemeral exec-*) run on the `workers` profile, which has no
+// messaging toolset, so they cannot reach a channel directly.
 // ctrl-api bridges them via /api/v1/notifications: the request lands on
-// ctrl-api, which forwards {action: "send", channel, to, message, urgency}
-// to MAIN openclaw's /tools/invoke endpoint. The principal is paired with
-// the chosen channel by openclaw, so the recipient resolution happens
-// server-side via pickPrimaryChannel() + resolveRecipient().
+// ctrl-api, which (issue #45) creates a one-shot Hermes `main`-profile cron
+// job with deliver=<channel>:<to>, triggers it for immediate execution, and
+// waits for the Hermes scheduler to deliver the message to the channel.
+// Recipient resolution happens server-side via pickPrimaryChannel() +
+// resolveRecipient() against the native Hermes session index.
 
 const channelTools: ToolDef[] = [
   {
     name: "notify_principal",
     description:
-      "Send a message to Sir on his preferred channel (Telegram, Slack, …). USE THIS — never composio_execute — when the principal asks you to ping/notify/remind him. Telegram is NOT a Composio toolkit; it's an OpenClaw main-gateway channel, and only the main runtime can reach it. This tool bridges that: ctrl-api forwards to main openclaw's `message` tool, which dispatches into the right channel using main's stored bot tokens. Auto-picks the tenant's primary channel when you pass channel='auto' or omit it. When Sir explicitly names a channel (\"send me a reminder on Telegram\"), pass that channel slug — do NOT rely on auto. Backing: POST /api/v1/notifications → main openclaw /tools/invoke {tool: message}.",
+      "Send a message to Sir on his preferred channel (Telegram, Slack, …). USE THIS — never composio_execute — when the principal asks you to ping/notify/remind him. Telegram is NOT a Composio toolkit; it's a Hermes main-profile channel, and only the main runtime can reach it. This tool bridges that: ctrl-api creates a one-shot Hermes main-profile cron job that delivers the message to the named channel, and returns delivered:true only once the channel send is confirmed (a failure comes back as a real error, never a silent no-op). Auto-picks the tenant's primary channel when you pass channel='auto' or omit it. When Sir explicitly names a channel (\"send me a reminder on Telegram\"), pass that channel slug — do NOT rely on auto. Backing: POST /api/v1/notifications → Hermes main-profile cron job with deliver=<channel>:<to>.",
     inputSchema: z.object({
       message: z.string().min(1).describe(
         "The text to send Sir. Plain text; no markdown formatting unless the channel renders it. Keep it tight — this lands as a notification, not a document.",

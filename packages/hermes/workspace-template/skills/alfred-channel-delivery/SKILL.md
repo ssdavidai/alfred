@@ -111,7 +111,13 @@ If `KNOWN_CONTACTS.md` did NOT have the value (so you had to do the pair-then-ca
 
 ## Step 2 — Send via `/api/v1/notifications` (preferred)
 
-The unified delivery endpoint dispatches through OpenClaw's `message.send` tool to the right channel adapter. Pass the cached `to` value explicitly so the endpoint doesn't have to guess.
+The unified delivery endpoint puts the message on the named channel via a
+native Hermes `main`-profile cron job (`deliver=<channel>:<to>`) — ctrl-api
+creates the job, triggers it for immediate execution, waits for the run, and
+returns `delivered: true` only when Hermes confirms the channel send. A
+delivery failure comes back as a real `502` with an `error`, never a silent
+no-op. Pass the cached `to` value explicitly so the endpoint doesn't have to
+guess.
 
 ### Slack DM
 
