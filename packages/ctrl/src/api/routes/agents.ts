@@ -1,28 +1,8 @@
 import { spawn } from "node:child_process";
-import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { execAsync, dockerExec, dockerComposeCmd, HERMES_CMD, HERMES_CONTAINER } from "../helpers.js";
-
-// The init container writes the gateway token to /alfred-data/.gateway-token
-// (PLAN.md Part F) — that value becomes the Hermes API_SERVER_KEY for both
-// profiles. The shim validates the same token, so this caller logic is
-// unchanged from OpenClaw.
-const GATEWAY_TOKEN_CANDIDATES = [
-  process.env.HERMES_GATEWAY_TOKEN_FILE,
-  process.env.OPENCLAW_GATEWAY_TOKEN_FILE,
-  "/alfred-data/.gateway-token",
-].filter((p): p is string => typeof p === "string" && p.length > 0);
-
-function readGatewayToken(): string {
-  for (const candidate of GATEWAY_TOKEN_CANDIDATES) {
-    try {
-      const v = fs.readFileSync(candidate, "utf-8").trim();
-      if (v) return v;
-    } catch { /* try next */ }
-  }
-  return "";
-}
+import { resolveDeliveryTarget } from "../hermes-sessions.js";
 
 // alfred daemon config (the surveyor lives here, not in the Hermes config).
 const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
@@ -346,63 +326,36 @@ export function registerAgentRoutes(): void {
       ? (b.name as string)
       : `agent-task-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    // Resolve delivery target. Openclaw's `--channel last` doesn't auto-
-    // resolve reliably across tenants — it works when Sir has an active
-    // recent session on that channel but fails with "Delivering to Slack
-    // requires target" when the resolution can't find a prior thread. So
-    // we explicitly resolve: if caller passed `to`, use it; else find the
-    // most-recent session on the requested channel via openclaw
-    // sessions_list and extract deliveryContext.to (same helper
-    // /api/v1/notifications uses).
+    // Resolve delivery target. Hermes' `--channel last` doesn't auto-resolve
+    // reliably across tenants — it works when Sir has an active recent
+    // session on that channel but fails with "Delivering to Slack requires
+    // target" when the resolution can't find a prior thread. So we explicitly
+    // resolve: if caller passed `to`, use it; else find the most-recent
+    // session on the requested channel from the native Hermes gateway session
+    // index (sessions.json — see hermes-sessions.ts) and extract its delivery
+    // target. Same resolveDeliveryTarget helper /api/v1/notifications uses.
+    //
+    // This replaced the retired hermes-shim `sessions_list` tool (issue #39).
     let toTarget: string | undefined = typeof b.to === "string" && (b.to as string).length > 0
       ? (b.to as string)
       : undefined;
-    // Resolve toTarget by asking the gateway for the most-recent session on
-    // the requested channel (or any delivery-capable channel when channel is
-    // "last"), and extracting deliveryContext.to. Also re-infers the effective
-    // channel when caller asked for "last" and we found a session on a specific
-    // channel, so the cron job passes both --channel and --to concretely.
+    // resolveDeliveryTarget enumerates the most-recent session on the
+    // requested channel (or any delivery-capable channel when channel is
+    // "last") and returns its native chat_id. When the caller asked for
+    // "last" and we landed on a concrete channel, re-infer effectiveChannel
+    // so the cron job passes both --channel and --to concretely.
     let effectiveChannel = channel;
     if (announce && !toTarget) {
       try {
-        const gatewayToken = readGatewayToken();
-        // The hermes-shim binds the legacy :18789 and preserves the OpenClaw
-        // `POST /tools/invoke` contract — this call is unchanged.
-        const gatewayUrl =
-          process.env.HERMES_GATEWAY_URL ||
-          process.env.OPENCLAW_GATEWAY_URL ||
-          "http://hermes:18789";
-        const resp = await fetch(`${gatewayUrl}/tools/invoke`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${gatewayToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ tool: "sessions_list", args: {} }),
-        });
-        if (resp.ok) {
-          const envelope = await resp.json() as { result?: { content?: Array<{ type: string; text?: string }> } };
-          for (const item of envelope?.result?.content ?? []) {
-            if (item?.type !== "text" || typeof item.text !== "string") continue;
-            const payload = JSON.parse(item.text) as { sessions?: Array<Record<string, any>> };
-            const sessions = payload?.sessions ?? [];
-            const filter = channel === "last"
-              ? (s: Record<string, any>) => s?.deliveryContext?.to && s?.channel && s.channel !== "webchat"
-              : (s: Record<string, any>) => (s?.channel ?? "") === channel && s?.deliveryContext?.to;
-            const matching = sessions.filter(filter).sort(
-              (a, b) => Number(b?.updatedAt ?? 0) - Number(a?.updatedAt ?? 0),
-            );
-            if (matching[0]?.deliveryContext?.to) {
-              toTarget = String(matching[0].deliveryContext.to);
-              if (channel === "last" && matching[0]?.channel) {
-                effectiveChannel = String(matching[0].channel);
-              }
-              break;
-            }
+        const resolved = resolveDeliveryTarget(channel);
+        if (resolved) {
+          toTarget = resolved.to;
+          if (channel === "last") {
+            effectiveChannel = resolved.channel;
           }
         }
       } catch {
-        /* fall through — openclaw cron will error and we'll surface it */
+        /* fall through — hermes cron will error and we'll surface it */
       }
     }
 

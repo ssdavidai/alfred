@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
+import { resolveDeliveryTarget } from "../hermes-sessions.js";
 
 // The ctrl-api container mounts /mnt/encrypted/alfred at the same path (NOT
 // remapped to /alfred-data like alfred-learn does — see
@@ -45,56 +46,20 @@ function pickPrimaryChannel(): string {
   return "webchat";
 }
 
-// Resolve Sir's recipient id on a given channel by asking the gateway's
-// sessions_list for the most-recent session bound to that channel. We
-// extract `deliveryContext.to` — e.g. `user:U08UGBQL5J5` on Slack or a
-// chat id on Telegram. Fails soft: returns undefined if nothing found.
-async function resolveRecipient(channel: string, token: string): Promise<string | undefined> {
-  try {
-    const resp = await fetch(`${OPENCLAW_GATEWAY_URL}/tools/invoke`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ tool: "sessions_list", args: {} }),
-    });
-    if (!resp.ok) return undefined;
-    const envelope = await resp.json() as { result?: { content?: Array<{ type: string; text?: string }> } };
-    const content = envelope?.result?.content ?? [];
-    for (const item of content) {
-      if (item?.type !== "text" || typeof item.text !== "string") continue;
-      const payload = JSON.parse(item.text) as { sessions?: Array<Record<string, any>> };
-      const sessions = Array.isArray(payload?.sessions) ? payload.sessions : [];
-      // For Telegram, chat_ids are POSITIVE for DMs and NEGATIVE for
-      // groups/supergroups. "Notify the principal" means the principal
-      // directly — never broadcast into a group just because that group
-      // happened to be the most recently active session. Prefer DM
-      // sessions; fall back to group only if no DM is on record. See
-      // 2026-05-13 trace: plex delegate landed in a group because a
-      // shared group's updatedAt was newer than Sir's DM.
-      const isTelegramDm = (s: Record<string, any>): boolean => {
-        if (channel !== "telegram") return true; // no-op outside Telegram
-        const to = String(s?.deliveryContext?.to ?? "");
-        const id = to.startsWith("telegram:") ? to.slice("telegram:".length) : to;
-        return !id.startsWith("-");
-      };
-      const allMatching = sessions
-        .filter((s) => (s?.channel ?? "") === channel && s?.deliveryContext?.to)
-        .sort((a, b) => Number(b?.updatedAt ?? 0) - Number(a?.updatedAt ?? 0));
-      const dmFirst = [
-        ...allMatching.filter(isTelegramDm),
-        ...allMatching.filter((s) => !isTelegramDm(s)),
-      ];
-      const top = dmFirst[0];
-      if (top?.deliveryContext?.to) {
-        const raw = String(top.deliveryContext.to);
-        // openclaw stores slack recipients as "user:U08UGBQL5J5" — the
-        // `message.send` tool wants the bare id. Strip the `user:` prefix.
-        return raw.startsWith("user:") ? raw.slice("user:".length) : raw;
-      }
-    }
-  } catch {
-    // fall through
-  }
-  return undefined;
+// Resolve Sir's recipient id on a given channel from native Hermes session
+// data: the most-recently-active gateway session bound to that channel, with
+// its delivery target (`origin.chat_id`) — e.g. a Slack channel/IM id or a
+// Telegram chat id. Fails soft: returns undefined if nothing found.
+//
+// Backed by the Hermes gateway session index (`sessions.json`, see
+// hermes-sessions.ts), which replaced the retired hermes-shim `sessions_list`
+// tool in issue #39. The "notify the principal directly, never a group"
+// Telegram rule is preserved inside resolveDeliveryTarget — it now uses
+// Hermes' own `chat_type` ("dm" vs "group") plus the chat_id-sign fallback.
+// See 2026-05-13 trace: a plex delegate landed in a group because a shared
+// group's updatedAt was newer than Sir's DM.
+function resolveRecipient(channel: string): string | undefined {
+  return resolveDeliveryTarget(channel)?.to;
 }
 
 export function registerNotificationRoutes(): void {
@@ -136,7 +101,7 @@ export function registerNotificationRoutes(): void {
     const channel = channelHint === "auto" ? pickPrimaryChannel() : channelHint;
     const to = typeof b.to === "string" && b.to.length > 0
       ? (b.to as string)
-      : await resolveRecipient(channel, token);
+      : resolveRecipient(channel);
 
     if (!to) {
       sendJson(res, 424, {

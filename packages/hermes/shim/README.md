@@ -13,26 +13,30 @@ container (see `../docker/supervisor.sh`):
 | `main`    | `:18789`            | `127.0.0.1:18799`      |
 | `workers` | `:18790`            | `127.0.0.1:18800`      |
 
-## Phase 1 → Phase 2
+## Retiring the OpenClaw compat surface
 
 Phase 1 re-exposed the **entire** OpenClaw `POST /tools/invoke`
 `sessions_*` surface so the runtime swap landed with zero caller diffs.
-Phase 2 retired that scaffolding once the native rewrites landed:
+Subsequent phases retired that scaffolding once the native rewrites landed:
 
 * `learn` (`clerk.py`, `ephemeral_agent.py`) and the `alfred` vault-daemon
   `openclaw-wrapper` now call Hermes `/v1/runs` directly.
 * ctrl-api `crossTenant.ts` / `channelsEmail.ts` now call `/v1/runs` directly.
 * The `sessions_spawn` / `sessions_history` / `sessions_delete` /
   `sessions_send` handlers were **removed** — they now return `410 Gone`.
+* `sessions_list` was **removed** (issue #39). It existed only so ctrl-api
+  could resolve a delivery target from a shim-owned run→channel registry;
+  ctrl-api now reads the native Hermes gateway session index
+  (`profiles/<p>/sessions/sessions.json`) directly — see ctrl-api
+  `api/hermes-sessions.ts`. The shim no longer keeps any session state.
 
 ## What the shim does now
 
 | Surface | Behaviour |
 |---------|-----------|
-| `/v1/*` (any method) | **transparent reverse proxy** → the Hermes API server. The native surface every Phase-2 caller uses. |
-| `POST /tools/invoke` `sessions_list` | KEPT — Hermes has no native session enumeration; ctrl-api `agents.ts` / `notifications.ts` still resolve a delivery target from the run→channel registry. Rows are populated by the `/v1` proxy mirroring `POST /v1/runs` creations. |
+| `/v1/*` (any method) | **transparent reverse proxy** → the Hermes API server. The native surface every caller uses. |
 | `POST /tools/invoke` `message` | no-op ack (channel delivery is native to the Hermes gateway). |
-| `POST /tools/invoke` `sessions_spawn`/`_history`/`_delete`/`_send` | retired — `410 Gone` with a pointer to `/v1/runs`. |
+| `POST /tools/invoke` `sessions_spawn`/`_history`/`_delete`/`_send`/`_list` | retired — `410 Gone` with a pointer to the native surface. |
 | `GET /health` `/healthz` | proxy `GET /health` (reports degraded if Hermes is down). |
 
 ## Auth
@@ -46,7 +50,7 @@ token value, kept as a separate concept so the two can diverge later).
 
 All via environment (see the module docstring in `hermes_shim.py`):
 `HERMES_SHIM_PROFILE`, `HERMES_SHIM_PORT`, `HERMES_API_URL`,
-`HERMES_API_KEY`, `HERMES_GATEWAY_TOKEN_FILE`, `HERMES_SHIM_STATE_DB`.
+`HERMES_API_KEY`, `HERMES_GATEWAY_TOKEN_FILE`.
 
 ## Run standalone (dev)
 

@@ -4,7 +4,7 @@
 // alfred-black replaces the two-container OpenClaw split with a single
 // `hermes` container running two profiles (`main` :18789, `workers` :18790).
 // The runtime is reached through the hermes-shim, which proxies the Hermes
-// `/v1` API and keeps the residual `sessions_list` tool.
+// `/v1` API.
 //
 // Routes are registered under `/api/v1/hermes/*` only. The Phase-1
 // `/api/v1/openclaw/*` alias has been retired (issue #25); every caller
@@ -377,8 +377,9 @@ const MCP_SERVER_TOOLS: Record<
 // Short human-readable descriptions for the built-in gateway tools. Under
 // Hermes, run lifecycle is the native `/v1/runs` API and subagent fan-out is
 // the `delegate_task` tool — the OpenClaw `sessions_spawn`/`sessions_history`/
-// `sessions_delete` primitives were retired in Phase 2. `sessions_list` is the
-// one residual the hermes-shim still serves (ctrl-api delivery-target lookup).
+// `sessions_delete`/`sessions_list` primitives were all retired (the last,
+// `sessions_list`, in issue #39 — ctrl-api delivery-target lookup now reads
+// the native Hermes gateway session index directly).
 const BUILTIN_TOOL_DESCRIPTIONS: Record<string, string> = {
   web_search: "Search the web via the configured search provider.",
   web_fetch: "Fetch a URL and return the cleaned text contents.",
@@ -386,6 +387,5 @@ const BUILTIN_TOOL_DESCRIPTIONS: Record<string, string> = {
     "Dispatch any Composio action (Gmail, Slack, Notion, …) on a connected account.",
   ctrl_composio_execute:
     "(legacy dispatch name, superseded by composio_execute — kept for in-flight sessions)",
-  sessions_list: "List active sessions / runs on this instance.",
   delegate_task: "Delegate a subtask to a child agent run.",
 };

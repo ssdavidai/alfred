@@ -6,13 +6,18 @@ exposes on the compose network, because the Hermes API server itself binds
 ``127.0.0.1`` inside the container.
 
 Phase 1 of the OpenClaw→Hermes swap re-exposed the *entire* OpenClaw
-``sessions_*`` surface here so callers needed zero diffs. Phase 2 retired
-most of it:
+``sessions_*`` surface here so callers needed zero diffs. Subsequent phases
+retired all of it:
 
   * ``learn`` (clerk.py / ephemeral_agent.py) and the ``alfred`` vault-daemon
     ``openclaw-wrapper`` were rewritten to call Hermes ``/v1/runs`` natively.
   * The ``sessions_spawn`` / ``sessions_history`` / ``sessions_delete`` /
     ``sessions_send`` handlers were **removed** — nothing speaks them anymore.
+  * ``sessions_list`` was **removed** (issue #39): it existed only so ctrl-api
+    could resolve a delivery target from a shim-owned run→channel registry.
+    ctrl-api now reads the native Hermes gateway session index
+    (``profiles/<p>/sessions/sessions.json``) directly — see ctrl-api
+    ``api/hermes-sessions.ts``. The shim no longer keeps any session state.
 
 What this shim still does:
 
@@ -21,11 +26,6 @@ What this shim still does:
                                 (openclaw-wrapper, clerk, ephemeral_agent,
                                 ctrl-api crossTenant/channelsEmail) now uses.
     POST /tools/invoke
-        sessions_list           KEPT — Hermes has no native session
-                                enumeration, and ctrl-api's agents.ts /
-                                notifications.ts still resolve a delivery
-                                target from the run→channel registry. Retire
-                                once that resolution is reworked (issue #25).
         message                 no-op acknowledgement — channel delivery is
                                 native to the Hermes gateway; autonomous code
                                 reaches the principal via ctrl-api →
@@ -44,17 +44,13 @@ Environment:
     HERMES_API_URL            Hermes API server base URL     (default per profile)
     HERMES_API_KEY            Bearer key for the Hermes API server
     HERMES_GATEWAY_TOKEN_FILE legacy token file              (default /alfred-data/.gateway-token)
-    HERMES_SHIM_STATE_DB      sessions_list sidecar SQLite    (default /alfred-data/.hermes-shim-<profile>.db)
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
-import sqlite3
-import time
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -92,12 +88,6 @@ HERMES_API_KEY = os.environ.get("HERMES_API_KEY", "")
 GATEWAY_TOKEN_FILE = os.environ.get(
     "HERMES_GATEWAY_TOKEN_FILE", "/alfred-data/.gateway-token"
 )
-STATE_DB = os.environ.get(
-    "HERMES_SHIM_STATE_DB", f"/alfred-data/.hermes-shim-{PROFILE}.db"
-)
-
-# How long a terminal run's registry row is retained for sessions_list.
-RUN_RETENTION_SECONDS = 3600
 
 
 # ---------------------------------------------------------------------------
@@ -144,115 +134,7 @@ def _check_auth(authorization: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# sessions_list sidecar — SQLite-backed run→channel registry
-# ---------------------------------------------------------------------------
-
-class RunRegistry:
-    """Tracks runs the shim has observed so `sessions_list` can answer.
-
-    Hermes has no native "list my sessions" endpoint. ctrl-api's agents.ts
-    and notifications.ts still resolve a delivery target (`deliveryContext.to`
-    on a channel) from this registry, so the shim keeps it. Backed by SQLite
-    so the list survives a shim restart.
-
-    Rows are populated by the `/v1` proxy: when a native caller creates a run
-    via `POST /v1/runs` carrying a `channel` / `session_id`, the proxy records
-    it here so the run still surfaces in `sessions_list`.
-    """
-
-    def __init__(self, path: str) -> None:
-        self._path = path
-        # check_same_thread=False — FastAPI serves on a threadpool; the
-        # connection is guarded by an asyncio lock at the call sites.
-        self._db = sqlite3.connect(path, check_same_thread=False)
-        self._db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS runs (
-                session_key   TEXT PRIMARY KEY,
-                run_id        TEXT NOT NULL,
-                agent_id      TEXT,
-                channel       TEXT,
-                delivery_to   TEXT,
-                status        TEXT,
-                created_at    REAL NOT NULL,
-                updated_at    REAL NOT NULL
-            )
-            """
-        )
-        # Older sidecar DBs predate delivery_to — add it if missing.
-        cols = {r[1] for r in self._db.execute("PRAGMA table_info(runs)")}
-        if "delivery_to" not in cols:
-            self._db.execute("ALTER TABLE runs ADD COLUMN delivery_to TEXT")
-        self._db.commit()
-        self._lock = asyncio.Lock()
-
-    async def record(
-        self,
-        session_key: str,
-        run_id: str,
-        agent_id: str | None,
-        channel: str | None,
-        delivery_to: str | None,
-        status: str,
-    ) -> None:
-        now = time.time()
-        async with self._lock:
-            self._db.execute(
-                """
-                INSERT INTO runs (session_key, run_id, agent_id, channel,
-                                  delivery_to, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(session_key) DO UPDATE SET
-                    run_id=excluded.run_id,
-                    agent_id=COALESCE(excluded.agent_id, runs.agent_id),
-                    channel=COALESCE(excluded.channel, runs.channel),
-                    delivery_to=COALESCE(excluded.delivery_to, runs.delivery_to),
-                    status=excluded.status,
-                    updated_at=excluded.updated_at
-                """,
-                (session_key, run_id, agent_id, channel, delivery_to, status, now, now),
-            )
-            self._db.commit()
-
-    async def list(self) -> list[dict[str, Any]]:
-        cutoff = time.time() - RUN_RETENTION_SECONDS
-        async with self._lock:
-            # Opportunistically prune long-dead runs so the list stays small.
-            self._db.execute(
-                "DELETE FROM runs WHERE status IN "
-                "('completed','succeeded','failed','cancelled','error') "
-                "AND updated_at < ?",
-                (cutoff,),
-            )
-            self._db.commit()
-            cur = self._db.execute(
-                "SELECT session_key, run_id, agent_id, channel, delivery_to, "
-                "status, created_at, updated_at FROM runs ORDER BY updated_at DESC"
-            )
-            rows = cur.fetchall()
-        return [self._row_to_dict(r) for r in rows]
-
-    @staticmethod
-    def _row_to_dict(row: tuple) -> dict[str, Any]:
-        # Shape mirrors what ctrl-api agents.ts / notifications.ts expect:
-        # a `channel` and a `deliveryContext.to`, plus `updatedAt` for sort.
-        return {
-            "sessionKey": row[0],
-            "runId": row[1],
-            "agentId": row[2],
-            "channel": row[3],
-            "deliveryContext": {"to": row[4]} if row[4] else {},
-            "status": row[5],
-            "createdAt": row[6],
-            "updatedAt": row[7],
-        }
-
-    def close(self) -> None:
-        self._db.close()
-
-
-# ---------------------------------------------------------------------------
-# Application lifespan — shared HTTP client + registry
+# Application lifespan — shared HTTP client
 # ---------------------------------------------------------------------------
 
 @asynccontextmanager
@@ -262,7 +144,6 @@ async def lifespan(app: FastAPI):
         headers={"Authorization": f"Bearer {HERMES_API_KEY}"},
         timeout=httpx.Timeout(60.0, read=120.0),
     )
-    app.state.registry = RunRegistry(STATE_DB)
     log.info(
         "hermes-shim up — profile=%s bind=%s:%d → hermes=%s",
         PROFILE, SHIM_HOST, SHIM_PORT, HERMES_API_URL,
@@ -271,7 +152,6 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await app.state.http.aclose()
-        app.state.registry.close()
 
 
 app = FastAPI(title="hermes-shim", lifespan=lifespan)
@@ -279,7 +159,7 @@ app = FastAPI(title="hermes-shim", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
 # Envelope helpers — reproduce the OpenClaw double-encoded result shape.
-# Only `sessions_list` and `message` still use this; native /v1 callers do not.
+# Only the `message` no-op still uses this; native /v1 callers do not.
 # ---------------------------------------------------------------------------
 
 def _envelope(payload: dict[str, Any]) -> dict[str, Any]:
@@ -306,38 +186,6 @@ _HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
 }
-
-
-def _record_run_from_proxy(app: FastAPI, req_body: bytes, resp_body: bytes) -> None:
-    """Best-effort: mirror a `POST /v1/runs` create into the run registry.
-
-    Lets `sessions_list` keep answering even though the shim no longer owns
-    the spawn path. A parse failure here is silently ignored — the proxy
-    response is already on its way to the caller.
-    """
-    try:
-        req = json.loads(req_body or b"{}")
-        resp = json.loads(resp_body or b"{}")
-    except (json.JSONDecodeError, ValueError):
-        return
-    if not isinstance(req, dict) or not isinstance(resp, dict):
-        return
-    run_id = resp.get("id") or resp.get("run_id")
-    if not run_id:
-        return
-    channel = req.get("channel") or req.get("source")
-    delivery_to = req.get("delivery_to") or req.get("to")
-    agent_id = req.get("session_id") or req.get("agent_id") or "main"
-    asyncio.create_task(
-        app.state.registry.record(
-            session_key=str(run_id),
-            run_id=str(run_id),
-            agent_id=str(agent_id),
-            channel=str(channel) if channel else None,
-            delivery_to=str(delivery_to) if delivery_to else None,
-            status=str(resp.get("status", "started")),
-        )
-    )
 
 
 @app.api_route(
@@ -404,14 +252,11 @@ async def v1_proxy(
             media_type="text/event-stream",
         )
 
-    # Non-streaming — buffer the body (needed to mirror run creations into
-    # the registry so sessions_list keeps working).
+    # Non-streaming — buffer the body and return it verbatim.
     try:
         content = await upstream.aread()
     finally:
         await upstream.aclose()
-    if request.method == "POST" and path.rstrip("/") == "runs" and upstream.is_success:
-        _record_run_from_proxy(app, body, content)
     return Response(
         content=content,
         status_code=upstream.status_code,
@@ -421,21 +266,8 @@ async def v1_proxy(
 
 
 # ---------------------------------------------------------------------------
-# Residual /tools/invoke handlers — sessions_list + message only.
+# Residual /tools/invoke handler — the `message` no-op only.
 # ---------------------------------------------------------------------------
-
-async def _handle_sessions_list(
-    app: FastAPI, args: dict[str, Any]
-) -> dict[str, Any]:
-    """sessions_list → the shim's own run registry.
-
-    Hermes has no native session enumeration. ctrl-api agents.ts /
-    notifications.ts use this to resolve a delivery target. Retire once that
-    resolution is reworked (issue #25).
-    """
-    sessions = await app.state.registry.list()
-    return _envelope({"sessions": sessions})
-
 
 async def _handle_message(app: FastAPI, args: dict[str, Any]) -> dict[str, Any]:
     """message → no-op acknowledgement.
@@ -457,18 +289,21 @@ async def _handle_message(app: FastAPI, args: dict[str, Any]) -> dict[str, Any]:
 
 
 _TOOL_HANDLERS = {
-    "sessions_list": _handle_sessions_list,
     "message": _handle_message,
 }
 
-# Tools retired in Phase 2 — callers were rewritten to native /v1/runs. A
-# clear 410 (instead of a generic 400) tells anything still calling them
-# exactly what happened.
+# Tools retired during the OpenClaw→Hermes swap — callers were rewritten to
+# native surfaces. A clear 410 (instead of a generic 400) tells anything still
+# calling them exactly what happened.
 _RETIRED_TOOLS = {
     "sessions_spawn": "rewritten to POST /v1/runs",
     "sessions_history": "rewritten to GET /v1/runs/{id}",
     "sessions_delete": "rewritten to POST /v1/runs/{id}/stop",
     "sessions_send": "rewritten to POST /v1/runs (same session_id)",
+    "sessions_list": (
+        "removed in issue #39 — ctrl-api reads the native Hermes gateway "
+        "session index (profiles/<p>/sessions/sessions.json) directly"
+    ),
 }
 
 
@@ -481,7 +316,7 @@ async def tools_invoke(
     request: Request,
     authorization: str | None = Header(default=None),
 ) -> JSONResponse:
-    """Residual OpenClaw tool-dispatch endpoint — sessions_list + message only.
+    """Residual OpenClaw tool-dispatch endpoint — the `message` no-op only.
 
     Body: {"tool": "<name>", "args": {...}}
     """
