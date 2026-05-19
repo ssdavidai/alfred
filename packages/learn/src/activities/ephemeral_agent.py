@@ -1,7 +1,7 @@
 """Ephemeral subagent lifecycle — Hermes-native (Phase 2, #22).
 
 Before Hermes, dispatching a per-task executor was a distributed
-dance: create an agent entry → mutate the workers ``openclaw.json`` →
+dance: create an agent entry → mutate the workers ``hermes.json`` →
 wait for the gateway to hot-reload → spawn against it → delete the
 entry. ``ephemeral_agent.py`` drove that dance over ctrl-api.
 
@@ -11,18 +11,19 @@ per-task scope expressed in the run's ``instructions``/prompt. There
 is no config to mutate, nothing to hot-reload, and no entry to clean
 up — Hermes' SQLite SessionStore owns the run's lifecycle.
 
-So this module collapses to:
+So this module collapses to a single helper:
 
   * ``create_ephemeral_agent`` — returns a synthetic ``exec-<hash>``
     id. NO HTTP call, NO config mutation. The id is purely a
     ``session_id`` label for the subsequent ``_call_clerk`` run.
-  * ``delete_ephemeral_agent`` — a no-op stub. Kept for ONE release so
-    any Temporal workflow whose history still records this activity
-    can replay deterministically (removing a registered activity
-    mid-history breaks replay). Safe to delete in a later deploy once
-    no in-flight workflow references it.
-  * ``wait_for_agent_ready`` — DELETED. There is no hot-reload to wait
-    on; a Hermes run is accepted immediately by ``POST /v1/runs``.
+
+``delete_ephemeral_agent`` and ``wait_for_agent_ready`` are DELETED
+(#43). Neither was ever scheduled via ``workflow.execute_activity`` —
+both were only ever invoked as direct Python ``await`` calls inside
+the ``signal_actions.dispatch_action_to_agent`` *activity* body. An
+activity body is not replayed deterministically (only its return
+value is recorded in workflow history), so no workflow replay path
+ever depended on these activities and removing them is replay-safe.
 
 The actual dispatch happens in ``signal_actions.dispatch_action_to_agent``
 via ``clerk._call_clerk(prompt, raw=True, agent_id="exec-...")`` —
@@ -70,21 +71,3 @@ async def create_ephemeral_agent(
         agent_id,
     )
     return agent_id
-
-
-@activity.defn
-async def delete_ephemeral_agent(agent_id: str) -> bool:
-    """No-op stub — kept ONE release for Temporal replay safety (#22).
-
-    There is nothing to delete: a Hermes run cleans up after itself via
-    the SQLite SessionStore. This stub exists only so workflows whose
-    history still records a ``delete_ephemeral_agent`` activity replay
-    deterministically. Remove in a later deploy once no in-flight
-    workflow references it.
-    """
-    logger.debug(
-        "ephemeral_agent.delete_ephemeral_agent: no-op stub for %s "
-        "(Hermes runs self-clean; activity kept for replay safety)",
-        agent_id,
-    )
-    return True

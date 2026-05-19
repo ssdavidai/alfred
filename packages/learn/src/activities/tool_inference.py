@@ -97,16 +97,24 @@ def _hints_for(source_type: str) -> list[str]:
 
 @activity.defn
 async def infer_required_tools(decision: dict[str, Any]) -> dict[str, Any]:
-    """Return ``{"source_type", "tools_required", "hints"}``.
+    """Return ``{"source_type", "hints"}``.
 
-    Pulls the underlying signal's ``source_type`` from the decision
-    record's chain (decision → needs_attention → source signal),
-    or falls back to nothing if we can't determine it. The caller
+    Reads a ``source_type`` (the caller in
+    ``signal_actions.dispatch_action_to_agent`` pre-extracts it from the
+    source signal and passes ``{"source_type": <value>}``) and maps it
+    onto a short list of Composio action-slug *prompt hints*. The caller
     embeds ``hints`` in the executor's prompt verbatim.
+
+    #43 cleanup: the old ``tools_required`` return key was a remnant of
+    the pre-Hermes design, where it fed gateway-level per-action tool
+    scoping during ephemeral-agent creation. Under Hermes the workers
+    profile exposes the full tool surface and ``create_ephemeral_agent``
+    explicitly ignores its ``tools_required`` argument — so the key was
+    a dead duplicate of ``hints`` that no caller read. Dropped.
     """
     # Best-effort source_type extraction: prefer the explicit field
-    # on the decision (if signal_extract stamped it), otherwise leave
-    # empty and let the executor figure it out via vault reads.
+    # on the input dict (the caller stamps it), otherwise leave empty
+    # and let the executor figure it out via vault reads.
     source_type = ""
     fm = decision if isinstance(decision, dict) else {}
     candidate = (
@@ -124,6 +132,5 @@ async def infer_required_tools(decision: dict[str, Any]) -> dict[str, Any]:
     )
     return {
         "source_type": source_type,
-        "tools_required": hints,
         "hints": hints,
     }

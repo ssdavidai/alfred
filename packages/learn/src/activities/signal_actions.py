@@ -4,7 +4,8 @@ When a signal has ``effect=action``, this module decides:
 
   * **HIGH path** — matched instinct + combined_confidence above the
     instinct's discretion threshold + env not pinned to shadow →
-    dispatch the action to openclaw main as a subagent task. The
+    dispatch the action to Hermes (workers profile) as a subagent
+    task. The
     response gets recorded as a follow-up signal record
     (``record_type=signal``, ``source_type=agent_outcome``).
 
@@ -22,7 +23,7 @@ combined-confidence metric on the signal side is
 
 Hard rules:
 
-  * NO mocks. Every code path runs against real openclaw via
+  * NO mocks. Every code path runs against real Hermes via
     ``clerk._call_clerk`` (subagent dispatch) or real vault writes via
     ``VaultClient``.
   * Reuse existing discretion machinery
@@ -33,7 +34,7 @@ Hard rules:
     validation.
   * NO direct vault filesystem; all vault writes flow through
     ``VaultClient``.
-  * NO direct Anthropic; all LLM calls flow through OpenClaw via
+  * NO direct Anthropic; all LLM calls flow through Hermes via
     ``_call_clerk``.
 
 Env gate: ``STEWARD_SIGNAL_ACTION_LIVE_MODE`` (separate from
@@ -968,7 +969,7 @@ async def dispatch_action_to_agent(
     source_signal_path: str = "",
     principal_note: str = "",
 ) -> dict[str, Any]:
-    """Dispatch an autonomous action to openclaw main via clerk subagent.
+    """Dispatch an autonomous action to the Hermes workers profile via clerk subagent.
 
     Builds an "act as Alfred main" prompt and calls
     ``clerk._call_clerk`` with ``raw=True`` so we get the agent's
@@ -1074,10 +1075,12 @@ async def dispatch_action_to_agent(
     # a workflow — activity bodies are not replayed deterministically
     # (only their return value is recorded), so changing this internal
     # branch is replay-safe and needs no ``workflow.patched()`` guard
-    # (which is only valid inside a workflow). The Hermes rewrite keeps
-    # the same activity *signature*; ``create_ephemeral_agent`` /
-    # ``delete_ephemeral_agent`` stay registered (the latter as a
-    # no-op stub) so no registered-activity is removed in this deploy.
+    # (which is only valid inside a workflow). ``create_ephemeral_agent``
+    # is invoked here as a direct Python ``await`` call inside this
+    # activity body — never scheduled via ``workflow.execute_activity``
+    # — so no workflow history records it and it produces no replay
+    # event. The ``delete_ephemeral_agent`` no-op stub was removed in
+    # #43 for the same reason: nothing ever scheduled it as an activity.
     import os as _os
     use_ephemeral = (
         _os.environ.get("DISPATCH_USE_EPHEMERAL_EXECUTOR", "").strip().lower()
@@ -1137,7 +1140,7 @@ async def dispatch_action_to_agent(
             )
 
         # MCP-5: the executor prompt no longer inlines a hardcoded
-        # tool list. Each openclaw runtime now bundles all 5 stdio MCP
+        # tool list. Each Hermes runtime now bundles all 5 stdio MCP
         # servers (alfred, sure, plane, vaultwarden, execute) + the
         # canonical AGENTS.md instructions file at
         # /home/node/.openclaw/AGENTS.md — sourced from the SAME
@@ -1210,10 +1213,7 @@ async def dispatch_action_to_agent(
             "1-2 sentences."
         )
 
-        from src.activities.ephemeral_agent import (
-            create_ephemeral_agent,
-            delete_ephemeral_agent,
-        )
+        from src.activities.ephemeral_agent import create_ephemeral_agent
         # Derive the executor session id from the source signal path or
         # a digest of the action so retries land on the same
         # ``exec-<hash>`` session_id. Under Hermes this is purely a
@@ -1229,6 +1229,9 @@ async def dispatch_action_to_agent(
         # create_ephemeral_agent is now a pure synthetic-id helper —
         # no HTTP, no config mutation, no hot-reload wait.
         exec_agent_id = await create_ephemeral_agent(task_seed, hints)
+        # No teardown step: a Hermes run cleans up after itself via the
+        # SQLite SessionStore, so there is nothing to delete (#43 — the
+        # ``delete_ephemeral_agent`` no-op stub was removed).
         try:
             agent_raw = await _call_clerk(
                 executor_prompt, raw=True, agent_id=exec_agent_id,
@@ -1240,13 +1243,6 @@ async def dispatch_action_to_agent(
                 exec_agent_id, exc,
             )
             raise
-        finally:
-            # No-op stub (Hermes runs self-clean); kept one release for
-            # Temporal replay safety. See ephemeral_agent.py.
-            try:
-                await delete_ephemeral_agent(exec_agent_id)
-            except Exception:  # noqa: BLE001
-                pass
       else:
         # ---- Legacy path: shared learn-clerk subagent ----
         try:

@@ -316,13 +316,13 @@ from src.activities.composio_tools import (
 )
 
 # Ephemeral agent lifecycle (#378; Phase 2 #22 — Hermes-native).
-# wait_for_agent_ready is gone: a Hermes run needs no hot-reload wait.
-# delete_ephemeral_agent is a no-op stub kept ONE release for Temporal
-# replay safety (workflow histories may still record the activity).
-from src.activities.ephemeral_agent import (
-    create_ephemeral_agent,
-    delete_ephemeral_agent,
-)
+# wait_for_agent_ready and delete_ephemeral_agent are gone (#43): a
+# Hermes run needs no hot-reload wait and self-cleans via the SQLite
+# SessionStore. Neither was ever scheduled via workflow.execute_activity
+# — both were only direct ``await`` calls inside the
+# dispatch_action_to_agent activity body — so removing them is
+# replay-safe (no workflow history records them).
+from src.activities.ephemeral_agent import create_ephemeral_agent
 
 # Tool inference for delegate dispatch — maps source_type → Composio
 # action slug hints injected into the executor's prompt.
@@ -886,10 +886,10 @@ ALL_ACTIVITIES = [
     check_composio_readiness,
     list_composio_connected_accounts,
     # Ephemeral agent lifecycle (#378; Phase 2 #22 — Hermes-native).
-    # delete_ephemeral_agent is a no-op stub kept ONE release for
-    # Temporal replay safety; wait_for_agent_ready was removed.
+    # delete_ephemeral_agent and wait_for_agent_ready were removed (#43):
+    # never scheduled as activities, only direct ``await`` calls inside
+    # the dispatch_action_to_agent activity body — replay-safe to drop.
     create_ephemeral_agent,
-    delete_ephemeral_agent,
     # Tool inference for delegate dispatch
     infer_required_tools,
     # Task closure watcher — signal-closes-task backward arrow
