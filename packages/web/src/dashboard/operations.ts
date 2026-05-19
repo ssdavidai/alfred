@@ -1352,7 +1352,22 @@ export const getStewardFeed = async (
   }
 };
 
-// Submit fact corrections and trigger brief generation
+// Submit fact corrections and trigger brief generation.
+//
+// The ctrl-api endpoint /api/v1/onboarding/corrections atomically:
+//   (1) writes corrections to onboard.json,
+//   (2) advances stage to "brief", and
+//   (3) starts the brief-stage OnboardingPipelineWorkflow with the
+//       FULL contract — workflow_id="onboarding-<user_id>-brief-<ts>",
+//       gmail_mode + composio_action carried forward off onboard.json,
+//       resume_stage="brief" (#74).
+//
+// We must NOT additionally spawn a workflow from here: doing so used to
+// create a parallel "onboarding-brief-<ts>" workflow (no user_id prefix)
+// with default gmail_mode="google" and no resume_stage, which then
+// immediately failed on the legacy direct-Gmail fetch_email_metadata
+// (no GOOGLE_CLIENT_* in alfred-black single-VM deploys). The ctrl-api
+// call alone is the contract.
 export const submitFactCorrections: any = async (
   args: { corrections: Record<string, string> },
   context: any,
@@ -1360,28 +1375,11 @@ export const submitFactCorrections: any = async (
   if (!context.user) throw new HttpError(401, "Not authenticated");
   const instance = await getUserInstance(context);
 
-  // Write corrections to onboard.json and update stage to "brief"
+  // Write corrections to onboard.json AND start the brief workflow.
   await proxyToTenant(instance, {
     method: "POST",
     path: "/api/v1/onboarding/corrections",
     body: { corrections: args.corrections },
-  });
-
-  // Trigger the onboarding workflow to resume from "brief" stage
-  const userId = context.user.id;
-  const stream = await prisma.stream.findFirst({
-    where: { userId, source: "gmail" },
-  });
-
-  await proxyToTenant(instance, {
-    method: "POST",
-    path: "/api/v1/workflows",
-    body: {
-      workflow_type: "OnboardingPipelineWorkflow",
-      task_queue: "alfred-learn",
-      workflow_id: `onboarding-brief-${Date.now()}`,
-      input: { user_id: userId, stream_id: stream?.id || "" },
-    },
   });
 
   return { status: "brief_generating" };
