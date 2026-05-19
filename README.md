@@ -31,10 +31,11 @@ The full design lives in [`docs/PLAN.md`](docs/PLAN.md) (Parts A–I).
   `ANTHROPIC_API_KEY` is **optional** — Hermes routes LLM traffic through
   OpenRouter by default.
 - **Google OAuth credentials** (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`) —
-  required for **automatic onboarding**. Onboarding works by connecting the
-  owner's Gmail (read-only) and profiling ~100 days of mail; without an OAuth
-  client there is nothing to connect. The app still installs and the owner can
-  sign in without it, but the "Start onboarding" flow needs it. See
+  **optional**. Onboarding does *not* need them: with `COMPOSIO_API_KEY` set,
+  "Start onboarding" connects Gmail through Composio's managed Google OAuth,
+  so you create no Google Cloud client. Set these two only for the cosmetic
+  "Sign in with Google" login button, or to run onboarding's Gmail connect
+  through your own Google client instead of Composio's managed flow. See
   *Onboarding* below.
 - Optionally: a **Mailgun** API key + domain for transactional email (signup
   verification / password reset — see the note under *Install*).
@@ -106,7 +107,8 @@ no Node needed — and runs a containerized wizard that:
   and Composio and tells you immediately if a key is wrong;
 - lets you **pick the Hermes models** from OpenRouter's live model catalogue
   (autocomplete search);
-- prints the exact Google OAuth **redirect URI** to register for your domain;
+- if you opt into your own Google OAuth client, prints the exact **redirect
+  URI** to register for your domain (skip it to use Composio-managed Gmail);
 - generates every auto-secret with a cryptographically-secure
   `randomBytes(32)`;
 - writes a complete `.env`.
@@ -166,8 +168,12 @@ Onboarding is automatic and runs once, for the owner:
 
 1. Sign up and log in — you land on `/desk`.
 2. The desk shows a **"Start onboarding"** card. Click it.
-3. You're sent to Google to **connect Gmail** (read-only, `gmail.readonly`
-   scope). This needs `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` in `.env`.
+3. You're sent to Google to **connect Gmail**. By default — whenever
+   `COMPOSIO_API_KEY` is set (it is required anyway) — this goes through
+   **Composio's managed Google OAuth**: no Google Cloud client of your own,
+   no Google app-verification. The consent screen is **Composio-branded**
+   (Composio's verified Google app) and requests **full Gmail access**
+   (`https://mail.google.com/`) plus Google contacts/profile scopes.
 4. On return, Alfred backfills ~100 days of email, builds a behavioural
    profile, extracts facts, and composes your first Brief — you watch the
    progress through the onboarding ritual (`/awaken → … → /first-brief`),
@@ -175,6 +181,14 @@ Onboarding is automatic and runs once, for the owner:
 5. When the first Brief lands you're dropped back on `/desk`, now live.
 
 Later (non-owner) members skip onboarding — it is the owner's setup.
+
+> **Using your own Google client instead.** If you set `GOOGLE_CLIENT_ID` /
+> `GOOGLE_CLIENT_SECRET` in `.env`, onboarding's Gmail connect switches to a
+> direct Google OAuth flow under *your* brand, requesting only the narrower
+> read-only `gmail.readonly` scope. That path needs a Web-application OAuth
+> client from console.cloud.google.com and Google's app-verification for the
+> `gmail.readonly` scope. If `COMPOSIO_API_KEY` is set, the Composio-managed
+> flow wins regardless.
 
 ### Choosing the LLM models
 
