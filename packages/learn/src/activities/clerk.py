@@ -3,14 +3,20 @@
 NEVER call the Anthropic API directly. The Clerk is a stateless LLM worker
 dispatched for creative tasks.
 
-Phase 2 rewrite (#20): ``_call_clerk`` now talks Hermes-native
-``POST /v1/runs`` + polls ``GET /v1/runs/{id}`` instead of the legacy
-OpenClaw ``POST /tools/invoke`` envelope (``sessions_spawn`` /
+Phase 2 rewrite (#20): ``_call_clerk`` talks Hermes-native instead of
+the legacy OpenClaw ``POST /tools/invoke`` envelope (``sessions_spawn`` /
 ``sessions_history`` / ``sessions_delete``). The double-encoded
 ``result.content[].text`` envelope parsing and the ``_cleanup_session``
 helper are gone — Hermes' SQLite SessionStore makes per-run cleanup
-unnecessary (no leaked ``.bak-*`` files), and a run's output is a
-plain JSON field, not a nested re-encoded string.
+unnecessary (no leaked ``.bak-*`` files).
+
+#46: the bespoke ``POST /v1/runs`` + ``GET /v1/runs/{id}`` poll loop is
+retired in favour of Hermes' native synchronous completion endpoint,
+``POST /v1/responses`` (the OpenAI Responses API). That handler runs the
+agent to completion server-side and returns the final ``output`` in the
+HTTP response — request → final-output in a single call, no fixed-
+interval polling. ``_call_clerk``'s signature and return shape are
+unchanged; this is an internal-mechanism swap.
 
 ``_extract_json`` is unchanged: it parses the LLM's *text* output (the
 model still emits prose/markdown around JSON), not the transport.
@@ -513,20 +519,15 @@ Return JSON only:
     return await _call_clerk(prompt)
 
 
-# Run-state polling cadence. 90 × 10s = 900s ceiling — matched to the
-# 900s the workers profile caps a run at. Background executors that
-# actually do work (Composio calls + vault reads + multi-step
-# reasoning) routinely need 4-10 minutes; the workers gateway is
-# asynchronous (no human waiting) so the budget is deliberately
-# generous enough that a genuinely-working run is never cut off
-# mid-step.
-_RUN_POLL_INTERVAL_SECONDS = 10
-_RUN_POLL_MAX_ATTEMPTS = 90
-
-# Terminal Hermes run states. Anything else (queued/running/…) means
-# keep polling.
-_RUN_TERMINAL_OK = {"completed", "succeeded", "success"}
-_RUN_TERMINAL_FAIL = {"failed", "errored", "error", "cancelled", "canceled", "stopped"}
+# Overall completion budget for a single clerk call. ``POST /v1/responses``
+# blocks for the full agent run, so this is the httpx read timeout —
+# the direct successor of the old 90 × 10s = 900s poll ceiling. Background
+# executors that actually do work (Composio calls + vault reads + multi-
+# step reasoning) routinely need 4-10 minutes; the workers gateway is
+# asynchronous (no human waiting) so the budget is deliberately generous
+# enough that a genuinely-working run is never cut off mid-step. The
+# enclosing Temporal activity timeout/heartbeat is the outer bound.
+_CLERK_COMPLETION_BUDGET_SECONDS = 900.0
 
 _BILLING_ERROR_MARKERS = (
     "insufficient credits",
@@ -536,32 +537,20 @@ _BILLING_ERROR_MARKERS = (
 )
 
 
-def _run_output_text(run: dict[str, Any]) -> str:
-    """Pull the assistant's final text out of a Hermes ``GET /v1/runs/{id}``
-    body.
+def _content_parts_text(content: Any) -> str:
+    """Concatenate the text of an OpenAI-style ``content`` parts list.
 
-    Hermes is OpenAI-style: the run's result lives in a plain ``output``
-    field, not a double-encoded ``result.content[].text`` envelope.
-    We accept a few shapes defensively because the gateway has emitted
-    each across v0.2.x:
-
-      * ``output`` is a plain string — return it.
-      * ``output`` is a list of content parts (``{type:"text", text}``)
-        — concatenate the text parts.
-      * ``output`` is a dict with a nested ``text`` / ``content`` — unwrap.
-      * fall back to ``output_text`` / ``result`` keys.
+    A Responses ``message`` item's ``content`` is a list of parts such as
+    ``{"type": "output_text", "text": "..."}``. We accept a few shapes
+    defensively because the gateway has emitted variants across versions:
+    a plain string, a list of part dicts (``text`` or ``content`` keys),
+    or a bare list of strings.
     """
-    out = run.get("output")
-    if out is None:
-        out = run.get("output_text")
-    if out is None:
-        out = run.get("result")
-
-    if isinstance(out, str):
-        return out
-    if isinstance(out, list):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
         parts: list[str] = []
-        for part in out:
+        for part in content:
             if isinstance(part, dict):
                 if isinstance(part.get("text"), str):
                     parts.append(part["text"])
@@ -570,13 +559,54 @@ def _run_output_text(run: dict[str, Any]) -> str:
             elif isinstance(part, str):
                 parts.append(part)
         return "\n".join(p for p in parts if p)
+    if isinstance(content, dict):
+        if isinstance(content.get("text"), str):
+            return content["text"]
+        if isinstance(content.get("content"), str):
+            return content["content"]
+        if isinstance(content.get("content"), list):
+            return _content_parts_text(content["content"])
+    return ""
+
+
+def _response_output_text(response: dict[str, Any]) -> str:
+    """Pull the assistant's final text out of a Hermes ``POST /v1/responses``
+    body.
+
+    The canonical shape (Hermes ``_extract_output_items``) is::
+
+        {"output": [ ...function_call / function_call_output items...,
+                     {"type": "message", "role": "assistant",
+                      "content": [{"type": "output_text", "text": "..."}]} ]}
+
+    The final ``message`` item carries the assistant's reply. We walk the
+    ``output`` list and take the last assistant ``message``. A few
+    fallbacks are kept defensively: a top-level ``output_text`` string, or
+    ``output`` itself being a plain string / parts list (older or mocked
+    transports).
+    """
+    out = response.get("output")
+
+    if isinstance(out, list):
+        message_text = ""
+        for item in out:
+            if isinstance(item, dict) and item.get("type") == "message":
+                text = _content_parts_text(item.get("content"))
+                if text:
+                    message_text = text
+        if message_text:
+            return message_text
+        # No ``message`` item — fall back to concatenating any text parts.
+        return _content_parts_text(out)
+
+    if isinstance(out, str):
+        return out
     if isinstance(out, dict):
-        if isinstance(out.get("text"), str):
-            return out["text"]
-        if isinstance(out.get("content"), str):
-            return out["content"]
-        if isinstance(out.get("content"), list):
-            return _run_output_text({"output": out["content"]})
+        return _content_parts_text(out)
+
+    fallback = response.get("output_text")
+    if isinstance(fallback, str):
+        return fallback
     return ""
 
 
@@ -587,94 +617,92 @@ async def _call_clerk(
 ) -> dict[str, Any] | str:
     """Run a one-shot Hermes job on the workers gateway and return its output.
 
-    Phase 2 (#20): native ``POST /v1/runs`` + poll ``GET /v1/runs/{id}``.
-    No ``sessions_spawn`` / ``sessions_history`` / ``sessions_delete``
-    envelope; no per-run cleanup (Hermes' SQLite SessionStore handles
-    its own lifecycle — see #23).
+    #46: native synchronous ``POST /v1/responses`` (the OpenAI Responses
+    API). Hermes runs the agent to completion server-side and returns the
+    final ``output`` in the HTTP response — request → final-output in a
+    single call. There is no ``POST /v1/runs`` + ``GET /v1/runs/{id}``
+    poll loop, no ``sessions_spawn`` / ``sessions_history`` /
+    ``sessions_delete`` envelope, and no per-run cleanup (Hermes' SQLite
+    SessionStore handles its own lifecycle — see #23).
 
-    The run targets the WORKERS profile gateway. The main gateway
+    The request targets the WORKERS profile gateway. The main gateway
     (:18789) is reserved for Sir's live chat; autonomous traffic
     deliberately never touches it so the human surface stays
     uncongested.
 
-    ``agent_id`` becomes the run's ``session_id``. For the default
-    clerk it is ``learn-clerk``; ephemeral executors pass an
-    ``exec-<hash>`` id so each delegated task gets its own session
-    scope (see ``ephemeral_agent.py``). Per-task tool scoping is
-    expressed in the prompt/instructions, not a per-agent allowlist.
+    ``agent_id`` scopes the call via the ``X-Hermes-Session-Key`` header
+    — Hermes' stable per-channel identifier. For the default clerk it is
+    ``learn-clerk``; ephemeral executors pass an ``exec-<hash>`` id so
+    each delegated task gets its own session scope (see
+    ``ephemeral_agent.py``). Per-task tool scoping is expressed in the
+    prompt/instructions, not a per-agent allowlist.
+
+    The whole call is bounded by ``_CLERK_COMPLETION_BUDGET_SECONDS`` (the
+    direct successor of the old 900s poll ceiling); the enclosing Temporal
+    activity timeout/heartbeat is the outer bound.
 
     If raw=True, returns the run's text output verbatim; otherwise the
     output is fed through ``_extract_json``.
     """
-    import asyncio
-
     config = load_config()
     token = config.gateway_token()
     base = config.openclaw_workers_gateway_url
-    session_id = agent_id or config.clerk_agent_id
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    session_key = agent_id or config.clerk_agent_id
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        # Stable per-channel scope; the Responses API has no body
+        # ``session_id`` field — see Hermes ``_handle_responses``.
+        "X-Hermes-Session-Key": session_key,
+    }
 
-    # 1. Create the run.
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        create_resp = await client.post(
-            f"{base}/v1/runs",
-            headers=headers,
-            json={
-                "input": prompt,
-                "session_id": session_id,
-            },
+    # POST /v1/responses blocks until the agent run completes, so the read
+    # timeout IS the completion budget. ``stream`` is omitted (defaults
+    # false) — the non-streaming branch returns the final response JSON.
+    timeout = httpx.Timeout(_CLERK_COMPLETION_BUDGET_SECONDS, connect=30.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                f"{base}/v1/responses",
+                headers=headers,
+                json={"input": prompt},
+            )
+    except httpx.TimeoutException as exc:
+        raise TimeoutError(
+            f"Clerk run did not complete within "
+            f"{int(_CLERK_COMPLETION_BUDGET_SECONDS)}s"
+        ) from exc
+
+    # Hermes returns 5xx with an ``error`` envelope when the agent run
+    # itself raises; surface that as a run failure rather than a bare
+    # HTTPStatusError so callers see a clear cause.
+    if resp.status_code >= 400:
+        detail = ""
+        try:
+            err_body = resp.json()
+            if isinstance(err_body, dict):
+                err = err_body.get("error")
+                detail = err.get("message") if isinstance(err, dict) else str(err or err_body)
+        except Exception:
+            detail = resp.text
+        raise RuntimeError(
+            f"Clerk run failed (HTTP {resp.status_code}): {str(detail)[:300]}"
         )
-        create_resp.raise_for_status()
-        create_data = create_resp.json()
 
-    run_id = create_data.get("id") or create_data.get("run_id")
-    if not run_id:
-        raise ValueError(f"Could not get run id from POST /v1/runs: {create_data}")
+    response = resp.json()
+    output_text = _response_output_text(response)
 
-    # 2. Poll GET /v1/runs/{id} until the run reaches a terminal state.
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        for _ in range(_RUN_POLL_MAX_ATTEMPTS):
-            await asyncio.sleep(_RUN_POLL_INTERVAL_SECONDS)
-            try:
-                poll_resp = await client.get(
-                    f"{base}/v1/runs/{run_id}", headers=headers,
-                )
-                if poll_resp.status_code != 200:
-                    continue
-                run = poll_resp.json()
-            except Exception:
-                continue
+    # Fail fast on billing/credit exhaustion. A failed agent run comes back
+    # as HTTP 200 with the failure text in ``output`` (Hermes folds the
+    # agent's ``error`` into the final message), so this check stays.
+    if output_text and any(
+        m in output_text.lower() for m in _BILLING_ERROR_MARKERS
+    ):
+        raise RuntimeError(f"Clerk LLM billing error: {output_text[:200]}")
 
-            status = str(run.get("status") or "").strip().lower()
-            output_text = _run_output_text(run)
-
-            # Fail fast on billing/credit exhaustion rather than burning
-            # the whole 900s polling budget.
-            if output_text and any(
-                m in output_text.lower() for m in _BILLING_ERROR_MARKERS
-            ):
-                raise RuntimeError(f"Clerk LLM billing error: {output_text[:200]}")
-
-            if status in _RUN_TERMINAL_FAIL:
-                err = (
-                    run.get("error")
-                    or run.get("error_message")
-                    or output_text
-                    or status
-                )
-                raise RuntimeError(f"Clerk run {run_id} {status}: {str(err)[:300]}")
-
-            if status in _RUN_TERMINAL_OK:
-                if raw:
-                    return output_text
-                return _extract_json(output_text)
-
-            # Non-terminal (queued/running/…) — keep polling.
-
-    raise TimeoutError(
-        f"Clerk run did not complete within "
-        f"{_RUN_POLL_INTERVAL_SECONDS * _RUN_POLL_MAX_ATTEMPTS}s: {run_id}"
-    )
+    if raw:
+        return output_text
+    return _extract_json(output_text)
 
 
 def _extract_json(content: str) -> dict[str, Any]:

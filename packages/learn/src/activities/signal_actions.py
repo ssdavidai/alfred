@@ -1066,7 +1066,7 @@ async def dispatch_action_to_agent(
 
     # ---- Ephemeral-executor path (env-gated) ----
     # When DISPATCH_USE_EPHEMERAL_EXECUTOR is set, run this dispatch as
-    # a Hermes ``POST /v1/runs`` job with its own ``session_id`` =
+    # a Hermes ``POST /v1/responses`` job with its own session key =
     # ``exec-<hash>`` (Phase 2 #22). This isolates each delegate
     # dispatch from learn-clerk's shared background context and gives
     # us a deliberate audit boundary per task.
@@ -1216,10 +1216,10 @@ async def dispatch_action_to_agent(
         from src.activities.ephemeral_agent import create_ephemeral_agent
         # Derive the executor session id from the source signal path or
         # a digest of the action so retries land on the same
-        # ``exec-<hash>`` session_id. Under Hermes this is purely a
-        # run ``session_id`` label — there is no config entry to
-        # create or hot-reload, so the create/wait/delete dance
-        # collapses to a single ``POST /v1/runs`` inside ``_call_clerk``.
+        # ``exec-<hash>`` session key. Under Hermes this is purely a
+        # session-key label — there is no config entry to create or
+        # hot-reload, so the create/wait/delete dance collapses to a
+        # single ``POST /v1/responses`` inside ``_call_clerk``.
         if source_signal_path:
             task_seed = source_signal_path.split("/")[-1].replace(".md", "")
         else:

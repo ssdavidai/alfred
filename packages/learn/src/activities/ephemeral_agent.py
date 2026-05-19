@@ -5,17 +5,17 @@ dance: create an agent entry → mutate the workers ``hermes.json`` →
 wait for the gateway to hot-reload → spawn against it → delete the
 entry. ``ephemeral_agent.py`` drove that dance over ctrl-api.
 
-Under Hermes an ephemeral executor is just **one ``POST /v1/runs``**
-against the workers profile with ``session_id = exec-<hash>`` and the
-per-task scope expressed in the run's ``instructions``/prompt. There
+Under Hermes an ephemeral executor is just **one ``POST /v1/responses``**
+against the workers profile with the ``X-Hermes-Session-Key`` header set
+to ``exec-<hash>`` and the per-task scope expressed in the prompt. There
 is no config to mutate, nothing to hot-reload, and no entry to clean
-up — Hermes' SQLite SessionStore owns the run's lifecycle.
+up — Hermes' SQLite SessionStore owns the session's lifecycle.
 
 So this module collapses to a single helper:
 
   * ``create_ephemeral_agent`` — returns a synthetic ``exec-<hash>``
     id. NO HTTP call, NO config mutation. The id is purely a
-    ``session_id`` label for the subsequent ``_call_clerk`` run.
+    session-key label for the subsequent ``_call_clerk`` run.
 
 ``delete_ephemeral_agent`` and ``wait_for_agent_ready`` are DELETED
 (#43). Neither was ever scheduled via ``workflow.execute_activity`` —
@@ -27,7 +27,7 @@ ever depended on these activities and removing them is replay-safe.
 
 The actual dispatch happens in ``signal_actions.dispatch_action_to_agent``
 via ``clerk._call_clerk(prompt, raw=True, agent_id="exec-...")`` —
-``_call_clerk`` is the single Hermes ``/v1/runs`` entry point.
+``_call_clerk`` is the single Hermes ``/v1/responses`` entry point.
 """
 from __future__ import annotations
 
@@ -54,8 +54,8 @@ async def create_ephemeral_agent(
     """Return a synthetic ephemeral-executor id — purely a label.
 
     Phase 2 (#22): there is no longer any agent *entry* to create.
-    A Hermes ephemeral executor is one ``POST /v1/runs`` whose
-    ``session_id`` is this id; per-task scope lives in the run's
+    A Hermes ephemeral executor is one ``POST /v1/responses`` whose
+    ``X-Hermes-Session-Key`` is this id; per-task scope lives in the
     prompt, not in a config-file allowlist.
 
     ``tools_required`` and ``model`` are accepted for backwards-compat
