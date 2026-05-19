@@ -663,9 +663,12 @@ Return ONLY the brief text. No JSON wrapping."""
             await client.post(
                 "/api/v1/vault/records",
                 json={
-                    "type": "event",
+                    # `briefing` is a canonical vault type; `event` is
+                    # demoted by the promotion contract and rejected with
+                    # a 422 by ctrl-api's assertCanonicalVaultPath (#75).
+                    "type": "briefing",
                     "name": "First Brief",
-                    "content": f"---\ntype: event\nname: First Brief\nstatus: active\ntags: [onboarding, brief]\n---\n\n# First Brief\n\n{brief}\n",
+                    "content": f"---\ntype: briefing\nname: First Brief\nstatus: active\ntags: [onboarding, brief]\n---\n\n# First Brief\n\n{brief}\n",
                 },
             )
         except Exception:
@@ -960,10 +963,13 @@ async def write_brief_and_opportunities_opus(onboard_path: str) -> dict[str, Any
             await client.post(
                 "/api/v1/vault/records",
                 json={
-                    "type": "event",
+                    # `briefing` is a canonical vault type; `event` is
+                    # demoted by the promotion contract and rejected with
+                    # a 422 by ctrl-api's assertCanonicalVaultPath (#75).
+                    "type": "briefing",
                     "name": "First Brief",
                     "content": (
-                        f"---\ntype: event\nname: First Brief\nstatus: active\n"
+                        f"---\ntype: briefing\nname: First Brief\nstatus: active\n"
                         f"tags: [onboarding, brief]\n---\n\n"
                         f"# First Brief\n\n{brief_text}\n"
                     ),

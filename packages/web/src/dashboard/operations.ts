@@ -645,10 +645,13 @@ export const getFirstBrief: GetFirstBrief<void, any> = async (
 ) => {
   const instance = await getUserInstance(context);
 
-  // Search for onboarding brief in vault events
+  // Search for the onboarding First Brief. The onboarding pipeline writes
+  // it as a `briefing` record (a canonical vault type) — it used to be
+  // written as `event`, which the promotion contract rejects (#75). List
+  // `briefing` records and pick the onboarding First Brief by name.
   try {
     const data: any = await proxyToTenant(instance, {
-      path: "/api/v1/vault/list/event",
+      path: "/api/v1/vault/list/briefing",
     });
 
     if (data && Array.isArray(data.results)) {
@@ -658,18 +661,19 @@ export const getFirstBrief: GetFirstBrief<void, any> = async (
           r.name?.toLowerCase().includes("first-brief") ||
           r.name?.toLowerCase().includes("first brief") ||
           r.name?.toLowerCase().includes("onboarding-brief") ||
-          r.path?.toLowerCase().includes("first-brief"),
+          r.path?.toLowerCase().includes("first-brief") ||
+          r.path?.toLowerCase().includes("first brief"),
       );
 
       if (briefRecord) {
         // Fetch the full content
         const fullRecord: any = await proxyToTenant(instance, {
-          path: `/api/v1/vault/records/${encodeURIComponent(briefRecord.path || `event/${briefRecord.name}`)}`,
+          path: `/api/v1/vault/records/${encodeURIComponent(briefRecord.path || `briefing/${briefRecord.name}`)}`,
         });
 
         return {
           brief: fullRecord?.content ?? fullRecord?.body ?? null,
-          path: briefRecord.path || `event/${briefRecord.name}`,
+          path: briefRecord.path || `briefing/${briefRecord.name}`,
           name: briefRecord.name,
         };
       }

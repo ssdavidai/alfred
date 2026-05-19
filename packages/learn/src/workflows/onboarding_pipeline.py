@@ -22,6 +22,7 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from src.activities.onboarding import (
@@ -77,10 +78,23 @@ STAGE_ORDER = [
 
 
 def _stage_index(stage: str) -> int:
+    """Resolve a stage name to its index in STAGE_ORDER.
+
+    Raises ValueError on an unknown stage instead of silently collapsing it
+    to 0. A bad stage name (e.g. the legacy ``"backfill"`` default, which is
+    NOT in STAGE_ORDER) used to swallow the error and restart the whole
+    pipeline from ``metadata`` — losing every completed stage. Surfacing the
+    error makes a bad stage a loud, debuggable failure instead of a silent
+    full restart.
+    """
     try:
         return STAGE_ORDER.index(stage)
     except ValueError:
-        return 0
+        raise ValueError(
+            f"Unknown onboarding stage {stage!r} — not in STAGE_ORDER "
+            f"({', '.join(STAGE_ORDER)}). onboard.json is corrupt or a "
+            f"caller passed a bad resume_stage."
+        )
 
 
 @dataclass
@@ -112,6 +126,27 @@ class OnboardingInput:
     # forward-compat / so the brief-stage resume path can re-stamp it;
     # the P3 email activities hard-target GMAIL_FETCH_EMAILS regardless.
     composio_action: str = ""
+    # Explicit resume stage — carried in the workflow input so a restart
+    # can resume DETERMINISTICALLY at a named stage instead of re-deriving
+    # it from onboard.json's facts-presence (#74).
+    #
+    # The brief stage runs as a *separate* OnboardingPipelineWorkflow,
+    # started by ctrl-api's POST /api/v1/onboarding/corrections after the
+    # user verifies their facts. That workflow MUST resume at "brief" —
+    # past the awaiting_verification hard-return. Re-deriving the stage
+    # from onboard.json could not express "skip past awaiting_verification"
+    # and silently restarted from metadata, making the brief stage
+    # structurally unreachable.
+    #
+    # When set to a STAGE_ORDER member, the workflow trusts THIS value as
+    # the resume point and ignores onboard.json's persisted stage. When
+    # empty (the default — every pre-#74 caller and the initial
+    # onboarding/start), the workflow falls back to the onboard.json stage,
+    # exactly as before. A new dataclass field with a default is
+    # Temporal-replay-safe: historical OnboardingInput payloads that lack
+    # the field deserialize with resume_stage="" and take the unchanged
+    # legacy path.
+    resume_stage: str = ""
 
 
 @dataclass
@@ -135,7 +170,35 @@ class OnboardingPipelineWorkflow:
             start_to_close_timeout=timedelta(seconds=10),
         )
 
-        current_stage = current_state.get("stage", "metadata")
+        # Resolve the resume point. When the caller supplied an explicit
+        # resume_stage (a STAGE_ORDER member), TRUST it — this is how the
+        # brief-stage workflow (#74) resumes past the awaiting_verification
+        # hard-return. Otherwise fall back to onboard.json's persisted
+        # stage. A persisted stage that is NOT a STAGE_ORDER member (the
+        # legacy "backfill" default) falls back to "metadata" so a fresh /
+        # corrupt onboard.json starts from the real first stage instead of
+        # raising. An explicit resume_stage, by contrast, MUST be valid —
+        # a bad one is a caller bug and should raise loudly.
+        if input.resume_stage:
+            if input.resume_stage not in STAGE_ORDER:
+                # A bad explicit resume_stage is a caller bug. Raise a
+                # NON-retryable ApplicationError so the workflow FAILS
+                # loudly and immediately — a plain exception in the
+                # workflow body is a workflow-task failure that Temporal
+                # retries forever, which would hang onboarding silently.
+                raise ApplicationError(
+                    f"OnboardingInput.resume_stage={input.resume_stage!r} "
+                    f"is not a STAGE_ORDER member "
+                    f"({', '.join(STAGE_ORDER)}).",
+                    type="InvalidResumeStage",
+                    non_retryable=True,
+                )
+            current_stage = input.resume_stage
+        else:
+            persisted_stage = current_state.get("stage", "metadata")
+            current_stage = (
+                persisted_stage if persisted_stage in STAGE_ORDER else "metadata"
+            )
         resume_idx = _stage_index(current_stage)
 
         # Gmail backfill mode — read ONCE from the workflow input. Replay-safe:
@@ -162,7 +225,7 @@ class OnboardingPipelineWorkflow:
         # If already done, skip everything
         if current_stage == "done":
             return OnboardingResult(
-                brief_path="event/First Brief.md",
+                brief_path="briefing/First Brief.md",
                 facts_count=len(current_state.get("facts", [])),
                 patterns_count=len(current_state.get("patterns", [])),
             )
@@ -313,7 +376,10 @@ class OnboardingPipelineWorkflow:
                 heartbeat_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=4),
             )
-            brief_path = "event/First Brief.md"
+            # The First Brief is a `briefing` record — a canonical vault
+            # type. `event` is demoted by the promotion contract and
+            # ctrl-api rejects an `event` vault write with a 422 (#75).
+            brief_path = "briefing/First Brief.md"
 
         # -----------------------------------------------------------------
         # Stage 7: Generate four packs from profiler data

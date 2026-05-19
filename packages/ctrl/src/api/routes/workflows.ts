@@ -241,6 +241,14 @@ export function registerWorkflowRoutes(): void {
           user_id: userId,
           stream_id: streamId,
           gmail_mode: briefGmailMode,
+          // Carry the resume stage EXPLICITLY (#74). The brief stage runs
+          // as a fresh OnboardingPipelineWorkflow; without this the
+          // workflow re-derived its resume point from onboard.json and
+          // could not express "resume past awaiting_verification" — it
+          // restarted from metadata and the brief stage never ran.
+          // OnboardingPipelineWorkflow trusts resume_stage when it is a
+          // STAGE_ORDER member and resumes at exactly that stage.
+          resume_stage: "brief",
         };
         if (
           briefGmailMode === "composio" &&

@@ -36,10 +36,15 @@ def _read_onboard(path: str) -> dict[str, Any]:
         with open(path) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
+        # Fresh default. `stage` MUST be a real STAGE_ORDER member
+        # (onboarding_pipeline.STAGE_ORDER) — the legacy "backfill" value
+        # is NOT in STAGE_ORDER and made _stage_index swallow a ValueError
+        # → full pipeline restart (#74). "metadata" is the real first
+        # stage.
         return {
             "user_id": "",
             "started_at": "",
-            "stage": "backfill",
+            "stage": "metadata",
             "progress": {"current_day": 0, "total_days": 0, "facts_count": 0, "patterns_count": 0},
             "facts": [],
             "patterns": [],
@@ -135,11 +140,13 @@ async def init_onboard_json(onboard_path: str, user_id: str) -> dict[str, Any]:
         activity.heartbeat(f"Resuming: stage={existing.get('stage')}, facts={len(existing['facts'])}")
         return existing
 
-    # Fresh start
+    # Fresh start. `stage` MUST be a real STAGE_ORDER member — "backfill"
+    # is not in onboarding_pipeline.STAGE_ORDER and used to make
+    # _stage_index swallow a ValueError → full pipeline restart (#74).
     data = {
         "user_id": user_id,
         "started_at": datetime.now(timezone.utc).isoformat(),
-        "stage": "backfill",
+        "stage": "metadata",
         "progress": {"current_day": 0, "total_days": 0, "facts_count": 0, "patterns_count": 0},
         "facts": [],
         "patterns": [],
