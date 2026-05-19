@@ -540,6 +540,17 @@ chown -R 1000:1000 /vault 2>/dev/null || true
 mkdir -p /alfred-data
 chmod -R 777 /alfred-data 2>/dev/null || true
 
+# OPS-TOKEN-1-followup: the recursive chmod 777 above wipes the
+# 0:1000 0640 perms we set on the gateway token at line 227 and lets
+# any tenant container overwrite the token, so the perm hardening only
+# survives until this point. Re-apply on the token specifically — keeps
+# /alfred-data world-writable for the legacy callers but locks the
+# token down to root-write / group-1000-read.
+if [[ -f "$TOKEN_FILE" ]]; then
+    chown 0:1000 "$TOKEN_FILE" 2>/dev/null || true
+    chmod 0640 "$TOKEN_FILE" 2>/dev/null || true
+fi
+
 # Chore system: where dynamic chore template files live (Step 4 of the
 # bespoke chore generation system). The dynamic loader in alfred-learn
 # scans this directory at startup, validates each .py via Layer 2 static
