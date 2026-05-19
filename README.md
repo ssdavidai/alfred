@@ -183,6 +183,16 @@ agents) take **bare OpenRouter model IDs** (see `openrouter.ai/models`).
 Defaults: `x-ai/grok-4.3` and `openai/gpt-4.1-nano`. To change one, edit
 `.env` and run `docker compose up -d --force-recreate init hermes`.
 
+**Switching provider.** Hermes itself supports many providers (OpenAI,
+OpenAI Codex, Nous Portal, NovitaAI, NIM, a custom endpoint, …). To switch,
+use Hermes' own command inside the container —
+`docker compose exec hermes hermes model` (and `hermes auth add <provider>`
+for OAuth providers) — then `docker compose restart hermes`. The `init`
+container preserves a switched `model:` block across restarts, so the choice
+persists. (Note: as of Hermes `v2026.5.16`, the `openai-codex` provider is
+broken inside the agent loop — upstream issue #5736 — so a Codex
+subscription does not yet work for Alfred; OpenRouter is the supported path.)
+
 ### Optional: the Vexa meeting-transcription stack
 
 Vexa (meeting-bot transcription) ships behind a Compose profile so it is

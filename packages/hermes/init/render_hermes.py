@@ -40,9 +40,12 @@ runtime view (e.g. /opt/data/profiles/main); the script writes the files
 through <profile_dir> but bakes paths from HERMES_RUNTIME_PROFILE_DIR.
 When unset, it falls back to <profile_dir> (single-view setups).
 
-The script is idempotent: it always overwrites config.yaml + .env so a
-re-run picks up template or env changes. It never touches sessions,
-memory, or skills.
+The script is idempotent: it re-renders config.yaml + .env on every run so
+template and .env changes propagate. The ONE exception: if the principal
+has switched the LLM provider away from the default (openrouter) using
+Hermes' own `hermes model` command, the `model:` block in config.yaml is
+preserved across re-renders rather than clobbered back to the template
+default. It never touches sessions, memory, skills, or auth.json.
 """
 
 from __future__ import annotations
@@ -57,6 +60,75 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 # 18789/18790 and forwards here. Must match docker/supervisor.sh and
 # the shim's port table.
 _INTERNAL_API_PORT = {"main": 18799, "workers": 18800}
+
+# The template renders the `model:` block with `provider: openrouter`. Hermes
+# owns provider/model selection natively (`hermes model`, with a live model
+# picker) and that edit lands in config.yaml — which this script re-renders
+# on every boot. To avoid clobbering a deliberate switch, a re-render keeps
+# the existing `model:` block whenever its provider is no longer the default.
+_DEFAULT_PROVIDER = "openrouter"
+
+
+def _model_block_span(text: str):
+    """Line span [start, end) of the top-level `model:` block in `text`.
+
+    The block runs from the `model:` line through the last line before the
+    next column-0 (non-indented, non-blank) line — the next top-level key or
+    comment divider. Returns None when there is no top-level `model:` key.
+    """
+    lines = text.splitlines(keepends=True)
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("model:")), None)
+    if start is None:
+        return None
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        ln = lines[j]
+        if ln.strip() and not ln[0].isspace():
+            end = j
+            break
+    return start, end
+
+
+def _block_provider(block: str):
+    """The `provider:` value inside a rendered `model:` block, or None."""
+    for ln in block.splitlines():
+        s = ln.strip()
+        if s.startswith("provider:"):
+            return s.split(":", 1)[1].strip().strip("\"'")
+    return None
+
+
+def _preserve_switched_model_block(rendered: str, config_path: Path) -> str:
+    """Keep a user-switched `model:` block across a re-render.
+
+    If config.yaml already exists and its `model:` block has been pointed at
+    a non-default provider (via `hermes model`), splice that block into the
+    freshly-rendered config so init does not clobber the principal's choice.
+    While still on the default provider, the block re-renders normally so
+    HERMES_MAIN_MODEL / HERMES_WORKERS_MODEL edits in .env keep taking effect.
+    """
+    if not config_path.exists():
+        return rendered
+    try:
+        old_text = config_path.read_text(encoding="utf-8")
+    except OSError:
+        return rendered
+    old_span = _model_block_span(old_text)
+    new_span = _model_block_span(rendered)
+    if not old_span or not new_span:
+        return rendered
+    old_lines = old_text.splitlines(keepends=True)
+    old_block = "".join(old_lines[old_span[0]:old_span[1]])
+    provider = _block_provider(old_block)
+    if not provider or provider == _DEFAULT_PROVIDER:
+        return rendered  # still on the default — re-render from the template
+    new_lines = rendered.splitlines(keepends=True)
+    print(f"[render] preserving user-switched model: block (provider={provider})")
+    return (
+        "".join(new_lines[: new_span[0]])
+        + old_block
+        + "".join(new_lines[new_span[1] :])
+    )
 
 
 def main() -> int:
@@ -120,6 +192,7 @@ def main() -> int:
         workers_model=os.environ.get("HERMES_WORKERS_MODEL", "openai/gpt-4.1-nano"),
     )
     config_path = profile_dir / "config.yaml"
+    config_out = _preserve_switched_model_block(config_out, config_path)
     config_path.write_text(config_out, encoding="utf-8")
     config_path.chmod(0o640)
     print(f"[render] wrote {config_path} ({len(config_out)} bytes)")
