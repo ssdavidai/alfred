@@ -149,6 +149,8 @@ from src.activities.onboarding_v3 import (
 from src.activities.pull import (
     backfill_gmail_as_events,
     build_sync_args,
+    composio_backfill_gmail_as_events,
+    composio_fetch_email_metadata,
     composio_pull,
     http_pull,
     http_pull_detail,
@@ -240,6 +242,7 @@ from src.activities.judge import (
 # Activities — onboarding v2
 from src.activities.onboarding import (
     init_onboard_json,
+    persist_onboarding_mode,
     update_onboard_stage,
     update_onboard_progress,
     backfill_gmail_history,
@@ -738,6 +741,8 @@ ALL_ACTIVITIES = [
     ensure_enrichment_entities,
     # Pull
     backfill_gmail_as_events,
+    composio_backfill_gmail_as_events,
+    composio_fetch_email_metadata,
     build_sync_args,
     composio_pull,
     http_pull,
@@ -811,6 +816,7 @@ ALL_ACTIVITIES = [
     write_task_artifacts,
     # Onboarding v2
     init_onboard_json,
+    persist_onboarding_mode,
     update_onboard_stage,
     update_onboard_progress,
     backfill_gmail_history,

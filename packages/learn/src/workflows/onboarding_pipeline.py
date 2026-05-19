@@ -26,6 +26,7 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from src.activities.onboarding import (
         init_onboard_json,
+        persist_onboarding_mode,
         update_onboard_stage,
         update_onboard_progress,
     )
@@ -37,7 +38,11 @@ with workflow.unsafe.imports_passed_through():
         write_brief_opus,
         write_brief_and_opportunities_opus,
     )
-    from src.activities.pull import backfill_gmail_as_events
+    from src.activities.pull import (
+        backfill_gmail_as_events,
+        composio_backfill_gmail_as_events,
+        composio_fetch_email_metadata,
+    )
     from src.activities.batch_processor import process_stream_batch
     from src.activities.profiler import run_behavioral_profiler
     from src.activities.packs import (
@@ -82,6 +87,31 @@ def _stage_index(stage: str) -> int:
 class OnboardingInput:
     user_id: str
     stream_id: str = ""
+    # Gmail backfill mode — decided ONCE at workflow start by the caller
+    # (the SaaS, from server-side env) and carried in the workflow input.
+    # The email stages branch on this field; they MUST NOT read env inside
+    # the workflow body, or a replay on a host with different env would
+    # diverge from history (Temporal non-determinism).
+    #
+    #   "google"   — legacy direct-Gmail path: a `google` OAuthCredential in
+    #                the SaaS DB, fetched via /api/internal/oauth2/token.
+    #   "composio" — Composio managed OAuth: GMAIL_FETCH_EMAILS via the
+    #                composio_pull machinery, no Google token needed.
+    #
+    # Defaults to "google" so onboardings started before P2 stamps the
+    # field (older `OnboardingInput` payloads) keep the existing behaviour
+    # unchanged. New Composio onboardings must set gmail_mode="composio".
+    #
+    # P2-RECONCILED: the web/ctrl-api side (P2, ctrl-api
+    # routes/workflows.ts `onboarding/start`) already stamps this exact
+    # field name `gmail_mode` ("composio" | "google") into the
+    # workflow-start `--input`. Names match — no reconciliation needed.
+    gmail_mode: str = "google"
+    # The exact Composio fetch action for the email stages — P2 sends
+    # "GMAIL_FETCH_EMAILS" alongside gmail_mode="composio". Carried for
+    # forward-compat / so the brief-stage resume path can re-stamp it;
+    # the P3 email activities hard-target GMAIL_FETCH_EMAILS regardless.
+    composio_action: str = ""
 
 
 @dataclass
@@ -108,6 +138,27 @@ class OnboardingPipelineWorkflow:
         current_stage = current_state.get("stage", "metadata")
         resume_idx = _stage_index(current_stage)
 
+        # Gmail backfill mode — read ONCE from the workflow input. Replay-safe:
+        # this is a deterministic field on the input, never an env read. Every
+        # email-stage branch below keys off this local, so a resume (which
+        # carries the same OnboardingInput) always takes the same path.
+        use_composio_gmail = input.gmail_mode == "composio"
+
+        # Persist the Gmail-mode contract into onboard.json so the
+        # brief-stage resume path (ctrl-api /onboarding/corrections, #69)
+        # can rebuild this same OnboardingInput and stay on the same path.
+        # Idempotent — a resume just re-writes the same values.
+        await workflow.execute_activity(
+            persist_onboarding_mode,
+            args=[
+                onboard_path,
+                input.stream_id,
+                input.gmail_mode,
+                input.composio_action,
+            ],
+            start_to_close_timeout=timedelta(seconds=10),
+        )
+
         # If already done, skip everything
         if current_stage == "done":
             return OnboardingResult(
@@ -127,9 +178,18 @@ class OnboardingPipelineWorkflow:
             )
 
             # Activity writes emails directly to onboard.json (too large for
-            # Temporal activity result — 5000 emails exceeds 4MB gRPC limit)
+            # Temporal activity result — 5000 emails exceeds 4MB gRPC limit).
+            # Composio path: GMAIL_FETCH_EMAILS via managed OAuth (no Google
+            # token). Google path: the legacy direct-Gmail fetch. Both write
+            # the SAME onboard.json `emails` shape so every downstream stage
+            # (profiler, Opus) is mode-agnostic.
+            email_metadata_activity = (
+                composio_fetch_email_metadata
+                if use_composio_gmail
+                else fetch_email_metadata
+            )
             await workflow.execute_activity(
-                fetch_email_metadata,
+                email_metadata_activity,
                 args=[input.user_id],
                 start_to_close_timeout=timedelta(minutes=30),
                 heartbeat_timeout=timedelta(seconds=60),
@@ -381,9 +441,16 @@ class OnboardingPipelineWorkflow:
         # Background: full email backfill → batch to inbox → curator
         # -----------------------------------------------------------------
         if input.stream_id:
-            # Fetch full emails as stream events
+            # Fetch full emails as stream events. Composio path uses the
+            # GMAIL_FETCH_EMAILS paginated loop → composio parser → ingest;
+            # Google path uses the legacy direct-Gmail full-message fetch.
+            backfill_activity = (
+                composio_backfill_gmail_as_events
+                if use_composio_gmail
+                else backfill_gmail_as_events
+            )
             await workflow.execute_activity(
-                backfill_gmail_as_events,
+                backfill_activity,
                 args=[input.stream_id, input.user_id, 100, 5000],
                 start_to_close_timeout=timedelta(minutes=60),
                 heartbeat_timeout=timedelta(seconds=120),

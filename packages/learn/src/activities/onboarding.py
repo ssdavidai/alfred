@@ -152,6 +152,35 @@ async def init_onboard_json(onboard_path: str, user_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Activity: persist_onboarding_mode
+# ---------------------------------------------------------------------------
+
+@activity.defn
+async def persist_onboarding_mode(
+    onboard_path: str,
+    stream_id: str,
+    gmail_mode: str,
+    composio_action: str,
+) -> None:
+    """Persist the Gmail-mode contract fields into onboard.json.
+
+    The brief-stage resume path (ctrl-api ``POST /api/v1/onboarding/
+    corrections``, #69) re-triggers ``OnboardingPipelineWorkflow`` and
+    reads ``gmail_mode`` / ``composio_action`` / ``stream_id`` back off
+    ``onboard.json`` to rebuild the workflow input — so the resumed run
+    stays on the same Gmail path. The learn pipeline must therefore
+    write these fields at first start. Idempotent: a resume just
+    re-writes the same values.
+    """
+    data = _read_onboard(onboard_path)
+    data["stream_id"] = stream_id
+    data["gmail_mode"] = gmail_mode if gmail_mode in ("composio", "google") else "google"
+    if composio_action:
+        data["composio_action"] = composio_action
+    _write_onboard(onboard_path, data)
+
+
+# ---------------------------------------------------------------------------
 # Activity: update_onboard_stage
 # ---------------------------------------------------------------------------
 

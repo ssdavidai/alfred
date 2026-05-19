@@ -631,6 +631,264 @@ async def backfill_gmail_as_events(
     return ingested
 
 
+# ---------------------------------------------------------------------------
+# Composio Gmail onboarding backfill (issue #70)
+#
+# The recurring stream puller drives GMAIL_FETCH_EMAILS through
+# ``composio_pull`` + ``SYNC_CONFIGS`` — but that path inherits the
+# ``verbose:true`` schema default which Composio caps at ``max_results:30``
+# (the #474 artifact). Onboarding needs a 100-day backfill of thousands of
+# messages, so it must set ``verbose:false`` explicitly — that unlocks
+# ``max_results:500`` and a plain ``nextPageToken`` pagination loop
+# (~10 calls / ~90s per 5000 messages, per the epic #66 probe verdict).
+#
+# These two activities are the Composio variants of the direct-Gmail
+# ``fetch_email_metadata`` / ``backfill_gmail_as_events``. They take no
+# OAuth token — Composio holds the credential, resolved per-tenant from
+# COMPOSIO_USER_ID inside ``execute_action``.
+# ---------------------------------------------------------------------------
+
+# Gmail query for the onboarding backfill window. Mirrors the direct-Gmail
+# path's filter (drafts/spam/trash/chats excluded); ``-category:promotions``
+# is intentionally dropped here because it is a Gmail-UI categorisation that
+# the probe did not confirm is honoured under Composio's GMAIL_FETCH_EMAILS.
+_COMPOSIO_GMAIL_EXCLUDES = "-in:drafts -in:spam -in:trash -in:chats"
+
+# verbose:false unlocks max_results up to 500 (verbose:true forces 30 — #474).
+_COMPOSIO_GMAIL_PAGE_SIZE = 500
+
+
+def _composio_gmail_messages(raw_response: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    """Extract (messages, nextPageToken) from a GMAIL_FETCH_EMAILS response.
+
+    Composio wraps the Gmail payload at varying nesting depths
+    (``data`` / ``data.response_data``). Returns an empty list + empty
+    token when the page carries no messages — the loop's termination
+    signal.
+    """
+    if not isinstance(raw_response, dict):
+        return [], ""
+    # Walk the known Composio wrapper shapes to the payload dict.
+    payload: Any = raw_response
+    for _ in range(3):
+        if not isinstance(payload, dict):
+            break
+        if "messages" in payload or "nextPageToken" in payload:
+            break
+        nxt = payload.get("data")
+        if nxt is None:
+            nxt = payload.get("response_data")
+        if nxt is None:
+            break
+        payload = nxt
+    if not isinstance(payload, dict):
+        return [], ""
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        messages = []
+    token = payload.get("nextPageToken") or ""
+    return [m for m in messages if isinstance(m, dict)], str(token)
+
+
+def _composio_msg_to_email(msg: dict[str, Any]) -> dict[str, Any]:
+    """Map one verbose:false GMAIL_FETCH_EMAILS message to the profiler shape.
+
+    The behavioral profiler (src/profiler/features.py) reads onboard.json
+    ``emails`` entries by the keys ``from``/``to``/``subject``/``date``/
+    ``snippet``/``domain`` — the exact shape the direct-Gmail
+    ``fetch_email_metadata`` emits. This adapts Composio's per-message
+    fields (``sender``/``to``/``subject``/``messageTimestamp``/
+    ``preview.body``) to that shape so the profiler is mode-agnostic.
+    """
+    sender = str(msg.get("sender") or msg.get("from") or "")
+    domain = sender.split("@")[-1].strip(">").strip() if "@" in sender else "unknown"
+    preview = msg.get("preview")
+    snippet = ""
+    if isinstance(preview, dict):
+        snippet = str(preview.get("body") or "")
+    if not snippet:
+        snippet = str(msg.get("snippet") or "")
+    return {
+        "from": sender,
+        "to": str(msg.get("to") or ""),
+        "subject": str(msg.get("subject") or ""),
+        "date": str(msg.get("messageTimestamp") or msg.get("date") or ""),
+        "snippet": snippet,
+        "domain": domain,
+    }
+
+
+async def _composio_gmail_pages(
+    query: str,
+    max_messages: int,
+    page_size: int = _COMPOSIO_GMAIL_PAGE_SIZE,
+):
+    """Yield pages of GMAIL_FETCH_EMAILS messages — the backfill loop.
+
+    A simple paginated loop: each call passes ``verbose:false`` and
+    ``max_results`` and the running ``page_token``; the loop follows
+    ``nextPageToken`` and terminates on an empty page (no messages or no
+    token) or when ``max_messages`` is reached. ``verbose:false`` is
+    mandatory — it is the difference between ``max_results:500`` and the
+    ``verbose:true`` 30-cap (#474).
+
+    Runs synchronous ``composio_pull`` work in a thread so the activity
+    event loop keeps heartbeating.
+    """
+    page_token = ""
+    fetched = 0
+    while True:
+        args: dict[str, Any] = {
+            "userId": "me",
+            "query": query,
+            "verbose": False,
+            "max_results": page_size,
+        }
+        if page_token:
+            args["page_token"] = page_token
+        raw_response = await composio_pull("GMAIL_FETCH_EMAILS", args)
+        messages, page_token = _composio_gmail_messages(raw_response)
+        if not messages:
+            # Empty page — backfill complete.
+            break
+        yield messages
+        fetched += len(messages)
+        try:
+            activity.heartbeat(f"composio gmail: fetched {fetched} messages")
+        except Exception:
+            pass
+        if not page_token or fetched >= max_messages:
+            break
+
+
+@activity.defn
+async def composio_fetch_email_metadata(user_id: str) -> dict[str, Any]:
+    """Composio variant of ``fetch_email_metadata`` (onboarding Stage 1).
+
+    Backfills the last 100 days of Gmail through Composio's managed OAuth
+    (no Google token needed) and writes the email corpus to onboard.json
+    in the same shape the direct-Gmail path produces, so the behavioral
+    profiler and the Opus stages are mode-agnostic.
+
+    ``user_id`` is accepted for activity-signature parity with the direct
+    path but is unused — Composio resolves the credential from the
+    tenant's COMPOSIO_USER_ID.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from_date = (datetime.now(timezone.utc) - timedelta(days=100)).strftime("%Y/%m/%d")
+    query = f"after:{from_date} {_COMPOSIO_GMAIL_EXCLUDES}"
+
+    emails: list[dict[str, Any]] = []
+    async for page in _composio_gmail_pages(query, max_messages=5000):
+        for msg in page:
+            emails.append(_composio_msg_to_email(msg))
+            if len(emails) >= 5000:
+                break
+        if len(emails) >= 5000:
+            break
+
+    by_domain: dict[str, int] = {}
+    for e in emails:
+        by_domain[e["domain"]] = by_domain.get(e["domain"], 0) + 1
+
+    logger.info(
+        "composio_fetch_email_metadata: fetched %d emails from %d domains",
+        len(emails), len(by_domain),
+    )
+
+    # Write emails directly to onboard.json — same contract as the direct
+    # path (5000 emails exceeds Temporal's 4MB activity-result limit).
+    import json
+
+    onboard_path = os.environ.get("ONBOARD_PATH", "/alfred-data/onboard.json")
+    try:
+        with open(onboard_path, encoding="utf-8") as f:
+            onboard = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        onboard = {}
+    if not isinstance(onboard.get("progress"), dict):
+        onboard["progress"] = {"current_day": 0, "total_days": 0, "facts_count": 0, "patterns_count": 0}
+    onboard["emails"] = emails
+    onboard["top_domains"] = sorted(by_domain.items(), key=lambda x: -x[1])[:30]
+    onboard["progress"]["current_day"] = len(emails)
+    onboard["progress"]["total_days"] = len(emails)
+    os.makedirs(os.path.dirname(onboard_path), exist_ok=True)
+    with open(onboard_path, "w", encoding="utf-8") as f:
+        json.dump(onboard, f, indent=2)
+
+    return {"count": len(emails), "domains": len(by_domain)}
+
+
+@activity.defn
+async def composio_backfill_gmail_as_events(
+    stream_id: str,
+    user_id: str,
+    days: int = 100,
+    max_messages: int = 5000,
+) -> int:
+    """Composio variant of ``backfill_gmail_as_events`` (onboarding background).
+
+    Same paginated GMAIL_FETCH_EMAILS loop as
+    ``composio_fetch_email_metadata``, but feeds each message through the
+    ``composio`` parser → ctrl ``/streams/ingest`` so the event processor
+    and curator handle them normally. Takes no Google token — Composio
+    holds the credential.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    config = load_config()
+    parser = get_parser("composio")
+
+    from_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y/%m/%d")
+    query = f"after:{from_date} {_COMPOSIO_GMAIL_EXCLUDES}"
+
+    ingested = 0
+    seen = 0
+    async with _ctrl_client(config) as ctrl:
+        async for page in _composio_gmail_pages(query, max_messages=max_messages):
+            for msg in page:
+                seen += 1
+                try:
+                    for event in parser(msg):
+                        ingest_resp = await ctrl.post(
+                            "/api/v1/streams/ingest",
+                            json={
+                                "stream_id": stream_id,
+                                "stream_type": "gmail",
+                                "source_ref": event.source_ref,
+                                "received_at": event.received_at,
+                                "raw": event.raw,
+                                "summary": event.summary,
+                                "metadata": {
+                                    **event.metadata,
+                                    "event_type": event.event_type,
+                                    "parser": "composio",
+                                    "backfill": True,
+                                },
+                            },
+                        )
+                        if ingest_resp.status_code in (200, 201):
+                            status = ingest_resp.json().get("status", "")
+                            if status != "duplicate":
+                                ingested += 1
+                except Exception as exc:
+                    logger.warning("composio_backfill_gmail: failed msg: %s", exc)
+                    continue
+            try:
+                activity.heartbeat(f"composio backfill: ingested {ingested}/{seen}")
+            except Exception:
+                pass
+            if seen >= max_messages:
+                break
+
+    logger.info(
+        "composio_backfill_gmail_as_events: ingested %d events from %d messages",
+        ingested, seen,
+    )
+    return ingested
+
+
 @activity.defn
 async def composio_pull(
     action_slug: str,
