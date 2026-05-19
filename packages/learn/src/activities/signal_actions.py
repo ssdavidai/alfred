@@ -1046,6 +1046,88 @@ async def write_needs_attention_record(
             written, decision_reason, combined_confidence,
             matched_instinct_path or "none",
         )
+
+        # STORE-P6-1 followup shadow write — emit a corresponding row to
+        # state.db's ``needs_attention`` table via ctrl-api. The markdown
+        # record remains authoritative during the soak; failures here are
+        # logged + swallowed (never starve the primary write that already
+        # landed). Replay-safe: this is inside an ``@activity.defn`` body,
+        # so no ``workflow.patched()`` gate is required per
+        # packages/learn/CLAUDE.md.
+        try:
+            from src.activities.needs_attention_writer import (
+                write_needs_attention_safe,
+            )
+
+            # Prefer the explicit voiced headline when present; else
+            # fall back to the actionable summary; finally the
+            # ``Needs Attention: ...`` body label.
+            shadow_headline = (
+                display_headline
+                or action_what
+                or f"Needs Attention: {decision_reason}"
+            )[:500]
+
+            # body = the rendered markdown body (without frontmatter)
+            shadow_body = "\n".join(body_lines)
+
+            # target_matter: only stamp when the binding is matter-prefixed.
+            shadow_target_matter: str | None = None
+            if isinstance(target_path, str) and target_path.strip().startswith(
+                "matter/"
+            ):
+                shadow_target_matter = target_path.strip()
+
+            shadow_target_kind: str | None = None
+            if isinstance(target_kind, str) and target_kind.strip():
+                shadow_target_kind = target_kind.strip()
+
+            shadow_source_signal: str | None = (
+                source_signal_path.strip() if source_signal_path else None
+            )
+
+            # Forensic payload — the full card frontmatter (mirrors the
+            # YAML we wrote into the markdown file).
+            shadow_payload: dict[str, Any] = {
+                "source_signal_path": source_signal_path,
+                "source_event_path": source_event_path,
+                "action_what": action_what,
+                "suggested_actor": suggested_actor,
+                "due_at": due_at,
+                "target_path": target_path,
+                "target_kind": target_kind,
+                "matched_instinct": matched_instinct_path,
+                "decision_reason": decision_reason,
+                "confidence": round(combined_confidence, 4),
+                "target_confidence": round(target_confidence, 4),
+                "effect_confidence": round(effect_confidence, 4),
+                "status": "pending",
+                "raw_quote": raw_quote,
+                "reasoning": reasoning,
+                "display_headline": display_headline or None,
+                "display_body": display_body or None,
+                "vault_path": written,
+            }
+
+            await write_needs_attention_safe(
+                headline=shadow_headline,
+                body=shadow_body,
+                source_signal_id=shadow_source_signal,
+                target_matter=shadow_target_matter,
+                target_kind=shadow_target_kind,
+                payload=shadow_payload,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Defence in depth — write_needs_attention_safe already
+            # swallows transport errors, but a programming error in the
+            # kwargs mapping above would surface here. Never sink the
+            # primary markdown write because of a shadow-mode bug.
+            logger.warning(
+                "signal_actions.write_needs_attention_record: "
+                "shadow SQL emit failed path=%s err=%r",
+                written, exc,
+            )
+
         return written
     finally:
         await client.close()

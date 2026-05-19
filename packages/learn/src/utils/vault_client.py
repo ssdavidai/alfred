@@ -464,6 +464,78 @@ class VaultClient:
         resp.raise_for_status()
         return resp.json().get("results", []) or []
 
+    # --- Pattern proposal + needs_attention rows (STORE-P6-1 followup) -----
+
+    async def write_pattern_proposal(
+        self,
+        *,
+        proposed_name: str,
+        proposed_body: str,
+        cluster_size: int = 0,
+        member_observation_ids: list[str] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """POST one row to the pattern_proposal table via ctrl-api.
+
+        Wraps ``POST /api/v1/pattern-proposals`` (STORE-P6-1 followup).
+        The server assigns ``id`` (UUIDv4) and ``ts`` (unix ns, returned
+        as decimal STRING so nanosecond precision survives JSON's
+        ``Number.MAX_SAFE_INTEGER`` ceiling).
+
+        Returns ``{"id": "<uuid>", "ts": "<unix-ns-string>"}``.
+        """
+        body: dict[str, Any] = {
+            "proposed_name": proposed_name,
+            "proposed_body": proposed_body,
+            "cluster_size": int(cluster_size),
+        }
+        if member_observation_ids is not None:
+            body["member_observation_ids"] = list(member_observation_ids)
+        if payload is not None:
+            body["payload"] = payload
+        resp = await self._client.post(
+            "/api/v1/pattern-proposals", json=body,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def write_needs_attention(
+        self,
+        *,
+        headline: str,
+        body: str,
+        source_signal_id: str | None = None,
+        target_matter: str | None = None,
+        target_kind: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """POST one row to the needs_attention table via ctrl-api.
+
+        Wraps ``POST /api/v1/needs-attention`` (STORE-P6-1 followup).
+        The server assigns ``id`` (UUIDv4) and ``ts`` (unix ns, returned
+        as decimal STRING so nanosecond precision survives JSON's
+        ``Number.MAX_SAFE_INTEGER`` ceiling).
+
+        Returns ``{"id": "<uuid>", "ts": "<unix-ns-string>"}``.
+        """
+        request_body: dict[str, Any] = {
+            "headline": headline,
+            "body": body,
+        }
+        if source_signal_id is not None:
+            request_body["source_signal_id"] = source_signal_id
+        if target_matter is not None:
+            request_body["target_matter"] = target_matter
+        if target_kind is not None:
+            request_body["target_kind"] = target_kind
+        if payload is not None:
+            request_body["payload"] = payload
+        resp = await self._client.post(
+            "/api/v1/needs-attention", json=request_body,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # --- Plane Steward action helpers (#839 Phase 3) -----------------------
 
     async def plane_post_steward_action(

@@ -611,6 +611,44 @@ async def detect_pattern_proposals() -> dict[str, Any]:
                 path, cluster["sender"][:40], cluster["intent"],
                 cluster["cluster_size"], cluster["agreement"],
             )
+
+            # STORE-P6-1 followup shadow write — emit a corresponding row
+            # to state.db's ``pattern_proposal`` table via ctrl-api. The
+            # markdown record remains authoritative during the soak;
+            # failures here are logged + swallowed (never starve the
+            # primary write that already landed). Replay-safe: this is
+            # inside an ``@activity.defn`` body, so no
+            # ``workflow.patched()`` gate is required per
+            # packages/learn/CLAUDE.md.
+            try:
+                from src.activities.pattern_proposal_writer import (
+                    write_pattern_proposal_safe,
+                )
+
+                observation_refs = fm.get("observation_refs") or []
+                member_ids = (
+                    [str(x) for x in observation_refs]
+                    if isinstance(observation_refs, list)
+                    else None
+                )
+                await write_pattern_proposal_safe(
+                    proposed_name=str(fm.get("name") or record_name),
+                    proposed_body=content,
+                    cluster_size=int(fm.get("cluster_size") or 0),
+                    member_observation_ids=member_ids,
+                    payload=fm,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Defence in depth — write_pattern_proposal_safe already
+                # swallows transport errors, but a programming error in
+                # the kwargs mapping above would surface here. Never
+                # sink the primary markdown write because of a
+                # shadow-mode bug.
+                logger.warning(
+                    "pattern_detection: shadow SQL emit failed name=%s err=%r",
+                    record_name, exc,
+                )
+
             # Also add to skip set so a duplicate cluster later in the
             # same pass doesn't double-write.
             skip.add(key)
