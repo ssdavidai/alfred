@@ -48,6 +48,8 @@ import { registerStateChangeRoutes } from "./routes/stateChanges.js";
 import { registerAuditRoutes } from "./routes/audit.js";
 import { registerSignalRoutes } from "./routes/signals.js";
 import { registerObservationRoutes } from "./routes/observations.js";
+import { registerPatternProposalRoutes } from "./routes/pattern_proposals.js";
+import { registerNeedsAttentionRoutes } from "./routes/needs_attention.js";
 import { registerTodoRoutes } from "./routes/todos.js";
 import { registerPlaneStewardWebhookRoute } from "./routes/webhooks/plane.js";
 import { registerVexaWebhookRoute } from "./routes/webhooks/vexa.js";
@@ -155,6 +157,8 @@ export function createApiServer(): http.Server {
   registerAuditRoutes();
   registerSignalRoutes();
   registerObservationRoutes();
+  registerPatternProposalRoutes();
+  registerNeedsAttentionRoutes();
   registerTodoRoutes();
   registerPlaneStewardWebhookRoute();
   registerVexaWebhookRoute();
