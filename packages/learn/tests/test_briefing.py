@@ -793,3 +793,138 @@ async def test_gather_window_signals_respects_env_override(
     assert any(
         (entry.get("when") or "").startswith("2026-04-13") for entry in out_off
     ), f"expected aged signal to appear with cutoff disabled, got {out_off!r}"
+
+
+# ---------------------------------------------------------------------------
+# _collapse_duplicate_section_headers — Bug C (rapali 2026-05-19-morning)
+# ---------------------------------------------------------------------------
+
+
+def test_collapse_duplicate_header_preamble_then_list():
+    """The exact rapali 2026-05-19-morning pattern.
+
+    Section header appears twice: first with an intro sentence but no
+    list, second with an empty header line followed by the numbered
+    list. The collapser must emit the header exactly once with the
+    preamble + list both attached underneath.
+    """
+    from src.activities.briefing import _collapse_duplicate_section_headers
+
+    body = (
+        "**Ma.** Négy sorba sorolom a legfontosabb teendőket.\n"
+        "\n"
+        "**Ma.** \n"
+        "\n"
+        "1. **Mahesh, Maven** — 6 órán belül lezárul az ablaka.\n"
+        "2. **Julianna Kocsis** — válasz a partnership ajánlatra.\n"
+    )
+    out = _collapse_duplicate_section_headers(body)
+    assert out.count("**Ma.**") == 1
+    # First header + its preamble + the list all survived.
+    assert "Négy sorba sorolom" in out
+    assert "Mahesh, Maven" in out
+    assert "Julianna Kocsis" in out
+    # Body order preserved: header, preamble, list.
+    header_idx = out.find("**Ma.**")
+    preamble_idx = out.find("Négy sorba sorolom")
+    list_idx = out.find("1. **Mahesh")
+    assert header_idx < preamble_idx < list_idx
+
+
+def test_collapse_duplicate_header_english_today():
+    """English-language equivalent — the same artefact in 'Today' form.
+
+    Confirms the pass is language-agnostic.
+    """
+    from src.activities.briefing import _collapse_duplicate_section_headers
+
+    body = (
+        "**Today.** Two items on your desk.\n"
+        "\n"
+        "**Today.**\n"
+        "\n"
+        "1. Approve the EIN application.\n"
+        "2. Reply to Aaron.\n"
+    )
+    out = _collapse_duplicate_section_headers(body)
+    assert out.count("**Today.**") == 1
+    assert "Two items on your desk." in out
+    assert "Approve the EIN application." in out
+
+
+def test_collapse_idempotent_when_no_duplicate():
+    """Single-header sections must pass through unchanged."""
+    from src.activities.briefing import _collapse_duplicate_section_headers
+
+    body = (
+        "**Today.** Two items.\n"
+        "\n"
+        "1. First.\n"
+        "2. Second.\n"
+        "\n"
+        "**Flags.** One anomaly.\n"
+        "\n"
+        "- Card declined.\n"
+    )
+    out = _collapse_duplicate_section_headers(body)
+    assert out == body
+
+
+def test_collapse_preserves_distinct_sections_with_real_preambles():
+    """Defensive: two headers both carrying their own preamble are NOT merged.
+
+    The renderer bug only manifests as an empty-tail second header. If
+    both headers have real prose after them, that's a different scenario
+    and we should leave it alone.
+    """
+    from src.activities.briefing import _collapse_duplicate_section_headers
+
+    body = (
+        "**Today.** First block of prose.\n"
+        "\n"
+        "**Today.** Second block of prose with content.\n"
+    )
+    out = _collapse_duplicate_section_headers(body)
+    # Both occurrences survive because both have real content attached.
+    assert out.count("**Today.**") == 2
+
+
+def test_collapse_is_idempotent():
+    """Running the pass twice produces the same output as once."""
+    from src.activities.briefing import _collapse_duplicate_section_headers
+
+    body = (
+        "**Ma.** Négy sorba sorolom.\n"
+        "\n"
+        "**Ma.**\n"
+        "\n"
+        "1. First.\n"
+    )
+    once = _collapse_duplicate_section_headers(body)
+    twice = _collapse_duplicate_section_headers(once)
+    assert once == twice
+    assert once.count("**Ma.**") == 1
+
+
+def test_collapse_handles_preamble_plus_list_both_present():
+    """The unit-test the PR asks for, stated directly.
+
+    A section with BOTH a preamble (sentence) AND a list payload must
+    emit its header exactly once, regardless of how the LLM segmented
+    the blocks.
+    """
+    from src.activities.briefing import _collapse_duplicate_section_headers
+
+    body_with_dup_header = (
+        "**Waiting on you.** Three threads in your court.\n"
+        "\n"
+        "**Waiting on you.**\n"
+        "\n"
+        "- Mahesh — Maven welcome session.\n"
+        "- Julianna — partnership reply.\n"
+    )
+    out = _collapse_duplicate_section_headers(body_with_dup_header)
+    assert out.count("**Waiting on you.**") == 1
+    assert "Three threads in your court." in out
+    assert "Mahesh" in out
+    assert "Julianna" in out

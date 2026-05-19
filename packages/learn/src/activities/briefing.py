@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -698,6 +699,108 @@ def _strip_compose_preamble(body: str) -> str:
             if len(after) > 80:
                 return after
     return body
+
+
+# Section header pattern: a bold prose label like ``**Today.**`` or
+# ``**Ma.**``. The label body is 1-30 chars, may include letters, an
+# apostrophe ("Day's shape"), and a trailing period. Anchored to the
+# start of a line because **bold** mid-sentence emphasis would otherwise
+# match. The trailing punctuation lookbehind keeps the regex inert on
+# inline emphasis where the bolded fragment is not a header.
+_SECTION_HEADER_RE = re.compile(
+    r"(?m)^\*\*(?P<label>[^\n*]{1,30}?\.)\*\*"
+)
+
+
+def _collapse_duplicate_section_headers(body: str) -> str:
+    """Merge adjacent duplicate **X.** section headers.
+
+    The composer prompt is a markdown skeleton with ``**Bold.**`` prose
+    labels for each section (no markdown headings, per ABSOLUTE
+    PROHIBITIONS rule 5). Some clerk emissions split one section into
+    two blocks: a header + one-line preamble, then an empty header + the
+    list payload. Observed example (rapali 2026-05-19-morning, Bug C):
+
+        **Ma.** Négy sorba sorolom a legfontosabb teendőket.
+
+        **Ma.**
+
+        1. ...
+
+    The second header is a render artefact — the section is one logical
+    block, not two. This pass collapses the pair by emitting the first
+    header, the first block's preamble, the empty line, and the second
+    block's body (omitting the redundant header). Idempotent — repeated
+    application produces the same output.
+
+    Detection:
+      * Two ``**X.**`` headers with identical label X.
+      * Separation: ≤ 4 lines of content between them (so we don't
+        merge legitimately distinct sections that happen to share a
+        label later in the brief — those don't occur in practice but
+        the bound is defensive).
+      * The second header's line is "empty" — i.e. nothing follows it
+        on its own line except optional whitespace. (A second header
+        with a real preamble of its own is a different bug; we leave
+        it alone rather than risk eating real content.)
+
+    Returns the cleaned-up body. Best-effort: on regex failure the
+    original body is returned unchanged.
+    """
+    if not body or "**" not in body:
+        return body
+    try:
+        # Walk the body line-by-line so we can examine the exact line
+        # the second header sits on (to enforce the "second header has
+        # no trailing content" rule).
+        lines = body.split("\n")
+        out: list[str] = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            line = lines[i]
+            m = _SECTION_HEADER_RE.match(line)
+            if not m:
+                out.append(line)
+                i += 1
+                continue
+            label = m.group("label")
+            # The header opens this block. Look ahead up to 5 lines
+            # for a second ``**<label>.**`` header.
+            #
+            # Within that window we accept either an empty header line
+            # (``**label.**`` with nothing else after the closing **)
+            # OR a header line where the only trailing content is
+            # whitespace. In both cases the second occurrence is a
+            # template artefact and must be dropped.
+            collapsed = False
+            for j in range(i + 1, min(i + 6, n)):
+                next_line = lines[j]
+                m2 = _SECTION_HEADER_RE.match(next_line)
+                if not m2 or m2.group("label") != label:
+                    continue
+                # Reject the merge if the second header carries its
+                # own preamble — that's a legitimately distinct block
+                # we shouldn't touch.
+                tail = next_line[m2.end():].strip()
+                if tail:
+                    break
+                # Emit lines [i .. j-1] as-is, but skip line j (the
+                # duplicate header). Anything past j stays. This
+                # preserves the first header's preamble and reattaches
+                # the list/body that followed the second header
+                # directly underneath.
+                out.extend(lines[i:j])
+                i = j + 1
+                collapsed = True
+                break
+            if not collapsed:
+                out.append(line)
+                i += 1
+        return "\n".join(out)
+    except Exception:  # noqa: BLE001
+        # Never let a regex bug eat a brief — fail open.
+        return body
 
 
 def _is_clerk_failure(raw: str) -> bool:
@@ -2296,6 +2399,7 @@ async def compose_and_write_briefing(
         body_text = str(body_text)
     body_text = body_text.strip()
     body_text = _strip_compose_preamble(body_text)
+    body_text = _collapse_duplicate_section_headers(body_text)
     # If clerk returned a failure sentinel ('[assistant turn failed...]' or
     # similar), don't let it become the brief body — replace with a stub that
     # makes the failure visible without polluting the snapshot with garbage.
