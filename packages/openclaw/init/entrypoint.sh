@@ -219,6 +219,12 @@ else
     echo "${OPENCLAW_GATEWAY_TOKEN}" > "$TOKEN_FILE"
     echo "[init] Using provided gateway token"
 fi
+# OPS-TOKEN-1: alfred-learn (uid 1000 inside its own container) shares
+# this file via the /mnt/encrypted/alfred bind. Default umask leaves it
+# root:root mode 600 which alfred-learn can't read. 0:1000 + 0640 lets
+# alfred-learn's gid 1000 read via group while keeping root-only write.
+chown 0:1000 "$TOKEN_FILE" 2>/dev/null || true
+chmod 0640 "$TOKEN_FILE" 2>/dev/null || true
 
 # --- 5. Initialize observation/intuition base records ---
 if [[ ! -f /vault/intuition/index.md ]]; then

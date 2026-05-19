@@ -36,11 +36,23 @@ if [[ -f "$OPENCLAW_CONFIG" ]]; then
         export OPENCLAW_GATEWAY_TOKEN="$LIVE_TOKEN"
         # Also update the static file so openclaw-wrapper reads it correctly
         echo -n "$LIVE_TOKEN" > "$TOKEN_FILE"
-        echo "[alfred] Token synced from OpenClaw config"
+        # OPS-TOKEN-1 fix: alfred-learn runs as uid 1000 inside its own
+        # container and shares this file via the /mnt/encrypted/alfred bind
+        # mount. Without these perms it reads as root:root mode 600 → all
+        # clerk/LLM calls from alfred-learn fail with Permission denied.
+        # 0:1000 + 0640 lets alfred-learn's gid 1000 read via group, while
+        # keeping root-only write (the alfred container is the only writer).
+        chown 0:1000 "$TOKEN_FILE" 2>/dev/null || true
+        chmod 0640 "$TOKEN_FILE" 2>/dev/null || true
+        echo "[alfred] Token synced from OpenClaw config (perms 0:1000 0640)"
     fi
 elif [[ -f "$TOKEN_FILE" ]]; then
     export OPENCLAW_GATEWAY_TOKEN
     OPENCLAW_GATEWAY_TOKEN=$(cat "$TOKEN_FILE")
+    # OPS-TOKEN-1 fix: re-apply perms in case the file was created by
+    # init under an older umask (mode 600) that blocks alfred-learn.
+    chown 0:1000 "$TOKEN_FILE" 2>/dev/null || true
+    chmod 0640 "$TOKEN_FILE" 2>/dev/null || true
 fi
 
 # Create data directory
