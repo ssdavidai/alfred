@@ -13,7 +13,7 @@
 #   * python3 + python3-yaml — a handful of routes shell out to `python3 -c`
 #     for YAML/JSON config surgery (agents.ts, learning.ts).
 #   * sqlite-vec — loadable SQLite extension; ctrl-api opens it at boot so the
-#     `embedding` table (state.db, Store 2) can do vector k-NN. See
+#     `embedding` table (alfred-state.db, Store 2) can do vector k-NN. See
 #     docs/STORAGE-ARCHITECTURE.md.
 #
 # Multi-arch: build with `docker buildx build --platform linux/amd64,linux/arm64`.
@@ -104,14 +104,14 @@ ENV SQLITE_VEC_PATH=/usr/local/lib/sqlite-vec/vec0.so
 ENV AAS_PORT=3100 \
     AAS_HOST=0.0.0.0 \
     COMPOSE_DIR=/srv/alfred-black \
-    STATE_DB_PATH=/state/state.db \
+    STATE_DB_PATH=/state/alfred-state.db \
     INGEST_DB_PATH=/ingest/ingest.db \
     COLD_DB_PATH=/cold/cold.db \
     NODE_ENV=production
 
 EXPOSE 3100
 
-# state.db / ingest.db / cold.db (Store 3 archive) live on named volumes
+# alfred-state.db / ingest.db / cold.db (Store 3 archive) live on named volumes
 # mounted at these paths.
 VOLUME ["/state", "/ingest", "/cold"]
 

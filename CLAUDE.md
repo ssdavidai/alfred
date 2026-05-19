@@ -51,9 +51,13 @@ alfred-black persists data in **four stores**, not one markdown directory:
 | # | Store | Backing | Owner |
 |---|-------|---------|-------|
 | 1 | **Vault** | Markdown (`vault_data` volume) | alfred daemon, via ctrl-api |
-| 2 | **`state.db`** | SQLite + WAL + sqlite-vec (`state_data`) | **ctrl-api — sole writer** |
+| 2 | **`alfred-state.db`** | SQLite + WAL + sqlite-vec (`state_data`) | **ctrl-api — sole writer** |
 | 3 | **Cold archive** | DuckDB/Parquet | deferred |
 | 4 | **`ingest.db`** | SQLite (`ingest_data`) | ctrl-api — sole writer |
+
+The operational store is named **`alfred-state.db`** (not `state.db`) to avoid
+a filename collision with Hermes' own gateway-session store at
+`$HERMES_HOME/state.db` — a different file in a different container.
 
 Full detail: `packages/ctrl/docs/STORAGE-ARCHITECTURE.md`.
 
@@ -80,15 +84,15 @@ can ever be written as markdown.**
 Demoted record types and their correct store:
 
 - `signal-action` / `steward-action` / `desk-action` / `state-change` /
-  `needs_attention_action` / `event` → `state.db` **`audit`** table.
-- `signal` → `state.db` **`signal`**; `observation` / `pattern_proposal` /
-  `synthesis` / `contradiction` / `assumption` / `constraint` → `state.db`
-  **`observation`**.
+  `needs_attention_action` / `event` → `alfred-state.db` **`audit`** table.
+- `signal` → `alfred-state.db` **`signal`**; `observation` / `pattern_proposal` /
+  `synthesis` / `contradiction` / `assumption` / `constraint` →
+  `alfred-state.db` **`observation`**.
 - `stream_event` → `ingest.db` **`stream_event`**.
 
 ### Single-writer discipline
 
-ctrl-api is the **only** process with a write handle to `state.db` and
+ctrl-api is the **only** process with a write handle to `alfred-state.db` and
 `ingest.db`. `alfred-learn` and the alfred vault daemon write through ctrl-api
 HTTP endpoints — never directly. Other services may open the files read-only.
 This eliminates SQLite multi-process write contention and makes the
@@ -96,7 +100,7 @@ This eliminates SQLite multi-process write contention and makes the
 
 When adding code that needs to persist a record, ask: *does the principal have
 a reason to read or edit it?* If yes → a canonical vault type via the vault
-routes. If no → `state.db` (working memory / audit) or `ingest.db` (raw
+routes. If no → `alfred-state.db` (working memory / audit) or `ingest.db` (raw
 stream) via the `/api/v1/state/*` and `/api/v1/ingest/*` endpoints. Never add a
 new vault directory.
 

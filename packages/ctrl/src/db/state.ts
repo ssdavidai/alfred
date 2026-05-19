@@ -1,11 +1,14 @@
 // ============================================================================
-// state.db — Store 2 open/init module.
+// alfred-state.db — Store 2 open/init module.
 //
 // This is ctrl-api's own SQLite file (node:sqlite). ctrl-api is the SOLE
 // process with a write handle (single-writer discipline, PLAN.md Part I).
 //
+// The file is named `alfred-state.db` (not `state.db`) to avoid a name
+// collision with Hermes' own gateway-session store at $HERMES_HOME/state.db.
+//
 // Responsibilities:
-//   * open state.db at STATE_DB_PATH, apply WAL + busy_timeout PRAGMAs,
+//   * open alfred-state.db at STATE_DB_PATH, apply WAL + busy_timeout PRAGMAs,
 //   * exec the CREATE-only schema (schema.sql),
 //   * load the sqlite-vec loadable extension and create the `embedding`
 //     vec0 virtual table once the extension is available,
@@ -18,7 +21,8 @@ import path from "node:path";
 import schema from "./schema.sql";
 
 const STATE_DB_PATH =
-  process.env.STATE_DB_PATH ?? path.join(process.cwd(), "data", "state.db");
+  process.env.STATE_DB_PATH ??
+  path.join(process.cwd(), "data", "alfred-state.db");
 
 // sqlite-vec loadable extension. The ctrl-api Dockerfile bakes it in and sets
 // SQLITE_VEC_PATH. If absent (e.g. local dev without the extension), vector
@@ -38,7 +42,7 @@ export function vecAvailable(): boolean {
 }
 
 /**
- * Open (or return the cached) state.db handle. Idempotent — safe to call from
+ * Open (or return the cached) alfred-state.db handle. Idempotent — safe to call from
  * every route module's top level.
  */
 export function getStateDb(): DatabaseSync {
@@ -72,14 +76,18 @@ export function getStateDb(): DatabaseSync {
         `CREATE VIRTUAL TABLE IF NOT EXISTS embedding USING vec0(embedding float[${EMBEDDING_DIM}])`,
       );
       _vecLoaded = true;
-      console.log(`[state.db] sqlite-vec loaded; embedding[${EMBEDDING_DIM}] ready`);
+      console.log(
+        `[alfred-state.db] sqlite-vec loaded; embedding[${EMBEDDING_DIM}] ready`,
+      );
     } catch (err) {
-      console.error(`[state.db] sqlite-vec load failed (vector search disabled): ${err}`);
+      console.error(
+        `[alfred-state.db] sqlite-vec load failed (vector search disabled): ${err}`,
+      );
       _vecLoaded = false;
     }
   } else {
     console.warn(
-      "[state.db] SQLITE_VEC_PATH not set or missing — vector search disabled",
+      "[alfred-state.db] SQLITE_VEC_PATH not set or missing — vector search disabled",
     );
   }
 

@@ -8,8 +8,8 @@
 //
 // The vault (Store 1, markdown) holds exactly ~12 canonical record types. Any
 // other record type is DEMOTED:
-//   * audit-class actions  → state.db `audit` table
-//   * signals / observations / patterns → state.db `signal` / `observation`
+//   * audit-class actions  → alfred-state.db `audit` table
+//   * signals / observations / patterns → alfred-state.db `signal` / `observation`
 //   * raw stream events    → ingest.db `stream_event`
 //
 // ctrl-api is the sole vault writer. Every vault write route MUST call
@@ -57,23 +57,23 @@ export const CANONICAL_NON_RECORD_DIRS = new Set<string>(["_templates"]);
  * caller that tries to write a demoted type gets told the correct store.
  */
 export const DEMOTED_TYPES: Record<string, string> = {
-  // → state.db `audit`
-  "signal-action": "state.db audit table (POST /api/v1/state/audit)",
-  "steward-action": "state.db audit table (POST /api/v1/state/audit)",
-  "desk-action": "state.db audit table (POST /api/v1/state/audit)",
-  "state-change": "state.db audit table (POST /api/v1/state/audit)",
-  "needs_attention_action": "state.db audit table (POST /api/v1/state/audit)",
-  event: "state.db audit table (POST /api/v1/state/audit)",
-  // → state.db `signal` / `observation`
-  signal: "state.db signal table (POST /api/v1/state/signals)",
-  observation: "state.db observation table (POST /api/v1/state/observations)",
-  pattern_proposal: "state.db observation table (kind=pattern_proposal)",
-  decision_pattern: "state.db observation table (kind=pattern_proposal)",
-  synthesis: "state.db observation table (kind=synthesis)",
-  contradiction: "state.db observation table (kind=contradiction)",
-  assumption: "state.db observation table (kind=assumption)",
-  constraint: "state.db observation table (kind=constraint)",
-  needs_attention: "state.db signal table (a needs_attention card is a routed signal)",
+  // → alfred-state.db `audit`
+  "signal-action": "alfred-state.db audit table (POST /api/v1/state/audit)",
+  "steward-action": "alfred-state.db audit table (POST /api/v1/state/audit)",
+  "desk-action": "alfred-state.db audit table (POST /api/v1/state/audit)",
+  "state-change": "alfred-state.db audit table (POST /api/v1/state/audit)",
+  "needs_attention_action": "alfred-state.db audit table (POST /api/v1/state/audit)",
+  event: "alfred-state.db audit table (POST /api/v1/state/audit)",
+  // → alfred-state.db `signal` / `observation`
+  signal: "alfred-state.db signal table (POST /api/v1/state/signals)",
+  observation: "alfred-state.db observation table (POST /api/v1/state/observations)",
+  pattern_proposal: "alfred-state.db observation table (kind=pattern_proposal)",
+  decision_pattern: "alfred-state.db observation table (kind=pattern_proposal)",
+  synthesis: "alfred-state.db observation table (kind=synthesis)",
+  contradiction: "alfred-state.db observation table (kind=contradiction)",
+  assumption: "alfred-state.db observation table (kind=assumption)",
+  constraint: "alfred-state.db observation table (kind=constraint)",
+  needs_attention: "alfred-state.db signal table (a needs_attention card is a routed signal)",
   // → ingest.db
   stream_event: "ingest.db stream_event table (POST /api/v1/ingest/events)",
   streams: "ingest.db stream_event table (POST /api/v1/ingest/events)",

@@ -14,8 +14,8 @@ source of truth for ctrl-api, alfred-learn, and the alfred vault daemon.
 | # | Store | Backing | Owner | Holds |
 |---|-------|---------|-------|-------|
 | 1 | **Vault** | Markdown files (`vault_data` volume) | alfred daemon, via ctrl-api | The principal's knowledge surface — the ~12 canonical record types. |
-| 2 | **`state.db`** | SQLite + WAL + sqlite-vec (`state_data` volume) | **ctrl-api (sole writer)** | The machine's working memory — signals, observations, routing decisions, audit ledger, link graph, vault read-index, embeddings. |
-| 3 | **`cold.db`** | SQLite, zstd-compressed rows (`cold_data` volume) | ctrl-api (sole writer) | Forensic long tail — rows aged out of `state.db` by the TTL compactor. |
+| 2 | **`alfred-state.db`** | SQLite + WAL + sqlite-vec (`state_data` volume) | **ctrl-api (sole writer)** | The machine's working memory — signals, observations, routing decisions, audit ledger, link graph, vault read-index, embeddings. |
+| 3 | **`cold.db`** | SQLite, zstd-compressed rows (`cold_data` volume) | ctrl-api (sole writer) | Forensic long tail — rows aged out of `alfred-state.db` by the TTL compactor. |
 | 4 | **`ingest.db`** | SQLite (`ingest_data` volume) | ctrl-api (sole writer) | Raw inbound stream events. Hard 7-day TTL, consume-then-delete. |
 
 Separate from all four is the **`web-db` Postgres** — Wasp's own store for
@@ -54,16 +54,22 @@ the filesystem. A write to a non-canonical path is rejected with HTTP 422
 
 | Was a vault type | Now lives in |
 |------------------|--------------|
-| `signal-action`, `steward-action`, `desk-action`, `state-change`, `needs_attention_action`, `event` | `state.db` → `audit` |
-| `signal` | `state.db` → `signal` |
-| `observation`, `pattern_proposal`, `synthesis`, `contradiction`, `assumption`, `constraint` | `state.db` → `observation` |
+| `signal-action`, `steward-action`, `desk-action`, `state-change`, `needs_attention_action`, `event` | `alfred-state.db` → `audit` |
+| `signal` | `alfred-state.db` → `signal` |
+| `observation`, `pattern_proposal`, `synthesis`, `contradiction`, `assumption`, `constraint` | `alfred-state.db` → `observation` |
 | `stream_event` | `ingest.db` → `stream_event` |
 
 ---
 
-## Store 2 — `state.db`
+## Store 2 — `alfred-state.db`
 
 ctrl-api's own SQLite file (`node:sqlite`). The machine's working memory.
+
+> **Filename note.** This file is `alfred-state.db`, not `state.db`. Hermes
+> keeps its own gateway-session store at `$HERMES_HOME/state.db` — a different
+> file, a different container, the `hermes_data` volume. The `alfred-` prefix
+> keeps the two unambiguous when debugging on the box (`find / -name '*state.db'`,
+> log lines).
 
 - **Single-writer discipline.** ctrl-api is the **only** process with a write
   handle. `alfred-learn` and the alfred vault daemon write through ctrl-api
@@ -110,10 +116,11 @@ else still works.
 
 ## Store 3 — cold archive (`cold.db`)
 
-The forensic long tail. A periodic TTL compactor rolls aged-out `state.db` rows
-into `cold.db`, a **third SQLite file** on the `cold_data` volume
-(`src/db/cold.ts`, `src/db/compactor.ts`). ctrl-api is the sole writer, same
-single-writer discipline as `state.db` and `ingest.db`.
+The forensic long tail. A periodic TTL compactor rolls aged-out
+`alfred-state.db` rows into `cold.db`, a **third SQLite file** on the
+`cold_data` volume (`src/db/cold.ts`, `src/db/compactor.ts`). ctrl-api is the
+sole writer, same single-writer discipline as `alfred-state.db` and
+`ingest.db`.
 
 ### Why a compressed SQLite file, not DuckDB
 
@@ -151,7 +158,7 @@ rows' bodies are inflated. `cold_compact_log` records one row per compactor run.
 `POST /api/v1/state/cold/compact`. Per hot table it: computes
 `cutoff = now − TTL`, batches the rows past the cutoff (`BATCH_SIZE=500`),
 compresses + `INSERT OR REPLACE`s them into `cold.db`, then — **only once the
-cold write committed** — deletes them from `state.db`. A crash between the two
+cold write committed** — deletes them from `alfred-state.db`. A crash between the two
 steps leaves a row in **both** tiers (the cross-tier reader de-dupes by `id`),
 never in neither — data is never lost to a mid-compaction crash.
 
@@ -180,8 +187,8 @@ and so reads the full long tail transparently.
 
 ## Store 4 — `ingest.db`
 
-A **separate** SQLite file from `state.db` (`src/db/ingest.ts`) so a firehose
-burst of inbound events never takes the `state.db` write lock.
+A **separate** SQLite file from `alfred-state.db` (`src/db/ingest.ts`) so a firehose
+burst of inbound events never takes the `alfred-state.db` write lock.
 
 - **One table:** `stream_event` — raw inbound payloads, sequential consume.
 - **Hard 7-day TTL.** A periodic in-process sweep (`sweepIngestTTL`, every 6h)
@@ -196,14 +203,14 @@ burst of inbound events never takes the `state.db` write lock.
 
 ## ctrl-api endpoints
 
-### state.db (Store 2) — `/api/v1/state/*`
+### alfred-state.db (Store 2) — `/api/v1/state/*`
 
 | Method + path | Purpose |
 |---------------|---------|
 | `POST/GET /signals`, `GET/PATCH /signals/:id` | signal CRUD |
 | `POST/GET /observations`, `GET/PATCH /observations/:id` | observation CRUD |
 | `POST/GET /routing-decisions`, `GET/PATCH /routing-decisions/:id` | routing-decision CRUD |
-| `POST/GET /audit`, `GET /audit/:id` | audit ledger append + **cross-tier** query (hot `state.db` + cold `cold.db`) |
+| `POST/GET /audit`, `GET /audit/:id` | audit ledger append + **cross-tier** query (hot `alfred-state.db` + cold `cold.db`) |
 | `POST/GET /links`, `DELETE /links/:id` | link graph |
 | `POST /embeddings`, `POST /embeddings/search`, `DELETE /embeddings` | vector store |
 | `POST /cold/compact` | run the Store 3 TTL compactor now |
@@ -241,7 +248,7 @@ desk-action routes) mirror every action into the `audit` table via
 
 | Var | Default | Meaning |
 |-----|---------|---------|
-| `STATE_DB_PATH` | `/state/state.db` | state.db location (mount the `state_data` volume here). |
+| `STATE_DB_PATH` | `/state/alfred-state.db` | alfred-state.db location (mount the `state_data` volume here). |
 | `INGEST_DB_PATH` | `/ingest/ingest.db` | ingest.db location (mount the `ingest_data` volume here). |
 | `COLD_DB_PATH` | `/cold/cold.db` | cold.db location (mount the `cold_data` volume here). |
 | `SQLITE_VEC_PATH` | `/usr/local/lib/sqlite-vec/vec0.so` | sqlite-vec loadable extension (baked into the image). |

@@ -1,5 +1,5 @@
 -- ============================================================================
--- state.db — Store 2 of the alfred-black four-store architecture.
+-- alfred-state.db — Store 2 of the alfred-black four-store architecture.
 --
 -- This is the machine's working memory: ctrl-api's own SQLite file
 -- (node:sqlite, single-writer). See packages/ctrl/docs/STORAGE-ARCHITECTURE.md
@@ -7,7 +7,7 @@
 --
 -- The four stores:
 --   Store 1  Vault (markdown)        — the principal's published knowledge.
---   Store 2  state.db (THIS FILE)    — working memory: signals, observations,
+--   Store 2  alfred-state.db (THIS)  — working memory: signals, observations,
 --                                      routing decisions, audit, links, the
 --                                      vault read-index, and embeddings.
 --   Store 3  Cold archive (DuckDB)   — deferred; TTL `ts` columns + archive
@@ -145,7 +145,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_subject   ON audit(subject_ref, ts DESC);
 -- link — the cross-record graph edge.
 --
 -- An explicit, queryable edge between two records. Either endpoint may be a
--- vault path (`matter/x.md`) or a state.db row id (`signal:01J…`). Replaces
+-- vault path (`matter/x.md`) or an alfred-state.db row id (`signal:01J…`). Replaces
 -- the implicit graph that lived in scattered frontmatter `*_ref` fields.
 -- ----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS link (
@@ -253,8 +253,8 @@ CREATE INDEX IF NOT EXISTS idx_events_type    ON events(event_type, created_at D
 -- Store 3 — cold archive. IMPLEMENTED, but it lives in a SEPARATE FILE.
 --
 -- The archive_* tables are NOT in this schema: they are created in cold.db
--- (the `cold_data` volume) by src/db/cold.ts, not in state.db. cold.db is a
--- third single-writer SQLite file — keeping the cold tail out of state.db
+-- (the `cold_data` volume) by src/db/cold.ts, not in alfred-state.db. cold.db is a
+-- third single-writer SQLite file — keeping the cold tail out of alfred-state.db
 -- means a long forensic scan never touches the hot working-memory file.
 --
 -- The TTL compactor (src/db/compactor.ts) rolls rows from the hot tables above
