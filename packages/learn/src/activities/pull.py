@@ -657,17 +657,70 @@ _COMPOSIO_GMAIL_EXCLUDES = "-in:drafts -in:spam -in:trash -in:chats"
 # verbose:false unlocks max_results up to 500 (verbose:true forces 30 — #474).
 _COMPOSIO_GMAIL_PAGE_SIZE = 500
 
+# Per-page retry budget for Composio bulk-fetch + Gmail quota flake (#74).
+#
+# Two failure modes observed in production:
+#
+#   (a) Composio bulk-fetch flake — one bad message in a 500-batch fails
+#       the whole page with ``successful:false``. Transient; retry of the
+#       same args within seconds usually succeeds.
+#
+#   (b) Gmail per-user-per-minute quota exhaustion. Surfaces inside
+#       Composio's error envelope sometimes as "HTTP 403: Quota
+#       exceeded for ... 'Queries per minute per user'" and sometimes
+#       (confusingly) as "Your Gmail connection uses a restricted
+#       scope". A retry-storm against an exhausted quota digs the hole
+#       deeper — we MUST wait long enough for the per-minute window to
+#       roll forward (~60s) before trying again, or we never recover.
+#
+# 8 attempts with a quota-aware backoff (≥30s when the error looks like
+# a quota or scope-mask) gives the per-minute window time to reset
+# while still bounding per-page wall time to a few minutes.
+_PAGE_MAX_RETRIES = 8
+# Tokens we use to recognise "this is really a quota error, back off
+# hard" vs "ordinary flake, short retry is fine".
+_QUOTA_HINT_TOKENS = ("quota", "rate", "restricted scope", "per minute")
 
-def _composio_gmail_messages(raw_response: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
-    """Extract (messages, nextPageToken) from a GMAIL_FETCH_EMAILS response.
+
+def _composio_gmail_messages(
+    raw_response: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str, str | None]:
+    """Extract (messages, nextPageToken, error) from a GMAIL_FETCH_EMAILS response.
 
     Composio wraps the Gmail payload at varying nesting depths
-    (``data`` / ``data.response_data``). Returns an empty list + empty
-    token when the page carries no messages — the loop's termination
-    signal.
+    (``data`` / ``data.response_data``).
+
+    Returns:
+        (messages, page_token, error)
+        - ``error`` is ``None`` on success.
+        - ``error`` is a short string when Composio reports
+          ``successful: false`` at the top level (e.g. Gmail returned a
+          400 fetching one message's metadata — the whole page fails in
+          Composio's bulk implementation). Distinguishes a Composio
+          failure from a truly empty page so the caller can retry.
+
+    A "truly empty page" — Composio returned ``successful: true`` with
+    no messages, i.e. backfill is complete — surfaces as
+    ``([], "", None)``.
     """
     if not isinstance(raw_response, dict):
-        return [], ""
+        return [], "", "non-dict response"
+
+    # Composio v3 SDK returns {"successful": bool, "data": {...}, "error": str|None}
+    # at the top level. When successful is False the `data` payload is
+    # an error envelope, NOT a Gmail page — surface this to the caller
+    # instead of silently returning an empty page. Without this check,
+    # transient flakiness in Composio's bulk-metadata fetch (Gmail 400
+    # on one message → whole page fails) was indistinguishable from a
+    # backfill-complete signal and the loop terminated with 0 emails.
+    if raw_response.get("successful") is False:
+        err = raw_response.get("error")
+        if not err:
+            data = raw_response.get("data")
+            if isinstance(data, dict):
+                err = data.get("message") or data.get("error")
+        return [], "", str(err or "composio reported successful=false")[:300]
+
     # Walk the known Composio wrapper shapes to the payload dict.
     payload: Any = raw_response
     for _ in range(3):
@@ -682,12 +735,12 @@ def _composio_gmail_messages(raw_response: dict[str, Any]) -> tuple[list[dict[st
             break
         payload = nxt
     if not isinstance(payload, dict):
-        return [], ""
+        return [], "", None
     messages = payload.get("messages")
     if not isinstance(messages, list):
         messages = []
     token = payload.get("nextPageToken") or ""
-    return [m for m in messages if isinstance(m, dict)], str(token)
+    return [m for m in messages if isinstance(m, dict)], str(token), None
 
 
 def _composio_msg_to_email(msg: dict[str, Any]) -> dict[str, Any]:
@@ -722,19 +775,34 @@ async def _composio_gmail_pages(
     query: str,
     max_messages: int,
     page_size: int = _COMPOSIO_GMAIL_PAGE_SIZE,
+    connected_account_id: str | None = None,
 ):
     """Yield pages of GMAIL_FETCH_EMAILS messages — the backfill loop.
 
-    A simple paginated loop: each call passes ``verbose:false`` and
-    ``max_results`` and the running ``page_token``; the loop follows
-    ``nextPageToken`` and terminates on an empty page (no messages or no
-    token) or when ``max_messages`` is reached. ``verbose:false`` is
-    mandatory — it is the difference between ``max_results:500`` and the
+    A paginated loop: each call passes ``verbose:false`` and
+    ``max_results`` and the running ``page_token``; follows
+    ``nextPageToken`` and terminates on a truly empty page or when
+    ``max_messages`` is reached. ``verbose:false`` is mandatory — it
+    is the difference between ``max_results:500`` and the
     ``verbose:true`` 30-cap (#474).
 
-    Runs synchronous ``composio_pull`` work in a thread so the activity
-    event loop keeps heartbeating.
+    Composio's GMAIL_FETCH_EMAILS is FLAKY: it fetches each message's
+    metadata under the hood, and if Gmail returns a 400 on any one
+    message in the batch (an entirely transient, message-specific
+    failure observed live), the whole page comes back as
+    ``successful:false`` with ``data.error="HTTP 400 error while
+    fetching message metadata: ..."``. Without retry handling, the
+    parser used to treat that envelope as "empty page" and break the
+    loop → onboarding silently received 0 emails and produced a
+    no-data brief (#74).
+
+    Retry strategy: per page, attempt up to ``_PAGE_MAX_RETRIES`` with
+    exponential backoff. On terminal failure raise ``RuntimeError`` so
+    Temporal retries the whole activity (its ``RetryPolicy
+    maximum_attempts=3`` covers genuine prolonged Composio outages).
     """
+    import asyncio
+
     page_token = ""
     fetched = 0
     while True:
@@ -746,10 +814,85 @@ async def _composio_gmail_pages(
         }
         if page_token:
             args["page_token"] = page_token
-        raw_response = await composio_pull("GMAIL_FETCH_EMAILS", args)
-        messages, page_token = _composio_gmail_messages(raw_response)
+
+        # Per-page retry on Composio bulk-fetch flake. 5 attempts with
+        # exponential backoff covers the observed transient failure
+        # mode (one bad message in a 500-batch) while still bounding
+        # total per-page wall time. When a specific Gmail
+        # ``connected_account_id`` is pinned (see below), the flake
+        # also includes Composio's auto-routing picking a stale
+        # restricted-scope connection — pinning eliminates that
+        # variability, so the retry is for genuine transient errors.
+        messages: list[dict[str, Any]] = []
+        token: str = ""
+        last_err: str | None = None
+        for attempt in range(1, _PAGE_MAX_RETRIES + 1):
+            raw_response = await composio_pull(
+                "GMAIL_FETCH_EMAILS",
+                args,
+                connected_account_id=connected_account_id,
+            )
+            messages, token, last_err = _composio_gmail_messages(raw_response)
+            if last_err is None:
+                break
+            logger.warning(
+                "composio GMAIL_FETCH_EMAILS page attempt %d/%d failed: %s",
+                attempt,
+                _PAGE_MAX_RETRIES,
+                last_err,
+            )
+            try:
+                activity.heartbeat(
+                    f"composio gmail page retry {attempt}: {last_err[:80]}"
+                )
+            except Exception:
+                pass
+            if attempt < _PAGE_MAX_RETRIES:
+                # Quota-aware backoff. If the error looks like a Gmail
+                # per-minute-quota cap or a scope-mask of one (Composio
+                # collapses both into similar 403 envelopes), wait long
+                # enough for the per-user quota window to roll forward
+                # (Gmail's window is 60s; we sleep ≥35s with jitter).
+                # Anything else gets the short exponential backoff
+                # appropriate for transient bulk-fetch flake.
+                err_lower = (last_err or "").lower()
+                if any(tok in err_lower for tok in _QUOTA_HINT_TOKENS):
+                    delay = 35 + (attempt * 5)  # 40, 45, 50, … capped below
+                else:
+                    delay = min(1.5 ** attempt, 30)
+                delay = min(delay, 90)
+                # Heartbeat through the sleep so Temporal's heartbeat
+                # timeout (60s in the calling activity) doesn't fire while
+                # we wait out a quota window. A naive ``await asyncio.sleep
+                # (delay)`` of 40-90s used to kill the activity at the 60s
+                # mark, turning a recoverable quota dip into a workflow
+                # failure (#74).
+                slept = 0.0
+                while slept < delay:
+                    step = min(10.0, delay - slept)
+                    await asyncio.sleep(step)
+                    slept += step
+                    try:
+                        activity.heartbeat(
+                            f"composio gmail backoff: waited {slept:.0f}/{delay:.0f}s "
+                            f"after attempt {attempt}"
+                        )
+                    except Exception:
+                        pass
+
+        if last_err is not None:
+            # All retries exhausted — surface the failure to Temporal
+            # so the activity-level RetryPolicy can take a fresh swing
+            # (or, after that's also exhausted, the workflow fails
+            # loudly rather than silently producing a no-data brief).
+            raise RuntimeError(
+                "composio GMAIL_FETCH_EMAILS failed after "
+                f"{_PAGE_MAX_RETRIES} page-level retries: {last_err}"
+            )
+
+        page_token = token
         if not messages:
-            # Empty page — backfill complete.
+            # Truly empty page (Composio said ok, no messages) — backfill done.
             break
         yield messages
         fetched += len(messages)
@@ -773,14 +916,34 @@ async def composio_fetch_email_metadata(user_id: str) -> dict[str, Any]:
     ``user_id`` is accepted for activity-signature parity with the direct
     path but is unused — Composio resolves the credential from the
     tenant's COMPOSIO_USER_ID.
+
+    The activity resolves and PINS the active Gmail
+    ``connected_account_id`` before the page loop. Without pinning,
+    Composio's auto-routing across stale historical connections
+    intermittently picks one with restricted scope and the action
+    fails with 403 "Your Gmail connection uses a restricted scope" —
+    so the whole backfill silently returned 0 emails (#74).
     """
     from datetime import datetime, timedelta, timezone
+
+    from src.integrations.composio_client import resolve_active_connected_account_id
 
     from_date = (datetime.now(timezone.utc) - timedelta(days=100)).strftime("%Y/%m/%d")
     query = f"after:{from_date} {_COMPOSIO_GMAIL_EXCLUDES}"
 
+    conn_id = resolve_active_connected_account_id("gmail")
+    if conn_id:
+        logger.info("composio_fetch_email_metadata: pinned gmail connection %s", conn_id)
+    else:
+        logger.warning(
+            "composio_fetch_email_metadata: no active gmail connection — "
+            "falling back to auto-routing (may flake on restricted-scope)"
+        )
+
     emails: list[dict[str, Any]] = []
-    async for page in _composio_gmail_pages(query, max_messages=5000):
+    async for page in _composio_gmail_pages(
+        query, max_messages=5000, connected_account_id=conn_id
+    ):
         for msg in page:
             emails.append(_composio_msg_to_email(msg))
             if len(emails) >= 5000:
@@ -837,16 +1000,29 @@ async def composio_backfill_gmail_as_events(
     """
     from datetime import datetime, timedelta, timezone
 
+    from src.integrations.composio_client import resolve_active_connected_account_id
+
     config = load_config()
     parser = get_parser("composio")
 
     from_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y/%m/%d")
     query = f"after:{from_date} {_COMPOSIO_GMAIL_EXCLUDES}"
 
+    # Same pin as composio_fetch_email_metadata above — the background
+    # backfill hits Composio's auto-routing flake (#74) identically.
+    conn_id = resolve_active_connected_account_id("gmail")
+    if conn_id:
+        logger.info(
+            "composio_backfill_gmail_as_events: pinned gmail connection %s",
+            conn_id,
+        )
+
     ingested = 0
     seen = 0
     async with _ctrl_client(config) as ctrl:
-        async for page in _composio_gmail_pages(query, max_messages=max_messages):
+        async for page in _composio_gmail_pages(
+            query, max_messages=max_messages, connected_account_id=conn_id
+        ):
             for msg in page:
                 seen += 1
                 try:
@@ -893,19 +1069,26 @@ async def composio_backfill_gmail_as_events(
 async def composio_pull(
     action_slug: str,
     arguments: dict[str, Any] | None = None,
+    connected_account_id: str | None = None,
 ) -> dict[str, Any]:
     """Execute a Composio action as a stream pull source.
 
     Calls the Composio SDK via the composio_client module to execute the action
     (e.g. GMAIL_FETCH_EMAILS) and returns the raw result dict. The caller
     passes this through the composio parser to extract events.
+
+    ``connected_account_id`` pins a specific connection — required for
+    Gmail to defeat Composio's flaky auto-routing across multiple
+    historical connections (#74).
     """
     from src.integrations.composio_client import execute_action
 
     args = arguments or {}
     # Inject sensible defaults for known actions that require parameters
     args = {**_default_args(action_slug), **args}
-    result = execute_action(action_slug, args)
+    result = execute_action(
+        action_slug, args, connected_account_id=connected_account_id
+    )
 
     if "error" in result and not result.get("data"):
         logger.warning("Composio pull %s returned error: %s", action_slug, result.get("error"))

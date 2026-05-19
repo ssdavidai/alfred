@@ -173,7 +173,7 @@ def test_composio_fetch_email_metadata_returns_summary_not_corpus(
     # carrying the whole corpus, then an empty page to terminate the loop.
     pages = [list(corpus), []]
 
-    async def _fake_pages(query, max_messages, page_size=500):  # type: ignore[no-untyped-def]
+    async def _fake_pages(query, max_messages, page_size=500, connected_account_id=None):  # type: ignore[no-untyped-def]
         for page in pages:
             yield page
 
@@ -185,6 +185,9 @@ def test_composio_fetch_email_metadata_returns_summary_not_corpus(
 
     with patch.dict("os.environ", {"ONBOARD_PATH": onboard_path}), patch.object(
         pull_mod, "_composio_gmail_pages", _fake_pages
+    ), patch(
+        "src.integrations.composio_client.resolve_active_connected_account_id",
+        return_value="ca_test_gmail",
     ):
         result = asyncio.run(env.run(_wrapper))
 

@@ -83,23 +83,46 @@ def get_user_id() -> str:
 def list_connected_accounts(user_id: str | None = None) -> list[dict[str, Any]]:
     """List connected accounts for this tenant user only.
 
-    Passes ``user_id`` to Composio for server-side scoping, with a
-    defense-in-depth client-side filter on top.
+    Composio SDK v3 takes ``user_ids=[uid]`` (plural). The historical
+    call passed ``user_id=uid`` (singular) which raises ``TypeError`` on
+    every modern SDK → silently falls back to an *unfiltered* list +
+    a client-side ``user_id`` field match. The fallback only happens to
+    populate a single result here because the unfiltered list returns a
+    different (paginated / globally-ordered) subset than the
+    user-scoped query does — so the gmail account this tenant connected
+    was simply missing from the response (issue diagnosed during P5).
+
+    Use the correct plural kwarg first; fall back to no-args + the
+    client-side filter only if the SDK rejects both.
     """
     client = _get_client()
     uid = user_id or get_user_id()
     try:
-        # Try server-side scoping first — accepted by Composio SDK v3.
-        try:
-            response = client.connected_accounts.list(user_id=uid)
-        except TypeError:
-            # Older SDK signature — fall back to unfiltered list + client-side filter.
-            response = client.connected_accounts.list()
+        response = None
+        for call in (
+            lambda: client.connected_accounts.list(user_ids=[uid]),
+            # Legacy SDK fallbacks. Order matters — the v3 plural arg
+            # above is the canonical path; the others exist to keep
+            # older SDK pins (and a defensive unfiltered last resort)
+            # from breaking this function outright.
+            lambda: client.connected_accounts.list(user_id=uid),
+            lambda: client.connected_accounts.list(),
+        ):
+            try:
+                response = call()
+                break
+            except TypeError:
+                continue
+        if response is None:
+            raise RuntimeError("Composio SDK rejected every list() signature")
 
+        items = list(getattr(response, "items", response) or [])
         results = []
-        for acct in response.items:
-            d = acct.model_dump()
+        for acct in items:
+            d = acct.model_dump() if hasattr(acct, "model_dump") else dict(acct)
             acct_user = d.get("user_id") or d.get("member_id")
+            if not acct_user and isinstance(d.get("user"), dict):
+                acct_user = d["user"].get("id")
             # Defense-in-depth: require an explicit owner match. Accounts
             # with missing owner fields must NOT be exposed to this tenant —
             # cross-tenant leakage is the failure mode this guards against.
@@ -114,7 +137,11 @@ def list_connected_accounts(user_id: str | None = None) -> list[dict[str, Any]]:
             toolkit = d.get("toolkit", {})
             results.append({
                 "id": d.get("id", ""),
-                "toolkit_slug": toolkit.get("slug", "") if isinstance(toolkit, dict) else "",
+                "toolkit_slug": (
+                    toolkit.get("slug", "")
+                    if isinstance(toolkit, dict)
+                    else (d.get("toolkit_slug") or "")
+                ),
                 "status": d.get("status", ""),
                 "auth_scheme": d.get("authScheme", d.get("auth_scheme", "")),
                 "user_id": acct_user,
@@ -124,6 +151,38 @@ def list_connected_accounts(user_id: str | None = None) -> list[dict[str, Any]]:
     except Exception as e:
         logger.error("Failed to list connected accounts: %s", e)
         return []
+
+
+def resolve_active_connected_account_id(
+    toolkit_slug: str,
+    user_id: str | None = None,
+) -> str | None:
+    """Resolve the ACTIVE ``connected_account_id`` for a toolkit on this user.
+
+    Composio's auto-routing (``execute_action`` with only ``user_id``)
+    is non-deterministic when a user has multiple historical
+    connections for the same toolkit — even when only one is ACTIVE.
+    Pinning the specific ACTIVE connection ID eliminates the
+    "sometimes 403 restricted-scope, sometimes 200 OK with full
+    payload" flake observed live (#74).
+
+    Returns the most-recently-created ACTIVE account id, or None if no
+    active connection exists.
+    """
+    accounts = list_connected_accounts(user_id)
+    active = [
+        a
+        for a in accounts
+        if a.get("toolkit_slug") == toolkit_slug and a.get("status") == "ACTIVE"
+    ]
+    if not active:
+        return None
+    # Prefer the most-recently-created connection when more than one
+    # ACTIVE row exists (rare — a duplicate reconnect that left both
+    # active). Falling back to the first when timestamps are missing
+    # keeps the function deterministic-ish.
+    active.sort(key=lambda a: a.get("created_at", ""), reverse=True)
+    return active[0].get("id") or None
 
 
 def list_toolkit_actions(
