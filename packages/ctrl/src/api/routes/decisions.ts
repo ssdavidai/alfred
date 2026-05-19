@@ -7,13 +7,20 @@
 // agent dispatches, matter timeline appends, task closures, to_do
 // spawns. Lifecycle:
 //
-//   open      → just written by the UI, side-effects not yet run
-//   executing → router fired the side-effects; awaiting an external
-//               outcome (agent completion) for terminal flip
-//   completed → terminal state — either no async work was needed, or
-//               the outcome arrived and was stamped
-//   reversed  → principal undid this decision; router has already (or
-//               will) run inverse side-effects
+//   open        → just written by the UI, side-effects not yet run
+//   dispatching → #55 mark-before-dispatch: route_decision wrote this
+//                 state on the `intent=delegate` path BEFORE the real
+//                 agent dispatch POST, so a crashed/retried run sees a
+//                 non-`open` decision and the guard does not re-fire
+//                 the agent. Distinct from `executing` precisely so
+//                 check_decision_outcomes (which polls only `executing`)
+//                 never waits on a decision whose dispatch never landed.
+//   executing   → router fired the dispatch; awaiting an external
+//                 outcome (agent completion) for terminal flip
+//   completed   → terminal state — either no async work was needed, or
+//                 the outcome arrived and was stamped
+//   reversed    → principal undid this decision; router has already (or
+//                 will) run inverse side-effects
 //
 // Endpoints:
 //
@@ -56,6 +63,15 @@ type DecisionSource =
 type DecisionState =
   | "open"
   | "scheduled"
+  // `dispatching` is the #55 mark-before-dispatch intermediate state for
+  // the `intent=delegate` path. route_decision writes it BEFORE the real
+  // agent dispatch POST so a crashed/retried run re-enters with the
+  // decision no longer `open` and the guard does NOT re-fire the agent.
+  // It is deliberately distinct from `executing`: check_decision_outcomes
+  // only polls `executing` decisions, so a decision stuck in `dispatching`
+  // (crash between the mark and a successful dispatch) cannot poison the
+  // outcome poller — it is a visible, sweepable stuck state instead.
+  | "dispatching"
   | "executing"
   | "completed"
   | "reversed";
@@ -80,7 +96,7 @@ const VALID_SOURCES: readonly DecisionSource[] = [
 type DecisionPrincipal = "principal" | "alfred";
 const VALID_PRINCIPALS: readonly DecisionPrincipal[] = ["principal", "alfred"];
 const VALID_STATES: readonly DecisionState[] = [
-  "open", "scheduled", "executing", "completed", "reversed",
+  "open", "scheduled", "dispatching", "executing", "completed", "reversed",
 ];
 
 interface DecisionRecord {
@@ -635,10 +651,14 @@ export function registerDecisionRoutes(): void {
   //
   // Returns the currently-in-flight decisions for the "What Alfred is
   // doing now" Desk strip. In-flight = state in [open, scheduled,
-  // executing]. Decisions in `open` for >10 min are surfaced too —
-  // they're effectively stuck (workflow should have picked them up
-  // within 60s). Sorted by `created` desc so the most recent action
-  // appears first.
+  // dispatching, executing]. Decisions in `open` for >10 min are
+  // surfaced too — they're effectively stuck (workflow should have
+  // picked them up within 60s). A decision in `dispatching` is the #55
+  // mark-before-dispatch intermediate state; one that never advances to
+  // `executing` is stranded (crash between the pre-dispatch mark and a
+  // successful dispatch) — keeping it in this strip makes that stuck
+  // state observable. Sorted by `created` desc so the most recent
+  // action appears first.
   // ─────────────────────────────────────────────────────────────
   addRoute("GET", "/api/v1/decisions/in-flight", async ({ res, req }) => {
     if (!fs.existsSync(DECISIONS_DIR)) {
@@ -658,7 +678,12 @@ export function registerDecisionRoutes(): void {
       if (!rec) continue;
       const fm = rec.frontmatter;
       const state = String(fm.state ?? "open");
-      if (state !== "open" && state !== "scheduled" && state !== "executing") {
+      if (
+        state !== "open" &&
+        state !== "scheduled" &&
+        state !== "dispatching" &&
+        state !== "executing"
+      ) {
         continue;
       }
       // Reject malformed/legacy decision-shaped records that don't

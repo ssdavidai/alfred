@@ -13,7 +13,10 @@ write and everything else happens asynchronously:
 - For ``intent=delegate`` → call the existing ctrl-api dispatch route,
   which re-arms the source signal AND stamps ``decision_origin`` on it
   so the eventual outcome signal can be matched back to the decision.
-  Decision state flips to ``executing`` and waits for the outcome.
+  The decision is marked ``state=dispatching`` *before* the dispatch
+  POST (#55 mark-before-dispatch — see the guard note below), then
+  flips to ``executing`` after a successful dispatch and waits for the
+  outcome.
 - For ``intent=take_mine`` → spawn a ``to_do/<ts>.md`` record so the
   principal's personal queue is durable (no more in-React Backstage
   tray). Decision state flips to ``completed``.
@@ -41,6 +44,16 @@ Idempotency:
   ``state=executing`` decisions. Once flipped to ``completed`` the
   decision is terminal and the router skips it. State transitions are
   atomic ctrl-api PATCHes.
+- ``intent=delegate`` is the one path with a real, non-idempotent side
+  effect (a live agent dispatch). To make it exactly-once across
+  retries, ``route_decision`` writes a non-terminal ``dispatching``
+  state *before* the dispatch POST and the entry guard early-returns on
+  ``dispatching`` (#55). ``dispatching`` is intentionally distinct from
+  ``executing``: ``check_decision_outcomes`` polls only ``executing``
+  decisions, so a decision stranded in ``dispatching`` (a crash between
+  the mark and a successful dispatch) cannot poison the outcome poller.
+  Such a stranded decision is observable — a WARNING log on every
+  guarded re-entry plus the ``GET /api/v1/decisions/in-flight`` strip.
 """
 from __future__ import annotations
 
@@ -116,6 +129,41 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
         existing_side_effects = {}
     synchronous_flip = bool(existing_side_effects.get("synchronous_flip"))
 
+    # Idempotency guard. The workflow only feeds this activity decisions
+    # it listed in ``state=open``, but the activity is retried (Temporal
+    # ``_ROUTE_RETRY``, maximum_attempts=3) and the workflow re-runs every
+    # 60 s — so a decision can be re-presented here while a prior run is
+    # mid-flight. A decision that has already advanced is skipped.
+    #
+    # ``dispatching`` (#55) is the non-terminal mark-before-dispatch state
+    # written *before* the real agent dispatch on the ``intent=delegate``
+    # path below. Before #55, route_decision POSTed the dispatch and only
+    # *then* PATCHed the decision to ``executing`` — a run that died or
+    # was retried between the dispatch POST and that PATCH re-entered with
+    # the decision still ``open``, this guard missed, and the agent was
+    # dispatched a SECOND time. Marking ``dispatching`` before the
+    # dispatch closes that window: a crashed/retried run now finds the
+    # decision ``dispatching`` and early-returns here WITHOUT re-firing.
+    # Trade-off: a crash *between* the ``dispatching`` write and a
+    # successful dispatch strands the decision in ``dispatching`` with no
+    # agent run — a visible, sweepable stuck state (this WARNING + the
+    # ``GET /api/v1/decisions/in-flight`` strip), strictly safer than a
+    # silent double real-world dispatch.
+    if state == "dispatching":
+        logger.warning(
+            "decision_router.route_decision: idempotency skip — "
+            "decision=%s is 'dispatching' (mark-before-dispatch guard "
+            "hit). If this decision never reaches 'executing' it is "
+            "STUCK: a crash landed between the dispatching mark and the "
+            "agent dispatch. created=%s — observable via "
+            "GET /api/v1/decisions/in-flight",
+            decision_id, str(decision.get("created") or "unknown"),
+        )
+        return {
+            "id": decision_id,
+            "skipped": True,
+            "reason": "state=dispatching",
+        }
     if state != "open":
         return {"id": decision_id, "skipped": True, "reason": f"state={state}"}
 
@@ -246,6 +294,50 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
                     next_state = "scheduled"
                 else:
                     # No time-bearing note → fire dispatch now.
+                    #
+                    # #55 — mark-before-dispatch. Write the non-terminal
+                    # ``dispatching`` state on the decision BEFORE the
+                    # agent dispatch POST so the idempotency guard at the
+                    # top of this activity catches a crashed/retried run
+                    # and does NOT re-fire. The dispatch endpoint
+                    # (``POST .../needs-attention/{na_id}/dispatch``)
+                    # re-arms the source signal and triggers a real agent
+                    # run — a non-idempotent side effect. Without this
+                    # mark, a run that dies between a successful dispatch
+                    # and the terminal ``state=executing`` PATCH at the
+                    # bottom of this activity re-enters with the decision
+                    # still ``open``, the guard misses, and the agent is
+                    # dispatched a second time.
+                    #
+                    # ``dispatching`` is deliberately NOT ``executing``:
+                    # ``check_decision_outcomes`` polls ``executing``
+                    # decisions waiting for an outcome signal. If we set
+                    # ``executing`` before the dispatch and the dispatch
+                    # then failed, that poller would wait forever on a
+                    # decision that never got an agent run. A
+                    # ``dispatching`` decision is invisible to the poller.
+                    #
+                    # The mark write itself must succeed before we
+                    # dispatch — if it fails we re-raise rather than
+                    # dispatch unguarded, so Temporal retries the whole
+                    # activity from a clean ``open`` state (no agent run
+                    # has happened yet).
+                    try:
+                        mark = await client.patch(
+                            f"/api/v1/decisions/{decision_id}",
+                            json={"state": "dispatching"},
+                        )
+                        mark.raise_for_status()
+                    except httpx.HTTPError as exc:
+                        logger.warning(
+                            "decision_router.route_decision: pre-dispatch "
+                            "'dispatching' mark failed decision=%s err=%s "
+                            "— re-raising before dispatch (no agent run "
+                            "yet)",
+                            decision_id, exc,
+                        )
+                        raise
+
                     resp = await client.post(
                         f"/api/v1/admin/needs-attention/{na_id}/dispatch",
                         json={
