@@ -220,6 +220,18 @@ export const submitInboxItem: SubmitInboxItem<
   { title: string; content: string; type?: string; filename?: string; encoding?: string },
   any
 > = async (args, context) => {
+  // Validate the payload up front. A raw-file submit needs filename +
+  // content; a text-note submit dereferences args.title. Without these
+  // guards a malformed call threw (e.g. args.title.replace on undefined)
+  // and surfaced as an HTTP 500 instead of a clean 400.
+  if (args?.filename) {
+    if (typeof args.content !== "string") {
+      throw new HttpError(400, "content required for a file upload");
+    }
+  } else if (typeof args?.title !== "string" || args.title.trim() === "") {
+    throw new HttpError(400, "title required");
+  }
+
   const instance = await getUserInstance(context);
 
   // Raw file upload mode — preserve original filename and content as-is
