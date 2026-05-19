@@ -11,7 +11,7 @@ import path from "node:path";
 import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
-import { dockerExec, dockerComposeCmd, HERMES_CMD } from "../helpers.js";
+import { dockerExec, dockerComposeCmd } from "../helpers.js";
 
 // Vault root — for synthetic integration sources (Omi, custom webhooks).
 const VAULT_ROOT = process.env.VAULT_PATH ?? "/vault";
@@ -1307,38 +1307,27 @@ export function registerIntegrationRoutes(): void {
         };
       });
 
-      // 2. Omi device rows — best-effort. Failure here MUST NOT fail the
-      //    whole listing endpoint, so anything goes wrong we just skip.
+      // 2. Omi wearable row — derived from stream-event source types.
+      //    The OpenClaw-era `devices list --json` CLI that used to enumerate
+      //    Omi devices does not exist in Hermes (issue #42 — Hermes pairing
+      //    is messaging-channel DM pairing only). An Omi wearable is now
+      //    surfaced when it has actually streamed events into the vault,
+      //    which is the same signal the webhook rows below key off.
       const omiRows: any[] = [];
-      try {
-        const stdout = await dockerExec("hermes", [...HERMES_CMD, "-p", "main", "devices", "list", "--json"]);
-        let parsed: unknown = null;
-        try { parsed = JSON.parse(stdout); } catch { /* ignore */ }
-        // The CLI returns either an array or {devices: [...]}; handle both.
-        const devices: any[] = Array.isArray(parsed)
-          ? parsed as any[]
-          : Array.isArray((parsed as any)?.devices)
-            ? (parsed as any).devices
-            : [];
-        const omiHasEvent = [...sourceTypeSet].some((s) => s.toLowerCase().includes("omi"));
-        for (const d of devices) {
-          const kind = String(d?.type ?? d?.device_type ?? "").toLowerCase();
-          if (!kind.includes("omi")) continue;
-          const id = d?.id ?? d?.serial ?? d?.device_id ?? d?.uuid ?? "";
-          if (!id) continue;
-          omiRows.push({
-            id: `omi:${id}`,
-            toolkit: "alfred-omi",
-            toolkit_name: d?.name || "Omi",
-            toolkit_icon: "",
-            status: "ACTIVE",
-            auth_scheme: "DEVICE_PAIR",
-            user_id: "",
-            created_at: d?.paired_at || d?.created_at || "",
-            is_stream_source: omiHasEvent,
-          });
-        }
-      } catch { /* openclaw not reachable or no devices — skip */ }
+      const omiHasEvent = [...sourceTypeSet].some((s) => s.toLowerCase().includes("omi"));
+      if (omiHasEvent) {
+        omiRows.push({
+          id: "omi:default",
+          toolkit: "alfred-omi",
+          toolkit_name: "Omi",
+          toolkit_icon: "",
+          status: "ACTIVE",
+          auth_scheme: "DEVICE_PAIR",
+          user_id: "",
+          created_at: "",
+          is_stream_source: true,
+        });
+      }
 
       // 3. Inbound webhook rows — list vault records under webhook_endpoint/.
       const webhookRows: any[] = [];

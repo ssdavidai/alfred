@@ -1,32 +1,36 @@
 ---
-title: "Revoke Device Access"
-description: "Revoke specific role access for a paired device"
-api: "POST /api/v1/devices/{deviceId}/revoke"
+title: "Revoke Pairing"
+description: "Revoke an approved user's channel access"
+api: "POST /api/v1/devices/revoke"
 ---
 
-Revokes specific role-based access for a paired device without fully removing it. The device remains paired but loses access to operations requiring the revoked role.
-
-<ParamField path="deviceId" type="string" required>
-  The unique identifier of the paired device whose access should be revoked.
-</ParamField>
+Revokes a previously-approved messaging account's access to Alfred. Proxies
+the native `hermes pairing revoke <platform> <user-id>` CLI.
 
 <ParamField header="Authorization" type="string" required>
   Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
 </ParamField>
 
-<ParamField body="role" type="string" required>
-  The role to revoke from the device. Valid values: `agent`, `user`, `admin`.
+<ParamField body="platform" type="string" required>
+  The messaging platform the user is on — e.g. `telegram`, `slack`,
+  `discord`, `whatsapp`, `signal`.
+</ParamField>
+
+<ParamField body="userId" type="string" required>
+  The platform-specific user id of the approved account to revoke. Shown in
+  the approved-users section of `GET /api/v1/devices`.
 </ParamField>
 
 <RequestExample>
 
 ```bash cURL
 curl --request POST \
-  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/dev_x9y8z7w6v5/revoke \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/revoke \
   --header 'Authorization: Bearer YOUR_API_KEY' \
   --header 'Content-Type: application/json' \
   --data '{
-    "role": "admin"
+    "platform": "telegram",
+    "userId": "123456789"
   }'
 ```
 
@@ -36,10 +40,7 @@ curl --request POST \
 
 ```json Response
 {
-  "message": "Device access revoked successfully",
-  "deviceId": "dev_x9y8z7w6v5",
-  "revokedRole": "admin",
-  "remainingRoles": ["agent"]
+  "message": "Access revoked"
 }
 ```
 

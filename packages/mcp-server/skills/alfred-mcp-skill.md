@@ -41,9 +41,9 @@ The catalogue is intentionally narrow. Container restarts, credential rotation, 
 - `list_openclaw_agents` — live agent state from the gateway (model bindings, provider auth)
 - `list_openclaw_allowed_tools` — `gateway.tools.allow` + MCP-server tool inventory
 
-### Devices (1)
+### DM pairing (1)
 
-- `approve_device` — approve a pending pairing request (the only non-rotating device op exposed here)
+- `approve_device` — approve a pending Hermes DM-pairing code by `platform` + `code` (the only pairing op exposed here)
 
 ---
 
@@ -84,9 +84,9 @@ The common task queue on the learn package is `alfred-learn`. If Sir doesn't kno
 
 `get_openclaw_health` — gateway-side health (provider auth, queue depth). Pair with `list_openclaw_agents` to see which model each agent is wired to right now and whether any provider is missing credentials. If health is bad, surface what's broken to Sir; do NOT try to restart anything from this connector — that's deliberately not exposed.
 
-### "Approve my new iPhone / laptop"
+### "Approve my Telegram / Slack pairing"
 
-`approve_device({requestId: "<id from Sir's pairing screen>"})`. If Sir says "approve whatever just came in", pass `latest: true` instead. This is the ONLY device operation exposed — clear / rotate / revoke / remove are not, by design.
+`approve_device({platform: "telegram", code: "<8-char code from Sir's pairing screen>"})`. Hermes hands an unknown messaging account a one-hour pairing code; this approves it so the conversation can reach Alfred. This is the ONLY pairing operation exposed — revoke / clear-pending are not, by design.
 
 ---
 

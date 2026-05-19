@@ -1,32 +1,36 @@
 ---
-title: "Approve Device"
-description: "Approve a pending device pairing request"
-api: "POST /api/v1/devices/{requestId}/approve"
+title: "Approve Pairing"
+description: "Approve a pending Hermes DM-pairing code"
+api: "POST /api/v1/devices/approve"
 ---
 
-Approves a pending device pairing request, allowing the device to connect to the OpenClaw gateway.
-
-<ParamField path="requestId" type="string" required>
-  The unique identifier of the pending pairing request to approve.
-</ParamField>
+Approves a pending DM-pairing code, allowing that messaging account to reach
+Alfred. Proxies the native `hermes pairing approve <platform> <code>` CLI.
 
 <ParamField header="Authorization" type="string" required>
   Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
 </ParamField>
 
-<ParamField body="latest" type="boolean" default={false}>
-  If true, approve only if this is the most recent request from this device. Prevents approval of stale requests.
+<ParamField body="platform" type="string" required>
+  The messaging platform the code is for — e.g. `telegram`, `slack`,
+  `discord`, `whatsapp`, `signal`.
+</ParamField>
+
+<ParamField body="code" type="string" required>
+  The 8-character pairing code shown to the unknown account when it first
+  messaged the gateway (unambiguous alphabet, no `0/O/1/I`; 1-hour TTL).
 </ParamField>
 
 <RequestExample>
 
 ```bash cURL
 curl --request POST \
-  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/req_7k9m3p2q1/approve \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/approve \
   --header 'Authorization: Bearer YOUR_API_KEY' \
   --header 'Content-Type: application/json' \
   --data '{
-    "latest": true
+    "platform": "telegram",
+    "code": "XKGH5N7P"
   }'
 ```
 
@@ -36,9 +40,7 @@ curl --request POST \
 
 ```json Response
 {
-  "message": "Device approved successfully",
-  "deviceId": "dev_n5m4k3j2h1",
-  "requestId": "req_7k9m3p2q1"
+  "message": "Pairing approved"
 }
 ```
 

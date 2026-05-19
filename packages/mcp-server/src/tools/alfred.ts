@@ -22,7 +22,7 @@
 //   - admin/chores/emergency-pause-all         → fleet-wide chore halt
 //   - credentials PATCH (rotate)               → rotates secrets out of sync
 //   - admin/config/env PATCH                   → can brick boot
-//   - devices clear|rotate|revoke              → token rotation locks Sir out
+//   - pairing revoke|clear-pending             → can lock Sir's channels out
 //   - openclaw/restart                         → kills the running session
 //   - logs streaming                           → bandwidth + leak surface
 // These remain available to in-tenant agents (Alfred main, chores) where
@@ -321,25 +321,25 @@ const openclawTools: ToolDef[] = [
   },
 ];
 
-// ─── devices (non-rotating only) ────────────────────────────────────────────
+// ─── DM pairing (approve only) ──────────────────────────────────────────────
 
 const deviceTools: ToolDef[] = [
   {
     name: "approve_device",
     description:
-      "Approve a pending device pairing request — what happens after Sir's iPhone / new laptop hits the OpenClaw pairing endpoint and shows up as a pending request needing the operator's nod. Pass the request id (Sir's UI shows it; or list pending requests via the dashboard). Optional `latest` flag approves the most-recently-submitted request without specifying its id. Returns 200 with the openclaw CLI's confirmation message. NOT exposed over this connector (deliberately): clear / rotate / revoke / remove — those touch token state and shouldn't be driven by a remote LLM with a 1h bearer. Use this ONLY when Sir explicitly asks claude.ai to approve a pending device while he's away from his phone. Backing: docker exec openclaw devices approve.",
+      "Approve a pending Hermes DM-pairing code — what happens after an unknown messaging account (Telegram, Slack, …) DMs Alfred's gateway and is handed a one-hour pairing code that needs the operator's nod before that conversation can reach Alfred. Pass the `platform` and the 8-char `code`; the principal's dashboard `/dashboard/devices` page shows pending codes (it surfaces the raw `hermes pairing list` text). Returns 200 with the Hermes CLI's confirmation message. NOT exposed over this connector (deliberately): revoke / clear-pending — those can lock Sir's channels out and shouldn't be driven by a remote LLM with a 1h bearer. Use this ONLY when Sir explicitly asks claude.ai to approve a pending pairing while he's away from his phone. Backing: docker exec hermes pairing approve <platform> <code>.",
     inputSchema: z.object({
-      requestId: z.string().min(1).describe(
-        "Pending pairing request id (UUID-like). The openclaw CLI's `devices list --json` surfaces these; Sir's dashboard shows them too.",
+      platform: z.string().min(1).describe(
+        "Messaging platform the pairing code is for — e.g. telegram, slack, discord, whatsapp, signal.",
       ),
-      latest: z.boolean().optional().describe(
-        "If true, ignore requestId semantics and approve the most-recent request. Useful when Sir says 'approve whatever just came in'.",
+      code: z.string().min(1).describe(
+        "The 8-character pairing code (unambiguous alphabet, no 0/O/1/I). Sir's `/dashboard/devices` page shows pending codes; `hermes pairing list` is the underlying source.",
       ),
     }),
-    buildRequest: ({ requestId, ...body }) => ({
+    buildRequest: ({ platform, code }) => ({
       method: "POST",
-      path: `/api/v1/devices/${encodeURIComponent(requestId)}/approve`,
-      body,
+      path: `/api/v1/devices/approve`,
+      body: { platform, code },
     }),
   },
 ];

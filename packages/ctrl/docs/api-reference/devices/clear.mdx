@@ -1,29 +1,22 @@
 ---
-title: "Clear Devices"
-description: "Bulk clear pending or all devices"
-api: "POST /api/v1/devices/clear"
+title: "Clear Pending Pairings"
+description: "Drop all pending Hermes DM-pairing codes"
+api: "POST /api/v1/devices/clear-pending"
 ---
 
-Clears multiple devices at once. Can be used to clear all pending requests or reset all devices (both pending and paired).
+Clears all outstanding (unapproved) DM-pairing codes. Approved users are
+unaffected. Proxies the native `hermes pairing clear-pending` CLI.
 
 <ParamField header="Authorization" type="string" required>
   Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
-</ParamField>
-
-<ParamField body="pending_only" type="boolean" default={true}>
-  If true, only clear pending device requests. If false, clear both pending and paired devices.
 </ParamField>
 
 <RequestExample>
 
 ```bash cURL
 curl --request POST \
-  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/clear \
-  --header 'Authorization: Bearer YOUR_API_KEY' \
-  --header 'Content-Type: application/json' \
-  --data '{
-    "pending_only": true
-  }'
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/clear-pending \
+  --header 'Authorization: Bearer YOUR_API_KEY'
 ```
 
 </RequestExample>
@@ -32,9 +25,7 @@ curl --request POST \
 
 ```json Response
 {
-  "message": "Cleared 3 pending device requests",
-  "pending_cleared": 3,
-  "paired_cleared": 0
+  "message": "Pending codes cleared"
 }
 ```
 

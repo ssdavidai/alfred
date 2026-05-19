@@ -24,8 +24,7 @@ import type {
   SubmitInboxItem,
   TriggerWorker,
   ApproveDevice,
-  RejectDevice,
-  RemoveDevice,
+  RevokeDevice,
   UpdateCredentials,
   UpdateAgentConfig,
   UpdateAgentModel,
@@ -116,7 +115,7 @@ export const getDashboardData: GetDashboardData<void, any> = async (
   const healthRaw = raw?.health ?? null;
   const vaultRaw = raw?.vault ?? null;
   const inboxRaw = raw?.inbox ?? null;
-  const devicesRaw = raw?.devices ?? null;
+  const pairingRaw = raw?.pairing ?? null;
   const containersRaw = raw?.containers ?? null;
   const openclawCfgRaw = raw?.openclawCfg ?? null;
 
@@ -137,9 +136,11 @@ export const getDashboardData: GetDashboardData<void, any> = async (
     ? inboxRaw.files.filter((f: string) => f !== "processed")
     : [];
 
-  // Device counts
-  const paired = Array.isArray(devicesRaw?.paired) ? devicesRaw.paired.length : 0;
-  const pending = Array.isArray(devicesRaw?.pending) ? devicesRaw.pending.length : 0;
+  // DM-pairing status. Hermes' `pairing list` emits human-readable text
+  // (no JSON, no counts) — the dashboard carries the raw text so the
+  // TopBar/DevicesPanel can render it as a read-only surface.
+  const pairingText: string | null =
+    typeof pairingRaw?.raw === "string" ? pairingRaw.raw : null;
 
   // Full container list
   const containers = containersRaw
@@ -165,7 +166,7 @@ export const getDashboardData: GetDashboardData<void, any> = async (
       agentmailInboxAddress: (instance as any).agentmailInboxAddress ?? null,
     },
     inbox: inboxRaw ? { count: inboxFiles.length } : null,
-    devices: devicesRaw ? { paired, pending } : null,
+    pairing: pairingText !== null ? { raw: pairingText } : null,
     containers,
     gatewayToken,
   };
@@ -390,44 +391,40 @@ export const triggerWorker: TriggerWorker<
 };
 
 // ============================================================
-// Devices
+// DM pairing (Hermes-native — issue #42)
 // ============================================================
+// The old per-device-token surface (reject / remove / rotate) was an
+// OpenClaw-era reinvention with no Hermes equivalent. Hermes pairs a
+// messaging account by a one-hour pairing code. `getDevices` returns the
+// raw `hermes pairing list` text ({ raw }); `approveDevice` / `revokeDevice`
+// proxy the native `pairing approve|revoke` CLI.
+
 export const getDevices: GetDevices<void, any> = async (_args, context) => {
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, { path: "/api/v1/devices" });
 };
 
 export const approveDevice: ApproveDevice<
-  { requestId: string; name?: string },
+  { platform: string; code: string },
   any
 > = async (args, context) => {
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, {
     method: "POST",
-    path: `/api/v1/devices/${args.requestId}/approve`,
-    body: args.name ? { name: args.name } : undefined,
+    path: `/api/v1/devices/approve`,
+    body: { platform: args.platform, code: args.code },
   });
 };
 
-export const rejectDevice: RejectDevice<{ requestId: string }, any> = async (
-  args,
-  context,
-) => {
+export const revokeDevice: RevokeDevice<
+  { platform: string; userId: string },
+  any
+> = async (args, context) => {
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, {
     method: "POST",
-    path: `/api/v1/devices/${args.requestId}/reject`,
-  });
-};
-
-export const removeDevice: RemoveDevice<{ deviceId: string }, any> = async (
-  args,
-  context,
-) => {
-  const instance = await getUserInstance(context);
-  return proxyToTenant(instance, {
-    method: "DELETE",
-    path: `/api/v1/devices/${args.deviceId}`,
+    path: `/api/v1/devices/revoke`,
+    body: { platform: args.platform, userId: args.userId },
   });
 };
 

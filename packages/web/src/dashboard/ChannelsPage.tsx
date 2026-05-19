@@ -12,7 +12,6 @@ import {
   removeAuthorizedNumber,
   getVexaAutoJoin,
   setVexaAutoJoin,
-  getDevices,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 
@@ -28,10 +27,6 @@ export default function ChannelsPage() {
     undefined,
     { retry: false },
   );
-  const { data: devicesData } = useQuery(getDevices, undefined, {
-    retry: false,
-  });
-
   const inboxAddress: string =
     (dashData as any)?.instance?.agentmailInboxAddress ?? "";
   const phoneNumber: string = (phoneData as any)?.twilio_number ?? (phoneData as any)?.number ?? "";
@@ -39,16 +34,6 @@ export default function ChannelsPage() {
     ? (phoneData as any).authorized_numbers
     : [];
   const vexaEnabled: boolean = Boolean((vexaData as any)?.enabled);
-  const omiPaired = Array.isArray((devicesData as any)?.paired)
-    ? ((devicesData as any).paired as any[]).filter(
-        (d) => String(d?.type ?? d?.device_type ?? "").toLowerCase() === "omi",
-      )
-    : [];
-  const omiPending = Array.isArray((devicesData as any)?.pending)
-    ? ((devicesData as any).pending as any[]).filter(
-        (d) => String(d?.type ?? d?.device_type ?? "").toLowerCase() === "omi",
-      )
-    : [];
 
   // Phone-form state.
   const [newNumber, setNewNumber] = useState("");
@@ -223,21 +208,15 @@ export default function ChannelsPage() {
             </button>
           </ChannelCard>
 
-          {/* Omi */}
+          {/* Omi — a wearable webhook stream source, configured under Streams. */}
           <ChannelCard
             name="Omi"
-            address={
-              omiPaired.length > 0
-                ? `${omiPaired.length} paired`
-                : omiPending.length > 0
-                  ? `${omiPending.length} awaiting approval`
-                  : "Not paired"
-            }
+            address="Wearable audio stream"
             note="Ambient voice. Wear it; I will keep up."
-            status={omiPaired.length > 0 ? "active" : "available"}
+            status="available"
           >
-            <Link to="/dashboard/devices" className="btn-ghost mt-4 inline-block">
-              Manage devices →
+            <Link to="/dashboard/streams" className="btn-ghost mt-4 inline-block">
+              Configure stream →
             </Link>
           </ChannelCard>
 

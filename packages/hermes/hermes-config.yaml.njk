@@ -144,6 +144,28 @@ delegation:
 {%- endif %}
 
 # =============================================================================
+# Command approval
+# =============================================================================
+# Hermes-native per-command safety gate (Codex-inspired). Replaces the
+# bespoke ctrl-api approval path that used to wrap a non-existent `hermes
+# devices` CLI surface.
+approvals:
+{%- if is_main %}
+  # The user-facing Alfred runs against a live principal who can answer a
+  # prompt. `smart` uses an auxiliary LLM to risk-assess each command:
+  # low-risk commands auto-approve, genuinely dangerous ones auto-deny, and
+  # only ambiguous cases escalate to the principal.
+  mode: smart
+  timeout: 60
+{%- else %}
+  # Background workers run autonomously on cron/batch pipelines with no TTY
+  # and no human to answer a prompt — a `manual`/`smart` escalation would
+  # deadlock the run. `tool_loop_guardrails` (below) is the safety net that
+  # actually fits an unattended worker: a hard stop on stuck loops.
+  mode: off
+{%- endif %}
+
+# =============================================================================
 # Tool loop guardrails
 # =============================================================================
 tool_loop_guardrails:

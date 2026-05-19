@@ -602,13 +602,8 @@ action approveDevice {
   entities: []
 }
 
-action rejectDevice {
-  fn: import { rejectDevice } from "@src/dashboard/operations",
-  entities: []
-}
-
-action removeDevice {
-  fn: import { removeDevice } from "@src/dashboard/operations",
+action revokeDevice {
+  fn: import { revokeDevice } from "@src/dashboard/operations",
   entities: []
 }
 

@@ -35,11 +35,12 @@ const endpoints = [
     ],
   },
   {
-    section: "Devices",
+    section: "DM Pairing",
     items: [
-      { method: "GET", path: "devices", desc: "List paired devices" },
-      { method: "POST", path: "devices/:requestId/approve", desc: "Approve a device" },
-      { method: "POST", path: "devices/:requestId/reject", desc: "Reject a device" },
+      { method: "GET", path: "devices", desc: "List pairings (raw `hermes pairing list` text)" },
+      { method: "POST", path: "devices/approve", desc: "Approve a pairing code (platform + code)" },
+      { method: "POST", path: "devices/revoke", desc: "Revoke a user's channel access (platform + userId)" },
+      { method: "POST", path: "devices/clear-pending", desc: "Clear pending pairing codes" },
     ],
   },
   {

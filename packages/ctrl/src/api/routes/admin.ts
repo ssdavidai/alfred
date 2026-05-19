@@ -896,10 +896,13 @@ export function registerAdminRoutes(): void {
 
   addRoute("GET", "/api/v1/admin/dashboard", async ({ res }) => {
     // Run all async operations in parallel to minimise total wait time
-    const [healthResult, containersResult, devicesResult] = await Promise.allSettled([
+    const [healthResult, containersResult, pairingResult] = await Promise.allSettled([
       execAsync("/opt/alfred/healthcheck.sh", []).then(r => JSON.parse(r.stdout.trim())),
       dockerComposeCmd(["ps", "--format", "json"]).then(s => parseJsonLines(s)),
-      dockerExec(HERMES_CONTAINER, [...HERMES_CMD, "-p", "main", "devices", "list", "--json"]).then(s => JSON.parse(s)),
+      // Hermes-native DM pairing (issue #42). `pairing list` emits
+      // human-readable text — there is no JSON output — so the dashboard
+      // carries the raw CLI text as a read-only status surface.
+      dockerExec(HERMES_CONTAINER, [...HERMES_CMD, "-p", "main", "pairing", "list"]).then(s => ({ raw: s.trim() })),
     ]);
 
     // Fast synchronous reads
@@ -918,7 +921,7 @@ export function registerAdminRoutes(): void {
     sendJson(res, 200, {
       health: healthResult.status === "fulfilled" ? healthResult.value : null,
       containers: containersResult.status === "fulfilled" ? containersResult.value : null,
-      devices: devicesResult.status === "fulfilled" ? devicesResult.value : null,
+      pairing: pairingResult.status === "fulfilled" ? pairingResult.value : null,
       vault: vaultRaw,
       inbox: { files: inboxFiles },
       openclawCfg,

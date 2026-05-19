@@ -1,83 +1,53 @@
-// DevicesPage — Hermes DM-pairing / command-approval (#31).
+// DevicesPage — Hermes-native DM pairing (issue #42).
 //
-// SEMANTIC SHIFT (PLAN.md Part F, issue #15): OpenClaw "devices" were
-// per-device gateway tokens. Hermes has no device-token concept — its
-// equivalent is **DM pairing**: a chat/DM (Telegram, Slack, Omi, …) is
-// paired with the principal, and privileged commands require approval.
+// HISTORY. The old page wrapped an OpenClaw-era "devices" surface (per-device
+// gateway tokens; approve/reject by request id). Hermes has no such concept.
+// Its native equivalent is **DM pairing**: when an unknown messaging account
+// DMs the gateway it gets a one-hour 8-char pairing code, and the owner
+// approves that code by `platform` + `code`.
 //
-// The data still arrives via `getDevices` → ctrl-api `GET /api/v1/devices`,
-// which now proxies `hermes -p main devices list --json`. The exact field
-// names depend on the pinned Hermes build, so every read is tolerant: a
-// pairing is identified by `id`/`requestId`/`deviceId`, described by
-// `channel`/`platform`/`clientId`, and approved/rejected by request id.
-import {
-  useQuery,
-  getDevices,
-  approveDevice,
-  rejectDevice,
-} from "wasp/client/operations";
+// Native `hermes pairing list` emits human-readable text only (no JSON, no
+// stable per-row id), so this page is a read-only status surface for the
+// list, plus a small form to approve a pending code by platform + code —
+// the only two inputs the native CLI takes. Command approval is no longer
+// surfaced here at all: it is now Hermes-native (`approvals.mode`).
+import { useQuery, getDevices, approveDevice } from "wasp/client/operations";
 import DashboardLayout from "./DashboardLayout";
 import { Card, CardContent } from "../client/components/ui/card";
 import { Button } from "../client/components/ui/button";
-import { MessageSquare, Check, X, Shield } from "lucide-react";
+import { MessageSquare, Check } from "lucide-react";
 import { useState } from "react";
-
-/** A pairing's stable id — Hermes builds vary, so accept the common keys. */
-function pairingId(p: any): string {
-  return String(p?.id ?? p?.requestId ?? p?.deviceId ?? p?.pairingId ?? "");
-}
-
-/** A human label for a pairing — channel + handle, falling back gracefully. */
-function pairingLabel(p: any): string {
-  return String(
-    p?.channel ??
-      p?.clientId ??
-      p?.handle ??
-      p?.platform ??
-      p?.deviceName ??
-      "DM pairing",
-  );
-}
-
-/** The channel/transport a pairing arrived on (telegram, slack, omi, …). */
-function pairingChannel(p: any): string {
-  return String(p?.channel ?? p?.platform ?? p?.transport ?? "—");
-}
 
 export default function DevicesPage() {
   const { data, isLoading, error, refetch } = useQuery(getDevices);
-  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [platform, setPlatform] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  const handleApprove = async (requestId: string) => {
-    setActionLoading(requestId);
+  const raw: string =
+    typeof (data as any)?.raw === "string" ? (data as any).raw : "";
+
+  const handleApprove = async () => {
+    if (!platform.trim() || !code.trim()) return;
+    setBusy(true);
+    setResult(null);
+    setActionError(null);
     try {
-      await approveDevice({ requestId });
+      const res = await approveDevice({
+        platform: platform.trim(),
+        code: code.trim(),
+      });
+      setResult((res as any)?.message ?? "Pairing approved");
+      setCode("");
       refetch();
-    } catch (err) {
-      console.error("Approve failed:", err);
+    } catch (err: any) {
+      setActionError(err?.message ?? "Approve failed");
     } finally {
-      setActionLoading(null);
+      setBusy(false);
     }
   };
-
-  const handleReject = async (requestId: string) => {
-    setActionLoading(requestId);
-    try {
-      await rejectDevice({ requestId });
-      refetch();
-    } catch (err) {
-      console.error("Reject failed:", err);
-    } finally {
-      setActionLoading(null);
-    }
-  };
-
-  const pending: any[] = Array.isArray((data as any)?.pending)
-    ? (data as any).pending
-    : [];
-  const paired: any[] = Array.isArray((data as any)?.paired)
-    ? (data as any).paired
-    : [];
 
   return (
     <DashboardLayout>
@@ -85,113 +55,88 @@ export default function DevicesPage() {
         Pairings
       </h1>
       <p className="text-muted-foreground mb-6 max-w-[60ch] text-sm">
-        Hermes pairs a chat or DM with you instead of issuing device tokens.
-        Approve a pairing request to let that conversation reach Alfred;
-        privileged commands from a paired DM still ask for your approval.
+        Hermes pairs a messaging account with you instead of issuing device
+        tokens. When an unknown account DMs Alfred it receives a one-hour
+        8-character pairing code. Approve that code below to let the
+        conversation reach Alfred.
       </p>
 
+      {/* Approve a pending pairing code */}
+      <Card className="mb-6">
+        <CardContent className="p-4">
+          <h2 className="text-cream mb-3 text-sm font-semibold">
+            Approve a pairing code
+          </h2>
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-muted-foreground text-xs">Platform</span>
+              <input
+                className="bg-black/30 text-cream border-gold-dim/20 rounded-sm border px-2 py-1 font-mono text-sm"
+                placeholder="telegram"
+                value={platform}
+                onChange={(e) => setPlatform(e.target.value)}
+              />
+            </label>
+            <label className="flex flex-col gap-1">
+              <span className="text-muted-foreground text-xs">
+                Pairing code
+              </span>
+              <input
+                className="bg-black/30 text-cream border-gold-dim/20 rounded-sm border px-2 py-1 font-mono text-sm uppercase"
+                placeholder="XKGH5N7P"
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+              />
+            </label>
+            <Button
+              size="sm"
+              disabled={busy || !platform.trim() || !code.trim()}
+              onClick={handleApprove}
+            >
+              <Check className="mr-1 h-3 w-3" />
+              Approve
+            </Button>
+          </div>
+          {result && (
+            <p className="mt-3 font-mono text-xs text-green-400">{result}</p>
+          )}
+          {actionError && (
+            <p className="text-destructive mt-3 font-mono text-xs">
+              {actionError}
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Pairing status — raw `hermes pairing list` output */}
+      <h2 className="text-cream mb-2 text-lg font-semibold">Pairing status</h2>
       {isLoading && (
         <p className="text-muted-foreground">Loading pairings...</p>
       )}
-
       {error && (
         <div className="bg-destructive/10 text-destructive rounded-sm p-4">
           <p>{error.message}</p>
         </div>
       )}
-
-      {data && (
-        <div className="space-y-4">
-          {/* Pending pairing requests */}
-          {pending.length > 0 && (
-            <>
-              <h2 className="text-cream text-lg font-semibold">
-                Pairing requests
-              </h2>
-              {pending.map((req: any) => {
-                const id = pairingId(req);
-                return (
-                  <Card key={id} className="border-primary/50 border">
-                    <CardContent className="flex items-center justify-between p-4">
-                      <div className="flex items-center gap-3">
-                        <Shield className="text-primary h-5 w-5" />
-                        <div>
-                          <p className="text-cream font-medium">
-                            {pairingLabel(req)}
-                          </p>
-                          <p className="text-muted-foreground text-xs">
-                            {pairingChannel(req)}
-                            {req?.createdAtMs
-                              ? ` · requested ${new Date(
-                                  req.createdAtMs,
-                                ).toLocaleString()}`
-                              : ""}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex gap-2">
-                        <Button
-                          size="sm"
-                          disabled={actionLoading === id}
-                          onClick={() => handleApprove(id)}
-                        >
-                          <Check className="mr-1 h-3 w-3" />
-                          Approve
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          disabled={actionLoading === id}
-                          onClick={() => handleReject(id)}
-                        >
-                          <X className="mr-1 h-3 w-3" />
-                          Reject
-                        </Button>
-                      </div>
-                    </CardContent>
-                  </Card>
-                );
-              })}
-            </>
-          )}
-
-          {/* Paired conversations */}
-          <h2 className="text-cream text-lg font-semibold">
-            Paired conversations
-          </h2>
-          {paired.length > 0 ? (
-            paired.map((p: any) => {
-              const id = pairingId(p);
-              return (
-                <Card key={id || pairingLabel(p)}>
-                  <CardContent className="flex items-center gap-3 p-4">
-                    <MessageSquare className="text-muted-foreground h-5 w-5" />
-                    <div>
-                      <p className="text-cream font-medium">
-                        {pairingLabel(p)}
-                      </p>
-                      <p className="text-muted-foreground text-xs">
-                        {pairingChannel(p)}
-                        {p?.role ? ` · ${p.role}` : ""}
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
-              );
-            })
-          ) : (
-            <Card>
-              <CardContent className="p-8 text-center">
-                <MessageSquare className="text-muted-foreground mx-auto mb-3 h-12 w-12" />
+      {!isLoading && !error && (
+        <Card>
+          <CardContent className="p-4">
+            {raw ? (
+              <pre className="text-muted-foreground whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+                {raw}
+              </pre>
+            ) : (
+              <div className="py-6 text-center">
+                <MessageSquare className="text-muted-foreground mx-auto mb-3 h-10 w-10" />
                 <p className="text-muted-foreground">
-                  No conversations paired yet. Message Alfred from Telegram,
-                  Slack, or another channel and approve the pairing request
+                  No pairings yet. Message Alfred from Telegram, Slack, or
+                  another channel — you will receive a pairing code to approve
                   here.
                 </p>
-              </CardContent>
-            </Card>
-          )}
-        </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
     </DashboardLayout>
   );

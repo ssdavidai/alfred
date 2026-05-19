@@ -151,15 +151,12 @@
             ]
           },
           {
-            "group": "Devices",
+            "group": "DM Pairing",
             "pages": [
               "api-reference/devices/list",
               "api-reference/devices/approve",
-              "api-reference/devices/reject",
-              "api-reference/devices/remove",
-              "api-reference/devices/clear",
-              "api-reference/devices/rotate",
-              "api-reference/devices/revoke"
+              "api-reference/devices/revoke",
+              "api-reference/devices/clear"
             ]
           },
           {

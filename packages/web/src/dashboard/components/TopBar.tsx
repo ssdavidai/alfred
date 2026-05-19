@@ -54,9 +54,9 @@ export default function TopBar({
   const totalContainers =
     containers?.filter((c: any) => c.Service !== "init").length ?? 0;
 
-  const pairedCount = data.devices?.paired;
-  const pendingCount = data.devices?.pending;
-  const isDevicesLoading = !data.devices;
+  // Hermes-native DM pairing (issue #42) emits human-readable text, not
+  // counts — the panel renders the raw `hermes pairing list` output.
+  const isPairingLoading = !data.pairing;
 
   const subdomainUrl = data.instance?.subdomainUrl ?? null;
   const agentmailAddress = (data.instance as any)?.agentmailInboxAddress ?? null;
@@ -210,7 +210,7 @@ export default function TopBar({
 
         <div className="h-6 border-r border-white/[0.08]" />
 
-        {/* Devices */}
+        {/* DM pairing */}
         <motion.button
           whileHover={hoverGlow}
           transition={{ type: "spring" as const, stiffness: 300, damping: 20 }}
@@ -224,14 +224,7 @@ export default function TopBar({
           }
         >
           <Smartphone className="h-3.5 w-3.5 text-[#C9A84C]/70" />
-          <span>
-            {isDevicesLoading ? "Loading devices..." : `${pairedCount} paired`}
-          </span>
-          {!isDevicesLoading && (pendingCount ?? 0) > 0 && (
-            <span className="rounded-full bg-[#C9A84C]/20 px-1.5 py-0.5 text-[0.6rem] font-medium text-[#C9A84C]">
-              PENDING: {pendingCount}
-            </span>
-          )}
+          <span>{isPairingLoading ? "Loading pairings..." : "Pairings"}</span>
         </motion.button>
 
         {/* Spacer */}
