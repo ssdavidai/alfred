@@ -35,7 +35,6 @@ import { registerSureAssistantRoutes } from "./routes/sureAssistant.js";
 import { registerAppsRoutes } from "./routes/apps.js";
 import { registerVaultwardenRoutes } from "./routes/vaultwarden.js";
 import { registerClaudeSetupRoutes } from "./routes/claudeSetup.js";
-import { registerSkillsRoutes } from "./routes/skills.js";
 import { registerContextRoutes } from "./routes/context.js";
 import { registerStewardRoutes } from "./routes/steward.js";
 import { registerVexaRoutes } from "./routes/vexa.js";
@@ -141,7 +140,6 @@ export function createApiServer(): http.Server {
   registerAppsRoutes();
   registerVaultwardenRoutes();
   registerClaudeSetupRoutes();
-  registerSkillsRoutes();
   registerContextRoutes();
   registerStewardRoutes();
   registerVexaRoutes();
