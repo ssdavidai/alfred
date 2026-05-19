@@ -149,6 +149,30 @@ class OnboardingInput:
     resume_stage: str = ""
 
 
+def _state_count(state: dict[str, Any], kind: str) -> int:
+    """Read a facts/patterns count from an ``init_onboard_json`` result.
+
+    ``init_onboard_json`` now returns a SMALL summary carrying explicit
+    ``facts_count`` / ``patterns_count`` ints (issue #76 — the full
+    onboard dict, with its ~5000-email corpus, must not travel through
+    Temporal's 4 MB activity-completion payload).
+
+    This helper is replay-safe: a workflow that recorded the activity
+    result in history under the OLD shape — the full onboard dict with a
+    ``facts`` / ``patterns`` LIST — replays that historical result, so we
+    fall back to ``len(list)`` when the explicit count key is absent.
+    Both shapes resolve to the same int, so history stays deterministic.
+
+    ``kind`` is ``"facts"`` or ``"patterns"``.
+    """
+    count_key = f"{kind}_count"
+    if count_key in state:
+        value = state.get(count_key)
+        return value if isinstance(value, int) else 0
+    legacy = state.get(kind)
+    return len(legacy) if isinstance(legacy, list) else 0
+
+
 @dataclass
 class OnboardingResult:
     brief_path: str = ""
@@ -226,8 +250,8 @@ class OnboardingPipelineWorkflow:
         if current_stage == "done":
             return OnboardingResult(
                 brief_path="briefing/First Brief.md",
-                facts_count=len(current_state.get("facts", [])),
-                patterns_count=len(current_state.get("patterns", [])),
+                facts_count=_state_count(current_state, "facts"),
+                patterns_count=_state_count(current_state, "patterns"),
             )
 
         # -----------------------------------------------------------------
@@ -349,8 +373,8 @@ class OnboardingPipelineWorkflow:
             # and resumes from "brief" stage.
             return OnboardingResult(
                 brief_path="",
-                facts_count=len(current_state.get("facts", [])),
-                patterns_count=len(current_state.get("patterns", [])),
+                facts_count=_state_count(current_state, "facts"),
+                patterns_count=_state_count(current_state, "patterns"),
             )
 
         # -----------------------------------------------------------------
@@ -534,6 +558,6 @@ class OnboardingPipelineWorkflow:
 
         return OnboardingResult(
             brief_path=brief_path,
-            facts_count=len(current_state.get("facts", [])),
-            patterns_count=len(current_state.get("patterns", [])),
+            facts_count=_state_count(current_state, "facts"),
+            patterns_count=_state_count(current_state, "patterns"),
         )

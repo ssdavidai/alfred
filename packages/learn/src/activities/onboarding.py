@@ -124,11 +124,46 @@ def _parse_json_response(raw: Any, key: str) -> list[dict]:
 # Activity: init_onboard_json
 # ---------------------------------------------------------------------------
 
+def _onboard_summary(state: dict[str, Any]) -> dict[str, Any]:
+    """Build the SMALL resume summary the workflow needs from onboard.json.
+
+    The workflow consumes exactly three things from this activity's result:
+    the resume ``stage`` and the ``facts``/``patterns`` counts. It NEVER
+    needs the ``emails`` corpus, the full ``facts`` list, or the full
+    ``patterns`` list — and those are precisely what makes onboard.json
+    large (a 100-day Gmail backfill is ~5000 emails ≈ 4.9 MB).
+
+    Returning the whole onboard dict pushed that corpus through Temporal's
+    activity-completion message (``RespondActivityTaskCompleted``), which
+    has a 4 MB default gRPC ``blobSizeLimit``. On a resume — when
+    onboard.json already carries the corpus written by an earlier
+    ``*_fetch_email_metadata`` run — ``init_onboard_json`` would exceed
+    that limit → ``ResourceExhausted`` and a stuck onboarding (issue #76).
+
+    onboard.json on disk remains the full source of truth; every
+    downstream stage reads the corpus straight off disk. Only this
+    Temporal-facing summary is trimmed.
+    """
+    facts = state.get("facts") or []
+    patterns = state.get("patterns") or []
+    return {
+        "user_id": state.get("user_id", ""),
+        "stage": state.get("stage", "metadata"),
+        # Explicit counts so the workflow never has to len() a (potentially
+        # large) list carried through Temporal.
+        "facts_count": len(facts) if isinstance(facts, list) else 0,
+        "patterns_count": len(patterns) if isinstance(patterns, list) else 0,
+    }
+
+
 @activity.defn
 async def init_onboard_json(onboard_path: str, user_id: str) -> dict[str, Any]:
     """Initialize onboard.json, preserving existing data for resume capability.
 
-    Returns the current state so the workflow can decide where to resume from.
+    Returns a SMALL summary (``stage`` + ``facts_count`` + ``patterns_count``)
+    so the workflow can decide where to resume from. The full state —
+    including the email corpus — stays on disk in onboard.json; it must
+    NOT travel through Temporal's 4 MB activity-completion payload (#76).
     """
     existing = _read_onboard(onboard_path)
 
@@ -138,7 +173,7 @@ async def init_onboard_json(onboard_path: str, user_id: str) -> dict[str, Any]:
         existing["user_id"] = user_id
         _write_onboard(onboard_path, existing)
         activity.heartbeat(f"Resuming: stage={existing.get('stage')}, facts={len(existing['facts'])}")
-        return existing
+        return _onboard_summary(existing)
 
     # Fresh start. `stage` MUST be a real STAGE_ORDER member — "backfill"
     # is not in onboarding_pipeline.STAGE_ORDER and used to make
@@ -155,7 +190,7 @@ async def init_onboard_json(onboard_path: str, user_id: str) -> dict[str, Any]:
         "processed_days": [],  # Track which days have been processed
     }
     _write_onboard(onboard_path, data)
-    return data
+    return _onboard_summary(data)
 
 
 # ---------------------------------------------------------------------------
