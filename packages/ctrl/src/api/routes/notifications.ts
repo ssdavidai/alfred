@@ -48,6 +48,57 @@ const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || "/mnt/encrypted
 //   DELETE /api/jobs/{id}       — clean up
 // All authenticated with the same Bearer gateway token other
 // ctrl-api→Hermes calls use.
+//
+// ---------------------------------------------------------------------------
+// Issue #61 — delivery hardening. Two quality gaps over #45's mechanism:
+//
+//   Gap 1 — wrap_response cruft (FIXED outside this file). Hermes' cron
+//     scheduler wraps every delivered result with a "Cronjob Response: …"
+//     header and a "To stop or manage this job…" footer
+//     (`cron/scheduler.py::_deliver_result`, v2026.5.16 — `wrap_response`
+//     defaults True). `packages/hermes/hermes-config.yaml.njk` now sets
+//     `cron.wrap_response: false` in the main-profile block, so the principal
+//     sees the message verbatim with no scheduler chrome.
+//
+//   Gap 2 — non-deterministic echo. The job below wakes an LLM agent and
+//     tells it to echo the message verbatim. That is a rephrasing/commentary
+//     risk for exact-content notifications. The fully deterministic path
+//     would be a Hermes `no_agent` cron job: `cron/scheduler.py::run_job`
+//     short-circuits on `job["no_agent"]`, runs `_run_job_script(script)`,
+//     and delivers the script's stdout VERBATIM as the final response —
+//     genuinely no LLM. We verified against the pinned Hermes source
+//     (v2026.5.16) that this path is real. We do NOT use it, for two
+//     independently-fatal reasons found in that same source:
+//
+//       (a) The cron HTTP API cannot create a no_agent job. Hermes'
+//           `_handle_create_job` (`gateway/platforms/api_server.py`) forwards
+//           a fixed whitelist of fields to `cron.jobs.create_job` —
+//           `{prompt, schedule, name, deliver, skills, repeat}`. `no_agent`
+//           and `script` are real `create_job()` parameters but are NOT in
+//           that whitelist, so a `POST /api/jobs` body carrying them is
+//           silently dropped — the job is created as an ordinary agent job.
+//           `PATCH /api/jobs/{id}`'s `_UPDATE_ALLOWED_FIELDS` whitelist
+//           likewise excludes them. There is no HTTP path to a no_agent job.
+//
+//       (b) Even if the API accepted it, a no_agent job needs a `script`
+//           file that `_run_job_script` resolves under (and validates is
+//           inside) `HERMES_HOME/scripts/` — physically inside the `hermes`
+//           container. ctrl-api is a SEPARATE container; it cannot write
+//           there. This is exactly the cross-container staging problem the
+//           #48 cron-execution spike (SPIKE-cron-execution.md, Fact 3.2)
+//           documented. Building a file-staging bridge from ctrl-api into the
+//           Hermes container is out of scope and a security regression
+//           (`hermes` deliberately runs `cap_drop: ALL` + no-new-privileges).
+//
+//     So #61's Gap 2 takes the hardened-agent-echo path: keep the agent job
+//     but constrain the prompt as tightly as a prompt can be (see
+//     `hermesCreateDeliveryJob` below). Residual risk: a model can still in
+//     principle disobey a prompt; that risk is non-zero but small for a
+//     single-turn echo, and is the price of staying within ctrl-api's
+//     container boundary. A fully deterministic path would require Hermes to
+//     either accept `no_agent`/`script` over its HTTP API or expose an
+//     inline-content delivery endpoint — an upstream change, not a
+//     ctrl-api one.
 // ---------------------------------------------------------------------------
 
 // The main-profile gateway: it owns the six messaging toolsets and the
@@ -122,19 +173,49 @@ async function hermesCreateDeliveryJob(
   message: string,
   urgency: string,
 ): Promise<string> {
-  // The cron agent's *final response* is what Hermes auto-delivers. Instruct
-  // it to emit the message verbatim — no rephrasing, no commentary. The
-  // [SILENT] escape hatch is deliberately not offered: this job must deliver.
+  // The cron agent's *final response* is what Hermes auto-delivers. This is
+  // an agent (LLM) job — issue #61 establishes that a fully deterministic
+  // `no_agent` script job is NOT reachable from ctrl-api (see the module
+  // header, Gap 2). So this path is hardened instead: the prompt is written
+  // to constrain the agent as tightly as a prompt can — a single, explicit,
+  // non-negotiable copy instruction with a unique sentinel fence so the
+  // exact message body is unambiguous even if the message itself contains
+  // dashes, backticks, quotes, or its own fences.
+  //
+  // The sentinel is per-call random so it cannot collide with message
+  // content. The agent is told the text BETWEEN the sentinels is the literal
+  // payload and that its entire reply must be exactly that payload — nothing
+  // before it, nothing after it, the sentinels themselves excluded.
+  //
+  // The [SILENT] escape hatch is deliberately not offered: this job must
+  // deliver. No tools are needed — it is a pure copy task.
+  const sentinel = `===ALFRED-NOTIFY-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 10)}===`;
   const prompt = [
-    "You are a one-shot delivery job. Your only task is to relay a message",
-    "from a background Alfred process to the principal, unchanged.",
+    "ROLE: You are a deterministic message-relay job. You are NOT a chat",
+    "assistant. A background Alfred process has produced an exact message for",
+    "the principal. Your ONLY job is to reproduce that message byte-for-byte.",
     "",
-    "Output the following message EXACTLY and VERBATIM as your entire final",
-    "response — no preamble, no quotes, no commentary, no markdown fences:",
+    "RULES — all mandatory, no exceptions:",
+    "  1. The payload is the text strictly BETWEEN the two sentinel lines",
+    "     below. The sentinel lines themselves are NOT part of the payload.",
+    "  2. Your entire final response MUST be exactly that payload — copied",
+    "     character-for-character.",
+    "  3. Do NOT add a greeting, sign-off, preamble, or trailing remark.",
+    "  4. Do NOT summarise, rephrase, translate, correct, reformat, or",
+    "     'improve' the payload. Copy it as-is, including any typos,",
+    "     punctuation, casing, line breaks, markdown, emoji, or symbols.",
+    "  5. Do NOT wrap the payload in quotes or code fences.",
+    "  6. Do NOT comment on the task, explain what you are doing, or mention",
+    "     that you are relaying a message. Emit ONLY the payload.",
+    "  7. Do NOT include the sentinel lines in your response.",
+    "  8. Use no tools. This is a pure copy task — there is nothing to look",
+    "     up and nothing to decide.",
     "",
-    "---",
+    `${sentinel} PAYLOAD BEGINS — copy everything after this line, up to (but not including) the END line`,
     message,
-    "---",
+    `${sentinel} PAYLOAD ENDS`,
   ].join("\n");
 
   // deliver = "<platform>:<chat_id>" — the scheduler resolves this to a

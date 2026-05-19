@@ -71,6 +71,30 @@ agent:
   restart_drain_timeout: 60
 
 # =============================================================================
+# Cron jobs
+# =============================================================================
+{%- if is_main %}
+cron:
+  # Deliver cron-job output as a clean message — no header/footer.
+  #
+  # Hermes' cron scheduler defaults to wrapping every delivered cron result
+  # with a "Cronjob Response: <job-name>\n(job_id: …)" header and a
+  # "To stop or manage this job…" footer (cron/scheduler.py::_deliver_result,
+  # v2026.5.16 — `wrap_response` defaults True). The main profile's only cron
+  # consumers are notify_principal (ctrl-api's POST /api/v1/notifications
+  # creates a one-shot delivery job) and any user-set reminders — for both the
+  # principal should see the message itself, not scheduler chrome. Setting
+  # wrap_response: false makes _deliver_result use the raw content verbatim.
+  #
+  # This is read per-profile: load_config() resolves config.yaml under each
+  # gateway process's own HERMES_HOME, so this affects main-profile cron jobs
+  # only. The workers profile renders no `cron:` block and is unaffected.
+  wrap_response: false
+{%- else %}
+# Workers profile: no cron consumers — cron is left at Hermes defaults.
+{%- endif %}
+
+# =============================================================================
 # Context compression — auto-shrink long conversations
 # =============================================================================
 compression:
