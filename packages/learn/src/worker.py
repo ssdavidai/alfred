@@ -32,9 +32,12 @@ from src.workflows.fleet_audit import FleetAuditWorkflow
 from src.workflows.composio_reconnect_cleanup import (
     ComposioReconnectCleanupWorkflow,
 )
-from src.workflows.openclaw_sessions_sweep import (
-    OpenclawSessionSweepWorkflow,
-)
+# Phase 2 #23: OpenclawSessionSweepWorkflow + sweep_openclaw_bak_sessions
+# were DELETED. The .bak-* session reaper existed only because OpenClaw
+# did O(N) readdir over per-agent .jsonl files; Hermes' SQLite
+# SessionStore makes that CPU-peg failure mode structurally impossible.
+# Safe to remove workflow + activity outright: alfred-black is a fresh
+# deploy with no Temporal history that could reference them on replay.
 from src.workflows.steward import StewardWorkflow
 from src.workflows.nightly_narrative import NightlyNarrativeWorkflow
 from src.workflows.decision_router import DecisionRouterWorkflow
@@ -312,11 +315,13 @@ from src.activities.composio_tools import (
     list_composio_connected_accounts,
 )
 
-# Ephemeral agent lifecycle (#378)
+# Ephemeral agent lifecycle (#378; Phase 2 #22 — Hermes-native).
+# wait_for_agent_ready is gone: a Hermes run needs no hot-reload wait.
+# delete_ephemeral_agent is a no-op stub kept ONE release for Temporal
+# replay safety (workflow histories may still record the activity).
 from src.activities.ephemeral_agent import (
     create_ephemeral_agent,
     delete_ephemeral_agent,
-    wait_for_agent_ready,
 )
 
 # Tool inference for delegate dispatch — maps source_type → Composio
@@ -383,11 +388,9 @@ from src.activities.composio_reconnect import (
     verify_new_connection_active,
 )
 
-# Hourly sweep of leaked openclaw-workers .bak-* session files.
-# See packages/learn/src/activities/openclaw_sessions.py for the
-# motivation — same class of leak as the Sir openclaw degradation
-# incident, fixed durably by a Temporal-scheduled reaper.
-from src.activities.openclaw_sessions import sweep_openclaw_bak_sessions
+# Phase 2 #23: the openclaw .bak-* session reaper activity
+# (sweep_openclaw_bak_sessions) was DELETED — Hermes' SQLite
+# SessionStore removes the O(N) readdir leak it existed to mop up.
 
 # Plane reverse sync (#536 B7) — Plane → vault ingress activities
 from src.activities.plane_reverse_sync import (
@@ -672,7 +675,7 @@ _STATIC_WORKFLOWS = [
     PlaneReconciliationWorkflow,
     FleetAuditWorkflow,
     ComposioReconnectCleanupWorkflow,
-    OpenclawSessionSweepWorkflow,
+    # OpenclawSessionSweepWorkflow removed — Phase 2 #23.
     StewardWorkflow,
     NightlyNarrativeWorkflow,
     DecisionRouterWorkflow,
@@ -882,10 +885,11 @@ ALL_ACTIVITIES = [
     execute_composio_action,
     check_composio_readiness,
     list_composio_connected_accounts,
-    # Ephemeral agent lifecycle (#378)
+    # Ephemeral agent lifecycle (#378; Phase 2 #22 — Hermes-native).
+    # delete_ephemeral_agent is a no-op stub kept ONE release for
+    # Temporal replay safety; wait_for_agent_ready was removed.
     create_ephemeral_agent,
     delete_ephemeral_agent,
-    wait_for_agent_ready,
     # Tool inference for delegate dispatch
     infer_required_tools,
     # Task closure watcher — signal-closes-task backward arrow
@@ -923,8 +927,7 @@ ALL_ACTIVITIES = [
     verify_new_connection_active,
     delete_old_connection,
     remove_ledger_entry,
-    # OpenClaw session-leak reaper (hourly schedule via register_schedules)
-    sweep_openclaw_bak_sessions,
+    # sweep_openclaw_bak_sessions removed — Phase 2 #23.
     # Plane reverse sync (#536 B7)
     plane_reverse_sync_is_enabled,
     load_reverse_sync_state,

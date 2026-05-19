@@ -1,60 +1,45 @@
-"""Ephemeral subagent lifecycle — create, wait, delete via ctrl-api.
+"""Ephemeral subagent lifecycle — Hermes-native (Phase 2, #22).
 
-Per-task scoped subagents on the openclaw-workers gateway. Each
-delegated action gets a fresh agent entry, runs against it, and the
-entry gets cleaned up on the way out — so the workers config doesn't
-accumulate stale agents and each task has its own audit boundary.
+Before Hermes, dispatching a per-task executor was a distributed
+dance: create an agent entry → mutate the workers ``openclaw.json`` →
+wait for the gateway to hot-reload → spawn against it → delete the
+entry. ``ephemeral_agent.py`` drove that dance over ctrl-api.
 
-Why ctrl-api and not direct file I/O: alfred-learn runs with all
-Linux capabilities dropped (CapEff=0). Even "root" inside the
-container can't traverse the mode-700 encrypted volume the workers
-config lives on. ctrl-api has CAP_DAC_OVERRIDE and the right mount,
-so it owns the writes; we drive it over HTTP. Bonus: the in-process
-mutex on ctrl-api's single Node event loop gives us atomic
-read-mutate-write for free, and the gateway's hot-reload trigger
-(meta.lastTouchedAt) is handled in one place.
+Under Hermes an ephemeral executor is just **one ``POST /v1/runs``**
+against the workers profile with ``session_id = exec-<hash>`` and the
+per-task scope expressed in the run's ``instructions``/prompt. There
+is no config to mutate, nothing to hot-reload, and no entry to clean
+up — Hermes' SQLite SessionStore owns the run's lifecycle.
+
+So this module collapses to:
+
+  * ``create_ephemeral_agent`` — returns a synthetic ``exec-<hash>``
+    id. NO HTTP call, NO config mutation. The id is purely a
+    ``session_id`` label for the subsequent ``_call_clerk`` run.
+  * ``delete_ephemeral_agent`` — a no-op stub. Kept for ONE release so
+    any Temporal workflow whose history still records this activity
+    can replay deterministically (removing a registered activity
+    mid-history breaks replay). Safe to delete in a later deploy once
+    no in-flight workflow references it.
+  * ``wait_for_agent_ready`` — DELETED. There is no hot-reload to wait
+    on; a Hermes run is accepted immediately by ``POST /v1/runs``.
+
+The actual dispatch happens in ``signal_actions.dispatch_action_to_agent``
+via ``clerk._call_clerk(prompt, raw=True, agent_id="exec-...")`` —
+``_call_clerk`` is the single Hermes ``/v1/runs`` entry point.
 """
 from __future__ import annotations
 
 import logging
-import os
-from typing import Any
 
-import httpx
 from temporalio import activity
-
-from src.config import load_config
 
 logger = logging.getLogger("ephemeral-agent")
 
-# NOTE: we used to send an explicit per-agent ``tools.allow`` here. We
-# don't anymore. The workers gateway exposes a gateway-level allowlist
-# (built-in primitives + every MCP-namespaced tool from the 5 stdio
-# servers) — that's the surface we want every ephemeral agent to see.
-# A per-agent ``tools.allow`` would shadow that and we kept getting it
-# wrong: case-mismatched primitives (`glob` vs `Glob`), fake
-# composio-named entries (`gmail_send_email`) that don't match real MCP
-# tool names, and the burden of keeping it in sync with the MCP catalog
-# at all. Inherit gateway defaults instead. See the openclaw-workers
-# log warning 2026-05-13 09:28:29 (`allowlist contains unknown entries
-# gmail_fetch_emails, …, glob, grep, ls, composio_execute`) for the
-# canonical evidence this approach was broken.
-
-
-def _http() -> httpx.AsyncClient:
-    cfg = load_config()
-    api_key = os.environ.get("AAS_API_KEY", "")
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    return httpx.AsyncClient(
-        base_url=cfg.alfred_ctrl_url, headers=headers, timeout=30.0
-    )
-
 
 def _agent_id_for_task(task_id: str) -> str:
-    """exec-<short-hash>. ctrl-api validates [a-zA-Z0-9_-]+, so we sanitise."""
+    """exec-<short-hash>. Sanitised to ``[a-zA-Z0-9_-]+`` so the id is a
+    safe Hermes ``session_id``."""
     cleaned = "".join(c for c in task_id if c.isalnum() or c in "-_")
     return f"exec-{cleaned[:24] or 'unknown'}"
 
@@ -62,40 +47,26 @@ def _agent_id_for_task(task_id: str) -> str:
 @activity.defn
 async def create_ephemeral_agent(
     task_id: str,
-    tools_required: list[str],
+    tools_required: list[str] | None = None,
     model: str = "",
 ) -> str:
-    """Create an ephemeral agent entry on openclaw-workers via ctrl-api.
+    """Return a synthetic ephemeral-executor id — purely a label.
 
-    Returns the agent_id (e.g. ``exec-abc12345``). Caller MUST call
-    ``delete_ephemeral_agent`` in a ``finally`` so stale entries don't
-    accumulate even when the dispatch raises.
+    Phase 2 (#22): there is no longer any agent *entry* to create.
+    A Hermes ephemeral executor is one ``POST /v1/runs`` whose
+    ``session_id`` is this id; per-task scope lives in the run's
+    prompt, not in a config-file allowlist.
 
-    No per-agent ``tools_allow`` is sent — the agent inherits the
-    workers gateway's full allowlist, which already includes the
-    built-in primitives plus every MCP-namespaced tool from the 5
-    stdio servers. ``tools_required`` is accepted for backwards-compat
-    with callers but ignored. Per-task scoping happens in the prompt,
-    not the allowlist.
+    ``tools_required`` and ``model`` are accepted for backwards-compat
+    with existing callers and intentionally ignored — the workers
+    profile already exposes the full tool surface, and the model is
+    fixed by the profile config.
     """
-    del tools_required  # accepted for compat, intentionally unused
-
+    del tools_required, model  # accepted for compat, intentionally unused
     agent_id = _agent_id_for_task(task_id)
-    payload: dict[str, Any] = {
-        "id": agent_id,
-        "name": f"Ephemeral Executor ({task_id[:24]})",
-    }
-    if model:
-        payload["model"] = model
-
-    async with _http() as client:
-        resp = await client.post(
-            "/api/v1/admin/openclaw-workers/agents", json=payload
-        )
-        resp.raise_for_status()
     logger.info(
-        "ephemeral_agent.create_ephemeral_agent: created %s "
-        "(inherits gateway allowlist)",
+        "ephemeral_agent.create_ephemeral_agent: synthetic id %s "
+        "(no config mutation — Hermes run session_id)",
         agent_id,
     )
     return agent_id
@@ -103,63 +74,17 @@ async def create_ephemeral_agent(
 
 @activity.defn
 async def delete_ephemeral_agent(agent_id: str) -> bool:
-    """Remove an ephemeral agent entry. Idempotent — returns True if
-    we removed it, False if it was already gone."""
-    if not agent_id or not agent_id.startswith("exec-"):
-        return False
-    async with _http() as client:
-        resp = await client.delete(
-            f"/api/v1/admin/openclaw-workers/agents/{agent_id}"
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    removed = bool(data.get("removed"))
-    logger.info(
-        "ephemeral_agent.delete_ephemeral_agent: %s removed=%s",
-        agent_id, removed,
-    )
-    return removed
+    """No-op stub — kept ONE release for Temporal replay safety (#22).
 
-
-@activity.defn
-async def wait_for_agent_ready(agent_id: str) -> bool:
-    """Wait for the openclaw-workers gateway to hot-reload and pick up
-    the new agent entry.
-
-    Polls the workers gateway ``/health`` endpoint. Returns ``True``
-    once healthy, ``False`` on timeout. We err on the side of
-    proceeding — a transient health blip shouldn't strand the
-    dispatch; the worst case is a 404 on the subsequent spawn, which
-    we surface honestly to the caller.
+    There is nothing to delete: a Hermes run cleans up after itself via
+    the SQLite SessionStore. This stub exists only so workflows whose
+    history still records a ``delete_ephemeral_agent`` activity replay
+    deterministically. Remove in a later deploy once no in-flight
+    workflow references it.
     """
-    import asyncio
-
-    config = load_config()
-    gateway_url = config.openclaw_workers_gateway_url
-    token = config.gateway_token()
-
-    for attempt in range(6):  # 6 × 5 s = 30 s
-        try:
-            activity.heartbeat(f"waiting for {agent_id} (attempt {attempt + 1}/6)")
-        except Exception:
-            pass
-        await asyncio.sleep(5)
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    f"{gateway_url}/health",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-                if resp.status_code == 200:
-                    logger.info(
-                        "ephemeral_agent.wait_for_agent_ready: %s ready", agent_id,
-                    )
-                    return True
-        except Exception:
-            continue
-
-    logger.warning(
-        "ephemeral_agent.wait_for_agent_ready: %s timeout — proceeding anyway",
+    logger.debug(
+        "ephemeral_agent.delete_ephemeral_agent: no-op stub for %s "
+        "(Hermes runs self-clean; activity kept for replay safety)",
         agent_id,
     )
     return True

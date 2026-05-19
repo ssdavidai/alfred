@@ -192,19 +192,13 @@ INTERVAL_SCHEDULES = [
         "workflow": "ComposioReconnectCleanupWorkflow",
         "interval": timedelta(minutes=15),
     },
-    {
-        # OpenClaw session-leak reaper — hourly sweep of the
-        # ``.bak-N-<epoch>`` files OpenClaw drops in each agent's
-        # sessions/ dir on rollover. Without this, listing the
-        # sessions dir hits O(N) on every new session create and
-        # CPU-pegs openclaw-workers (>100%) once the count grows
-        # past a few hundred. See ``src/activities/openclaw_sessions.py``
-        # for the full incident note + the prior Sir openclaw
-        # degradation reference.
-        "id": "al-openclaw-session-sweep",
-        "workflow": "OpenclawSessionSweepWorkflow",
-        "interval": timedelta(hours=1),
-    },
+    # Phase 2 #23: the al-openclaw-session-sweep schedule + its
+    # OpenclawSessionSweepWorkflow were removed. The .bak-* reaper
+    # existed only for OpenClaw's O(N) readdir session-leak; Hermes'
+    # SQLite SessionStore makes that failure mode impossible. This is
+    # a greenfield deploy with no pre-existing Temporal schedules, so
+    # dropping the entry here means it is simply never created — no
+    # prune step needed.
     {
         # Decision router — every Desk click writes a decision/<ts>.md
         # record; this workflow reads them, runs side effects (status

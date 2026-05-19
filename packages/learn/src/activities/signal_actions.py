@@ -1116,13 +1116,21 @@ async def dispatch_action_to_agent(
         "Do the action and report what you did in 1-2 sentences."
     )
 
-    # ---- New ephemeral-executor path (env-gated) ----
-    # When DISPATCH_USE_EPHEMERAL_EXECUTOR is set, spawn a fresh
-    # exec-<id> subagent on the workers gateway with a tool surface
-    # tailored to this task, run the dispatch against it, then clean
-    # up. This isolates each delegate dispatch from learn-clerk's
-    # shared background context and gives us a deliberate audit
-    # boundary per task.
+    # ---- Ephemeral-executor path (env-gated) ----
+    # When DISPATCH_USE_EPHEMERAL_EXECUTOR is set, run this dispatch as
+    # a Hermes ``POST /v1/runs`` job with its own ``session_id`` =
+    # ``exec-<hash>`` (Phase 2 #22). This isolates each delegate
+    # dispatch from learn-clerk's shared background context and gives
+    # us a deliberate audit boundary per task.
+    #
+    # Temporal note: ``dispatch_action_to_agent`` is an *activity*, not
+    # a workflow — activity bodies are not replayed deterministically
+    # (only their return value is recorded), so changing this internal
+    # branch is replay-safe and needs no ``workflow.patched()`` guard
+    # (which is only valid inside a workflow). The Hermes rewrite keeps
+    # the same activity *signature*; ``create_ephemeral_agent`` /
+    # ``delete_ephemeral_agent`` stay registered (the latter as a
+    # no-op stub) so no registered-activity is removed in this deploy.
     import os as _os
     use_ephemeral = (
         _os.environ.get("DISPATCH_USE_EPHEMERAL_EXECUTOR", "").strip().lower()
@@ -1257,41 +1265,41 @@ async def dispatch_action_to_agent(
 
         from src.activities.ephemeral_agent import (
             create_ephemeral_agent,
-            wait_for_agent_ready,
             delete_ephemeral_agent,
         )
-        # Derive an agent_id from the source signal path or a digest of
-        # the action so retries land on the same name (idempotent for
-        # the ctrl-api POST, which replaces same-id entries).
+        # Derive the executor session id from the source signal path or
+        # a digest of the action so retries land on the same
+        # ``exec-<hash>`` session_id. Under Hermes this is purely a
+        # run ``session_id`` label — there is no config entry to
+        # create or hot-reload, so the create/wait/delete dance
+        # collapses to a single ``POST /v1/runs`` inside ``_call_clerk``.
         if source_signal_path:
             task_seed = source_signal_path.split("/")[-1].replace(".md", "")
         else:
             task_seed = hashlib.sha256(
                 f"{what}\x00{matched_instinct_path}".encode("utf-8")
             ).hexdigest()[:12]
+        # create_ephemeral_agent is now a pure synthetic-id helper —
+        # no HTTP, no config mutation, no hot-reload wait.
         exec_agent_id = await create_ephemeral_agent(task_seed, hints)
         try:
-            await wait_for_agent_ready(exec_agent_id)
-            try:
-                agent_raw = await _call_clerk(
-                    executor_prompt, raw=True, agent_id=exec_agent_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "dispatch_action_to_agent: ephemeral dispatch failed "
-                    "agent=%s err=%s",
-                    exec_agent_id, exc,
-                )
-                raise
+            agent_raw = await _call_clerk(
+                executor_prompt, raw=True, agent_id=exec_agent_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "dispatch_action_to_agent: ephemeral dispatch failed "
+                "agent=%s err=%s",
+                exec_agent_id, exc,
+            )
+            raise
         finally:
+            # No-op stub (Hermes runs self-clean); kept one release for
+            # Temporal replay safety. See ephemeral_agent.py.
             try:
                 await delete_ephemeral_agent(exec_agent_id)
-            except Exception as cleanup_exc:  # noqa: BLE001
-                logger.warning(
-                    "dispatch_action_to_agent: ephemeral cleanup failed "
-                    "agent=%s err=%s",
-                    exec_agent_id, cleanup_exc,
-                )
+            except Exception:  # noqa: BLE001
+                pass
       else:
         # ---- Legacy path: shared learn-clerk subagent ----
         try:

@@ -1,7 +1,19 @@
-"""OpenClaw subagent bridge — all LLM calls go through the gateway.
+"""Hermes run bridge — all LLM calls go through the gateway.
 
 NEVER call the Anthropic API directly. The Clerk is a stateless LLM worker
 dispatched for creative tasks.
+
+Phase 2 rewrite (#20): ``_call_clerk`` now talks Hermes-native
+``POST /v1/runs`` + polls ``GET /v1/runs/{id}`` instead of the legacy
+OpenClaw ``POST /tools/invoke`` envelope (``sessions_spawn`` /
+``sessions_history`` / ``sessions_delete``). The double-encoded
+``result.content[].text`` envelope parsing and the ``_cleanup_session``
+helper are gone — Hermes' SQLite SessionStore makes per-run cleanup
+unnecessary (no leaked ``.bak-*`` files), and a run's output is a
+plain JSON field, not a nested re-encoded string.
+
+``_extract_json`` is unchanged: it parses the LLM's *text* output (the
+model still emits prose/markdown around JSON), not the transport.
 """
 
 from __future__ import annotations
@@ -501,184 +513,168 @@ Return JSON only:
     return await _call_clerk(prompt)
 
 
+# Run-state polling cadence. 90 × 10s = 900s ceiling — matched to the
+# 900s the workers profile caps a run at. Background executors that
+# actually do work (Composio calls + vault reads + multi-step
+# reasoning) routinely need 4-10 minutes; the workers gateway is
+# asynchronous (no human waiting) so the budget is deliberately
+# generous enough that a genuinely-working run is never cut off
+# mid-step.
+_RUN_POLL_INTERVAL_SECONDS = 10
+_RUN_POLL_MAX_ATTEMPTS = 90
+
+# Terminal Hermes run states. Anything else (queued/running/…) means
+# keep polling.
+_RUN_TERMINAL_OK = {"completed", "succeeded", "success"}
+_RUN_TERMINAL_FAIL = {"failed", "errored", "error", "cancelled", "canceled", "stopped"}
+
+_BILLING_ERROR_MARKERS = (
+    "insufficient credits",
+    "billing error",
+    "out of credits",
+    "api key has run out",
+)
+
+
+def _run_output_text(run: dict[str, Any]) -> str:
+    """Pull the assistant's final text out of a Hermes ``GET /v1/runs/{id}``
+    body.
+
+    Hermes is OpenAI-style: the run's result lives in a plain ``output``
+    field, not a double-encoded ``result.content[].text`` envelope.
+    We accept a few shapes defensively because the gateway has emitted
+    each across v0.2.x:
+
+      * ``output`` is a plain string — return it.
+      * ``output`` is a list of content parts (``{type:"text", text}``)
+        — concatenate the text parts.
+      * ``output`` is a dict with a nested ``text`` / ``content`` — unwrap.
+      * fall back to ``output_text`` / ``result`` keys.
+    """
+    out = run.get("output")
+    if out is None:
+        out = run.get("output_text")
+    if out is None:
+        out = run.get("result")
+
+    if isinstance(out, str):
+        return out
+    if isinstance(out, list):
+        parts: list[str] = []
+        for part in out:
+            if isinstance(part, dict):
+                if isinstance(part.get("text"), str):
+                    parts.append(part["text"])
+                elif isinstance(part.get("content"), str):
+                    parts.append(part["content"])
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(p for p in parts if p)
+    if isinstance(out, dict):
+        if isinstance(out.get("text"), str):
+            return out["text"]
+        if isinstance(out.get("content"), str):
+            return out["content"]
+        if isinstance(out.get("content"), list):
+            return _run_output_text({"output": out["content"]})
+    return ""
+
+
 async def _call_clerk(
     prompt: str,
     raw: bool = False,
     agent_id: str | None = None,
 ) -> dict[str, Any] | str:
-    """Spawn a subagent on the workers gateway via sessions_spawn, poll
-    for the assistant response.
+    """Run a one-shot Hermes job on the workers gateway and return its output.
 
-    By default targets ``learn-clerk`` (the reasoning subagent with
-    vault tools). Pass ``agent_id="exec-<id>"`` to dispatch to an
-    ephemeral executor created via ``create_ephemeral_agent``; the
-    same workers gateway hosts both.
+    Phase 2 (#20): native ``POST /v1/runs`` + poll ``GET /v1/runs/{id}``.
+    No ``sessions_spawn`` / ``sessions_history`` / ``sessions_delete``
+    envelope; no per-run cleanup (Hermes' SQLite SessionStore handles
+    its own lifecycle — see #23).
 
-    The subagent has tool access scoped by its per-agent ``tools.allow``
-    in openclaw.json. Uses sessions_history polling with cleanup=keep
-    so the response is available after completion.
+    The run targets the WORKERS profile gateway. The main gateway
+    (:18789) is reserved for Sir's live chat; autonomous traffic
+    deliberately never touches it so the human surface stays
+    uncongested.
 
-    If raw=True, returns the raw text response without JSON extraction.
+    ``agent_id`` becomes the run's ``session_id``. For the default
+    clerk it is ``learn-clerk``; ephemeral executors pass an
+    ``exec-<hash>`` id so each delegated task gets its own session
+    scope (see ``ephemeral_agent.py``). Per-task tool scoping is
+    expressed in the prompt/instructions, not a per-agent allowlist.
+
+    If raw=True, returns the run's text output verbatim; otherwise the
+    output is fed through ``_extract_json``.
     """
     import asyncio
 
     config = load_config()
     token = config.gateway_token()
-    # Both learn-clerk and ephemeral exec-* agents live on the WORKERS
-    # gateway. The main gateway is reserved for agentId=main (Sir's
-    # live chat); we deliberately do NOT route autonomous traffic to it
-    # so the human surface stays uncongested.
     base = config.openclaw_workers_gateway_url
-    target_agent_id = agent_id or config.clerk_agent_id
+    session_id = agent_id or config.clerk_agent_id
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
+    # 1. Create the run.
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # 1. Spawn the clerk subagent
-        spawn_resp = await client.post(
-            f"{base}/tools/invoke",
+        create_resp = await client.post(
+            f"{base}/v1/runs",
             headers=headers,
             json={
-                "tool": "sessions_spawn",
-                "args": {
-                    "task": prompt,
-                    "agentId": target_agent_id,
-                    "mode": "run",
-                    "cleanup": "auto",
-                    "sandbox": "inherit",
-                    # 15 min ceiling. Autonomous agents that actually do
-                    # work (RSVP to a calendar invite, send a reply, file
-                    # a receipt) routinely need to read context + call
-                    # 1-3 Composio actions; 4 min was cutting them off
-                    # mid-plan. The whole point of the workers gateway
-                    # is that it's async — there's no human watching.
-                    "runTimeoutSeconds": 900,
-                    # We poll sessions_history for the result; we are not
-                    # a persistent channel-bound parent. Without this,
-                    # the gateway queues an "announce" retry to a
-                    # nonexistent listener — on error, the retry loop
-                    # accumulates in subagents/runs.json and eventually
-                    # saturates the V8 event loop (tenant-a 2026-05-18).
-                    "expectsCompletionMessage": False,
-                },
+                "input": prompt,
+                "session_id": session_id,
             },
         )
-        spawn_resp.raise_for_status()
-        spawn_data = spawn_resp.json()
+        create_resp.raise_for_status()
+        create_data = create_resp.json()
 
-        # Extract session key
-        result = spawn_data.get("result", {})
-        content_list = result.get("content", [])
-        session_key = None
-        for item in content_list:
-            if isinstance(item, dict) and item.get("type") == "text":
-                try:
-                    inner = json.loads(item["text"])
-                    session_key = inner.get("childSessionKey")
-                except (json.JSONDecodeError, KeyError):
-                    pass
+    run_id = create_data.get("id") or create_data.get("run_id")
+    if not run_id:
+        raise ValueError(f"Could not get run id from POST /v1/runs: {create_data}")
 
-        if not session_key:
-            raise ValueError(f"Could not get session key from spawn: {spawn_data}")
-
-    # 2. Poll sessions_history until assistant response appears
-    # Use a fresh client with longer timeout for polling phase
+    # 2. Poll GET /v1/runs/{id} until the run reaches a terminal state.
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # 90 × 10s = 900s, matched to the 900s runTimeoutSeconds above.
-        # Background executor agents that actually do work (Composio
-        # calls + vault reads + multi-step reasoning) routinely need
-        # 4-10 minutes. The whole point of the workers gateway is that
-        # it's asynchronous — there's no human waiting on the response,
-        # so the timeout should be generous enough that an agent
-        # genuinely working never gets cut off mid-step.
-        for attempt in range(90):  # 90 × 10s = 900s max
-            await asyncio.sleep(10)
+        for _ in range(_RUN_POLL_MAX_ATTEMPTS):
+            await asyncio.sleep(_RUN_POLL_INTERVAL_SECONDS)
             try:
-                hist_resp = await client.post(
-                    f"{base}/tools/invoke",
-                    headers=headers,
-                    json={
-                        "tool": "sessions_history",
-                        "args": {
-                            "sessionKey": session_key,
-                            "limit": 5,
-                        },
-                    },
+                poll_resp = await client.get(
+                    f"{base}/v1/runs/{run_id}", headers=headers,
                 )
-                if hist_resp.status_code != 200:
+                if poll_resp.status_code != 200:
                     continue
-                hist_data = hist_resp.json()
+                run = poll_resp.json()
             except Exception:
                 continue
 
-            # Navigate to messages array
-            hist_result = hist_data.get("result", {})
-            hist_content = hist_result.get("content", [])
-            messages = []
-            for item in hist_content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    try:
-                        parsed = json.loads(item["text"])
-                        messages = parsed.get("messages", [])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+            status = str(run.get("status") or "").strip().lower()
+            output_text = _run_output_text(run)
 
-            # Check for error indicators in assistant messages only (not user/system)
-            for msg in messages:
-                if msg.get("role") != "assistant":
-                    continue
-                msg_content = msg.get("content", "")
-                content_str = ""
-                if isinstance(msg_content, str):
-                    content_str = msg_content
-                elif isinstance(msg_content, list):
-                    content_str = " ".join(
-                        p.get("text", "") for p in msg_content
-                        if isinstance(p, dict) and p.get("type") == "text"
-                    )
-                # Detect billing/credit errors — fail fast instead of waiting 280s
-                if any(err in content_str.lower() for err in [
-                    "insufficient credits", "billing error",
-                    "out of credits", "api key has run out",
-                ]):
-                    raise RuntimeError(f"Clerk LLM billing error: {content_str[:200]}")
+            # Fail fast on billing/credit exhaustion rather than burning
+            # the whole 900s polling budget.
+            if output_text and any(
+                m in output_text.lower() for m in _BILLING_ERROR_MARKERS
+            ):
+                raise RuntimeError(f"Clerk LLM billing error: {output_text[:200]}")
 
-            # Look for assistant response
-            for msg in messages:
-                if msg.get("role") == "assistant":
-                    # Extract text content from the message
-                    msg_content = msg.get("content", "")
-                    if isinstance(msg_content, list):
-                        # Content is array of parts
-                        for part in msg_content:
-                            if isinstance(part, dict) and part.get("type") == "text":
-                                await _cleanup_session(session_key)
-                                if raw:
-                                    return part["text"]
-                                return _extract_json(part["text"])
-                    elif isinstance(msg_content, str):
-                        await _cleanup_session(session_key)
-                        if raw:
-                            return msg_content
-                        return _extract_json(msg_content)
+            if status in _RUN_TERMINAL_FAIL:
+                err = (
+                    run.get("error")
+                    or run.get("error_message")
+                    or output_text
+                    or status
+                )
+                raise RuntimeError(f"Clerk run {run_id} {status}: {str(err)[:300]}")
 
-    raise TimeoutError(f"Clerk subagent did not respond within 580s: {session_key}")
+            if status in _RUN_TERMINAL_OK:
+                if raw:
+                    return output_text
+                return _extract_json(output_text)
 
+            # Non-terminal (queued/running/…) — keep polling.
 
-async def _cleanup_session(session_key: str) -> None:
-    """Delete a clerk subagent session from OpenClaw to prevent accumulation."""
-    try:
-        config = load_config()
-        token = config.gateway_token()
-        # Cleanup targets the same gateway the clerk was spawned on.
-        base = config.openclaw_workers_gateway_url
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
-                f"{base}/tools/invoke",
-                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-                json={"tool": "sessions_delete", "args": {"sessionKey": session_key}},
-            )
-    except Exception:
-        pass  # Best-effort cleanup
+    raise TimeoutError(
+        f"Clerk run did not complete within "
+        f"{_RUN_POLL_INTERVAL_SECONDS * _RUN_POLL_MAX_ATTEMPTS}s: {run_id}"
+    )
 
 
 def _extract_json(content: str) -> dict[str, Any]:
