@@ -595,6 +595,99 @@ export const getObservationVecNeighbors = async (
 };
 
 // ============================================================
+// STORE-P6-1: SQL-backed needs_attention + pattern_proposal reads.
+//
+// Round 1 of #478 shipped ctrl-api endpoints + table writers. Round 2
+// (this code) is the SaaS read-side migration: thin proxies that the
+// Desk + Instincts pages consume in place of the legacy markdown-walking
+// ops (`getNeedsAttention`, `getPatternProposals`). The legacy ops are
+// kept as fallbacks during the soak; Round 3 retires them.
+//
+// Wire shape returned by ctrl-api (decimal-string bigints, same
+// convention as audit / signal / observation):
+//
+//   /api/v1/needs-attention → { results: NeedsAttentionRow[], count: number }
+//     NeedsAttentionRow = {
+//       id, ts, source_signal_id, target_matter, target_kind,
+//       headline, body, status, resolved_at, resolved_by,
+//       resolution, payload
+//     }
+//
+//   /api/v1/pattern-proposals → { results: PatternProposalRow[], count: number }
+//     PatternProposalRow = {
+//       id, ts, proposed_name, proposed_body, cluster_size,
+//       member_observation_ids, status, reviewed_at, reviewed_by,
+//       promoted_to_instinct_id, payload
+//     }
+// ============================================================
+
+export const getNeedsAttention2 = async (
+  args: {
+    status?: string;
+    target_matter?: string;
+    since?: string;
+    limit?: number;
+    offset?: number;
+  } | void,
+  context: any,
+) => {
+  if (!context.user) {
+    throw new HttpError(401, "Not authenticated");
+  }
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args && typeof args === "object") {
+    if (args.status) query.status = args.status;
+    if (args.target_matter) query.target_matter = args.target_matter;
+    if (args.since) query.since = args.since;
+    if (args.limit !== undefined) query.limit = String(args.limit);
+    if (args.offset !== undefined) query.offset = String(args.offset);
+  }
+  if (query.limit === undefined) query.limit = "50";
+  try {
+    return await proxyToTenant(instance, {
+      path: "/api/v1/needs-attention",
+      query,
+    });
+  } catch {
+    // Older tenants without migration 006 / Round 1 endpoints — degrade
+    // silently so the Desk still renders.
+    return { results: [], count: 0 };
+  }
+};
+
+export const getPatternProposals2 = async (
+  args: {
+    status?: string;
+    since?: string;
+    limit?: number;
+    offset?: number;
+  } | void,
+  context: any,
+) => {
+  if (!context.user) {
+    throw new HttpError(401, "Not authenticated");
+  }
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args && typeof args === "object") {
+    if (args.status) query.status = args.status;
+    if (args.since) query.since = args.since;
+    if (args.limit !== undefined) query.limit = String(args.limit);
+    if (args.offset !== undefined) query.offset = String(args.offset);
+  }
+  if (query.limit === undefined) query.limit = "50";
+  try {
+    return await proxyToTenant(instance, {
+      path: "/api/v1/pattern-proposals",
+      query,
+    });
+  } catch {
+    return { results: [], count: 0 };
+  }
+};
+
+// ============================================================
 // Container Logs
 // ============================================================
 export const getContainerLogs: GetContainerLogs<

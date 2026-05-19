@@ -28,6 +28,7 @@ import {
   useQuery,
   useAction,
   getNeedsAttention,
+  getNeedsAttention2,
   getPendingApprovals,
   getRecentJudgments,
   getActivityFeed,
@@ -47,6 +48,7 @@ import {
   getMyTodos,
   completeMyTodo,
   getPatternProposals,
+  getPatternProposals2,
   getInFlightDecisions,
   getBriefings,
   getBriefing,
@@ -272,9 +274,131 @@ function formatAuditVerb(actionType: string): string {
 // Page
 // --------------------------------------------------------------------------
 
+// STORE-P6-1 Round 2: adapter from the SQL needs_attention row
+// (ctrl-api /api/v1/needs-attention) into the legacy markdown shape
+// the rest of this file already consumes (top-level fields + an
+// optional `frontmatter` blob). The `payload` column from the SQL
+// row, when present, is a JSON object that historically carried the
+// rich record (action_what, reasoning, raw_quote, origin_at,
+// confidence, decay_band, …). We spread that first, then overlay the
+// canonical SQL columns so they always win.
+function adaptSqlNeedsAttentionRow(row: any): any {
+  if (!row || typeof row !== "object") return null;
+  let payload: Record<string, unknown> = {};
+  if (row.payload) {
+    try {
+      payload =
+        typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
+      if (!payload || typeof payload !== "object") payload = {};
+    } catch {
+      payload = {};
+    }
+  }
+  // SQL ts is decimal-string ns. Convert to ISO for `created` fallback
+  // when the payload didn't carry one.
+  let createdIso = "";
+  try {
+    const ns = BigInt(String(row.ts ?? "0"));
+    const ms = Number(ns / 1_000_000n);
+    if (Number.isFinite(ms) && ms > 0) {
+      createdIso = new Date(ms).toISOString();
+    }
+  } catch {
+    /* ignore */
+  }
+  return {
+    // First, the payload fields (action_what, reasoning, raw_quote,
+    // suggested_actor, origin_at, decay_band, confidence, frontmatter…)
+    ...(payload as Record<string, unknown>),
+    // Then the SQL columns — canonical truth.
+    id: String(row.id ?? ""),
+    status: String(row.status ?? "pending"),
+    target_matter: row.target_matter ?? (payload as any).target_matter ?? null,
+    target_kind: row.target_kind ?? (payload as any).target_kind ?? null,
+    // `display_headline`/`display_body` are the voiced surface fields the
+    // existing decisions adapter prefers. Headline/body from SQL are the
+    // authoritative versions written by signal_extract.
+    display_headline:
+      (payload as any).display_headline ?? row.headline ?? "",
+    display_body: (payload as any).display_body ?? row.body ?? "",
+    body: row.body ?? (payload as any).body ?? "",
+    created: (payload as any).created ?? createdIso,
+    // Existing decisions adapter falls back to `target_path`; SQL stores
+    // matter id in `target_matter`, mirror it across so the matter-context
+    // callout still works.
+    target_path:
+      (payload as any).target_path ??
+      (row.target_kind === "matter" && row.target_matter
+        ? `matter/${row.target_matter}`
+        : (payload as any).target_path ?? null),
+  };
+}
+
+// STORE-P6-1 Round 2: adapter from the SQL pattern_proposal row into
+// the legacy shape (each entry was `{ path, rule, evidence,
+// proposed_action, created, matter_ref }` on disk). The `payload`
+// blob carries any pre-existing rule/evidence/proposed_action when
+// the writer fills it; otherwise we map proposed_name → rule and
+// proposed_body → evidence so the DeskPage card still reads.
+function adaptSqlPatternProposalRow(row: any): any {
+  if (!row || typeof row !== "object") return null;
+  let payload: Record<string, unknown> = {};
+  if (row.payload) {
+    try {
+      payload =
+        typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
+      if (!payload || typeof payload !== "object") payload = {};
+    } catch {
+      payload = {};
+    }
+  }
+  let createdIso = "";
+  try {
+    const ns = BigInt(String(row.ts ?? "0"));
+    const ms = Number(ns / 1_000_000n);
+    if (Number.isFinite(ms) && ms > 0) {
+      createdIso = new Date(ms).toISOString();
+    }
+  } catch {
+    /* ignore */
+  }
+  const id = String(row.id ?? "");
+  return {
+    ...(payload as Record<string, unknown>),
+    // `path` is the legacy stable key the Desk uses as `recordId`. The
+    // SQL table doesn't store a path, so synthesise one from the id.
+    path: (payload as any).path ?? `pattern_proposal/${id}.md`,
+    id,
+    status: String(row.status ?? "pending"),
+    rule: (payload as any).rule ?? row.proposed_name ?? "",
+    evidence: (payload as any).evidence ?? row.proposed_body ?? "",
+    proposed_action: (payload as any).proposed_action ?? "",
+    created: (payload as any).created ?? createdIso,
+    matter_ref: (payload as any).matter_ref ?? null,
+  };
+}
+
 export default function DeskPage() {
   const { data: user } = useAuth();
-  const { data: needs, isLoading: needsLoading } = useQuery(getNeedsAttention);
+  // STORE-P6-1 Round 2: read needs_attention from the SQL-backed
+  // /api/v1/needs-attention endpoint. The legacy markdown-walking
+  // `getNeedsAttention` op stays imported as a fallback (Round 3
+  // cleanup deletes it). We pre-filter to status=pending to match the
+  // existing consumer's hand-rolled filter (`if (status !== "pending")
+  // continue`) — saves bytes over the wire.
+  const { data: needsSql, isLoading: needsLoading } = useQuery(
+    getNeedsAttention2,
+    { status: "pending", limit: 50 },
+  );
+  const needs = useMemo(() => {
+    const results = Array.isArray((needsSql as any)?.results)
+      ? (needsSql as any).results
+      : [];
+    const records = results
+      .map(adaptSqlNeedsAttentionRow)
+      .filter((r: any) => r !== null);
+    return { records, count: Number((needsSql as any)?.count ?? records.length) };
+  }, [needsSql]);
   const { data: approvals, isLoading: approvalsLoading } = useQuery(getPendingApprovals);
   // NB: `getRecentJudgments` is a misnamed query — it actually proxies
   // /api/v1/vault/list/observation. Observations are learning-layer
@@ -285,10 +409,27 @@ export default function DeskPage() {
   // Pattern proposals — proposed standing rules extracted nightly from
   // the principal's decisions. Surfaced as cards alongside the rest of
   // the queue so adopting a rule is itself a Decision.
-  const { data: patternProposals, isLoading: patternsLoading } = useQuery(
-    getPatternProposals,
-    { limit: 50 },
+  //
+  // STORE-P6-1 Round 2: read from the SQL-backed /api/v1/pattern-proposals
+  // endpoint. Legacy `getPatternProposals` stays imported as a fallback
+  // (Round 3 cleanup retires it). Pre-filter to status=pending so
+  // already-adopted/rejected rules don't crowd the Desk.
+  const { data: patternProposalsSql, isLoading: patternsLoading } = useQuery(
+    getPatternProposals2,
+    { status: "pending", limit: 50 },
   );
+  const patternProposals = useMemo(() => {
+    const results = Array.isArray((patternProposalsSql as any)?.results)
+      ? (patternProposalsSql as any).results
+      : [];
+    const proposals = results
+      .map(adaptSqlPatternProposalRow)
+      .filter((r: any) => r !== null);
+    return {
+      proposals,
+      count: Number((patternProposalsSql as any)?.count ?? proposals.length),
+    };
+  }, [patternProposalsSql]);
   const { data: activity } = useQuery(getActivityFeed);
   const { data: steward } = useQuery(getRecentStewardActions);
   // STORE-P2-4: SQL-backed audit feed. Same surface the Audit section in

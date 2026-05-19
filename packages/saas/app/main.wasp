@@ -749,6 +749,21 @@ query getObservationVecNeighbors {
   entities: [User, Instance]
 }
 
+// STORE-P6-1 followup (#478) Round 2: SQL-backed reads of the
+// needs_attention + pattern_proposal tables (migration 006). The
+// legacy markdown-walking ops (`getNeedsAttention`,
+// `getPatternProposals`) stay as soak-period fallbacks; the cleanup
+// sweep in Round 3 retires them.
+query getNeedsAttention2 {
+  fn: import { getNeedsAttention2 } from "@src/dashboard/operations",
+  entities: [User, Instance]
+}
+
+query getPatternProposals2 {
+  fn: import { getPatternProposals2 } from "@src/dashboard/operations",
+  entities: [User, Instance]
+}
+
 query getCredentials {
   fn: import { getCredentials } from "@src/dashboard/operations",
   entities: [Instance]

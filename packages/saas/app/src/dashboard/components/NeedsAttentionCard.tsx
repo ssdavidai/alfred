@@ -1,8 +1,9 @@
 // NeedsAttentionCard — Phase 6 dashboard surface (#160).
 //
-// Reads vault/needs_attention/*.md via the ctrl-api proxy
-// (getNeedsAttention) and renders one card per pending record. Each row
-// has three resolution buttons:
+// STORE-P6-1 Round 2 (#478): reads from the SQL-backed
+// /api/v1/needs-attention endpoint via `getNeedsAttention2`. The
+// legacy markdown-walking `getNeedsAttention` op is still exported
+// (Round 3 retires it). Each row has three resolution buttons:
 //
 //   - "I'll do it"     → POST /api/v1/admin/needs-attention/:id/done
 //   - "Alfred do it"   → POST /api/v1/admin/needs-attention/:id/dispatch
@@ -11,10 +12,10 @@
 // Empty/error states render the same "No items needing your attention"
 // message — older tenants don't have the route yet, so we degrade
 // silently rather than blocking the rest of the dashboard.
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   useQuery,
-  getNeedsAttention,
+  getNeedsAttention2,
   resolveNeedsAttentionDone,
   resolveNeedsAttentionDispatch,
   resolveNeedsAttentionSkip,
@@ -45,17 +46,84 @@ interface NeedsAttentionRecord {
 
 type ActionKind = "done" | "dispatch" | "skip";
 
+// STORE-P6-1 Round 2: adapter from the SQL needs_attention row into
+// the legacy `NeedsAttentionRecord` shape this card already renders.
+// The SQL row keeps the rich payload (action_what, raw_quote,
+// confidence, suggested_actor, …) inside the `payload` JSON column;
+// we spread that first, then overlay the canonical SQL columns.
+function adaptSqlNeedsAttentionRow(row: any): NeedsAttentionRecord | null {
+  if (!row || typeof row !== "object") return null;
+  let payload: Record<string, unknown> = {};
+  if (row.payload) {
+    try {
+      payload =
+        typeof row.payload === "string" ? JSON.parse(row.payload) : row.payload;
+      if (!payload || typeof payload !== "object") payload = {};
+    } catch {
+      payload = {};
+    }
+  }
+  let createdIso = "";
+  try {
+    const ns = BigInt(String(row.ts ?? "0"));
+    const ms = Number(ns / 1_000_000n);
+    if (Number.isFinite(ms) && ms > 0) {
+      createdIso = new Date(ms).toISOString();
+    }
+  } catch {
+    /* ignore */
+  }
+  const id = String(row.id ?? "");
+  return {
+    ...(payload as Record<string, unknown>),
+    id,
+    // `path` was the legacy markdown path; synthesise so any consumer
+    // that reads it still gets something stable.
+    path: ((payload as any).path as string) ?? `needs_attention/${id}.md`,
+    status: String(row.status ?? "pending"),
+    created: ((payload as any).created as string) ?? createdIso,
+    action_what:
+      ((payload as any).action_what as string) ??
+      (row.headline as string) ??
+      undefined,
+    decision_reason:
+      ((payload as any).decision_reason as string) ??
+      (row.body as string) ??
+      undefined,
+    target_path:
+      ((payload as any).target_path as string) ??
+      (row.target_kind === "matter" && row.target_matter
+        ? `matter/${row.target_matter}`
+        : undefined),
+    target_kind:
+      ((payload as any).target_kind as string) ??
+      (row.target_kind as string) ??
+      undefined,
+  } as NeedsAttentionRecord;
+}
+
 export default function NeedsAttentionCard() {
-  const { data, refetch, isLoading } = useQuery(getNeedsAttention, undefined, {
-    refetchInterval: 30_000,
-    retry: false,
-  });
+  const { data, refetch, isLoading } = useQuery(
+    getNeedsAttention2,
+    { status: "pending", limit: 50 },
+    {
+      refetchInterval: 30_000,
+      retry: false,
+    },
+  );
 
   const [actingOn, setActingOn] = useState<{ id: string; kind: ActionKind } | null>(
     null,
   );
 
-  const records: NeedsAttentionRecord[] = data?.records ?? [];
+  const records: NeedsAttentionRecord[] = useMemo(() => {
+    const results = Array.isArray((data as any)?.results)
+      ? (data as any).results
+      : [];
+    return results
+      .map(adaptSqlNeedsAttentionRow)
+      .filter((r: NeedsAttentionRecord | null): r is NeedsAttentionRecord => r !== null);
+  }, [data]);
 
   const handle = async (id: string, kind: ActionKind) => {
     setActingOn({ id, kind });
