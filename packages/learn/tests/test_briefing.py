@@ -698,3 +698,98 @@ async def test_briefing_visit_matter_invalid_path(fake_vault):
     assert out["applied"] is False
     assert out["state_changed"] is False
     assert out["error_message"] == "invalid matter_path"
+
+
+# ---------------------------------------------------------------------------
+# BRIEF_SIGNAL_MAX_AGE_DAYS — aging cutoff for brief signal gathers.
+#
+# Regression for the 2026-05-19 leak: David's morning brief surfaced an
+# Ed Cave RSVP reminder from April 2 and a December Karácsonyi party
+# invite from Mandragóra. Both signals had recent ts (the writer
+# re-asserted stale events as fresh signal rows), but the workflow's
+# ``prior_composed`` anchor stretched the read window back far enough
+# that those rows still made it into the gather. The clamp narrows the
+# read window to ``window_end - BRIEF_SIGNAL_MAX_AGE_DAYS``.
+# ---------------------------------------------------------------------------
+
+
+async def test_gather_window_signals_excludes_aged_signal_by_default(
+    fake_vault, monkeypatch
+):
+    """A signal 30 days older than ``window_end`` is dropped; a 5-day-old
+    signal is kept. Default ``BRIEF_SIGNAL_MAX_AGE_DAYS`` is 14d."""
+    # Ensure the env var is at the default for this test.
+    monkeypatch.delenv("BRIEF_SIGNAL_MAX_AGE_DAYS", raising=False)
+    fake_vault.records_by_type["signal"] = [
+        # 30 days old — must be excluded by the 14d default cutoff even
+        # though the workflow's window_start (45 days back) would include it.
+        _signal_record(
+            "signal/old-rsvp.md",
+            target_path="matter/inbox.md",
+            applied_at="2026-04-13T07:00:00Z",
+        ),
+        # 5 days old — must be included; well inside the 14d cutoff.
+        _signal_record(
+            "signal/recent-rsvp.md",
+            target_path="matter/inbox.md",
+            applied_at="2026-05-08T07:00:00Z",
+        ),
+    ]
+
+    # Window spans 45 days back → without the clamp both signals would
+    # appear in the gather. With the 14d default both rows pass through
+    # the SQL since/until filter (the fake honors them) and only the
+    # in-process age clamp can keep the 30-day-old row out.
+    window_start = briefing_mod._parse_iso_or_none("2026-03-29T07:00:00Z")
+    window_end = briefing_mod._parse_iso_or_none("2026-05-13T07:00:00Z")
+    out = await briefing_mod._gather_window_signals(
+        fake_vault, window_start=window_start, window_end=window_end,
+    )
+    paths_or_headlines = {
+        # _gather_window_signals doesn't return paths, but it embeds the
+        # `target_matter` slug + the legacy fixture's headline-equivalent
+        # via ``display_headline``/``name``. The fixture uses neither, so
+        # we identify rows via their ``when`` ISO timestamps.
+        (entry.get("when") or "")[:10] for entry in out
+    }
+    assert "2026-05-08" in paths_or_headlines, (
+        f"expected the 5-day-old signal to be surfaced, got {out!r}"
+    )
+    assert "2026-04-13" not in paths_or_headlines, (
+        f"expected the 30-day-old signal to be excluded by the 14d cutoff, "
+        f"got {out!r}"
+    )
+
+
+async def test_gather_window_signals_respects_env_override(
+    fake_vault, monkeypatch
+):
+    """``BRIEF_SIGNAL_MAX_AGE_DAYS=60`` widens the cutoff; the aged row
+    surfaces again. ``BRIEF_SIGNAL_MAX_AGE_DAYS=0`` disables the clamp."""
+    fake_vault.records_by_type["signal"] = [
+        _signal_record(
+            "signal/old-rsvp.md",
+            target_path="matter/inbox.md",
+            applied_at="2026-04-13T07:00:00Z",
+        ),
+    ]
+    window_start = briefing_mod._parse_iso_or_none("2026-03-29T07:00:00Z")
+    window_end = briefing_mod._parse_iso_or_none("2026-05-13T07:00:00Z")
+
+    # Override to 60d — the 30-day-old signal must now appear.
+    monkeypatch.setenv("BRIEF_SIGNAL_MAX_AGE_DAYS", "60")
+    out_wide = await briefing_mod._gather_window_signals(
+        fake_vault, window_start=window_start, window_end=window_end,
+    )
+    assert any(
+        (entry.get("when") or "").startswith("2026-04-13") for entry in out_wide
+    ), f"expected aged signal to appear with 60d cutoff, got {out_wide!r}"
+
+    # Setting BRIEF_SIGNAL_MAX_AGE_DAYS=0 disables the clamp entirely.
+    monkeypatch.setenv("BRIEF_SIGNAL_MAX_AGE_DAYS", "0")
+    out_off = await briefing_mod._gather_window_signals(
+        fake_vault, window_start=window_start, window_end=window_end,
+    )
+    assert any(
+        (entry.get("when") or "").startswith("2026-04-13") for entry in out_off
+    ), f"expected aged signal to appear with cutoff disabled, got {out_off!r}"

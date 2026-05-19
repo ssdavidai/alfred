@@ -86,6 +86,72 @@ DEFAULT_FALLBACK_WINDOW = timedelta(hours=24)
 # overruns — letterpress prose, not a transcript.
 BRIEF_BODY_CHAR_CAP = 4000
 
+# Maximum signal age (by ``ts``) the briefing will surface. Anything
+# older than this gets clamped out of the brief-visible window even if
+# the workflow's ``prior_composed`` anchor points further back (e.g.
+# after a briefing-chain reset, or a tenant that hadn't run for weeks).
+#
+# Override with the ``BRIEF_SIGNAL_MAX_AGE_DAYS`` env var. The cutoff
+# only narrows the briefing's read window — aged rows remain queryable
+# via direct SQL / ``GET /api/v1/signals`` for audit purposes.
+#
+# Rationale: writers sometimes create fresh signal rows that re-assert
+# stale content (e.g. a gcal sweep that produces an RSVP-needed signal
+# today for an event that happened months ago). Even when ``ts`` is
+# fresh, this clamp ensures only signals from the last N days reach the
+# brief composer. See PR `fix/learn-brief-signal-aging-cutoff` for the
+# 2026-05-19 incident where April + December events leaked into the
+# morning brief.
+DEFAULT_BRIEF_SIGNAL_MAX_AGE_DAYS = 14
+
+
+def _brief_signal_max_age_days() -> int:
+    """Return the configured max signal age (days) for brief gathers.
+
+    Defaults to ``DEFAULT_BRIEF_SIGNAL_MAX_AGE_DAYS`` (14d). Returns ``0``
+    when explicitly disabled via ``BRIEF_SIGNAL_MAX_AGE_DAYS=0`` — the
+    helpers below treat ``<= 0`` as "no cutoff".
+    """
+    raw = (os.environ.get("BRIEF_SIGNAL_MAX_AGE_DAYS") or "").strip()
+    if not raw:
+        return DEFAULT_BRIEF_SIGNAL_MAX_AGE_DAYS
+    try:
+        n = int(raw)
+    except ValueError:
+        logger.warning(
+            "_brief_signal_max_age_days: invalid BRIEF_SIGNAL_MAX_AGE_DAYS=%r "
+            "— falling back to default %d",
+            raw, DEFAULT_BRIEF_SIGNAL_MAX_AGE_DAYS,
+        )
+        return DEFAULT_BRIEF_SIGNAL_MAX_AGE_DAYS
+    return max(0, n)
+
+
+def _clamp_window_start_for_signals(
+    window_start: datetime,
+    window_end: datetime,
+) -> datetime:
+    """Clamp ``window_start`` forward so signals older than N days drop out.
+
+    The briefing's ``window_start`` is normally the prior briefing's
+    ``composed_at``, which may be hours-to-days old. When the briefing
+    chain breaks (or a tenant resumes after a long gap) the anchor can
+    drift far enough back that stale signals leak into the brief. The
+    clamp forces the effective start to be no earlier than
+    ``window_end - N days``.
+
+    ``BRIEF_SIGNAL_MAX_AGE_DAYS=0`` disables the clamp (returns the
+    original ``window_start``) so operators can opt out for audit
+    re-runs.
+    """
+    max_age_days = _brief_signal_max_age_days()
+    if max_age_days <= 0:
+        return window_start
+    cutoff = window_end - timedelta(days=max_age_days)
+    if cutoff > window_start:
+        return cutoff
+    return window_start
+
 
 # ---------------------------------------------------------------------------
 # SOUL.md loader — same pattern as signals._load_soul_md (Phase 3, #889).
@@ -488,13 +554,22 @@ async def _gather_observed_for_matter(
     # STORE-P3-5: activity-internal SQL read; no workflow.patched gate needed per CLAUDE.md.
     use_sql = _readers_use_sql()
 
+    # PR fix/learn-brief-signal-aging-cutoff: clamp the signal window
+    # forward when the workflow's anchor is older than the configured
+    # max age — keeps stale-content signals (gcal RSVP sweeps re-asserting
+    # past events, etc.) out of the brief-visible set without blocking
+    # the SQL row from being written.
+    effective_signal_start = _clamp_window_start_for_signals(
+        window_start, window_end,
+    )
+
     try:
         # --- Signals ----------------------------------------------------
         if use_sql:
             try:
                 rows = await vault.list_signals(
                     target_matter=target_path,
-                    since_ns=int(window_start.timestamp() * 1_000_000_000),
+                    since_ns=int(effective_signal_start.timestamp() * 1_000_000_000),
                     until_ns=int(window_end.timestamp() * 1_000_000_000),
                     limit=10_000,
                 )
@@ -532,7 +607,9 @@ async def _gather_observed_for_matter(
                 or rec.get("created")
             )
             ts = _parse_iso_or_none(ts_raw)
-            if ts is None or ts < window_start or ts > window_end:
+            # Use the age-clamped start so the markdown fallback gets the
+            # same aging cutoff the SQL path enforces.
+            if ts is None or ts < effective_signal_start or ts > window_end:
                 continue
             path = str(rec.get("path") or fm.get("path") or "").strip()
             if path:
@@ -1440,11 +1517,15 @@ async def _gather_signal_anomalies(
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     """Signals classified as anomaly/system_error inside the window."""
+    # PR fix/learn-brief-signal-aging-cutoff: clamp the brief-visible
+    # window forward by BRIEF_SIGNAL_MAX_AGE_DAYS (default 14) so a
+    # stretched-out workflow anchor can't surface old anomalies.
+    effective_start = _clamp_window_start_for_signals(window_start, window_end)
     # STORE-P3-5: activity-internal SQL read; no workflow.patched gate needed per CLAUDE.md.
     if _readers_use_sql():
         try:
             rows = await vault.list_signals(
-                since_ns=int(window_start.timestamp() * 1_000_000_000),
+                since_ns=int(effective_start.timestamp() * 1_000_000_000),
                 until_ns=int(window_end.timestamp() * 1_000_000_000),
                 limit=400,
             )
@@ -1477,7 +1558,7 @@ async def _gather_signal_anomalies(
             continue
         ts_raw = fm.get("created") or rec.get("created") or ""
         ts = _parse_iso_or_none(ts_raw)
-        if ts is None or ts < window_start or ts > window_end:
+        if ts is None or ts < effective_start or ts > window_end:
             continue
         out.append({
             "kind": classification or target_kind or "signal_anomaly",
@@ -1556,11 +1637,16 @@ async def _gather_window_signals(
     what other people said, what the world surfaced) so the brief can
     reference real movement rather than counters.
     """
+    # PR fix/learn-brief-signal-aging-cutoff: clamp the brief's read
+    # window forward so stale rows don't leak into the compose prompt
+    # even when the workflow's anchor reaches back further than the
+    # configured signal-age ceiling.
+    effective_start = _clamp_window_start_for_signals(window_start, window_end)
     # STORE-P3-5: activity-internal SQL read; no workflow.patched gate needed per CLAUDE.md.
     if _readers_use_sql():
         try:
             rows = await vault.list_signals(
-                since_ns=int(window_start.timestamp() * 1_000_000_000),
+                since_ns=int(effective_start.timestamp() * 1_000_000_000),
                 until_ns=int(window_end.timestamp() * 1_000_000_000),
                 limit=600,
             )
@@ -1589,7 +1675,7 @@ async def _gather_window_signals(
         fm = rec.get("frontmatter") if isinstance(rec.get("frontmatter"), dict) else {}
         ts_raw = fm.get("created") or rec.get("created") or ""
         ts = _parse_iso_or_none(ts_raw)
-        if ts is None or ts < window_start or ts > window_end:
+        if ts is None or ts < effective_start or ts > window_end:
             continue
         out.append({
             "when": str(ts_raw)[:19],
@@ -2081,6 +2167,13 @@ async def compose_and_write_briefing(
         # Best-effort signal/decision count over the window — purely for
         # the briefing frontmatter's ``observed.signals_count`` / ``decisions_count``
         # fields. Not load-bearing for the prose itself.
+        #
+        # PR fix/learn-brief-signal-aging-cutoff: align the signals
+        # counter with the gather-side age clamp so the frontmatter's
+        # ``signals_count`` doesn't suggest more activity than the brief
+        # body actually saw. Decisions retain the raw window because the
+        # cutoff is a signal-aging policy, not a decision-aging policy.
+        signal_start = _clamp_window_start_for_signals(window_start, window_end)
         for record_type, counter_setter in (
             ("signal", "signals"),
             ("decision", "decisions"),
@@ -2093,6 +2186,9 @@ async def compose_and_write_briefing(
                     record_type, type(exc).__name__, repr(exc),
                 )
                 continue
+            effective_start = (
+                signal_start if record_type == "signal" else window_start
+            )
             count = 0
             for rec in records:
                 if not isinstance(rec, dict):
@@ -2106,7 +2202,7 @@ async def compose_and_write_briefing(
                     or rec.get("created")
                 )
                 ts = _parse_iso_or_none(ts_raw)
-                if ts is None or ts < window_start or ts > window_end:
+                if ts is None or ts < effective_start or ts > window_end:
                     continue
                 count += 1
             if counter_setter == "signals":
