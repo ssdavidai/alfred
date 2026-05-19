@@ -1,0 +1,49 @@
+# Build + push the alfred-worker image (the Alfred vault daemon).
+#
+# Dockerfile: packages/hermes/dockerfiles/alfred.Dockerfile — Python + the
+# alfred-vault CLI + the Hermes-native openclaw-wrapper. Context is
+# packages/hermes (the Dockerfile COPYs openclaw-wrapper + the entrypoint).
+name: build-alfred-worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/hermes/dockerfiles/alfred.Dockerfile"
+      - "packages/hermes/dockerfiles/alfred-entrypoint.sh"
+      - "packages/hermes/openclaw-wrapper"
+      - ".github/workflows/build-alfred-worker.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: build-alfred-worker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: packages/hermes
+          file: packages/hermes/dockerfiles/alfred.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ssdavidai00/alfred-worker:latest
+          cache-from: type=gha,scope=alfred-worker
+          cache-to: type=gha,mode=max,scope=alfred-worker
