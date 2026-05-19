@@ -4,12 +4,20 @@ import { addRoute } from "../server.js";
 import { sendJson, ApiError, ValidationError } from "../errors.js";
 import { dockerExec, parseJsonLines } from "../helpers.js";
 
-const ONBOARD_JSON_PATH = "/mnt/encrypted/alfred/onboard.json";
+// alfred-black single-VM stacks mount the alfred-data named volume at
+// /alfred-data inside ctrl-api (see docker-compose.yaml). Legacy multi-tenant
+// stacks used /mnt/encrypted/alfred. Read the path from the environment so
+// both topologies work without an api.mjs recompile; default to the
+// alfred-black layout because that is the supported single-VM contract.
+const ONBOARD_JSON_PATH =
+  process.env.ONBOARD_JSON_PATH || "/alfred-data/onboard.json";
 
-// Vault chore record dir. Kept in sync with VAULT_PATH from vault.ts (which we
-// don't import here because the user-set file boundaries for #144 forbid
-// editing other route files; chore lookup is read-only and the path is stable).
-const CHORE_RECORD_DIR = "/mnt/encrypted/vault/chore";
+// Vault chore record dir. Kept in sync with VAULT_PATH from vault.ts (which
+// we don't import here because the user-set file boundaries for #144 forbid
+// editing other route files; chore lookup is read-only and the path is
+// stable). Same env override as ONBOARD_JSON_PATH so both topologies work.
+const CHORE_RECORD_DIR =
+  process.env.CHORE_RECORD_DIR || "/vault/chore";
 
 export function registerWorkflowRoutes(): void {
   // --- Workflows ---
