@@ -117,7 +117,6 @@ export const getDashboardData: GetDashboardData<void, any> = async (
   const inboxRaw = raw?.inbox ?? null;
   const pairingRaw = raw?.pairing ?? null;
   const containersRaw = raw?.containers ?? null;
-  const openclawCfgRaw = raw?.openclawCfg ?? null;
 
   // Build health object with derived status
   const health = healthRaw
@@ -151,9 +150,11 @@ export const getDashboardData: GetDashboardData<void, any> = async (
         : []
     : null;
 
-  // Gateway token for OpenClaw UI link
-  const gatewayToken: string | null =
-    openclawCfgRaw?.gateway?.auth?.token ?? null;
+  // NOTE (issue #59): the `gatewayToken` field is gone. It read
+  // `openclawCfg.gateway.auth.token` from the tenant /admin/dashboard
+  // endpoint — an OpenClaw-era key the Hermes config schema does not
+  // define, sourced from a config path that did not exist, so it was
+  // always `null`. No component rendered it.
 
   return {
     health,
@@ -168,7 +169,6 @@ export const getDashboardData: GetDashboardData<void, any> = async (
     inbox: inboxRaw ? { count: inboxFiles.length } : null,
     pairing: pairingText !== null ? { raw: pairingText } : null,
     containers,
-    gatewayToken,
   };
 };
 

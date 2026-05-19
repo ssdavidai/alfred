@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { dockerComposeCmd, dockerExec, execAsync, sudoExec, parseJsonLines, validateServiceName, COMPOSE_DIR, HERMES_CMD, HERMES_CONTAINER } from "../helpers.js";
@@ -21,13 +20,6 @@ const CHORE_VAULT_DIR = `${VAULT_PATH}/chore`;
 const PROMOTION_DRAFTS_DIR = `${ALFRED_DATA_DIR}/promotion-drafts`;
 
 const ENV_PATH = `${COMPOSE_DIR}/.env`;
-// Hermes per-profile config (was openclaw.json). The hermes_data volume holds
-// one config.yaml per profile; the `main` profile config is the dashboard's
-// view target. Note: the legacy /api/v1/admin/config/openclaw PATCH route
-// deep-merges JSON — under Hermes the config is YAML, so that route now
-// read-merges YAML via js-yaml (see the route body).
-const HERMES_CONFIG_DIR = process.env.HERMES_CONFIG_DIR ?? "/hermes-data";
-const OPENCLAW_JSON_PATH = `${HERMES_CONFIG_DIR}/main/config.yaml`;
 
 // In-memory rate limit for the chore-specific learn restart route. Prevents
 // thrashing when an onboarding generates multiple templates and each tries
@@ -806,54 +798,18 @@ export function registerAdminRoutes(): void {
     sendJson(res, 200, { message: "Environment updated", keys: Object.keys(b) });
   });
 
-  // Read the Hermes `main` profile config.yaml.
-  // Kept at /api/v1/admin/config/openclaw (the dashboard's existing route);
-  // the runtime is now Hermes and the config is YAML, parsed to JSON here.
-  addRoute("GET", "/api/v1/admin/config/openclaw", async ({ res }) => {
-    try {
-      const parsed = yaml.load(fs.readFileSync(OPENCLAW_JSON_PATH, "utf-8"));
-      sendJson(res, 200, parsed && typeof parsed === "object" ? parsed : {});
-    } catch {
-      sendJson(res, 200, {});
-    }
-  });
-
-  // Update the Hermes `main` profile config.yaml (deep merge).
-  addRoute("PATCH", "/api/v1/admin/config/openclaw", async ({ res, body }) => {
-    const b = body as Record<string, unknown> | undefined;
-    if (!b || typeof b !== "object") throw new ValidationError("Request body must be an object");
-
-    let existing: Record<string, unknown> = {};
-    try {
-      const parsed = yaml.load(fs.readFileSync(OPENCLAW_JSON_PATH, "utf-8"));
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        existing = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // file doesn't exist yet
-    }
-
-    // Backup before write — a timestamped .bak copy so a bad patch can be
-    // reverted manually.
-    const isoStamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const backupPath = OPENCLAW_JSON_PATH.replace(/\.ya?ml$/, `.bak-${isoStamp}.yaml`);
-    try {
-      if (fs.existsSync(OPENCLAW_JSON_PATH)) {
-        fs.copyFileSync(OPENCLAW_JSON_PATH, backupPath);
-      }
-    } catch (backupErr) {
-      console.warn(`[admin] hermes config backup failed: ${backupErr}`);
-    }
-
-    const merged = deepMerge(existing, b);
-
-    fs.writeFileSync(
-      OPENCLAW_JSON_PATH,
-      yaml.dump(merged, { lineWidth: 120, noRefs: true }),
-      "utf-8",
-    );
-    sendJson(res, 200, { message: "Hermes config updated", backup: backupPath });
-  });
+  // --- Hermes config GET/PATCH: REMOVED (issue #59) ---
+  //
+  // The `GET`/`PATCH /api/v1/admin/config/openclaw` routes were dead
+  // phantom-config machinery, the same class #44 removed from
+  // integrations.ts. They read/backed-up/deep-merge-wrote a `config.yaml`
+  // at `/hermes-data/main/config.yaml` — a path that does not exist (the
+  // real layout is `${HERMES_HOME}/profiles/<profile>/config.yaml`,
+  // HERMES_HOME=/opt/data). No caller used either route: the GET had zero
+  // consumers in web or mcp-server, and the PATCH hand-edited a config
+  // Hermes owns and regenerates from a template (hermes-config.yaml.njk) —
+  // the native write path is `hermes config set`. Removed rather than
+  // path-corrected: there is nothing for ctrl-api to mediate here.
 
   // --- Ephemeral agents: REMOVED (PLAN.md Part F, issue #15) ---
   //
@@ -908,15 +864,14 @@ export function registerAdminRoutes(): void {
     // Fast synchronous reads
     const vaultRaw = getVaultContextData();
     const inboxFiles = getInboxFiles();
-    // Hermes `main` profile config (YAML). Key stays `openclawCfg` for the
-    // dashboard's existing reader; drop the alias in Phase 2.
-    let openclawCfg: unknown = {};
-    try {
-      const parsed = yaml.load(fs.readFileSync(OPENCLAW_JSON_PATH, "utf-8"));
-      if (parsed && typeof parsed === "object") openclawCfg = parsed;
-    } catch {
-      // file may not exist yet
-    }
+
+    // NOTE (issue #59): the legacy `openclawCfg` field is gone. It read
+    // `/hermes-data/main/config.yaml` — a nonexistent path — so it was
+    // always `{}`, and its only consumer (web `getDashboardData`) used it
+    // solely to pull `gateway.auth.token`, an OpenClaw-era key Hermes' YAML
+    // schema does not define (hermes-config.yaml.njk has no `gateway`
+    // block). The field carried no real data; the web reader is updated to
+    // match.
 
     sendJson(res, 200, {
       health: healthResult.status === "fulfilled" ? healthResult.value : null,
@@ -924,7 +879,6 @@ export function registerAdminRoutes(): void {
       pairing: pairingResult.status === "fulfilled" ? pairingResult.value : null,
       vault: vaultRaw,
       inbox: { files: inboxFiles },
-      openclawCfg,
     });
   });
 
@@ -1033,19 +987,4 @@ export function registerAdminRoutes(): void {
       retired: true,
     });
   });
-}
-
-function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
-  const result = { ...target };
-  for (const [key, value] of Object.entries(source)) {
-    if (
-      value && typeof value === "object" && !Array.isArray(value) &&
-      result[key] && typeof result[key] === "object" && !Array.isArray(result[key])
-    ) {
-      result[key] = deepMerge(result[key] as Record<string, unknown>, value as Record<string, unknown>);
-    } else {
-      result[key] = value;
-    }
-  }
-  return result;
 }
