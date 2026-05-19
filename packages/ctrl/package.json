@@ -11,7 +11,7 @@
     "build": "node build.mjs",
     "dev": "node build.mjs --watch",
     "start": "node dist/index.mjs",
-    "test": "node --experimental-test-module-mocks --import tsx/esm --test tests/*.test.ts"
+    "test": "node --experimental-test-module-mocks --import ./tests/sql-loader.mjs --import tsx/esm --test tests/*.test.ts"
   },
   "dependencies": {
     "commander": "^13.1.0",

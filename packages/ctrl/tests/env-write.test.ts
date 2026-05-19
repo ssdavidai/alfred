@@ -30,10 +30,15 @@ describe("buildEnvWriteCommand (#681 regression)", () => {
     const cmd = buildEnvWriteCommand("/opt/alfred/compose/.env", AGENTPHONE_BLOCK);
     assert.ok(cmd, "expected non-null command for non-empty entries");
 
-    // Each key MUST appear inside its own single-quoted printf argument:
-    //   "KEY='VALUE'" (after JSON.stringify wrapping that becomes \"KEY='VALUE'\")
+    // Each key MUST appear inside its own printf argument. Commit 4f04b9e
+    // ("fix: vault-cli race + env quoting + dashboard brief gating") changed
+    // env-write to only single-quote values that contain shell-special
+    // characters — the four AGENTPHONE_BLOCK values (UUID, phone with leading
+    // `+`, https URL, lowercase-hex) are all shell-safe, so they land as
+    // bare `KEY=VALUE` printf args. After JSON.stringify wrapping the
+    // literal substring is `"KEY=VALUE"`.
     for (const key of Object.keys(AGENTPHONE_BLOCK)) {
-      const expected = `\"${key}='${AGENTPHONE_BLOCK[key]}'\"`;
+      const expected = `\"${key}=${AGENTPHONE_BLOCK[key]}\"`;
       assert.ok(
         cmd.includes(expected),
         `expected printf argument ${expected} in command, got:\n${cmd}`,
@@ -144,14 +149,16 @@ describe("buildEnvWriteCommand (#681 regression)", () => {
         written.includes("EXISTING_KEY=preserved"),
         `EXISTING_KEY line was clobbered. Content:\n${written}`,
       );
-      // The stale TENANT_ID must have been replaced (not duplicated).
+      // The stale TENANT_ID must have been replaced (not duplicated). Since
+      // commit 4f04b9e the impl writes UUIDs unquoted (no shell-special
+      // chars), so the expected line is bare `TENANT_ID=<uuid>`.
       const tenantIdLines = written
         .split("\n")
         .filter((l: string) => l.startsWith("TENANT_ID="));
       assert.equal(tenantIdLines.length, 1);
       assert.equal(
         tenantIdLines[0],
-        `TENANT_ID='${AGENTPHONE_BLOCK.TENANT_ID}'`,
+        `TENANT_ID=${AGENTPHONE_BLOCK.TENANT_ID}`,
       );
     } finally {
       try {

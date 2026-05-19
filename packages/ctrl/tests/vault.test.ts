@@ -4,6 +4,15 @@ import http from "node:http";
 import crypto from "node:crypto";
 import type { AddressInfo } from "node:net";
 
+// STORE-P1-4 added a SQLite vault_index fast path behind VAULT_LIST_USE_INDEX
+// (default on). The fast path calls openStateDb(), which tries to open
+// /var/lib/alfred/state.db and crashes the GET /api/v1/vault/list/:type
+// handler in a test context where there is no state.db. The legacy walkMd
+// path is preserved by the impl as the rollback handle (=0) and is what
+// these tests exercise via the readdirSync/readFileSync mocks. Force the
+// legacy path for the duration of this test file.
+process.env.VAULT_LIST_USE_INDEX = "0";
+
 // ---------------------------------------------------------------------------
 // Mocks — must be registered before any import of code that uses them
 // ---------------------------------------------------------------------------
