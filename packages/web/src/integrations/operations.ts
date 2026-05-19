@@ -19,6 +19,7 @@
 import type {
   GetIntegrationCatalog,
   GetConnectedIntegrations,
+  GetGmailConnectionStatus,
   GetIntegrationCapabilities,
   GetOpenclawReadiness,
   GetIntegrationScope,
@@ -245,6 +246,57 @@ export const getConnectedIntegrations: GetConnectedIntegrations<void, any> = asy
     integrations: [...enriched, ...orphans],
     count: enriched.length + orphans.length,
   };
+};
+
+// =============================================================================
+// Gmail connection status — onboarding's "is Gmail connected?" check.
+// =============================================================================
+//
+// Composio-managed Gmail onboarding (#68, epic #66). The Composio path of
+// DeskOnboardingGate uses this the way the Google path uses
+// getGoogleRefreshTokenStatus.hasCredential: to know the connection
+// completed before auto-firing startOnboarding.
+//
+// "Connected" means an ACTIVE Composio connection for the `gmail` toolkit
+// exists on the tenant. The tenant's `GET /api/v1/integrations` is the
+// authoritative truth for Composio connection status (the SaaS
+// ComposioConnection row only mirrors it) — Composio flips a connection
+// INITIATED → ACTIVE on its own side after the user finishes consent, and
+// the stack learns it by re-reading this list. We therefore read the
+// tenant list directly here, exactly as finalizeComposioConnections does.
+//
+// `ComposioConnection` is declared as an entity in main.wasp for this
+// query so a future revision can fall back to the SaaS mirror row if the
+// tenant is briefly unreachable; today the tenant list is the source of
+// truth and the only thing consulted.
+//
+// P2 (#69) will reuse this same query to gate startOnboarding server-side.
+
+export const getGmailConnectionStatus: GetGmailConnectionStatus<
+  void,
+  { connected: boolean; status: string | null }
+> = async (_args, context) => {
+  requireUser(context);
+  const instance = await getUserInstance(context);
+
+  const data = await proxyToTenant(instance, {
+    path: "/api/v1/integrations",
+  });
+  const list: any[] = Array.isArray(data?.integrations)
+    ? data.integrations
+    : [];
+
+  // The Gmail toolkit slug in Composio is `gmail` (confirmed against
+  // ctrl-api's RECOMMENDED_STREAMS + GMAIL_FETCH_EMAILS action mapping).
+  const gmail = list.find(
+    (c) => String(c?.toolkit ?? "").toLowerCase() === "gmail",
+  );
+  if (!gmail) {
+    return { connected: false, status: null };
+  }
+
+  const status = String(gmail.status ?? "").toUpperCase();
+  return { connected: status === "ACTIVE", status: status || null };
 };
 
 // =============================================================================

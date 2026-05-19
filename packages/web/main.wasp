@@ -952,6 +952,13 @@ query getConnectedIntegrations {
   entities: [ComposioConnection]
 }
 
+// #68 — onboarding's "is Gmail connected?" check for the Composio path.
+// True when an ACTIVE `gmail` Composio connection exists on the tenant.
+query getGmailConnectionStatus {
+  fn: import { getGmailConnectionStatus } from "@src/integrations/operations",
+  entities: [ComposioConnection]
+}
+
 query getIntegrationCapabilities {
   fn: import { getIntegrationCapabilities } from "@src/integrations/operations",
   entities: []
