@@ -44,12 +44,13 @@
 # =============================================================================
 model:
 {%- if is_main %}
-  # User-facing Alfred — a fast, capable model for the live chat surface.
-  default: "openrouter/x-ai/grok-4.1-fast"
+  # User-facing Alfred — a capable model for the live chat surface.
+  # Bare OpenRouter model ID; provider/base_url below do the routing.
+  default: "{{ main_model }}"
 {%- else %}
   # Background workers — a cheaper model; these agents are autonomous and
   # high-volume (clerk classification, vault curation, ephemeral executors).
-  default: "openrouter/openai/gpt-5.4-nano"
+  default: "{{ workers_model }}"
 {%- endif %}
   provider: "openrouter"
   base_url: "https://openrouter.ai/api/v1"

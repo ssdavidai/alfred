@@ -113,6 +113,11 @@ def main() -> int:
         node_modules=node_modules,
         alfred_prime=alfred_prime,
         cross_tenant_peers=cross_tenant_peers,
+        # Bare OpenRouter model IDs (no `openrouter/` prefix — `provider:
+        # openrouter` + base_url route it). Overridable via .env so a
+        # stale model ID is a one-line fix, not a rebuild.
+        main_model=os.environ.get("HERMES_MAIN_MODEL", "x-ai/grok-4.3"),
+        workers_model=os.environ.get("HERMES_WORKERS_MODEL", "openai/gpt-4.1-nano"),
     )
     config_path = profile_dir / "config.yaml"
     config_path.write_text(config_out, encoding="utf-8")
