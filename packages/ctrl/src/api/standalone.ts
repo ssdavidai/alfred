@@ -21,6 +21,8 @@ import { attachTerminalUpgrade } from "./routes/terminal.js";
 import { flushPendingOpenclawWrites } from "./routes/integrations.js";
 import { getStateDb, closeStateDb } from "../db/state.js";
 import { getIngestDb, startIngestSweep, closeIngestDb } from "../db/ingest.js";
+import { getColdDb, closeColdDb } from "../db/cold.js";
+import { startCompactor, stopCompactor } from "../db/compactor.js";
 import { reconcileVaultIndex } from "../db/vaultIndex.js";
 
 const apiKey = process.env.AAS_API_KEY;
@@ -37,7 +39,9 @@ setApiKey(apiKey);
 //   1. Open state.db (Store 2) — ctrl-api is its SOLE write handle. This also
 //      loads the sqlite-vec extension and creates the `embedding` vec0 table.
 //   2. Open ingest.db (Store 4) and start the periodic 7-day TTL sweep.
-//   3. Reconcile vault_index against the markdown vault (Store 1) — catches
+//   3. Open cold.db (Store 3) and start the daily TTL compactor — it rolls
+//      state.db rows past their TTL into the compressed cold archive.
+//   4. Reconcile vault_index against the markdown vault (Store 1) — catches
 //      out-of-band edits made while ctrl-api was down. Per-write hooks keep it
 //      exact thereafter.
 //
@@ -48,6 +52,8 @@ setApiKey(apiKey);
 getStateDb();
 getIngestDb();
 startIngestSweep();
+getColdDb();
+startCompactor();
 try {
   reconcileVaultIndex();
 } catch (err) {
@@ -72,7 +78,9 @@ server.listen(port, host, () => {
 function shutdown(signal: string): void {
   console.log(`${signal} received, shutting down...`);
   flushPendingOpenclawWrites();
+  stopCompactor();
   closeIngestDb();
+  closeColdDb();
   closeStateDb();
   server.close(() => process.exit(0));
 }

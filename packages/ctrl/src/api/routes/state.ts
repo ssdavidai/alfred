@@ -37,6 +37,9 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { getStateDb, vecAvailable, EMBEDDING_DIM } from "../../db/state.js";
 import { ulid } from "../../db/ulid.js";
+import { queryAuditCrossTier, getAuditCrossTier } from "../../db/coldRead.js";
+import { runCompaction } from "../../db/compactor.js";
+import { COLD_TTL_DAYS, COLD_CODEC, getColdDb } from "../../db/cold.js";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -375,40 +378,85 @@ export function registerStateRoutes(): void {
     sendJson(res, 201, { ok: true, id });
   });
 
+  // GET /audit — cross-tier (hot state.db + cold archive). The forensic long
+  // tail lives in cold.db once the compactor rolls rows past their TTL; this
+  // query merges both tiers when the window (`since`) reaches past the cutoff,
+  // and stays hot-only for the common recent-window case (PLAN.md Part I,
+  // Store 3). `tiers` in the response shows which tiers actually contributed.
   addRoute("GET", "/api/v1/state/audit", async ({ res, query }) => {
-    const where: string[] = [];
-    const args: unknown[] = [];
-    for (const [col, key] of [
-      ["action_type", "action_type"],
-      ["actor", "actor"],
-      ["source", "source"],
-      ["target_path", "target"],
-      ["subject_ref", "subject"],
-      ["mode", "mode"],
-    ] as const) {
-      const v = query.get(key);
-      if (v) { where.push(`${col} = ?`); args.push(v); }
-    }
-    const since = query.get("since");
-    if (since) { where.push("ts >= ?"); args.push(since); }
-    const until = query.get("until");
-    if (until) { where.push("ts <= ?"); args.push(until); }
     const limit = clampLimit(query);
     const offset = Math.max(0, parseInt(query.get("offset") ?? "0", 10) || 0);
-    const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
-    const total = (
-      db().prepare(`SELECT COUNT(*) AS n FROM audit ${whereSql}`).get(...args) as { n: number }
-    ).n;
-    const rows = db()
-      .prepare(`SELECT * FROM audit ${whereSql} ORDER BY ts DESC LIMIT ? OFFSET ?`)
-      .all(...args, limit, offset);
-    sendJson(res, 200, { entries: rows, total, limit, offset });
+    const result = queryAuditCrossTier({
+      action_type: query.get("action_type"),
+      actor: query.get("actor"),
+      source: query.get("source"),
+      target_path: query.get("target"),
+      subject_ref: query.get("subject"),
+      mode: query.get("mode"),
+      since: query.get("since"),
+      until: query.get("until"),
+      limit,
+      offset,
+    });
+    sendJson(res, 200, {
+      entries: result.entries,
+      total: result.total,
+      limit,
+      offset,
+      tiers: result.tiers,
+      hot_total: result.hot_total,
+      cold_total: result.cold_total,
+    });
   });
 
+  // GET /audit/:id — hot tier first, then the cold archive.
   addRoute("GET", "/api/v1/state/audit/:id", async ({ res, params }) => {
-    const row = db().prepare("SELECT * FROM audit WHERE id = ?").get(params.id);
+    const row = getAuditCrossTier(params.id);
     if (!row) throw new NotFoundError(`audit ${params.id} not found`);
     sendJson(res, 200, row);
+  });
+
+  // ─────────────────────────────────────────────────────────────
+  // Store 3 — cold archive ops.
+  //
+  //   POST /api/v1/state/cold/compact   run the TTL compactor now (the
+  //                                     boot-scheduled daily job calls the
+  //                                     same runCompaction()).
+  //   GET  /api/v1/state/cold/status    archive row counts + last compactions.
+  // ─────────────────────────────────────────────────────────────
+  addRoute("POST", "/api/v1/state/cold/compact", async ({ res }) => {
+    const result = runCompaction();
+    sendJson(res, 200, { ok: true, ...result });
+  });
+
+  addRoute("GET", "/api/v1/state/cold/status", async ({ res }) => {
+    const cold = getColdDb();
+    const archiveTables = [
+      "archive_signal",
+      "archive_observation",
+      "archive_routing_decision",
+      "archive_audit",
+      "archive_link",
+    ];
+    const counts: Record<string, number> = {};
+    for (const t of archiveTables) {
+      counts[t] = (
+        cold.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }
+      ).n;
+    }
+    const recent = cold
+      .prepare(
+        `SELECT ran_at, table_name, cutoff_ts, rows_moved, bytes_cold,
+                duration_ms, ok, note
+           FROM cold_compact_log ORDER BY ran_at DESC LIMIT 25`,
+      )
+      .all();
+    sendJson(res, 200, {
+      codec: COLD_CODEC,
+      ttl_days: COLD_TTL_DAYS,
+      archive_counts: counts,
+      recent_compactions: recent,
+    });
   });
 
   // ─────────────────────────────────────────────────────────────

@@ -325,6 +325,7 @@ services:
       - hermes_data:/hermes-state
       - state_data:/state
       - ingest_data:/ingest
+      - cold_data:/cold
       # ctrl-api restarts sibling containers (worker ops, chore runs).
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
@@ -1213,6 +1214,7 @@ volumes:
   mcp_server_data:
   state_data:
   ingest_data:
+  cold_data:
   plane_pgdata:
   plane_redis:
   plane_rabbitmq:

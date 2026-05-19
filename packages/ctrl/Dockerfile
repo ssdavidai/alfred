@@ -106,12 +106,14 @@ ENV AAS_PORT=3100 \
     COMPOSE_DIR=/srv/alfred-black \
     STATE_DB_PATH=/state/state.db \
     INGEST_DB_PATH=/ingest/ingest.db \
+    COLD_DB_PATH=/cold/cold.db \
     NODE_ENV=production
 
 EXPOSE 3100
 
-# state.db / ingest.db live on named volumes mounted at these paths.
-VOLUME ["/state", "/ingest"]
+# state.db / ingest.db / cold.db (Store 3 archive) live on named volumes
+# mounted at these paths.
+VOLUME ["/state", "/ingest", "/cold"]
 
 # Node 22's node:sqlite is behind an experimental flag.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

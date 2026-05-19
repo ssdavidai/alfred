@@ -15,7 +15,7 @@ source of truth for ctrl-api, alfred-learn, and the alfred vault daemon.
 |---|-------|---------|-------|-------|
 | 1 | **Vault** | Markdown files (`vault_data` volume) | alfred daemon, via ctrl-api | The principal's knowledge surface — the ~12 canonical record types. |
 | 2 | **`state.db`** | SQLite + WAL + sqlite-vec (`state_data` volume) | **ctrl-api (sole writer)** | The machine's working memory — signals, observations, routing decisions, audit ledger, link graph, vault read-index, embeddings. |
-| 3 | **Cold archive** | DuckDB / Parquet | — | Forensic long tail. **Deferred** — see "Store 3" below. |
+| 3 | **`cold.db`** | SQLite, zstd-compressed rows (`cold_data` volume) | ctrl-api (sole writer) | Forensic long tail — rows aged out of `state.db` by the TTL compactor. |
 | 4 | **`ingest.db`** | SQLite (`ingest_data` volume) | ctrl-api (sole writer) | Raw inbound stream events. Hard 7-day TTL, consume-then-delete. |
 
 Separate from all four is the **`web-db` Postgres** — Wasp's own store for
@@ -108,13 +108,73 @@ else still works.
 
 ---
 
-## Store 3 — cold archive (DEFERRED)
+## Store 3 — cold archive (`cold.db`)
 
-Greenfield alfred-black has no 90d+ cold data for months, so the DuckDB/Parquet
-compactor is a later phase. The hot `state.db` tables already carry `ts`
-columns, and `schema.sql` reserves the archive table names
-(`archive_signal`, `archive_observation`, `archive_routing_decision`,
-`archive_audit`, `archive_link`). No archive tables are created yet.
+The forensic long tail. A periodic TTL compactor rolls aged-out `state.db` rows
+into `cold.db`, a **third SQLite file** on the `cold_data` volume
+(`src/db/cold.ts`, `src/db/compactor.ts`). ctrl-api is the sole writer, same
+single-writer discipline as `state.db` and `ingest.db`.
+
+### Why a compressed SQLite file, not DuckDB
+
+PLAN.md Part I names "DuckDB/Parquet" as the candidate. A DuckDB node binding
+is a **native addon** — it would break ctrl-api's build contract (esbuild
+bundles a single dependency-free `dist/api.mjs`; `node:sqlite` is the only DB
+and it is built into Node 22) and would force per-arch native builds into the
+image. The plan's actual hard requirements — single file, no daemon,
+dependency-light, columnar-ish compression — are all met by a second SQLite
+file whose row bodies are **zstd-compressed**, with **zero new dependencies**:
+
+- **single file** — `cold.db` on the `cold_data` volume.
+- **no daemon** — `node:sqlite`, same as the other two stores.
+- **dependency-light** — zero npm deps; `node:zlib` `zstdCompressSync` (Node
+  ≥ 22.15) with a gzip fallback on older runtimes. The `codec` column on every
+  archive row records which was used so reads always inflate correctly.
+- **compression** — each archived row is one zstd blob (~4–6× on JSON audit
+  rows). Cold archive is write-once / read-rarely, so per-row blobs are the
+  right granularity.
+
+### Archive tables
+
+One `archive_*` table per cold-archivable hot table — the names reserved in
+`schema.sql`: `archive_signal`, `archive_observation`,
+`archive_routing_decision`, `archive_audit`, `archive_link`. Each keeps `id`,
+`ts`, and the table-specific **filter columns** (`action_type`, `actor`,
+`kind`, …) as plain **indexed** columns alongside the compressed `body` blob —
+so a cold query filters and orders **without decompressing**; only the matched
+rows' bodies are inflated. `cold_compact_log` records one row per compactor run.
+
+### TTL compactor
+
+`runCompaction()` (in `src/db/compactor.ts`) runs daily — scheduled at boot
+(`startCompactor()`, first run 5 min after boot, then every 24h) and exposed as
+`POST /api/v1/state/cold/compact`. Per hot table it: computes
+`cutoff = now − TTL`, batches the rows past the cutoff (`BATCH_SIZE=500`),
+compresses + `INSERT OR REPLACE`s them into `cold.db`, then — **only once the
+cold write committed** — deletes them from `state.db`. A crash between the two
+steps leaves a row in **both** tiers (the cross-tier reader de-dupes by `id`),
+never in neither — data is never lost to a mid-compaction crash.
+
+Per-table TTL (override via env): `signal` / `observation` /
+`routing_decision` = **90d**; `audit` / `link` = **365d** (the forensic ledger
+keeps a year before it cools). `ingest.db` is never archived — it is
+consume-then-delete.
+
+### Cross-tier reads
+
+`GET /api/v1/state/audit` and `GET /api/v1/state/audit/:id` read **across hot +
+cold** via `src/db/coldRead.ts`. The cold tier is queried **only when the query
+window can reach past the cutoff** (`since` is null or `since` < the table's
+cold cutoff) — so the common "last 7 days" query never touches `cold.db`. The
+reader merges, de-dupes by `id`, re-applies `ts`-DESC ordering and
+`limit`/`offset` across the union, and returns a `tiers` field showing which
+tiers contributed. The Decisions/Desk audit feed consumes `/api/v1/state/audit`
+and so reads the full long tail transparently.
+
+> Note: `GET /api/v1/decisions` is backed by `vault_index` (the `decision/*.md`
+> markdown is a canonical Store-1 type and is **not** TTL-compacted). The
+> audit-class events those decisions emit *are* mirrored into the `audit` table
+> and so are covered by the cold tier through `/api/v1/state/audit`.
 
 ---
 
@@ -143,9 +203,11 @@ burst of inbound events never takes the `state.db` write lock.
 | `POST/GET /signals`, `GET/PATCH /signals/:id` | signal CRUD |
 | `POST/GET /observations`, `GET/PATCH /observations/:id` | observation CRUD |
 | `POST/GET /routing-decisions`, `GET/PATCH /routing-decisions/:id` | routing-decision CRUD |
-| `POST/GET /audit`, `GET /audit/:id` | audit ledger append + query |
+| `POST/GET /audit`, `GET /audit/:id` | audit ledger append + **cross-tier** query (hot `state.db` + cold `cold.db`) |
 | `POST/GET /links`, `DELETE /links/:id` | link graph |
 | `POST /embeddings`, `POST /embeddings/search`, `DELETE /embeddings` | vector store |
+| `POST /cold/compact` | run the Store 3 TTL compactor now |
+| `GET /cold/status` | cold-archive row counts, codec, TTLs, recent compactions |
 
 ### vault_index (Store 2) — `/api/v1/vault-index*`
 
@@ -181,8 +243,14 @@ desk-action routes) mirror every action into the `audit` table via
 |-----|---------|---------|
 | `STATE_DB_PATH` | `/state/state.db` | state.db location (mount the `state_data` volume here). |
 | `INGEST_DB_PATH` | `/ingest/ingest.db` | ingest.db location (mount the `ingest_data` volume here). |
+| `COLD_DB_PATH` | `/cold/cold.db` | cold.db location (mount the `cold_data` volume here). |
 | `SQLITE_VEC_PATH` | `/usr/local/lib/sqlite-vec/vec0.so` | sqlite-vec loadable extension (baked into the image). |
 | `EMBEDDING_DIM` | `768` | embedding vector dimension. |
+| `COLD_TTL_SIGNAL_DAYS` / `COLD_TTL_OBSERVATION_DAYS` / `COLD_TTL_ROUTING_DECISION_DAYS` | `90` | per-table cold-archive TTL. |
+| `COLD_TTL_AUDIT_DAYS` / `COLD_TTL_LINK_DAYS` | `365` | per-table cold-archive TTL (forensic ledger). |
+| `COLD_COMPACT_INTERVAL_MS` | `86400000` | compactor run interval (default daily). |
+| `COLD_COMPACT_BOOT_DELAY_MS` | `300000` | delay before the first compactor run after boot. |
+| `COLD_COMPACT_BATCH` | `500` | rows moved per compactor transaction. |
 | `INGEST_TTL_DAYS` | `7` | hard TTL for `stream_event`. |
 | `INGEST_SWEEP_INTERVAL_MS` | `21600000` (6h) | TTL sweep cadence. |
 | `VAULT_PATH` | `/vault` | the markdown vault (Store 1) mount point. |

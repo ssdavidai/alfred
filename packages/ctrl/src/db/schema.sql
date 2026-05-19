@@ -250,22 +250,28 @@ CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_type    ON events(event_type, created_at DESC);
 
 -- ============================================================================
--- Store 3 reservations — cold archive (DuckDB/Parquet).
+-- Store 3 — cold archive. IMPLEMENTED, but it lives in a SEPARATE FILE.
 --
--- Store 3 itself is DEFERRED (PLAN.md Part I: greenfield has no 90d+ cold
--- data). When the compactor lands it will roll rows older than the TTL out of
--- the hot tables above into Parquet bundles. The hot tables already carry a
--- `ts` column for exactly this. The archive table NAMES are reserved here so
--- the future compactor and the cross-tier audit reader agree on a contract:
+-- The archive_* tables are NOT in this schema: they are created in cold.db
+-- (the `cold_data` volume) by src/db/cold.ts, not in state.db. cold.db is a
+-- third single-writer SQLite file — keeping the cold tail out of state.db
+-- means a long forensic scan never touches the hot working-memory file.
 --
---   archive_signal            ← signal            (TTL ~90d)
---   archive_observation       ← observation       (TTL ~90d)
---   archive_routing_decision  ← routing_decision  (TTL ~90d)
---   archive_audit             ← audit             (TTL ~365d — forensic long tail)
---   archive_link              ← link              (TTL ~365d)
+-- The TTL compactor (src/db/compactor.ts) rolls rows from the hot tables above
+-- into cold.db once their `ts` is older than the per-table TTL:
+--
+--   archive_signal            ← signal            (TTL 90d)
+--   archive_observation       ← observation       (TTL 90d)
+--   archive_routing_decision  ← routing_decision  (TTL 90d)
+--   archive_audit             ← audit             (TTL 365d — forensic long tail)
+--   archive_link              ← link              (TTL 365d)
+--
+-- Each archive row keeps id + ts + the filter columns uncompressed (indexed)
+-- and the full row JSON as a zstd-compressed blob. The cross-tier reader
+-- (src/db/coldRead.ts) merges hot + cold for /api/v1/state/audit.
 --
 -- ingest.db.stream_event has its own hard 7d TTL (see ingest-schema.sql) and
 -- is never archived — it is consumed then deleted.
 --
--- No archive tables are created now: Store 3 is a later phase.
+-- See docs/STORAGE-ARCHITECTURE.md -> "Store 3" for the full design.
 -- ============================================================================

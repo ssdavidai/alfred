@@ -1,13 +1,14 @@
 // OpenAI Realtime function-tool definitions + dispatchers.
 //
-// We expose the same two tools the openclaw main agent uses:
+// We expose the same two tools the Alfred agent uses:
 //   self              — proxy to THIS tenant's ctrl-api (mirrors the MCP
-//                       `self` tool defined in packages/openclaw/mcp/ctrl-server.mjs:159)
+//                       `self` tool surfaced by the mcp-server)
 //   composio_execute  — dispatch a Composio action via the tenant's
 //                       /api/v1/integrations/execute endpoint
 //
-// Dispatch happens by HTTP from the bridge to the tenant's ctrl-api over
-// Tailscale, using the per-call AAS_API_KEY fetched at call setup.
+// Dispatch happens by plain HTTP from the bridge to the tenant's ctrl-api
+// (NOT over any agent-runtime WebSocket — see README.md, issue #30), using the
+// per-call AAS_API_KEY fetched at call setup.
 
 import type { TenantContext } from "./tenant.js";
 
