@@ -11,6 +11,7 @@ on:
     branches: [main]
     paths:
       - "packages/hermes/init/**"
+      - "packages/hermes/mcp/**"
       - "packages/hermes/workspace-template/**"
       - "packages/mcp-server/**"
       - ".github/workflows/build-init.yml"
