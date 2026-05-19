@@ -1080,14 +1080,29 @@ async def composio_pull(
     ``connected_account_id`` pins a specific connection — required for
     Gmail to defeat Composio's flaky auto-routing across multiple
     historical connections (#74).
+
+    The underlying ``execute_action`` is a SYNCHRONOUS SDK call — it
+    blocks the event loop for the duration of the Composio HTTP
+    request (5-30 seconds for a 500-message GMAIL_FETCH_EMAILS page,
+    occasionally longer when Composio's bulk-metadata fetch hits a
+    slow Gmail response). With the call running directly on the
+    activity's event loop, the heartbeat coroutine couldn't run and
+    Temporal's 60s heartbeat_timeout fired even though the activity
+    was making forward progress. Run it on a worker thread via
+    ``asyncio.to_thread`` so the event loop stays free to heartbeat.
     """
+    import asyncio
+
     from src.integrations.composio_client import execute_action
 
     args = arguments or {}
     # Inject sensible defaults for known actions that require parameters
     args = {**_default_args(action_slug), **args}
-    result = execute_action(
-        action_slug, args, connected_account_id=connected_account_id
+    result = await asyncio.to_thread(
+        execute_action,
+        action_slug,
+        args,
+        connected_account_id=connected_account_id,
     )
 
     if "error" in result and not result.get("data"):

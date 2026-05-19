@@ -279,7 +279,13 @@ class OnboardingPipelineWorkflow:
                 email_metadata_activity,
                 args=[input.user_id],
                 start_to_close_timeout=timedelta(minutes=30),
-                heartbeat_timeout=timedelta(seconds=60),
+                # Bumped from 60s → 300s for #74: a single Composio
+                # GMAIL_FETCH_EMAILS page can take 10-30s, and a
+                # quota-backoff sleep (heartbeated every 10s) can
+                # legitimately delay the next response by 60-90s.
+                # 300s leaves comfortable slack so a legitimately
+                # slow Composio call doesn't trip the timeout.
+                heartbeat_timeout=timedelta(seconds=300),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
 
