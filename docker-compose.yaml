@@ -260,8 +260,18 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - NODE_OPTIONS=--max-old-space-size=3072
       - CTRL_API_URL=http://ctrl-api:3100
-    env_file:
-      - .env
+      # Per-job timeout (seconds) Hermes applies to every `cron` job. This is
+      # the cron analogue of the Temporal `execution_timeout` the `learn`
+      # schedules set today. Issue #56 audited every workflow in the
+      # cron-eligible set (WORKFLOW-DURABILITY.md) + the two #51 movers: the
+      # largest Temporal timeout being replaced is SignalExtractWorkflow at
+      # 25 min (register_schedules.py register_signal_extract — 10 chunks ×
+      # 120 s ≈ 1200 s worst case, 25-min envelope); StreamEventPurgeWorkflow
+      # is 10 min; most others set no Temporal timeout at all. 1800 s = the
+      # 25-min ceiling + a 5-min margin, so a long-tail signal-extract tick is
+      # never killed mid-flight (silent data loss). MUST stay ≥ the largest
+      # Temporal execution_timeout before #48 moves any workflow to cron.
+      - HERMES_CRON_TIMEOUT=1800
     healthcheck:
       # the hermes image (python:3.12-slim base) ships curl, not wget
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18789/health >/dev/null 2>&1 || exit 1"]
