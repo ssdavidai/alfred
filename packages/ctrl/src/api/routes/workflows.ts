@@ -112,10 +112,33 @@ export function registerWorkflowRoutes(): void {
   // --- Onboarding ---
 
   // Start onboarding pipeline workflow (v2)
+  //
+  // OnboardingInput contract (P2→P3, Composio-managed Gmail onboarding #69):
+  //   user_id         — SaaS User.id (required).
+  //   stream_id       — the Gmail stream id (optional).
+  //   gmail_mode      — "composio" | "google". Resolved ONCE by the web app
+  //                     (resolveOnboardingGmailMode) at workflow start and
+  //                     carried in OnboardingInput so the workflow branches
+  //                     on a field, never on env (Temporal replay-safety).
+  //                     Defaults to "google" when absent so pre-#69 callers
+  //                     and in-flight workflows keep the legacy path.
+  //   composio_action — e.g. "GMAIL_FETCH_EMAILS". Present only for the
+  //                     composio path; tells P3's learn pipeline the exact
+  //                     Composio fetch action without re-reading the stream.
   addRoute("POST", "/api/v1/workflows/onboarding/start", async ({ res, body }) => {
     const b = body as Record<string, unknown> | undefined;
     if (!b || typeof b.user_id !== "string") {
       throw new ValidationError("user_id is required");
+    }
+
+    const gmailMode = b.gmail_mode === "composio" ? "composio" : "google";
+    const onboardingInput: Record<string, unknown> = {
+      user_id: b.user_id,
+      stream_id: b.stream_id ?? "",
+      gmail_mode: gmailMode,
+    };
+    if (gmailMode === "composio" && typeof b.composio_action === "string") {
+      onboardingInput.composio_action = b.composio_action;
     }
 
     const workflowId = `onboarding-${b.user_id}-${Date.now()}`;
@@ -124,7 +147,7 @@ export function registerWorkflowRoutes(): void {
       "--type", "OnboardingPipelineWorkflow",
       "--task-queue", "alfred-learn",
       "--workflow-id", workflowId,
-      "--input", JSON.stringify({ user_id: b.user_id, stream_id: b.stream_id ?? "" }),
+      "--input", JSON.stringify(onboardingInput),
     ];
 
     const stdout = await dockerExec("temporal", args);
@@ -204,17 +227,34 @@ export function registerWorkflowRoutes(): void {
 
       // Trigger a new onboarding workflow to pick up from "brief" stage.
       // The previous workflow already exited after awaiting_verification.
+      // Carry gmail_mode / composio_action forward off onboard.json (the
+      // learn pipeline persists them there at first start) so the resumed
+      // brief-stage workflow stays on the same Gmail path — never re-derive
+      // the mode inside the workflow (#69, Temporal replay-safety).
       const userId = data.user_id ?? "";
       const streamId = data.stream_id ?? "";
+      const briefGmailMode =
+        data.gmail_mode === "composio" ? "composio" : "google";
       if (userId) {
         const workflowId = `onboarding-${userId}-brief-${Date.now()}`;
+        const briefInput: Record<string, unknown> = {
+          user_id: userId,
+          stream_id: streamId,
+          gmail_mode: briefGmailMode,
+        };
+        if (
+          briefGmailMode === "composio" &&
+          typeof data.composio_action === "string"
+        ) {
+          briefInput.composio_action = data.composio_action;
+        }
         try {
           await dockerExec("temporal", [
             "temporal", "workflow", "start",
             "--type", "OnboardingPipelineWorkflow",
             "--task-queue", "alfred-learn",
             "--workflow-id", workflowId,
-            "--input", JSON.stringify({ user_id: userId, stream_id: streamId }),
+            "--input", JSON.stringify(briefInput),
           ]);
         } catch (e: any) {
           console.error("Failed to trigger brief workflow:", e.message);

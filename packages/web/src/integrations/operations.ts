@@ -36,7 +36,11 @@ import type {
   CreateInboundWebhook,
   DeleteInboundWebhook,
 } from "wasp/server/operations";
-import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
+import {
+  getUserInstance,
+  proxyToTenant,
+  type Instance,
+} from "../server/tenantProxy";
 import {
   GoogleAccountMismatchError,
   isGoogleFamilyToolkit,
@@ -270,15 +274,29 @@ export const getConnectedIntegrations: GetConnectedIntegrations<void, any> = asy
 // tenant is briefly unreachable; today the tenant list is the source of
 // truth and the only thing consulted.
 //
-// P2 (#69) will reuse this same query to gate startOnboarding server-side.
+// P2 (#69) reuses the same connection check via the shared
+// `checkGmailConnection` helper below, so startOnboarding's server-side
+// gate and this query can never disagree about what "connected" means.
 
-export const getGmailConnectionStatus: GetGmailConnectionStatus<
-  void,
-  { connected: boolean; status: string | null }
-> = async (_args, context) => {
-  requireUser(context);
-  const instance = await getUserInstance(context);
+/** Result shape for the Gmail-connection check — shared by the query and
+ *  startOnboarding's server-side gate. */
+export type GmailConnectionStatus = { connected: boolean; status: string | null };
 
+/**
+ * Core "is the Composio `gmail` toolkit connected?" check, factored out so
+ * it has exactly one implementation. Reads the tenant's authoritative
+ * `GET /api/v1/integrations` list and reports whether a `gmail` connection
+ * is ACTIVE.
+ *
+ * Both `getGmailConnectionStatus` (the client-facing query, used by
+ * DeskOnboardingGate) and `startOnboarding`'s server-side gate (#69, P2)
+ * call this — the gate must NOT trust a client-supplied flag, it re-runs
+ * the same check itself. Takes a resolved tenant `instance` so it is
+ * callable from any server operation, not just a query with a `context`.
+ */
+export async function checkGmailConnection(
+  instance: Instance,
+): Promise<GmailConnectionStatus> {
   const data = await proxyToTenant(instance, {
     path: "/api/v1/integrations",
   });
@@ -297,6 +315,15 @@ export const getGmailConnectionStatus: GetGmailConnectionStatus<
 
   const status = String(gmail.status ?? "").toUpperCase();
   return { connected: status === "ACTIVE", status: status || null };
+}
+
+export const getGmailConnectionStatus: GetGmailConnectionStatus<
+  void,
+  GmailConnectionStatus
+> = async (_args, context) => {
+  requireUser(context);
+  const instance = await getUserInstance(context);
+  return checkGmailConnection(instance);
 };
 
 // =============================================================================

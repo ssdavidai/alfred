@@ -37,6 +37,7 @@ import {
   resolveOnboardingGmailMode,
   type OnboardingGmailMode,
 } from "../server/onboardingGmailMode";
+import { checkGmailConnection } from "../integrations/operations";
 
 // ============================================================
 // AgentPhone (Phase 8 — dashboard PhonePage)
@@ -689,6 +690,57 @@ export const startOnboarding: StartOnboarding<
   const instance = await getUserInstance(context);
   const userId = context.user.id;
 
+  // ─────────────────────────────────────────────────────────────────────
+  // Composio-managed Gmail onboarding (#69, P2). Resolve the Gmail mode
+  // server-side, exactly once, here at workflow start — never inside the
+  // Temporal workflow (env reads inside a workflow break replay
+  // determinism). The resolved mode is stamped into OnboardingInput (via
+  // ctrl-api's onboarding/start body) so P3's learn pipeline branches on a
+  // field decided once, here.
+  //
+  //   composio — gate on an ACTIVE `gmail` Composio connection; the stream
+  //              is a Composio-archetype stream (composio_action
+  //              GMAIL_FETCH_EMAILS), no Wasp OAuthCredential involved.
+  //   google   — gate on a `google` OAuthCredential (the legacy path,
+  //              unchanged); the stream is a direct Gmail-API HTTP pull.
+  //   none     — neither COMPOSIO_API_KEY nor GOOGLE_CLIENT_* configured;
+  //              onboarding's Gmail step genuinely cannot run.
+  // ─────────────────────────────────────────────────────────────────────
+  const gmailMode = resolveOnboardingGmailMode();
+
+  if (gmailMode === "none") {
+    // No auth path is configured — fail fast rather than starting a
+    // pipeline that can never fetch email and will stall.
+    throw new HttpError(
+      412,
+      "Gmail onboarding is not configured on this deployment — set COMPOSIO_API_KEY (recommended) or GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET.",
+    );
+  }
+
+  if (gmailMode === "composio") {
+    // Gate on the Composio Gmail connection — re-run the same check the
+    // getGmailConnectionStatus query uses (shared helper), server-side, so
+    // a client that calls startOnboarding without a real ACTIVE
+    // connection is rejected here rather than starting a stalling pipeline.
+    let gmailConn: { connected: boolean; status: string | null };
+    try {
+      gmailConn = await checkGmailConnection(instance);
+    } catch (e: any) {
+      throw new HttpError(
+        502,
+        `Could not verify the Gmail connection with the tenant: ${e?.message ?? String(e)}`,
+      );
+    }
+    if (!gmailConn.connected) {
+      throw new HttpError(
+        412,
+        gmailConn.status
+          ? `The Gmail connection is not active (status: ${gmailConn.status}). Finish connecting Gmail before starting onboarding.`
+          : "No Gmail connection found. Connect Gmail before starting onboarding.",
+      );
+    }
+  }
+
   // Track per-step outcomes so the dashboard can see which sub-steps
   // failed even if startOnboarding returns successfully overall (the
   // function intentionally returns "started" once the SaaS-side stream
@@ -707,13 +759,52 @@ export const startOnboarding: StartOnboarding<
     where: { userId, source: "gmail" },
   });
 
+  // The SaaS-DB Stream `config` blob — mode-specific. For `google` it is
+  // the legacy direct Gmail-API HTTP-pull config (unchanged). For
+  // `composio` it is a Composio-archetype config carrying
+  // composio_action="GMAIL_FETCH_EMAILS" with the verbose:false fetch
+  // intent — Composio holds the token, so there is no oauth2 auth block.
+  // This blob is mirrored to the tenant by the Step 3 PATCH below.
+  const streamConfig =
+    gmailMode === "composio"
+      ? {
+          transport: "composio",
+          parser: "composio",
+          // P3's learn pipeline reads composio_action off the stream row
+          // to drive the Composio fetch path. verbose:false keeps the
+          // GMAIL_FETCH_EMAILS payload small enough to paginate a backfill.
+          composio: {
+            action: "GMAIL_FETCH_EMAILS",
+            toolkit: "gmail",
+            args: { userId: "me", verbose: false, max_results: 500 },
+          },
+        }
+      : {
+          transport: "pull",
+          parser: "gmail",
+          pull: {
+            endpoint:
+              "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
+            method: "GET",
+            intervalSeconds: 300,
+            detailEndpoint:
+              "https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=full",
+            detailIdField: "messages[*].id",
+          },
+        };
+
   if (!gmailStream) {
-    // Step 1a: Need Google credential to even attempt the rest.
-    const credential = await context.entities.OAuthCredential.findFirst({
-      where: { userId, provider: "google" },
-    });
-    if (!credential) {
-      return { status: "no_credential", message: "No Google credential found" };
+    // Step 1a: in `google` mode we need a Google OAuthCredential to even
+    // attempt the rest. In `composio` mode the equivalent gate — an
+    // ACTIVE `gmail` Composio connection — already ran up-front (above);
+    // the token lives in Composio's backend, no OAuthCredential exists.
+    if (gmailMode === "google") {
+      const credential = await context.entities.OAuthCredential.findFirst({
+        where: { userId, provider: "google" },
+      });
+      if (!credential) {
+        return { status: "no_credential", message: "No Google credential found" };
+      }
     }
 
     // Step 1b: Create the SaaS-DB Stream row. The tenant-side reconcile
@@ -728,17 +819,7 @@ export const startOnboarding: StartOnboarding<
         name: "Gmail",
         type: "scheduled",
         source: "gmail",
-        config: {
-          transport: "pull",
-          parser: "gmail",
-          pull: {
-            endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
-            method: "GET",
-            intervalSeconds: 300,
-            detailEndpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=full",
-            detailIdField: "messages[*].id",
-          },
-        },
+        config: streamConfig,
         webhookToken: crypto.randomBytes(24).toString("hex"),
       },
     });
@@ -781,25 +862,52 @@ export const startOnboarding: StartOnboarding<
     recordStep("tenant_stream_post", false, e?.message ?? String(e));
   }
 
-  // Step 3: Patch pull config + auth_config (the critical step that was
-  // silently failing). PATCH is idempotent. user_id MUST be the SaaS
-  // User.id — alfred-learn's resolve_auth_header activity calls back to
-  // /api/internal/oauth2/token with that exact id to fetch a fresh
-  // access token from the encrypted refresh token in the SaaS DB.
+  // Step 3: Patch the tenant stream config (the critical step that was
+  // silently failing). PATCH is idempotent. The body is mode-specific:
+  //
+  //   google   — direct Gmail-API HTTP-pull config + an oauth2 auth_config.
+  //              user_id MUST be the SaaS User.id — alfred-learn's
+  //              resolve_auth_header activity calls back to
+  //              /api/internal/oauth2/token with that exact id to fetch a
+  //              fresh access token from the encrypted refresh token in
+  //              the SaaS DB. UNCHANGED from the pre-#69 behaviour.
+  //   composio — a Composio-archetype config: composio_action
+  //              "GMAIL_FETCH_EMAILS" (+ composio_toolkit / composio_args
+  //              with the verbose:false fetch intent). No auth_type /
+  //              auth_config — Composio holds the token. This is the
+  //              stream-row contract P3's learn pipeline reads to drive
+  //              the Composio fetch path.
+  const streamPatchBody: Record<string, unknown> =
+    gmailMode === "composio"
+      ? {
+          type: "composio",
+          parser: "composio",
+          // P3 contract — the onboarding stream row carries the Composio
+          // action + toolkit + args. `verbose:false` keeps the
+          // GMAIL_FETCH_EMAILS payload small enough for a paginated
+          // backfill (per the scope doc).
+          composio_action: "GMAIL_FETCH_EMAILS",
+          composio_toolkit: "gmail",
+          composio_args: { userId: "me", verbose: false, max_results: 500 },
+          schedule_interval_seconds: 300,
+        }
+      : {
+          pull_endpoint:
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
+          pull_method: "GET",
+          detail_endpoint:
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=full",
+          detail_id_field: "id",
+          parser: "gmail",
+          auth_type: "oauth2",
+          auth_config: { provider: "google", user_id: userId },
+          schedule_interval_seconds: 300,
+        };
   try {
     await proxyToTenant(instance, {
       method: "PATCH",
       path: `/api/v1/streams/${gmailStream.id}`,
-      body: {
-        pull_endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
-        pull_method: "GET",
-        detail_endpoint: "https://gmail.googleapis.com/gmail/v1/users/me/messages/{id}?format=full",
-        detail_id_field: "id",
-        parser: "gmail",
-        auth_type: "oauth2",
-        auth_config: { provider: "google", user_id: userId },
-        schedule_interval_seconds: 300,
-      },
+      body: streamPatchBody,
     });
     recordStep("tenant_stream_patch", true);
   } catch (e: any) {
@@ -862,7 +970,20 @@ export const startOnboarding: StartOnboarding<
     await proxyToTenant(instance, {
       method: "POST",
       path: "/api/v1/workflows/onboarding/start",
-      body: { user_id: userId, stream_id: gmailStream.id },
+      // `gmail_mode` is the P2→P3 workflow-start contract. ctrl-api
+      // forwards it into OnboardingInput so P3's OnboardingPipelineWorkflow
+      // branches on a value resolved once here (replay-safe — the workflow
+      // must never read env itself). `composio_action` is carried for the
+      // Composio path so the learn pipeline knows the exact Composio fetch
+      // action without re-reading the stream row.
+      body: {
+        user_id: userId,
+        stream_id: gmailStream.id,
+        gmail_mode: gmailMode,
+        ...(gmailMode === "composio"
+          ? { composio_action: "GMAIL_FETCH_EMAILS" }
+          : {}),
+      },
       timeoutMs: 30_000,
     });
     recordStep("onboarding_workflow_start", true);
@@ -870,7 +991,12 @@ export const startOnboarding: StartOnboarding<
     recordStep("onboarding_workflow_start", false, e?.message ?? String(e));
   }
 
-  return { status: "started", streamId: gmailStream.id, steps: stepResults };
+  return {
+    status: "started",
+    streamId: gmailStream.id,
+    gmailMode,
+    steps: stepResults,
+  };
 };
 
 // ============================================================
