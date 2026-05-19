@@ -23,12 +23,15 @@ The full design lives in [`docs/PLAN.md`](docs/PLAN.md) (Parts A–I).
   GCP, DigitalOcean, …) or bare metal works — `amd64` or `arm64`.
 - **Docker Engine 24+** and the **Docker Compose v2** plugin (`docker compose`,
   not the legacy `docker-compose`).
-- **A domain name** you control the DNS for. You will point five A-records at
-  the VM (see below).
+- **A domain name** you control the DNS for. You will point **six** A-records
+  at the VM (see below).
 - **`git`** and **`openssl`** on the VM (`openssl` is used by the bootstrap
   script to generate secrets).
-- **API keys** for Anthropic, OpenRouter, and Composio. Optionally Google
-  OAuth credentials and a SendGrid key (for transactional email).
+- **API keys**: `OPENROUTER_API_KEY` and `COMPOSIO_API_KEY` are required.
+  `ANTHROPIC_API_KEY` is **optional** — Hermes routes LLM traffic through
+  OpenRouter by default. Optionally: Google OAuth credentials, and a
+  **Mailgun** API key + domain for transactional email (signup
+  verification / password reset — see the note under *Install*).
 
 ### Minimum VM spec
 
@@ -85,10 +88,10 @@ cd alfred-black
 # 2. Create your .env from the template
 cp .env.example .env
 
-# 3. Edit .env — fill every value in the "USER MUST FILL" block:
-#      DOMAIN, ACME_EMAIL, OWNER_NAME,
-#      ANTHROPIC_API_KEY, OPENROUTER_API_KEY, COMPOSIO_API_KEY
-#    (GOOGLE_CLIENT_*, SENDGRID_API_KEY, VEXA_* are optional)
+# 3. Edit .env — fill the required values in the "USER MUST FILL" block:
+#      DOMAIN, ACME_EMAIL, OWNER_NAME, OPENROUTER_API_KEY, COMPOSIO_API_KEY
+#    Optional: ANTHROPIC_API_KEY, MAILGUN_API_KEY + MAILGUN_DOMAIN (email),
+#      GOOGLE_CLIENT_*, HERMES_MAIN_MODEL / HERMES_WORKERS_MODEL, VEXA_*
 nano .env
 
 # 4. Generate every auto-secret into .env (run once, before `up`)
@@ -114,6 +117,19 @@ When the stack is healthy, open `https://<your-domain>` and **sign up**. The
 **first account created becomes the owner** with full administrative control;
 any later signups are plain members.
 
+> **Email:** the owner's account is auto-verified on signup, so you can log in
+> immediately with no mail provider configured. Later members receive a
+> verification email — that requires a real `MAILGUN_API_KEY` + `MAILGUN_DOMAIN`
+> in `.env` (or switch the provider in `packages/web/main.wasp`). Without one,
+> only the owner can log in.
+
+### Choosing the LLM models
+
+`HERMES_MAIN_MODEL` (user-facing chat) and `HERMES_WORKERS_MODEL` (background
+agents) take **bare OpenRouter model IDs** (see `openrouter.ai/models`).
+Defaults: `x-ai/grok-4.3` and `openai/gpt-4.1-nano`. To change one, edit
+`.env` and run `docker compose up -d --force-recreate init hermes`.
+
 ### Optional: the Vexa meeting-transcription stack
 
 Vexa (meeting-bot transcription) ships behind a Compose profile so it is
@@ -137,30 +153,27 @@ re-bootstrap is needed and Let's Encrypt is not re-hit.
 
 ---
 
-## Building the `alfred-web` image (maintainers only)
+## Building the images (maintainers only)
 
-A fresh VM never builds the web app — `docker compose` pulls the pre-built
-`ssdavidai00/alfred-web` image. The image is built in CI from `packages/web`:
+A fresh VM never builds anything — `docker compose` only **pulls**. The eight
+custom `ssdavidai00/*` images are built and pushed by CI on every push to
+`main` (`.github/workflows/build-*.yml`, multi-arch `linux/amd64,linux/arm64`):
 
-```sh
-cd packages/web
-wasp build                              # → packages/web/.wasp/build/
-docker build -t ssdavidai00/alfred-web .wasp/build/
-docker push ssdavidai00/alfred-web
-```
+| Image | Built from |
+|-------|-----------|
+| `alfred-web` | `wasp build` → the server half of `.wasp/build/` |
+| `alfred-web-client` | the SPA half of `.wasp/build/web-app/`, served by nginx |
+| `alfred-ctrl-api` | `packages/ctrl` (esbuild bundle + sqlite-vec) |
+| `alfred-black-hermes` | `packages/hermes` (Hermes runtime + shim) |
+| `alfred-worker` | `packages/hermes/dockerfiles/alfred.Dockerfile` |
+| `alfred-learn` | `packages/learn` (Temporal worker) |
+| `alfred-mcp-server` | `packages/mcp-server` |
+| `alfred-init` | `packages/hermes/init` (one-shot bootstrap) |
 
-Notes:
-
-- **`wasp build` needs no database.** It only compiles the Wasp app into a
-  plain Node + React project under `.wasp/build/`. Schema migrations
-  (`prisma migrate deploy`) run automatically inside the `web` **container**
-  at startup, against the `web-db` Postgres service — not at build time.
-- Build the image **multi-arch** (`linux/amd64,linux/arm64`) via `docker
-  buildx` so a fresh VM works on both Intel/AMD and ARM hosts.
-
-The same applies to the other custom images (`alfred-ctrl-api`,
-`alfred-black-hermes`, `alfred-learn`, `alfred-mcp-server`, `alfred-init`,
-`alfred-vault-init`); see [`docs/PLAN.md`](docs/PLAN.md) Part G.
+`wasp build` needs no database — schema migrations (`prisma migrate deploy`)
+run inside the `web` container at startup against `web-db`. The `Makefile`
+has `build-*` targets that mirror CI for local rebuilds. See
+[`docs/PLAN.md`](docs/PLAN.md) Part G.
 
 ---
 
@@ -181,7 +194,8 @@ Four-store storage model — see [`docs/PLAN.md`](docs/PLAN.md) Part I:
 
 - **Vault** (markdown) — the principal's published knowledge surface.
 - **`state.db`** (SQLite + sqlite-vec) — the machine's working memory.
-- **Cold archive** (DuckDB/Parquet) — forensic long tail.
+- **`cold.db`** (zstd-compressed SQLite) — forensic long tail; a daily
+  compactor rolls `state.db` rows older than 90 days into it.
 - **`ingest.db`** (SQLite) — raw inbound stream, 7-day TTL.
 
 See [`docs/PLAN.md`](docs/PLAN.md) for the complete plan (Parts A–I).
