@@ -706,6 +706,13 @@ query getOnboardingProgress {
   entities: []
 }
 
+// #67 — server-readable onboardingGmailMode flag (composio | google | none).
+// Derived purely from server env; no entities, no tenant round-trip.
+query getOnboardingGmailMode {
+  fn: import { getOnboardingGmailMode } from "@src/dashboard/operations",
+  entities: []
+}
+
 // ============================================================
 // Tasks
 // ============================================================

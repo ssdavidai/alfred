@@ -17,6 +17,7 @@ import type {
   GetWorkspaceFile,
   GetFirstBrief,
   GetOnboardingProgress,
+  GetOnboardingGmailMode,
   GetInstalledApps,
   GetClaudeSetup,
 } from "wasp/server/operations";
@@ -32,6 +33,10 @@ import type {
   StartOnboarding,
 } from "wasp/server/operations";
 import { getUserInstance, proxyToTenant } from "../server/tenantProxy";
+import {
+  resolveOnboardingGmailMode,
+  type OnboardingGmailMode,
+} from "../server/onboardingGmailMode";
 
 // ============================================================
 // AgentPhone (Phase 8 — dashboard PhonePage)
@@ -893,6 +898,30 @@ export const getOnboardingProgress: GetOnboardingProgress<void, any> = async (
       brief: "",
     };
   }
+};
+
+// ============================================================
+// Onboarding Gmail mode (#67 — Composio-managed Gmail onboarding, P0)
+// ============================================================
+//
+// Server-readable signal telling the client which OAuth path onboarding's
+// "connect Gmail" step uses. Flag only — no behaviour change in P0.
+//
+// A dedicated query (rather than folding the field into
+// getOnboardingProgress) is the cleaner option here: the mode is derived
+// purely from server env, so it needs no tenant round-trip and no
+// entities, and it must not be lost when getOnboardingProgress falls back
+// to its tenant-unreachable default. P1's DeskOnboardingGate reads this to
+// pick the right CTA; startOnboarding computes the same value directly via
+// resolveOnboardingGmailMode() (no query) when it later stamps the mode
+// into OnboardingInput.
+
+export const getOnboardingGmailMode: GetOnboardingGmailMode<
+  void,
+  { mode: OnboardingGmailMode }
+> = async (_args, context) => {
+  if (!context.user) throw new HttpError(401);
+  return { mode: resolveOnboardingGmailMode() };
 };
 
 // ============================================================
