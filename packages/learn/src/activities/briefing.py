@@ -803,6 +803,283 @@ def _collapse_duplicate_section_headers(body: str) -> str:
         return body
 
 
+# Section header pattern — used by the dedup pass to partition the brief
+# body into sections. Same shape as the headers the composer prompt
+# emits: ``**Label.**`` at line start, body 1-30 chars, ending in a
+# period.
+_BRIEF_SECTION_HEADER_RE = re.compile(
+    r"(?m)^\*\*(?P<label>[^\n*]{1,30}?\.)\*\*"
+)
+
+# Wikilink pattern — ``[[Some Name]]``. The dedup pass keys off these
+# because the composer prompt explicitly tells the clerk to wikilink
+# matters by name (HARD RULES, "Wikilinks use the matter NAME").
+_WIKILINK_RE = re.compile(r"\[\[([^\]\n]+?)\]\]")
+
+# Section priority for the dedup pass. A matter referenced in an earlier
+# section is suppressed when it reappears in a later section. The single
+# exception is the §Quiet enumeration, which is name-only and may
+# include matters that appear elsewhere — it is intentionally OMITTED
+# from this list so the dedup pass leaves it alone.
+#
+# Labels are matched as a lowercased prefix against the actual ``**X.**``
+# header text the clerk emits. Matching is loose-prefix to tolerate
+# minor variations like "Day's shape" vs "Day shape", "What landed."
+# vs "Landed today.", and the Hungarian renderings (the clerk picks the
+# label vocabulary from SOUL.md and the prior brief). For Hungarian and
+# other localised briefs the priority below still applies in the
+# emitted ORDER — the dedup walker visits whatever sections show up,
+# left-to-right, and treats earlier-emitted sections as higher priority.
+_DEDUP_SECTION_ORDER_HINT = (
+    "today",
+    "ma",         # Hungarian "Today"
+    "day",        # Day's shape — items here can also appear in Today
+    "waiting",
+    "flag",
+    "you acted",
+    "yesterday",  # Since yesterday
+    "landed",     # What landed
+    "i handled",
+    "in flight",
+    "money",
+    "looking",
+)
+
+_DEDUP_SECTION_SKIP_HINTS = (
+    "quiet",      # name-only enumeration, exempt
+)
+
+
+def _section_label_priority(label: str) -> int:
+    """Return a priority rank for a section label (lower = higher priority).
+
+    Used as a tiebreaker — the dedup pass primarily uses emit order
+    (earlier sections in the body win), but when two sections appear in
+    an unusual order we still want to prefer the more actionable one.
+    Sections we don't recognise get the lowest priority (most
+    suppressible), which means in the unusual case where an unknown
+    section emits first, a known higher-priority section after it can
+    still claim the matter. Practically: emit order dominates.
+    """
+    low = label.lower().strip(" .*")
+    for idx, hint in enumerate(_DEDUP_SECTION_ORDER_HINT):
+        if low.startswith(hint):
+            return idx
+    return 99
+
+
+def _is_dedup_skip_section(label: str) -> bool:
+    """True for §Quiet (and any other exempt sections)."""
+    low = label.lower().strip(" .*")
+    return any(low.startswith(h) for h in _DEDUP_SECTION_SKIP_HINTS)
+
+
+# Forbidden passive phrasings the post-LLM voice-fix pass rewrites.
+# Each entry is (regex, replacement). The replacement is a deliberately
+# neutral "I suggest …" phrasing — Alfred's first-person stance — which
+# is language-neutral enough to land in any locale the brief might be
+# composed in.
+#
+# These mirror the FORBIDDEN list in the composer prompt's
+# "ACTION VOICE — PRINCIPAL DIRECT" rule. The prompt covers compliance
+# at draft time; this pass rewrites whatever survives.
+_PASSIVE_REWRITE_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
+    # "someone should check X" / "someone should look at X"
+    (
+        re.compile(r"\bsomeone\s+should\s+", re.IGNORECASE),
+        "I suggest ",
+    ),
+    # "someone needs to X"
+    (
+        re.compile(r"\bsomeone\s+needs\s+to\s+", re.IGNORECASE),
+        "I suggest ",
+    ),
+    # "it might be worth X-ing"
+    (
+        re.compile(r"\bit\s+might\s+be\s+worth\s+", re.IGNORECASE),
+        "I suggest ",
+    ),
+    # "maybe check X" / "maybe look at X"
+    (
+        re.compile(r"\bmaybe\s+check(ing)?\s+", re.IGNORECASE),
+        "I suggest checking ",
+    ),
+    (
+        re.compile(r"\bmaybe\s+look(ing)?\s+at\s+", re.IGNORECASE),
+        "I suggest looking at ",
+    ),
+    # "worth a look" / "worth checking" as standalone phrases
+    (
+        re.compile(r"\b(it\s+is\s+|it's\s+)?worth\s+a\s+look\b", re.IGNORECASE),
+        "I suggest a look",
+    ),
+    (
+        re.compile(r"\b(it\s+is\s+|it's\s+)?worth\s+checking\b", re.IGNORECASE),
+        "I suggest checking",
+    ),
+    # "could be checked"
+    (
+        re.compile(r"\bcould\s+be\s+checked\b", re.IGNORECASE),
+        "I will check unless you say otherwise",
+    ),
+)
+
+
+def _rewrite_passive_to_principal_directed(body: str) -> str:
+    """Rewrite forbidden passive phrasings into Alfred-direct form.
+
+    The composer prompt instructs the clerk to phrase actions as
+    'Sir, do X' or 'I suggest X — approve and I will act'. When that
+    instruction is not followed (observed in miguel's 2026-05-19-morning
+    brief: "someone should check the Retool app"), this pass rewrites
+    the survivors. Patterns are language-bound (English) — Hungarian /
+    Spanish briefs are unaffected since the rules look for English
+    fragment matches.
+
+    Idempotent: replacement strings do not themselves match the
+    patterns, so running the pass twice produces the same output.
+    """
+    if not body:
+        return body
+    out = body
+    for pattern, replacement in _PASSIVE_REWRITE_RULES:
+        out = pattern.sub(replacement, out)
+    return out
+
+
+def _split_into_sections(body: str) -> list[tuple[str, str, str]]:
+    """Partition the brief body into (label, header_line, content) tuples.
+
+    Order preserved. The pre-section preamble (everything before the
+    first ``**X.**`` header — typically the opening greeting) is
+    returned with an empty label and header line so the caller can
+    reattach it as-is.
+    """
+    if not body:
+        return []
+    sections: list[tuple[str, str, str]] = []
+    lines = body.split("\n")
+    cur_label = ""
+    cur_header = ""
+    cur_content: list[str] = []
+    for line in lines:
+        m = _BRIEF_SECTION_HEADER_RE.match(line)
+        if m:
+            # Flush the previous block.
+            sections.append((cur_label, cur_header, "\n".join(cur_content)))
+            cur_label = m.group("label")
+            cur_header = line
+            cur_content = []
+        else:
+            cur_content.append(line)
+    sections.append((cur_label, cur_header, "\n".join(cur_content)))
+    return sections
+
+
+def _extract_section_wikilinks(content: str) -> list[set[str]]:
+    """For each non-empty content line, return the set of wikilink names.
+
+    Names are lowercased + whitespace-collapsed so 'Hanna's First Year'
+    and 'hannas first year' don't drift apart. Returns one set per
+    line so the caller can drop individual bullets without rewriting
+    surrounding lines.
+    """
+    out: list[set[str]] = []
+    for line in content.split("\n"):
+        if not line.strip():
+            out.append(set())
+            continue
+        names: set[str] = set()
+        for m in _WIKILINK_RE.finditer(line):
+            name = m.group(1).strip().lower()
+            name = re.sub(r"\s+", " ", name)
+            if name:
+                names.add(name)
+        out.append(names)
+    return out
+
+
+def _dedupe_matters_across_sections(body: str) -> str:
+    """Suppress lines that re-reference a matter already covered upstream.
+
+    The composer prompt's "ONE MATTER, ONE SECTION" rule defines the
+    contract: each matter belongs in exactly one prose section. When
+    the clerk produces redundancy anyway (observed in miguel's
+    2026-05-19-morning brief: the Retool npm incident appeared in both
+    §What landed and §Flags), this pass walks sections in emit order
+    and drops lower-section lines whose wikilink set is a subset of
+    matters already named in earlier sections.
+
+    Conservative by design:
+
+      * Dedup operates on ``[[wikilinks]]`` only. A line with no
+        wikilinks is never touched (we cannot tell which matter it
+        belongs to without re-doing the LLM's clustering).
+      * §Quiet is exempt (it's the enumeration).
+      * A line is suppressed only when its wikilinks are a non-empty
+        subset of the seen-set. A line that introduces a new matter
+        (even if it also mentions a seen one) survives.
+      * Bullet markers ('- ', '* ', '1. ') are recognised so the pass
+        drops the bullet, not whole paragraphs of context.
+      * Idempotent — once a body has no duplicate wikilink references,
+        the pass is a no-op.
+    """
+    if not body or "[[" not in body:
+        return body
+    sections = _split_into_sections(body)
+    if not sections:
+        return body
+
+    seen_wikilinks: set[str] = set()
+    out_sections: list[tuple[str, str, str]] = []
+
+    for label, header, content in sections:
+        if not label:
+            # Pre-section preamble — no dedup, no seen-set update.
+            out_sections.append((label, header, content))
+            continue
+        if _is_dedup_skip_section(label):
+            # §Quiet is the enumeration — leave it alone and do NOT
+            # add its wikilinks to the seen-set (they're meant to be
+            # name-only mentions of holding matters).
+            out_sections.append((label, header, content))
+            continue
+        # Walk the content lines. A bullet whose wikilinks are all
+        # already in seen_wikilinks gets dropped. Non-wikilink lines
+        # and lines that introduce a new matter survive.
+        section_lines = content.split("\n")
+        per_line_links = _extract_section_wikilinks(content)
+        kept: list[str] = []
+        for line, links in zip(section_lines, per_line_links, strict=True):
+            if not links:
+                kept.append(line)
+                continue
+            new_matters = links - seen_wikilinks
+            if not new_matters:
+                # Every matter on this line is already covered in a
+                # prior section. Drop the bullet.
+                continue
+            # Line introduces at least one new matter — keep it.
+            seen_wikilinks |= links
+            kept.append(line)
+        out_sections.append((label, header, "\n".join(kept)))
+
+    # Reassemble. Trim trailing/leading whitespace per section to avoid
+    # producing huge blank gaps where bullets were dropped.
+    rebuilt: list[str] = []
+    for label, header, content in out_sections:
+        if header:
+            rebuilt.append(header)
+        content_stripped = content.strip("\n")
+        if content_stripped:
+            rebuilt.append(content_stripped)
+        rebuilt.append("")  # paragraph spacer
+    # Drop the trailing empty + collapse triple newlines.
+    out = "\n".join(rebuilt).rstrip() + "\n"
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out
+
+
 def _is_clerk_failure(raw: str) -> bool:
     """True when clerk returned an obvious failure sentinel rather than prose.
 
@@ -1543,6 +1820,27 @@ def _build_composition_prompt(
         "  belongs in §13 (Quiet) or not at all.",
         "- No JSON, no YAML, no markdown headings. Only **bold** labels",
         "  and prose / bullets.",
+        "",
+        "- ONE MATTER, ONE SECTION. Each matter appears in at most ONE",
+        "  prose section. If a matter belongs in §Today, it does NOT also",
+        "  appear in §Waiting on you, §Since yesterday, §You acted on,",
+        "  §What landed, or §Flags. Pick the most actionable section for",
+        "  each matter and surface it there only. The single exception is",
+        "  §Quiet, which is a name-only enumeration and may list matters",
+        "  that appear elsewhere. Priority when deciding where a matter",
+        "  belongs (highest first): §Today → §Waiting on you → §Flags →",
+        "  §You acted on → §What landed → §I handled → §In flight.",
+        "",
+        "- ACTION VOICE — PRINCIPAL DIRECT. Every actionable item in",
+        "  §Today, §Waiting on you, and §Flags must either name Sir",
+        "  directly ('Sir, approve the Retool app fix') or phrase the",
+        "  action as something Alfred can do on Sir's behalf ('I suggest",
+        "  rotating the npm token — approve and I will act.'). The",
+        "  following passive phrasings are FORBIDDEN: 'someone should',",
+        "  'someone needs to', 'it might be worth', 'maybe check',",
+        "  'worth a look', 'worth checking', 'could be checked'. Replace",
+        "  each with either the principal-direct form or the",
+        "  I-suggest-and-act form.",
     ])
     return "\n".join(lines)
 
@@ -2415,6 +2713,21 @@ async def compose_and_write_briefing(
             "snapshots below are current; please regenerate when the gateway "
             "is healthy."
         )
+    # Post-LLM scrubbers (Bug A + Bug B in the brief composer):
+    #
+    #  * _dedupe_matters_across_sections enforces the "one matter, one
+    #    section" rule from the composer prompt's HARD RULES — even
+    #    when the clerk drafts the same matter into both §Waiting on
+    #    you and §What landed, only the upstream mention survives.
+    #  * _rewrite_passive_to_principal_directed enforces the
+    #    ACTION VOICE rule by rewriting the forbidden passive phrasings
+    #    ("someone should check", "maybe check", etc.) into Alfred's
+    #    first-person stance ("I suggest checking …").
+    #
+    # Both passes are fail-open (return the original body on any
+    # internal error) and idempotent.
+    body_text = _dedupe_matters_across_sections(body_text)
+    body_text = _rewrite_passive_to_principal_directed(body_text)
     if len(body_text) > BRIEF_BODY_CHAR_CAP:
         body_text = body_text[:BRIEF_BODY_CHAR_CAP].rstrip() + "..."
 

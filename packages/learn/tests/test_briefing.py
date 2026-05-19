@@ -928,3 +928,252 @@ def test_collapse_handles_preamble_plus_list_both_present():
     assert "Three threads in your court." in out
     assert "Mahesh" in out
     assert "Julianna" in out
+
+
+# ---------------------------------------------------------------------------
+# _dedupe_matters_across_sections — Bug A (miguel 2026-05-19-morning)
+# ---------------------------------------------------------------------------
+
+
+def test_dedupe_same_matter_in_three_sections_collapses_to_first():
+    """Composer prompt's 'one matter, one section' contract.
+
+    Miguel's 2026-05-19-morning brief had the Retool npm incident
+    mentioned in §What landed AND §Flags (and the Gestinova thread in
+    §Waiting on you AND §What landed). The dedup pass walks sections
+    in emit order and suppresses lower-section lines whose
+    [[wikilinks]] are already covered upstream.
+
+    This test puts the same matter ([[Retool ops]]) in three sections
+    and asserts only the first (§Today) survives.
+    """
+    from src.activities.briefing import _dedupe_matters_across_sections
+
+    body = (
+        "Good morning, Sir.\n"
+        "\n"
+        "**Today.**\n"
+        "\n"
+        "1. **[[Retool ops]]** — approve the npm-token rotation.\n"
+        "\n"
+        "**Waiting on you.**\n"
+        "\n"
+        "- [[Retool ops]] — Iván's question on today's sync.\n"
+        "\n"
+        "**Flags.**\n"
+        "\n"
+        "- [[Retool ops]] — npm library incident.\n"
+        "\n"
+        "**Quiet.**\n"
+        "\n"
+        "Eight matters holding — [[Retool ops]], [[Other]]. I'll surface them.\n"
+    )
+    out = _dedupe_matters_across_sections(body)
+    # §Today bullet survives.
+    assert "approve the npm-token rotation" in out
+    # §Waiting on you bullet about Retool was dropped.
+    assert "Iván's question on today's sync" not in out
+    # §Flags bullet about Retool was dropped.
+    assert "npm library incident" not in out
+    # §Quiet enumeration is EXEMPT — Retool name still appears there.
+    assert "Eight matters holding — [[Retool ops]]" in out
+    # The Retool wikilink itself still appears multiple times overall
+    # (Today bullet + Quiet enumeration), but each prose section other
+    # than Quiet should contain it at most once.
+    assert out.count("[[Retool ops]]") == 2
+
+
+def test_dedupe_keeps_line_introducing_new_matter():
+    """A line mentioning BOTH a seen matter and a new matter survives.
+
+    Conservative-by-design: we only drop lines whose entire wikilink
+    set is already covered. If a line introduces at least one new
+    matter, the line stays.
+    """
+    from src.activities.briefing import _dedupe_matters_across_sections
+
+    body = (
+        "**Today.**\n"
+        "\n"
+        "1. **[[Alpha]]** — approve the renewal.\n"
+        "\n"
+        "**What landed.**\n"
+        "\n"
+        "- [[Alpha]] and [[Beta]] — both shifted in the same thread.\n"
+    )
+    out = _dedupe_matters_across_sections(body)
+    assert "approve the renewal" in out
+    # Line introduces [[Beta]] (new), so it survives despite [[Alpha]]
+    # being seen.
+    assert "both shifted in the same thread" in out
+
+
+def test_dedupe_leaves_quiet_section_alone():
+    """§Quiet is name-only enumeration and is the documented exception."""
+    from src.activities.briefing import _dedupe_matters_across_sections
+
+    body = (
+        "**Today.**\n"
+        "\n"
+        "1. **[[Foo]]** — approve.\n"
+        "\n"
+        "**Quiet.**\n"
+        "\n"
+        "Four matters holding their state — [[Foo]], [[Bar]], [[Baz]], "
+        "[[Qux]]. I'll surface them when something moves.\n"
+    )
+    out = _dedupe_matters_across_sections(body)
+    assert "[[Foo]]" in out
+    assert "Four matters holding their state — [[Foo]], [[Bar]], [[Baz]], [[Qux]]" in out
+
+
+def test_dedupe_is_idempotent():
+    """Running the dedup pass twice produces the same output as once."""
+    from src.activities.briefing import _dedupe_matters_across_sections
+
+    body = (
+        "**Today.**\n"
+        "\n"
+        "1. **[[Alpha]]** — approve.\n"
+        "\n"
+        "**Flags.**\n"
+        "\n"
+        "- [[Alpha]] — same matter, duplicate.\n"
+    )
+    once = _dedupe_matters_across_sections(body)
+    twice = _dedupe_matters_across_sections(once)
+    assert once == twice
+
+
+def test_dedupe_no_op_when_no_wikilinks():
+    """Plain-prose body with no wikilinks is untouched."""
+    from src.activities.briefing import _dedupe_matters_across_sections
+
+    body = (
+        "**Today.**\n"
+        "\n"
+        "Approve the EIN application.\n"
+        "\n"
+        "**What landed.**\n"
+        "\n"
+        "A quiet day overall.\n"
+    )
+    out = _dedupe_matters_across_sections(body)
+    assert out.strip() == body.strip()
+
+
+# ---------------------------------------------------------------------------
+# _rewrite_passive_to_principal_directed — Bug B (miguel 2026-05-19-morning)
+# ---------------------------------------------------------------------------
+
+
+def test_rewrite_someone_should_check():
+    """The exact miguel 2026-05-19-morning failure pattern.
+
+    Original: "Retool query in the New Finanze Multli app errored out
+    under Action Coach Davila's setup — worth logging under Upstring
+    operations, someone should check the Retool app."
+
+    Expected: the "someone should check" phrase gets rewritten into
+    Alfred's voice ("I suggest checking …"). The rest of the sentence
+    is untouched.
+    """
+    from src.activities.briefing import _rewrite_passive_to_principal_directed
+
+    body = (
+        "A Retool query in the New Finanze Multli app errored out "
+        "under Action Coach Davila's setup — worth logging under "
+        "Upstring operations, someone should check the Retool app."
+    )
+    out = _rewrite_passive_to_principal_directed(body)
+    assert "someone should check" not in out.lower()
+    assert "I suggest check" in out  # "I suggest checking the Retool app"
+
+
+def test_rewrite_covers_all_forbidden_phrasings():
+    """All forbidden phrasings from the prompt's ACTION VOICE rule."""
+    from src.activities.briefing import _rewrite_passive_to_principal_directed
+
+    cases = [
+        ("Someone should rotate the token.", "I suggest rotate the token."),
+        ("Someone needs to reply to Aaron.", "I suggest reply to Aaron."),
+        ("It might be worth checking the dashboard.", "I suggest checking the dashboard."),
+        ("Maybe check the credentials.", "I suggest checking the credentials."),
+        ("Maybe look at the renewal.", "I suggest looking at the renewal."),
+        ("It's worth a look.", "I suggest a look."),
+        ("It's worth checking.", "I suggest checking."),
+        ("This could be checked later.", "This I will check unless you say otherwise later."),
+    ]
+    for original, expected_fragment in cases:
+        out = _rewrite_passive_to_principal_directed(original)
+        # Forbidden phrase eliminated.
+        assert "someone should" not in out.lower(), out
+        assert "someone needs to" not in out.lower(), out
+        assert "might be worth" not in out.lower(), out
+        assert "maybe check" not in out.lower(), out
+        assert "maybe look" not in out.lower(), out
+        # And the I-suggest rewrite landed.
+        assert "i suggest" in out.lower() or "i will check" in out.lower(), (
+            f"original={original!r} out={out!r}"
+        )
+
+
+def test_rewrite_is_idempotent():
+    """Running the rewrite twice produces the same output as once."""
+    from src.activities.briefing import _rewrite_passive_to_principal_directed
+
+    body = "Someone should check the Retool app."
+    once = _rewrite_passive_to_principal_directed(body)
+    twice = _rewrite_passive_to_principal_directed(once)
+    assert once == twice
+    assert "someone should" not in once.lower()
+
+
+def test_rewrite_preserves_non_english_text():
+    """Hungarian / non-English fragments are unaffected.
+
+    The action-voice rules are English-only by design. A Hungarian
+    sentence ("Ellenőrizd a fiókod") that the brief composer
+    legitimately emits must survive untouched.
+    """
+    from src.activities.briefing import _rewrite_passive_to_principal_directed
+
+    body = "Ellenőrizd a fiókod és cselekedj — Sybell díjbekérő érkezett."
+    out = _rewrite_passive_to_principal_directed(body)
+    assert out == body
+
+
+# ---------------------------------------------------------------------------
+# Composer prompt: ACTION VOICE + ONE MATTER, ONE SECTION rules present
+# ---------------------------------------------------------------------------
+
+
+def test_composer_prompt_contains_dedup_and_action_voice_rules():
+    """The composer prompt must include the two new HARD RULES so the
+    clerk has a chance to comply at draft time, before the post-LLM
+    scrubbers run."""
+    from src.activities.briefing import _build_composition_prompt
+
+    prompt = _build_composition_prompt(
+        slot="morning",
+        window_start_iso="2026-05-19T07:00:00Z",
+        window_end_iso="2026-05-19T08:00:00Z",
+        matter_snapshots=[],
+        state_changes_count=0,
+        signals_count=0,
+        decisions_count=0,
+        pending_decisions=[],
+        anomalies=[],
+        autonomous_actions=[],
+        inbox_unresolved_count=0,
+        window_signals=[],
+        window_decisions=[],
+        waiting_on_you=[],
+    )
+    # Dedup rule present.
+    assert "ONE MATTER, ONE SECTION" in prompt
+    assert "Quiet" in prompt and "exception" in prompt
+    # Action voice rule present.
+    assert "ACTION VOICE" in prompt
+    for forbidden in ("someone should", "maybe check", "worth a look"):
+        assert forbidden in prompt
