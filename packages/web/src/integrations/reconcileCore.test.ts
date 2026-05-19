@@ -115,7 +115,8 @@ test("reconcileBatch: fires auto-config on a pending ACTIVE row and flips it to 
         toolkit: "gmail",
         composio_execute_enabled: true,
         stream_created: "composio-gmail-gmail-fetch-emails",
-        schedule_created: "al-stream-pull-composio-composio-gmail-gma",
+        // (#53) auto-config no longer creates a per-stream schedule —
+        // the `schedule_created` field was dropped from its response.
         skill_generated: "/home/node/.openclaw/workspace/skills/alfred-composio-gmail",
         actions_count: 12,
       };

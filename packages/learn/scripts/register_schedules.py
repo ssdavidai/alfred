@@ -73,6 +73,23 @@ STEWARD_SWEEP_SCHEDULE_ID = "al-steward-sweep"
 STEWARD_SWEEP_WORKFLOW = "StewardSweepWorkflow"
 STEWARD_SWEEP_INTERVAL = timedelta(minutes=30)
 
+# Stream pull (#53) — generic HTTP/Composio pull engine. Originally one
+# Temporal Schedule per stream (``al-stream-pull-composio-<id...>``),
+# created/deleted by ctrl-api as streams were enabled/disabled — the
+# same per-entity dynamic-registrar anti-pattern as Steward. Issue #53
+# collapsed that fan-out into a single ``al-stream-sweep`` schedule
+# running ``StreamSweepWorkflow`` — one schedule for the whole fleet of
+# streams, regardless of stream count. The sweep reads each stream's
+# persisted ``schedule_interval_seconds`` / ``last_pull_at`` to decide
+# what is due, so the per-stream "when" needs no per-stream schedule.
+# The legacy per-stream ``al-stream-pull-*`` schedules are deleted once
+# on the next boot. The 2-min sweep interval is the polling granularity:
+# a stream's effective cadence is max(schedule_interval_seconds, 2 min).
+STREAM_PULL_SCHEDULE_PREFIX = "al-stream-pull-"
+STREAM_SWEEP_SCHEDULE_ID = "al-stream-sweep"
+STREAM_SWEEP_WORKFLOW = "StreamSweepWorkflow"
+STREAM_SWEEP_INTERVAL = timedelta(minutes=2)
+
 # Steward Phase 4 (#840) — Vexa transcript intake. Two singleton
 # schedules: MeetingCapture polls the gcal stream and dispatches the
 # Vexa bot for upcoming Meet events; TranscriptIntake polls Vexa's
@@ -1187,6 +1204,137 @@ async def register_steward_schedules(client: Client) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Stream pull (#53) — single sweep-schedule registration
+# ---------------------------------------------------------------------------
+
+async def _delete_legacy_stream_pull_schedules(client: Client) -> int:
+    """Delete every legacy per-stream ``al-stream-pull-*`` schedule.
+
+    Issue #53 retired the per-stream ``al-stream-pull-*`` fan-out in
+    favour of the single ``al-stream-sweep`` schedule. ctrl-api no
+    longer creates these (the schedule-registration code path in
+    integrations.ts is removed), so this is a one-time cleanup: it
+    lists every schedule whose id starts with the ``al-stream-pull-``
+    prefix and deletes all of them. It is idempotent — once the legacy
+    schedules are gone, subsequent boots find nothing to delete.
+
+    Mirrors ``_delete_legacy_steward_schedules`` (#52). Best-effort — a
+    failed individual delete is logged and does not abort the boot
+    sequence.
+
+    Returns the number of schedules deleted.
+    """
+    deleted = 0
+    try:
+        legacy_ids: list[str] = []
+        async for entry in client.list_schedules():
+            sid = getattr(entry, "id", None) or ""
+            if sid.startswith(STREAM_PULL_SCHEDULE_PREFIX):
+                legacy_ids.append(sid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "register_stream_sweep: list_schedules failed: %s "
+            "— skipping legacy-schedule cleanup this boot", exc,
+        )
+        return 0
+
+    for sid in legacy_ids:
+        try:
+            await client.get_schedule_handle(sid).delete()
+            logger.info(
+                "register_stream_sweep: deleted legacy per-stream "
+                "schedule %s", sid,
+            )
+            deleted += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "register_stream_sweep: delete legacy %s failed: %s",
+                sid, exc,
+            )
+    return deleted
+
+
+async def register_stream_sweep_schedule(client: Client) -> None:
+    """Register the single ``al-stream-sweep`` schedule (#53).
+
+    Replaces the former ctrl-api per-stream registrar. One schedule for
+    the whole fleet of streams: ``StreamSweepWorkflow`` runs every
+    2 min, lists the enabled streams whose persisted
+    ``schedule_interval_seconds`` has elapsed since their
+    ``last_pull_at``, and runs the existing per-stream pull body for
+    each.
+
+    Also performs the one-time cleanup of the legacy per-stream
+    ``al-stream-pull-*`` schedules. Idempotent — re-running refreshes
+    the sweep schedule and finds no legacy schedules left to delete.
+    """
+    cfg = load_config()
+
+    action = ScheduleActionStartWorkflow(
+        STREAM_SWEEP_WORKFLOW,
+        id=f"{STREAM_SWEEP_SCHEDULE_ID}-run",
+        task_queue=cfg.task_queue,
+        # 110-second envelope — comfortably inside the 2-min interval so
+        # a slow sweep can't stack against the next tick (overlap is
+        # also SKIP). The per-run stream count is bounded by
+        # SWEEP_STREAM_BATCH_LIMIT (100) and streams are typically
+        # <20/tenant, so the worst case stays well inside this window;
+        # any backlog drains on the next tick.
+        execution_timeout=timedelta(seconds=110),
+        run_timeout=timedelta(seconds=110),
+    )
+    spec = ScheduleSpec(
+        intervals=[ScheduleIntervalSpec(every=STREAM_SWEEP_INTERVAL)],
+    )
+    # SKIP overlap: a sweep run that somehow ran past its envelope must
+    # not stack a second sweep on top — the per-stream last_pull_at
+    # cursors make the next tick re-pick any stream not yet pulled.
+    new_schedule = Schedule(
+        action=action,
+        spec=spec,
+        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
+    )
+
+    async def _updater(inp: ScheduleUpdateInput) -> ScheduleUpdate:
+        return ScheduleUpdate(schedule=new_schedule)
+
+    handle = client.get_schedule_handle(STREAM_SWEEP_SCHEDULE_ID)
+    try:
+        await handle.describe()
+        await handle.update(_updater)
+        logger.info(
+            "register_stream_sweep: schedule %s updated (2-min, SKIP)",
+            STREAM_SWEEP_SCHEDULE_ID,
+        )
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
+        try:
+            await client.create_schedule(
+                STREAM_SWEEP_SCHEDULE_ID, new_schedule,
+            )
+            logger.info(
+                "register_stream_sweep: schedule %s created (2-min, SKIP)",
+                STREAM_SWEEP_SCHEDULE_ID,
+            )
+        except RPCError as create_exc:
+            if create_exc.status != RPCStatusCode.ALREADY_EXISTS:
+                raise
+            logger.info(
+                "register_stream_sweep: schedule %s already exists "
+                "(skipping)", STREAM_SWEEP_SCHEDULE_ID,
+            )
+
+    # One-time cleanup: delete every legacy per-stream
+    # al-stream-pull-* schedule now that the sweep owns all streams.
+    deleted = await _delete_legacy_stream_pull_schedules(client)
+    logger.info(
+        "register_stream_sweep: legacy per-stream schedules deleted=%d",
+        deleted,
+    )
+
+
 async def register_all() -> None:
     config = load_config()
     try:
@@ -1242,6 +1390,12 @@ async def register_all() -> None:
     # into one StewardSweepWorkflow schedule; this call also does the
     # one-time cleanup of the legacy per-matter schedules.
     await register_steward_schedules(client)
+    # Stream pull (#53) — single ``al-stream-sweep`` schedule. Issue #53
+    # collapsed the per-stream ``al-stream-pull-*`` fan-out (formerly
+    # created/deleted by ctrl-api) into one StreamSweepWorkflow
+    # schedule; this call also does the one-time cleanup of the legacy
+    # per-stream schedules.
+    await register_stream_sweep_schedule(client)
     # Steward Phase 4 (#840) — Vexa transcript intake. VEXA_ENABLED-gated
     # at registration time so a tenant without Vexa never gets these
     # schedules created. Both workflows tick every 60s; the

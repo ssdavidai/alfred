@@ -191,26 +191,16 @@ export const createStream: CreateStream<any, any> = async (args: any, context) =
         patchBody.detail_id_field = pullConfig.detailIdField || "id";
       }
 
+      // PATCH the pull config — schedule_interval_seconds in patchBody
+      // is all the scheduling info the tenant needs. (#53) The tenant's
+      // single `al-stream-sweep` schedule (StreamSweepWorkflow) reads
+      // every stream config on each 2-min tick and pulls any stream
+      // whose interval has elapsed; we no longer create a per-stream
+      // `al-stream-pull-*` Temporal schedule.
       await proxyToTenant(instance, {
         method: "PATCH",
         path: `/api/v1/streams/${stream.id}`,
         body: patchBody,
-      });
-
-      // Create Temporal schedule for the pull
-      const scheduleId = `al-stream-pull-${args.source}-${stream.id.slice(0, 8)}`;
-      const intervalMin = Math.max(Math.round((pullConfig.intervalSeconds || 300) / 60), 1);
-      await proxyToTenant(instance, {
-        method: "POST",
-        path: "/api/v1/schedules",
-        body: {
-          schedule_id: scheduleId,
-          workflow_type: "StreamPullerWorkflow",
-          task_queue: "alfred-learn",
-          cron: `*/${intervalMin} * * * *`,
-          input: { stream_id: stream.id },
-          overlap_policy: "Skip",
-        },
       });
     }
   } catch (err: any) {

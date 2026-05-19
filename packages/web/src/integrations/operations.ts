@@ -379,7 +379,12 @@ export const enableIntegrationStream: EnableIntegrationStream<
   }
   const instance = await getUserInstance(context);
 
-  // 1. Create the stream config on the tenant
+  // Create the stream config on the tenant. (#53) That is the whole
+  // job — the tenant's single `al-stream-sweep` schedule
+  // (StreamSweepWorkflow, registered once by alfred-learn) reads every
+  // stream config by id on each 2-min tick and pulls any stream whose
+  // `schedule_interval_seconds` has elapsed since `last_pull_at`. We no
+  // longer create a per-stream `al-stream-pull-*` Temporal schedule.
   const streamResult = await proxyToTenant(instance, {
     method: "POST",
     path: `/api/v1/integrations/${encodeURIComponent(args.connectionId)}/enable-stream`,
@@ -389,31 +394,6 @@ export const enableIntegrationStream: EnableIntegrationStream<
       stream_name: args.stream_name || args.action_slug.replace(/_/g, " "),
     },
   });
-
-  // 2. Create Temporal schedule for the stream puller
-  const streamId = streamResult?.stream_id;
-  if (streamId) {
-    const intervalMin = Math.max(
-      Math.round((args.poll_interval_seconds || 300) / 60),
-      1,
-    );
-    try {
-      await proxyToTenant(instance, {
-        method: "POST",
-        path: "/api/v1/schedules",
-        body: {
-          schedule_id: `al-stream-pull-composio-${streamId.slice(0, 20)}`,
-          workflow_type: "StreamPullerWorkflow",
-          task_queue: "alfred-learn",
-          cron: `*/${intervalMin} * * * *`,
-          input: { stream_id: streamId },
-          overlap_policy: "Skip",
-        },
-      });
-    } catch (err: any) {
-      console.error("[enableIntegrationStream] Schedule creation failed:", err?.message);
-    }
-  }
 
   return streamResult;
 };

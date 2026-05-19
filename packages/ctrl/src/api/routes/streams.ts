@@ -432,8 +432,8 @@ function getStreamsSchema(): Record<string, unknown> {
       cursor_field: { type: "string", description: "Path to the timestamp/id on each event used for incremental pulls (append mode). Dot-notation supported, e.g. 'updated_at'." },
       cursor_value: { type: "string", description: "Last-seen cursor. Pull worker writes back after each successful pull. Initialize to '' for full backfill on first run." },
       cursor_param: { type: "string", description: "Query param name to send the cursor as on the next pull, e.g. 'since' or 'after'." },
-      schedule_cron: { type: "string", description: "Standard 5-field cron. Mutually exclusive with schedule_interval_seconds." },
-      schedule_interval_seconds: { type: "number", description: "Simple interval scheduler. Use this for most pulls. 300 = 5 min, 600 = 10 min." },
+      schedule_cron: { type: "string", description: "Legacy 5-field cron field. No longer honored — the al-stream-sweep schedule polls by schedule_interval_seconds. Kept on the schema for back-compat with old configs." },
+      schedule_interval_seconds: { type: "number", description: "Minimum seconds between pulls. The al-stream-sweep schedule (every 2 min) pulls a stream when this interval has elapsed since last_pull_at. 300 = 5 min, 600 = 10 min. Effective cadence is max(this, 120s)." },
       composio_action: { type: "string", description: "Composio SDK action slug, e.g. 'GMAIL_FETCH_EMAILS'. Required for the composio archetype." },
       composio_connection_id: { type: "string", description: "ID of the ACTIVE ComposioConnection on this tenant. Look up via GET /api/v1/integrations." },
       composio_toolkit: { type: "string", description: "Toolkit slug, e.g. 'gmail'. Must match a connection's toolkit." },
@@ -503,7 +503,7 @@ function getStreamsSchema(): Record<string, unknown> {
         manual_recipe: {
           step_1: "POST /api/v1/streams with type: 'pull' and the example fields.",
           step_2: "PATCH the auth_config separately (don't include secrets in conversation logs).",
-          step_3: "Register a Temporal schedule that calls the StreamPullerWorkflow with this stream_id, OR use schedule_interval_seconds and let the next reconciler pick it up.",
+          step_3: "Set schedule_interval_seconds — that is all. The al-stream-sweep Temporal schedule (StreamSweepWorkflow, every 2 min) lists enabled streams and pulls any whose interval has elapsed since last_pull_at. No per-stream schedule is created.",
         },
         example_body: {
           id: "pull-status-page",
@@ -876,13 +876,35 @@ export function registerStreamRoutes(): void {
       }
     }
 
-    // Attach a fully-composed public webhook_url to every webhook-type stream
-    // so the agent can copy it verbatim instead of constructing it. Omi uses
-    // its dedicated tenant endpoint; everything else routes via the SaaS proxy.
+    // Overlay the pull-engine config onto each stream's metadata so a
+    // single GET /api/v1/streams call carries everything a caller needs
+    // — notably `schedule_interval_seconds` / `last_pull_at`, which
+    // StreamSweepWorkflow's `list_due_streams` activity reads to decide
+    // what is due (#53). This mirrors the meta+config merge that
+    // GET /api/v1/streams/:id already does; the list route previously
+    // returned metadata only.
+    //
+    // Also attach a fully-composed public webhook_url to every
+    // webhook-type stream so the agent can copy it verbatim instead of
+    // constructing it. Omi uses its dedicated tenant endpoint;
+    // everything else routes via the SaaS proxy.
     const enriched = streams.map((s) => {
-      if (s.type !== "webhook") return s;
-      const url = composeWebhookUrl(s.source, s.webhookToken);
-      return url ? { ...s, webhook_url: url } : s;
+      const merged: Record<string, unknown> = { ...s };
+      const config = loadStreamConfig(s.id);
+      if (config) {
+        for (const [key, val] of Object.entries(config)) {
+          if (val !== undefined) merged[key] = val;
+        }
+        // The metadata `enabled` is authoritative for the UI's
+        // pause/resume; keep it from being clobbered by a stale
+        // config-side value of the same field.
+        merged.enabled = s.enabled;
+      }
+      if (s.type === "webhook") {
+        const url = composeWebhookUrl(s.source, s.webhookToken);
+        if (url) merged.webhook_url = url;
+      }
+      return merged;
     });
 
     sendJson(res, 200, { streams: enriched });

@@ -336,85 +336,6 @@ async function fetchCatalog(apiKey: string): Promise<CatalogEntry[]> {
 // a permanent `false` so the dashboard's web layer compiles unchanged.
 // ---------------------------------------------------------------------------
 
-/**
- * Describe a Temporal schedule and decode its first input payload as
- * `{stream_id: ...}`. Used by /auto-config to detect when an existing
- * schedule's encoded stream_id has gone stale (e.g. Composio renamed the
- * action behind the previous stream config) so we can force-recreate
- * instead of skipping with the obsolete args.
- *
- * Returns:
- *   { exists: false }                     — describe failed (likely no such id)
- *   { exists: true, streamId: undefined } — schedule exists but input was
- *                                            unparseable / missing. Caller
- *                                            should treat as a mismatch and
- *                                            recreate (safer than running
- *                                            forever against unknown args).
- *   { exists: true, streamId: "..."     } — schedule exists, args decoded.
- */
-export async function describeScheduleStreamId(
-  scheduleId: string,
-): Promise<{ exists: boolean; streamId?: string }> {
-  let raw: string;
-  try {
-    raw = await dockerExec("temporal", [
-      "temporal", "schedule", "describe",
-      "--schedule-id", scheduleId,
-      "--output", "json",
-    ]);
-  } catch {
-    // describe fails with non-zero exit when the schedule does not exist.
-    // Temporal CLI also fails closed when the cluster is unreachable; the
-    // caller treats `exists: false` as "go ahead and create", which is
-    // safe — if the schedule turns out to exist the create call will surface
-    // AlreadyExists and we degrade to the legacy "already exists" path.
-    return { exists: false };
-  }
-
-  let described: any;
-  try {
-    described = JSON.parse(raw);
-  } catch {
-    return { exists: true, streamId: undefined };
-  }
-
-  const action =
-    described?.scheduleInfo?.action ||
-    described?.schedule?.action ||
-    {};
-  const startWorkflow = action?.startWorkflow || action;
-  const payloads = startWorkflow?.input?.payloads;
-  if (Array.isArray(payloads) && payloads.length > 0) {
-    const first = payloads[0];
-    const data: unknown = first?.data;
-    if (typeof data === "string" && data.length > 0) {
-      try {
-        const decoded = Buffer.from(data, "base64").toString("utf-8");
-        const parsed = JSON.parse(decoded);
-        const streamId = parsed?.stream_id;
-        return {
-          exists: true,
-          streamId: typeof streamId === "string" ? streamId : undefined,
-        };
-      } catch {
-        // Fall through to fallback shape
-      }
-    }
-  }
-
-  // Legacy `args` shape, just in case (kept for parity with workflows.ts).
-  const args = startWorkflow?.args;
-  if (Array.isArray(args) && args.length > 0) {
-    const first = args[0];
-    const streamId = first?.stream_id;
-    return {
-      exists: true,
-      streamId: typeof streamId === "string" ? streamId : undefined,
-    };
-  }
-
-  return { exists: true, streamId: undefined };
-}
 
 // ---------------------------------------------------------------------------
 // Recommended streams + default args per toolkit
@@ -1685,17 +1606,13 @@ export function registerIntegrationRoutes(): void {
         } catch { /* ok */ }
       }
 
-      // 5. Clean up: delete Temporal schedules for cleaned streams
+      // 5. (#53) No per-stream Temporal schedule to delete. Streams are
+      //    polled by the single al-stream-sweep schedule, which reads
+      //    each stream's config; removing the config file in step 3
+      //    drops the stream from the sweep on its next tick. The
+      //    `deleted_schedules` field is kept in the response for shape
+      //    stability with pre-#53 callers.
       const deletedSchedules: string[] = [];
-      for (const streamId of cleanedStreams) {
-        const scheduleId = `al-stream-pull-composio-${streamId.slice(0, 20)}`;
-        try {
-          await dockerExec("temporal", [
-            "temporal", "schedule", "delete", "--schedule-id", scheduleId,
-          ]);
-          deletedSchedules.push(scheduleId);
-        } catch { /* schedule may not exist */ }
-      }
 
       // 6 + 7. Per-toolkit cleanup, scoped to the deleted connection.
       //
@@ -1847,15 +1764,10 @@ export function registerIntegrationRoutes(): void {
         } catch { /* ok */ }
       }
 
-      for (const streamId of cleanedStreams) {
-        const scheduleId = `al-stream-pull-composio-${streamId.slice(0, 20)}`;
-        try {
-          await dockerExec("temporal", [
-            "temporal", "schedule", "delete", "--schedule-id", scheduleId,
-          ]);
-          deletedSchedules.push(scheduleId);
-        } catch { /* ok */ }
-      }
+      // (#53) No per-stream Temporal schedule to delete — the
+      // al-stream-sweep schedule polls streams from their config files,
+      // and the configs were removed above. `deleted_schedules` stays
+      // in the response for shape stability with pre-#53 callers.
 
       // No Hermes tool-enable list to strip: Composio is the single
       // always-on `composio_execute` MCP tool, so disconnecting every
@@ -2338,7 +2250,7 @@ export function registerIntegrationRoutes(): void {
       sendJson(res, 201, {
         stream_id: streamId,
         config,
-        message: `Stream created. Create a Temporal schedule for StreamPullerWorkflow with stream_id=${streamId} to start polling.`,
+        message: `Stream created and enabled. The al-stream-sweep schedule will pull it on its next tick (no per-stream schedule needed).`,
       });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to create stream: ${err.message}` });
@@ -2470,47 +2382,14 @@ export function registerIntegrationRoutes(): void {
         fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
       } catch { /* ok */ }
 
-      // Delete both old + new schedule ids (they can collide when
-      // slice(0,20) truncates identically, e.g. composio-notion-notion-{list-pages,
-      // fetch-data} both → composio-notion-noti). Then always recreate with
-      // the new stream_id as input so the schedule points at the migrated
-      // config. The previous guard `if (oldScheduleId !== newScheduleId)`
-      // silently skipped creation in the common rename-within-the-same-
-      // toolkit case, leaving the stream scheduled-less.
-      const oldScheduleId = `al-stream-pull-composio-${oldStreamId.slice(0, 20)}`;
-      const newScheduleId = `al-stream-pull-composio-${newStreamId.slice(0, 20)}`;
-      try {
-        await dockerExec("temporal", [
-          "temporal", "schedule", "delete",
-          "--schedule-id", oldScheduleId,
-        ]);
-      } catch { /* schedule may not exist */ }
-      if (oldScheduleId !== newScheduleId) {
-        try {
-          await dockerExec("temporal", [
-            "temporal", "schedule", "delete",
-            "--schedule-id", newScheduleId,
-          ]);
-        } catch { /* ok */ }
-      }
-
-      const intervalMin = Math.max(Math.round(intervalSeconds / 60), 1);
-      try {
-        await dockerExec("temporal", [
-          "temporal", "schedule", "create",
-          "--schedule-id", newScheduleId,
-          "--type", "StreamPullerWorkflow",
-          "--task-queue", "alfred-learn",
-          "--cron", `*/${intervalMin} * * * *`,
-          "--input", JSON.stringify({ stream_id: newStreamId }),
-          "--overlap-policy", "Skip",
-        ]);
-      } catch (err: any) {
-        // Not fatal for the migrate itself (stream config is written and
-        // can be retriggered via the schedules endpoint), but warn loudly
-        // so the operator knows a retry is needed.
-        console.error(`[migrate-stream] schedule create failed: ${err?.message}`);
-      }
+      // (#53) No per-stream Temporal schedule to delete or recreate.
+      // The migrate rewrote the on-disk config (new id, new action,
+      // same schedule_interval_seconds); the al-stream-sweep schedule
+      // reads stream configs by id every tick, so it picks up the
+      // migrated config automatically and stops pulling the old id
+      // once its config file is gone. Before #53 each stream had its
+      // own al-stream-pull-* schedule that had to be deleted+recreated
+      // here.
 
       sendJson(res, 200, {
         status: "migrated",
@@ -2532,13 +2411,14 @@ export function registerIntegrationRoutes(): void {
   // POST /api/v1/integrations/:id/disable-stream — tear down a Composio stream
   //
   // Inverse of enable-stream: finds the stream config that matches
-  // (composio_action, composio_connection_id), deletes the config file, removes
-  // the entry from streams.json, and best-effort deletes the Temporal schedule.
+  // (composio_action, composio_connection_id), deletes the config file and
+  // removes the entry from streams.json.
   //
-  // The schedule delete is best-effort because a stale config with no schedule
-  // is harmless (StreamPullerWorkflow won't fire), whereas failing the whole
-  // request because of a Temporal hiccup would block the user from disabling
-  // the stream from the UI.
+  // (#53) There is no per-stream Temporal schedule to delete. Streams are
+  // polled by the single al-stream-sweep schedule, which reads stream
+  // configs by id every tick — deleting the config file drops the stream
+  // from the sweep on its next pass. `schedule_deleted: false` is kept in
+  // the response for shape stability with pre-#53 callers.
   // =========================================================================
   addRoute("POST", "/api/v1/integrations/:id/disable-stream", async ({ res, params, body }) => {
     const b = body as Record<string, unknown> | undefined;
@@ -2582,19 +2462,11 @@ export function registerIntegrationRoutes(): void {
         }
       } catch { /* no metadata file — ok */ }
 
-      // Best-effort schedule delete. Same schedule_id convention as
-      // SaaS-side enableIntegrationStream: al-stream-pull-composio-{streamId.slice(0,20)}.
-      let scheduleDeleted = false;
-      if (matchedStreamId) {
-        const scheduleId = `al-stream-pull-composio-${matchedStreamId.slice(0, 20)}`;
-        try {
-          await dockerExec("temporal", [
-            "temporal", "schedule", "delete",
-            "--schedule-id", scheduleId,
-          ]);
-          scheduleDeleted = true;
-        } catch { /* schedule may not exist — ok */ }
-      }
+      // (#53) No per-stream Temporal schedule to delete — deleting the
+      // config file above drops the stream from the al-stream-sweep
+      // schedule. `schedule_deleted` is kept false for response-shape
+      // stability with pre-#53 callers.
+      const scheduleDeleted = false;
 
       sendJson(res, 200, {
         status: "disabled",
@@ -2994,90 +2866,17 @@ print(json.dumps(result, default=str))
         });
         fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
 
-        // Create Temporal schedule. Two paths:
-        //
-        //   (A) Schedule does not exist → `temporal schedule create`.
-        //   (B) Schedule already exists → inspect its encoded stream_id; if it
-        //       matches `streamId` we skip (idempotent rerun), otherwise we
-        //       force-recreate (delete + create) so the schedule fires against
-        //       the CURRENT stream config rather than a stale slug.
-        //
-        // The naive previous behaviour treated "AlreadyExists" as success even
-        // when the existing schedule's args pointed at a removed Composio
-        // action. Live evidence: tenant-a's notion schedule fired 1,671 times
-        // against the deleted `composio-notion-notion-list-pages` stream id
-        // (whose action `NOTION_LIST_PAGES` was 404'd by Composio) before we
-        // manually swapped it. Auto-config now catches that on its own.
-        const scheduleId = `al-stream-pull-composio-${streamId.slice(0, 20)}`;
-        const intervalMin = Math.max(Math.round(rec.interval / 60), 1);
-        const desiredInput = JSON.stringify({ stream_id: streamId });
-        const createSchedule = async (): Promise<void> => {
-          await dockerExec("temporal", [
-            "temporal", "schedule", "create",
-            "--schedule-id", scheduleId,
-            "--type", "StreamPullerWorkflow",
-            "--task-queue", "alfred-learn",
-            "--cron", `*/${intervalMin} * * * *`,
-            "--input", desiredInput,
-            "--overlap-policy", "Skip",
-          ]);
-        };
-
-        const existing = await describeScheduleStreamId(scheduleId);
-        if (existing.exists) {
-          if (existing.streamId === streamId) {
-            summary.stream_created = streamId;
-            summary.schedule_created = `${scheduleId} (already exists)`;
-          } else {
-            // Stale schedule: encoded stream_id doesn't match the one
-            // auto-config wants. Delete + recreate so future pulls hit the
-            // fresh stream config rather than a dead action.
-            console.log(
-              `[auto-config] swapping stale schedule ${scheduleId}: ` +
-              `existing stream_id=${JSON.stringify(existing.streamId)} → desired=${streamId}`,
-            );
-            try {
-              await dockerExec("temporal", [
-                "temporal", "schedule", "delete",
-                "--schedule-id", scheduleId,
-              ]);
-            } catch (err: any) {
-              // If delete fails (race with another caller, or schedule
-              // disappeared between describe and delete), fall through to
-              // create — Temporal will refuse the create with AlreadyExists
-              // and we'll surface that below as a warning.
-              console.warn(`[auto-config] schedule delete failed (continuing): ${err?.message?.slice(0, 200)}`);
-            }
-            try {
-              await createSchedule();
-              summary.stream_created = streamId;
-              summary.schedule_created = scheduleId;
-              summary.schedule_replaced_stale = {
-                schedule_id: scheduleId,
-                old_stream_id: existing.streamId,
-                new_stream_id: streamId,
-              };
-            } catch (err: any) {
-              summary.stream_error = `Failed to recreate stale schedule: ${err.message?.slice(0, 200)}`;
-            }
-          }
-        } else {
-          try {
-            await createSchedule();
-            summary.stream_created = streamId;
-            summary.schedule_created = scheduleId;
-          } catch (err: any) {
-            // describeScheduleStreamId can fail closed (return exists=false)
-            // when Temporal is transiently unavailable; if create then races
-            // with another caller and hits AlreadyExists, treat as success.
-            if (err.message?.includes("already exists") || err.message?.includes("AlreadyExists") || err.message?.includes("already registered")) {
-              summary.stream_created = streamId;
-              summary.schedule_created = `${scheduleId} (already exists)`;
-            } else {
-              summary.stream_error = err.message?.slice(0, 200);
-            }
-          }
-        }
+        // (#53) No per-stream Temporal schedule is created. Before #53
+        // auto-config created one al-stream-pull-* schedule per stream
+        // (with a describe/delete/recreate dance to heal a stale
+        // encoded stream_id — tenant-a's notion schedule once fired 1,671
+        // times against a dead `NOTION_LIST_PAGES` action before the
+        // swap logic was added). The single al-stream-sweep schedule
+        // (StreamSweepWorkflow, every 2 min) now reads every stream
+        // config by id each tick, so writing the config above is the
+        // whole job — there is no stale-schedule failure mode left, and
+        // a re-run of auto-config simply rewrites the same config file.
+        summary.stream_created = streamId;
       } else {
         summary.stream_created = null; // No recommended stream for this toolkit
       }

@@ -18,7 +18,7 @@ from src.workflows.reflection import ReflectionWorkflow
 from src.workflows.judgment import JudgmentWorkflow
 from src.workflows.media_ingestion import MediaIngestionWorkflow
 from src.workflows.task_runner import TaskRunnerWorkflow
-from src.workflows.stream_puller import StreamPullerWorkflow
+from src.workflows.stream_puller import StreamPullerWorkflow, StreamSweepWorkflow
 from src.workflows.onboarding_pipeline import OnboardingPipelineWorkflow
 from src.workflows.omi_processor import OmiAudioProcessorWorkflow
 from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
@@ -153,6 +153,7 @@ from src.activities.pull import (
     http_pull,
     http_pull_detail,
     ingest_events,
+    list_due_streams,
     load_stream_config,
     notion_fetch_blocks,
     resolve_auth_header,
@@ -663,7 +664,11 @@ _STATIC_WORKFLOWS = [
     JudgmentWorkflow,
     MediaIngestionWorkflow,
     TaskRunnerWorkflow,
+    # StreamPullerWorkflow kept registered as a tombstone (#53): no
+    # longer scheduled per-stream, but callable ad-hoc and harmless to
+    # register. StreamSweepWorkflow is the scheduled entity.
     StreamPullerWorkflow,
+    StreamSweepWorkflow,
     OnboardingPipelineWorkflow,
     OmiAudioProcessorWorkflow,
     NightlyMaintenanceWorkflow,
@@ -738,6 +743,7 @@ ALL_ACTIVITIES = [
     http_pull,
     http_pull_detail,
     ingest_events,
+    list_due_streams,
     load_stream_config,
     notion_fetch_blocks,
     resolve_auth_header,

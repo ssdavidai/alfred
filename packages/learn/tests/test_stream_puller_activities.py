@@ -23,6 +23,7 @@ from src.activities.pull import (  # noqa: E402
     _extract_claimed_email,
     _resolve_owner_email,
     ingest_events,
+    list_due_streams,
 )
 
 
@@ -283,3 +284,127 @@ async def test_ingest_non_google_streams_unaffected(
     result = await ingest_events("s1", "slack", "composio", [slack_item])
     assert result == {"ingested": 1, "rejected": 0}
     assert len(fake_client.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# list_due_streams — the StreamSweepWorkflow due-stream listing (#53)
+# ---------------------------------------------------------------------------
+
+
+class _FakeStreamListClient:
+    """Stand-in for the _ctrl_client httpx AsyncClient — GET /api/v1/streams.
+
+    Returns a configurable `{streams: [...]}` payload so list_due_streams
+    can be exercised without a real ctrl-api.
+    """
+
+    def __init__(self, streams: list[dict[str, Any]]) -> None:
+        self._streams = streams
+
+    async def __aenter__(self) -> "_FakeStreamListClient":
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        return None
+
+    async def get(self, url: str) -> MagicMock:
+        assert url == "/api/v1/streams"
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.raise_for_status = MagicMock()
+        resp.json = MagicMock(return_value={"streams": self._streams})
+        return resp
+
+
+def _stream_list_client(
+    monkeypatch: pytest.MonkeyPatch, streams: list[dict[str, Any]]
+) -> None:
+    client = _FakeStreamListClient(streams)
+    monkeypatch.setattr("src.activities.pull._ctrl_client", lambda _cfg: client)
+    monkeypatch.setattr("src.activities.pull.load_config", lambda: MagicMock())
+
+
+def _old_iso(seconds_ago: int) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (
+        datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+    ).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_list_due_streams_returns_due_enabled_streams(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # s-due was pulled 400s ago with a 300s interval → due.
+    # s-fresh was pulled 60s ago with a 300s interval → not due.
+    # s-never has no last_pull_at → always due.
+    _stream_list_client(monkeypatch, [
+        {"id": "s-due", "enabled": True, "type": "composio",
+         "schedule_interval_seconds": 300, "last_pull_at": _old_iso(400)},
+        {"id": "s-fresh", "enabled": True, "type": "composio",
+         "schedule_interval_seconds": 300, "last_pull_at": _old_iso(60)},
+        {"id": "s-never", "enabled": True, "type": "composio",
+         "schedule_interval_seconds": 300, "last_pull_at": ""},
+    ])
+    due = await list_due_streams(100)
+    assert due == ["s-due", "s-never"]  # sorted-id order
+
+
+@pytest.mark.asyncio
+async def test_list_due_streams_skips_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stream_list_client(monkeypatch, [
+        {"id": "s-off", "enabled": False, "type": "composio",
+         "schedule_interval_seconds": 300, "last_pull_at": ""},
+        {"id": "s-on", "enabled": True, "type": "composio",
+         "schedule_interval_seconds": 300, "last_pull_at": ""},
+    ])
+    due = await list_due_streams(100)
+    assert due == ["s-on"]
+
+
+@pytest.mark.asyncio
+async def test_list_due_streams_skips_system_and_webhook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # System streams (push-fed) and webhook streams (no pull config)
+    # are never driven by the sweep, even when enabled + "due".
+    _stream_list_client(monkeypatch, [
+        {"id": "system-inbox", "enabled": True, "type": "system",
+         "system": True, "last_pull_at": ""},
+        {"id": "wh-1", "enabled": True, "type": "webhook",
+         "last_pull_at": ""},
+        {"id": "pull-1", "enabled": True, "type": "composio",
+         "schedule_interval_seconds": 300, "last_pull_at": ""},
+    ])
+    due = await list_due_streams(100)
+    assert due == ["pull-1"]
+
+
+@pytest.mark.asyncio
+async def test_list_due_streams_respects_batch_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 5 due streams, cap of 2 → first 2 in sorted-id order.
+    streams = [
+        {"id": f"s-{i}", "enabled": True, "type": "composio",
+         "schedule_interval_seconds": 300, "last_pull_at": ""}
+        for i in range(5)
+    ]
+    _stream_list_client(monkeypatch, streams)
+    due = await list_due_streams(2)
+    assert due == ["s-0", "s-1"]
+
+
+@pytest.mark.asyncio
+async def test_list_due_streams_empty_when_nothing_due(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stream_list_client(monkeypatch, [
+        {"id": "s-fresh", "enabled": True, "type": "composio",
+         "schedule_interval_seconds": 300, "last_pull_at": _old_iso(10)},
+    ])
+    due = await list_due_streams(100)
+    assert due == []

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -413,6 +414,119 @@ async def update_cursor(
         resp.raise_for_status()
 
 
+# ---------------------------------------------------------------------------
+# Activity: list_due_streams (StreamSweepWorkflow — issue #53)
+# ---------------------------------------------------------------------------
+
+# Default pull interval for a stream whose config carries no
+# ``schedule_interval_seconds``. Mirrors the 300s default ctrl-api
+# stamps on newly-created streams (see streams.ts / integrations.ts).
+_DEFAULT_STREAM_INTERVAL_SECONDS = 300
+
+
+def _stream_pull_due(
+    interval_seconds: Any,
+    last_pull_at: Any,
+    now: datetime,
+) -> bool:
+    """Return True iff a stream is due for a pull.
+
+    A stream is due when ``now - last_pull_at >= schedule_interval_seconds``.
+    A stream that has never been pulled (empty / missing / unparseable
+    ``last_pull_at``) is always due — a malformed cursor must never pin a
+    stream out of the sweep forever. ``last_pull_at`` round-trips as an
+    ISO-8601 string from the stream config; ``Z`` and naive timestamps
+    are tolerated.
+    """
+    try:
+        interval = int(interval_seconds)
+    except (TypeError, ValueError):
+        interval = _DEFAULT_STREAM_INTERVAL_SECONDS
+    if interval <= 0:
+        interval = _DEFAULT_STREAM_INTERVAL_SECONDS
+
+    if not last_pull_at or not isinstance(last_pull_at, str):
+        return True
+    s = last_pull_at.strip()
+    if not s:
+        return True
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return True
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (now - dt).total_seconds() >= interval
+
+
+@activity.defn
+async def list_due_streams(batch_limit: int = 100) -> list[str]:
+    """Return the ids of enabled streams that are due for a pull.
+
+    Single ctrl-api ``GET /api/v1/streams`` scan — the list response
+    merges each stream's config so ``enabled``,
+    ``schedule_interval_seconds`` and ``last_pull_at`` are available
+    without an N+1 per-stream fetch. A stream is "due" iff it is enabled
+    and ``now - last_pull_at >= schedule_interval_seconds`` (a
+    never-pulled stream is always due).
+
+    System streams (``system: true`` — openclaw sessions, inbox) are
+    excluded: they have no pull engine, they receive events by push.
+    Webhook-type streams are likewise skipped (they have no
+    ``schedule_interval_seconds`` / pull config — events arrive via the
+    SaaS proxy). The sweep only drives pull-engine streams.
+
+    The returned list is the work set for one ``StreamSweepWorkflow``
+    run, capped at ``batch_limit`` streams per tick and returned in
+    sorted-id order so the cap is deterministic across ticks (no
+    starvation). Streams are far fewer than matters so the cap is mostly
+    a defensive ceiling.
+
+    Errors from ctrl-api propagate so Temporal's retry policy can take
+    over — better to retry the whole listing than to sweep a partial
+    stream set.
+    """
+    config = load_config()
+    async with _ctrl_client(config) as client:
+        resp = await client.get("/api/v1/streams")
+        resp.raise_for_status()
+        streams = resp.json().get("streams", [])
+
+    now = _now_dt()
+    due: list[str] = []
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        stream_id = stream.get("id")
+        if not stream_id or not isinstance(stream_id, str):
+            continue
+        # System streams have no pull engine — they are push-fed.
+        if stream.get("system") is True:
+            continue
+        # Webhook streams receive events by push; they carry no
+        # schedule_interval_seconds / pull config.
+        if stream.get("type") == "webhook":
+            continue
+        if not stream.get("enabled", False):
+            continue
+        if _stream_pull_due(
+            stream.get("schedule_interval_seconds"),
+            stream.get("last_pull_at"),
+            now,
+        ):
+            due.append(stream_id)
+
+    ordered = sorted(due)
+    capped = ordered[: max(0, int(batch_limit))]
+    logger.info(
+        "list_due_streams: due=%d returned=%d (cap=%d)",
+        len(ordered), len(capped), batch_limit,
+    )
+    return capped
+
+
 @activity.defn
 async def backfill_gmail_as_events(
     stream_id: str,
@@ -743,6 +857,9 @@ def _ctrl_client(config: Any) -> httpx.AsyncClient:
 
 def _now_iso() -> str:
     """Return current UTC time as ISO string."""
-    from datetime import datetime, timezone
+    return _now_dt().isoformat()
 
-    return datetime.now(timezone.utc).isoformat()
+
+def _now_dt() -> datetime:
+    """Return the current UTC time as a timezone-aware datetime."""
+    return datetime.now(timezone.utc)

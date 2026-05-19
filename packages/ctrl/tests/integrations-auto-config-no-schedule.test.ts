@@ -1,22 +1,22 @@
-// Tests for the stale-schedule recovery in /api/v1/integrations/:id/auto-config
-// (Defect B in fix/composio-auto-config-on-callback-and-stale-schedule).
+// Tests for /api/v1/integrations/:id/auto-config — stream-config-only path (#53).
 //
 // Background:
-//   When a tenant's Composio toolkit gets auto-configured, the route ensures a
-//   Temporal schedule named `al-stream-pull-composio-<streamId.slice(0,20)>`
-//   exists for the recommended stream. The legacy implementation treated
-//   "AlreadyExists" as success, which left tenants firing forever against a
-//   stale schedule whose encoded `stream_id` pointed at a Composio action that
-//   no longer exists (e.g. NOTION_LIST_PAGES → NOTION_FETCH_DATA, where the
-//   OLD streamId `composio-notion-notion-list-pages` truncates to a different
-//   slice(0,20) than the NEW one — but for actions whose first 20 chars match,
-//   the schedule is reused and stays stale).
+//   Before #53, auto-config ensured one Temporal schedule per stream
+//   (`al-stream-pull-composio-<streamId.slice(0,20)>`) and ran a
+//   describe/delete/recreate dance to heal a schedule whose encoded
+//   `stream_id` had gone stale (NOTION_LIST_PAGES → NOTION_FETCH_DATA etc.).
+//
+//   Issue #53 collapsed the per-stream `al-stream-pull-*` schedules into a
+//   single `al-stream-sweep` schedule (StreamSweepWorkflow) registered once
+//   by alfred-learn. The sweep reads every stream config by id on each tick,
+//   so auto-config no longer creates, deletes, or describes any Temporal
+//   schedule — it just writes the stream config file. The stale-schedule
+//   failure mode (and `describeScheduleStreamId`) no longer exists.
 //
 // Coverage:
-//   - Existing schedule with current stream_id → skipped (no delete + create)
-//   - Existing schedule with stale stream_id → deleted + recreated
-//   - No existing schedule → created normally
-//   - Describe returns AlreadyExists race → caller handles gracefully
+//   - auto-config writes the recommended stream config
+//   - auto-config makes NO `al-stream-pull-*` schedule call at all
+//   - re-running auto-config is idempotent and still creates no schedule
 
 import { mock, describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -273,11 +273,15 @@ mock.module("node:child_process", {
 
 process.env.COMPOSIO_API_KEY = "test-composio-key";
 process.env.COMPOSIO_USER_ID = "alfred-test-user";
+// Pin the data dir so the in-memory fs assertions know the config path.
+// (integrations.ts derives STREAM_CONFIGS_DIR from ALFRED_DATA_DIR at
+// module-load time, so this must be set before the import below.)
+process.env.ALFRED_DATA_DIR = "/alfred-data";
 
-const integrationsModule = await import("../src/api/routes/integrations.js");
+await import("../src/api/routes/integrations.js");
 const { createApiServer } = await import("../src/api/server.js");
 
-const STREAM_CONFIGS_DIR = "/mnt/encrypted/alfred/streams/configs";
+const STREAM_CONFIGS_DIR = `${process.env.ALFRED_DATA_DIR}/streams/configs`;
 
 let server: http.Server;
 
@@ -355,11 +359,11 @@ function describeJson(streamId: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Defect B — auto-config swaps stale schedules
+// auto-config — stream-config-only (no per-stream schedule, #53)
 // ---------------------------------------------------------------------------
 
-describe("auto-config — schedule freshness check (Defect B)", () => {
-  it("creates a new schedule when none exists", async () => {
+describe("auto-config — writes stream config, creates no schedule (#53)", () => {
+  it("writes the recommended stream config and reports stream_created", async () => {
     seedConn({ id: "ca_notion", toolkit: "notion" });
 
     const { status, data } = await req(
@@ -370,135 +374,63 @@ describe("auto-config — schedule freshness check (Defect B)", () => {
     assert.strictEqual(status, 200, `expected 200, got ${status} (${JSON.stringify(data)})`);
     const expectedStreamId = "composio-notion-notion-fetch-data";
     assert.strictEqual(data.stream_created, expectedStreamId);
-    assert.ok(
-      typeof data.schedule_created === "string" && !data.schedule_created.includes("already exists"),
-      "fresh create — schedule_created should NOT have the (already exists) suffix",
-    );
 
-    const creates = temporalCalls.filter((c) => c.verb === "create");
-    assert.strictEqual(creates.length, 1, "exactly one create call");
-    assert.strictEqual(creates[0].input, JSON.stringify({ stream_id: expectedStreamId }));
-
-    const deletes = temporalCalls.filter((c) => c.verb === "delete");
-    assert.strictEqual(deletes.length, 0, "nothing to delete on fresh create");
+    // The stream config file must have been written so the al-stream-sweep
+    // schedule can pick it up on its next tick.
+    const configPath = `${STREAM_CONFIGS_DIR}/${expectedStreamId}.json`;
+    assert.ok(memFs.has(configPath), "stream config file should be written");
+    const cfg = JSON.parse(memFs.get(configPath)!);
+    assert.strictEqual(cfg.enabled, true);
+    assert.strictEqual(cfg.composio_action, "NOTION_FETCH_DATA");
+    assert.strictEqual(typeof cfg.schedule_interval_seconds, "number");
   });
 
-  it("skips create when the existing schedule already encodes the right stream_id", async () => {
+  it("makes NO al-stream-pull-* Temporal schedule call", async () => {
     seedConn({ id: "ca_notion", toolkit: "notion" });
 
-    const expectedStreamId = "composio-notion-notion-fetch-data";
-    const expectedScheduleId = `al-stream-pull-composio-${expectedStreamId.slice(0, 20)}`;
-    describeResponder = (id) =>
-      id === expectedScheduleId ? describeJson(expectedStreamId) : null;
+    await req("POST", "/api/v1/integrations/ca_notion/auto-config");
 
-    const { status, data } = await req(
-      "POST",
-      "/api/v1/integrations/ca_notion/auto-config",
+    // #53: ctrl-api no longer creates/deletes/describes per-stream
+    // schedules. The single al-stream-sweep schedule (owned by
+    // alfred-learn's register_schedules) drives all streams.
+    const scheduleCalls = temporalCalls.filter(
+      (c) =>
+        c.verb === "create" ||
+        c.verb === "delete" ||
+        c.verb === "describe",
     );
-
-    assert.strictEqual(status, 200, `expected 200, got ${status}`);
-    assert.strictEqual(data.stream_created, expectedStreamId);
-    assert.ok(
-      String(data.schedule_created).includes("(already exists)"),
-      "expected (already exists) marker — got " + JSON.stringify(data.schedule_created),
+    assert.strictEqual(
+      scheduleCalls.length,
+      0,
+      `auto-config must make no schedule calls — got ${JSON.stringify(scheduleCalls)}`,
     );
-    assert.ok(!data.schedule_replaced_stale, "no swap should have happened");
+    // Belt-and-braces: nothing should reference the legacy id prefix.
+    const legacy = temporalCalls.filter((c) =>
+      (c.scheduleId ?? "").startsWith("al-stream-pull-"),
+    );
+    assert.strictEqual(legacy.length, 0, "no al-stream-pull-* schedule id touched");
 
-    const deletes = temporalCalls.filter((c) => c.verb === "delete");
-    const creates = temporalCalls.filter((c) => c.verb === "create");
-    assert.strictEqual(deletes.length, 0, "no delete on a fresh schedule");
-    assert.strictEqual(creates.length, 0, "no create on a fresh schedule");
+    // The summary no longer carries schedule_* fields.
+    // (stream_created is still reported for the reconciler.)
   });
 
-  it("deletes + recreates when the existing schedule encodes a stale stream_id", async () => {
+  it("is idempotent on re-run and still creates no schedule", async () => {
     seedConn({ id: "ca_notion", toolkit: "notion" });
 
-    // Stale: schedule encodes the old NOTION_LIST_PAGES stream id even though
-    // RECOMMENDED_STREAMS now points at NOTION_FETCH_DATA.
-    const desiredStreamId = "composio-notion-notion-fetch-data";
-    const staleStreamId = "composio-notion-notion-list-pages";
-    const expectedScheduleId = `al-stream-pull-composio-${desiredStreamId.slice(0, 20)}`;
-    describeResponder = (id) =>
-      id === expectedScheduleId ? describeJson(staleStreamId) : null;
+    const first = await req("POST", "/api/v1/integrations/ca_notion/auto-config");
+    assert.strictEqual(first.status, 200);
+    temporalCalls.length = 0;
 
-    const { status, data } = await req(
-      "POST",
-      "/api/v1/integrations/ca_notion/auto-config",
+    const second = await req("POST", "/api/v1/integrations/ca_notion/auto-config");
+    assert.strictEqual(second.status, 200);
+    assert.strictEqual(
+      second.data.stream_created,
+      "composio-notion-notion-fetch-data",
     );
 
-    assert.strictEqual(status, 200, `expected 200, got ${status} (${JSON.stringify(data)})`);
-    assert.strictEqual(data.stream_created, desiredStreamId);
-    assert.strictEqual(data.schedule_created, expectedScheduleId, "should be the bare id, not '(already exists)'");
-    assert.deepStrictEqual(data.schedule_replaced_stale, {
-      schedule_id: expectedScheduleId,
-      old_stream_id: staleStreamId,
-      new_stream_id: desiredStreamId,
-    });
-
-    const deletes = temporalCalls.filter((c) => c.verb === "delete");
-    const creates = temporalCalls.filter((c) => c.verb === "create");
-    assert.strictEqual(deletes.length, 1, "one delete on stale swap");
-    assert.strictEqual(deletes[0].scheduleId, expectedScheduleId);
-    assert.strictEqual(creates.length, 1, "one create on stale swap");
-    assert.strictEqual(creates[0].scheduleId, expectedScheduleId);
-    assert.strictEqual(creates[0].input, JSON.stringify({ stream_id: desiredStreamId }));
-  });
-
-  it("recreates when the existing schedule's input is unparseable (treated as stale)", async () => {
-    seedConn({ id: "ca_notion", toolkit: "notion" });
-
-    const desiredStreamId = "composio-notion-notion-fetch-data";
-    const expectedScheduleId = `al-stream-pull-composio-${desiredStreamId.slice(0, 20)}`;
-    // Schedule exists but describe returns no decodable stream_id. We choose
-    // to recreate (safer than letting an opaque schedule fire forever).
-    describeResponder = (id) =>
-      id === expectedScheduleId ? JSON.stringify({ schedule: {} }) : null;
-
-    const { status, data } = await req(
-      "POST",
-      "/api/v1/integrations/ca_notion/auto-config",
+    const scheduleCalls = temporalCalls.filter(
+      (c) => c.verb === "create" || c.verb === "delete" || c.verb === "describe",
     );
-
-    assert.strictEqual(status, 200);
-    assert.ok(
-      data.schedule_replaced_stale,
-      "schedule with unparseable args must be replaced",
-    );
-    assert.strictEqual(data.schedule_replaced_stale.old_stream_id, undefined);
-    assert.strictEqual(data.schedule_replaced_stale.new_stream_id, desiredStreamId);
-
-    const creates = temporalCalls.filter((c) => c.verb === "create");
-    assert.strictEqual(creates.length, 1);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Direct unit test of the helper
-// ---------------------------------------------------------------------------
-
-describe("describeScheduleStreamId helper", () => {
-  it("returns exists:false when the schedule is missing", async () => {
-    describeResponder = () => null;
-    const out = await integrationsModule.describeScheduleStreamId(
-      "al-stream-pull-composio-doesntexist",
-    );
-    assert.deepStrictEqual(out, { exists: false });
-  });
-
-  it("decodes a base64 payload to the stream_id", async () => {
-    describeResponder = () => describeJson("composio-gmail-gmail-fetch-emails");
-    const out = await integrationsModule.describeScheduleStreamId(
-      "al-stream-pull-composio-composio-gmail-gma",
-    );
-    assert.deepStrictEqual(out, {
-      exists: true,
-      streamId: "composio-gmail-gmail-fetch-emails",
-    });
-  });
-
-  it("returns exists:true with no streamId when payload is unparseable", async () => {
-    describeResponder = () => JSON.stringify({ schedule: { action: {} } });
-    const out = await integrationsModule.describeScheduleStreamId("al-foo");
-    assert.deepStrictEqual(out, { exists: true, streamId: undefined });
+    assert.strictEqual(scheduleCalls.length, 0, "re-run makes no schedule calls");
   });
 });

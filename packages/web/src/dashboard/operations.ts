@@ -789,42 +789,30 @@ export const startOnboarding: StartOnboarding<
     recordStep("tenant_stream_patch", false, e?.message ?? String(e));
   }
 
-  // Step 4: Create the al-stream-pull-gmail Temporal schedule. ctrl-api
-  // returns 201 on first create and a 409/200 on idempotent re-create —
-  // we accept both. A failure here means the puller will never fire
-  // automatically (manual triggers via step 5 still work, but stop after
-  // a single pull).
+  // Step 4: (#53) No per-stream Temporal schedule is created. The
+  // gmail stream config written in step 3 carries
+  // schedule_interval_seconds=300; the tenant's single al-stream-sweep
+  // schedule (StreamSweepWorkflow, registered once by alfred-learn,
+  // 2-min interval) reads every stream config on each tick and pulls
+  // any stream whose interval has elapsed. There used to be a
+  // dedicated `al-stream-pull-gmail` schedule here.
+  recordStep("tenant_schedule_post", true, "stream-sweep (no per-stream schedule, #53)");
+
+  // Step 5: Kick an immediate first pull so the user sees fresh data
+  // without waiting up to 2 min for the next al-stream-sweep tick.
+  // We start a one-off StreamPullerWorkflow run (the per-stream
+  // workflow is kept registered as an ad-hoc-callable tombstone in
+  // #53). Best-effort — failures are non-blocking because the sweep
+  // will pull the stream on its own within ~2 min.
   try {
     await proxyToTenant(instance, {
       method: "POST",
-      path: "/api/v1/schedules",
+      path: "/api/v1/workflows",
       body: {
-        schedule_id: "al-stream-pull-gmail",
         workflow_type: "StreamPullerWorkflow",
         task_queue: "alfred-learn",
-        cron: "*/5 * * * *",
         input: { stream_id: gmailStream.id },
-        overlap_policy: "Skip",
       },
-    });
-    recordStep("tenant_schedule_post", true);
-  } catch (e: any) {
-    // 409 from create-schedule means it already exists — that's fine.
-    const msg = e?.message ?? String(e);
-    if (/409|already exists|conflict/i.test(msg)) {
-      recordStep("tenant_schedule_post", true, "already exists (idempotent)");
-    } else {
-      recordStep("tenant_schedule_post", false, msg);
-    }
-  }
-
-  // Step 5: Trigger immediate first pull so the user sees fresh data
-  // without waiting for the next 5-min cron tick. Best-effort — failures
-  // here are non-blocking because the schedule will fire on its own.
-  try {
-    await proxyToTenant(instance, {
-      method: "POST",
-      path: "/api/v1/schedules/al-stream-pull-gmail/trigger",
     });
     recordStep("tenant_schedule_trigger", true);
   } catch (e: any) {
