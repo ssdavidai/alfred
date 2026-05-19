@@ -1344,12 +1344,14 @@ async def route_signal_action(
       5. Compute combined confidence ``min(target, effect)``.
       6. Resolve effective mode: caller-mode ∩ env-veto.
       7. Branch:
-         a. HIGH path — instinct + threshold + non-shadow → dispatch.
+         a. HIGH path — instinct + threshold + non-shadow → mark the
+            signal ``dispatching`` (the #54 mark-before-dispatch guard
+            point), THEN dispatch.
          b. HUMAN path — anything else → write needs_attention card.
-      8. Mark signal status (``routed_agent`` / ``routed_human``) +
+      8. Emit the audit ``event/signal-action-*.md`` record.
+      9. Mark signal status (``routed_agent`` / ``routed_human``) +
          ``audit_record_path`` (the outcome signal path or the
          needs_attention path, respectively) + ``applied_at``.
-      9. Emit the audit ``event/signal-action-*.md`` record.
 
     Returns a dict matching the workflow's expected counter shape::
 
@@ -1445,13 +1447,52 @@ async def route_signal_action(
         # retry chain fired. With the guard: re-entry returns early,
         # no duplicate write, no duplicate audit, signal stays at its
         # already-set status.
+        #
+        # ``dispatching`` is the non-terminal mark-before-dispatch
+        # status (issue #54). It is written *before* the agent is
+        # dispatched, so a run that dies or is retried between dispatch
+        # and the terminal ``routed_agent`` write re-enters and finds
+        # the signal already ``dispatching`` — and early-returns here
+        # WITHOUT re-dispatching. Before #54 the terminal status was
+        # the only thing the guard read, leaving a double-fire window:
+        # dispatch succeeded → status not yet written → re-run
+        # re-dispatched a second real ``POST /v1/runs`` (a second
+        # real-world action). Trade-off: a crash *between* the
+        # ``dispatching`` write and a successful dispatch strands the
+        # signal in ``dispatching`` with no agent run — a visible,
+        # sweepable stuck state, strictly safer than a silent double
+        # action.
         existing_status = str(fm.get("status") or "").strip().lower()
-        if existing_status in ("routed_human", "routed_agent"):
-            logger.info(
-                "signal_actions.route_signal_action: idempotency skip "
-                "path=%s already_status=%s",
-                signal_path, existing_status,
-            )
+        if existing_status in (
+            "routed_human", "routed_agent", "dispatching"
+        ):
+            # A signal stuck in ``dispatching`` (crash between the
+            # pre-dispatch mark and the terminal ``routed_agent``
+            # write) is the #54 trade-off's accepted failure mode.
+            # It is observable two ways: this WARNING on every guard
+            # re-entry, and a state.db query
+            # ``GET /api/v1/state/signals?status=dispatching``. Log it
+            # loud (WARNING, not INFO) with the pre-dispatch
+            # ``applied_at`` so a stale-since timestamp is on record;
+            # the terminal statuses stay at INFO (benign retry skip).
+            if existing_status == "dispatching":
+                logger.warning(
+                    "signal_actions.route_signal_action: idempotency "
+                    "skip — signal id=%s is %s (mark-before-dispatch "
+                    "guard hit). If this signal never reaches "
+                    "routed_agent it is STUCK: a crash landed between "
+                    "the dispatching mark and the dispatch. "
+                    "marked_at=%s — sweepable via "
+                    "GET /api/v1/state/signals?status=dispatching",
+                    signal_path, existing_status,
+                    str(fm.get("applied_at") or "unknown"),
+                )
+            else:
+                logger.info(
+                    "signal_actions.route_signal_action: idempotency "
+                    "skip path=%s already_status=%s",
+                    signal_path, existing_status,
+                )
             return {
                 "signal_path": signal_path,
                 "signal_status": existing_status,
@@ -1667,6 +1708,38 @@ async def route_signal_action(
             dispatch_principal_note = (
                 principal_note if principal_delegate_override else ""
             )
+
+            # #54 — mark-before-dispatch. Write the non-terminal
+            # ``dispatching`` status BEFORE the agent dispatch so the
+            # idempotency guard above catches a crashed/retried run and
+            # does NOT re-fire. ``dispatch_action_to_agent`` issues a
+            # real ``POST /v1/runs`` to Hermes — a non-idempotent call
+            # that can take a real-world action. Without this mark, a
+            # run that dies between a successful dispatch and the
+            # terminal ``routed_agent`` write at step 9 re-enters with
+            # the signal still ``action_pending``, the guard misses,
+            # and the agent is dispatched a second time. The status
+            # write itself must succeed before we dispatch — if it
+            # fails we re-raise rather than dispatch unguarded, so
+            # Temporal retries the whole activity from a clean
+            # ``action_pending`` state (no agent run has happened yet).
+            try:
+                await set_signal_status(
+                    signal_ref,
+                    "dispatching",
+                    applied_at=_now_utc_iso(),
+                    audit_record_ref="",
+                    config=cfg,
+                )
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "signal_actions.route_signal_action: pre-dispatch "
+                    "status write failed id=%s err=%s — re-raising "
+                    "before dispatch (no agent run yet)",
+                    signal_ref, exc,
+                )
+                raise
+
             try:
                 agent_outcome = await dispatch_action_to_agent(
                     proposal,

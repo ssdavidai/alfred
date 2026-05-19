@@ -178,7 +178,10 @@ class SignalRouterResult:
       * ``routed_action`` — signals marked ``action_pending`` for
         Phase 6.4 to pick up.
       * ``skipped`` — signals marked ``status=skipped`` (effect=none /
-        informational / malformed past the validation gate).
+        informational / malformed past the validation gate), plus
+        action signals the #54 idempotency guard caught already
+        ``dispatching`` (a benign mark-before-dispatch re-entry, not
+        an error).
       * ``errors`` — count of per-signal exceptions surfaced from the
         try/except. ``error_messages`` carries the first ~10 messages
         for surfacing in Temporal UI.
@@ -373,6 +376,18 @@ class SignalRouterWorkflow:
                             # Defensive — route_signal_action's own
                             # validation (no proposal / 404 / bad
                             # shape). Don't double-count as routed.
+                            result.skipped += 1
+                        elif action_status == "dispatching":
+                            # #54 idempotency skip — a prior attempt
+                            # already marked this signal ``dispatching``
+                            # (mark-before-dispatch) and route_signal_action
+                            # early-returned without re-firing the agent.
+                            # That is the guard working as intended, not
+                            # an error: count it as skipped so the tick
+                            # stays quiet. A signal that is genuinely
+                            # *stuck* in ``dispatching`` (crash between
+                            # the mark and a successful dispatch) is
+                            # surfaced separately — see below.
                             result.skipped += 1
                         else:
                             result.errors += 1
