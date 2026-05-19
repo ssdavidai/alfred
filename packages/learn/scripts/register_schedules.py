@@ -61,13 +61,17 @@ FLEET_AUDIT_NOTE = (
     "true)."
 )
 
-# Steward (#835) — per-matter perception loop. One schedule per
-# matter named ``al-steward-<matter-slug>``. Phase 0 cadence is the
-# Layer 3 default (30 min). Layer 2 polled-source-tied cadences and
-# Layer 1 webhook nudges arrive in Phase 2.
+# Steward (#835 → #52) — perception loop. Originally one Temporal
+# Schedule per matter (``al-steward-<matter-slug>``). Issue #52
+# collapsed that fan-out into a single ``al-steward-sweep`` schedule
+# running ``StewardSweepWorkflow`` — one schedule for the whole fleet
+# of matters, regardless of matter count. The legacy per-matter
+# ``al-steward-<slug>`` schedules (everything matching the prefix but
+# NOT the sweep id) are deleted once on the next boot.
 STEWARD_SCHEDULE_PREFIX = "al-steward-"
-STEWARD_WORKFLOW = "StewardWorkflow"
-STEWARD_DEFAULT_INTERVAL = timedelta(minutes=30)
+STEWARD_SWEEP_SCHEDULE_ID = "al-steward-sweep"
+STEWARD_SWEEP_WORKFLOW = "StewardSweepWorkflow"
+STEWARD_SWEEP_INTERVAL = timedelta(minutes=30)
 
 # Steward Phase 4 (#840) — Vexa transcript intake. Two singleton
 # schedules: MeetingCapture polls the gcal stream and dispatches the
@@ -1052,229 +1056,133 @@ async def register_stream_event_purge(client: Client, task_queue: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Steward (#835) — per-matter schedule registration
+# Steward (#835 → #52) — single sweep-schedule registration
 # ---------------------------------------------------------------------------
 
-def _matter_slug_from_path(path: str) -> str:
-    """Extract the slug portion of a ``matter/<slug>.md`` path.
+async def _delete_legacy_steward_schedules(client: Client) -> int:
+    """Delete every legacy per-matter ``al-steward-<slug>`` schedule.
 
-    Returns the empty string when ``path`` doesn't look like a matter
-    record. Used for both schedule-id construction and matter-id
-    arguments to the workflow.
-    """
-    if not isinstance(path, str):
-        return ""
-    s = path.strip()
-    if not s.startswith("matter/") or not s.endswith(".md"):
-        return ""
-    return s[len("matter/"):-len(".md")]
+    Issue #52 retired the per-matter ``al-steward-*`` fan-out in favour
+    of the single ``al-steward-sweep`` schedule. This is a one-time
+    cleanup: it lists every schedule whose id starts with the
+    ``al-steward-`` prefix and deletes all of them EXCEPT the new
+    ``al-steward-sweep`` id. It is idempotent — once the legacy
+    schedules are gone, subsequent boots find nothing to delete.
 
+    This repurposes the old ``_delete_orphan_steward_schedules`` logic:
+    where that deleted schedules whose matter no longer existed, this
+    deletes every per-matter schedule unconditionally (the sweep now
+    owns all matters). Best-effort — a failed individual delete is
+    logged and does not abort the boot sequence.
 
-def _schedule_id_for_matter(slug: str) -> str:
-    return f"{STEWARD_SCHEDULE_PREFIX}{slug}"
-
-
-async def _list_matter_paths(ctrl_url: str) -> list[str]:
-    """Enumerate every ``matter/*.md`` path via ctrl-api.
-
-    Returns an empty list on transport failure — better to skip Steward
-    schedule registration this run than to delete every existing
-    ``al-steward-*`` schedule because the API was momentarily down.
-    """
-    api_key = os.environ.get("AAS_API_KEY", "")
-    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    paths: list[str] = []
-    try:
-        async with httpx.AsyncClient(
-            base_url=ctrl_url, timeout=30.0, headers=headers,
-        ) as client:
-            resp = await client.get(
-                "/api/v1/vault/list/matter", params={"preview": 0}
-            )
-            resp.raise_for_status()
-            records = resp.json().get("results", [])
-    except httpx.HTTPError as exc:
-        logger.warning(
-            "register_steward_schedules: ctrl-api list/matter failed: %s "
-            "— skipping Steward schedule registration this run", exc,
-        )
-        return []
-    for rec in records:
-        path = rec.get("path") or ""
-        if _matter_slug_from_path(path):
-            paths.append(path)
-    return paths
-
-
-def _make_steward_schedule(
-    slug: str, task_queue: str,
-) -> Schedule:
-    """Build the Schedule object for one matter.
-
-    Args carry ``[matter_path]`` (e.g. ``["matter/inbox.md"]``) so the
-    workflow's normalizer accepts both bare slugs and canonical paths.
-    """
-    matter_id = f"matter/{slug}.md"
-    action = ScheduleActionStartWorkflow(
-        STEWARD_WORKFLOW,
-        args=[matter_id],
-        id=f"{_schedule_id_for_matter(slug)}-run",
-        task_queue=task_queue,
-        # Generous 5-minute envelope. A typical no-op Phase 0 tick
-        # finishes in <1s; the cap protects against a wedge during
-        # Phase 1+ when LLM calls land in evaluate_task.
-        execution_timeout=timedelta(minutes=5),
-        run_timeout=timedelta(minutes=5),
-    )
-    spec = ScheduleSpec(
-        intervals=[ScheduleIntervalSpec(every=STEWARD_DEFAULT_INTERVAL)],
-    )
-    policy = SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP)
-    return Schedule(action=action, spec=spec, policy=policy)
-
-
-async def _create_or_update_steward_schedule(
-    client: Client, slug: str, task_queue: str,
-) -> str:
-    """Create the schedule, or update its action+spec if it already exists.
-
-    Returns one of ``"created"``, ``"updated"``, ``"unchanged"`` for
-    summary logging. Update is idempotent: we always re-issue the
-    full Schedule definition so a deploy that bumps the cadence /
-    workflow signature lands cleanly without a manual purge.
-    """
-    schedule_id = _schedule_id_for_matter(slug)
-    schedule = _make_steward_schedule(slug, task_queue)
-    handle = client.get_schedule_handle(schedule_id)
-
-    try:
-        await handle.describe()
-        exists = True
-    except RPCError as exc:
-        if exc.status == RPCStatusCode.NOT_FOUND:
-            exists = False
-        else:
-            raise
-
-    if not exists:
-        try:
-            await client.create_schedule(schedule_id, schedule)
-            return "created"
-        except RPCError as exc:
-            if exc.status == RPCStatusCode.ALREADY_EXISTS:
-                # Race with another registrar instance — fall through
-                # to the update path.
-                pass
-            else:
-                raise
-        except Exception as exc:  # noqa: BLE001 — parity with sibling helpers
-            err = str(exc).lower()
-            if "already" in err or "exists" in err:
-                pass
-            else:
-                raise
-
-    # Update path: refresh action + spec so cadence / workflow-name
-    # changes flow through without a manual delete.
-    async def _updater(input: ScheduleUpdateInput) -> ScheduleUpdate:
-        return ScheduleUpdate(schedule=schedule)
-
-    try:
-        await handle.update(_updater)
-        return "updated"
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "register_steward_schedules: update %s failed: %s",
-            schedule_id, exc,
-        )
-        return "unchanged"
-
-
-async def _delete_orphan_steward_schedules(
-    client: Client, live_ids: set[str],
-) -> int:
-    """Delete any ``al-steward-*`` schedule whose matter no longer exists.
-
-    Returns the number of schedules deleted. Best-effort — failures on
-    individual deletes are logged and don't abort the whole sweep.
+    Returns the number of schedules deleted.
     """
     deleted = 0
     try:
-        existing_ids: list[str] = []
+        legacy_ids: list[str] = []
         async for entry in client.list_schedules():
             sid = getattr(entry, "id", None) or ""
-            if sid.startswith(STEWARD_SCHEDULE_PREFIX):
-                existing_ids.append(sid)
+            if sid.startswith(STEWARD_SCHEDULE_PREFIX) and sid != STEWARD_SWEEP_SCHEDULE_ID:
+                legacy_ids.append(sid)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "register_steward_schedules: list_schedules failed: %s "
-            "— skipping orphan sweep", exc,
+            "register_steward_sweep: list_schedules failed: %s "
+            "— skipping legacy-schedule cleanup this boot", exc,
         )
         return 0
 
-    for sid in existing_ids:
-        if sid in live_ids:
-            continue
+    for sid in legacy_ids:
         try:
             await client.get_schedule_handle(sid).delete()
-            logger.info("register_steward_schedules: deleted orphan %s", sid)
+            logger.info(
+                "register_steward_sweep: deleted legacy per-matter "
+                "schedule %s", sid,
+            )
             deleted += 1
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "register_steward_schedules: delete %s failed: %s",
+                "register_steward_sweep: delete legacy %s failed: %s",
                 sid, exc,
             )
     return deleted
 
 
 async def register_steward_schedules(client: Client) -> None:
-    """Create-or-update one ``al-steward-<slug>`` schedule per matter.
+    """Register the single ``al-steward-sweep`` schedule (#52).
 
-    Idempotent: re-running creates missing schedules, refreshes existing
-    ones (so a cadence change lands without a manual purge), and
-    deletes orphaned schedules whose matter no longer exists in the
-    vault.
+    Replaces the former per-matter registrar. One schedule for the whole
+    fleet of matters: ``StewardSweepWorkflow`` runs every 30 min, lists
+    the matters whose per-task ``next_check_after`` cursors have elapsed,
+    and runs the existing per-matter Steward loop for each.
+
+    Also performs the one-time cleanup of the legacy per-matter
+    ``al-steward-<slug>`` schedules. Idempotent — re-running refreshes
+    the sweep schedule and finds no legacy schedules left to delete.
     """
     cfg = load_config()
-    matter_paths = await _list_matter_paths(cfg.alfred_ctrl_url)
-    if not matter_paths:
-        logger.info(
-            "register_steward_schedules: no matters found in vault "
-            "— nothing to register"
-        )
-        return
 
-    live_ids: set[str] = set()
-    counts = {"created": 0, "updated": 0, "unchanged": 0}
-    for path in matter_paths:
-        slug = _matter_slug_from_path(path)
-        if not slug:
-            continue
-        live_ids.add(_schedule_id_for_matter(slug))
+    action = ScheduleActionStartWorkflow(
+        STEWARD_SWEEP_WORKFLOW,
+        id=f"{STEWARD_SWEEP_SCHEDULE_ID}-run",
+        task_queue=cfg.task_queue,
+        # 25-minute envelope. One sweep does more work than a single
+        # per-matter run did (the old per-matter schedule used a 5-min
+        # cap), so the timeout is sized up — but stays well under the
+        # 30-min Hermes/Temporal cron norm (HERMES_CRON_TIMEOUT=1800)
+        # and under the 30-min schedule interval. The per-run matter
+        # count is bounded by SWEEP_MATTER_BATCH_LIMIT (200) so the
+        # worst case stays inside this envelope; matters beyond the cap
+        # drain on the next tick. Mirrors al-signal-extract's 25-min cap.
+        execution_timeout=timedelta(minutes=25),
+        run_timeout=timedelta(minutes=25),
+    )
+    spec = ScheduleSpec(
+        intervals=[ScheduleIntervalSpec(every=STEWARD_SWEEP_INTERVAL)],
+    )
+    # SKIP overlap: a sweep run that somehow ran past its envelope must
+    # not stack a second sweep on top — the per-task next_check_after
+    # cursors make the next tick re-pick any matter not yet processed.
+    new_schedule = Schedule(
+        action=action,
+        spec=spec,
+        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
+    )
+
+    async def _updater(inp: ScheduleUpdateInput) -> ScheduleUpdate:
+        return ScheduleUpdate(schedule=new_schedule)
+
+    handle = client.get_schedule_handle(STEWARD_SWEEP_SCHEDULE_ID)
+    try:
+        await handle.describe()
+        await handle.update(_updater)
+        logger.info(
+            "register_steward_sweep: schedule %s updated (30-min, SKIP)",
+            STEWARD_SWEEP_SCHEDULE_ID,
+        )
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
         try:
-            outcome = await _create_or_update_steward_schedule(
-                client, slug, cfg.task_queue,
+            await client.create_schedule(
+                STEWARD_SWEEP_SCHEDULE_ID, new_schedule,
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "register_steward_schedules: %s failed: %s",
-                _schedule_id_for_matter(slug), exc,
+            logger.info(
+                "register_steward_sweep: schedule %s created (30-min, SKIP)",
+                STEWARD_SWEEP_SCHEDULE_ID,
             )
-            continue
-        counts[outcome] = counts.get(outcome, 0) + 1
-        logger.info(
-            "register_steward_schedules: %s %s",
-            _schedule_id_for_matter(slug), outcome,
-        )
+        except RPCError as create_exc:
+            if create_exc.status != RPCStatusCode.ALREADY_EXISTS:
+                raise
+            logger.info(
+                "register_steward_sweep: schedule %s already exists "
+                "(skipping)", STEWARD_SWEEP_SCHEDULE_ID,
+            )
 
-    deleted = await _delete_orphan_steward_schedules(client, live_ids)
+    # One-time cleanup: delete every legacy per-matter al-steward-<slug>
+    # schedule now that the sweep owns all matters.
+    deleted = await _delete_legacy_steward_schedules(client)
     logger.info(
-        "register_steward_schedules: matters=%d created=%d updated=%d "
-        "unchanged=%d deleted_orphans=%d",
-        len(live_ids),
-        counts.get("created", 0),
-        counts.get("updated", 0),
-        counts.get("unchanged", 0),
+        "register_steward_sweep: legacy per-matter schedules deleted=%d",
         deleted,
     )
 
@@ -1329,9 +1237,10 @@ async def register_all() -> None:
     await register_plane_reconciliation(client, config.task_queue)
     # Fleet audit — daily wrong-tenant stream contamination check.
     await register_fleet_audit(client, config.task_queue)
-    # Steward (#835) — per-matter schedule (Phase 0). Always-on; the
-    # workflow itself is a no-op until Phase 1 swaps in evaluator
-    # logic, so registration cost is negligible.
+    # Steward (#835 → #52) — single ``al-steward-sweep`` schedule.
+    # Issue #52 collapsed the per-matter ``al-steward-<slug>`` fan-out
+    # into one StewardSweepWorkflow schedule; this call also does the
+    # one-time cleanup of the legacy per-matter schedules.
     await register_steward_schedules(client)
     # Steward Phase 4 (#840) — Vexa transcript intake. VEXA_ENABLED-gated
     # at registration time so a tenant without Vexa never gets these

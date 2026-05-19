@@ -363,6 +363,121 @@ async def load_matter_tasks(matter_id: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Activity: list_due_steward_matters (StewardSweepWorkflow — issue #52)
+# ---------------------------------------------------------------------------
+
+def _next_check_elapsed(value: Any, now: datetime) -> bool:
+    """Return True iff ``next_check_after`` is empty or refers to <= now.
+
+    Mirrors ``StewardWorkflow._next_check_due`` exactly so the sweep's
+    pre-filter and the per-matter loop's per-task gate agree on what
+    "due" means. A missing or unparseable cursor counts as due (a
+    malformed cursor must never pin a task forever).
+    """
+    if value is None:
+        return True
+    if isinstance(value, datetime):
+        ref = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return ref <= now
+    if not isinstance(value, str):
+        return True
+    s = value.strip()
+    if not s:
+        return True
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return True
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt <= now
+
+
+def _task_is_terminal(fm: dict[str, Any]) -> bool:
+    """Tasks in ``done`` / ``archived`` state are never due.
+
+    Mirrors ``StewardWorkflow._is_terminal_state`` so the sweep's
+    pre-filter excludes the same tasks the per-matter loop would skip.
+    """
+    state = fm.get("state")
+    if isinstance(state, str):
+        return state.strip().lower() in ("done", "archived")
+    return False
+
+
+@activity.defn
+async def list_due_steward_matters(batch_limit: int = 200) -> list[str]:
+    """Return matter ids that have >=1 task whose Steward check is due.
+
+    Single ctrl-api ``GET /api/v1/vault/list/task`` scan — the same call
+    ``load_matter_tasks`` makes, but done once for the whole sweep
+    instead of once per matter. Tasks are grouped by their resolved
+    ``parent_matter``; a matter is "due" iff at least one of its
+    non-terminal tasks has an elapsed (or missing) ``next_check_after``
+    cursor.
+
+    The returned list is the work set for one ``StewardSweepWorkflow``
+    run. It is capped at ``batch_limit`` matters per tick so a fleet
+    with hundreds of matters drains across consecutive 30-min ticks
+    rather than wedging one run — exactly the BATCH_LIMIT discipline
+    ``SignalExtractWorkflow`` uses. Matters are returned in sorted slug
+    order so the cap is deterministic across ticks (no starvation: a
+    capped-out matter sorts to the same position next tick and the
+    backlog drains predictably).
+
+    Errors from ctrl-api propagate so Temporal's retry policy can take
+    over — better to retry the whole listing than to sweep a partial
+    matter set.
+    """
+    cfg = load_config()
+    client = VaultClient(cfg)
+    try:
+        resp = await client._client.get(
+            "/api/v1/vault/list/task", params={"preview": 0}
+        )
+        resp.raise_for_status()
+        records = resp.json().get("results", [])
+    except httpx.HTTPError as exc:
+        logger.error(
+            "steward.list_due_steward_matters: ctrl-api list/task failed: %s",
+            exc,
+        )
+        raise
+    finally:
+        await client.close()
+
+    now = datetime.now(timezone.utc)
+    due_matters: set[str] = set()
+    for rec in records:
+        path = rec.get("path") or ""
+        if not path.startswith("task/") or not path.endswith(".md"):
+            continue
+        fm = rec.get("frontmatter") or {}
+        if not isinstance(fm, dict):
+            continue
+        if _task_is_terminal(fm):
+            continue
+        parent = _resolve_parent_matter(fm)
+        if not parent:
+            continue
+        if parent in due_matters:
+            # Already known due — no need to re-check the cursor.
+            continue
+        if _next_check_elapsed(fm.get("next_check_after"), now):
+            due_matters.add(parent)
+
+    ordered = sorted(due_matters)
+    capped = ordered[: max(0, int(batch_limit))]
+    logger.info(
+        "steward.list_due_steward_matters: due=%d returned=%d (cap=%d)",
+        len(ordered), len(capped), batch_limit,
+    )
+    return capped
+
+
+# ---------------------------------------------------------------------------
 # Phase 1: cadence helpers
 # ---------------------------------------------------------------------------
 

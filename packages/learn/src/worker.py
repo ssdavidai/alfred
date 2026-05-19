@@ -37,7 +37,7 @@ from src.workflows.composio_reconnect_cleanup import (
 # SessionStore makes that CPU-peg failure mode structurally impossible.
 # Safe to remove workflow + activity outright: alfred-black is a fresh
 # deploy with no Temporal history that could reference them on replay.
-from src.workflows.steward import StewardWorkflow
+from src.workflows.steward import StewardWorkflow, StewardSweepWorkflow
 from src.workflows.nightly_narrative import NightlyNarrativeWorkflow
 from src.workflows.decision_router import DecisionRouterWorkflow
 from src.workflows.decision_patterns import DecisionPatternsWorkflow
@@ -440,6 +440,7 @@ from src.activities.steward import (
     gather_signals_gmail as steward_gather_signals_gmail,
     gather_signals_sure as steward_gather_signals_sure,
     gather_signals_vault_record as steward_gather_signals_vault_record,
+    list_due_steward_matters as steward_list_due_steward_matters,
     load_matter_tasks as steward_load_matter_tasks,
     record_steward_check as steward_record_steward_check,
     update_matter_cadence as steward_update_matter_cadence,
@@ -674,7 +675,10 @@ _STATIC_WORKFLOWS = [
     FleetAuditWorkflow,
     ComposioReconnectCleanupWorkflow,
     # OpenclawSessionSweepWorkflow removed — Phase 2 #23.
+    # StewardWorkflow kept registered as a tombstone (#52): no longer
+    # scheduled per-matter, but callable ad-hoc and harmless to register.
     StewardWorkflow,
+    StewardSweepWorkflow,
     NightlyNarrativeWorkflow,
     DecisionRouterWorkflow,
     DecisionPatternsWorkflow,
@@ -953,6 +957,7 @@ ALL_ACTIVITIES = [
     # gather_signals_vault_record + evaluate_state. Phase 2 adds the
     # gmail / sure / ctrl-api stream gatherers plus the matter-level
     # cadence backoff helper.
+    steward_list_due_steward_matters,
     steward_load_matter_tasks,
     steward_evaluate_task,
     steward_record_steward_check,
