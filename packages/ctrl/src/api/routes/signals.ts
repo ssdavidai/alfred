@@ -29,6 +29,7 @@ import {
   type SignalRow,
   type ListSignalsOpts,
 } from "../../db/signal_queries.js";
+import { classifyEngineeringNoise } from "./signals_filter.js";
 
 interface SignalRowOut {
   id: string;
@@ -102,6 +103,11 @@ interface InsertBody {
   classified_noise?: unknown;
   payload?: unknown;
 }
+
+// Engineering-tag deny-list lives in ./signals_filter.ts so the helpers
+// can be unit-tested without standing up state.db / the .sql migration
+// loader. See PR fix/learn-signal-writer-block-engineering-tags for the
+// 2026-05-19 david "P3-2 smoke detector" incident that motivated this.
 
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value) {
@@ -244,6 +250,29 @@ export function registerSignalRoutes(): void {
       b.id === undefined || b.id === null
         ? undefined
         : requireString(b.id, "id");
+
+    // PR fix/learn-signal-writer-block-engineering-tags — engineering /
+    // ops prose must never become a principal-visible signal. Block at
+    // the writer so downstream readers (brief, desk, decisions) don't
+    // each need their own filter.
+    const rejection = classifyEngineeringNoise({
+      source_type,
+      actor,
+      display_headline,
+      display_body,
+      body: body_text,
+    });
+    if (rejection !== null) {
+      sendJson(res, 400, {
+        error: {
+          code: "REJECTED_ENGINEERING_TAG",
+          message: `signal rejected: ${rejection.reason}`,
+          rejected: rejection.reason,
+          pattern: rejection.pattern ?? null,
+        },
+      });
+      return;
+    }
 
     const db = openStateDb();
     const effectiveTs = ts ?? BigInt(Date.now()) * 1_000_000n;
