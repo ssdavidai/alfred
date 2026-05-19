@@ -18,7 +18,6 @@ if (fs.existsSync(envPath)) {
 import { setApiKey } from "./auth.js";
 import { createApiServer } from "./server.js";
 import { attachTerminalUpgrade } from "./routes/terminal.js";
-import { flushPendingOpenclawWrites } from "./routes/integrations.js";
 import { getStateDb, closeStateDb } from "../db/state.js";
 import { getIngestDb, startIngestSweep, closeIngestDb } from "../db/ingest.js";
 import { getColdDb, closeColdDb } from "../db/cold.js";
@@ -77,7 +76,6 @@ server.listen(port, host, () => {
 
 function shutdown(signal: string): void {
   console.log(`${signal} received, shutting down...`);
-  flushPendingOpenclawWrites();
   stopCompactor();
   closeIngestDb();
   closeColdDb();
@@ -87,7 +85,3 @@ function shutdown(signal: string): void {
 
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
-
-process.on("beforeExit", () => {
-  flushPendingOpenclawWrites();
-});

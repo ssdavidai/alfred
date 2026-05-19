@@ -21,7 +21,6 @@
 import { mock, describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import yaml from "js-yaml";
 import type { AddressInfo } from "node:net";
 
 // ---------------------------------------------------------------------------
@@ -278,7 +277,6 @@ process.env.COMPOSIO_USER_ID = "alfred-test-user";
 const integrationsModule = await import("../src/api/routes/integrations.js");
 const { createApiServer } = await import("../src/api/server.js");
 
-const OPENCLAW_CONFIG_PATH = "/hermes-data/main/config.yaml";
 const STREAM_CONFIGS_DIR = "/mnt/encrypted/alfred/streams/configs";
 
 let server: http.Server;
@@ -289,7 +287,6 @@ before(async () => {
 });
 
 after(async () => {
-  integrationsModule.flushPendingOpenclawWrites();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   globalThis.fetch = realFetch;
 });
@@ -345,13 +342,6 @@ function seedConn(opts: { id: string; toolkit: string; status?: string }): void 
   });
 }
 
-// Hermes profile config is YAML with a `tools.enabled` list.
-function seedOpenclawConfig(allow: string[]): void {
-  const cfg = yaml.dump({ tools: { enabled: allow } });
-  memFs.set(OPENCLAW_CONFIG_PATH, cfg);
-  memFs.set("/hermes-data/workers/config.yaml", cfg);
-}
-
 /**
  * Build a Temporal `schedule describe --output json` response that encodes
  * `{stream_id}` as the workflow's first input payload — same envelope shape
@@ -371,14 +361,11 @@ function describeJson(streamId: string): string {
 describe("auto-config — schedule freshness check (Defect B)", () => {
   it("creates a new schedule when none exists", async () => {
     seedConn({ id: "ca_notion", toolkit: "notion" });
-    seedOpenclawConfig(["sessions_send"]);
-    // describeResponder returns null → describe fails → exists: false.
 
     const { status, data } = await req(
       "POST",
       "/api/v1/integrations/ca_notion/auto-config",
     );
-    integrationsModule.flushPendingOpenclawWrites();
 
     assert.strictEqual(status, 200, `expected 200, got ${status} (${JSON.stringify(data)})`);
     const expectedStreamId = "composio-notion-notion-fetch-data";
@@ -398,7 +385,6 @@ describe("auto-config — schedule freshness check (Defect B)", () => {
 
   it("skips create when the existing schedule already encodes the right stream_id", async () => {
     seedConn({ id: "ca_notion", toolkit: "notion" });
-    seedOpenclawConfig(["sessions_send"]);
 
     const expectedStreamId = "composio-notion-notion-fetch-data";
     const expectedScheduleId = `al-stream-pull-composio-${expectedStreamId.slice(0, 20)}`;
@@ -409,7 +395,6 @@ describe("auto-config — schedule freshness check (Defect B)", () => {
       "POST",
       "/api/v1/integrations/ca_notion/auto-config",
     );
-    integrationsModule.flushPendingOpenclawWrites();
 
     assert.strictEqual(status, 200, `expected 200, got ${status}`);
     assert.strictEqual(data.stream_created, expectedStreamId);
@@ -427,7 +412,6 @@ describe("auto-config — schedule freshness check (Defect B)", () => {
 
   it("deletes + recreates when the existing schedule encodes a stale stream_id", async () => {
     seedConn({ id: "ca_notion", toolkit: "notion" });
-    seedOpenclawConfig(["sessions_send"]);
 
     // Stale: schedule encodes the old NOTION_LIST_PAGES stream id even though
     // RECOMMENDED_STREAMS now points at NOTION_FETCH_DATA.
@@ -441,7 +425,6 @@ describe("auto-config — schedule freshness check (Defect B)", () => {
       "POST",
       "/api/v1/integrations/ca_notion/auto-config",
     );
-    integrationsModule.flushPendingOpenclawWrites();
 
     assert.strictEqual(status, 200, `expected 200, got ${status} (${JSON.stringify(data)})`);
     assert.strictEqual(data.stream_created, desiredStreamId);
@@ -463,7 +446,6 @@ describe("auto-config — schedule freshness check (Defect B)", () => {
 
   it("recreates when the existing schedule's input is unparseable (treated as stale)", async () => {
     seedConn({ id: "ca_notion", toolkit: "notion" });
-    seedOpenclawConfig(["sessions_send"]);
 
     const desiredStreamId = "composio-notion-notion-fetch-data";
     const expectedScheduleId = `al-stream-pull-composio-${desiredStreamId.slice(0, 20)}`;
@@ -476,7 +458,6 @@ describe("auto-config — schedule freshness check (Defect B)", () => {
       "POST",
       "/api/v1/integrations/ca_notion/auto-config",
     );
-    integrationsModule.flushPendingOpenclawWrites();
 
     assert.strictEqual(status, 200);
     assert.ok(

@@ -226,12 +226,14 @@ beforeEach(() => {
   files.clear();
   dirs.clear();
   dropWritesTo = null;
-  ensureDirs("/hermes-data/main/workspace/skills");
-  ensureDirs("/hermes-data/workers/workspace/skills");
+  ensureDirs("/opt/data/profiles/main/workspace/skills");
+  ensureDirs("/opt/data/profiles/workers/workspace/skills");
 });
 
-const OC = "/hermes-data/main/workspace/skills";
-const OCW = "/hermes-data/workers/workspace/skills";
+// Hermes resolves profile state under HERMES_HOME (default /opt/data); each
+// profile's workspace skills live at /opt/data/profiles/<profile>/workspace/skills.
+const OC = "/opt/data/profiles/main/workspace/skills";
+const OCW = "/opt/data/profiles/workers/workspace/skills";
 
 async function req(
   method: string,

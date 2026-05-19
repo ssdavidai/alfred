@@ -20,18 +20,21 @@ import { addRoute } from "../server.js";
 import { sendJson } from "../errors.js";
 import { dockerExec, dockerComposeCmd, HERMES_CMD, HERMES_CONTAINER } from "../helpers.js";
 
-// Hermes per-profile config lives in the hermes_data volume, one config.yaml
-// per profile. The `main` profile config doubles as the source for the
-// tool-enable list and MCP server inventory the /tools dashboard reads.
-const HERMES_CONFIG_DIR = process.env.HERMES_CONFIG_DIR ?? "/hermes-data";
+// Hermes resolves all profile state under HERMES_HOME (default /opt/data in
+// the runtime container — see packages/hermes/Dockerfile). Each profile lives
+// at ${HERMES_HOME}/profiles/<profile>/config.yaml. ctrl-api reads the `main`
+// profile config READ-ONLY to derive the dashboard's tool inventory; it never
+// writes it — runtime config changes go through native `hermes` CLI commands
+// (`hermes config set`, `hermes tools`). The legacy HERMES_CONFIG_DIR override
+// is still honoured for deployments that pin a custom path.
+const HERMES_HOME = process.env.HERMES_HOME ?? "/opt/data";
+const HERMES_CONFIG_DIR = process.env.HERMES_CONFIG_DIR ?? `${HERMES_HOME}/profiles`;
 const HERMES_MAIN_CONFIG = `${HERMES_CONFIG_DIR}/main/config.yaml`;
 // The Hermes `main` API server binds `:18789`; `GET /health` is its
 // liveness probe.
 const HERMES_HEALTH_URL =
   process.env.HERMES_GATEWAY_URL ?? "http://hermes:18789";
 const HEALTH_PROBE_TIMEOUT_MS = 1500;
-// How long after a config touch we still assume a hermes restart is in-flight.
-const RESTART_WINDOW_MS = 60_000;
 
 /** Load + parse a Hermes profile config.yaml. Returns {} if unreadable. */
 function readHermesConfig(configPath: string): Record<string, any> {
@@ -78,16 +81,15 @@ export function registerHermesRoutes(): void {
   });
 
   // ── Gateway readiness ─────────────────────────────────────────
-  // Fast, poll-friendly signal for the dashboard to detect the restart
-  // window that follows a tool-enable config change.
+  // Fast, poll-friendly liveness signal for the dashboard.
+  //
+  // Composio tool access (composio_execute) is served by the always-on
+  // `execute` MCP server — connecting/disconnecting an app no longer touches
+  // any Hermes config and never triggers a gateway restart. The dashboard's
+  // ReconfiguringBanner therefore never fires from this route; the
+  // `last_config_touch_at` / `restart_expected_until` fields are retained as
+  // permanent nulls only so the web `getOpenclawReadiness` shape is stable.
   dual("GET", "ready", async ({ res }) => {
-    let lastTouchedAt: string | null = null;
-    try {
-      const cfg = readHermesConfig(HERMES_MAIN_CONFIG);
-      const v = cfg?.meta?.last_touched_at ?? cfg?.meta?.lastTouchedAt;
-      if (typeof v === "string" && v.length > 0) lastTouchedAt = v;
-    } catch { /* treat as null */ }
-
     let ready = false;
     try {
       const ctrl = new AbortController();
@@ -97,18 +99,10 @@ export function registerHermesRoutes(): void {
       ready = resp.ok;
     } catch { /* probe failed — not ready */ }
 
-    let restartExpectedUntil: string | null = null;
-    if (!ready && lastTouchedAt) {
-      const touchMs = Date.parse(lastTouchedAt);
-      if (Number.isFinite(touchMs) && Date.now() - touchMs < RESTART_WINDOW_MS) {
-        restartExpectedUntil = new Date(touchMs + RESTART_WINDOW_MS).toISOString();
-      }
-    }
-
     sendJson(res, 200, {
       ready,
-      last_config_touch_at: lastTouchedAt,
-      restart_expected_until: restartExpectedUntil,
+      last_config_touch_at: null,
+      restart_expected_until: null,
     });
   });
 
@@ -278,25 +272,37 @@ export function registerHermesRoutes(): void {
   });
 
   // ═════════════════════════════════════════════════════════════
-  // GET .../allowed-tools — built-in + MCP tool inventory.
+  // GET .../allowed-tools — built-in + MCP tool inventory (READ-ONLY).
   //
-  // Returns the two tool surfaces that live outside Composio. Sourced from
-  // the Hermes `main` profile config.yaml tool-enable section (was
-  // `gateway.tools.allow` in openclaw.json).
+  // The dashboard's /tools page renders this. It is a thin read of the
+  // Hermes `main` profile config.yaml — the file Hermes itself owns:
+  //
+  //   • built-in tools  ← the `platform_toolsets.cli` toolset list (the
+  //                        Hermes-native replacement for the OpenClaw
+  //                        `gateway.tools.allow` array). These are toolset
+  //                        keys (web, file, …), not individual tool names.
+  //   • MCP servers     ← the `mcp_servers` map keys.
+  //
+  // ctrl-api never writes this config — `hermes config set` / `hermes tools`
+  // are the native write path. Composio is NOT modelled here: it is a single
+  // `composio_execute` MCP tool, surfaced per-connection by the
+  // /integrations/:id/capabilities endpoint, not a per-action allow-list.
   // ═════════════════════════════════════════════════════════════
   dual("GET", "allowed-tools", async ({ res }) => {
     const cfg = readHermesConfig(HERMES_MAIN_CONFIG);
 
-    // Hermes config tool-enable section. Tolerate a few shapes so the route
-    // is robust to the exact key the hermes-config template settles on.
+    // Built-in capability surface: the `main` profile's CLI platform
+    // toolsets. Older configs used `tools.enabled` / `gateway.tools.allow`;
+    // tolerate them so the route degrades cleanly on a not-yet-migrated VM.
     const allow: string[] =
+      (Array.isArray(cfg?.platform_toolsets?.cli) && cfg.platform_toolsets.cli) ||
       (Array.isArray(cfg?.tools?.enabled) && cfg.tools.enabled) ||
-      (Array.isArray(cfg?.tools?.allow) && cfg.tools.allow) ||
       (Array.isArray(cfg?.gateway?.tools?.allow) && cfg.gateway.tools.allow) ||
       [];
 
-    const mcpSection = cfg?.mcp?.servers ?? cfg?.mcp_servers ?? {};
-    const mcpServers: string[] = mcpSection ? Object.keys(mcpSection) : [];
+    const mcpSection = cfg?.mcp_servers ?? cfg?.mcp?.servers ?? {};
+    const mcpServers: string[] =
+      mcpSection && typeof mcpSection === "object" ? Object.keys(mcpSection) : [];
 
     // Strip Composio action slugs — described separately via the
     // per-connection capabilities endpoint.
@@ -375,18 +381,22 @@ const MCP_SERVER_TOOLS: Record<
   ],
 };
 
-// Short human-readable descriptions for the built-in gateway tools. Under
-// Hermes, run lifecycle is the native `/v1/runs` API and subagent fan-out is
-// the `delegate_task` tool — the OpenClaw `sessions_spawn`/`sessions_history`/
-// `sessions_delete`/`sessions_list` primitives were all retired (the last,
-// `sessions_list`, in issue #39 — ctrl-api delivery-target lookup now reads
-// the native Hermes gateway session index directly).
+// Short human-readable descriptions for the Hermes built-in toolset keys that
+// appear in `platform_toolsets`. These are toolset *groups* (the unit Hermes'
+// own `hermes tools` CLI enables/disables), not individual tool names. The
+// `hermes-*` keys are the bundled per-platform toolsets; the bare keys are the
+// granular built-in toolsets the `workers` profile composes from.
 const BUILTIN_TOOL_DESCRIPTIONS: Record<string, string> = {
-  web_search: "Search the web via the configured search provider.",
-  web_fetch: "Fetch a URL and return the cleaned text contents.",
-  composio_execute:
-    "Dispatch any Composio action (Gmail, Slack, Notion, …) on a connected account.",
-  ctrl_composio_execute:
-    "(legacy dispatch name, superseded by composio_execute — kept for in-flight sessions)",
-  delegate_task: "Delegate a subtask to a child agent run.",
+  "hermes-cli": "Full built-in toolset for the CLI surface (terminal, file, web, skills, …).",
+  "hermes-telegram": "Built-in toolset for the Telegram channel.",
+  "hermes-slack": "Built-in toolset for the Slack channel.",
+  "hermes-discord": "Built-in toolset for the Discord channel.",
+  "hermes-whatsapp": "Built-in toolset for the WhatsApp channel.",
+  "hermes-signal": "Built-in toolset for the Signal channel.",
+  terminal: "Run shell commands in the agent workspace.",
+  file: "Read, write, patch, and search files in the workspace.",
+  web: "Search the web and fetch URL contents.",
+  vision: "Inspect images and visual media.",
+  skills: "Load and run installed Hermes skills.",
+  todo: "Maintain the agent's task list within a run.",
 };

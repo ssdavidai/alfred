@@ -1,26 +1,28 @@
-// Tests for the DELETE / disconnect-all integration paths fixed in #658
-// and the auto-config name fix in #659.
+// Tests for the DELETE / disconnect-all integration paths.
 //
-// Coverage:
+// Originally (#658/#659) these covered a Hermes-config tool-enable list that
+// ctrl-api hand-edited per-connection. Issue #44 removed that machinery: under
+// Hermes, Composio is the single always-on `composio_execute` MCP tool — there
+// is no per-action allow-list to mutate and no gateway restart on connect /
+// disconnect. What remains real, and is covered here:
+//
 //   - DELETE on a tenant with N>1 Composio connections of mixed toolkits:
-//       * the deleted connection's toolkit prefix stays in the allowlist
-//         IF another ACTIVE connection of the same toolkit survives.
-//       * `composio_execute` always survives a single-id DELETE.
-//       * Other toolkits' allow entries are untouched.
-//   - DELETE on the LAST connection of a toolkit while OTHER toolkits
-//     survive: the deleted toolkit's prefix is stripped, the per-toolkit
-//     skill dir is deleted, but `composio_execute` and other toolkits'
-//     prefixes remain.
+//       * the per-toolkit skill dir survives IF another ACTIVE connection of
+//         the same toolkit survives;
+//       * it is removed when the deleted connection was the LAST of its
+//         toolkit;
+//       * other toolkits' skill dirs are untouched.
 //   - POST /api/v1/integrations/disconnect-all enumerates every owned
-//     connection, deletes each at Composio, removes `composio_execute`
-//     from the allowlist, and clears every alfred-composio-* skill dir.
-//   - POST /api/v1/integrations/:id/auto-config registers the canonical
-//     `composio_execute` tool name (NOT the dead `ctrl_composio_execute`).
+//     connection, deletes each at Composio, and clears every
+//     alfred-composio-* skill dir (non-composio skills untouched).
+//   - POST /api/v1/integrations/:id/auto-config reports composio_execute as
+//     enabled with no gateway restart.
+//   - Every response carries `gateway_restart_triggered: false` and
+//     `removed_tools: []` — there is no Hermes config to mutate.
 
 import { mock, describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import yaml from "js-yaml";
 import type { AddressInfo } from "node:net";
 
 // ---------------------------------------------------------------------------
@@ -52,14 +54,8 @@ globalThis.fetch = (async (url: any, init?: any) => {
 
   // GET /api/v3/connected_accounts (list, paginated)
   if (method === "GET" && /\/api\/v3\/connected_accounts(?:\?|$)/.test(u)) {
-    // The route paginates with cursor, but our mock returns all matching
-    // conns in one page (we never set next_cursor).
     const parsed = new URL(u);
     const filterUid = parsed.searchParams.get("user_id");
-    // Composio's server-side filter is buggy in production (issue #658), but
-    // for these tests we simulate the CORRECT behaviour — the route now
-    // always re-filters locally with accountMatchesUserId, so a buggy
-    // upstream would not change the test outcomes.
     const items = [...composioConns.values()].filter(
       (c) => !filterUid || c.user_id === filterUid,
     );
@@ -94,7 +90,7 @@ globalThis.fetch = (async (url: any, init?: any) => {
     return new Response(JSON.stringify({ deleted: true }), { status: 200 });
   }
 
-  // POST /api/v2/actions?apps=... (skill generation — return empty list so
+  // GET /api/v2/actions?apps=... (skill generation — return empty list so
   // generateComposioSkill writes a minimal SKILL.md without exploding).
   if (method === "GET" && u.includes("/api/v2/actions")) {
     return new Response(
@@ -117,7 +113,6 @@ const memFs: Map<string, string> = new Map();
 const memDirs: Set<string> = new Set();
 
 function ensureParentDirs(p: string): void {
-  // Track every prefix path so readdirSync finds nested dirs.
   const parts = p.split("/").filter(Boolean);
   let cur = "";
   for (const part of parts.slice(0, -1)) {
@@ -175,7 +170,6 @@ const fsMock = {
   }),
   appendFileSync: mock.fn(),
   rmSync: mock.fn((p: string) => {
-    // Recursive remove — clear file at exact path AND any descendants.
     memFs.delete(p);
     memDirs.delete(p);
     for (const f of [...memFs.keys()]) {
@@ -239,11 +233,13 @@ mock.module("node:child_process", {
 process.env.COMPOSIO_API_KEY = "test-composio-key";
 process.env.COMPOSIO_USER_ID = "alfred-test-user";
 
-const integrationsModule = await import("../src/api/routes/integrations.js");
+await import("../src/api/routes/integrations.js");
 const { createApiServer } = await import("../src/api/server.js");
 
-const OPENCLAW_CONFIG_PATH = "/hermes-data/main/config.yaml";
-const OPENCLAW_WORKERS_CONFIG_PATH = "/hermes-data/workers/config.yaml";
+// Hermes profile workspace skill dirs — HERMES_HOME defaults to /opt/data, so
+// profiles live at /opt/data/profiles/<profile>/workspace/skills.
+const SKILLS_DIR = "/opt/data/profiles/main/workspace/skills";
+const WORKERS_SKILLS_DIR = "/opt/data/profiles/workers/workspace/skills";
 
 let server: http.Server;
 
@@ -253,9 +249,6 @@ before(async () => {
 });
 
 after(async () => {
-  // Flush any debounced openclaw.json writes before tearing down so the
-  // memFs reflects final state during assertions.
-  integrationsModule.flushPendingOpenclawWrites();
   await new Promise<void>((resolve) => server.close(() => resolve()));
   globalThis.fetch = realFetch;
 });
@@ -317,300 +310,204 @@ function seedConn(opts: Partial<FakeConn> & { id: string; toolkit: string }): Fa
   return conn;
 }
 
-// Hermes profile config is YAML with a `tools.enabled` list (was openclaw.json
-// `gateway.tools.allow`). seed/read helpers model that.
-function seedOpenclawConfig(allow: string[]): void {
-  const cfg = yaml.dump({ tools: { enabled: allow } });
-  memFs.set(OPENCLAW_CONFIG_PATH, cfg);
-  memFs.set(OPENCLAW_WORKERS_CONFIG_PATH, cfg);
-}
-
-function readAllow(path: string): string[] {
-  const raw = memFs.get(path);
-  if (!raw) return [];
-  try {
-    const cfg = yaml.load(raw) as any;
-    return cfg?.tools?.enabled ?? [];
-  } catch { return []; }
-}
-
-function flush(): void {
-  integrationsModule.flushPendingOpenclawWrites();
-}
-
 // ---------------------------------------------------------------------------
-// #658 — DELETE single connection, surviving siblings of same toolkit
+// DELETE single connection — per-toolkit skill-dir lifecycle
 // ---------------------------------------------------------------------------
 
-describe("DELETE /api/v1/integrations/:id — sibling-of-same-toolkit survival (#658)", () => {
-  it("keeps GMAIL_* prefix + composio_execute when a second Gmail connection survives", async () => {
+describe("DELETE /api/v1/integrations/:id — sibling-of-same-toolkit survival", () => {
+  it("keeps the shared skill dir when a second Gmail connection survives", async () => {
     seedConn({ id: "ca_gmail_personal", toolkit: "gmail" });
     seedConn({ id: "ca_gmail_work",     toolkit: "gmail" });
     seedConn({ id: "ca_gcal",           toolkit: "googlecalendar" });
-    seedOpenclawConfig([
-      "composio_execute",
-      "GMAIL_FETCH_EMAILS",
-      "GMAIL_SEND_EMAIL",
-      "GOOGLECALENDAR_EVENTS_LIST",
-      "sessions_send",
-    ]);
     // Pre-seed the per-toolkit skill dir so we can confirm it survives.
-    memFs.set(
-      "/hermes-data/main/workspace/skills/alfred-composio-gmail/SKILL.md",
-      "x",
-    );
+    memFs.set(`${SKILLS_DIR}/alfred-composio-gmail/SKILL.md`, "x");
 
-    const { status, data } = await req(
-      "DELETE",
-      "/api/v1/integrations/ca_gmail_personal",
-    );
-    flush();
+    const { status, data } = await req("DELETE", "/api/v1/integrations/ca_gmail_personal");
 
     assert.strictEqual(status, 200, `expected 200, got ${status} (${JSON.stringify(data)})`);
     assert.strictEqual(data.toolkit, "gmail");
-    assert.deepStrictEqual(data.removed_tools, [], "no toolkit prefix should be stripped — Gmail work survives");
+    // There is no Hermes tool-enable list under Hermes — these are always
+    // empty/false. composio_execute lives on the always-on `execute` MCP server.
+    assert.deepStrictEqual(data.removed_tools, []);
     assert.strictEqual(data.skill_removed, false, "shared skill dir survives");
     assert.strictEqual(data.gateway_restart_triggered, false);
-    // Issue #658 regression: this field is gone. The handler no longer
-    // claims to manage composio_execute on single-id deletes.
     assert.strictEqual(
       Object.prototype.hasOwnProperty.call(data, "composio_execute_removed"),
       false,
       "single-id DELETE must not claim authority over composio_execute",
     );
-
-    const allow = readAllow(OPENCLAW_CONFIG_PATH);
-    assert.ok(allow.includes("composio_execute"), "composio_execute MUST survive");
-    assert.ok(allow.includes("GMAIL_FETCH_EMAILS"), "GMAIL_* must survive — work account still active");
-    assert.ok(allow.includes("GMAIL_SEND_EMAIL"));
-    assert.ok(allow.includes("GOOGLECALENDAR_EVENTS_LIST"), "unrelated toolkit untouched");
     assert.ok(
-      memFs.has("/hermes-data/main/workspace/skills/alfred-composio-gmail/SKILL.md"),
+      memFs.has(`${SKILLS_DIR}/alfred-composio-gmail/SKILL.md`),
       "shared per-toolkit skill dir must survive",
     );
   });
 
-  it("strips only the deleted toolkit's prefix when it was the LAST of its toolkit and other toolkits remain", async () => {
+  it("removes the skill dir when deleting the LAST connection of a toolkit", async () => {
     seedConn({ id: "ca_gmail",   toolkit: "gmail" });
     seedConn({ id: "ca_gcal",    toolkit: "googlecalendar" });
     seedConn({ id: "ca_notion",  toolkit: "notion" });
-    seedOpenclawConfig([
-      "composio_execute",
-      "GMAIL_FETCH_EMAILS",
-      "GMAIL_SEND_EMAIL",
-      "GOOGLECALENDAR_EVENTS_LIST",
-      "NOTION_FETCH_DATA",
-    ]);
-    memFs.set(
-      "/hermes-data/main/workspace/skills/alfred-composio-gmail/SKILL.md",
-      "x",
-    );
-    memFs.set(
-      "/hermes-data/workers/workspace/skills/alfred-composio-gmail/SKILL.md",
-      "x",
-    );
-    memFs.set(
-      "/hermes-data/main/workspace/skills/alfred-composio-notion/SKILL.md",
-      "y",
-    );
+    memFs.set(`${SKILLS_DIR}/alfred-composio-gmail/SKILL.md`, "x");
+    memFs.set(`${WORKERS_SKILLS_DIR}/alfred-composio-gmail/SKILL.md`, "x");
+    memFs.set(`${SKILLS_DIR}/alfred-composio-notion/SKILL.md`, "y");
 
     const { status, data } = await req("DELETE", "/api/v1/integrations/ca_gmail");
-    flush();
 
     assert.strictEqual(status, 200);
     assert.strictEqual(data.toolkit, "gmail");
-    assert.deepStrictEqual(
-      [...data.removed_tools].sort(),
-      ["GMAIL_FETCH_EMAILS", "GMAIL_SEND_EMAIL"],
-    );
+    assert.deepStrictEqual(data.removed_tools, []);
     assert.strictEqual(data.skill_removed, true);
-
-    const allow = readAllow(OPENCLAW_CONFIG_PATH);
-    assert.ok(allow.includes("composio_execute"), "composio_execute MUST survive single-id DELETE");
-    assert.ok(!allow.includes("GMAIL_FETCH_EMAILS"));
-    assert.ok(!allow.includes("GMAIL_SEND_EMAIL"));
-    assert.ok(allow.includes("GOOGLECALENDAR_EVENTS_LIST"), "unrelated toolkit untouched");
-    assert.ok(allow.includes("NOTION_FETCH_DATA"), "unrelated toolkit untouched");
+    assert.strictEqual(data.gateway_restart_triggered, false);
 
     assert.ok(
-      !memFs.has("/hermes-data/main/workspace/skills/alfred-composio-gmail/SKILL.md"),
+      !memFs.has(`${SKILLS_DIR}/alfred-composio-gmail/SKILL.md`),
       "deleted toolkit skill dir gone (main)",
     );
     assert.ok(
-      !memFs.has("/hermes-data/workers/workspace/skills/alfred-composio-gmail/SKILL.md"),
+      !memFs.has(`${WORKERS_SKILLS_DIR}/alfred-composio-gmail/SKILL.md`),
       "deleted toolkit skill dir gone (workers)",
     );
     assert.ok(
-      memFs.has("/hermes-data/main/workspace/skills/alfred-composio-notion/SKILL.md"),
+      memFs.has(`${SKILLS_DIR}/alfred-composio-notion/SKILL.md`),
       "unrelated toolkit skill dir untouched",
     );
   });
 
-  it("does NOT strip any allow-list entries when deleting the LAST connection of last toolkit (composio_execute + prefix preserved)", async () => {
-    // Even when this is the actual last Composio connection on the tenant,
-    // the single-id DELETE must NOT take down composio_execute. That global
-    // teardown is the job of POST /disconnect-all.
+  it("removes the skill dir even when it is the last Composio connection", async () => {
     seedConn({ id: "ca_gmail_only", toolkit: "gmail" });
-    seedOpenclawConfig([
-      "composio_execute",
-      "GMAIL_FETCH_EMAILS",
-      "sessions_send",
-    ]);
-    memFs.set(
-      "/hermes-data/main/workspace/skills/alfred-composio-gmail/SKILL.md",
-      "x",
-    );
+    memFs.set(`${SKILLS_DIR}/alfred-composio-gmail/SKILL.md`, "x");
 
     const { status, data } = await req("DELETE", "/api/v1/integrations/ca_gmail_only");
-    flush();
 
     assert.strictEqual(status, 200);
-    // The toolkit prefix is stripped (no other gmail conn), but composio_execute lives on.
-    assert.deepStrictEqual(data.removed_tools, ["GMAIL_FETCH_EMAILS"]);
-    const allow = readAllow(OPENCLAW_CONFIG_PATH);
-    assert.ok(
-      allow.includes("composio_execute"),
-      "composio_execute MUST survive even the last Composio connection's single-id DELETE",
-    );
-    assert.ok(!allow.includes("GMAIL_FETCH_EMAILS"));
-    assert.ok(allow.includes("sessions_send"));
+    assert.deepStrictEqual(data.removed_tools, []);
+    assert.strictEqual(data.gateway_restart_triggered, false);
+    assert.strictEqual(data.skill_removed, true);
+    assert.ok(!memFs.has(`${SKILLS_DIR}/alfred-composio-gmail/SKILL.md`));
   });
 });
 
 // ---------------------------------------------------------------------------
-// #658 — POST /disconnect-all
+// POST /disconnect-all
 // ---------------------------------------------------------------------------
 
-describe("POST /api/v1/integrations/disconnect-all — explicit global cleanup (#658)", () => {
-  it("deletes every connection and clears the entire Composio surface", async () => {
+describe("POST /api/v1/integrations/disconnect-all — explicit global cleanup", () => {
+  it("deletes every connection and clears every alfred-composio-* skill dir", async () => {
     seedConn({ id: "ca_gmail",  toolkit: "gmail" });
     seedConn({ id: "ca_gcal",   toolkit: "googlecalendar" });
     seedConn({ id: "ca_notion", toolkit: "notion" });
-    seedOpenclawConfig([
-      "composio_execute",
-      "GMAIL_FETCH_EMAILS",
-      "GMAIL_SEND_EMAIL",
-      "GOOGLECALENDAR_EVENTS_LIST",
-      "NOTION_FETCH_DATA",
-      "sessions_send",
-    ]);
     for (const toolkit of ["gmail", "googlecalendar", "notion"]) {
-      memFs.set(
-        `/hermes-data/main/workspace/skills/alfred-composio-${toolkit}/SKILL.md`,
-        "x",
-      );
-      memFs.set(
-        `/hermes-data/workers/workspace/skills/alfred-composio-${toolkit}/SKILL.md`,
-        "x",
-      );
+      memFs.set(`${SKILLS_DIR}/alfred-composio-${toolkit}/SKILL.md`, "x");
+      memFs.set(`${WORKERS_SKILLS_DIR}/alfred-composio-${toolkit}/SKILL.md`, "x");
     }
     // Sentinel: a non-composio skill dir must NOT be touched.
-    memFs.set(
-      "/hermes-data/main/workspace/skills/alfred-vault-operations/SKILL.md",
-      "keep me",
-    );
+    memFs.set(`${SKILLS_DIR}/alfred-vault-operations/SKILL.md`, "keep me");
 
     const { status, data } = await req("POST", "/api/v1/integrations/disconnect-all");
-    flush();
 
     assert.strictEqual(status, 200, `expected 200, got ${status} (${JSON.stringify(data)})`);
     assert.strictEqual(data.disconnected_count, 3);
     assert.deepStrictEqual([...data.disconnected_ids].sort(), ["ca_gcal", "ca_gmail", "ca_notion"]);
     assert.deepStrictEqual([...data.toolkits].sort(), ["gmail", "googlecalendar", "notion"]);
     assert.deepStrictEqual(data.failed_ids, []);
-    assert.ok(data.gateway_restart_triggered, "global cleanup mutates allowlist → restart");
+    // No Hermes config to mutate — never a gateway restart.
+    assert.strictEqual(data.gateway_restart_triggered, false);
+    assert.deepStrictEqual(data.removed_tools, []);
 
     // Composio-side: every conn DELETEd.
     assert.ok(deletedConns.has("ca_gmail"));
     assert.ok(deletedConns.has("ca_gcal"));
     assert.ok(deletedConns.has("ca_notion"));
 
-    // Allowlist: composio_execute + every toolkit prefix gone, sessions_send survives.
-    const allow = readAllow(OPENCLAW_CONFIG_PATH);
-    assert.ok(!allow.includes("composio_execute"));
-    assert.ok(!allow.includes("GMAIL_FETCH_EMAILS"));
-    assert.ok(!allow.includes("GMAIL_SEND_EMAIL"));
-    assert.ok(!allow.includes("GOOGLECALENDAR_EVENTS_LIST"));
-    assert.ok(!allow.includes("NOTION_FETCH_DATA"));
-    assert.ok(allow.includes("sessions_send"), "non-composio tools untouched");
-
-    // Same on workers.
-    const workersAllow = readAllow(OPENCLAW_WORKERS_CONFIG_PATH);
-    assert.ok(!workersAllow.includes("composio_execute"));
-
     // Skill dirs: every alfred-composio-* gone, vault-operations survives.
     for (const toolkit of ["gmail", "googlecalendar", "notion"]) {
       assert.ok(
-        !memFs.has(`/hermes-data/main/workspace/skills/alfred-composio-${toolkit}/SKILL.md`),
+        !memFs.has(`${SKILLS_DIR}/alfred-composio-${toolkit}/SKILL.md`),
         `alfred-composio-${toolkit} should be gone`,
       );
     }
     assert.ok(
-      memFs.has("/hermes-data/main/workspace/skills/alfred-vault-operations/SKILL.md"),
+      memFs.has(`${SKILLS_DIR}/alfred-vault-operations/SKILL.md`),
       "non-composio skills untouched",
     );
   });
 
   it("returns disconnected_count: 0 with no errors when there are no connections", async () => {
-    seedOpenclawConfig(["sessions_send"]);
     const { status, data } = await req("POST", "/api/v1/integrations/disconnect-all");
-    flush();
     assert.strictEqual(status, 200);
     assert.strictEqual(data.disconnected_count, 0);
     assert.deepStrictEqual(data.failed_ids, []);
-    // No mutation needed since composio_execute wasn't there to begin with.
     assert.strictEqual(data.gateway_restart_triggered, false);
-    assert.ok(readAllow(OPENCLAW_CONFIG_PATH).includes("sessions_send"));
   });
 });
 
 // ---------------------------------------------------------------------------
-// #659 — auto-config registers the canonical tool name
+// auto-config — composio_execute is always enabled, no restart
 // ---------------------------------------------------------------------------
 
-describe("POST /api/v1/integrations/:id/auto-config — registers composio_execute (#659)", () => {
-  it("adds `composio_execute` (NOT `ctrl_composio_execute`) to gateway.tools.allow", async () => {
+describe("POST /api/v1/integrations/:id/auto-config — composio_execute always live", () => {
+  it("reports composio_execute_enabled with no gateway restart", async () => {
     seedConn({ id: "ca_gmail_new", toolkit: "gmail", status: "ACTIVE" });
-    seedOpenclawConfig(["sessions_send"]);
 
     const { status, data } = await req(
       "POST",
       "/api/v1/integrations/ca_gmail_new/auto-config",
     );
-    flush();
 
     assert.strictEqual(status, 200, `expected 200, got ${status} (${JSON.stringify(data)})`);
     assert.strictEqual(data.toolkit, "gmail");
     assert.strictEqual(data.composio_execute_enabled, true);
-    assert.strictEqual(data.gateway_restart_triggered, true, "first composio connect → restart");
-
-    const allow = readAllow(OPENCLAW_CONFIG_PATH);
-    assert.ok(allow.includes("composio_execute"), "canonical name must be present");
-    assert.ok(
-      !allow.includes("ctrl_composio_execute"),
-      "the dead `ctrl_composio_execute` name MUST NOT be added (#659)",
+    assert.strictEqual(
+      data.gateway_restart_triggered,
+      false,
+      "composio_execute is on the always-on execute MCP server — no restart",
     );
-
-    // Same on workers.
-    const workersAllow = readAllow(OPENCLAW_WORKERS_CONFIG_PATH);
-    assert.ok(workersAllow.includes("composio_execute"));
-    assert.ok(!workersAllow.includes("ctrl_composio_execute"));
   });
 
-  it("is idempotent — a second auto-config does not duplicate composio_execute", async () => {
+  it("is idempotent — a second auto-config behaves identically", async () => {
     seedConn({ id: "ca_gmail_new", toolkit: "gmail", status: "ACTIVE" });
-    seedOpenclawConfig(["composio_execute", "sessions_send"]);
 
+    await req("POST", "/api/v1/integrations/ca_gmail_new/auto-config");
     const { status, data } = await req(
       "POST",
       "/api/v1/integrations/ca_gmail_new/auto-config",
     );
-    flush();
 
     assert.strictEqual(status, 200);
-    assert.strictEqual(data.gateway_restart_triggered, false, "already present → no mutation");
-    const allow = readAllow(OPENCLAW_CONFIG_PATH);
-    const occurrences = allow.filter((t: string) => t === "composio_execute").length;
-    assert.strictEqual(occurrences, 1);
+    assert.strictEqual(data.composio_execute_enabled, true);
+    assert.strictEqual(data.gateway_restart_triggered, false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// enable-tool / disable-tool — stable idempotent no-ops
+// ---------------------------------------------------------------------------
+
+describe("POST /api/v1/integrations/{enable,disable}-tool — no-op under Hermes", () => {
+  it("enable-tool returns enabled with no gateway restart", async () => {
+    const { status, data } = await req(
+      "POST",
+      "/api/v1/integrations/enable-tool",
+      { action_slug: "GMAIL_SEND_EMAIL" },
+    );
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.status, "enabled");
+    assert.strictEqual(data.action_slug, "GMAIL_SEND_EMAIL");
+    assert.strictEqual(data.gateway_restart_triggered, false);
+  });
+
+  it("disable-tool returns disabled with no gateway restart", async () => {
+    const { status, data } = await req(
+      "POST",
+      "/api/v1/integrations/disable-tool",
+      { action_slug: "GMAIL_SEND_EMAIL" },
+    );
+    assert.strictEqual(status, 200);
+    assert.strictEqual(data.status, "disabled");
+    assert.strictEqual(data.gateway_restart_triggered, false);
+  });
+
+  it("enable-tool 400s when action_slug is missing", async () => {
+    const { status } = await req("POST", "/api/v1/integrations/enable-tool", {});
+    assert.strictEqual(status, 400);
   });
 });

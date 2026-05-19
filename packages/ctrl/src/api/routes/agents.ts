@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { execAsync, dockerExec, dockerComposeCmd, HERMES_CMD, HERMES_CONTAINER } from "../helpers.js";
@@ -8,13 +10,53 @@ import { resolveDeliveryTarget } from "../hermes-sessions.js";
 const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
 const CONFIG_PATH = `${ALFRED_DATA_DIR}/config.yaml`;
 
+// Hermes profile config layout. Hermes resolves all profile state under
+// HERMES_HOME (default /opt/data — see packages/hermes/Dockerfile); each
+// profile's config.yaml lives at ${HERMES_HOME}/profiles/<profile>/config.yaml.
+// ctrl-api reads these files READ-ONLY; the model is changed via the native
+// `hermes config set` CLI, never by hand-patching this file.
+const HERMES_HOME = process.env.HERMES_HOME ?? "/opt/data";
+const HERMES_CONFIG_DIR = process.env.HERMES_CONFIG_DIR ?? `${HERMES_HOME}/profiles`;
+
+/**
+ * The agents the dashboard shows. alfred-black runs ONE `hermes` container
+ * with two profiles — `main` (user-facing chat) and `workers` (background
+ * agents). Hermes has no per-agent model knob; the model is a per-PROFILE
+ * setting (`model.default`). So each dashboard "agent" maps to whichever
+ * profile actually serves it:
+ *   • `main`            → the `main` profile (the live chat surface).
+ *   • the four workers  → the `workers` profile — learn-clerk, the vault
+ *                          curator/janitor/distiller all run as `/v1/runs`
+ *                          sessions against `hermes:18790`. They share the
+ *                          `workers` profile model; changing one changes
+ *                          all four (a true reflection of the runtime).
+ */
 const AGENTS = [
-  { id: "main", label: "Alfred", description: "Default agent for device interactions" },
-  { id: "learn-clerk", label: "Clerk", description: "Stateless LLM worker for learning workflows" },
-  { id: "vault-curator", label: "Curator", description: "Processes inbox into structured vault records" },
-  { id: "vault-janitor", label: "Janitor", description: "Fixes structural vault issues" },
-  { id: "vault-distiller", label: "Distiller", description: "Extracts latent knowledge from records" },
+  { id: "main", label: "Alfred", description: "Default agent for device interactions", profile: "main" },
+  { id: "learn-clerk", label: "Clerk", description: "Stateless LLM worker for learning workflows", profile: "workers" },
+  { id: "vault-curator", label: "Curator", description: "Processes inbox into structured vault records", profile: "workers" },
+  { id: "vault-janitor", label: "Janitor", description: "Fixes structural vault issues", profile: "workers" },
+  { id: "vault-distiller", label: "Distiller", description: "Extracts latent knowledge from records", profile: "workers" },
 ];
+
+/** Read a Hermes profile's `model.default` from its config.yaml (read-only). */
+function readProfileModel(profile: string): string | null {
+  try {
+    const parsed = yaml.load(
+      fs.readFileSync(`${HERMES_CONFIG_DIR}/${profile}/config.yaml`, "utf-8"),
+    );
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const m = (parsed as Record<string, any>).model;
+      if (m && typeof m === "object" && typeof m.default === "string") {
+        return m.default;
+      }
+      if (typeof m === "string") return m;
+    }
+  } catch {
+    /* missing / unparseable — caller treats null as "unknown" */
+  }
+  return null;
+}
 
 /** Read config.yaml via Python's yaml module and return parsed JSON. */
 async function readConfig(): Promise<Record<string, any>> {
@@ -71,70 +113,41 @@ interface AgentModelStatus {
   };
 }
 
-// Hermes `main` profile config (was openclaw.json). Per-agent model lives in
-// the agent list; the file is YAML, so the read/patch scripts use yaml.
-const HERMES_CONFIG_DIR_AGENTS = process.env.HERMES_CONFIG_DIR ?? "/hermes-data";
-const HERMES_CONFIG = `${HERMES_CONFIG_DIR_AGENTS}/main/config.yaml`;
-
-/** Read per-agent model from the Hermes config, then enrich with live auth. */
+/** Resolve an agent's effective model: its profile's `model.default`, read
+ *  read-only from the Hermes-owned profile config, enriched with live
+ *  provider auth status from the native `hermes` CLI. */
 async function getAgentModelStatus(agentDef: typeof AGENTS[number]): Promise<Record<string, any>> {
+  // Model is a per-profile setting in Hermes. Read it straight from the
+  // profile config.yaml that Hermes owns — no python, no hand-patching.
+  const agentModel = readProfileModel(agentDef.profile);
+
+  // Live provider auth status (non-critical). Hermes' `hermes config check`
+  // surfaces missing-credential warnings; the model status here is best-effort.
+  let providers: any[] = [];
+  let missingProviders: string[] = [];
   try {
-    // Read model from the Hermes config (source of truth for per-agent config)
-    const readScript = [
-      "import json, yaml",
-      `d = yaml.safe_load(open("${HERMES_CONFIG}")) or {}`,
-      `aid = "${agentDef.id}"`,
-      "agents = d.get('agents', {}).get('list', [])",
-      "defaults = d.get('agents', {}).get('defaults', {}).get('model', {})",
-      "agent_model = None",
-      "for a in agents:",
-      "  if a.get('id') == aid:",
-      "    m = a.get('model')",
-      "    agent_model = m.get('primary') if isinstance(m, dict) else m",
-      "    break",
-      "print(json.dumps({'model': agent_model, 'default': (defaults or {}).get('primary')}))",
-    ].join("\n");
-    const modelResult = await dockerExec(HERMES_CONTAINER, ["python3", "-c", readScript]);
-    const modelInfo = JSON.parse(modelResult.trim());
-
-    const agentModel = modelInfo.model || modelInfo.default || null;
-
-    // Try to get live provider auth status (non-critical). Hermes exposes its
-    // model inventory at `GET /v1/models`; the CLI surfaces it here.
-    let providers: any[] = [];
-    let missingProviders: string[] = [];
-    try {
-      const raw = await dockerExec(HERMES_CONTAINER, [...HERMES_CMD, "models", "status", "--agent", agentDef.id, "--json"]);
-      const status: AgentModelStatus = JSON.parse(raw.trim());
-      providers = status.auth?.providers || [];
-      missingProviders = status.auth?.missingProvidersInUse || [];
-    } catch {
-      // Hermes may be starting up
-    }
-
-    return {
-      id: agentDef.id,
-      label: agentDef.label,
-      description: agentDef.description,
-      defaultModel: agentModel,
-      resolvedDefault: agentModel,
-      fallbacks: [],
-      providers,
-      missingProviders,
-    };
-  } catch (err: any) {
-    return {
-      id: agentDef.id,
-      label: agentDef.label,
-      description: agentDef.description,
-      defaultModel: null,
-      resolvedDefault: null,
-      fallbacks: [],
-      providers: [],
-      missingProviders: [],
-      error: err.message?.slice(0, 200),
-    };
+    const raw = await dockerExec(HERMES_CONTAINER, [
+      ...HERMES_CMD, "-p", agentDef.profile, "models", "status", "--json",
+    ]);
+    const status: AgentModelStatus = JSON.parse(raw.trim());
+    providers = status.auth?.providers || [];
+    missingProviders = status.auth?.missingProvidersInUse || [];
+  } catch {
+    // Hermes may be starting up, or this Hermes build has no `models status`
+    // subcommand — provider enrichment is optional, the model itself is not.
   }
+
+  return {
+    id: agentDef.id,
+    label: agentDef.label,
+    description: agentDef.description,
+    profile: agentDef.profile,
+    defaultModel: agentModel,
+    resolvedDefault: agentModel,
+    fallbacks: [],
+    providers,
+    missingProviders,
+  };
 }
 
 /** Get surveyor config from config.yaml. */
@@ -216,52 +229,35 @@ export function registerAgentRoutes(): void {
       return;
     }
 
-    // Validate it's a known OpenClaw agent
+    // Validate it's a known Hermes-backed agent.
     const agentDef = AGENTS.find((a) => a.id === agentId);
     if (!agentDef) {
       throw new ValidationError(`Unknown agent: ${agentId}. Known agents: ${AGENTS.map((a) => a.id).join(", ")}, surveyor`);
     }
 
-    // Directly patch the Hermes `main` config.yaml to set the per-agent
-    // model. The config is YAML — the patch script round-trips via yaml.
-    const patchScript = [
-      "import json, sys, shutil, yaml",
-      `p = "${HERMES_CONFIG}"`,
-      "d = yaml.safe_load(open(p)) or {}",
-      `aid = "${agentDef.id}"`,
-      `model = "${model}"`,
-      "agents = d.get('agents', {}).get('list', [])",
-      "found = False",
-      "for a in agents:",
-      "  if a.get('id') == aid:",
-      "    a['model'] = {'primary': model}",
-      "    found = True",
-      "    break",
-      "if not found:",
-      "  print(json.dumps({'error': f'Agent {aid} not found in Hermes config'}))",
-      "  sys.exit(1)",
-      "# Also update the global defaults so new runs use the right model",
-      "defaults = d.get('agents', {}).get('defaults', {})",
-      "if 'model' not in defaults: defaults['model'] = {}",
-      "defaults['model']['primary'] = model",
-      "d.setdefault('agents', {})['defaults'] = defaults",
-      "shutil.copy2(p, p + '.bak')",
-      "with open(p, 'w') as f:",
-      "  yaml.safe_dump(d, f, default_flow_style=False)",
-      "print(json.dumps({'ok': True, 'agent': aid, 'model': model}))",
-    ].join("\n");
-
-    const patchResult = await dockerExec(HERMES_CONTAINER, ["python3", "-c", patchScript]);
-    const parsed = JSON.parse(patchResult.trim());
-    if (parsed.error) {
-      throw new ValidationError(parsed.error);
+    // Set the model via Hermes' OWN config CLI — `hermes -p <profile> config
+    // set model.default <model>`. Hermes owns config.yaml; `config set` writes
+    // it the canonical way (no hand-rolled YAML round-trip, no `.bak` files).
+    // The model is a per-PROFILE setting, so this changes every agent the
+    // profile serves (all four `workers` agents share one model — see AGENTS).
+    try {
+      await dockerExec(HERMES_CONTAINER, [
+        ...HERMES_CMD, "-p", agentDef.profile, "config", "set", "model.default", model,
+      ]);
+    } catch (err: any) {
+      throw new ValidationError(
+        `hermes config set failed for profile ${agentDef.profile}: ${String(err?.message ?? err).slice(0, 200)}`,
+      );
     }
 
-    // Restart Hermes to pick up the new model config
+    // The `model.default` key is not in Hermes' hot-reload set (only
+    // `model.context_length` / `compression.*` reload live), so the gateway
+    // must be restarted to pick up the new model. The restart is now driven
+    // by a native `hermes config set`, not a hand-edit of config.yaml.
     try {
       await dockerComposeCmd(["restart", HERMES_CONTAINER]);
     } catch {
-      // Best effort — gateway may pick up changes on next request
+      // Best effort — gateway may pick up changes on next request.
     }
 
     sendJson(res, 200, {
@@ -270,6 +266,7 @@ export function registerAgentRoutes(): void {
         id: agentDef.id,
         label: agentDef.label,
         description: agentDef.description,
+        profile: agentDef.profile,
         defaultModel: model,
         resolvedDefault: model,
         fallbacks: [],
