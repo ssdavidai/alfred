@@ -1,16 +1,17 @@
 /**
  * Tests for cross-tenant ask polling behavior.
  *
- * Covers the two recent fixes (#129):
- *   1. Tagless fallback — accept the last assistant text as the final answer
- *      after TURNS_BEFORE_TAGLESS_FALLBACK substantive turns, even if the
- *      peer's Alfred forgot to wrap in <final>...</final> tags.
- *   2. Explicit <final>...</final> wrapper still wins when present.
- *   3. Session-status "completed" / "done" still wins.
+ * Phase 2: the receiving side calls the Hermes `/v1/runs` API natively (the
+ * OpenClaw `sessions_spawn`/`sessions_history` `/tools/invoke` contract was
+ * retired). These tests stub global `fetch` to simulate the Hermes runtime:
+ *   - POST /v1/runs        → returns a stable run id
+ *   - GET  /v1/runs/{id}   → returns a configurable {status, output} per call
  *
- * These tests stub global `fetch` to simulate the openclaw gateway:
- *   - sessions_spawn → returns a stable childSessionKey
- *   - sessions_history → returns a configurable message list per call
+ * Covered behaviour:
+ *   1. Explicit <final>...</final> wrapper wins as soon as it appears.
+ *   2. A terminal run status ("completed") returns the run output verbatim.
+ *   3. A run still `running` is never returned early — the poll keeps going.
+ *   4. Billing/credit failures surfaced in run output are reported fast.
  */
 
 import { mock, describe, it, before, after, beforeEach } from "node:test";
@@ -102,50 +103,39 @@ after(async () => {
 // fetch stub — controls gateway responses per-call
 // ---------------------------------------------------------------------------
 
-interface FakeMsg {
-  role: string;
-  content: string | Array<{ type: string; text?: string }>;
-}
-
 interface FetchScenario {
-  // Sequential message lists returned by successive sessions_history polls.
-  // The last entry repeats forever if poll runs longer than the list.
-  historyResponses: Array<{ messages: FakeMsg[]; status?: string }>;
+  // Sequential run states returned by successive GET /v1/runs/{id} polls.
+  // The last entry repeats forever if the poll runs longer than the list.
+  runStates: Array<{ status?: string; output?: string }>;
 }
 
-let scenario: FetchScenario = { historyResponses: [{ messages: [] }] };
-let historyCallIndex = 0;
+let scenario: FetchScenario = { runStates: [{ status: "running" }] };
+let pollCallIndex = 0;
 
 const originalFetch = globalThis.fetch;
 
 function installFetchStub() {
   (globalThis as any).fetch = async (url: string, opts: any) => {
-    const bodyStr = typeof opts?.body === "string" ? opts.body : "";
-    let parsed: any = {};
-    try { parsed = JSON.parse(bodyStr); } catch { /* ignore */ }
-    const tool = parsed?.tool;
+    const method = (opts?.method ?? "GET").toUpperCase();
 
-    if (tool === "sessions_spawn") {
+    // POST /v1/runs — create a run, return a stable id.
+    if (method === "POST" && /\/v1\/runs$/.test(url)) {
       return new Response(
-        JSON.stringify({
-          result: { details: { childSessionKey: "test-session-key" } },
-        }),
+        JSON.stringify({ id: "test-run-id", status: "running" }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
 
-    if (tool === "sessions_history") {
-      const idx = Math.min(historyCallIndex, scenario.historyResponses.length - 1);
-      historyCallIndex += 1;
-      const slot = scenario.historyResponses[idx];
+    // GET /v1/runs/{id} — return the next scripted run state.
+    if (method === "GET" && /\/v1\/runs\/[^/]+$/.test(url)) {
+      const idx = Math.min(pollCallIndex, scenario.runStates.length - 1);
+      pollCallIndex += 1;
+      const slot = scenario.runStates[idx];
       return new Response(
         JSON.stringify({
-          result: {
-            details: {
-              messages: slot.messages,
-              status: slot.status || "running",
-            },
-          },
+          id: "test-run-id",
+          status: slot.status ?? "running",
+          output: slot.output ?? "",
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
@@ -162,7 +152,7 @@ function restoreFetch() {
 
 beforeEach(() => {
   installFetchStub();
-  historyCallIndex = 0;
+  pollCallIndex = 0;
 });
 
 // ---------------------------------------------------------------------------
@@ -216,12 +206,8 @@ async function req(
 describe("POST /api/v1/cross-tenant/ask — completion detection", () => {
   it("accepts an explicit <final>...</final> wrapper", async () => {
     scenario = {
-      historyResponses: [
-        {
-          messages: [
-            { role: "assistant", content: "<final>The top three matters are A, B, C.</final>" },
-          ],
-        },
+      runStates: [
+        { status: "running", output: "<final>The top three matters are A, B, C.</final>" },
       ],
     };
 
@@ -235,15 +221,11 @@ describe("POST /api/v1/cross-tenant/ask — completion detection", () => {
     assert.ok(!r.data.answer.startsWith("[timeout"), "should not be a timeout response");
   });
 
-  it("accepts session-status 'completed' even without <final> tag", async () => {
+  it("returns the run output verbatim once the run status is 'completed'", async () => {
     scenario = {
-      historyResponses: [
-        {
-          status: "completed",
-          messages: [
-            { role: "assistant", content: "Plain answer without tags." },
-          ],
-        },
+      runStates: [
+        { status: "running", output: "" },
+        { status: "completed", output: "Plain answer without tags." },
       ],
     };
 
@@ -256,63 +238,13 @@ describe("POST /api/v1/cross-tenant/ask — completion detection", () => {
     assert.equal(r.data.answer, "Plain answer without tags.");
   });
 
-  it("falls back to last assistant text after TURNS_BEFORE_TAGLESS_FALLBACK turns (no <final> tag)", async () => {
-    // Simulate the realistic shape: 3 short text turns (e.g. "Reading USER.md...",
-    // "Reading SOUL.md...", "Reading MEMORY.md...") then a 4th substantive turn
-    // with the actual answer — but the agent forgot to wrap in <final> tags.
+  it("does NOT return a still-running run's interim output as the final answer", async () => {
+    // The run is still `running` and has only emitted an interim line. The
+    // poll must keep waiting (and ultimately time out in the test) rather
+    // than treating interim output as the final answer.
     scenario = {
-      historyResponses: [
-        // Poll 1: just the 3 read-acknowledgement turns
-        {
-          messages: [
-            { role: "assistant", content: "Reading USER.md..." },
-            { role: "assistant", content: "Reading SOUL.md..." },
-            { role: "assistant", content: "Reading MEMORY.md..." },
-          ],
-        },
-        // Poll 2: 4th turn — the real answer, no <final> wrapper
-        {
-          messages: [
-            { role: "assistant", content: "Reading USER.md..." },
-            { role: "assistant", content: "Reading SOUL.md..." },
-            { role: "assistant", content: "Reading MEMORY.md..." },
-            {
-              role: "assistant",
-              content:
-                "Your top three current matters are the strategic pivot of Apex Solutions into an AI agency, the Q3 product launch, and the new hire onboarding plan.",
-            },
-          ],
-        },
-      ],
-    };
-
-    const r = await req("POST", "/api/v1/cross-tenant/ask", {
-      prompt: "name 3 matters",
-      timeoutSeconds: 10,
-    });
-
-    assert.equal(r.status, 200);
-    assert.ok(
-      r.data.answer.startsWith("Your top three current matters"),
-      `expected real answer, got: ${r.data.answer.slice(0, 200)}`,
-    );
-    assert.ok(
-      !r.data.answer.startsWith("[timeout"),
-      "tagless answer must NOT be reported as timeout",
-    );
-  });
-
-  it("does NOT prematurely accept a single early text turn as the final answer", async () => {
-    // Only one short text turn so far — well under the threshold. The poll
-    // should keep waiting (and ultimately time out in the test, but that's
-    // fine — what we care about is that we don't return after just 1 turn).
-    scenario = {
-      historyResponses: [
-        {
-          messages: [
-            { role: "assistant", content: "One moment, sir..." },
-          ],
-        },
+      runStates: [
+        { status: "running", output: "One moment, sir..." },
       ],
     };
 
@@ -322,23 +254,38 @@ describe("POST /api/v1/cross-tenant/ask — completion detection", () => {
     });
 
     assert.equal(r.status, 200);
-    // Should hit timeout, NOT return "One moment, sir..." as the final answer
+    // Should hit timeout, NOT return "One moment, sir..." as the final answer.
     assert.ok(
       r.data.answer.startsWith("[timeout"),
       `expected timeout marker, got: ${r.data.answer.slice(0, 200)}`,
     );
   });
 
+  it("surfaces a failed run status with the run output as the error detail", async () => {
+    scenario = {
+      runStates: [
+        { status: "failed", output: "model provider returned 500" },
+      ],
+    };
+
+    const r = await req("POST", "/api/v1/cross-tenant/ask", {
+      prompt: "question",
+      timeoutSeconds: 5,
+    });
+
+    assert.equal(r.status, 200);
+    assert.ok(
+      r.data.answer.startsWith("[error: Remote run failed"),
+      `expected failed-run error, got: ${r.data.answer.slice(0, 200)}`,
+    );
+  });
+
   it("surfaces billing errors quickly without waiting for full timeout", async () => {
     scenario = {
-      historyResponses: [
+      runStates: [
         {
-          messages: [
-            {
-              role: "assistant",
-              content: "Sorry — billing error: insufficient balance on the provider key.",
-            },
-          ],
+          status: "running",
+          output: "Sorry — billing error: insufficient balance on the provider key.",
         },
       ],
     };

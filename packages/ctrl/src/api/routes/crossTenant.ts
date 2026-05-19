@@ -34,7 +34,13 @@ function loadPeers(): Map<string, PeerConfig> {
 }
 
 // ---------------------------------------------------------------------------
-// Gateway helpers (for the receiving side)
+// Hermes runtime helpers (for the receiving side)
+//
+// Phase 2: the receiving side calls the Hermes `/v1/runs` API natively. The
+// request goes to the hermes-shim port (the only Hermes surface on the
+// compose network — the Hermes API server itself binds 127.0.0.1); the shim
+// transparently proxies `/v1/*` through to the runtime. The OpenClaw
+// `sessions_spawn`/`sessions_history` `/tools/invoke` contract is retired.
 // ---------------------------------------------------------------------------
 
 const GATEWAY_TOKEN_PATHS = [
@@ -42,7 +48,12 @@ const GATEWAY_TOKEN_PATHS = [
   "/mnt/encrypted/alfred/.gateway-token",
   "/app/data/.gateway-token",
 ];
-const GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL || "http://openclaw:18789";
+// The main-profile gateway: cross-tenant asks are answered by the principal-
+// facing Alfred (full memory + workspace), not the workers profile.
+const GATEWAY_URL =
+  process.env.HERMES_GATEWAY_URL ||
+  process.env.OPENCLAW_GATEWAY_URL ||
+  "http://hermes:18789";
 
 function getGatewayToken(): string {
   for (const p of GATEWAY_TOKEN_PATHS) {
@@ -51,31 +62,78 @@ function getGatewayToken(): string {
       if (token) return token;
     } catch { /* try next */ }
   }
-  return process.env.OPENCLAW_GATEWAY_TOKEN || "";
+  return process.env.HERMES_API_KEY || process.env.OPENCLAW_GATEWAY_TOKEN || "";
 }
 
-async function gatewayInvoke(tool: string, args: Record<string, unknown>): Promise<unknown> {
-  const token = getGatewayToken();
-  if (!token) throw new Error("Gateway token not available");
-
-  const resp = await fetch(`${GATEWAY_URL}/tools/invoke`, {
+/** Create a Hermes run. Returns the run object. */
+async function hermesCreateRun(
+  token: string,
+  input: string,
+  sessionId: string,
+  instructions: string,
+): Promise<Record<string, unknown>> {
+  const resp = await fetch(`${GATEWAY_URL}/v1/runs`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ tool, args }),
+    body: JSON.stringify({ input, session_id: sessionId, instructions }),
   });
-
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`Gateway ${resp.status}: ${text.slice(0, 200)}`);
+    throw new Error(`Hermes /v1/runs ${resp.status}: ${text.slice(0, 200)}`);
   }
-  return resp.json();
+  return (await resp.json()) as Record<string, unknown>;
+}
+
+/** Fetch current Hermes run status. */
+async function hermesGetRun(
+  token: string,
+  runId: string,
+): Promise<Record<string, unknown>> {
+  const resp = await fetch(`${GATEWAY_URL}/v1/runs/${encodeURIComponent(runId)}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Hermes GET /v1/runs ${resp.status}: ${text.slice(0, 200)}`);
+  }
+  return (await resp.json()) as Record<string, unknown>;
+}
+
+/** Extract the final assistant text from a Hermes run object. */
+function extractRunText(run: Record<string, unknown>): string {
+  const output = run.output;
+  if (typeof output === "string") return output;
+  if (Array.isArray(output)) {
+    const parts: string[] = [];
+    for (const item of output) {
+      if (!item || typeof item !== "object") continue;
+      const it = item as Record<string, unknown>;
+      if (it.type !== "message") continue;
+      const content = it.content;
+      if (Array.isArray(content)) {
+        for (const c of content) {
+          if (c && typeof c === "object") {
+            const cc = c as Record<string, unknown>;
+            if ((cc.type === "output_text" || cc.type === "text") && typeof cc.text === "string") {
+              parts.push(cc.text);
+            }
+          }
+        }
+      } else if (typeof content === "string") {
+        parts.push(content);
+      }
+    }
+    return parts.filter(Boolean).join("\n");
+  }
+  if (typeof run.text === "string") return run.text;
+  return "";
 }
 
 // ---------------------------------------------------------------------------
-// Spawn a session and poll for the answer (receiving side)
+// Start a Hermes run and poll for the answer (receiving side)
 // ---------------------------------------------------------------------------
 
 async function spawnAndPoll(
@@ -83,187 +141,117 @@ async function spawnAndPoll(
   timeoutMs: number,
 ): Promise<{ answer: string; sessionKey: string; durationMs: number }> {
   const start = Date.now();
+  const token = getGatewayToken();
+  if (!token) throw new Error("Gateway token not available");
 
-  // Prepend instructions to read workspace context files — the bootstrap may
-  // truncate them if AGENTS.md is too large, so explicitly tell the subagent
-  // to read them from disk.
-  //
-  // We also instruct the subagent to wrap its FINAL answer in <final>...</final>
-  // tags so the polling loop below can deterministically detect completion.
-  // The poll loop has a tagless fallback for Alfreds who forget to wrap
-  // (see TURNS_BEFORE_TAGLESS_FALLBACK), but the explicit form is preferred.
-  const enrichedTask = [
-    "IMPORTANT: Before answering, you MUST read these files using the read tool with EXACT paths:",
-    "1. Read file at path: ~/.openclaw/workspace/USER.md",
-    "2. Read file at path: ~/.openclaw/workspace/SOUL.md",
-    "3. Read file at path: ~/.openclaw/workspace/MEMORY.md",
-    "These files contain your master's identity, preferences, clients, and curated facts.",
-    "Use the information from these files to answer this question:",
+  // The peer's Alfred is asked to wrap its FINAL answer in <final>...</final>
+  // tags so we can deterministically detect completion. A tagless fallback
+  // (the terminal run output once the run finishes) covers Alfreds that
+  // forget the wrapper.
+  const enrichedInput = [
+    "IMPORTANT: Before answering, read your workspace context files (USER, SOUL,",
+    "MEMORY) so your reply reflects your master's identity, preferences, and",
+    "curated facts. Then answer this question:",
     "",
     prompt,
     "",
-    "When you have your final answer, wrap it in <final>...</final> tags on a line by itself, e.g.:",
-    "<final>The answer is X because Y.</final>",
-    "Do not include commentary outside the tags. The relay returns only the wrapped content.",
+    "When you have your final answer, wrap it in <final>...</final> tags on a line",
+    "by itself, e.g. <final>The answer is X because Y.</final>. Do not include",
+    "commentary outside the tags — the relay returns only the wrapped content.",
   ].join("\n");
 
-  // Spawn
-  const spawnResult = (await gatewayInvoke("sessions_spawn", {
-    task: enrichedTask,
-    agentId: "main",
-    mode: "run",
-    runTimeoutSeconds: Math.floor(timeoutMs / 1000),
-  })) as { result?: { details?: { childSessionKey?: string } } };
+  const instructions =
+    "You are the principal-facing Alfred answering a relayed question from a " +
+    "peer instance. Reply concisely and wrap your final answer in <final> tags.";
 
-  const sessionKey = spawnResult?.result?.details?.childSessionKey;
-  if (!sessionKey) {
-    throw new Error("sessions_spawn did not return a childSessionKey");
+  // session_id = a fresh per-ask id so the relay never threads onto a live
+  // principal conversation.
+  const sessionId = `xtenant-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+
+  const run = await hermesCreateRun(token, enrichedInput, sessionId, instructions);
+  const runId = String(run.id ?? run.run_id ?? "");
+  if (!runId) {
+    throw new Error("Hermes /v1/runs did not return a run id");
   }
 
-  // After this many text-bearing assistant turns, we accept the most recent
-  // assistant text as the final answer even without <final>...</final> tags.
-  // The relay's enriched task instructs the agent to read 3 files (USER/SOUL/
-  // MEMORY) before answering, so realistic conversational shape is:
-  //   1–3: tool-call turns to read each file (no text)
-  //   4+ : the actual reasoned reply
-  // Setting the threshold at 4 means we wait for at least one substantive
-  // reply turn but bail out before pure timeout.
-  const TURNS_BEFORE_TAGLESS_FALLBACK = 4;
-
-  // Poll until done or timeout. Interval overridable via env for tests
-  // (default 5s in production keeps gateway pressure low).
   const pollInterval = Math.max(
     50,
     Number(process.env.CROSS_TENANT_POLL_INTERVAL_MS) || 5_000,
   );
   const deadline = start + timeoutMs;
-  let lastAssistantText = "";
-  let assistantTextTurns = 0; // number of assistant messages with non-empty text seen so far
-  let lastSeenAssistantTextSig = ""; // dedupe text-turn counting across polls
+  const terminal = new Set([
+    "completed",
+    "succeeded",
+    "done",
+    "failed",
+    "cancelled",
+    "error",
+  ]);
+  let lastText = "";
 
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, pollInterval));
 
-    const histResult = (await gatewayInvoke("sessions_history", {
-      sessionKey,
-      limit: 50,
-    })) as { result?: { details?: { status?: string; messages?: Array<{ role: string; content: unknown }> } } };
-
-    const details = histResult?.result?.details;
-    const messages = details?.messages || [];
-    const status = details?.status || "";
-
-    // Walk all assistant messages this poll so we can count turns and find
-    // the most recent text-bearing one. We intentionally ignore tool-call /
-    // tool-result turns (which surface as content blocks of type "tool_use"
-    // / "tool_result" and produce no extracted text).
-    let lastTextThisPoll = "";
-    let turnCount = 0;
-    for (const msg of messages) {
-      if (msg.role !== "assistant") continue;
-
-      let text = "";
-      if (typeof msg.content === "string") {
-        text = msg.content;
-      } else if (Array.isArray(msg.content)) {
-        text = (msg.content as Array<{ type: string; text?: string }>)
-          .filter((b) => b.type === "text" && b.text)
-          .map((b) => b.text!)
-          .join("\n");
-      }
-
-      if (text) {
-        turnCount += 1;
-        lastTextThisPoll = text;
-      }
+    let cur: Record<string, unknown>;
+    try {
+      cur = await hermesGetRun(token, runId);
+    } catch {
+      continue; // transient — keep polling
     }
 
-    // Refresh state for downstream checks
-    if (lastTextThisPoll) lastAssistantText = lastTextThisPoll;
-    // Only update the count when the latest text differs from what we last
-    // saw (the messages list is cumulative — re-counting every poll would
-    // double-count turns that haven't changed).
-    const sig = `${turnCount}::${lastTextThisPoll.slice(-200)}`;
-    if (sig !== lastSeenAssistantTextSig) {
-      assistantTextTurns = turnCount;
-      lastSeenAssistantTextSig = sig;
-    }
+    const status = String(cur.status ?? "").toLowerCase();
+    const text = extractRunText(cur);
+    if (text) lastText = text;
 
-    // ── Primary completion path: explicit <final>...</final> wrapper ────────
-    const finalMatch = lastAssistantText.match(/<final>([\s\S]*?)<\/final>/);
+    // ── Primary: explicit <final>...</final> wrapper ────────────────────────
+    const finalMatch = lastText.match(/<final>([\s\S]*?)<\/final>/);
     if (finalMatch) {
-      return {
-        answer: finalMatch[1].trim(),
-        sessionKey,
-        durationMs: Date.now() - start,
-      };
+      return { answer: finalMatch[1].trim(), sessionKey: runId, durationMs: Date.now() - start };
     }
 
-    // ── Secondary: explicit session-status completion ───────────────────────
-    if (status === "completed" || status === "done") {
-      return {
-        answer: lastAssistantText.trim(),
-        sessionKey,
-        durationMs: Date.now() - start,
-      };
-    }
-
-    // ── Tertiary: tagless fallback ──────────────────────────────────────────
-    // If we've seen enough assistant-text turns and the last one isn't an
-    // empty tool-only artefact, treat it as the final answer. This covers
-    // the case where the peer's Alfred answers cleanly but forgets to wrap
-    // in <final> tags. We only fire after TURNS_BEFORE_TAGLESS_FALLBACK so
-    // we don't grab a mid-thought "let me check that" intermediate turn.
-    if (
-      assistantTextTurns >= TURNS_BEFORE_TAGLESS_FALLBACK &&
-      lastAssistantText.trim().length > 0
-    ) {
-      return {
-        answer: lastAssistantText.trim(),
-        sessionKey,
-        durationMs: Date.now() - start,
-      };
-    }
-
-    // Detect billing / LLM errors surfaced as session content or error status.
-    // OpenClaw surfaces billing errors (402) as assistant messages containing
-    // "billing error" and may set status to "error" or "failed".
+    // ── Billing / credit failures surfaced in the run output ────────────────
     const billingPattern = /billing error|out of credits|insufficient balance|402/i;
-
-    if (billingPattern.test(lastAssistantText)) {
+    if (billingPattern.test(lastText)) {
       return {
-        answer: `[error: The target tenant's LLM provider returned a billing error — their API key has run out of credits or has an insufficient balance. The remote Alfred cannot respond until credits are topped up.]`,
-        sessionKey,
+        answer:
+          "[error: The target tenant's LLM provider returned a billing error — " +
+          "their API key has run out of credits or has an insufficient balance. " +
+          "The remote Alfred cannot respond until credits are topped up.]",
+        sessionKey: runId,
         durationMs: Date.now() - start,
       };
     }
 
-    // Catch error/failed session status early instead of polling until timeout
-    if (status === "error" || status === "failed") {
-      const detail = lastAssistantText
-        ? lastAssistantText.slice(0, 500)
-        : "no details available";
-      return {
-        answer: `[error: Remote session failed — ${detail}]`,
-        sessionKey,
-        durationMs: Date.now() - start,
-      };
+    // ── Terminal run state ──────────────────────────────────────────────────
+    if (terminal.has(status)) {
+      if (status === "failed" || status === "error" || status === "cancelled") {
+        const detail = lastText
+          ? lastText.slice(0, 500)
+          : String(cur.error ?? cur.detail ?? "no details available");
+        return {
+          answer: `[error: Remote run ${status} — ${detail}]`,
+          sessionKey: runId,
+          durationMs: Date.now() - start,
+        };
+      }
+      // Completed without <final> tags — return the terminal output verbatim.
+      return { answer: lastText.trim(), sessionKey: runId, durationMs: Date.now() - start };
     }
   }
 
-  // Timeout — return whatever partial content we captured so the caller
-  // gets useful diagnostic info instead of a bare "timeout" message.
-  if (lastAssistantText) {
+  // Timeout — return whatever partial content we captured.
+  if (lastText) {
     return {
-      answer: `[timeout — the remote Alfred did not produce a final answer within ${Math.round(timeoutMs / 1000)}s. Partial content: ${lastAssistantText.slice(0, 1000)}]`,
-      sessionKey,
+      answer: `[timeout — the remote Alfred did not produce a final answer within ${Math.round(timeoutMs / 1000)}s. Partial content: ${lastText.slice(0, 1000)}]`,
+      sessionKey: runId,
       durationMs: Date.now() - start,
     };
   }
-
   return {
     answer: `[timeout — the remote Alfred produced no response within ${Math.round(timeoutMs / 1000)}s. This may indicate the tenant's LLM provider is unavailable or out of credits.]`,
-    sessionKey,
+    sessionKey: runId,
     durationMs: Date.now() - start,
   };
 }

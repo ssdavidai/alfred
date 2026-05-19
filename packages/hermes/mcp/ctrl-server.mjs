@@ -2,12 +2,17 @@
 /**
  * alfred-ctrl MCP server — federated ctrl-api access.
  *
- * Exposes between 1 and 3 tools depending on whether this tenant is
+ * Exposes between 2 and 4 tools depending on whether this tenant is
  * "Alfred Prime" (controlled by the ALFRED_PRIME env var, only set on
  * Sir's instance):
  *
  *   self        — always present. Call THIS tenant's ctrl-api. Generic
  *                 HTTP proxy: { endpoint, method?, body?, query? }.
+ *
+ *   vault_search — always present. Semantic (meaning-based) search over the
+ *                 vault, backed by the state.db sqlite-vec embedding store.
+ *                 ctrl-api embeds the query and runs a k-NN lookup. This is
+ *                 the Hermes-native replacement for OpenClaw's QMD recall.
  *
  *   tenant      — Prime only. Call a named PEER tenant's ctrl-api via
  *                 Tailscale. Same params as `self` plus a required
@@ -193,6 +198,39 @@ const selfTool = {
   },
 };
 
+const vaultSearchTool = {
+  name: "vault_search",
+  description:
+    "Semantic search over the vault by MEANING (not keyword). Backed by the " +
+    "state.db sqlite-vec embedding store: ctrl-api embeds your query and " +
+    "returns the nearest vault records by vector distance, each with a " +
+    "text preview and a `ref` you can read in full via `self`. Use this to " +
+    "answer \"what do I know about X\" / \"recent signals on matter Y\" — it " +
+    "is the Hermes-native replacement for OpenClaw's QMD recall. For exact " +
+    "string / path lookups use `self` with /api/v1/vault/search instead.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "Natural-language search query (a phrase or question).",
+      },
+      k: {
+        type: "number",
+        description: "Number of nearest results to return (1–50, default 10).",
+        default: 10,
+      },
+      ref_kind: {
+        type: "string",
+        description:
+          "Optional filter on the embedding source kind (e.g. \"vault\"). " +
+          "Omit to search every kind.",
+      },
+    },
+    required: ["query"],
+  },
+};
+
 const tenantTool = {
   name: "tenant",
   description:
@@ -270,6 +308,24 @@ async function dispatchSelf(args) {
   return toolResult(result);
 }
 
+async function dispatchVaultSearch(args) {
+  const { query, k, ref_kind: refKind } = args;
+  if (typeof query !== "string" || !query.trim()) {
+    return errorResult("vault_search requires a non-empty `query` string.");
+  }
+  const body = { query: query.trim() };
+  if (typeof k === "number" && Number.isFinite(k)) body.k = k;
+  if (typeof refKind === "string" && refKind.trim()) body.ref_kind = refKind.trim();
+  const result = await callCtrl({
+    base: CTRL_URL,
+    apiKey: API_KEY,
+    endpoint: "/api/v1/state/embeddings/search-text",
+    method: "POST",
+    body,
+  });
+  return toolResult(result);
+}
+
 async function dispatchTenant(args) {
   const { tenant: peerId, endpoint, method, body, query } = args;
   const peer = resolvePeer(peerId);
@@ -334,7 +390,7 @@ async function dispatchAskAlfred(args) {
 // ── Wire it up ───────────────────────────────────────────────────────────────
 
 function assembleTools() {
-  const tools = [selfTool];
+  const tools = [selfTool, vaultSearchTool];
   if (IS_PRIME) {
     tools.push(tenantTool, askAlfredTool);
   }
@@ -356,6 +412,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     switch (name) {
       case "self":
         return await dispatchSelf(args);
+      case "vault_search":
+        return await dispatchVaultSearch(args);
       case "tenant":
         if (!IS_PRIME) {
           return errorResult(

@@ -2,15 +2,17 @@
 # =============================================================================
 # supervisor.sh — alfred-black-hermes process supervisor.
 #
-# Runs FOUR long-lived processes in one container and keeps them alive:
+# Runs FIVE long-lived processes in one container and keeps them alive:
 #
 #   1. hermes -p main    gateway run   — user-facing chat (Hermes API :18799)
 #   2. hermes -p workers gateway run   — background agents (Hermes API :18800)
 #   3. hermes-shim (main)              — legacy :18789 → :18799
 #   4. hermes-shim (workers)           — legacy :18790 → :18800
+#   5. sessionstore-maintenance        — hourly prune + VACUUM on the workers
+#                                        SessionStore (replaces the .bak reaper)
 #
 # tini is PID 1 (see Dockerfile ENTRYPOINT) and reaps zombies; this script
-# runs as tini's single child, owns the four workers, restarts any that die,
+# runs as tini's single child, owns the workers, restarts any that die,
 # and forwards SIGTERM/SIGINT for a graceful compose stop.
 #
 # Profile state (config.yaml, .env, SOUL.md, sessions, skills, the MCP
@@ -146,10 +148,15 @@ sleep 3
 start_shim "shim-main"    "main"
 start_shim "shim-workers" "workers"
 
+# SessionStore maintenance — hourly prune + VACUUM on the workers SessionStore.
+# Stdlib-only Python loop; if it crashes the supervise loop restarts it like
+# any other process. Self-paces internally (HERMES_MAINT_INTERVAL).
+start_proc "sessionstore-maintenance" "exec hermes-sessionstore-maintenance"
+
 # =============================================================================
 # Supervise — restart any worker that exits while we are not shutting down.
 # =============================================================================
-log "all four processes running — entering supervise loop"
+log "all five processes running — entering supervise loop"
 while true; do
     # Block until SOME child exits. `wait -n` returns that child's status.
     wait -n

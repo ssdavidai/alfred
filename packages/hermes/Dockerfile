@@ -139,6 +139,18 @@ RUN printf '#!/bin/sh\nexec python3 /opt/hermes-shim/hermes_shim.py "$@"\n' \
     && chmod +x /usr/local/bin/hermes-shim
 
 # =============================================================================
+# Install the SessionStore maintenance job.
+# =============================================================================
+# Periodic prune + VACUUM on the workers-profile SQLite SessionStore —
+# replaces the deleted OpenClaw `.bak-*` reaper. Stdlib-only, so no extra
+# pip install. The supervisor runs it as a 5th supervised process.
+COPY packages/hermes/docker/sessionstore-maintenance.py \
+        /opt/hermes-maintenance/sessionstore-maintenance.py
+RUN printf '#!/bin/sh\nexec python3 /opt/hermes-maintenance/sessionstore-maintenance.py "$@"\n' \
+        > /usr/local/bin/hermes-sessionstore-maintenance \
+    && chmod +x /usr/local/bin/hermes-sessionstore-maintenance
+
+# =============================================================================
 # Supervisor entrypoint.
 # =============================================================================
 COPY packages/hermes/docker/supervisor.sh /opt/hermes-supervisor/supervisor.sh

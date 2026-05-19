@@ -24,13 +24,13 @@ Base: `node:22-bookworm` + OpenClaw (git clone, unpinned)
 
 **2. `ssdavidai00/alfred-worker` — Vault Worker**
 
-Alfred daemon process — spawns OpenClaw agents via the gateway's HTTP API using the `openclaw-wrapper` script (Python). Runs vault tools (curator, janitor, distiller).
+Alfred daemon process — starts agent runs on the Hermes runtime via the `openclaw-wrapper` script (Python). Runs vault tools (curator, janitor, distiller).
 
 | Connection | Address | Protocol |
 |-----------|---------|----------|
-| OpenClaw gateway | http://openclaw:18789 | HTTP (`POST /tools/invoke`) |
+| Hermes runtime | http://hermes:18790 | HTTP (Hermes `/v1/runs` API, via the hermes-shim) |
 
-The `openclaw-wrapper` replaces the previous approach of running a local OpenClaw CLI over WebSocket. It calls `sessions_spawn` to start an agent, then polls `sessions_history` for the result. Both the `alfred` and `openclaw` containers share a `shared_tmp` Docker volume at `/tmp` so the wrapper can read prompt files written by the alfred daemons.
+The `openclaw-wrapper` (filename kept for backward-compatible config/Dockerfile references) calls Hermes `POST /v1/runs` to start a run, then polls `GET /v1/runs/{id}` for the result — the OpenClaw `sessions_spawn`/`sessions_history` `/tools/invoke` contract was retired in Phase 2. The `alfred` and `hermes` containers share the `/alfred-data` volume so the wrapper can read prompt files and curator manifest files written by the alfred daemons.
 
 Built from: `dockerfiles/alfred.Dockerfile`
 Base: `python:3.11-slim-bookworm` + Node.js 22 + `openclaw-wrapper` + Alfred (git clone, unpinned)

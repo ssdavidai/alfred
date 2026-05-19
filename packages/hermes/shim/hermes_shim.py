@@ -1,30 +1,41 @@
-"""hermes-shim — OpenClaw `/tools/invoke` contract → Hermes `/v1` translator.
+"""hermes-shim — residual OpenClaw `/tools/invoke` compatibility + `/v1` proxy.
 
 One instance per Hermes profile. Binds the legacy OpenClaw gateway port
-(``main`` → :18789, ``workers`` → :18790) and re-exposes the exact
-``POST /tools/invoke`` surface every existing caller already speaks:
+(``main`` → :18789, ``workers`` → :18790) — the only port the Hermes runtime
+exposes on the compose network, because the Hermes API server itself binds
+``127.0.0.1`` inside the container.
 
-    sessions_spawn    → POST /v1/runs
-    sessions_history  → GET  /v1/runs/{id}   (repackaged into the
-                        OpenClaw double-encoded result.content[].text envelope)
-    sessions_delete   → POST /v1/runs/{id}/stop
-    sessions_send     → POST /v1/runs        (new run, same session_id)
-    sessions_list     → in-memory run→channel map, persisted to a SQLite
-                        sidecar so it survives a shim restart
-    message           → no-op acknowledgement (channel delivery is handled
-                        natively by the Hermes gateway, not via this contract)
+Phase 1 of the OpenClaw→Hermes swap re-exposed the *entire* OpenClaw
+``sessions_*`` surface here so callers needed zero diffs. Phase 2 retired
+most of it:
 
-    GET /health, GET /healthz  → proxy Hermes GET /health
+  * ``learn`` (clerk.py / ephemeral_agent.py) and the ``alfred`` vault-daemon
+    ``openclaw-wrapper`` were rewritten to call Hermes ``/v1/runs`` natively.
+  * The ``sessions_spawn`` / ``sessions_history`` / ``sessions_delete`` /
+    ``sessions_send`` handlers were **removed** — nothing speaks them anymore.
 
-This lets the OpenClaw→Hermes runtime swap land with near-zero caller
-diffs — the only variable under test is Hermes itself. Native rewrites
-to ``/v1/runs`` follow as Phase 2/3 (see PLAN.md Part F).
+What this shim still does:
 
-Auth: the shim validates the *legacy* bearer token (the value of
-``/alfred-data/.gateway-token``) on every inbound request — so no
-caller's token logic changes — and calls Hermes with ``API_SERVER_KEY``
-(which is the same token, but kept as a separate concept so the two can
-diverge later).
+    /v1/*  (any method)         transparent reverse proxy → the Hermes API
+                                server. This is what every native caller
+                                (openclaw-wrapper, clerk, ephemeral_agent,
+                                ctrl-api crossTenant/channelsEmail) now uses.
+    POST /tools/invoke
+        sessions_list           KEPT — Hermes has no native session
+                                enumeration, and ctrl-api's agents.ts /
+                                notifications.ts still resolve a delivery
+                                target from the run→channel registry. Retire
+                                once that resolution is reworked (issue #25).
+        message                 no-op acknowledgement — channel delivery is
+                                native to the Hermes gateway; autonomous code
+                                reaches the principal via ctrl-api →
+                                alfred__notify_principal.
+    GET /health, /healthz       proxy Hermes GET /health.
+
+Auth: every inbound request is validated against the *legacy* bearer token
+(the value of ``/alfred-data/.gateway-token``). The shim then calls Hermes
+with ``HERMES_API_KEY`` (the same token, kept as a separate concept so the
+two can diverge later).
 
 Environment:
     HERMES_SHIM_PROFILE       "main" | "workers"            (required)
@@ -34,7 +45,6 @@ Environment:
     HERMES_API_KEY            Bearer key for the Hermes API server
     HERMES_GATEWAY_TOKEN_FILE legacy token file              (default /alfred-data/.gateway-token)
     HERMES_SHIM_STATE_DB      sessions_list sidecar SQLite    (default /alfred-data/.hermes-shim-<profile>.db)
-    HERMES_SHIM_RUN_TIMEOUT   default per-run ceiling, seconds (default 900)
 """
 
 from __future__ import annotations
@@ -50,7 +60,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 logging.basicConfig(
     level=os.environ.get("HERMES_SHIM_LOG_LEVEL", "INFO"),
@@ -85,9 +95,8 @@ GATEWAY_TOKEN_FILE = os.environ.get(
 STATE_DB = os.environ.get(
     "HERMES_SHIM_STATE_DB", f"/alfred-data/.hermes-shim-{PROFILE}.db"
 )
-DEFAULT_RUN_TIMEOUT = int(os.environ.get("HERMES_SHIM_RUN_TIMEOUT", "900"))
 
-# How long a terminal run's status is retained for sessions_history polling.
+# How long a terminal run's registry row is retained for sessions_list.
 RUN_RETENTION_SECONDS = 3600
 
 
@@ -96,35 +105,16 @@ RUN_RETENTION_SECONDS = 3600
 # ---------------------------------------------------------------------------
 
 def _read_legacy_token() -> str:
-    """Read the OpenClaw gateway token from disk on every call.
+    """Read the gateway token from disk on every call.
 
-    Read fresh (not cached) because the init container regenerates the
-    file and the shim must not pin a stale value across a container
-    restart sequence.
+    Read fresh (not cached) because the init container regenerates the file
+    and the shim must not pin a stale value across a container restart.
     """
     try:
         with open(GATEWAY_TOKEN_FILE, encoding="utf-8") as fh:
             return fh.read().strip()
     except OSError:
         return ""
-
-
-def _check_auth(authorization: str | None) -> None:
-    """Validate the inbound Authorization header against the legacy token.
-
-    Fails closed: if the token file is missing/empty the shim rejects
-    every request rather than running unauthenticated.
-    """
-    expected = _read_legacy_token()
-    if not expected:
-        log.error("legacy gateway token file is missing or empty: %s", GATEWAY_TOKEN_FILE)
-        raise HTTPException(status_code=503, detail="gateway token not provisioned")
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="missing bearer token")
-    presented = authorization[len("Bearer "):].strip()
-    # Constant-time compare.
-    if not _consteq(presented, expected):
-        raise HTTPException(status_code=401, detail="invalid gateway token")
 
 
 def _consteq(a: str, b: str) -> bool:
@@ -136,23 +126,44 @@ def _consteq(a: str, b: str) -> bool:
     return result == 0
 
 
+def _check_auth(authorization: str | None) -> None:
+    """Validate the inbound Authorization header against the legacy token.
+
+    Fails closed: if the token file is missing/empty the shim rejects every
+    request rather than running unauthenticated.
+    """
+    expected = _read_legacy_token()
+    if not expected:
+        log.error("legacy gateway token file is missing or empty: %s", GATEWAY_TOKEN_FILE)
+        raise HTTPException(status_code=503, detail="gateway token not provisioned")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    presented = authorization[len("Bearer "):].strip()
+    if not _consteq(presented, expected):
+        raise HTTPException(status_code=401, detail="invalid gateway token")
+
+
 # ---------------------------------------------------------------------------
 # sessions_list sidecar — SQLite-backed run→channel registry
 # ---------------------------------------------------------------------------
 
 class RunRegistry:
-    """Tracks every run the shim has spawned so `sessions_list` can answer.
+    """Tracks runs the shim has observed so `sessions_list` can answer.
 
-    Hermes has no native "list my sessions" endpoint, so the shim keeps
-    its own registry. Backed by SQLite (a sidecar file, NOT the Hermes
-    SessionStore) so the list survives a shim restart — callers that
-    enumerate sessions after a container bounce still see history.
+    Hermes has no native "list my sessions" endpoint. ctrl-api's agents.ts
+    and notifications.ts still resolve a delivery target (`deliveryContext.to`
+    on a channel) from this registry, so the shim keeps it. Backed by SQLite
+    so the list survives a shim restart.
+
+    Rows are populated by the `/v1` proxy: when a native caller creates a run
+    via `POST /v1/runs` carrying a `channel` / `session_id`, the proxy records
+    it here so the run still surfaces in `sessions_list`.
     """
 
     def __init__(self, path: str) -> None:
         self._path = path
-        # check_same_thread=False — FastAPI serves requests on a threadpool;
-        # the connection is guarded by an asyncio lock at the call sites.
+        # check_same_thread=False — FastAPI serves on a threadpool; the
+        # connection is guarded by an asyncio lock at the call sites.
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.execute(
             """
@@ -161,12 +172,17 @@ class RunRegistry:
                 run_id        TEXT NOT NULL,
                 agent_id      TEXT,
                 channel       TEXT,
+                delivery_to   TEXT,
                 status        TEXT,
                 created_at    REAL NOT NULL,
                 updated_at    REAL NOT NULL
             )
             """
         )
+        # Older sidecar DBs predate delivery_to — add it if missing.
+        cols = {r[1] for r in self._db.execute("PRAGMA table_info(runs)")}
+        if "delivery_to" not in cols:
+            self._db.execute("ALTER TABLE runs ADD COLUMN delivery_to TEXT")
         self._db.commit()
         self._lock = asyncio.Lock()
 
@@ -176,6 +192,7 @@ class RunRegistry:
         run_id: str,
         agent_id: str | None,
         channel: str | None,
+        delivery_to: str | None,
         status: str,
     ) -> None:
         now = time.time()
@@ -183,40 +200,18 @@ class RunRegistry:
             self._db.execute(
                 """
                 INSERT INTO runs (session_key, run_id, agent_id, channel,
-                                  status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                  delivery_to, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_key) DO UPDATE SET
                     run_id=excluded.run_id,
-                    agent_id=excluded.agent_id,
-                    channel=excluded.channel,
+                    agent_id=COALESCE(excluded.agent_id, runs.agent_id),
+                    channel=COALESCE(excluded.channel, runs.channel),
+                    delivery_to=COALESCE(excluded.delivery_to, runs.delivery_to),
                     status=excluded.status,
                     updated_at=excluded.updated_at
                 """,
-                (session_key, run_id, agent_id, channel, status, now, now),
+                (session_key, run_id, agent_id, channel, delivery_to, status, now, now),
             )
-            self._db.commit()
-
-    async def set_status(self, session_key: str, status: str) -> None:
-        async with self._lock:
-            self._db.execute(
-                "UPDATE runs SET status=?, updated_at=? WHERE session_key=?",
-                (status, time.time(), session_key),
-            )
-            self._db.commit()
-
-    async def get(self, session_key: str) -> dict[str, Any] | None:
-        async with self._lock:
-            cur = self._db.execute(
-                "SELECT session_key, run_id, agent_id, channel, status, "
-                "created_at, updated_at FROM runs WHERE session_key=?",
-                (session_key,),
-            )
-            row = cur.fetchone()
-        return self._row_to_dict(row) if row else None
-
-    async def delete(self, session_key: str) -> None:
-        async with self._lock:
-            self._db.execute("DELETE FROM runs WHERE session_key=?", (session_key,))
             self._db.commit()
 
     async def list(self) -> list[dict[str, Any]]:
@@ -225,27 +220,31 @@ class RunRegistry:
             # Opportunistically prune long-dead runs so the list stays small.
             self._db.execute(
                 "DELETE FROM runs WHERE status IN "
-                "('completed','failed','cancelled') AND updated_at < ?",
+                "('completed','succeeded','failed','cancelled','error') "
+                "AND updated_at < ?",
                 (cutoff,),
             )
             self._db.commit()
             cur = self._db.execute(
-                "SELECT session_key, run_id, agent_id, channel, status, "
-                "created_at, updated_at FROM runs ORDER BY updated_at DESC"
+                "SELECT session_key, run_id, agent_id, channel, delivery_to, "
+                "status, created_at, updated_at FROM runs ORDER BY updated_at DESC"
             )
             rows = cur.fetchall()
         return [self._row_to_dict(r) for r in rows]
 
     @staticmethod
     def _row_to_dict(row: tuple) -> dict[str, Any]:
+        # Shape mirrors what ctrl-api agents.ts / notifications.ts expect:
+        # a `channel` and a `deliveryContext.to`, plus `updatedAt` for sort.
         return {
             "sessionKey": row[0],
             "runId": row[1],
             "agentId": row[2],
             "channel": row[3],
-            "status": row[4],
-            "createdAt": row[5],
-            "updatedAt": row[6],
+            "deliveryContext": {"to": row[4]} if row[4] else {},
+            "status": row[5],
+            "createdAt": row[6],
+            "updatedAt": row[7],
         }
 
     def close(self) -> None:
@@ -279,17 +278,12 @@ app = FastAPI(title="hermes-shim", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
-# Envelope helpers — reproduce the OpenClaw double-encoded result shape
+# Envelope helpers — reproduce the OpenClaw double-encoded result shape.
+# Only `sessions_list` and `message` still use this; native /v1 callers do not.
 # ---------------------------------------------------------------------------
 
 def _envelope(payload: dict[str, Any]) -> dict[str, Any]:
-    """Wrap a payload in the OpenClaw `/tools/invoke` response envelope.
-
-    OpenClaw returns:
-        {"result": {"content": [{"type": "text", "text": "<json string>"}]}}
-    Four-plus callers hand-parse exactly this — clerk.py, openclaw-wrapper,
-    ephemeral_agent. The inner `text` is itself a JSON string.
-    """
+    """Wrap a payload in the OpenClaw `/tools/invoke` response envelope."""
     return {
         "result": {
             "content": [
@@ -304,273 +298,117 @@ def _error_envelope(message: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Hermes API calls
+# /v1 transparent proxy — the native surface every Phase-2 caller uses.
 # ---------------------------------------------------------------------------
 
-async def _hermes_create_run(
-    client: httpx.AsyncClient,
-    input_text: str,
-    session_id: str | None,
-    instructions: str | None,
-) -> dict[str, Any]:
-    body: dict[str, Any] = {"input": input_text}
-    if session_id:
-        body["session_id"] = session_id
-    if instructions:
-        body["instructions"] = instructions
-    resp = await client.post("/v1/runs", json=body)
-    resp.raise_for_status()
-    return resp.json()
+# Hop-by-hop headers must not be forwarded across the proxy boundary.
+_HOP_BY_HOP = {
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+}
 
 
-async def _hermes_get_run(client: httpx.AsyncClient, run_id: str) -> dict[str, Any]:
-    resp = await client.get(f"/v1/runs/{run_id}")
-    resp.raise_for_status()
-    return resp.json()
+def _record_run_from_proxy(app: FastAPI, req_body: bytes, resp_body: bytes) -> None:
+    """Best-effort: mirror a `POST /v1/runs` create into the run registry.
 
-
-async def _hermes_stop_run(client: httpx.AsyncClient, run_id: str) -> dict[str, Any]:
-    resp = await client.post(f"/v1/runs/{run_id}/stop")
-    # Stop is best-effort — a 404 (already gone) is not an error to the caller.
-    if resp.status_code == 404:
-        return {"status": "not_found"}
-    resp.raise_for_status()
-    return resp.json()
-
-
-# ---------------------------------------------------------------------------
-# tool handlers
-# ---------------------------------------------------------------------------
-
-async def _handle_sessions_spawn(
-    app: FastAPI, args: dict[str, Any]
-) -> dict[str, Any]:
-    """sessions_spawn → POST /v1/runs.
-
-    OpenClaw args: {task, agentId, mode, cleanup, sandbox, runTimeoutSeconds,
-                    expectsCompletionMessage, ...}
-    We use `task` as the run input and `agentId` to scope the run via both
-    `session_id` (so the run is correlated) and an instructions preamble.
-
-    Returns the OpenClaw spawn envelope whose inner JSON carries
-    `childSessionKey` — every caller extracts exactly that field.
+    Lets `sessions_list` keep answering even though the shim no longer owns
+    the spawn path. A parse failure here is silently ignored — the proxy
+    response is already on its way to the caller.
     """
-    task = args.get("task") or args.get("message") or args.get("prompt") or ""
-    if not task:
-        return _error_envelope("sessions_spawn requires a non-empty `task`")
-
-    agent_id = args.get("agentId") or args.get("agent_id") or "main"
-    channel = args.get("channel") or args.get("source")
-
-    # Per-task scoping lives in the instructions, not an allowlist — mirrors
-    # how ephemeral_agent.py already works against the workers gateway.
-    instructions = (
-        f"You are running as the `{agent_id}` agent on the Alfred {PROFILE} "
-        f"runtime. Complete the delegated task and return your final answer "
-        f"as your last assistant message."
-    )
-
-    client: httpx.AsyncClient = app.state.http
-    run = await _hermes_create_run(
-        client,
-        input_text=task,
-        session_id=agent_id if agent_id else None,
-        instructions=instructions,
-    )
-    run_id = run.get("run_id") or run.get("id")
+    try:
+        req = json.loads(req_body or b"{}")
+        resp = json.loads(resp_body or b"{}")
+    except (json.JSONDecodeError, ValueError):
+        return
+    if not isinstance(req, dict) or not isinstance(resp, dict):
+        return
+    run_id = resp.get("id") or resp.get("run_id")
     if not run_id:
-        return _error_envelope(f"Hermes /v1/runs returned no run_id: {run}")
-
-    # The OpenClaw `childSessionKey` becomes the Hermes run_id verbatim, so
-    # every subsequent sessions_history / sessions_delete call addresses the
-    # exact run.
-    session_key = run_id
-
-    await app.state.registry.record(
-        session_key=session_key,
-        run_id=run_id,
-        agent_id=agent_id,
-        channel=channel,
-        status=run.get("status", "started"),
-    )
-
-    log.info("sessions_spawn → run_id=%s agent=%s", run_id, agent_id)
-    return _envelope(
-        {
-            "childSessionKey": session_key,
-            "runId": run_id,
-            "agentId": agent_id,
-            "status": run.get("status", "started"),
-        }
+        return
+    channel = req.get("channel") or req.get("source")
+    delivery_to = req.get("delivery_to") or req.get("to")
+    agent_id = req.get("session_id") or req.get("agent_id") or "main"
+    asyncio.create_task(
+        app.state.registry.record(
+            session_key=str(run_id),
+            run_id=str(run_id),
+            agent_id=str(agent_id),
+            channel=str(channel) if channel else None,
+            delivery_to=str(delivery_to) if delivery_to else None,
+            status=str(resp.get("status", "started")),
+        )
     )
 
 
-def _run_to_messages(run: dict[str, Any]) -> list[dict[str, Any]]:
-    """Translate a Hermes run status into the OpenClaw `messages` array.
+@app.api_route(
+    "/v1/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+)
+async def v1_proxy(
+    path: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> Response:
+    """Transparent reverse proxy for the Hermes `/v1/*` API.
 
-    OpenClaw sessions_history yields:
-        {"messages": [{"role": "assistant", "content": "<text>"}, ...]}
-    Callers walk this for the last assistant message. Hermes' run status
-    exposes a single `output` string (the final answer) plus optional
-    structured `output` items; we surface the final text as one assistant
-    message, which is all every caller actually consumes.
+    The Hermes API server binds 127.0.0.1 inside the container; the shim is
+    the only thing on the compose network in front of it. Native callers
+    (`openclaw-wrapper`, `clerk.py`, `ephemeral_agent.py`,
+    ctrl-api `crossTenant`/`channelsEmail`) issue plain `/v1/runs` requests
+    against the shim port and the shim forwards them verbatim — auth
+    swapped from the legacy token to HERMES_API_KEY.
     """
-    messages: list[dict[str, Any]] = []
-    status = run.get("status")
+    _check_auth(authorization)
 
-    output = run.get("output")
-    text = ""
-    if isinstance(output, str):
-        text = output
-    elif isinstance(output, list):
-        # Responses-style structured output: collect message text parts.
-        parts: list[str] = []
-        for item in output:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") == "message":
-                content = item.get("content", [])
-                if isinstance(content, list):
-                    for c in content:
-                        if isinstance(c, dict) and c.get("type") in (
-                            "output_text", "text"
-                        ):
-                            parts.append(c.get("text", ""))
-                elif isinstance(content, str):
-                    parts.append(content)
-        text = "\n".join(p for p in parts if p)
-
-    if text:
-        messages.append({"role": "assistant", "content": text})
-    elif status == "failed":
-        # Surface the failure as an assistant message so polling callers
-        # (which only inspect assistant text) see the error and stop.
-        err = run.get("error") or run.get("detail") or "run failed"
-        messages.append({"role": "assistant", "content": f"ERROR: {err}"})
-
-    return messages
-
-
-async def _handle_sessions_history(
-    app: FastAPI, args: dict[str, Any]
-) -> dict[str, Any]:
-    """sessions_history → GET /v1/runs/{id}.
-
-    Repackages the run status into the OpenClaw `{messages: [...]}` envelope.
-    While the run is still in flight, returns an empty `messages` array —
-    exactly what OpenClaw did before the assistant turn completed, so
-    polling callers keep polling.
-    """
-    session_key = args.get("sessionKey") or args.get("session_key")
-    if not session_key:
-        return _error_envelope("sessions_history requires `sessionKey`")
-
-    entry = await app.state.registry.get(session_key)
-    run_id = entry["runId"] if entry else session_key
-
+    body = await request.body()
+    fwd_headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in _HOP_BY_HOP and k.lower() != "authorization"
+    }
     client: httpx.AsyncClient = app.state.http
     try:
-        run = await _hermes_get_run(client, run_id)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 404:
-            # Unknown run — return an empty transcript rather than erroring,
-            # matching OpenClaw's behaviour for an unknown/expired session.
-            return _envelope({"messages": [], "status": "unknown"})
-        raise
+        upstream = await client.request(
+            request.method,
+            f"/v1/{path}",
+            content=body if body else None,
+            params=dict(request.query_params),
+            headers=fwd_headers,
+        )
+    except httpx.RequestError as exc:
+        log.error("/v1 proxy: hermes unreachable: %s", exc)
+        return JSONResponse(
+            status_code=503,
+            content={"error": True, "message": f"hermes API unreachable: {exc}"},
+        )
 
-    status = run.get("status", "running")
-    if entry and status != entry.get("status"):
-        await app.state.registry.set_status(session_key, status)
+    # Mirror run creations into the registry so sessions_list still works.
+    if request.method == "POST" and path.rstrip("/") == "runs" and upstream.is_success:
+        _record_run_from_proxy(app, body, upstream.content)
 
-    messages = _run_to_messages(run)
-    payload: dict[str, Any] = {"messages": messages, "status": status}
-
-    # Echo usage if present — harmless extra field; callers ignore unknown keys.
-    if "usage" in run:
-        payload["usage"] = run["usage"]
-
-    return _envelope(payload)
-
-
-async def _handle_sessions_delete(
-    app: FastAPI, args: dict[str, Any]
-) -> dict[str, Any]:
-    """sessions_delete → POST /v1/runs/{id}/stop.
-
-    OpenClaw `sessions_delete` interrupted + removed a session. Hermes runs
-    are interrupted via /stop; the run record itself ages out of the
-    SessionStore on its own. The shim drops its registry row so the run
-    no longer appears in sessions_list.
-    """
-    session_key = args.get("sessionKey") or args.get("session_key")
-    if not session_key:
-        return _error_envelope("sessions_delete requires `sessionKey`")
-
-    entry = await app.state.registry.get(session_key)
-    run_id = entry["runId"] if entry else session_key
-
-    client: httpx.AsyncClient = app.state.http
-    try:
-        result = await _hermes_stop_run(client, run_id)
-    except httpx.HTTPStatusError as exc:
-        # Stop is best-effort; surface nothing fatal to the caller.
-        log.warning("sessions_delete: stop run %s failed: %s", run_id, exc)
-        result = {"status": "error"}
-
-    await app.state.registry.set_status(session_key, "cancelled")
-    await app.state.registry.delete(session_key)
-    log.info("sessions_delete → run_id=%s stopped", run_id)
-    return _envelope({"deleted": True, "sessionKey": session_key, **result})
-
-
-async def _handle_sessions_send(
-    app: FastAPI, args: dict[str, Any]
-) -> dict[str, Any]:
-    """sessions_send → POST /v1/runs against the same session_id.
-
-    OpenClaw `sessions_send` injected a follow-up message into an existing
-    session. Hermes runs are single-turn; a follow-up is a fresh run that
-    reuses the same `session_id` so Hermes chains the conversation.
-    """
-    session_key = args.get("sessionKey") or args.get("session_key")
-    text = args.get("message") or args.get("text") or args.get("task") or ""
-    if not text:
-        return _error_envelope("sessions_send requires a non-empty `message`")
-
-    entry = await app.state.registry.get(session_key) if session_key else None
-    agent_id = (entry or {}).get("agentId") or "main"
-
-    client: httpx.AsyncClient = app.state.http
-    run = await _hermes_create_run(
-        client,
-        input_text=text,
-        session_id=agent_id,
-        instructions=None,
-    )
-    run_id = run.get("run_id") or run.get("id")
-    if not run_id:
-        return _error_envelope(f"Hermes /v1/runs returned no run_id: {run}")
-
-    new_key = run_id
-    await app.state.registry.record(
-        session_key=new_key,
-        run_id=run_id,
-        agent_id=agent_id,
-        channel=(entry or {}).get("channel"),
-        status=run.get("status", "started"),
-    )
-    return _envelope(
-        {"childSessionKey": new_key, "runId": run_id, "status": run.get("status", "started")}
+    resp_headers = {
+        k: v for k, v in upstream.headers.items()
+        if k.lower() not in _HOP_BY_HOP
+    }
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=resp_headers,
+        media_type=upstream.headers.get("content-type"),
     )
 
+
+# ---------------------------------------------------------------------------
+# Residual /tools/invoke handlers — sessions_list + message only.
+# ---------------------------------------------------------------------------
 
 async def _handle_sessions_list(
     app: FastAPI, args: dict[str, Any]
 ) -> dict[str, Any]:
     """sessions_list → the shim's own run registry.
 
-    Hermes has no native session enumeration; the shim is authoritative.
-    Returns the registry rows in the OpenClaw `{sessions: [...]}` shape.
+    Hermes has no native session enumeration. ctrl-api agents.ts /
+    notifications.ts use this to resolve a delivery target. Retire once that
+    resolution is reworked (issue #25).
     """
     sessions = await app.state.registry.list()
     return _envelope({"sessions": sessions})
@@ -579,25 +417,35 @@ async def _handle_sessions_list(
 async def _handle_message(app: FastAPI, args: dict[str, Any]) -> dict[str, Any]:
     """message → no-op acknowledgement.
 
-    `message` was OpenClaw's outbound channel-delivery primitive. Under
-    Hermes, channel delivery is handled natively by the gateway (Telegram
-    /Slack/email adapters) — there is no equivalent `/tools/invoke`
-    operation. Autonomous code that needs to reach the principal goes
-    through ctrl-api → alfred__notify_principal instead. We acknowledge
-    the call so any legacy caller that still issues `message` does not
-    hard-fail; the delivery itself is a no-op here.
+    `message` was OpenClaw's outbound channel-delivery primitive. Under Hermes
+    channel delivery is native to the gateway; autonomous code that needs to
+    reach the principal goes through ctrl-api → alfred__notify_principal. We
+    acknowledge the call so any legacy caller does not hard-fail; the delivery
+    itself is a no-op here.
     """
     log.info("message tool invoked — acknowledged as no-op (channel delivery is native)")
-    return _envelope({"delivered": False, "noop": True, "reason": "channel delivery is native to the Hermes gateway"})
+    return _envelope(
+        {
+            "delivered": False,
+            "noop": True,
+            "reason": "channel delivery is native to the Hermes gateway",
+        }
+    )
 
 
 _TOOL_HANDLERS = {
-    "sessions_spawn": _handle_sessions_spawn,
-    "sessions_history": _handle_sessions_history,
-    "sessions_delete": _handle_sessions_delete,
-    "sessions_send": _handle_sessions_send,
     "sessions_list": _handle_sessions_list,
     "message": _handle_message,
+}
+
+# Tools retired in Phase 2 — callers were rewritten to native /v1/runs. A
+# clear 410 (instead of a generic 400) tells anything still calling them
+# exactly what happened.
+_RETIRED_TOOLS = {
+    "sessions_spawn": "rewritten to POST /v1/runs",
+    "sessions_history": "rewritten to GET /v1/runs/{id}",
+    "sessions_delete": "rewritten to POST /v1/runs/{id}/stop",
+    "sessions_send": "rewritten to POST /v1/runs (same session_id)",
 }
 
 
@@ -610,7 +458,7 @@ async def tools_invoke(
     request: Request,
     authorization: str | None = Header(default=None),
 ) -> JSONResponse:
-    """The OpenClaw gateway tool-dispatch endpoint.
+    """Residual OpenClaw tool-dispatch endpoint — sessions_list + message only.
 
     Body: {"tool": "<name>", "args": {...}}
     """
@@ -626,25 +474,21 @@ async def tools_invoke(
     if not isinstance(args, dict):
         raise HTTPException(status_code=400, detail="`args` must be an object")
 
+    if tool in _RETIRED_TOOLS:
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                f"tool {tool!r} was retired in Phase 2 — {_RETIRED_TOOLS[tool]}. "
+                f"Call the Hermes /v1 API through the shim instead."
+            ),
+        )
+
     handler = _TOOL_HANDLERS.get(tool)
     if handler is None:
         raise HTTPException(status_code=400, detail=f"unsupported tool: {tool!r}")
 
     try:
         payload = await handler(app, args)
-    except httpx.HTTPStatusError as exc:
-        log.error("hermes API error on %s: %s", tool, exc)
-        # Surface as a 502 — the upstream Hermes API failed, not the caller.
-        return JSONResponse(
-            status_code=502,
-            content=_error_envelope(f"hermes API error: {exc.response.status_code}"),
-        )
-    except httpx.RequestError as exc:
-        log.error("hermes API unreachable on %s: %s", tool, exc)
-        return JSONResponse(
-            status_code=503,
-            content=_error_envelope(f"hermes API unreachable: {exc}"),
-        )
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001 — last-resort guard
@@ -659,7 +503,6 @@ async def tools_invoke(
 
 @app.get("/health")
 @app.get("/healthz")
-@app.get("/v1/health")
 async def health() -> JSONResponse:
     """Proxy the Hermes API server's health endpoint.
 

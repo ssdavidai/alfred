@@ -2,28 +2,35 @@
 //
 // Called by the SaaS webhook receiver at
 // packages/saas/app/src/server/agentmailReceiver.ts when an inbound email
-// comes from an authorized sender. We spawn a one-shot openclaw session
-// with the email pre-loaded as the initial user message plus an envelope
-// of metadata (from/to/cc/subject/thread_id/message_id), so the main
-// agent can read, reason, and reply via /api/v1/email/reply.
+// comes from an authorized sender. We start a one-shot Hermes run with the
+// email pre-loaded as the run input plus an envelope of metadata
+// (from/to/cc/subject/thread_id/message_id), so the main agent can read,
+// reason, and reply via /api/v1/email/reply.
 //
-// Fire-and-forget: we respond 202 immediately and let the session run in
-// the background. Failures to spawn are logged; the message is still safe
+// Fire-and-forget: we respond 202 immediately and let the run proceed in
+// the background. Failures to start are logged; the message is still safe
 // because the SaaS receiver also buffers a StreamEvent fallback.
+//
+// Phase 2: calls Hermes `POST /v1/runs` natively (through the hermes-shim
+// port — the only Hermes surface on the compose network). The OpenClaw
+// `sessions_spawn` `/tools/invoke` contract is retired.
 
 import fs from "node:fs";
 
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 
-const OPENCLAW_GATEWAY_URL =
-  process.env.OPENCLAW_GATEWAY_URL || "http://openclaw:18789";
+const HERMES_GATEWAY_URL =
+  process.env.HERMES_GATEWAY_URL ||
+  process.env.OPENCLAW_GATEWAY_URL ||
+  "http://hermes:18789";
 const GATEWAY_TOKEN_FILE =
   process.env.OPENCLAW_GATEWAY_TOKEN_FILE || "/alfred-data/.gateway-token";
-const CHANNEL_SESSION_BUDGET_SECONDS = 300;
 
 function getGatewayToken(): string {
-  const envToken = (process.env.OPENCLAW_GATEWAY_TOKEN || "").trim();
+  const envToken = (
+    process.env.HERMES_API_KEY || process.env.OPENCLAW_GATEWAY_TOKEN || ""
+  ).trim();
   if (envToken) return envToken;
   try {
     return fs.readFileSync(GATEWAY_TOKEN_FILE, "utf-8").trim();
@@ -97,41 +104,40 @@ export function registerChannelsEmailRoutes(): void {
     const token = getGatewayToken();
     if (!token) {
       throw new ValidationError(
-        "OpenClaw gateway token not available — cannot spawn session",
+        "Hermes gateway token not available — cannot start run",
       );
     }
 
     const prompt = buildChannelPrompt(b.message);
 
-    // Fire-and-forget against the main openclaw gateway. We intentionally
-    // don't await the response — the session runs for tens of seconds to
-    // minutes and AgentMail has a 5s webhook budget upstream (though
-    // we're past that gate by this point — SaaS already 204'd).
-    const spawn = fetch(`${OPENCLAW_GATEWAY_URL}/tools/invoke`, {
+    // Fire-and-forget Hermes run on the main profile. We intentionally don't
+    // await the response — the run takes tens of seconds to minutes and
+    // AgentMail has a 5s webhook budget upstream (already satisfied — SaaS
+    // 204'd before this point). `session_id` correlates the run to the email
+    // thread so a follow-up reply on the same thread chains the conversation.
+    const sessionId = `email-${b.message?.thread_id ?? b.message?.message_id ?? b.event_id ?? Date.now()}`;
+    const run = fetch(`${HERMES_GATEWAY_URL}/v1/runs`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        tool: "sessions_spawn",
-        args: {
-          task: prompt,
-          mode: "run",
-          cleanup: "auto",
-          runTimeoutSeconds: CHANNEL_SESSION_BUDGET_SECONDS,
-          labels: ["email-channel", `event:${b.event_id ?? ""}`],
-        },
+        input: prompt,
+        session_id: sessionId,
+        instructions:
+          "You are the principal-facing Alfred handling an inbound email " +
+          "channel event. Follow the alfred-email-channel skill.",
       }),
     }).catch((err) => {
       console.warn(
-        "[channels-email] sessions_spawn failed:",
+        "[channels-email] POST /v1/runs failed:",
         err instanceof Error ? err.message : String(err),
       );
     });
 
     // Don't await — let it run in the background.
-    void spawn;
+    void run;
 
     sendJson(res, 202, { accepted: true, message_id: b.message?.message_id ?? null });
   });

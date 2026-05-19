@@ -26,7 +26,10 @@
 //   GET    /links                    list (filter: src, dst, rel, limit)
 //   DELETE /links/:id                delete an edge
 //   POST   /embeddings               upsert a vector
-//   POST   /embeddings/search        k-NN search
+//   POST   /embeddings/search        k-NN search (caller supplies the vector)
+//   POST   /embeddings/search-text   semantic search by TEXT — ctrl-api embeds
+//                                    the query via Ollama, then runs k-NN.
+//                                    Backs the vault semantic-search MCP tool.
 //   DELETE /embeddings               delete vectors by ref
 // ============================================================================
 
@@ -37,6 +40,42 @@ import { ulid } from "../../db/ulid.js";
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+// ----------------------------------------------------------------------------
+// Query-text embedding — used by POST /embeddings/search-text.
+//
+// The `embedding` vec0 table stores 768-d nomic-embed-text vectors written by
+// the alfred-learn surveyor. To search by natural-language text the query
+// must be embedded with the SAME model, so ctrl-api calls the shared Ollama
+// sidecar (the surveyor uses the same service — see config.yaml.tpl).
+// ----------------------------------------------------------------------------
+const OLLAMA_URL = (process.env.OLLAMA_BASE_URL ?? "http://ollama:11434").replace(/\/$/, "");
+const EMBED_MODEL = process.env.EMBED_MODEL ?? "nomic-embed-text";
+
+async function embedQuery(text: string): Promise<number[]> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15_000);
+  let resp: Response;
+  try {
+    resp = await fetch(`${OLLAMA_URL}/api/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: EMBED_MODEL, prompt: text }),
+      signal: ctrl.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!resp.ok) {
+    throw new Error(`Ollama embeddings ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+  }
+  const data = (await resp.json()) as { embedding?: unknown };
+  const vec = data.embedding;
+  if (!Array.isArray(vec) || !vec.every((n) => typeof n === "number" && Number.isFinite(n))) {
+    throw new Error("Ollama returned no usable embedding vector");
+  }
+  return vec as number[];
 }
 
 function asObj(body: unknown): Record<string, unknown> {
@@ -509,6 +548,60 @@ export function registerStateRoutes(): void {
       )
       .all(...(refKind ? [JSON.stringify(vector), k, refKind] : [JSON.stringify(vector), k]));
     sendJson(res, 200, { results: rows, count: rows.length });
+  });
+
+  // POST /api/v1/state/embeddings/search-text — semantic search by TEXT.
+  //
+  // ctrl-api embeds the query string via the Ollama sidecar (same model the
+  // surveyor used to write the vectors), then runs the vec0 k-NN. This is the
+  // endpoint the vault semantic-search MCP tool calls — it lets Alfred search
+  // the vault by meaning without having to compute an embedding itself.
+  addRoute("POST", "/api/v1/state/embeddings/search-text", async ({ res, body }) => {
+    if (!vecAvailable()) {
+      sendJson(res, 503, {
+        error: { code: "VEC_UNAVAILABLE", message: "sqlite-vec extension not loaded" },
+      });
+      return;
+    }
+    const b = asObj(body);
+    const q = reqStr(b, "query");
+    const k = Math.max(1, Math.min(50, optNum(b, "k") ?? 10));
+    const refKind = optStr(b, "ref_kind");
+
+    let vector: number[];
+    try {
+      vector = await embedQuery(q);
+    } catch (err) {
+      sendJson(res, 502, {
+        error: {
+          code: "EMBED_FAILED",
+          message: `query embedding failed: ${err instanceof Error ? err.message : String(err)}`,
+        },
+      });
+      return;
+    }
+    if (vector.length !== EMBEDDING_DIM) {
+      sendJson(res, 502, {
+        error: {
+          code: "EMBED_DIM_MISMATCH",
+          message: `embedding model returned ${vector.length} dims, expected ${EMBEDDING_DIM}`,
+        },
+      });
+      return;
+    }
+
+    const rows = db()
+      .prepare(
+        `SELECT m.rowid, m.ref, m.ref_kind, m.ts, m.model, m.chunk_index,
+                m.text_preview, e.distance
+           FROM embedding e
+           JOIN embedding_meta m ON m.rowid = e.rowid
+          WHERE e.embedding MATCH ? AND k = ?
+          ${refKind ? "AND m.ref_kind = ?" : ""}
+          ORDER BY e.distance`,
+      )
+      .all(...(refKind ? [JSON.stringify(vector), k, refKind] : [JSON.stringify(vector), k]));
+    sendJson(res, 200, { query: q, results: rows, count: rows.length });
   });
 
   addRoute("DELETE", "/api/v1/state/embeddings", async ({ res, query }) => {

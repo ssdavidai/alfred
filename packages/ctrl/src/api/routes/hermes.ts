@@ -3,15 +3,12 @@
 //
 // alfred-black replaces the two-container OpenClaw split with a single
 // `hermes` container running two profiles (`main` :18789, `workers` :18790).
-// The runtime is reached through the hermes-shim, which preserves the OpenClaw
-// `POST /tools/invoke` contract — so most route logic here is unchanged; what
-// changes is the container/command names and config paths.
+// The runtime is reached through the hermes-shim, which proxies the Hermes
+// `/v1` API and keeps the residual `sessions_list` tool.
 //
-// Routes are registered under BOTH:
-//   * /api/v1/hermes/*    — the canonical prefix.
-//   * /api/v1/openclaw/*  — kept as an alias for one release so existing
-//                           callers (dashboard, MCP) keep working. Drop in
-//                           Phase 2.
+// Routes are registered under `/api/v1/hermes/*` only. The Phase-1
+// `/api/v1/openclaw/*` alias has been retired (issue #25); every caller
+// (dashboard, MCP) uses the canonical `/api/v1/hermes/*` prefix.
 //
 // Health/status: Hermes is OpenAI-style — `GET /health` over HTTP (the shim
 // proxies it). Restart: `docker compose restart hermes`.
@@ -49,14 +46,14 @@ function readHermesConfig(configPath: string): Record<string, any> {
 }
 
 export function registerHermesRoutes(): void {
-  // Register every handler under both prefixes.
+  // Register each handler under the canonical /api/v1/hermes/* prefix.
+  // The Phase-1 /api/v1/openclaw/* alias was retired in Phase 2 (issue #25).
   const dual = (
     method: string,
     suffix: string,
     handler: Parameters<typeof addRoute>[2],
   ) => {
     addRoute(method, `/api/v1/hermes/${suffix}`, handler);
-    addRoute(method, `/api/v1/openclaw/${suffix}`, handler);
   };
 
   // ── Gateway health ────────────────────────────────────────────
@@ -341,9 +338,6 @@ export function registerHermesRoutes(): void {
   });
 }
 
-/** @deprecated old name — kept so server.ts keeps compiling this release. */
-export const registerOpenClawRoutes = registerHermesRoutes;
-
 // -----------------------------------------------------------------------------
 // Known MCP servers → tool names. Update this table when a new MCP server is
 // added to the Hermes workspace.
@@ -357,6 +351,12 @@ const MCP_SERVER_TOOLS: Record<
       name: "self",
       description:
         "Call this instance's ctrl-api. Alfred's primary way to read the vault, manage streams, create chores, etc.",
+      prime_only: false,
+    },
+    {
+      name: "vault_search",
+      description:
+        "Semantic (meaning-based) vault search backed by the state.db sqlite-vec embedding store — the Hermes-native QMD-recall replacement.",
       prime_only: false,
     },
     {
@@ -374,9 +374,11 @@ const MCP_SERVER_TOOLS: Record<
   ],
 };
 
-// Short human-readable descriptions for the built-in gateway tools. The
-// session_* tool names are the OpenClaw-contract names the hermes-shim
-// re-exposes — callers and the dashboard still see them.
+// Short human-readable descriptions for the built-in gateway tools. Under
+// Hermes, run lifecycle is the native `/v1/runs` API and subagent fan-out is
+// the `delegate_task` tool — the OpenClaw `sessions_spawn`/`sessions_history`/
+// `sessions_delete` primitives were retired in Phase 2. `sessions_list` is the
+// one residual the hermes-shim still serves (ctrl-api delivery-target lookup).
 const BUILTIN_TOOL_DESCRIPTIONS: Record<string, string> = {
   web_search: "Search the web via the configured search provider.",
   web_fetch: "Fetch a URL and return the cleaned text contents.",
@@ -385,8 +387,5 @@ const BUILTIN_TOOL_DESCRIPTIONS: Record<string, string> = {
   ctrl_composio_execute:
     "(legacy dispatch name, superseded by composio_execute — kept for in-flight sessions)",
   sessions_list: "List active sessions / runs on this instance.",
-  sessions_spawn: "Spawn a new session / subagent run.",
-  sessions_send: "Send a message to a running session.",
-  sessions_history: "Read the message history of a session / run.",
-  sessions_delete: "Delete / stop a session run.",
+  delegate_task: "Delegate a subtask to a child agent run.",
 };
