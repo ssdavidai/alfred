@@ -58,6 +58,7 @@ import { PageOverture } from "../client/components/ab/PageOverture";
 import { Markdown } from "../client/components/ab/Markdown";
 import { fadeUp, stagger } from "../client/lib/motion";
 import { enqueueDeskAction } from "./desk-action-queue";
+import DeskOnboardingGate from "./DeskOnboardingGate";
 
 // --------------------------------------------------------------------------
 // Decision row — unified shape across the three source queries.
@@ -182,7 +183,19 @@ interface AuditRow {
 // Page
 // --------------------------------------------------------------------------
 
+// DeskPage is gated by DeskOnboardingGate: a new principal who hasn't run
+// onboarding sees the "Start onboarding" CTA (and is routed into the
+// ritual) instead of an empty decision queue. Once onboarding's `stage`
+// reports "done", the gate renders DeskContent — the real Desk — below.
 export default function DeskPage() {
+  return (
+    <DeskOnboardingGate>
+      <DeskContent />
+    </DeskOnboardingGate>
+  );
+}
+
+function DeskContent() {
   const { data: user } = useAuth();
   const { data: needs, isLoading: needsLoading } = useQuery(getNeedsAttention);
   const { data: approvals, isLoading: approvalsLoading } = useQuery(getPendingApprovals);

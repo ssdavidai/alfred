@@ -29,8 +29,14 @@ The full design lives in [`docs/PLAN.md`](docs/PLAN.md) (Parts A–I).
   script to generate secrets).
 - **API keys**: `OPENROUTER_API_KEY` and `COMPOSIO_API_KEY` are required.
   `ANTHROPIC_API_KEY` is **optional** — Hermes routes LLM traffic through
-  OpenRouter by default. Optionally: Google OAuth credentials, and a
-  **Mailgun** API key + domain for transactional email (signup
+  OpenRouter by default.
+- **Google OAuth credentials** (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`) —
+  required for **automatic onboarding**. Onboarding works by connecting the
+  owner's Gmail (read-only) and profiling ~100 days of mail; without an OAuth
+  client there is nothing to connect. The app still installs and the owner can
+  sign in without it, but the "Start onboarding" flow needs it. See
+  *Onboarding* below.
+- Optionally: a **Mailgun** API key + domain for transactional email (signup
   verification / password reset — see the note under *Install*).
 
 ### Minimum VM spec
@@ -122,6 +128,22 @@ any later signups are plain members.
 > verification email — that requires a real `MAILGUN_API_KEY` + `MAILGUN_DOMAIN`
 > in `.env` (or switch the provider in `packages/web/main.wasp`). Without one,
 > only the owner can log in.
+
+### Onboarding
+
+Onboarding is automatic and runs once, for the owner:
+
+1. Sign up and log in — you land on `/desk`.
+2. The desk shows a **"Start onboarding"** card. Click it.
+3. You're sent to Google to **connect Gmail** (read-only, `gmail.readonly`
+   scope). This needs `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` in `.env`.
+4. On return, Alfred backfills ~100 days of email, builds a behavioural
+   profile, extracts facts, and composes your first Brief — you watch the
+   progress through the onboarding ritual (`/awaken → … → /first-brief`),
+   pausing once to confirm the facts Alfred inferred.
+5. When the first Brief lands you're dropped back on `/desk`, now live.
+
+Later (non-owner) members skip onboarding — it is the owner's setup.
 
 ### Choosing the LLM models
 
