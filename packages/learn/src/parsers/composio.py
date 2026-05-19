@@ -111,6 +111,20 @@ def _item_to_event(item: dict) -> ParsedEvent:
     # the parser fell through to ``datetime.now()``, stamping every
     # email with the fetch time. Decay/window calculations then
     # treated yesterday's email as fresh.
+    #
+    # Google Calendar events are the same class of bug, just shaped
+    # differently. The event's actual occurrence time lives under
+    # ``item.start.dateTime`` (timed events) or ``item.start.date``
+    # (all-day events) — NOT at the top-level fields the gmail-style
+    # branch above looks at. Without this, a calendar event from
+    # February gets stamped with ``datetime.now()`` whenever the
+    # syncToken resets and Composio re-fetches the past-30/future-90d
+    # window, and the brief's 14-day age cutoff (PR #932) treats
+    # months-old "Eszter Feb 8 fashion show"-style events as fresh.
+    # Live evidence on david 2026-05-19: nine gcal signal rows with
+    # ts ≈ now and bodies referencing events from Jan/Feb/Mar 2025.
+    # See ``_gcal_event_start_iso`` below for the shape we accept.
+    gcal_start = _gcal_event_start_iso(item)
     received_at = (
         item.get("date")
         or item.get("created_at")
@@ -119,6 +133,7 @@ def _item_to_event(item: dict) -> ParsedEvent:
         or item.get("receivedAt")
         or item.get("internalDate")
         or item.get("messageTimestamp")
+        or gcal_start
         or datetime.now(timezone.utc).isoformat()
     )
 
@@ -185,6 +200,40 @@ def _single_event(raw: dict) -> ParsedEvent:
         received_at=datetime.now(timezone.utc).isoformat(),
         metadata={},
     )
+
+
+def _gcal_event_start_iso(item: dict) -> str:
+    """Return the Google Calendar event's start time as an ISO string.
+
+    Google Calendar events arrive shaped as::
+
+        {
+          "id": "<eventId>",
+          "start": {"dateTime": "2025-02-08T17:00:00+01:00", "timeZone": "..."},
+          "end":   {"dateTime": "2025-02-08T18:00:00+01:00", "timeZone": "..."},
+          ...
+        }
+
+    All-day events use ``"date": "YYYY-MM-DD"`` instead of ``dateTime``.
+    Returns an empty string if neither shape is present — the caller
+    falls through to the next candidate (``datetime.now``).
+
+    Pinned to the gcal ``start`` field on purpose: ``updated`` /
+    ``created`` would be the moment the event was last edited in
+    Google's UI (also stable, but unrelated to "when does this event
+    matter for the principal"). The signal pipeline's freshness
+    contract is event-occurrence, not event-editing.
+    """
+    start = item.get("start")
+    if not isinstance(start, dict):
+        return ""
+    dt = start.get("dateTime")
+    if isinstance(dt, str) and dt.strip():
+        return dt.strip()
+    d = start.get("date")
+    if isinstance(d, str) and d.strip():
+        return d.strip()
+    return ""
 
 
 def _classify_event_type(item: dict) -> str:
