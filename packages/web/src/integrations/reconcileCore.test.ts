@@ -114,7 +114,6 @@ test("reconcileBatch: fires auto-config on a pending ACTIVE row and flips it to 
       return {
         toolkit: "gmail",
         composio_execute_enabled: true,
-        gateway_restart_triggered: false,
         stream_created: "composio-gmail-gmail-fetch-emails",
         schedule_created: "al-stream-pull-composio-composio-gmail-gma",
         skill_generated: "/home/node/.openclaw/workspace/skills/alfred-composio-gmail",

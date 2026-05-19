@@ -71,13 +71,9 @@ export const getIntegrationCatalog: GetIntegrationCatalog<
 };
 
 /**
- * Fast readiness probe for the tenant's Hermes runtime. Used by the
- * dashboard's `ReconfiguringBanner` to detect the restart window that
- * follows a tool-enable config change (e.g. first Composio connect).
- * Returns:
- *   { ready: bool,
- *     last_config_touch_at: iso | null,
- *     restart_expected_until: iso | null }
+ * Fast readiness probe for the tenant's Hermes runtime. The ConnectionsPage
+ * uses it to warn the user when the gateway isn't ready yet (new connections
+ * queue and apply once it settles).
  *
  * The runtime is Hermes — the Phase-1 `/api/v1/openclaw/*` alias was
  * retired (ctrl-api issue #25), so this reads `/api/v1/hermes/ready`.

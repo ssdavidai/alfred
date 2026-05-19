@@ -14,7 +14,6 @@ import {
   migrateIntegrationStream,
 } from "wasp/client/operations";
 import DashboardLayout from "../dashboard/DashboardLayout";
-import { useOpenclawStatus } from "../shared/OpenclawStatusContext";
 import SpotlightCard from "../components/ui/SpotlightCard";
 import {
   Search,
@@ -161,9 +160,6 @@ function LegacyIntegrationsPage() {
   const [apiKeyModal, setApiKeyModal] = useState<Toolkit | null>(null);
   const prevConnectedRef = useRef<Set<string>>(new Set());
   const autoFiredRef = useRef<Set<string>>(new Set());
-  const { markReconfiguring, reconfiguringUntil } = useOpenclawStatus();
-  const isReconfiguring =
-    reconfiguringUntil !== null && reconfiguringUntil > new Date();
 
   const {
     data: catalogData,
@@ -213,14 +209,6 @@ function LegacyIntegrationsPage() {
       setConfiguringId(connectionId);
       try {
         const result = await autoConfigIntegration({ connectionId });
-        // If ctrl-api reports a gateway restart was triggered (i.e. tools.allow
-        // actually changed), show the reconfiguring banner for ~60s so the user
-        // doesn't see a 502 when they click into Alfred. Connecting a second
-        // Composio app is a no-op at the openclaw layer and won't set this
-        // flag — banner stays hidden.
-        if (result?.gateway_restart_triggered) {
-          markReconfiguring(toolkitName);
-        }
         const parts: string[] = [];
         if (result?.stream_created) parts.push("stream active");
         if (result?.actions_count) parts.push(`${result.actions_count} actions`);
@@ -232,7 +220,7 @@ function LegacyIntegrationsPage() {
       setConfiguringId(null);
       void refetchConnected();
     },
-    [markReconfiguring, refetchConnected],
+    [refetchConnected],
   );
 
   // ---------------------------------------------------------------------------
@@ -417,10 +405,7 @@ function LegacyIntegrationsPage() {
     async (connId: string, toolkitName: string) => {
       if (!confirm(`Disconnect ${toolkitName}? This will remove the stream, skill, and all tool access.`)) return;
       try {
-        const result: any = await disconnectIntegration({ connectionId: connId });
-        if (result?.gateway_restart_triggered) {
-          markReconfiguring(toolkitName);
-        }
+        await disconnectIntegration({ connectionId: connId });
         refetchConnected();
         setExpandedConn(null);
         setToast(`${toolkitName} disconnected`);
@@ -428,7 +413,7 @@ function LegacyIntegrationsPage() {
         setToast(`Disconnect failed: ${err?.message}`);
       }
     },
-    [refetchConnected, markReconfiguring],
+    [refetchConnected],
   );
 
   return (
@@ -482,8 +467,7 @@ function LegacyIntegrationsPage() {
                     </div>
                     <button
                       onClick={() => handleConnect(r.slug)}
-                      disabled={connectingSlug === r.slug || isReconfiguring}
-                      title={isReconfiguring ? "Waiting for the gateway to finish restarting…" : undefined}
+                      disabled={connectingSlug === r.slug}
                       className="rounded-lg bg-[#C9A84C]/10 px-3 py-1.5 text-xs text-[#C9A84C] transition hover:bg-[#C9A84C]/20 disabled:opacity-50"
                     >
                       {connectingSlug === r.slug ? "Connecting..." : "Connect"}
@@ -574,7 +558,6 @@ function LegacyIntegrationsPage() {
                   toolkit={toolkit}
                   isConnected={connectedSlugs.has(toolkit.slug)}
                   isConnecting={connectingSlug === toolkit.slug}
-                  isReconfiguring={isReconfiguring}
                   onConnect={() => handleConnect(toolkit.slug)}
                 />
               ))}
@@ -620,13 +603,11 @@ function ToolkitCard({
   toolkit,
   isConnected,
   isConnecting,
-  isReconfiguring,
   onConnect,
 }: {
   toolkit: Toolkit;
   isConnected: boolean;
   isConnecting: boolean;
-  isReconfiguring: boolean;
   onConnect: () => void;
 }) {
   return (
@@ -670,8 +651,7 @@ function ToolkitCard({
       ) : (
         <button
           onClick={onConnect}
-          disabled={isConnecting || isReconfiguring}
-          title={isReconfiguring ? "Waiting for the gateway to finish restarting…" : undefined}
+          disabled={isConnecting}
           className="inline-flex items-center gap-1.5 self-start rounded-lg bg-[#C9A84C]/10 px-3 py-1.5 text-xs text-[#C9A84C] transition hover:bg-[#C9A84C]/20 disabled:opacity-50"
         >
           {isConnecting ? (
