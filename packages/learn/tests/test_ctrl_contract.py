@@ -281,22 +281,55 @@ class TestFetchUnprocessedEvents:
         http.get.assert_called_once()
         assert http.get.call_args.args[0] == "/api/v1/streams/events"
 
-    def test_status_param_is_unprocessed(self, vc):
-        """ctrl filters by ?status=unprocessed to exclude processed/quarantined events."""
+    def test_default_uses_consumer_aware_path(self, vc):
+        """STORE-P4-1: default fetch reads the JSONL log via the consumer-aware
+        endpoint (?consumer=event_processor&max=N), which atomically advances
+        the per-consumer offset in state.db. Replaces the legacy
+        ?status=unprocessed scan as the default code path."""
         client, http = vc
         http.get.return_value = make_response(200, {"events": []})
 
         asyncio.run(client.fetch_unprocessed_events())
 
         params = http.get.call_args.kwargs.get("params", {})
-        assert params.get("status") == "unprocessed"
+        assert params.get("consumer") == "event_processor"
+        assert "max" in params
+        # Legacy keys must not leak when on the consumer-aware path.
+        assert "status" not in params
+        assert "limit" not in params
 
-    def test_limit_param_forwarded(self, vc):
-        """limit is passed directly as a query param to ctrl."""
+    def test_legacy_path_when_consumer_is_none(self, vc):
+        """When consumer=None is passed explicitly, fall back to the legacy
+        status-keyed scan over the streams directory. Kept for callers that
+        cannot use offsets (e.g. one-off backfills, ops scripts)."""
+        client, http = vc
+        http.get.return_value = make_response(200, {"events": []})
+
+        asyncio.run(client.fetch_unprocessed_events(consumer=None))
+
+        params = http.get.call_args.kwargs.get("params", {})
+        assert params.get("status") == "unprocessed"
+        assert "limit" in params
+        # Consumer-aware keys must not leak when on the legacy path.
+        assert "consumer" not in params
+        assert "max" not in params
+
+    def test_limit_forwarded_on_consumer_aware_path(self, vc):
+        """limit is passed as ?max=N on the consumer-aware path."""
         client, http = vc
         http.get.return_value = make_response(200, {"events": []})
 
         asyncio.run(client.fetch_unprocessed_events(limit=5))
+
+        params = http.get.call_args.kwargs.get("params", {})
+        assert params.get("max") == 5
+
+    def test_limit_forwarded_on_legacy_path(self, vc):
+        """limit is passed as ?limit=N on the legacy path."""
+        client, http = vc
+        http.get.return_value = make_response(200, {"events": []})
+
+        asyncio.run(client.fetch_unprocessed_events(limit=5, consumer=None))
 
         params = http.get.call_args.kwargs.get("params", {})
         assert params.get("limit") == 5
