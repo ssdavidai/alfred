@@ -89,6 +89,7 @@ async def write_pattern_proposal_safe(
     cluster_size: int = 0,
     member_observation_ids: list[str] | None = None,
     payload: dict[str, Any] | None = None,
+    id: str | None = None,
 ) -> dict[str, Any] | None:
     """Best-effort POST to ``/api/v1/pattern-proposals``.
 
@@ -100,6 +101,12 @@ async def write_pattern_proposal_safe(
     authoritative during the soak period, so a missing row here is
     recoverable by re-running the backfill once the SQL table is the
     single source of truth.
+
+    STORE-P6-1f-F: ``id`` is forwarded as a deterministic primary key.
+    A 409 Conflict response (duplicate id) is treated as success —
+    Temporal retried; the row already landed; we return a synthesised
+    ``{"id": id}`` so the caller's downstream bookkeeping keeps the
+    same pseudo-path.
     """
     cfg = load_config()
     client = VaultClient(cfg)
@@ -110,7 +117,26 @@ async def write_pattern_proposal_safe(
             cluster_size=cluster_size,
             member_observation_ids=member_observation_ids,
             payload=payload,
+            id=id,
         )
+    except httpx.HTTPStatusError as exc:
+        if (
+            id is not None
+            and exc.response is not None
+            and exc.response.status_code == 409
+        ):
+            logger.info(
+                "pattern_proposal_writer.write_pattern_proposal_safe: "
+                "409 conflict id=%s — treating as idempotent success",
+                id,
+            )
+            return {"id": id, "ts": ""}
+        logger.warning(
+            "pattern_proposal_writer.write_pattern_proposal_safe: "
+            "POST /api/v1/pattern-proposals FAILED name=%s err=%s",
+            proposed_name, exc,
+        )
+        return None
     except httpx.HTTPError as exc:
         logger.warning(
             "pattern_proposal_writer.write_pattern_proposal_safe: "

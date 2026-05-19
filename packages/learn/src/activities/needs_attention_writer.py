@@ -90,6 +90,7 @@ async def write_needs_attention_safe(
     target_matter: str | None = None,
     target_kind: str | None = None,
     payload: dict[str, Any] | None = None,
+    id: str | None = None,
 ) -> dict[str, Any] | None:
     """Best-effort POST to ``/api/v1/needs-attention``.
 
@@ -101,6 +102,12 @@ async def write_needs_attention_safe(
     authoritative during the soak period, so a missing row here is
     recoverable by re-running the backfill once the SQL table is the
     single source of truth.
+
+    STORE-P6-1f-F: ``id`` is forwarded as a deterministic primary key.
+    A 409 Conflict response (duplicate id) is treated as success —
+    Temporal retried; the row already landed; return a synthesised
+    ``{"id": id}`` so the caller's downstream bookkeeping keeps the
+    same pseudo-path.
     """
     cfg = load_config()
     client = VaultClient(cfg)
@@ -112,7 +119,28 @@ async def write_needs_attention_safe(
             target_matter=target_matter,
             target_kind=target_kind,
             payload=payload,
+            id=id,
         )
+    except httpx.HTTPStatusError as exc:
+        # 409 == duplicate id == retry landed on an already-written row.
+        # Treat as success so the caller's idempotency contract holds.
+        if (
+            id is not None
+            and exc.response is not None
+            and exc.response.status_code == 409
+        ):
+            logger.info(
+                "needs_attention_writer.write_needs_attention_safe: "
+                "409 conflict id=%s — treating as idempotent success",
+                id,
+            )
+            return {"id": id, "ts": ""}
+        logger.warning(
+            "needs_attention_writer.write_needs_attention_safe: "
+            "POST /api/v1/needs-attention FAILED headline=%s err=%s",
+            headline[:80], exc,
+        )
+        return None
     except httpx.HTTPError as exc:
         logger.warning(
             "needs_attention_writer.write_needs_attention_safe: "

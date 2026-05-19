@@ -607,12 +607,26 @@ async def detect_pattern_proposals() -> dict[str, Any]:
                     if isinstance(observation_refs, list)
                     else None
                 )
+                # STORE-P6-1f-F: deterministic id from the cluster's
+                # canonical record_name (already a stable function of
+                # sender + intent + cluster signature) so Temporal
+                # retries collide on the same row; 409 returned by the
+                # ctrl-api POST is mapped to success by the safe wrapper.
+                import uuid as _uuid
+
+                determ_id = str(
+                    _uuid.uuid5(
+                        _uuid.NAMESPACE_URL,
+                        f"pattern-proposal:{record_name}",
+                    )
+                )
                 sql_resp = await write_pattern_proposal_safe(
                     proposed_name=str(fm.get("name") or record_name),
                     proposed_body=content,
                     cluster_size=int(fm.get("cluster_size") or 0),
                     member_observation_ids=member_ids,
                     payload=fm,
+                    id=determ_id,
                 )
             except Exception as exc:  # noqa: BLE001
                 # Programming error in the kwargs mapping above would

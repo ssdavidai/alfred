@@ -308,18 +308,72 @@ async def extract_observation_from_signal(signal_path: str) -> dict[str, Any]:
     if not signal_path.startswith("signal/"):
         return {"observation_path": None, "reason": "not a signal path"}
 
-    async with _http() as client:
-        signal_rec = await _read_record(client, signal_path)
-        if not signal_rec:
+    # STORE-P6-1f-F: the legacy ``vault/signal/<id>.md`` markdown file
+    # no longer exists once CANONICAL_PATH_ENFORCEMENT flips to enforce
+    # (Round 3). Read the signal via the SQL table instead — the row
+    # carries the canonical columns we need (source_type, source_event,
+    # target_matter, target_kind, display_headline, display_body). The
+    # legacy frontmatter fields the old markdown carried that aren't in
+    # the SQL row (effect, target_path, action_proposal, raw_quote, …)
+    # were never used by this observation-derivation path, so the swap
+    # is non-lossy for our purposes. The companion stream_event read
+    # still goes through ``/api/v1/vault/records/<path>`` — stream_event
+    # is NOT among the four banned vault types in Round 2 (signal,
+    # needs_attention, pattern_proposal, audit/event-style), so that
+    # read remains valid.
+    from src.utils.vault_client import VaultClient as _VC
+    cfg_sig = load_config()
+    sig_client = _VC(cfg_sig)
+    signal_fm: dict[str, Any] = {}
+    try:
+        signal_id = signal_path.split("/", 1)[-1]
+        if signal_id.endswith(".md"):
+            signal_id = signal_id[:-3]
+        try:
+            sql_row = await sig_client.get_signal(signal_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "extract_obs_from_signal: get_signal(%s) failed: %s",
+                signal_id, exc,
+            )
+            sql_row = None
+        if not sql_row:
             return {"observation_path": None, "reason": "signal not readable"}
-        signal_fm = signal_rec.get("frontmatter") or {}
-        if not isinstance(signal_fm, dict):
-            signal_fm = {}
+        # Map SQL row → frontmatter-shaped dict the downstream
+        # helpers read. Only the fields they actually consume are
+        # populated; everything else degrades to "" / None.
+        signal_fm = {
+            "source_type": sql_row.get("source_type") or "",
+            "source_event_path": sql_row.get("source_event") or "",
+            "target_path": sql_row.get("target_matter") or "",
+            "target_kind": sql_row.get("target_kind") or "",
+            "display_headline": sql_row.get("display_headline") or "",
+            "display_body": sql_row.get("display_body") or "",
+            "name": sql_row.get("display_headline") or "",
+            "created": "",  # not on SQL row; derived from ts below
+            # downstream helpers also poke at ``effect``, ``alfred_tags``,
+            # ``topic_tags``, ``target_candidates`` — all absent on the
+            # SQL row by design. Their callers tolerate missing keys.
+        }
+        # Convert ns ts back to ISO so _read_record-derived helpers
+        # that key off ``created`` keep working without special-casing.
+        ts_raw = sql_row.get("ts")
+        if ts_raw:
+            try:
+                ns = int(ts_raw)
+                signal_fm["created"] = datetime.fromtimestamp(
+                    ns / 1_000_000_000, tz=timezone.utc,
+                ).isoformat()
+            except (TypeError, ValueError):
+                pass
+    finally:
+        await sig_client.close()
 
-        source_event_path = str(signal_fm.get("source_event_path") or "").strip()
-        event_fm: dict[str, Any] = {}
-        if source_event_path:
-            event_rec = await _read_record(client, source_event_path)
+    source_event_path = str(signal_fm.get("source_event_path") or "").strip()
+    event_fm: dict[str, Any] = {}
+    if source_event_path:
+        async with _http() as event_client:
+            event_rec = await _read_record(event_client, source_event_path)
             event_fm = (event_rec.get("frontmatter") or {}) if isinstance(event_rec, dict) else {}
             if not isinstance(event_fm, dict):
                 event_fm = {}

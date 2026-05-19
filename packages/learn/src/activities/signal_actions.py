@@ -813,9 +813,10 @@ async def write_needs_attention_record(
     import hashlib
     import json
 
-    import httpx
-    from src.config import load_config
-    from src.utils.vault_client import VaultClient
+    # STORE-P6-1f-F: httpx / VaultClient / load_config no longer
+    # imported here — the legacy markdown pre-check + write that used
+    # them are gone. ``write_needs_attention_safe`` owns its own
+    # transport.
 
     if not isinstance(signal, dict):
         raise ValueError(
@@ -893,35 +894,14 @@ async def write_needs_attention_record(
     short_id = hashlib.sha256(digest_input).hexdigest()[:8]
     name = f"{ts_part}-{short_id}"
 
-    # Pre-write idempotency check. Even with the deterministic name,
-    # write_record may not be atomic with respect to retries from
-    # parallel ticks. Belt-and-suspenders: if the target path already
-    # exists, return it instead of writing again.
-    target_existing_path = f"needs_attention/{name}.md"
-    try:
-        check_cfg = load_config()
-        check_client = VaultClient(check_cfg)
-        try:
-            existing = await check_client.read_record(target_existing_path)
-            if isinstance(existing, dict):
-                logger.info(
-                    "signal_actions.write_needs_attention_record: "
-                    "idempotency hit — path=%s already exists (retry)",
-                    target_existing_path,
-                )
-                return target_existing_path
-        except httpx.HTTPStatusError as exc:
-            if exc.response is None or exc.response.status_code != 404:
-                raise
-            # 404 → not present → safe to write below.
-        finally:
-            await check_client.close()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "signal_actions.write_needs_attention_record: "
-            "idempotency check failed (continuing to write) err=%s",
-            exc,
-        )
+    # STORE-P6-1f-F: legacy markdown-existence pre-check removed.
+    # The needs_attention markdown file no longer exists (Round 2
+    # banned ``vault/needs_attention/*.md``), so ``read_record`` here
+    # always 404s — the pre-check was a no-op. Idempotency now lives at
+    # the SQL layer: we derive a deterministic UUIDv5 from the source
+    # signal path and pass it to ``POST /api/v1/needs-attention``;
+    # duplicate inserts return 409 which ``write_needs_attention_safe``
+    # treats as success.
 
     def _scalar(v: Any) -> str:
         if v is None:
@@ -1086,6 +1066,17 @@ async def write_needs_attention_record(
             "display_body": display_body or None,
         }
 
+        # STORE-P6-1f-F: deterministic id derived from the source
+        # signal path so Temporal retries land on the same SQL row
+        # (the server returns 409 → safe wrapper maps to success).
+        import uuid as _uuid
+
+        determ_seed = (
+            source_signal_path or f"needs_attention:fallback:{name}"
+        )
+        determ_id = str(
+            _uuid.uuid5(_uuid.NAMESPACE_URL, f"needs-attention:{determ_seed}")
+        )
         sql_resp = await write_needs_attention_safe(
             headline=shadow_headline,
             body=shadow_body,
@@ -1093,6 +1084,7 @@ async def write_needs_attention_record(
             target_matter=shadow_target_matter,
             target_kind=shadow_target_kind,
             payload=shadow_payload,
+            id=determ_id,
         )
     except Exception as exc:  # noqa: BLE001
         # Programming error in the kwargs mapping above (or transport
@@ -1440,80 +1432,65 @@ async def dispatch_action_to_agent(
     if len(agent_text) > 500:
         summary = summary + "…"
 
-    # Write the outcome as a follow-up signal record. We use the existing
-    # signal/ record_type so the same dashboard / audit views surface it.
+    # STORE-P6-1f-F: legacy /vault/signal/ ``agent-outcome-*`` markdown
+    # write removed; the outcome is now folded into the audit table as
+    # ``action_type=agent_outcome``. The audit row's ``decision_origin``
+    # points back at the upstream signal so ``check_decision_outcomes``
+    # can still match outcomes → executing decisions (it will need a
+    # follow-up patch to read /api/v1/audit instead of the legacy
+    # ``vault/list/signal`` scan — flagged below in the per-fix report).
+    # Same replay-safety contract as the rest of this activity: we're
+    # inside ``@activity.defn dispatch_action_to_agent``, no
+    # ``workflow.patched()`` gate required.
     ts_iso = _now_utc_iso()
-    ts_part = _ts_filename(ts_iso)
     digest_input = f"{matched_instinct_path}\x00{what}\x00{ts_iso}".encode(
         "utf-8", errors="replace",
     )
     short_id = hashlib.sha256(digest_input).hexdigest()[:8]
-    outcome_name = f"{ts_part}-agent-outcome-{short_id}"
+    audit_name = f"agent-outcome-{_ts_filename(ts_iso)}-{short_id}"
 
-    def _scalar(v: Any) -> str:
-        if v is None:
-            return "null"
-        if isinstance(v, bool):
-            return "true" if v else "false"
-        if isinstance(v, (int, float)):
-            return str(v)
-        s = str(v).replace("\\", "\\\\").replace('"', '\\"')
-        return f'"{s}"'
+    from src.activities.audit_writer import write_audit_safe
 
-    fm_lines = [
-        "---",
-        f"type: {_scalar('signal')}",
-        f"created: {_scalar(ts_iso)}",
-        f"source_type: {_scalar('agent_outcome')}",
-        f"source_event_path: {_scalar('')}",
-        # source_signal_path is the upstream signal this outcome is FOR.
-        # check_decision_outcomes uses this field to match outcomes back
-        # to the originating decision (decision.side_effects.re_routed_signal
-        # == outcome.source_signal_path). Without this the executing →
-        # completed transition never fires and decisions stay stuck.
-        f"source_signal_path: {_scalar(source_signal_path)}",
-        f"matched_instinct: {_scalar(matched_instinct_path)}",
-        f"matched_instinct_name: {_scalar(instinct_name)}",
-        f"target_path: {_scalar(target_path) if target_path else 'null'}",
-        f"action_what: {_scalar(what)}",
-        f"suggested_actor: {_scalar(suggested_actor)}",
-        f"effect: {_scalar('agent_outcome')}",
-        # The router-managed status fields stay at their terminal values;
-        # this is a leaf record (the agent has spoken).
-        f"status: {_scalar('agent_responded')}",
-        f"agent_response: {json.dumps(agent_text, ensure_ascii=False)}",
-        "---",
-        "",
-    ]
-    body_lines = [
-        f"# Agent outcome for: {what}",
-        "",
-        f"**Instinct:** `{matched_instinct_path}` ({instinct_name})",
-        f"**Target:** {target_clause}",
-        "",
-        "## Agent response",
-        "",
-        agent_text or "(empty response)",
-        "",
-    ]
-    content = "\n".join(fm_lines) + "\n".join(body_lines) + "\n"
+    outcome_payload: dict[str, Any] = {
+        "type": "agent_outcome",
+        "timestamp": ts_iso,
+        "source_signal_path": source_signal_path,
+        "matched_instinct": matched_instinct_path,
+        "matched_instinct_name": instinct_name,
+        "target_path": target_path,
+        "action_what": what,
+        "suggested_actor": suggested_actor,
+        "status": "agent_responded",
+        "agent_response": agent_text,
+        "agent_response_summary": summary,
+        "audit_name": audit_name,
+    }
 
-    cfg = load_config()
-    client = VaultClient(cfg)
-    try:
-        try:
-            outcome_path = await client.write_record(
-                record_type="signal", name=outcome_name, content=content,
-            )
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "signal_actions.dispatch_action_to_agent: outcome record "
-                "write failed name=%s err=%s",
-                outcome_name, exc,
-            )
-            raise
-    finally:
-        await client.close()
+    sql_resp = await write_audit_safe(
+        actor="agent_dispatcher",
+        action_type="agent_outcome",
+        target_type="signal",
+        target_id=source_signal_path or matched_instinct_path,
+        payload=outcome_payload,
+        decision_origin=source_signal_path or None,
+        reasoning=f"agent dispatched via instinct {instinct_name}",
+        reversible=False,
+    )
+
+    if not sql_resp:
+        logger.warning(
+            "signal_actions.dispatch_action_to_agent: outcome audit emit "
+            "returned None name=%s — outcome NOT persisted",
+            audit_name,
+        )
+        raise RuntimeError(
+            f"agent_outcome audit emit failed for {source_signal_path}"
+        )
+
+    row_id = (
+        str(sql_resp.get("id") or "") if isinstance(sql_resp, dict) else ""
+    )
+    outcome_path = f"audit/{row_id}" if row_id else ""
 
     logger.info(
         "signal_actions.dispatch_action_to_agent: dispatched + recorded "
@@ -1968,22 +1945,21 @@ async def route_signal_action(
         signal_status = (
             "routed_agent" if chosen_path == "agent" else "routed_human"
         )
-        try:
-            await client.patch_frontmatter_structured(
-                signal_path,
-                scalar_updates={
-                    "status": signal_status,
-                    "applied_at": _now_utc_iso(),
-                    "audit_record_path": audit_path,
-                },
-            )
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "signal_actions.route_signal_action: status PATCH failed "
-                "path=%s status=%s err=%s",
-                signal_path, signal_status, exc,
-            )
-            raise
+        # STORE-P6-1f-F: legacy frontmatter PATCH on the signal markdown
+        # removed. ``vault/signal/*.md`` no longer exists once Round 3
+        # flips CANONICAL_PATH_ENFORCEMENT, so the patch would 400. The
+        # audit row's ``target_id`` already cross-links audit→signal
+        # (and ``decision_origin`` repeats the signal path), so the
+        # signal→audit backlink is recoverable by query without a
+        # dedicated SQL column. The idempotency guard at the top of
+        # this activity reads ``status`` from the markdown frontmatter
+        # via ``read_record(signal_path)``; that read also 404s under
+        # enforce, falling cleanly into the ``signal_not_found`` early
+        # return — a known suboptimal-but-safe degradation flagged for
+        # follow-up (route_signal_action will need to query the
+        # signal SQL row instead, requiring frontmatter fields like
+        # ``effect``/``action_proposal``/confidences to be added to
+        # the signal table or carried inline by the caller).
 
         logger.info(
             "signal_actions.route_signal_action: routed path=%s "

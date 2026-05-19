@@ -409,6 +409,23 @@ class VaultClient:
 
     # --- Signal + Observation reads (STORE-P3-5) --------------------------
 
+    async def get_signal(self, signal_id: str) -> dict[str, Any] | None:
+        """GET /api/v1/signals/:id. Returns the SQL row or None on 404.
+
+        STORE-P6-1f-F: companion to ``list_signals`` for the
+        single-row case. Used by downstream readers that previously
+        called ``read_record("signal/...md")`` and now need to hit the
+        SQL table instead under the canonical-path lockdown.
+
+        Returns the raw JSON row (same columns as ``list_signals``) on
+        success, ``None`` on 404. Other HTTP errors propagate.
+        """
+        resp = await self._client.get(f"/api/v1/signals/{signal_id}")
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json()
+
     async def list_signals(
         self,
         *,
@@ -474,6 +491,7 @@ class VaultClient:
         cluster_size: int = 0,
         member_observation_ids: list[str] | None = None,
         payload: dict[str, Any] | None = None,
+        id: str | None = None,
     ) -> dict[str, Any]:
         """POST one row to the pattern_proposal table via ctrl-api.
 
@@ -481,6 +499,11 @@ class VaultClient:
         The server assigns ``id`` (UUIDv4) and ``ts`` (unix ns, returned
         as decimal STRING so nanosecond precision survives JSON's
         ``Number.MAX_SAFE_INTEGER`` ceiling).
+
+        When ``id`` is supplied (STORE-P6-1f-F), the server uses that id
+        deterministically; a duplicate POST returns 409 — callers that
+        want retry-idempotence should treat 409 as success and parse the
+        id back out of the URL (or just trust their seed).
 
         Returns ``{"id": "<uuid>", "ts": "<unix-ns-string>"}``.
         """
@@ -493,6 +516,8 @@ class VaultClient:
             body["member_observation_ids"] = list(member_observation_ids)
         if payload is not None:
             body["payload"] = payload
+        if id is not None:
+            body["id"] = id
         resp = await self._client.post(
             "/api/v1/pattern-proposals", json=body,
         )
@@ -508,6 +533,7 @@ class VaultClient:
         target_matter: str | None = None,
         target_kind: str | None = None,
         payload: dict[str, Any] | None = None,
+        id: str | None = None,
     ) -> dict[str, Any]:
         """POST one row to the needs_attention table via ctrl-api.
 
@@ -515,6 +541,12 @@ class VaultClient:
         The server assigns ``id`` (UUIDv4) and ``ts`` (unix ns, returned
         as decimal STRING so nanosecond precision survives JSON's
         ``Number.MAX_SAFE_INTEGER`` ceiling).
+
+        When ``id`` is supplied (STORE-P6-1f-F), the server uses that id
+        deterministically; a duplicate POST returns 409. Callers that
+        want retry-idempotence should derive ``id`` from a stable seed
+        (e.g. ``uuid5(NAMESPACE_URL, "needs-attention:<signal_path>")``)
+        and treat 409 as success.
 
         Returns ``{"id": "<uuid>", "ts": "<unix-ns-string>"}``.
         """
@@ -530,6 +562,8 @@ class VaultClient:
             request_body["target_kind"] = target_kind
         if payload is not None:
             request_body["payload"] = payload
+        if id is not None:
+            request_body["id"] = id
         resp = await self._client.post(
             "/api/v1/needs-attention", json=request_body,
         )
