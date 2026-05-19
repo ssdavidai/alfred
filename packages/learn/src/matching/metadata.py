@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from temporalio import activity
 
+
+@activity.defn
 def extract_input_metadata(input_event: dict[str, Any]) -> dict[str, Any]:
     """Extract metadata from an input for instinct matching.
 

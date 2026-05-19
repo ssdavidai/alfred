@@ -236,6 +236,7 @@ from src.activities.judge import (
     load_intuition_index,
     score_instincts,
 )
+from src.matching.metadata import extract_input_metadata
 
 # Activities — onboarding v2
 from src.activities.onboarding import (
@@ -807,6 +808,7 @@ ALL_ACTIVITIES = [
     # Judge
     attempt_judgment,
     execute_route,
+    extract_input_metadata,
     fetch_unrouted_inputs,
     load_intuition_index,
     score_instincts,
