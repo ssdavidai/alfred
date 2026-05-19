@@ -60,7 +60,7 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 logging.basicConfig(
     level=os.environ.get("HERMES_SHIM_LOG_LEVEL", "INFO"),
@@ -366,14 +366,15 @@ async def v1_proxy(
         if k.lower() not in _HOP_BY_HOP and k.lower() != "authorization"
     }
     client: httpx.AsyncClient = app.state.http
+    req = client.build_request(
+        request.method,
+        f"/v1/{path}",
+        content=body if body else None,
+        params=dict(request.query_params),
+        headers=fwd_headers,
+    )
     try:
-        upstream = await client.request(
-            request.method,
-            f"/v1/{path}",
-            content=body if body else None,
-            params=dict(request.query_params),
-            headers=fwd_headers,
-        )
+        upstream = await client.send(req, stream=True)
     except httpx.RequestError as exc:
         log.error("/v1 proxy: hermes unreachable: %s", exc)
         return JSONResponse(
@@ -381,19 +382,41 @@ async def v1_proxy(
             content={"error": True, "message": f"hermes API unreachable: {exc}"},
         )
 
-    # Mirror run creations into the registry so sessions_list still works.
-    if request.method == "POST" and path.rstrip("/") == "runs" and upstream.is_success:
-        _record_run_from_proxy(app, body, upstream.content)
-
     resp_headers = {
         k: v for k, v in upstream.headers.items()
         if k.lower() not in _HOP_BY_HOP
     }
+    ctype = upstream.headers.get("content-type", "")
+
+    # Server-Sent Events (GET /v1/runs/{id}/events) — re-stream chunk by
+    # chunk so the dashboard chat renders tokens live, not in one burst.
+    if "text/event-stream" in ctype:
+        async def _passthru():
+            try:
+                async for chunk in upstream.aiter_bytes():
+                    yield chunk
+            finally:
+                await upstream.aclose()
+        return StreamingResponse(
+            _passthru(),
+            status_code=upstream.status_code,
+            headers=resp_headers,
+            media_type="text/event-stream",
+        )
+
+    # Non-streaming — buffer the body (needed to mirror run creations into
+    # the registry so sessions_list keeps working).
+    try:
+        content = await upstream.aread()
+    finally:
+        await upstream.aclose()
+    if request.method == "POST" and path.rstrip("/") == "runs" and upstream.is_success:
+        _record_run_from_proxy(app, body, content)
     return Response(
-        content=upstream.content,
+        content=content,
         status_code=upstream.status_code,
         headers=resp_headers,
-        media_type=upstream.headers.get("content-type"),
+        media_type=ctype or None,
     )
 
 

@@ -94,6 +94,10 @@ services:
       - CTRL_API_URL=http://ctrl-api:3100
       - AAS_API_KEY=${AAS_API_KEY}
       - COLUMN_ENCRYPTION_KEY=${COLUMN_ENCRYPTION_KEY}
+    volumes:
+      # read-only — the chat proxy reads /alfred-data/.gateway-token to
+      # authenticate to the Hermes shim.
+      - alfred_data:/alfred-data:ro
     healthcheck:
       # the Wasp server image is slim (no wget/curl) and exposes no fixed
       # 200 route — a TCP-connect probe via the bundled Node is robust.
