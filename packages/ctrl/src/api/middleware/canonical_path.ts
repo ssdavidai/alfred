@@ -181,15 +181,17 @@ export function validateVaultWritePath(relPath: string): ValidationResult {
 export type EnforcementMode = "enforce" | "warn" | "off";
 
 export function getEnforcementMode(): EnforcementMode {
-  // Default is `warn` while four alfred-learn writers still target
-  // non-canonical types (pattern_proposal, signal markdown,
-  // needs_attention, event). After those migrate to SQL endpoints +
-  // a soak, flip the default to `enforce`. Operators can set the env
-  // explicitly to flip per-tenant earlier for canary enforcement.
-  const raw = (process.env.CANONICAL_PATH_ENFORCEMENT ?? "warn").toLowerCase();
+  // Default is `enforce` — the four-store lockdown completed via the
+  // STORE-P6-1-followup chain (#478): pattern_proposal, signal,
+  // needs_attention, and event writers all migrated to SQL endpoints
+  // (rounds A through G in commits 192190d → 762443a). Operators can
+  // set the env to `warn` for a soak window before flipping a new
+  // tenant, or `off` for emergency rollback.
+  const raw = (process.env.CANONICAL_PATH_ENFORCEMENT ?? "enforce").toLowerCase();
   if (raw === "off" || raw === "warn" || raw === "enforce") return raw;
-  // Unknown values fall back to warn (don't break the fleet on a typo).
-  return "warn";
+  // Unknown values fall back to enforce (fail-closed: the safe default
+  // once the lockdown is in effect; mirrors the original P6-1 intent).
+  return "enforce";
 }
 
 /**

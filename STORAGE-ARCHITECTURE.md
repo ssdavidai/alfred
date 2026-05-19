@@ -14,13 +14,25 @@
 > - all 4 tenants on persistent state.db (`/opt/alfred/state`), restic
 >   backups verified, canonical-path enforcement in `warn` mode
 >
-> The remaining followups (see GH issues #477, #478) are:
-> - migrate 4 stragglers (pattern_proposal, signal markdown,
->   needs_attention, event writers) off legacy vault types so
->   `CANONICAL_PATH_ENFORCEMENT` can default to `enforce`
-> - chown `/opt/alfred/state` to 1000:1000 + add the alfred-learn
->   bind on live tenants so `archival_sweep` can compact state.db
->   directly (currently short-circuits with `state_db_missing`)
+> All originally-scoped followups closed 2026-05-19:
+> - **#477** state.db bind on alfred-learn applied to all 4 tenants;
+>   archival_sweep workflow now compacts SQLite to Parquet on the
+>   daily 03:00 UTC schedule.
+> - **#478** lockdown completed via Rounds A→G (#480–#485):
+>   migration 006 added pattern_proposal + needs_attention tables;
+>   migration 007 added a `payload` JSON column to the signal table;
+>   alfred-learn writers migrated off all four banned types; SaaS
+>   readers cut over to the SQL endpoints; downstream readers
+>   (route_signal_action, dispatch_action_to_agent,
+>   apply_signal_mutation, check_decision_outcomes) all read from
+>   SQL now. `CANONICAL_PATH_ENFORCEMENT` default flipped to
+>   `enforce` — the four-store lockdown is in effect.
+>
+> The only remaining open issue from this session is the
+> pre-existing **#479** openclaw `.gateway-token` permission bug
+> (root:root mode 600 keeps getting rewritten; blocks all
+> alfred-learn clerk/LLM calls). That predates and is independent
+> of this epic.
 
 ---
 
