@@ -9,8 +9,12 @@ from temporalio import activity
 
 
 @activity.defn
-def extract_input_metadata(input_event: dict[str, Any]) -> dict[str, Any]:
+async def extract_input_metadata(input_event: dict[str, Any]) -> dict[str, Any]:
     """Extract metadata from an input for instinct matching.
+
+    Async to match the worker's activity-executor model (no sync
+    activity_executor is configured). The body is pure CPU and never
+    awaits — the async wrapper is a no-op at runtime.
 
     This is a deterministic Python operation — no LLM involved.
     """
