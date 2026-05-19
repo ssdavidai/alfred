@@ -41,5 +41,5 @@ widget (the other half of risk 5) is handled separately.
 
 If a future revision routes voice tool-calls through Hermes' ephemeral runtime
 instead of ctrl-api, that would use `POST /v1/runs` + `GET /v1/runs/{id}/events`
-(HTTP/SSE) via the shim passthrough — but that is a deliberate product change,
-not a transport migration, and is out of scope for #30.
+(HTTP/SSE) against the Hermes `/v1` API directly — but that is a deliberate
+product change, not a transport migration, and is out of scope for #30.

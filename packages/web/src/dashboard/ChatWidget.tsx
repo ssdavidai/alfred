@@ -3,7 +3,7 @@
 // OpenClaw exposed a raw WebSocket at `:18789/`; the old dashboard linked
 // straight out to it. Hermes is HTTP/SSE — this widget talks to the Wasp
 // server's chat proxy (`src/server/chatProxy.ts`), which forwards to the
-// Hermes runtime through the hermes-shim:
+// Hermes runtime's `/v1` API directly:
 //
 //   - streaming turn:  POST /api/chat/run  → SSE GET /api/chat/stream
 //   - fallback turn:   POST /api/chat/turn (Hermes POST /v1/responses)

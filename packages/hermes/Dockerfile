@@ -7,11 +7,11 @@
 # image, one extra ~150 MB Python process instead of a whole second Node
 # container.
 #
-# The container runs FOUR supervised processes (see docker/supervisor.sh):
-#   hermes -p main    gateway run   — user-facing chat, Hermes API on :18799
-#   hermes -p workers gateway run   — background agents, Hermes API on :18800
-#   hermes-shim (main)              — binds legacy :18789, → :18799
-#   hermes-shim (workers)           — binds legacy :18790, → :18800
+# The container runs TWO supervised processes (see docker/supervisor.sh):
+#   hermes -p main    gateway run   — user-facing chat, Hermes API on :18789
+#   hermes -p workers gateway run   — background agents, Hermes API on :18790
+# The hermes-shim was retired (issue #40): the Hermes API server binds the
+# canonical ports directly; callers speak the Hermes /v1 API natively.
 #
 # BUILD CONTEXT: the alfred-black monorepo root. All COPY paths are
 # repo-relative (matches the init container's `context: .` convention).
@@ -125,20 +125,6 @@ COPY packages/hermes/workspace-template/docs/TOOLS.md /opt/hermes-assets/TOOLS.m
 COPY packages/mcp-server/instructions/alfred-custom-instructions.md /opt/hermes-assets/AGENTS.md
 
 # =============================================================================
-# Install the hermes-shim.
-# =============================================================================
-# The FastAPI translator that re-exposes the OpenClaw /tools/invoke contract.
-# One instance per profile (bound by the supervisor to the legacy ports).
-COPY packages/hermes/shim/requirements.txt /opt/hermes-shim/requirements.txt
-RUN pip install --no-cache-dir -r /opt/hermes-shim/requirements.txt
-COPY packages/hermes/shim/hermes_shim.py   /opt/hermes-shim/hermes_shim.py
-
-# A thin launcher so the supervisor can invoke `hermes-shim` as a command.
-RUN printf '#!/bin/sh\nexec python3 /opt/hermes-shim/hermes_shim.py "$@"\n' \
-        > /usr/local/bin/hermes-shim \
-    && chmod +x /usr/local/bin/hermes-shim
-
-# =============================================================================
 # Supervisor entrypoint.
 # =============================================================================
 COPY packages/hermes/docker/supervisor.sh /opt/hermes-supervisor/supervisor.sh
@@ -152,14 +138,13 @@ ENV HERMES_HOME=/opt/data \
     HERMES_MCP_STDIO_SRC=/opt/mcp-stdio \
     HERMES_MCP_CTRL_SRC=/opt/mcp/ctrl-server.mjs
 
-# Legacy gateway ports — the hermes-shim binds these; this is the contract
-# every existing caller speaks. Internal Hermes API ports (18799/18800) are
-# never published.
+# Hermes API server ports — the gateways bind these directly (the shim that
+# used to front them was retired in issue #40). This is the contract every
+# caller speaks: the Hermes /v1 API on :18789 (main) / :18790 (workers).
 EXPOSE 18789 18790
 
-# Healthcheck hits the MAIN shim's /health, which itself proxies the Hermes
-# API server's /health — so a green healthcheck means the real runtime,
-# behind the shim, is up.
+# Healthcheck hits the MAIN gateway's /health endpoint directly — a green
+# healthcheck means the real Hermes runtime is up.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
     CMD curl -fsS http://localhost:18789/health || exit 1
 

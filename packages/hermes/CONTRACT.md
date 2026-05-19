@@ -28,9 +28,9 @@ Alfred daemon process — starts agent runs on the Hermes runtime via the `openc
 
 | Connection | Address | Protocol |
 |-----------|---------|----------|
-| Hermes runtime | http://hermes:18790 | HTTP (Hermes `/v1/runs` API, via the hermes-shim) |
+| Hermes runtime | http://hermes:18790 | HTTP (Hermes `/v1/runs` API, bound directly on the canonical port) |
 
-The `openclaw-wrapper` (filename kept for backward-compatible config/Dockerfile references) calls Hermes `POST /v1/runs` to start a run, then polls `GET /v1/runs/{id}` for the result — the OpenClaw `sessions_spawn`/`sessions_history` `/tools/invoke` contract was retired in Phase 2. The `alfred` and `hermes` containers share the `/alfred-data` volume so the wrapper can read prompt files and curator manifest files written by the alfred daemons.
+The `openclaw-wrapper` (filename kept for backward-compatible config/Dockerfile references) calls Hermes `POST /v1/runs` to start a run, then polls `GET /v1/runs/{id}` for the result — the OpenClaw `sessions_spawn`/`sessions_history` `/tools/invoke` contract was retired in Phase 2, and the hermes-shim that briefly fronted the Hermes API server was retired in issue #40. The `alfred` and `hermes` containers share the `/alfred-data` volume so the wrapper can read prompt files and curator manifest files written by the alfred daemons.
 
 Built from: `dockerfiles/alfred.Dockerfile`
 Base: `python:3.11-slim-bookworm` + Node.js 22 + `openclaw-wrapper` + Alfred (git clone, unpinned)
@@ -100,6 +100,6 @@ All three images run as Docker containers within the tenant Docker Compose stack
 
 | Consumer | Connection | What It Uses |
 |----------|-----------|-------------|
-| `alfred` (worker) | http://openclaw:18789 | HTTP gateway (`POST /tools/invoke` → `sessions_spawn` / `sessions_history`) |
-| `alfred-learn` | http://openclaw:18789 | HTTP gateway (`POST /tools/invoke` → `sessions_spawn` / `sessions_history`) |
-| Users (via Cloudflare Tunnel) | https://{subdomain}.{domain} → :18789 | HTTP/WS gateway |
+| `alfred` (worker) | http://hermes:18790 | Hermes `/v1/runs` API (workers profile) |
+| `alfred-learn` | http://hermes:18789 / :18790 | Hermes `/v1/runs` API (main / workers profile) |
+| Users (via Cloudflare Tunnel) | https://{subdomain}.{domain} → :18789 | Hermes `/v1` API (main profile) |

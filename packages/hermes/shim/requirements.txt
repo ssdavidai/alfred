@@ -1,5 +1,0 @@
-# hermes-shim — Hermes /v1 proxy + residual `message` no-op compat surface.
-# Pinned exact (matching the Hermes supply-chain hygiene policy: no ranges).
-fastapi==0.136.1
-uvicorn[standard]==0.47.0
-httpx==0.28.1

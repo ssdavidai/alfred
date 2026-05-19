@@ -37,10 +37,10 @@ function loadPeers(): Map<string, PeerConfig> {
 // Hermes runtime helpers (for the receiving side)
 //
 // Phase 2: the receiving side calls the Hermes `/v1/runs` API natively. The
-// request goes to the hermes-shim port (the only Hermes surface on the
-// compose network — the Hermes API server itself binds 127.0.0.1); the shim
-// transparently proxies `/v1/*` through to the runtime. The OpenClaw
-// `sessions_spawn`/`sessions_history` `/tools/invoke` contract is retired.
+// request goes straight to the Hermes API server, which binds the canonical
+// port on the compose network (the hermes-shim was retired in issue #40).
+// The OpenClaw `sessions_spawn`/`sessions_history` `/tools/invoke` contract
+// is retired.
 // ---------------------------------------------------------------------------
 
 const GATEWAY_TOKEN_PATHS = [

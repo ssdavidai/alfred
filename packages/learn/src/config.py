@@ -13,21 +13,19 @@ class Config:
     task_queue: str = field(default_factory=lambda: os.environ.get("TASK_QUEUE", "alfred-learn"))
 
     # Gateways. alfred-black runs ONE Hermes container exposing two
-    # profiles via the OpenClaw-contract compat shim:
+    # profiles, each binding its OpenAI-compatible /v1 API directly on its
+    # canonical port (the hermes-shim compat layer was retired in issue #40):
     #
-    # * ``openclaw_gateway_url`` → the MAIN profile shim on :18789. Hosts
-    #   ``agentId: "main"`` — Sir-facing chat, Slack DMs, Plane @alfred
-    #   mentions. Only this profile accepts ``agentId=main`` on
-    #   ``sessions_spawn``; the workers profile rejects it with
-    #   ``agentId is not allowed for sessions_spawn``.
-    # * ``openclaw_workers_gateway_url`` → the WORKERS profile shim on
-    #   :18790. Hosts ``learn-clerk`` + ephemeral execution subagents
-    #   spawned by TaskRunner. Rejects ``agentId=main``.
+    # * ``openclaw_gateway_url`` → the MAIN profile on :18789. Hosts the
+    #   Sir-facing chat, Slack DMs, Plane @alfred mentions.
+    # * ``openclaw_workers_gateway_url`` → the WORKERS profile on :18790.
+    #   Hosts ``learn-clerk`` + ephemeral execution subagents spawned by
+    #   TaskRunner.
     #
     # Both URLs point at the single ``hermes`` service — the profile is
     # selected by port (18789 = main, 18790 = workers). The variable NAMES
     # are deliberately unchanged (Temporal determinism); only the default
-    # values moved from the two openclaw containers to the hermes shim.
+    # values moved from the two openclaw containers to the hermes service.
     #
     # Keep these straight: any activity spawning a user-facing Alfred
     # session (notify EOD, Plane triggers, email channel, voice) must use
@@ -55,8 +53,8 @@ class Config:
     # Clerk agent (model comes from OpenClaw agent config, not env)
     clerk_agent_id: str = field(default_factory=lambda: os.environ.get("CLERK_AGENT_ID", "learn-clerk"))
 
-    # Execution gateway — the workers-profile shim, used by TaskRunner for
-    # ephemeral subagent spawning (#378). Same endpoint as
+    # Execution gateway — the workers-profile Hermes /v1 API, used by
+    # TaskRunner for ephemeral subagent spawning (#378). Same endpoint as
     # ``openclaw_workers_gateway_url``; the variable name is kept stable.
     execution_gateway_url: str = field(default_factory=lambda: os.environ.get("EXECUTION_GATEWAY_URL", "http://hermes:18790"))
     workers_openclaw_config_path: str = field(default_factory=lambda: os.environ.get("WORKERS_OPENCLAW_CONFIG", "/hermes-state/workers/config.yaml"))

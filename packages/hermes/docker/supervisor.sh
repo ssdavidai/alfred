@@ -2,12 +2,14 @@
 # =============================================================================
 # supervisor.sh — alfred-black-hermes process supervisor.
 #
-# Runs FOUR long-lived processes in one container and keeps them alive:
+# Runs TWO long-lived processes in one container and keeps them alive:
 #
-#   1. hermes -p main    gateway run   — user-facing chat (Hermes API :18799)
-#   2. hermes -p workers gateway run   — background agents (Hermes API :18800)
-#   3. hermes-shim (main)              — legacy :18789 → :18799
-#   4. hermes-shim (workers)           — legacy :18790 → :18800
+#   1. hermes -p main    gateway run   — user-facing chat (Hermes API :18789)
+#   2. hermes -p workers gateway run   — background agents (Hermes API :18790)
+#
+# The hermes-shim was retired in issue #40: the Hermes API server binds the
+# canonical ports (:18789 / :18790) directly, so callers speak the Hermes
+# /v1 API natively — there is no compat layer to supervise.
 #
 # SessionStore housekeeping is no longer a supervised process: Hermes
 # v2026.5.16 natively prunes its SQLite session store and VACUUMs, driven
@@ -114,28 +116,9 @@ wait_for_profiles() {
 log "alfred-black-hermes starting — HERMES_HOME=${HERMES_HOME}"
 wait_for_profiles
 
-# start_shim — launch a hermes-shim instance scoped to one profile.
-# The shim reads its profile, the upstream Hermes API URL, and the API key
-# from the environment. The API key is pulled from the profile's rendered
-# .env so the shim authenticates to the Hermes API server with the exact
-# token the init container generated.
-start_shim() {
-    local name="$1" profile="$2"
-    local env_file="${PROFILES_DIR}/${profile}/.env"
-    local api_key internal_port
-    api_key="$(grep -E '^API_SERVER_KEY=' "$env_file" | head -1 | cut -d= -f2-)"
-    if [[ "$profile" == "main" ]]; then internal_port=18799; else internal_port=18800; fi
-    CMDS["$name"]="HERMES_SHIM_PROFILE=${profile} HERMES_API_URL=http://127.0.0.1:${internal_port} HERMES_API_KEY='${api_key}' exec hermes-shim"
-    # shellcheck disable=SC2086
-    bash -c "${CMDS[$name]}" &
-    PIDS["$name"]=$!
-    log "started '$name' (pid ${PIDS[$name]}): hermes-shim profile=${profile} → :${internal_port}"
-}
-
-# Launch order: gateways first (they own the Hermes API servers), then the
-# shims. A shim whose Hermes is not up yet simply reports degraded health and
-# retries on the next call — no ordering hazard, but starting gateways first
-# shortens the window.
+# Launch the two Hermes gateways. Each `gateway run` owns its profile's
+# OpenAI-compatible API server, bound to the canonical port (18789 main /
+# 18790 workers) on 0.0.0.0 — callers reach the /v1 API directly.
 #
 # `gateway run --replace` runs in the FOREGROUND (so the supervisor owns the
 # process) and `--replace` clears any stale gateway.lock left by a previous
@@ -143,17 +126,10 @@ start_shim() {
 start_proc "hermes-main"     "exec hermes -p main gateway run --replace"
 start_proc "hermes-workers"  "exec hermes -p workers gateway run --replace"
 
-# Give the gateways a head start so the shims' first /health probe is more
-# likely to succeed (cosmetic — the shims self-heal regardless).
-sleep 3
-
-start_shim "shim-main"    "main"
-start_shim "shim-workers" "workers"
-
 # =============================================================================
 # Supervise — restart any worker that exits while we are not shutting down.
 # =============================================================================
-log "all four processes running — entering supervise loop"
+log "both gateway processes running — entering supervise loop"
 while true; do
     # Block until SOME child exits. `wait -n` returns that child's status.
     wait -n
@@ -179,16 +155,10 @@ while true; do
             sleep "$RESTART_DELAY"
             (( SHUTTING_DOWN == 1 )) && continue
 
-            case "$name" in
-                shim-main)    start_shim "shim-main"    "main" ;;
-                shim-workers) start_shim "shim-workers" "workers" ;;
-                *)
-                    # shellcheck disable=SC2086
-                    bash -c "${CMDS[$name]}" &
-                    PIDS["$name"]=$!
-                    log "restarted '$name' (pid ${PIDS[$name]})"
-                    ;;
-            esac
+            # shellcheck disable=SC2086
+            bash -c "${CMDS[$name]}" &
+            PIDS["$name"]=$!
+            log "restarted '$name' (pid ${PIDS[$name]})"
         fi
     done
 done

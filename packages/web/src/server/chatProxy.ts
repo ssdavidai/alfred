@@ -8,10 +8,9 @@ import { getSessionAndUserFromBearerToken } from "wasp/auth/session";
  * Chat proxy — single-VM edition, Hermes runtime.
  *
  * OpenClaw exposed a raw WebSocket at `:18789/` for the dashboard chat
- * widget. Hermes is HTTP/SSE: its API server is reached through the
- * hermes-shim's transparent `/v1/*` passthrough at `http://hermes:18789`.
- * The shim is the only Hermes surface on the compose network (the Hermes
- * API server itself binds 127.0.0.1 inside the container).
+ * widget. Hermes is HTTP/SSE: its API server binds the canonical port
+ * `http://hermes:18789` directly on the compose network (the hermes-shim
+ * that used to front it was retired in issue #40).
  *
  * The browser cannot reach `hermes:18789` directly, so this module mounts
  * three Express routes on the Wasp server — mirroring how `terminalProxy`
@@ -31,14 +30,13 @@ import { getSessionAndUserFromBearerToken } from "wasp/auth/session";
  * single-shot `/turn` is the fallback when SSE is unavailable.
  */
 
-// The hermes-shim binds the legacy `:18789` port (main profile) on the
-// compose network and transparently proxies `/v1/*` to the Hermes API
-// server. Overridable for local dev.
+// The Hermes `main`-profile API server binds `:18789` directly on the
+// compose network and serves the `/v1/*` API. Overridable for local dev.
 const HERMES_GATEWAY_URL =
   process.env.HERMES_GATEWAY_URL ?? "http://hermes:18789";
 
-// Hermes upstream auth. The shim validates inbound requests against the
-// legacy gateway token written by the init container to
+// Hermes upstream auth. The Hermes API server validates inbound requests
+// against the gateway token written by the init container to
 // `/alfred-data/.gateway-token`. If the web container mounts the
 // `alfred_data` volume, that file is the source of truth; otherwise fall
 // back to the `HERMES_API_SERVER_KEY` env var (same token value when the
@@ -316,9 +314,8 @@ export function registerChatProxy(app: Application): void {
         return;
       }
 
-      // Re-stream the upstream SSE bytes verbatim. The hermes-shim may
-      // buffer the upstream body before forwarding; either way the event
-      // framing is preserved and the browser renders tokens as they land.
+      // Re-stream the upstream SSE bytes verbatim — the event framing is
+      // preserved and the browser renders tokens as they land.
       const reader = upstream.body.getReader();
       while (true) {
         const { done, value } = await reader.read();

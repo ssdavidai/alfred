@@ -32,6 +32,10 @@ Positional:
     <gateway_token> the value of /alfred-data/.gateway-token — becomes
                     API_SERVER_KEY in the profile .env
 
+The Hermes API server binds the canonical ports 18789 (main) / 18790
+(workers) directly — the hermes-shim that used to front it was retired in
+issue #40.
+
 Path-baking: the absolute paths baked INTO the rendered config.yaml
 (mcp-stdio dir, ctrl-server.mjs, NODE_PATH) must be valid in the HERMES
 RUNTIME container, which mounts the same volume at a different path
@@ -56,10 +60,11 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
-# Internal Hermes API server ports — the hermes-shim binds the legacy
-# 18789/18790 and forwards here. Must match docker/supervisor.sh and
-# the shim's port table.
-_INTERNAL_API_PORT = {"main": 18799, "workers": 18800}
+# Hermes API server ports — the canonical ports every caller already uses.
+# The hermes-shim was retired (issue #40); the Hermes API server now binds
+# these ports directly. Must match docker/supervisor.sh and the EXPOSE in
+# the Dockerfile.
+_API_SERVER_PORT = {"main": 18789, "workers": 18790}
 
 # The template renders the `model:` block with `provider: openrouter`. Hermes
 # owns provider/model selection natively (`hermes model`, with a live model
@@ -201,9 +206,11 @@ def main() -> int:
     env_tmpl = env.get_template("hermes-profile.env.njk")
     env_out = env_tmpl.render(
         profile=profile,
-        api_server_port=_INTERNAL_API_PORT[profile],
+        api_server_port=_API_SERVER_PORT[profile],
         api_server_key=gateway_token,
-        api_server_host="127.0.0.1",
+        # Bind 0.0.0.0 — the Hermes API server is now reached directly over
+        # the compose network (the shim that used to front it is gone).
+        api_server_host="0.0.0.0",
         api_server_cors=os.environ.get("HERMES_API_CORS_ORIGINS", ""),
         openrouter_api_key=os.environ.get("OPENROUTER_API_KEY", ""),
         anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),

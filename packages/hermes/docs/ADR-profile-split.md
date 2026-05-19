@@ -17,10 +17,15 @@
 profiles**, each its own `hermes -p <profile> gateway run` process, supervised by
 `packages/hermes/docker/supervisor.sh`:
 
-| Profile   | Role | Hermes API | Shim (legacy) port | Model | Memory | Channels |
-|-----------|------|-----------|--------------------|-------|--------|----------|
-| `main`    | user-facing chat | `:18799` | `:18789` | `x-ai/grok-4.3` | on (`memory_enabled: true`, user profile, nudges) | all six toolsets (cli/telegram/slack/discord/whatsapp/signal) |
-| `workers` | background agents only | `:18800` | `:18790` | `openai/gpt-4.1-nano` | off (`memory_enabled: false`) | none — `cli: [terminal, file, web, vision, skills, todo]` |
+| Profile   | Role | Hermes API port | Model | Memory | Channels |
+|-----------|------|-----------------|-------|--------|----------|
+| `main`    | user-facing chat | `:18789` | `x-ai/grok-4.3` | on (`memory_enabled: true`, user profile, nudges) | all six toolsets (cli/telegram/slack/discord/whatsapp/signal) |
+| `workers` | background agents only | `:18790` | `openai/gpt-4.1-nano` | off (`memory_enabled: false`) | none — `cli: [terminal, file, web, vision, skills, todo]` |
+
+> Each profile's Hermes API server binds its canonical port directly. The
+> hermes-shim that briefly fronted the API server on a separate internal
+> port pair (18799/18800) was retired in issue #40 — this ADR's prose
+> below still references it as historical context.
 
 The split is inherited from OpenClaw's two-*container* split (`openclaw` +
 `openclaw-workers`), originally a resource-contention workaround. Every

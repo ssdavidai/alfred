@@ -3,30 +3,7 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { resolveDeliveryTarget } from "../hermes-sessions.js";
 
-// The ctrl-api container mounts /mnt/encrypted/alfred at the same path (NOT
-// remapped to /alfred-data like alfred-learn does — see
-// packages/ctrl/src/templates/docker-compose.yaml.njk and PR #463). Read the
-// env var the compose template already sets, and fall back to both common
-// paths for older tenants where the env wasn't in the compose template yet.
-const OPENCLAW_GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL || "http://openclaw:18789";
 const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || "/mnt/encrypted/openclaw/openclaw.json";
-const GATEWAY_TOKEN_CANDIDATES = [
-  process.env.OPENCLAW_GATEWAY_TOKEN_FILE,
-  "/mnt/encrypted/alfred/.gateway-token",
-  "/alfred-data/.gateway-token",
-].filter((p): p is string => typeof p === "string" && p.length > 0);
-
-function getGatewayToken(): string {
-  for (const candidate of GATEWAY_TOKEN_CANDIDATES) {
-    try {
-      const value = fs.readFileSync(candidate, "utf-8").trim();
-      if (value) return value;
-    } catch {
-      // try next candidate
-    }
-  }
-  return "";
-}
 
 // Pick the tenant's primary outbound channel. Preference order: slack →
 // telegram → webchat. Reads openclaw.json's `channels` map and returns the
@@ -63,9 +40,8 @@ function resolveRecipient(channel: string): string | undefined {
 }
 
 export function registerNotificationRoutes(): void {
-  // POST /api/v1/notifications — send an agent-initiated message to Sir on a
-  // configured channel (Slack, Telegram, etc). Used by every chore + any
-  // platform code that needs to push to Sir proactively.
+  // POST /api/v1/notifications — agent-initiated channel notification to Sir.
+  // Used by `notify_principal` (MCP) and any platform code pushing to Sir.
   //
   // Body: {
   //   message:  string (required)          — the text Sir sees
@@ -74,12 +50,21 @@ export function registerNotificationRoutes(): void {
   //   urgency?: "low" | "normal" | "high"  — passthrough to channel adapter
   // }
   //
-  // Delivers via openclaw's `message.send` tool, which routes through the
-  // channel adapter (chat.postMessage for Slack, sendMessage for Telegram,
-  // etc.). This is OPENCLAW'S OWN outbound primitive — sessions_send stores
-  // replies in session state but never pushes to channels for agent-initiated
-  // turns, so we don't use it here. See `openclaw-tools.js:6425` for the
-  // `message` tool definition.
+  // DELIVERY STATUS — the outbound channel-send path is currently a no-op.
+  // Under OpenClaw this hit the gateway's `message` tool; the OpenClaw→Hermes
+  // swap routed it through the hermes-shim's `/tools/invoke` `message`
+  // handler, which was a no-op acknowledgement from day one (Phase 1) — it
+  // never actually pushed to a channel. Issue #40 retired the shim entirely;
+  // the Hermes `/v1` API exposes `/v1/runs` + `/v1/responses` but no native
+  // outbound channel-send endpoint, so there is nothing to repoint onto.
+  //
+  // Rather than call the now-deleted `/tools/invoke` endpoint (which would
+  // 404), ctrl-api owns the no-op explicitly: it still validates the request
+  // and resolves the recipient (so callers see the same shape and the same
+  // 424 on an unresolvable recipient), logs the intended delivery, and
+  // returns `delivered: false`. Wiring real outbound delivery onto a
+  // `main`-profile Hermes run is a separate piece of work, tracked apart
+  // from the shim retirement.
   addRoute("POST", "/api/v1/notifications", async ({ res, body }) => {
     const b = body as Record<string, unknown> | undefined;
 
@@ -92,11 +77,6 @@ export function registerNotificationRoutes(): void {
     const channelHint = typeof b.channel === "string" && b.channel.length > 0
       ? b.channel
       : "auto";
-
-    const token = getGatewayToken();
-    if (!token) {
-      throw new ValidationError("Gateway token not available");
-    }
 
     const channel = channelHint === "auto" ? pickPrimaryChannel() : channelHint;
     const to = typeof b.to === "string" && b.to.length > 0
@@ -111,35 +91,19 @@ export function registerNotificationRoutes(): void {
       return;
     }
 
-    try {
-      const response = await fetch(`${OPENCLAW_GATEWAY_URL}/tools/invoke`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          tool: "message",
-          args: {
-            action: "send",
-            channel,
-            to,
-            message,
-            urgency,
-          },
-        }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Gateway request failed: ${response.status} ${errorText}`);
-      }
-
-      const data = await response.json();
-      sendJson(res, 200, { status: "sent", channel, to, data });
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      sendJson(res, 500, { status: "error", error: errorMessage });
-    }
+    // No-op acknowledgement — channel delivery is not wired post-shim-retire.
+    // Log the intended delivery so the gap is visible in tenant logs.
+    console.warn(
+      `[notifications] outbound delivery is a no-op — channel=${channel} to=${to} urgency=${urgency} message=${JSON.stringify(message.slice(0, 200))}`,
+    );
+    sendJson(res, 200, {
+      status: "acknowledged",
+      delivered: false,
+      noop: true,
+      channel,
+      to,
+      reason:
+        "outbound channel delivery is not wired — the hermes-shim `message` no-op was retired in issue #40 and the Hermes /v1 API has no channel-send endpoint",
+    });
   });
 }

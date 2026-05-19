@@ -11,10 +11,10 @@ It calls Hermes natively:
     poll:    GET   <gateway>/v1/runs/{id}    → {status, output, ...}
 
 The alfred vault daemon runs in its own container and reaches the Hermes
-runtime over the compose network via the hermes-shim's port (the shim
-transparently passes `/v1/*` through to the Hermes API server, which itself
-binds 127.0.0.1 inside the hermes container). So `<gateway>` here is the same
-URL legacy callers used — only the request shape changed.
+runtime over the compose network on its canonical port (the Hermes API
+server binds `:18789`/`:18790` directly — the hermes-shim that used to
+front it was retired in issue #40). So `<gateway>` here is the same URL
+legacy callers used — only the request shape changed.
 
 Alfred (the curator pipeline) calls:
     openclaw-wrapper agent --agent <id> --session-id <sid> --message "<prompt>" --local --json

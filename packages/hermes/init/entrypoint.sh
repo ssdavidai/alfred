@@ -209,9 +209,9 @@ fi
 if [[ ! -f /alfred-data/config.yaml ]]; then
     echo "[init] Generating alfred config.yaml..."
     export VAULT_PATH="/vault"
-    # The alfred vault daemon reaches the runtime via the hermes-shim, which
-    # preserves the OpenClaw wrapper contract. The wrapper path is unchanged;
-    # only the gateway behind it changed.
+    # The alfred vault daemon reaches the Hermes runtime directly on its
+    # canonical port via the openclaw-wrapper (Hermes `/v1/runs`). The
+    # wrapper path is unchanged; only the gateway behind it changed.
     export OPENCLAW_WRAPPER_PATH="/usr/local/bin/openclaw-wrapper"
     export DATA_DIR="/app/data"
     envsubst < ./config.yaml.tpl > /alfred-data/config.yaml
@@ -227,8 +227,7 @@ fi
 # 4. Generate the gateway token.
 #
 # token_urlsafe(32) → /alfred-data/.gateway-token. This single value is:
-#   - the bearer token every legacy caller already presents (the hermes-shim
-#     validates inbound /tools/invoke requests against it),
+#   - the bearer token every caller presents to the Hermes /v1 API,
 #   - rendered into each Hermes profile's .env as API_SERVER_KEY (step 6).
 # =============================================================================
 TOKEN_FILE="/alfred-data/.gateway-token"

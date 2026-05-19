@@ -96,7 +96,7 @@ services:
       - COLUMN_ENCRYPTION_KEY=${COLUMN_ENCRYPTION_KEY}
     volumes:
       # read-only — the chat proxy reads /alfred-data/.gateway-token to
-      # authenticate to the Hermes shim.
+      # authenticate to the Hermes /v1 API.
       - alfred_data:/alfred-data:ro
     healthcheck:
       # the Wasp server image is slim (no wget/curl) and exposes no fixed
@@ -232,11 +232,13 @@ services:
     pids_limit: 512
 
   # ── hermes — the single AI runtime (replaces openclaw + openclaw-workers) ─
-  # One image runs two `hermes -p <profile> gateway` processes plus one
-  # hermes-shim per profile (the OpenClaw-contract compat layer):
-  #   * main profile    — user-facing chat, shim binds legacy :18789
-  #   * workers profile — background agents, shim binds legacy :18790
-  # The supervised entrypoint baked into the image launches all four.
+  # One image runs two `hermes -p <profile> gateway` processes; each binds
+  # its OpenAI-compatible /v1 API server on the canonical port:
+  #   * main profile    — user-facing chat, API on :18789
+  #   * workers profile — background agents, API on :18790
+  # The supervised entrypoint baked into the image launches both. The
+  # hermes-shim compat layer was retired in issue #40 — callers speak the
+  # Hermes /v1 API directly.
   hermes:
     image: ssdavidai00/alfred-black-hermes:latest
     depends_on:
@@ -297,7 +299,7 @@ services:
       - /tmp:size=256m
     environment:
       # Vault subagents (curator/janitor/distiller) run on the workers
-      # gateway shim port — never main.
+      # gateway — :18790, never main.
       - OPENCLAW_GATEWAY_URL=http://hermes:18790
       - ALFRED_CTRL_URL=http://ctrl-api:3100
     env_file:
@@ -374,7 +376,7 @@ services:
       - hermes_data:/hermes-state
     environment:
       - TEMPORAL_HOST=temporal:7233
-      # Both gateway URLs point at the hermes shim ports (see
+      # Both gateway URLs point at the Hermes /v1 API ports (see
       # packages/learn/src/config.py). main = :18789, workers = :18790.
       - OPENCLAW_GATEWAY_URL=http://hermes:18789
       - OPENCLAW_WORKERS_GATEWAY_URL=http://hermes:18790

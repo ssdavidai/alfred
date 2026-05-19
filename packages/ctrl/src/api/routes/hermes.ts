@@ -3,15 +3,15 @@
 //
 // alfred-black replaces the two-container OpenClaw split with a single
 // `hermes` container running two profiles (`main` :18789, `workers` :18790).
-// The runtime is reached through the hermes-shim, which proxies the Hermes
-// `/v1` API.
+// Each profile's Hermes API server binds its canonical port directly — the
+// hermes-shim that used to front it was retired in issue #40.
 //
 // Routes are registered under `/api/v1/hermes/*` only. The Phase-1
 // `/api/v1/openclaw/*` alias has been retired (issue #25); every caller
 // (dashboard, MCP) uses the canonical `/api/v1/hermes/*` prefix.
 //
-// Health/status: Hermes is OpenAI-style — `GET /health` over HTTP (the shim
-// proxies it). Restart: `docker compose restart hermes`.
+// Health/status: Hermes is OpenAI-style — `GET /health` over HTTP.
+// Restart: `docker compose restart hermes`.
 // ============================================================================
 
 import fs from "node:fs";
@@ -25,7 +25,8 @@ import { dockerExec, dockerComposeCmd, HERMES_CMD, HERMES_CONTAINER } from "../h
 // tool-enable list and MCP server inventory the /tools dashboard reads.
 const HERMES_CONFIG_DIR = process.env.HERMES_CONFIG_DIR ?? "/hermes-data";
 const HERMES_MAIN_CONFIG = `${HERMES_CONFIG_DIR}/main/config.yaml`;
-// The shim binds the legacy port; `GET /health` is the Hermes liveness probe.
+// The Hermes `main` API server binds `:18789`; `GET /health` is its
+// liveness probe.
 const HERMES_HEALTH_URL =
   process.env.HERMES_GATEWAY_URL ?? "http://hermes:18789";
 const HEALTH_PROBE_TIMEOUT_MS = 1500;
@@ -57,8 +58,8 @@ export function registerHermesRoutes(): void {
   };
 
   // ── Gateway health ────────────────────────────────────────────
-  // Hermes exposes `GET /health` (OpenAI-style). The shim proxies it on the
-  // legacy port, so a plain HTTP GET is the canonical probe.
+  // Hermes exposes `GET /health` (OpenAI-style) on its canonical port, so a
+  // plain HTTP GET is the canonical probe.
   dual("GET", "health", async ({ res }) => {
     try {
       const ctrl = new AbortController();
@@ -161,8 +162,8 @@ export function registerHermesRoutes(): void {
   //
   // Under Hermes an ephemeral executor is a `POST /v1/runs` against the
   // workers profile with session_id = `exec-<hash>` — there is no longer a
-  // workers `openclaw.json` agent list to read. The shim's in-memory
-  // run→channel map is the source; `hermes sessions --json` surfaces it.
+  // workers `openclaw.json` agent list to read. The native Hermes gateway
+  // session index (`sessions.json`, see hermes-sessions.ts) is the source.
   // Filtered to the `exec-` prefix. Returns the structured shape briefing.py
   // and the alfred-self MCP `list_in_flight_agents` tool consume.
   dual("GET", "agents/ephemeral", async ({ res }) => {

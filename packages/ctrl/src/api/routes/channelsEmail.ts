@@ -11,9 +11,9 @@
 // the background. Failures to start are logged; the message is still safe
 // because the SaaS receiver also buffers a StreamEvent fallback.
 //
-// Phase 2: calls Hermes `POST /v1/runs` natively (through the hermes-shim
-// port — the only Hermes surface on the compose network). The OpenClaw
-// `sessions_spawn` `/tools/invoke` contract is retired.
+// Phase 2: calls Hermes `POST /v1/runs` natively against the Hermes API
+// server's canonical port (the hermes-shim was retired in issue #40). The
+// OpenClaw `sessions_spawn` `/tools/invoke` contract is retired.
 
 import fs from "node:fs";
 
