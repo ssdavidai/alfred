@@ -427,7 +427,10 @@ services:
     restart: unless-stopped
     environment:
       - DOMAIN=https://vault.${DOMAIN}
-      - SIGNUPS_ALLOWED=false
+      # signups allowed so the one-shot vault-signup can register the owner
+      # account on first boot. Set false post-bootstrap if you want to lock
+      # the instance (it is your own single-tenant Vaultwarden).
+      - SIGNUPS_ALLOWED=true
       - INVITATIONS_ALLOWED=true
       - WEB_VAULT_ENABLED=true
       - SHOW_PASSWORD_HINT=false
@@ -456,6 +459,24 @@ services:
     mem_limit: 256m
     pids_limit: 256
 
+  # ── vault-signup — one-shot: register the Vaultwarden owner account ─
+  # Runs the Bitwarden registration crypto (bootstrap-signup.mjs, baked
+  # into the image) so vault-cli has an account to `bw login` with.
+  vault-signup:
+    image: ssdavidai00/alfred-vault-init:latest
+    restart: "no"
+    depends_on:
+      vaultwarden:
+        condition: service_healthy
+    environment:
+      - BW_SERVER_URL=http://vaultwarden:80
+      - BW_USER=${ACME_EMAIL}
+      - BW_PASSWORD=${VAULTWARDEN_BW_PASSWORD}
+      - VAULTWARDEN_NAME=${OWNER_NAME}
+    entrypoint: ["node", "/opt/vault-init/bootstrap-signup.mjs"]
+    mem_limit: 256m
+    pids_limit: 256
+
   # ── vault-cli — long-running `bw serve` side-container ──────────────
   # Holds an unlocked bw session; ctrl-api proxies the Vaultwarden MCP
   # tool calls here over http://vault-cli:8087.
@@ -464,9 +485,15 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      - BW_SERVER_URL=http://vaultwarden:80
+      - BW_USER=${ACME_EMAIL}
+      - BW_PASSWORD=${VAULTWARDEN_BW_PASSWORD}
     depends_on:
       vaultwarden:
         condition: service_healthy
+      vault-signup:
+        condition: service_completed_successfully
     entrypoint: ["bash", "/opt/vault-init/serve.sh"]
     healthcheck:
       test: ["CMD-SHELL", "curl -sSf http://127.0.0.1:8087/status >/dev/null 2>&1 || exit 1"]
