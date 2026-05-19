@@ -478,17 +478,24 @@ services:
       - BW_USER=${ACME_EMAIL}
       - BW_PASSWORD=${VAULTWARDEN_BW_PASSWORD}
       - VAULTWARDEN_NAME=${OWNER_NAME}
+      - VAULTWARDEN_ADMIN_TOKEN=${VAULTWARDEN_ADMIN_TOKEN}
     # Idempotent: if the account already logs in, skip registration — so
     # re-running this one-shot (compose re-evaluates service_completed_
-    # successfully deps) is always safe. $$ escapes compose interpolation.
+    # successfully deps) is always safe. The `bw logout` fences are load-
+    # bearing: `bw config server` fails ("Logout required") if a prior
+    # `bw login` left a session, so clear it before every config/login.
+    # $$ escapes compose interpolation.
     entrypoint:
       - bash
       - -c
       - |
+        bw logout >/dev/null 2>&1 || true
         bw config server "$$BW_SERVER_URL" >/dev/null 2>&1 || true
         if bw login "$$BW_USER" "$$BW_PASSWORD" --raw </dev/null >/dev/null 2>&1; then
           echo "[vault-signup] Vaultwarden account already registered — skipping"
+          bw logout >/dev/null 2>&1 || true
         else
+          bw logout >/dev/null 2>&1 || true
           node /opt/vault-init/bootstrap-signup.mjs
         fi
     mem_limit: 256m
