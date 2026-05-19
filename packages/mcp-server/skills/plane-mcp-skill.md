@@ -1,16 +1,16 @@
 ---
 name: alfred-plane
-description: Drive Plane (issue tracker) end-to-end through the per-tenant MCP server — list/search/create/update issues, post comments, browse cycles. Use whenever Sir asks about Plane state, an @alfred mention fires on a Plane comment, or a vault edit needs pushing to Plane.
+description: Drive Plane (issue tracker) end-to-end through the per-tenant MCP server — list/search/create/update issues, post comments, browse cycles. Use whenever Sir asks about Plane state or an @alfred mention fires on a Plane comment.
 license: alfred-platform internal — see the parent monorepo's LICENSE
 ---
 
 # Plane MCP — operator's manual
 
-You have **11 Plane tools** through the MCP `plane` connector. Four originals (read+comment+sync) plus seven v2 tools that flesh out list / search / create / update + the resolution helpers (cycles, projects, states, labels). Together they let you drive Plane without bouncing through the vault mirror.
+You have **10 Plane tools** through the MCP `plane` connector. Three originals (read + comment) plus seven v2 tools that flesh out list / search / create / update + the resolution helpers (cycles, projects, states, labels). Together they let you drive Plane without bouncing through the vault mirror.
 
 `ctrl-api` holds the Plane PAT and the workspace slug — never bash-curl Plane directly, every call is a tool call.
 
-## The 11 tools
+## The 10 tools
 
 ### Read & resolve (cheap, call freely)
 
@@ -31,7 +31,8 @@ You have **11 Plane tools** through the MCP `plane` connector. Four originals (r
 - `create_issue` — new issue. NOT idempotent — re-search before retrying after a network error.
 - `update_issue` — partial update. **`assignees` and `labels` REPLACE the existing set** — to add, `get_issue` first, append, then PATCH.
 - `post_issue_comment` — comment as Alfred. NOT idempotent — `list_issue_comments` first if retrying.
-- `trigger_plane_sync_nudge` — push one vault record to Plane immediately (bypasses the 15s cron). Vault writes auto-nudge; only call this directly for ad-hoc fixes.
+
+Vault `matter/` and `task/` records mirror to Plane automatically — a 15 s forward-sync cron picks up every change. There is no manual push tool; just edit the vault record and the cron reconciles it.
 
 ## Resolution chain
 
@@ -138,7 +139,6 @@ The originals still do the heavy lifting on single-issue flows:
 
 - **search → get → comment**: `search_issues` to find candidates, `get_issue` to refresh full state, `post_issue_comment` to reply.
 - **mention → list_issue_comments → post_issue_comment**: when @alfred fires, the bootstrap prompt has the triggering comment + ids; pull the rest of the thread, then reply, using `is_alfred` to avoid repeating yourself.
-- **vault edit → trigger_plane_sync_nudge**: for the rare manual case where vault auto-nudge missed.
 
 ## Good behaviour
 

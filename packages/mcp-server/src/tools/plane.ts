@@ -3,8 +3,8 @@
 // Source of truth: packages/ctrl/src/api/routes/plane.ts (registered via
 // registerPlaneRoutes() in src/api/server.ts).
 //
-// v1 (4 tools, top of file): direct issue read + comment-thread + comment
-// post + sync-nudge. Kept verbatim — they are the load-bearing flows.
+// v1 (3 tools, top of file): direct issue read + comment-thread + comment
+// post. Kept verbatim — they are the load-bearing flows.
 //
 // v2 (7 tools below): list / search / create / update issues, plus the
 // resolution helpers (cycles, projects, states, labels). Together they
@@ -63,21 +63,6 @@ export const ALL_PLANE_TOOLS: ToolDef[] = [
       body: args,
     }),
   },
-  {
-    name: "trigger_plane_sync_nudge",
-    description:
-      "Kick off an immediate forward-sync of one vault record (a matter or a task) to Plane. Use when Sir has just edited a vault record and asks 'push that to Plane now', or to bypass the 15s cron. Most of the time this happens automatically on vault writes — only call directly for ad-hoc fixes. Fire-and-forget: returns 202 with {ok, scheduled, workflow_id?, reason?} once the Temporal workflow is dispatched. CRUCIAL: `record_type` + `slug` are the VAULT identifiers (e.g. record_type='matter', slug='client-x'), not Plane issue ids. Feature-gated by PLANE_SYNC_ENABLED — when off the response is {scheduled:false, reason:'PLANE_SYNC_ENABLED_off'} with HTTP 202, NOT an error. Backing: spawns Temporal PlaneSyncNudgeWorkflow on alfred-learn task queue.",
-    inputSchema: z.object({
-      record_type: z.enum(["matter", "task"]),
-      slug: z.string().regex(/^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/, "vault slug — alphanumeric/underscore/dash/dot, no slashes or leading dot"),
-    }),
-    buildRequest: (args) => ({
-      method: "POST",
-      path: "/api/v1/plane/nudge",
-      body: args,
-    }),
-  },
-
   // ─── v2: list / search / create / update + resolution helpers ──────
 
   {

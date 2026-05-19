@@ -25,7 +25,6 @@ from src.workflows.nightly_maintenance import NightlyMaintenanceWorkflow
 from src.workflows.chore_promotion import ChorePromotionReflectionWorkflow
 from src.workflows.hourly_enrichment import HourlyEnrichmentWorkflow
 from src.workflows.plane_sync import PlaneSyncWorkflow
-from src.workflows.plane_sync_nudge import PlaneSyncNudgeWorkflow
 from src.workflows.plane_reverse_sync import PlaneReverseSyncWorkflow
 from src.workflows.plane_reconciliation import PlaneReconciliationWorkflow
 from src.workflows.fleet_audit import FleetAuditWorkflow
@@ -670,7 +669,6 @@ _STATIC_WORKFLOWS = [
     ChorePromotionReflectionWorkflow,
     HourlyEnrichmentWorkflow,
     PlaneSyncWorkflow,
-    PlaneSyncNudgeWorkflow,
     PlaneReverseSyncWorkflow,
     PlaneReconciliationWorkflow,
     FleetAuditWorkflow,

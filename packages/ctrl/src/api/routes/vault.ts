@@ -12,11 +12,6 @@ import {
   invalidateVaultCachesForType,
 } from "../vaultCache.js";
 import {
-  triggerPlaneSyncNudge,
-  slugFromVaultPath,
-  type PlaneNudgeRecordType,
-} from "./plane.js";
-import {
   classifyTarget,
   stateFieldsFor,
 } from "../stateFields.js";
@@ -288,64 +283,6 @@ const NAME_FIELD_BY_TYPE: Record<string, string> = {
   conversation: "subject",
   input: "subject",
 };
-
-// ---------------------------------------------------------------------------
-// Plane forward-sync nudge hook (#574)
-//
-// Every successful write to a matter/* or task/* path kicks off a
-// single-record forward-sync workflow so Plane reflects the change in
-// 1-3 s instead of waiting up to 15 s for the cron tick.
-//
-// ``setImmediate`` pushes the work after the current tick so the
-// response to the vault-write caller is never blocked; the nudge
-// itself swallows all errors in ``triggerPlaneSyncNudge`` so a
-// Temporal outage cannot leak an error back into the HTTP response
-// the operator already saw.
-// ---------------------------------------------------------------------------
-
-function scheduleNudgeForPath(relPath: string): void {
-  // Classify by the directory prefix — matter/* and task/* are the
-  // two types that mirror into Plane. Anything else is a no-op.
-  let recordType: PlaneNudgeRecordType | null = null;
-  if (relPath.startsWith("matter/") || relPath.startsWith("matter\\")) {
-    recordType = "matter";
-  } else if (relPath.startsWith("task/") || relPath.startsWith("task\\")) {
-    recordType = "task";
-  }
-  if (!recordType) return;
-
-  const slug = slugFromVaultPath(recordType, relPath.replace(/\\/g, "/"));
-  if (!slug) return;
-
-  // Fire-and-forget: never await, never throw.
-  setImmediate(() => {
-    triggerPlaneSyncNudge(recordType, slug).catch((err: unknown) => {
-      console.warn(
-        `[vault.plane_nudge] unexpected throw record_type=${recordType} slug=${slug}: ${(err as Error).message}`,
-      );
-    });
-  });
-}
-
-function scheduleNudgeForRecord(
-  recordType: string | undefined,
-  recordName: string | undefined,
-): void {
-  if (recordType !== "matter" && recordType !== "task") return;
-  if (!recordName) return;
-  // ``name`` on create can be either a bare slug or a prefixed/suffixed
-  // path. Feed the raw value through the same resolver the write
-  // handler uses so the slug extraction stays consistent.
-  const slug = slugFromVaultPath(recordType, recordName);
-  if (!slug) return;
-  setImmediate(() => {
-    triggerPlaneSyncNudge(recordType, slug).catch((err: unknown) => {
-      console.warn(
-        `[vault.plane_nudge] unexpected throw record_type=${recordType} slug=${slug}: ${(err as Error).message}`,
-      );
-    });
-  });
-}
 
 // ---------------------------------------------------------------------------
 // Security: path validation & resolution
@@ -813,7 +750,6 @@ export function registerVaultRoutes(): void {
       await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
       await fs.promises.writeFile(fullPath, b.content, "utf-8");
       sendJson(res, 201, { path: filePath });
-      scheduleNudgeForPath(filePath);
       emitVaultEditSignal(filePath, "create");
       return;
     }
@@ -831,7 +767,6 @@ export function registerVaultRoutes(): void {
     } catch {
       sendJson(res, 201, { raw: stdout });
     }
-    scheduleNudgeForRecord(b.type as string, b.name as string);
     // Best-effort: derive the canonical relPath from the type+name. The CLI's
     // sanitization pass may have produced a slightly different filename, but
     // the resulting signal is still useful — Steward consumers join by the
@@ -1114,7 +1049,6 @@ export function registerVaultRoutes(): void {
       // to branch on which path executed.
       sendJson(res, 200, { ok: true, path: recordPath });
     }
-    scheduleNudgeForPath(recordPath);
     emitVaultEditSignal(recordPath, "edit");
   });
 
@@ -1136,10 +1070,6 @@ export function registerVaultRoutes(): void {
     } catch {
       sendJson(res, 200, { raw: stdout });
     }
-    // Nudge both endpoints of the move — if either one is a matter or
-    // task Plane needs to learn about the rename.
-    scheduleNudgeForPath(b.from as string);
-    scheduleNudgeForPath(b.to as string);
     emitVaultEditSignal(b.from as string, "delete");
     emitVaultEditSignal(b.to as string, "create");
   });
@@ -1186,11 +1116,6 @@ export function registerVaultRoutes(): void {
     } catch {
       sendJson(res, 200, { raw: stdout });
     }
-    // A delete IS an archive as far as Plane is concerned — the nudge
-    // workflow reads the vault to get the archived flag; if the file
-    // is truly gone it no-ops and the cron's delete detection picks
-    // the removal up on its next pass.
-    scheduleNudgeForPath(recordPath);
     emitVaultEditSignal(recordPath, "delete");
   });
 
