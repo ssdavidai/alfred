@@ -27,6 +27,17 @@ jobs:
           pip install -r packages/learn/requirements.txt
           pip install pytest pytest-asyncio
 
+      - name: Static check — every execute_activity target is registered
+        # Catches the JudgmentWorkflow bug class: a workflow.execute_activity
+        # call whose target isn't decorated with @activity.defn or isn't
+        # included in ALL_ACTIVITIES. Such a workflow wedges on
+        # WORKFLOW_TASK_FAILED at runtime and retries forever. See the script
+        # header for the 2026-05-19 incident write-up.
+        run: python -m scripts.check_activity_registration
+        env:
+          PYTHONPATH: packages/learn
+        working-directory: packages/learn
+
       - name: Run tests
         run: python -m pytest tests/ -v
         env:
