@@ -26,6 +26,7 @@ help:
 	@echo "  build-learn        build $(IMAGE_PREFIX)/alfred-learn"
 	@echo "  build-mcp-server   build $(IMAGE_PREFIX)/alfred-mcp-server"
 	@echo "  build-init         build $(IMAGE_PREFIX)/alfred-init"
+	@echo "  build-setup        build $(IMAGE_PREFIX)/alfred-setup"
 	@echo "  push-all           build + push every image multi-arch ($(PLATFORMS))"
 	@echo "  config             validate docker-compose.yaml"
 	@echo "  config-vexa        validate docker-compose.yaml with the vexa profile"
@@ -59,8 +60,12 @@ build-mcp-server:
 build-init:
 	docker build -f packages/hermes/init/Dockerfile -t $(IMAGE_PREFIX)/alfred-init:$(TAG) .
 
+.PHONY: build-setup
+build-setup:
+	docker build -f packages/setup/Dockerfile -t $(IMAGE_PREFIX)/alfred-setup:$(TAG) packages/setup
+
 .PHONY: build-all
-build-all: build-web build-ctrl-api build-hermes build-learn build-mcp-server build-init
+build-all: build-web build-ctrl-api build-hermes build-learn build-mcp-server build-init build-setup
 
 # ── multi-arch build + push (mirrors CI; needs `docker buildx`) ─────────────
 
@@ -76,6 +81,8 @@ push-all:
 		-t $(IMAGE_PREFIX)/alfred-mcp-server:$(TAG) -f packages/mcp-server/Dockerfile packages/mcp-server
 	docker buildx build --platform $(PLATFORMS) --push \
 		-t $(IMAGE_PREFIX)/alfred-init:$(TAG) -f packages/hermes/init/Dockerfile .
+	docker buildx build --platform $(PLATFORMS) --push \
+		-t $(IMAGE_PREFIX)/alfred-setup:$(TAG) -f packages/setup/Dockerfile packages/setup
 	cd packages/web && wasp build
 	docker buildx build --platform $(PLATFORMS) --push \
 		-t $(IMAGE_PREFIX)/alfred-web:$(TAG) packages/web/.wasp/build

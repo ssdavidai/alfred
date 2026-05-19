@@ -91,7 +91,37 @@ resolve; a stale record only delays the first certificate.
 git clone https://github.com/ssdavidai/alfred-black
 cd alfred-black
 
-# 2. Create your .env from the template
+# 2. Run the interactive setup wizard
+./scripts/setup.sh
+
+# 3. Bring the whole stack up
+docker compose up -d
+```
+
+`./scripts/setup.sh` is the recommended path. It is shell-only on the host —
+no Node needed — and runs a containerized wizard that:
+
+- prompts every required and optional value, with inline help;
+- **validates your API keys live** — it actually calls OpenRouter, Anthropic,
+  and Composio and tells you immediately if a key is wrong;
+- lets you **pick the Hermes models** from OpenRouter's live model catalogue
+  (autocomplete search);
+- prints the exact Google OAuth **redirect URI** to register for your domain;
+- generates every auto-secret with a cryptographically-secure
+  `randomBytes(32)`;
+- writes a complete `.env`.
+
+The wizard **doubles as a config editor** — re-run `./scripts/setup.sh` any
+time to change a value; it detects the existing `.env`, offers "edit existing
+values" (pre-filling every prompt) vs "start fresh", and keeps secrets you
+already have. At the end it offers to run `docker compose up -d` for you.
+
+### Non-interactive install (CI / automation)
+
+If you can't run an interactive terminal, the manual path still works:
+
+```sh
+# 1. Clone, 2. copy the template
 cp .env.example .env
 
 # 3. Edit .env — fill the required values in the "USER MUST FILL" block:
@@ -112,7 +142,8 @@ appends every auto-generated secret (`AAS_API_KEY`, `COLUMN_ENCRYPTION_KEY`,
 `JWT_SECRET`, the Hermes gateway token, Plane/Sure/Vexa datastore credentials,
 the Vaultwarden admin token, …) using `openssl rand -hex 32`. It is
 idempotent — re-running never overwrites an existing value — so every
-variable exists by the time `docker compose` parses `.env`.
+variable exists by the time `docker compose` parses `.env`. Unlike the wizard
+it does **not** verify keys against the provider APIs.
 
 `docker compose up` only **pulls** images — it never builds. The first boot
 runs database migrations, scaffolds the vault, and requests TLS certificates;
@@ -177,9 +208,11 @@ re-bootstrap is needed and Let's Encrypt is not re-hit.
 
 ## Building the images (maintainers only)
 
-A fresh VM never builds anything — `docker compose` only **pulls**. The eight
-custom `ssdavidai00/*` images are built and pushed by CI on every push to
-`main` (`.github/workflows/build-*.yml`, multi-arch `linux/amd64,linux/arm64`):
+A fresh VM never builds anything — `docker compose` only **pulls**. The custom
+`ssdavidai00/*` images are built and pushed by CI on every push to `main`
+(`.github/workflows/build-*.yml`, multi-arch `linux/amd64,linux/arm64`). Note
+`alfred-setup` is the setup wizard — run by `./scripts/setup.sh`, never started
+by `docker compose`:
 
 | Image | Built from |
 |-------|-----------|
@@ -191,6 +224,7 @@ custom `ssdavidai00/*` images are built and pushed by CI on every push to
 | `alfred-learn` | `packages/learn` (Temporal worker) |
 | `alfred-mcp-server` | `packages/mcp-server` |
 | `alfred-init` | `packages/hermes/init` (one-shot bootstrap) |
+| `alfred-setup` | `packages/setup` (the interactive setup wizard — run via `./scripts/setup.sh`, not a compose service) |
 
 `wasp build` needs no database — schema migrations (`prisma migrate deploy`)
 run inside the `web` container at startup against `web-db`. The `Makefile`
