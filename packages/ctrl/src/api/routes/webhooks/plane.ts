@@ -153,7 +153,12 @@ function extractIssueId(event: string, data: Record<string, unknown>): string {
  */
 function lookupTaskPathByPlaneIssue(plane_issue_id: string): string | null {
   if (!plane_issue_id) return null;
-  const taskDir = path.join("/mnt/encrypted/vault", "task");
+  // VAULT_PATH defaults to /vault — the vault_data volume mount on the
+  // merged single-VM stack. The old deploy-template /mnt/encrypted/vault
+  // path is NOT mounted in ctrl-api, so reading it threw ENOENT and every
+  // Plane→Steward webhook was silently dropped as no_vault_task.
+  const vaultRoot = process.env.VAULT_PATH ?? "/vault";
+  const taskDir = path.join(vaultRoot, "task");
   let entries: string[];
   try {
     entries = fs.readdirSync(taskDir);
