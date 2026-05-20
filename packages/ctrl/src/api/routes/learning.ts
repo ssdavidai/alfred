@@ -6,8 +6,8 @@ import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { dockerComposeCmd, dockerExec, ALFRED_CMD } from "../helpers.js";
 import { getInstinctCounts } from "../instinctCounts.js";
 
-const VAULT_PATH = "/mnt/encrypted/vault";
-const ALFRED_DATA = "/mnt/encrypted/alfred";
+const VAULT_PATH = process.env.VAULT_PATH ?? "/vault";
+const ALFRED_DATA = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
 const STREAMS_DIR = path.join(ALFRED_DATA, "streams");
 const QUARANTINE_DIR = path.join(VAULT_PATH, "inbox", "_quarantine");
 const ENV_PATH = "/opt/alfred/compose/.env";
@@ -449,7 +449,7 @@ export function registerLearningRoutes(): void {
     }
 
     // recentActivity: last 20 lines from activity log
-    const activityLogPath = "/mnt/encrypted/alfred/learn-activity.jsonl";
+    const activityLogPath = path.join(ALFRED_DATA, "learn-activity.jsonl");
     let recentActivity: unknown[] = [];
     try {
       const content = fs.readFileSync(activityLogPath, "utf-8");

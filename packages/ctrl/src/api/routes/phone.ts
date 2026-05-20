@@ -20,8 +20,8 @@ import { sendJson, ValidationError } from "../errors.js";
 // container and caused `/api/v1/phone/voice-context` to silently return empty
 // MEMORY.md, empty voice skill, and zero matters/tasks — making the voice
 // agent "not know who Sir is" at call start.
-const VAULT_PATH = process.env.VAULT_PATH ?? "/mnt/encrypted/vault";
-const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
+const VAULT_PATH = process.env.VAULT_PATH ?? "/vault";
+const STREAMS_DIR = `${process.env.ALFRED_DATA_DIR ?? "/alfred-data"}/streams`;
 const WORKSPACE_DIR =
   process.env.OPENCLAW_WORKSPACE_DIR ?? "/mnt/encrypted/openclaw/workspace";
 const OPENCLAW_GATEWAY_URL =
@@ -38,7 +38,7 @@ const GATEWAY_TOKEN_CANDIDATES = [
   "/mnt/encrypted/alfred/.gateway-token",
   "/alfred-data/.gateway-token",
 ].filter((p): p is string => typeof p === "string" && p.length > 0);
-const ALFRED_DATA_DIR = "/mnt/encrypted/alfred";
+const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
 const AUTHORIZED_NUMBERS_FILE = `${ALFRED_DATA_DIR}/.authorized-phone-numbers.json`;
 const SMS_THREAD_PREFIX = "sms-phone-";
 

@@ -9,12 +9,14 @@
 // dual-source pattern from #428).
 
 import fs from "node:fs";
+import path from "node:path";
 
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 
 const AGENTMAIL_API = "https://api.agentmail.to/v0";
-const FALLBACK_FILE = "/mnt/encrypted/alfred/.agentmail-credentials.json";
+const FALLBACK_FILE =
+  path.join(process.env.ALFRED_DATA_DIR ?? "/alfred-data", ".agentmail-credentials.json");
 
 interface AgentMailCreds {
   inbox_id: string;

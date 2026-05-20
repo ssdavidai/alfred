@@ -28,9 +28,9 @@ import * as crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 
-const VAULT_PATH = "/vault";
+const VAULT_PATH = process.env.VAULT_PATH ?? "/vault";
 const INBOX_DIR = path.join(VAULT_PATH, "inbox");
-const STREAMS_DIR = "/mnt/encrypted/alfred/streams";
+const STREAMS_DIR = path.join(process.env.ALFRED_DATA_DIR ?? "/alfred-data", "streams");
 const COMPOSIO_API = "https://backend.composio.dev/api/v3";
 const GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
 

@@ -4,8 +4,10 @@ import type { IncomingMessage } from "node:http";
 import { addRoute } from "../server.js";
 import { sendJson } from "../errors.js";
 
-const OMI_AUDIO_DIR = "/mnt/encrypted/alfred/streams/omi-audio";
-const STREAMS_META_PATH = "/mnt/encrypted/alfred/streams/streams.json";
+const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
+const STREAMS_DIR = path.join(ALFRED_DATA_DIR, "streams");
+const OMI_AUDIO_DIR = path.join(STREAMS_DIR, "omi-audio");
+const STREAMS_META_PATH = path.join(STREAMS_DIR, "streams.json");
 
 interface StreamMeta {
   id: string;
@@ -29,7 +31,7 @@ function loadStreamsMeta(): StreamMeta[] {
 
 function loadStreamConfig(streamId: string): StreamConfig | null {
   const safe = streamId.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const configPath = path.join("/mnt/encrypted/alfred/streams/configs", `${safe}.json`);
+  const configPath = path.join(STREAMS_DIR, "configs", `${safe}.json`);
   try {
     return JSON.parse(fs.readFileSync(configPath, "utf-8"));
   } catch {

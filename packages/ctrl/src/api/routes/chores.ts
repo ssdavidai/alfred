@@ -7,8 +7,9 @@ import { VAULT_PATH, walkMd, readRecord, IGNORE_DIRS } from "./vault.js";
 import { CHORE_ACTION_MANIFEST, lookupChoreActions, type ChoreActionSpec } from "./chore_manifest_data.js";
 import { nextFireTime } from "../cron.js";
 
-const USER_CHORES_DIR = "/mnt/encrypted/alfred/user-chores";
-const VALIDATE_STAGING_DIR = "/mnt/encrypted/alfred/.chore-validate";
+const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
+const USER_CHORES_DIR = path.join(ALFRED_DATA_DIR, "user-chores");
+const VALIDATE_STAGING_DIR = path.join(ALFRED_DATA_DIR, ".chore-validate");
 const SLUG_RE = /^[a-z0-9][a-z0-9-]*[a-z0-9]$/;
 const WORKFLOW_CLASS_RE = /^[A-Z][a-zA-Z0-9]*Workflow$/;
 
@@ -1218,7 +1219,7 @@ export function registerChoreRoutes(): void {
     // PATH NOTE: ctrl-api container does NOT remap /mnt/encrypted/alfred to
     // /alfred-data (unlike alfred-learn). Read directly from the shared host
     // path so we see the file alfred-learn's record_chore_run wrote.
-    const historyPath = "/mnt/encrypted/alfred/chore-run-history.jsonl";
+    const historyPath = path.join(ALFRED_DATA_DIR, "chore-run-history.jsonl");
     interface RunEntry {
       timestamp: string;     // ISO 8601 UTC — record_chore_run writes epoch seconds; we convert here
       result_summary: string;
@@ -1303,7 +1304,7 @@ export function registerChoreRoutes(): void {
     }
 
     // Generated chores: the .py lives in /alfred-data/user-chores/<template>.py
-    const sourcePath = `/mnt/encrypted/alfred/user-chores/${moduleName}.py`;
+    const sourcePath = path.join(USER_CHORES_DIR, `${moduleName}.py`);
 
     let source: string;
     try {

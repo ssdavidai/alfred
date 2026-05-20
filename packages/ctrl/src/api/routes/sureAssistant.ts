@@ -27,7 +27,7 @@ const SURE_PRIMING_ASSISTANT = `Understood, Sir. I'll load \`alfred-sure-operati
 const OPENCLAW_URL = process.env.OPENCLAW_GATEWAY_URL || "http://openclaw:18789";
 const OPENCLAW_AGENT_ID = "openclaw/main";
 const GATEWAY_TOKEN_FILE =
-  process.env.OPENCLAW_GATEWAY_TOKEN_FILE || "/mnt/encrypted/alfred/.gateway-token";
+  process.env.OPENCLAW_GATEWAY_TOKEN_FILE || "/alfred-data/.gateway-token";
 const SELF_SYNC_URL = "http://localhost:3100/api/v1/sure/sync";
 
 let cachedGatewayToken: string | null = null;
