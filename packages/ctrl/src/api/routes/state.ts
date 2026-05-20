@@ -33,6 +33,7 @@
 //   DELETE /embeddings               delete vectors by ref
 // ============================================================================
 
+import type { DatabaseSync } from "node:sqlite";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { getStateDb, vecAvailable, EMBEDDING_DIM } from "../../db/state.js";
@@ -43,6 +44,38 @@ import { COLD_TTL_DAYS, COLD_CODEC, getColdDb } from "../../db/cold.js";
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * Run `fn` inside a single SQLite transaction — all-or-nothing.
+ *
+ * B5: the embedding re-embed path deletes the old (embedding, embedding_meta)
+ * pair then re-inserts a new one. `embedding_meta.rowid` is a plain
+ * `INTEGER PRIMARY KEY` (schema.sql) — NOT AUTOINCREMENT — so SQLite is free to
+ * reuse a freed rowid. Run as four separate autocommit statements, a crash
+ * mid-sequence can orphan a meta row (no vector), orphan a vector (no meta), or
+ * re-pair a reused rowid with the wrong vector. Wrapping the whole sequence in
+ * one transaction makes it atomic: on any throw we ROLLBACK so the prior pair
+ * is left intact.
+ *
+ * node:sqlite's DatabaseSync has no `.transaction()` (that is better-sqlite3);
+ * we drive BEGIN/COMMIT/ROLLBACK explicitly. BEGIN IMMEDIATE takes the write
+ * lock up front so a concurrent writer cannot interleave.
+ */
+export function runInTx<T>(database: DatabaseSync, fn: () => T): T {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const result = fn();
+    database.exec("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      database.exec("ROLLBACK");
+    } catch {
+      // a failed ROLLBACK (e.g. no tx open) must not mask the original error
+    }
+    throw err;
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -547,32 +580,39 @@ export function registerStateRoutes(): void {
       throw new ValidationError(`embedding must be a float array of length ${EMBEDDING_DIM}`);
     }
     const chunkIndex = optNum(b, "chunk_index") ?? 0;
-    // Re-embed: drop any prior vector for this (ref, chunk).
-    const prior = db()
-      .prepare("SELECT rowid FROM embedding_meta WHERE ref = ? AND chunk_index = ?")
-      .get(ref, chunkIndex) as { rowid: number } | undefined;
-    if (prior) {
-      db().prepare("DELETE FROM embedding WHERE rowid = ?").run(prior.rowid);
-      db().prepare("DELETE FROM embedding_meta WHERE rowid = ?").run(prior.rowid);
-    }
-    const metaResult = db()
-      .prepare(
-        `INSERT INTO embedding_meta (ref, ref_kind, ts, model, chunk_index, text_preview)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        ref,
-        refKind,
-        optStr(b, "ts") ?? nowIso(),
-        optStr(b, "model") ?? "nomic-embed-text",
-        chunkIndex,
-        optStr(b, "text_preview"),
+    // B5: re-embed atomically. The DELETE-old-pair + INSERT-new-pair must be
+    // all-or-nothing — embedding_meta.rowid is a reusable INTEGER PRIMARY KEY
+    // (not AUTOINCREMENT), so a crash between the four statements could orphan
+    // a meta/vector or mis-pair a reused rowid. One transaction prevents that.
+    const rowid = runInTx(db(), () => {
+      // Re-embed: drop any prior vector for this (ref, chunk).
+      const prior = db()
+        .prepare("SELECT rowid FROM embedding_meta WHERE ref = ? AND chunk_index = ?")
+        .get(ref, chunkIndex) as { rowid: number } | undefined;
+      if (prior) {
+        db().prepare("DELETE FROM embedding WHERE rowid = ?").run(prior.rowid);
+        db().prepare("DELETE FROM embedding_meta WHERE rowid = ?").run(prior.rowid);
+      }
+      const metaResult = db()
+        .prepare(
+          `INSERT INTO embedding_meta (ref, ref_kind, ts, model, chunk_index, text_preview)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          ref,
+          refKind,
+          optStr(b, "ts") ?? nowIso(),
+          optStr(b, "model") ?? "nomic-embed-text",
+          chunkIndex,
+          optStr(b, "text_preview"),
+        );
+      const newRowid = Number(metaResult.lastInsertRowid);
+      db().prepare("INSERT INTO embedding (rowid, embedding) VALUES (?, ?)").run(
+        newRowid,
+        JSON.stringify(vector),
       );
-    const rowid = Number(metaResult.lastInsertRowid);
-    db().prepare("INSERT INTO embedding (rowid, embedding) VALUES (?, ?)").run(
-      rowid,
-      JSON.stringify(vector),
-    );
+      return newRowid;
+    });
     sendJson(res, 201, { ok: true, rowid, ref });
   });
 
@@ -668,14 +708,20 @@ export function registerStateRoutes(): void {
     }
     const ref = query.get("ref");
     if (!ref) throw new ValidationError("ref query param is required");
-    const metas = db()
-      .prepare("SELECT rowid FROM embedding_meta WHERE ref = ?")
-      .all(ref) as Array<{ rowid: number }>;
-    for (const m of metas) {
-      db().prepare("DELETE FROM embedding WHERE rowid = ?").run(m.rowid);
-    }
-    db().prepare("DELETE FROM embedding_meta WHERE ref = ?").run(ref);
-    sendJson(res, 200, { ok: true, ref, deleted: metas.length });
+    // B5: delete the vec0 vectors and their meta rows atomically — a crash
+    // between the per-rowid embedding deletes and the meta delete would leave
+    // half-deleted pairs (orphaned vectors or orphaned meta).
+    const deleted = runInTx(db(), () => {
+      const metas = db()
+        .prepare("SELECT rowid FROM embedding_meta WHERE ref = ?")
+        .all(ref) as Array<{ rowid: number }>;
+      for (const m of metas) {
+        db().prepare("DELETE FROM embedding WHERE rowid = ?").run(m.rowid);
+      }
+      db().prepare("DELETE FROM embedding_meta WHERE ref = ?").run(ref);
+      return metas.length;
+    });
+    sendJson(res, 200, { ok: true, ref, deleted });
   });
 }
 

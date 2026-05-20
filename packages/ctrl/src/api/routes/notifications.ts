@@ -3,8 +3,6 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 import { resolveDeliveryTarget } from "../hermes-sessions.js";
 
-const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || "/mnt/encrypted/openclaw/openclaw.json";
-
 // ---------------------------------------------------------------------------
 // Hermes `main`-profile gateway — the native channel-delivery surface.
 //
@@ -126,22 +124,21 @@ function getGatewayToken(): string {
   return process.env.HERMES_API_KEY || process.env.OPENCLAW_GATEWAY_TOKEN || "";
 }
 
-// Pick the tenant's primary outbound channel. Preference order: slack →
-// telegram → webchat. Reads openclaw.json's `channels` map and returns the
-// first one that's `enabled: true`. Falls back to "webchat".
-function pickPrimaryChannel(): string {
-  try {
-    const cfg = JSON.parse(fs.readFileSync(OPENCLAW_CONFIG_PATH, "utf-8")) as {
-      channels?: Record<string, { enabled?: boolean }>;
-    };
-    const channels = cfg.channels ?? {};
-    for (const name of ["slack", "telegram", "discord", "whatsapp", "webchat"]) {
-      if (channels[name]?.enabled) return name;
-    }
-  } catch {
-    // fall through
-  }
-  return "webchat";
+// Resolve the tenant's default ("auto") outbound channel + recipient from the
+// native Hermes session index. C8: the old pickPrimaryChannel() read
+// `/mnt/encrypted/openclaw/openclaw.json` — a path the Hermes init DELETED —
+// and so always fell through to "webchat", which the route then 424s. There is
+// no separate channel-enablement file under Hermes; the deliverable channels
+// ARE the channels Sir has actually messaged from, which is exactly what the
+// session index records. resolveDeliveryTarget("last") already returns the
+// most-recently-active delivery-capable session EXCLUDING webchat (it has no
+// Hermes channel adapter). So "auto" = "last", and it never yields webchat.
+//
+// Returns undefined only when no deliverable session exists yet (fresh tenant,
+// no inbound message) — in which case the route 424s honestly rather than
+// fabricating a "webchat" target that can never route.
+function resolveAutoTarget(): { to: string; channel: string } | undefined {
+  return resolveDeliveryTarget("last");
 }
 
 // Resolve Sir's recipient id on a given channel from native Hermes session
@@ -422,10 +419,37 @@ export function registerNotificationRoutes(): void {
       ? b.channel
       : "auto";
 
-    const channel = channelHint === "auto" ? pickPrimaryChannel() : channelHint;
-    const to = typeof b.to === "string" && b.to.length > 0
+    const explicitTo = typeof b.to === "string" && b.to.length > 0
       ? (b.to as string)
-      : resolveRecipient(channel);
+      : undefined;
+
+    let channel: string;
+    let to: string | undefined;
+
+    if (channelHint === "auto") {
+      // C8: resolve the default channel + recipient from the Hermes session
+      // index — the most-recently-active DELIVERABLE channel (never webchat).
+      const auto = resolveAutoTarget();
+      if (auto) {
+        channel = auto.channel;
+        // An explicit body.to overrides the resolved recipient but keeps the
+        // resolved (deliverable) channel.
+        to = explicitTo ?? auto.to;
+      } else {
+        // No deliverable session on record (fresh tenant, no inbound message).
+        sendJson(res, 424, {
+          status: "error",
+          error:
+            "channel=auto could not resolve a deliverable channel — Sir has no " +
+            "inbound message on any messaging platform yet. Pass body.channel " +
+            "and body.to explicitly, or have Sir send one message first.",
+        });
+        return;
+      }
+    } else {
+      channel = channelHint;
+      to = explicitTo ?? resolveRecipient(channel);
+    }
 
     if (!to) {
       sendJson(res, 424, {

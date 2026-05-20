@@ -175,6 +175,13 @@ const KNOWN_TYPES = [
   //               writes through POST /api/v1/vault/records with the
   //               structured `content` body.
   "briefing",
+  // Canonical types (db/promotionContract.ts CANONICAL_RECORD_TYPES) that were
+  // missing from this read allowlist, so GET /vault/list/daybook and /place
+  // 400'd valid records:
+  //  - daybook : the principal's day-by-day journal entries.
+  //  - place   : a location/venue record.
+  // (Demoted legacy types above stay until the C11 contract-enforcement pass.)
+  "daybook", "place",
 ];
 
 const STATUS_BY_TYPE: Record<string, string[]> = {
@@ -745,10 +752,17 @@ export function registerVaultRoutes(): void {
       const name = b.name as string;
       // name may already include type prefix and .md extension
       const filePath = name.endsWith(".md") ? name : `${b.type as string}/${name}.md`;
-      const fullPath = path.resolve(VAULT_PATH, filePath);
-      // Ensure parent directories exist
-      await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-      await fs.promises.writeFile(fullPath, b.content, "utf-8");
+      const content = b.content;
+      // Take the same single-writer lock the PATCH json_set/body_set paths
+      // take (_withVaultPathLock, keyed by relPath) so a create racing an edit
+      // — or another create — on the same path is serialised. Without it the
+      // raw-content write was the one unguarded direct-fs write path.
+      await _withVaultPathLock(filePath, async () => {
+        const fullPath = path.resolve(VAULT_PATH, filePath);
+        // Ensure parent directories exist
+        await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
+        await fs.promises.writeFile(fullPath, content, "utf-8");
+      });
       sendJson(res, 201, { path: filePath });
       emitVaultEditSignal(filePath, "create");
       return;
