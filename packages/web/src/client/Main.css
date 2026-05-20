@@ -321,7 +321,10 @@ a[href]:not(.no-hover):hover {
 }
 .btn-brass:hover svg { color: var(--paper); }
 /* On dark surfaces */
-.wool .btn-brass { color: var(--paper); }
+/* .wool is an always-dark surface, so pin the CTA text to the fixed ivory —
+   `--paper` is theme-swapped (it goes dark under .dark) and would render the
+   text black on the dark wool background. */
+.wool .btn-brass { color: oklch(0.953 0.018 80); }
 .wool .btn-brass:hover,
 .wool .btn-brass:hover * { background: var(--brass); color: var(--wool); }
 .wool .btn-brass:hover svg { color: var(--wool); }
