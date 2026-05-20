@@ -26,7 +26,14 @@ import {
 } from "./promotionContract.js";
 
 const VAULT_PATH = process.env.VAULT_PATH ?? "/vault";
-const IGNORE_DIRS = new Set([
+
+// Directories that are NOT vault content. THE single source of truth — the
+// reconciler (this module) and the list/walk endpoints (api/routes/vault.ts,
+// which re-exports this) MUST agree on what is vault content, or a file under
+// e.g. `inbox/` is served by the API yet never indexed (or vice-versa). This
+// set is the union the two formerly-divergent copies needed; vault.ts imports
+// it rather than defining its own.
+export const IGNORE_DIRS = new Set([
   "_templates",
   "_bases",
   "_docs",
