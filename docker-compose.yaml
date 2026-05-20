@@ -420,7 +420,15 @@ services:
       - VEXA_ENABLED=${VEXA_ENABLED:-false}
       - VEXA_API_URL=${VEXA_API_URL:-http://vexa-api-gateway:8000}
       - VEXA_BOT_DISPLAY_NAME=${VEXA_BOT_DISPLAY_NAME:-Alfred}
-      - VEXA_GCAL_STREAM_ID=${VEXA_GCAL_STREAM_ID:-composio-googlecalendar}
+      # VEXA_GCAL_STREAM_ID is intentionally NOT defaulted here. The old
+      # default `composio-googlecalendar` short-circuited transcript.py's
+      # candidate list (_gcal_stream_candidates) to a single slug whose stream
+      # file never exists, so find_upcoming_meet_events returned [] forever and
+      # no meeting bot ever dispatched. Left unset, transcript.py tries its own
+      # ordered candidates, canonical
+      # `composio-googlecalendar-googlecalendar-events-list` first. An operator
+      # whose Composio slug genuinely differs can still override it via .env
+      # (env_file injects it). See transcript.py:_gcal_stream_candidates.
       # Owner identity. The code reads OWNER_EMAIL (pull.py, first_brief_email.py,
       # fleet_audit.py, init step 9, sure-bootstrap.rb); transcript.py still
       # reads ALFRED_OWNER_EMAIL. Set BOTH from the same .env OWNER_EMAIL so the
