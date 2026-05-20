@@ -16,8 +16,8 @@ import ingestSchema from "./ingest-schema.sql";
 const INGEST_DB_PATH =
   process.env.INGEST_DB_PATH ?? path.join(process.cwd(), "data", "ingest.db");
 
-// Hard TTL. A stream event older than this is dropped whether or not it was
-// ever consumed.
+// TTL window. A PROCESSED stream event older than this is dropped; an
+// UNPROCESSED one is retained (#17) and reported as stale_dropped instead.
 const INGEST_TTL_DAYS = Number(process.env.INGEST_TTL_DAYS ?? "7");
 
 // How often the in-process sweep runs.
@@ -51,30 +51,40 @@ export interface SweepResult {
 }
 
 /**
- * Enforce the 7-day TTL: delete every stream_event with `ts` older than the
- * cutoff. Records a row in ingest_sweep_log. `stale_dropped` (unprocessed
- * events that aged out) is the alert signal — it means the EventProcessor has
- * fallen behind.
+ * Enforce the 7-day TTL: delete every PROCESSED stream_event with `ts` older
+ * than the cutoff. Aged-out UNPROCESSED rows are RETAINED — deleting them is
+ * silent inbound data loss (#17). Records a row in ingest_sweep_log.
+ * `stale_dropped` counts the aged-out-but-retained unprocessed rows; it is the
+ * alert signal that the EventProcessor has fallen behind.
  */
 export function sweepIngestTTL(): SweepResult {
   const db = getIngestDb();
   const cutoff = new Date(Date.now() - INGEST_TTL_DAYS * 24 * 60 * 60 * 1000)
     .toISOString();
 
+  // #17: the TTL is consume-then-delete. Only PROCESSED rows are deleted —
+  // an aged-out UNPROCESSED event is RETAINED (deleting it is silent data
+  // loss whenever anything upstream of mark_stream_event_processed wedges).
+  // staleDropped is now an alert count of aged-out-but-RETAINED rows: it means
+  // the EventProcessor has fallen behind, not that data was discarded.
   const staleRow = db
     .prepare(
       "SELECT COUNT(*) AS n FROM stream_event WHERE ts < ? AND processed_at IS NULL",
     )
     .get(cutoff) as { n: number };
-  const totalRow = db
-    .prepare("SELECT COUNT(*) AS n FROM stream_event WHERE ts < ?")
+  const processedRow = db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM stream_event WHERE ts < ? AND processed_at IS NOT NULL",
+    )
     .get(cutoff) as { n: number };
 
   const staleDropped = staleRow?.n ?? 0;
-  const totalDeleted = totalRow?.n ?? 0;
-  const processedDeleted = totalDeleted - staleDropped;
+  const processedDeleted = processedRow?.n ?? 0;
+  const totalDeleted = processedDeleted;
 
-  db.prepare("DELETE FROM stream_event WHERE ts < ?").run(cutoff);
+  db.prepare(
+    "DELETE FROM stream_event WHERE ts < ? AND processed_at IS NOT NULL",
+  ).run(cutoff);
   db.prepare(
     `INSERT INTO ingest_sweep_log
        (cutoff_ts, total_deleted, processed_deleted, stale_dropped)
@@ -83,8 +93,8 @@ export function sweepIngestTTL(): SweepResult {
 
   if (staleDropped > 0) {
     console.warn(
-      `[ingest.db] TTL sweep dropped ${staleDropped} UNPROCESSED stream events ` +
-        `older than ${INGEST_TTL_DAYS}d — EventProcessor may be behind.`,
+      `[ingest.db] TTL sweep RETAINED ${staleDropped} UNPROCESSED stream events ` +
+        `older than ${INGEST_TTL_DAYS}d (not deleted) — EventProcessor is behind.`,
     );
   }
 
