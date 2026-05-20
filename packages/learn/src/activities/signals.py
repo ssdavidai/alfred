@@ -761,6 +761,24 @@ def _pre_filter(event_dict: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+def _is_unknown_source_only_drop(event_dict: dict[str, Any]) -> bool:
+    """True when the *sole* reason an event would be pre-filtered is unknown source.
+
+    Distinguishes "real event the parser failed to classify" (retry) from
+    "genuine garbage / too old / too short / blocklisted" (terminal drop,
+    still marked processed). Returns True only when the event is NOT
+    structural garbage, NOT too old, and its inferred source_type is
+    ``unknown``. Everything else is a terminal drop.
+    """
+    is_garbage, _ = _is_garbage_event(event_dict)
+    if is_garbage:
+        return False
+    is_old, _ = _is_too_old(event_dict)
+    if is_old:
+        return False
+    return _infer_source_type(event_dict) == "unknown"
+
+
 def _extract_raw_quote(event_dict: dict[str, Any]) -> str:
     """Build the 200-char ground-truth excerpt preserved on the signal.
 
@@ -1896,6 +1914,30 @@ async def extract_signals_from_event(
 
         accepted, reason = _pre_filter(event)
         if not accepted:
+            # #9 / C6: an event dropped *only* because its source_type is
+            # unknown (a parser that didn't stamp source_type/from on real
+            # mail) must NOT be marked processed — raise so the workflow
+            # retries it next tick instead of burying it as noise. Genuine
+            # garbage / stale / short-body drops still return [] (marked).
+            if _is_unknown_source_only_drop(event):
+                from temporalio.exceptions import ApplicationError
+
+                logger.warning(
+                    "signals.extract_signals_from_event: unknown source_type, "
+                    "NOT marking processed (will retry) path=%s reason=%s",
+                    stream_event_path, reason,
+                )
+                # non_retryable: surface straight to the workflow's
+                # "extractor failed → don't mark, retry next tick" branch
+                # rather than burning the activity's 3 intra-tick retries
+                # on a deterministic classification (no LLM was called).
+                raise ApplicationError(
+                    f"unknown source_type for {stream_event_path}; "
+                    "deferring (not marking processed) so a fixed parser "
+                    "can re-stamp and the event re-flows",
+                    type="UnknownSourceTypeRetry",
+                    non_retryable=True,
+                )
             logger.info(
                 "signals.extract_signals_from_event: pre-filtered path=%s reason=%s",
                 stream_event_path, reason,
