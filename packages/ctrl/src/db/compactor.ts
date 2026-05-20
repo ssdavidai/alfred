@@ -32,6 +32,15 @@ interface TablePlan {
   extra: string[]; // filter columns kept uncompressed in the archive table
 }
 
+// B3: routing_decision.signal_id is `REFERENCES signal(id) ON DELETE SET NULL`
+// (schema.sql) and ctrl-api opens state.db with `PRAGMA foreign_keys = ON`.
+// Deleting an aged `signal` from hot would otherwise fire that FK and NULL the
+// signal_id of routing_decisions that reference it — both ones being archived
+// in the same run AND newer ones that stay hot — severing the cross-tier
+// "decisions for signal X" join. The compactor disables foreign_keys for the
+// duration of each hot-delete batch (see compactTable) so a compacted signal's
+// inbound references are PRESERVED: the signal still exists, in cold. The PLANS
+// order is therefore not load-bearing for correctness.
 const PLANS: TablePlan[] = [
   { hot: "signal", archive: "archive_signal", extra: ["kind", "source", "status", "matter_ref"] },
   { hot: "observation", archive: "archive_observation", extra: ["subject", "kind", "status"] },
@@ -124,7 +133,18 @@ function compactTable(plan: TablePlan): CompactTableResult {
       // cross-tier reader de-dupes by id, so no row is lost and none surfaces
       // twice. Deleting by explicit id list keeps it exact even if a row's ts
       // changed concurrently (it cannot — these rows are far past any TTL).
+      //
+      // B3: deleting an aged `signal` would, with foreign_keys=ON, fire the
+      // `routing_decision.signal_id … ON DELETE SET NULL` FK and NULL the
+      // signal_id of any routing_decision that is NEWER than its signal and so
+      // still hot — silently severing the (now hot-rd → cold-signal) join. The
+      // signal is not gone, it is in cold; so the reference must be PRESERVED.
+      // foreign_keys cannot be toggled inside a transaction (SQLite ignores it
+      // there), so we drop it for the duration of the delete batch and restore
+      // it after. Only `signal` has inbound FKs, but doing it unconditionally
+      // is harmless and keeps the delete uniform.
       const ids = batch.map((r) => String(r.id));
+      hot.exec("PRAGMA foreign_keys = OFF");
       hot.exec("BEGIN");
       try {
         const delStmt = hot.prepare(`DELETE FROM ${plan.hot} WHERE id = ?`);
@@ -133,6 +153,8 @@ function compactTable(plan: TablePlan): CompactTableResult {
       } catch (err) {
         hot.exec("ROLLBACK");
         throw err;
+      } finally {
+        hot.exec("PRAGMA foreign_keys = ON");
       }
 
       rowsMoved += batch.length;

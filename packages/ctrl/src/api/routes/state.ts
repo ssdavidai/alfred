@@ -38,7 +38,12 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { getStateDb, vecAvailable, EMBEDDING_DIM } from "../../db/state.js";
 import { ulid } from "../../db/ulid.js";
-import { queryAuditCrossTier, getAuditCrossTier } from "../../db/coldRead.js";
+import {
+  queryAuditCrossTier,
+  getAuditCrossTier,
+  queryCrossTier,
+  getCrossTier,
+} from "../../db/coldRead.js";
 import { runCompaction } from "../../db/compactor.js";
 import { COLD_TTL_DAYS, COLD_CODEC, getColdDb } from "../../db/cold.js";
 
@@ -191,36 +196,33 @@ export function registerStateRoutes(): void {
     sendJson(res, 201, { ok: true, id });
   });
 
+  // Cross-tier (hot state.db ∪ cold archive_signal). After TTL compaction a
+  // signal lives only in cold.db; a hot-only query would silently drop it.
   addRoute("GET", "/api/v1/state/signals", async ({ res, query }) => {
-    const where: string[] = [];
-    const args: unknown[] = [];
-    for (const [col, key] of [
-      ["status", "status"],
-      ["kind", "kind"],
-      ["matter_ref", "matter"],
-      ["source", "source"],
-    ] as const) {
-      const v = query.get(key);
-      if (v) {
-        where.push(`${col} = ?`);
-        args.push(v);
-      }
-    }
-    const since = query.get("since");
-    if (since) {
-      where.push("ts >= ?");
-      args.push(since);
-    }
     const limit = clampLimit(query);
-    const sql =
-      `SELECT * FROM signal ${where.length ? "WHERE " + where.join(" AND ") : ""} ` +
-      `ORDER BY ts DESC LIMIT ?`;
-    const rows = db().prepare(sql).all(...args, limit);
-    sendJson(res, 200, { signals: rows, count: rows.length });
+    const offset = Math.max(0, parseInt(query.get("offset") ?? "0", 10) || 0);
+    const r = queryCrossTier("signal", {
+      filters: {
+        status: query.get("status"),
+        kind: query.get("kind"),
+        matter_ref: query.get("matter"),
+        source: query.get("source"),
+      },
+      since: query.get("since"),
+      until: query.get("until"),
+      limit,
+      offset,
+    });
+    sendJson(res, 200, {
+      signals: r.entries,
+      count: r.entries.length,
+      total: r.total,
+      tiers: r.tiers,
+    });
   });
 
   addRoute("GET", "/api/v1/state/signals/:id", async ({ res, params }) => {
-    const row = db().prepare("SELECT * FROM signal WHERE id = ?").get(params.id);
+    const row = getCrossTier("signal", params.id);
     if (!row) throw new NotFoundError(`signal ${params.id} not found`);
     sendJson(res, 200, row);
   });
@@ -269,31 +271,31 @@ export function registerStateRoutes(): void {
     sendJson(res, 201, { ok: true, id });
   });
 
+  // Cross-tier (hot ∪ cold archive_observation).
   addRoute("GET", "/api/v1/state/observations", async ({ res, query }) => {
-    const where: string[] = [];
-    const args: unknown[] = [];
-    for (const [col, key] of [
-      ["kind", "kind"],
-      ["subject", "subject"],
-      ["status", "status"],
-    ] as const) {
-      const v = query.get(key);
-      if (v) { where.push(`${col} = ?`); args.push(v); }
-    }
-    const since = query.get("since");
-    if (since) { where.push("ts >= ?"); args.push(since); }
     const limit = clampLimit(query);
-    const rows = db()
-      .prepare(
-        `SELECT * FROM observation ${where.length ? "WHERE " + where.join(" AND ") : ""} ` +
-          `ORDER BY ts DESC LIMIT ?`,
-      )
-      .all(...args, limit);
-    sendJson(res, 200, { observations: rows, count: rows.length });
+    const offset = Math.max(0, parseInt(query.get("offset") ?? "0", 10) || 0);
+    const r = queryCrossTier("observation", {
+      filters: {
+        kind: query.get("kind"),
+        subject: query.get("subject"),
+        status: query.get("status"),
+      },
+      since: query.get("since"),
+      until: query.get("until"),
+      limit,
+      offset,
+    });
+    sendJson(res, 200, {
+      observations: r.entries,
+      count: r.entries.length,
+      total: r.total,
+      tiers: r.tiers,
+    });
   });
 
   addRoute("GET", "/api/v1/state/observations/:id", async ({ res, params }) => {
-    const row = db().prepare("SELECT * FROM observation WHERE id = ?").get(params.id);
+    const row = getCrossTier("observation", params.id);
     if (!row) throw new NotFoundError(`observation ${params.id} not found`);
     sendJson(res, 200, row);
   });
@@ -343,32 +345,32 @@ export function registerStateRoutes(): void {
     sendJson(res, 201, { ok: true, id });
   });
 
+  // Cross-tier (hot ∪ cold archive_routing_decision).
   addRoute("GET", "/api/v1/state/routing-decisions", async ({ res, query }) => {
-    const where: string[] = [];
-    const args: unknown[] = [];
-    for (const [col, key] of [
-      ["tier", "tier"],
-      ["signal_id", "signal_id"],
-      ["outcome", "outcome"],
-      ["chosen_path", "chosen_path"],
-    ] as const) {
-      const v = query.get(key);
-      if (v) { where.push(`${col} = ?`); args.push(v); }
-    }
-    const since = query.get("since");
-    if (since) { where.push("ts >= ?"); args.push(since); }
     const limit = clampLimit(query);
-    const rows = db()
-      .prepare(
-        `SELECT * FROM routing_decision ${where.length ? "WHERE " + where.join(" AND ") : ""} ` +
-          `ORDER BY ts DESC LIMIT ?`,
-      )
-      .all(...args, limit);
-    sendJson(res, 200, { routing_decisions: rows, count: rows.length });
+    const offset = Math.max(0, parseInt(query.get("offset") ?? "0", 10) || 0);
+    const r = queryCrossTier("routing_decision", {
+      filters: {
+        tier: query.get("tier"),
+        signal_id: query.get("signal_id"),
+        outcome: query.get("outcome"),
+        chosen_path: query.get("chosen_path"),
+      },
+      since: query.get("since"),
+      until: query.get("until"),
+      limit,
+      offset,
+    });
+    sendJson(res, 200, {
+      routing_decisions: r.entries,
+      count: r.entries.length,
+      total: r.total,
+      tiers: r.tiers,
+    });
   });
 
   addRoute("GET", "/api/v1/state/routing-decisions/:id", async ({ res, params }) => {
-    const row = db().prepare("SELECT * FROM routing_decision WHERE id = ?").get(params.id);
+    const row = getCrossTier("routing_decision", params.id);
     if (!row) throw new NotFoundError(`routing_decision ${params.id} not found`);
     sendJson(res, 200, row);
   });
@@ -534,26 +536,31 @@ export function registerStateRoutes(): void {
     sendJson(res, 201, { ok: true, id });
   });
 
+  // Cross-tier (hot ∪ cold archive_link). `ref` matches either endpoint — for
+  // "all edges touching X" graph queries — and is expressed as an anyOf OR
+  // predicate so it spans both tiers.
   addRoute("GET", "/api/v1/state/links", async ({ res, query }) => {
-    const where: string[] = [];
-    const args: unknown[] = [];
-    const src = query.get("src");
-    const dst = query.get("dst");
-    const rel = query.get("rel");
-    if (src) { where.push("src_ref = ?"); args.push(src); }
-    if (dst) { where.push("dst_ref = ?"); args.push(dst); }
-    if (rel) { where.push("rel = ?"); args.push(rel); }
-    // `ref` matches either endpoint — for "all edges touching X" graph queries.
-    const ref = query.get("ref");
-    if (ref) { where.push("(src_ref = ? OR dst_ref = ?)"); args.push(ref, ref); }
     const limit = clampLimit(query);
-    const rows = db()
-      .prepare(
-        `SELECT * FROM link ${where.length ? "WHERE " + where.join(" AND ") : ""} ` +
-          `ORDER BY ts DESC LIMIT ?`,
-      )
-      .all(...args, limit);
-    sendJson(res, 200, { links: rows, count: rows.length });
+    const offset = Math.max(0, parseInt(query.get("offset") ?? "0", 10) || 0);
+    const ref = query.get("ref");
+    const r = queryCrossTier("link", {
+      filters: {
+        src_ref: query.get("src"),
+        dst_ref: query.get("dst"),
+        rel: query.get("rel"),
+      },
+      since: query.get("since"),
+      until: query.get("until"),
+      anyOf: ref ? { cols: ["src_ref", "dst_ref"], value: ref } : null,
+      limit,
+      offset,
+    });
+    sendJson(res, 200, {
+      links: r.entries,
+      count: r.entries.length,
+      total: r.total,
+      tiers: r.tiers,
+    });
   });
 
   addRoute("DELETE", "/api/v1/state/links/:id", async ({ res, params }) => {

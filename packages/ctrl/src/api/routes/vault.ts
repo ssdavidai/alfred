@@ -15,7 +15,11 @@ import {
   classifyTarget,
   stateFieldsFor,
 } from "../stateFields.js";
-import { indexVaultWrite, removeFromVaultIndex } from "../../db/vaultIndex.js";
+import { indexVaultWrite, removeFromVaultIndex, IGNORE_DIRS } from "../../db/vaultIndex.js";
+// Re-export the single canonical IGNORE_DIRS so the many route modules that
+// import it from "./vault.js" (chores, context, steward, briefings, etc.)
+// keep working — and so the reconciler and the walk endpoints can never drift.
+export { IGNORE_DIRS };
 import { assertCanonicalVaultPath } from "../../db/promotionContract.js";
 
 // alfred-black mounts the vault as a named Docker volume (PLAN.md Part E),
@@ -124,7 +128,8 @@ async function _withVaultPathLock<T>(relPath: string, fn: () => Promise<T>): Pro
   }
 }
 
-export const IGNORE_DIRS = new Set(["_templates", "_bases", "_docs", ".obsidian", "view", "dashboard"]);
+// IGNORE_DIRS is imported + re-exported from ../../db/vaultIndex.js (top of
+// file) — the single source of truth shared with the reconciler.
 
 // ---------------------------------------------------------------------------
 // Title-index cache (#873).

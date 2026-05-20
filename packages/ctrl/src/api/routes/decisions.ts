@@ -611,17 +611,23 @@ export function registerDecisionRoutes(): void {
     );
 
     const db = getStateDb();
+    // The index `status` column mirrors frontmatter `status`, but a decision's
+    // canonical lifecycle field is `state`; legacy rows may carry `state` only
+    // (status column NULL). So the `state=` filter is NOT applied as a strict
+    // SQL `status = ?` (that silently drops state-only rows) — it is matched
+    // defensively in JS against the index status OR frontmatter state/status.
+    // `since` stays in SQL (always present on the index), and the result is
+    // already sliced to `limit` below.
     const where: string[] = ["record_type = 'decision'"];
     const args: unknown[] = [];
-    if (stateFilter) { where.push("status = ?"); args.push(stateFilter); }
     if (since) { where.push("mtime >= ?"); args.push(since); }
     const rows = db
       .prepare(
-        `SELECT path, frontmatter_json FROM vault_index
+        `SELECT path, status, frontmatter_json FROM vault_index
           WHERE ${where.join(" AND ")}
           ORDER BY mtime DESC`,
       )
-      .all(...args) as Array<{ path: string; frontmatter_json: string | null }>;
+      .all(...args) as Array<{ path: string; status: string | null; frontmatter_json: string | null }>;
 
     const records: any[] = [];
     for (const row of rows) {
@@ -631,8 +637,12 @@ export function registerDecisionRoutes(): void {
       } catch {
         continue;
       }
-      // `status` on the index row mirrors decision frontmatter `state`, but
-      // older rows may carry `state` only — filter defensively on both.
+      // Defensive state match: the effective state is the index status column,
+      // or frontmatter `state`, or frontmatter `status` — whichever is set.
+      if (stateFilter) {
+        const effective = row.status ?? fm.state ?? fm.status ?? null;
+        if (String(effective ?? "") !== stateFilter) continue;
+      }
       if (sourceFilter && String(fm.source ?? "") !== sourceFilter) continue;
       records.push({
         id: row.path.replace(/^decision\//, "").replace(/\.md$/, ""),
