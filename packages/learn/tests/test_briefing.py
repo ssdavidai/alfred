@@ -479,6 +479,61 @@ async def test_compose_reads_post_mutation_state(fake_vault):
     assert "prior_briefing: briefing/2026-05-12-evening.md" in content
 
 
+async def test_brief_date_uses_tenant_timezone(fake_vault, monkeypatch):
+    """B7: the brief's date/filename must be the TENANT-LOCAL calendar
+    day, not the UTC day. Chore schedules fire at tenant-local time, so
+    for a non-UTC tenant a UTC-derived date names the brief to the wrong
+    day. window_end 02:00Z on the 13th is still the EVENING of the 12th
+    in America/Los_Angeles (UTC-7/8) → brief date must be 2026-05-12.
+    """
+    monkeypatch.setenv("TENANT_TIMEZONE", "America/Los_Angeles")
+
+    async def fake_clerk(prompt: str, raw: bool = False) -> str:  # noqa: ARG001
+        return "Sir — a quiet evening."
+
+    with patch("src.activities.briefing._call_clerk", side_effect=fake_clerk):
+        path = await compose_and_write_briefing(
+            slot="evening",
+            window_start_iso="2026-05-12T18:00:00Z",
+            window_end_iso="2026-05-13T02:00:00Z",  # 19:00 on the 12th in LA
+            visit_results=[],
+            prior_briefing_path=None,
+        )
+
+    # Filename / record name is the LOCAL date, not the UTC date.
+    assert path == "briefing/2026-05-12-evening.md", path
+    rtype, name, content = fake_vault.write_calls[0]
+    assert name == "2026-05-12-evening", name
+    # composed_at remains the true (UTC) instant — only the date label is local.
+    assert "composed_at: 2026-05-13T02:00:00Z" in content
+
+
+async def test_day_shape_window_anchored_to_tenant_local_day():
+    """B7: the §Day's shape calendar window must bracket the tenant-LOCAL
+    day. When ``now`` carries a non-UTC tz, time_min must be that zone's
+    local midnight (preserving its offset), not UTC midnight."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    captured: dict[str, Any] = {}
+
+    async def fake_ctrl_call(method, path, body=None, timeout=None):  # noqa: ARG001
+        captured["arguments"] = (body or {}).get("arguments", {})
+        return {"error": "no integration"}  # degrade after capture
+
+    la = ZoneInfo("America/Los_Angeles")
+    # 2026-05-13 19:00 local (= 2026-05-14 02:00Z) — local day is the 13th.
+    local_now = datetime(2026, 5, 13, 19, 0, tzinfo=la)
+
+    with patch.object(briefing_mod, "_ctrl_call", side_effect=fake_ctrl_call):
+        await briefing_mod._gather_day_shape(now=local_now)
+
+    time_min = captured["arguments"]["time_min"]
+    # Local midnight of the 13th in LA = 00:00 with the LA offset.
+    assert time_min.startswith("2026-05-13T00:00:00"), time_min
+    assert not time_min.endswith("Z") and "+00:00" not in time_min, time_min
+
+
 # ---------------------------------------------------------------------------
 # BriefingWorkflow integration — 3 matters: 2 mutate, 1 no-change
 # ---------------------------------------------------------------------------
