@@ -1126,6 +1126,13 @@ services:
     init: true
     # runtime-api spawns Vexa-bot containers as docker children — it needs
     # the docker socket. Bot containers attach to the alfred-black network.
+    # The socket grants root-equivalent host control, so on this 3rd-party
+    # image at minimum forbid privilege escalation (no setuid/file-caps gain).
+    # We keep the RW socket mount (required to spawn bots) but do NOT cap_drop
+    # ALL — the upstream runtime-api's internal cap needs are unaudited and a
+    # blanket drop risks silently breaking bot spawning (FAILURE-MODES §Vexa).
+    security_opt:
+      - no-new-privileges:true
     environment:
       - DOCKER_NETWORK=alfred-black_default
       - BROWSER_IMAGE=vexaai/vexa-bot:0.10.6
