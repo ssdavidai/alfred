@@ -28,10 +28,29 @@ import http from "node:http";
 import type { AddressInfo } from "node:net";
 
 // ---------------------------------------------------------------------------
-// fs mock — getGatewayToken() reads a token from disk.
+// fs mock — getGatewayToken() reads a token from disk, and (C8)
+// pickPrimaryChannel()/resolveDeliveryTarget read the Hermes session index.
+//
+// The session index is a per-test fixture: setSessions([...]) installs the
+// SessionEntry-shaped objects that the sessions.json read returns. Any read of
+// a path ending in sessions.json yields that fixture; every other read yields
+// the gateway token.
 // ---------------------------------------------------------------------------
 
-const fsReadFileSync = mock.fn(() => "fake-gateway-token");
+let sessionsFixture: Record<string, any> = {};
+function setSessions(entries: Array<Record<string, any>>): void {
+  sessionsFixture = {};
+  entries.forEach((e, i) => {
+    sessionsFixture[e.session_key ?? `s${i}`] = e;
+  });
+}
+
+const fsReadFileSync = mock.fn((p: any) => {
+  if (typeof p === "string" && p.endsWith("sessions.json")) {
+    return JSON.stringify(sessionsFixture);
+  }
+  return "fake-gateway-token";
+});
 const fsMock = {
   readFileSync: fsReadFileSync,
   writeFileSync: mock.fn(() => {}),
@@ -182,6 +201,16 @@ beforeEach(() => {
   installFetchStub();
   pollCallIndex = 0;
   calls.length = 0;
+  // Default: a single most-recent Telegram DM session on record.
+  setSessions([
+    {
+      session_key: "tg-1",
+      platform: "telegram",
+      chat_type: "dm",
+      updated_at: "2026-05-20T10:00:00Z",
+      origin: { platform: "telegram", chat_id: "55501", chat_type: "dm" },
+    },
+  ]);
 });
 
 after(() => {
@@ -339,5 +368,92 @@ describe("POST /api/v1/notifications — native Hermes channel delivery", () => 
     });
     assert.notEqual(r.data.noop, true, "response must not carry noop:true");
     assert.equal(r.data.delivered, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C8 — channel:"auto" resolves a DELIVERABLE channel from the Hermes session
+// index, never webchat→424 when any deliverable channel exists. The legacy
+// pickPrimaryChannel() read the Hermes-init-deleted openclaw.json and fell
+// through to "webchat", 424-ing the default channel.
+// ---------------------------------------------------------------------------
+
+describe("POST /api/v1/notifications — C8 auto-channel resolution", () => {
+  it("default channel:auto resolves the deliverable channel + recipient from the session index", async () => {
+    setSessions([
+      {
+        session_key: "tg-1",
+        platform: "telegram",
+        chat_type: "dm",
+        updated_at: "2026-05-20T10:00:00Z",
+        origin: { platform: "telegram", chat_id: "55501", chat_type: "dm" },
+      },
+    ]);
+    scenario = {
+      jobStates: [
+        { last_status: null },
+        { last_status: "ok", last_delivery_error: null },
+      ],
+    };
+
+    // No channel and no `to` — the default "auto" path.
+    const r = await req("POST", "/api/v1/notifications", {
+      message: "Sir, your brief is ready.",
+    });
+
+    assert.equal(r.status, 200, "auto must not 424 when a deliverable session exists");
+    assert.equal(r.data.delivered, true);
+    assert.equal(r.data.channel, "telegram");
+    assert.equal(r.data.to, "55501");
+
+    const create = calls.find((c) => c.method === "POST" && /\/api\/jobs$/.test(c.url));
+    assert.ok(create, "should POST /api/jobs");
+    assert.equal(create!.body.deliver, "telegram:55501");
+  });
+
+  it("auto prefers the most-recently-active deliverable channel, skipping webchat", async () => {
+    setSessions([
+      // most recent is webchat — must be skipped, not chosen
+      {
+        session_key: "wc-1",
+        platform: "webchat",
+        chat_type: "dm",
+        updated_at: "2026-05-20T12:00:00Z",
+        origin: { platform: "webchat", chat_id: "web-abc", chat_type: "dm" },
+      },
+      {
+        session_key: "sl-1",
+        platform: "slack",
+        chat_type: "dm",
+        updated_at: "2026-05-20T11:00:00Z",
+        origin: { platform: "slack", chat_id: "D0123", chat_type: "dm" },
+      },
+    ]);
+    scenario = {
+      jobStates: [
+        { last_status: null },
+        { last_status: "ok", last_delivery_error: null },
+      ],
+    };
+
+    const r = await req("POST", "/api/v1/notifications", {
+      message: "test",
+      channel: "auto",
+    });
+
+    assert.equal(r.status, 200);
+    assert.equal(r.data.channel, "slack", "auto must skip webchat and pick a deliverable channel");
+    assert.equal(r.data.to, "D0123");
+  });
+
+  it("auto with no deliverable session on record 424s honestly (no webchat fabrication)", async () => {
+    setSessions([]); // fresh tenant — no inbound messages yet
+    const r = await req("POST", "/api/v1/notifications", {
+      message: "test",
+    });
+    assert.equal(r.status, 424);
+    assert.equal(r.data.status, "error");
+    // Must NOT claim webchat — there is simply no recipient yet.
+    assert.notEqual(r.data.channel, "webchat");
   });
 });
