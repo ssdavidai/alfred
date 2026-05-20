@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -201,6 +201,78 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
                         resp.json().get("audit_record_path")
                     )
             elif intent == "defer":
+                # #5: resolve the resurface intent FIRST, independent of (and
+                # before) the skip flip. The hourly DeferResurfaceWorkflow only
+                # brings a ``skipped`` card back if it carries a ``resurface_at``;
+                # if the resurface stamp is left to a fragile log-only path that
+                # runs AFTER the skip, a parse miss buries the card forever.
+                #
+                # A defer NOTE expresses intent to come back. We turn it into a
+                # concrete ``resurface_at`` via the clerk; if the clerk can't
+                # parse a time (or fails entirely), we fall back to a default
+                # horizon (the lenient "in a few days" = 3 days the defer prompt
+                # itself uses) so the card is preserved, not dismissed. A
+                # note-LESS defer is a deliberate dismiss — no resurface.
+                import src.activities.defer_resurface as _defer_mod
+
+                resurface_at: str | None = None
+                resurface_reasoning: str | None = None
+                if note:
+                    try:
+                        parsed = await _defer_mod.parse_resurface_time(note)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "decision_router: resurface parsing raised for %s: %s "
+                            "— falling back to default horizon",
+                            na_id, exc,
+                        )
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        cand = parsed.get("resurface_at")
+                        if isinstance(cand, str) and cand:
+                            resurface_at = cand
+                        resurface_reasoning = parsed.get("reasoning")
+                    if not resurface_at:
+                        # Parse miss/failure on a noted defer: don't lose the
+                        # card. Default to +3 days at ~09:00 UTC.
+                        fallback = (
+                            datetime.now(timezone.utc) + timedelta(days=3)
+                        ).replace(hour=9, minute=0, second=0, microsecond=0)
+                        resurface_at = fallback.isoformat()
+                        if not resurface_reasoning:
+                            resurface_reasoning = (
+                                "default horizon (no concrete time parsed)"
+                            )
+                        logger.info(
+                            "decision_router: defer note for %s carried no "
+                            "parseable time; defaulting resurface_at=%s",
+                            na_id, resurface_at,
+                        )
+
+                # Stamp the resurface BEFORE the skip flip so a crash between
+                # the two never leaves a skipped, un-resurfaceable card. The
+                # stamp is its own ctrl-api PATCH; the skip flip follows.
+                if resurface_at:
+                    try:
+                        await _defer_mod.stamp_resurface_on_needs_attention(
+                            na_id, resurface_at, note,
+                        )
+                        actions_taken.append(
+                            "needs_attention.resurface_scheduled"
+                        )
+                        side_effects["resurface_at"] = resurface_at
+                        side_effects["resurface_reasoning"] = resurface_reasoning
+                    except Exception as exc:  # noqa: BLE001
+                        # A failed stamp must NOT be swallowed silently into a
+                        # permanent skip — re-raise so Temporal retries the
+                        # whole activity before the card is flipped to skipped.
+                        logger.warning(
+                            "decision_router: resurface stamp failed for %s: %s "
+                            "— re-raising before skip flip",
+                            na_id, exc,
+                        )
+                        raise
+
                 if not synchronous_flip:
                     resp = await client.post(
                         f"/api/v1/admin/needs-attention/{na_id}/skip",
@@ -211,33 +283,6 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
                     side_effects["needs_attention_audit"] = (
                         resp.json().get("audit_record_path")
                     )
-                # Resurface parsing always runs — the synchronous flip
-                # doesn't call clerk. If the principal's defer note
-                # carries a "when", turn it into a concrete
-                # resurface_at; DeferResurfaceWorkflow (hourly) will
-                # flip status back to pending when due.
-                if note:
-                    try:
-                        from src.activities.defer_resurface import (
-                            parse_resurface_time,
-                            stamp_resurface_on_needs_attention,
-                        )
-                        parsed = await parse_resurface_time(note)
-                        ra = parsed.get("resurface_at") if isinstance(parsed, dict) else None
-                        if isinstance(ra, str) and ra:
-                            await stamp_resurface_on_needs_attention(
-                                na_id, ra, note,
-                            )
-                            actions_taken.append("needs_attention.resurface_scheduled")
-                            side_effects["resurface_at"] = ra
-                            side_effects["resurface_reasoning"] = (
-                                parsed.get("reasoning") if isinstance(parsed, dict) else None
-                            )
-                    except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "decision_router: resurface parsing failed for %s: %s",
-                            na_id, exc,
-                        )
             elif intent == "delegate":
                 # Schedule-or-dispatch. If the principal's note carries a
                 # "when" phrase (e.g. "send Adam Wednesday morning"),
@@ -538,7 +583,6 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
                         )
 
         # ---- Atomic state transition on the decision ----
-        from datetime import datetime, timezone
         now_iso = datetime.now(timezone.utc).isoformat()
         patch_body: dict[str, Any] = {"state": next_state}
         if next_state == "executing":
