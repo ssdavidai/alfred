@@ -31,6 +31,7 @@ from typing import Any
 
 import httpx
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from src.config import load_config
 
@@ -720,9 +721,16 @@ async def _call_clerk(
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await heartbeat_task
 
-    # Hermes returns 5xx with an ``error`` envelope when the agent run
-    # itself raises; surface that as a run failure rather than a bare
-    # HTTPStatusError so callers see a clear cause.
+    # Hermes returns 4xx/5xx with an ``error`` envelope when the request or
+    # the agent run itself fails. Discriminate retryable from un-retryable
+    # so Temporal stops blind-retrying failures that retries can never fix
+    # (FAILURE-MODES Hermes runtime, S2 — clerk.py collapsed everything into
+    # one generic RuntimeError):
+    #   * 401 (stale gateway token), 402/403 (auth/payment), or any status
+    #     carrying a billing/credit-exhaustion marker → NON-retryable. A
+    #     retry just burns the same dead token / empty wallet.
+    #   * 429 (rate limit) and 5xx (transient run failure) → retryable, so
+    #     Temporal's backoff can ride out the blip.
     if resp.status_code >= 400:
         detail = ""
         try:
@@ -732,8 +740,17 @@ async def _call_clerk(
                 detail = err.get("message") if isinstance(err, dict) else str(err or err_body)
         except Exception:
             detail = resp.text
-        raise RuntimeError(
-            f"Clerk run failed (HTTP {resp.status_code}): {str(detail)[:300]}"
+        detail = str(detail)
+        is_billing = any(m in detail.lower() for m in _BILLING_ERROR_MARKERS)
+        non_retryable = (
+            resp.status_code in (401, 402, 403) or is_billing
+        )
+        raise ApplicationError(
+            f"Clerk run failed (HTTP {resp.status_code}): {detail[:300]}",
+            type="ClerkBillingError" if (resp.status_code == 402 or is_billing)
+            else "ClerkAuthError" if resp.status_code in (401, 403)
+            else "ClerkRunError",
+            non_retryable=non_retryable,
         )
 
     response = resp.json()
