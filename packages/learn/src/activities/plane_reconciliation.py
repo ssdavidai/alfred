@@ -322,6 +322,15 @@ async def reconcile_plane_deletes() -> dict[str, Any]:
     counters["stale_map_entries"] = len(stale_slugs)
 
     # Archive + prune each stale entry.
+    #
+    # IMPORTANT: do NOT mutate the stale ``issue_map`` snapshot and write it
+    # back — the 15s forward-sync (``plane_sync.save_plane_sync_state``) may
+    # have persisted new ``issue_map`` entries / a bumped ``last_vault_mtime``
+    # during our minutes-long scan. Blindly overwriting the whole cursor from
+    # this snapshot would clobber those (lost-update race). Instead we only
+    # OWN the delete outcomes: record ``{slug: plane_id}`` we confirmed gone,
+    # then re-read + merge at write time.
+    pruned: dict[str, str] = {}
     vault_cfg = load_config()
     vault_client = VaultClient(vault_cfg)
     try:
@@ -339,7 +348,7 @@ async def reconcile_plane_deletes() -> dict[str, Any]:
                         "slug=%s plane_id=%s — pruning map entry",
                         slug, plane_id,
                     )
-                    issue_map.pop(slug, None)
+                    pruned[slug] = plane_id
                     continue
                 logger.warning(
                     "plane_reconciliation: read_record failed slug=%s "
@@ -361,7 +370,7 @@ async def reconcile_plane_deletes() -> dict[str, Any]:
             if fm.get("archived") is True:
                 # Already archived (forward-sync beat us to it, or another
                 # run). Just prune the map entry.
-                issue_map.pop(slug, None)
+                pruned[slug] = plane_id
                 continue
 
             try:
@@ -378,16 +387,26 @@ async def reconcile_plane_deletes() -> dict[str, Any]:
             counters["vault_archived"] = (
                 int(counters["vault_archived"]) + 1
             )
-            issue_map.pop(slug, None)
+            pruned[slug] = plane_id
     finally:
         await vault_client.close()
 
-    # Atomic cursor write — preserve last_vault_mtime + project_map.
+    # Atomic cursor write — re-read the CURRENT cursor immediately before
+    # writing and merge only the fields we own (the delete outcomes). This
+    # preserves any forward-sync update that landed during our scan.
     import json
+    current = _load_cursor_from_disk(cursor_path)
+    merged_issue_map: dict[str, str] = dict(current.get("issue_map") or {})
+    for slug, gone_plane_id in pruned.items():
+        # Only drop the entry if it STILL points at the plane_id we
+        # confirmed gone. If forward-sync recreated the slug with a fresh
+        # plane_id, leave it — that's a live mapping, not our delete.
+        if merged_issue_map.get(slug) == gone_plane_id:
+            merged_issue_map.pop(slug, None)
     state_out = {
-        "last_vault_mtime": float(state.get("last_vault_mtime", 0.0) or 0.0),
-        "project_map": project_map,
-        "issue_map": issue_map,
+        "last_vault_mtime": float(current.get("last_vault_mtime", 0.0) or 0.0),
+        "project_map": dict(current.get("project_map") or {}),
+        "issue_map": merged_issue_map,
     }
     payload = json.dumps(state_out, indent=2, sort_keys=True)
     _atomic_write(cursor_path, payload)
