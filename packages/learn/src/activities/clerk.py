@@ -24,6 +24,8 @@ model still emits prose/markdown around JSON), not the transport.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 from typing import Any
 
@@ -529,6 +531,25 @@ Return JSON only:
 # enclosing Temporal activity timeout/heartbeat is the outer bound.
 _CLERK_COMPLETION_BUDGET_SECONDS = 900.0
 
+# Temporal envelope for any activity whose body blocks on ``_call_clerk``.
+# The activity ``start_to_close_timeout`` MUST sit above the HTTP completion
+# budget, otherwise Temporal kills the activity mid-call (the billable clerk
+# run keeps going server-side) and then retries → double spend
+# (FAILURE-MODES Hermes runtime, S2: media_ingestion.py:110 vs clerk.py:530).
+# A 60s margin covers connect + JSON parse + dispatch overhead on top of the
+# 900s budget. The heartbeat is the inner liveness signal: a genuinely-
+# progressing run heartbeats every ``CLERK_ACTIVITY_HEARTBEAT_SECONDS`` so a
+# stalled/dead run is detected and reaped well before the full envelope,
+# while a working long run is never cut off. Workflows that schedule clerk-
+# backed activities import these so there is ONE source of truth.
+CLERK_ACTIVITY_TIMEOUT_SECONDS = _CLERK_COMPLETION_BUDGET_SECONDS + 60.0
+CLERK_ACTIVITY_HEARTBEAT_SECONDS = 60.0
+
+# How often ``_call_clerk`` pings ``activity.heartbeat`` while the blocking
+# HTTP call is in flight. Must be < ``CLERK_ACTIVITY_HEARTBEAT_SECONDS`` so
+# at least one heartbeat lands inside every Temporal heartbeat window.
+_CLERK_HEARTBEAT_INTERVAL_SECONDS = CLERK_ACTIVITY_HEARTBEAT_SECONDS / 2.0
+
 _BILLING_ERROR_MARKERS = (
     "insufficient credits",
     "billing error",
@@ -610,6 +631,24 @@ def _response_output_text(response: dict[str, Any]) -> str:
     return ""
 
 
+async def _heartbeat_until_cancelled() -> None:
+    """Ping Temporal at a fixed interval until cancelled.
+
+    Runs concurrently with the blocking ``POST /v1/responses`` so a
+    genuinely-progressing clerk run keeps the enclosing activity alive
+    against its ``heartbeat_timeout``. ``activity.heartbeat`` raises if
+    there is no activity context (unit tests, direct calls); we swallow
+    that so ``_call_clerk`` stays usable outside a worker.
+    """
+    while True:
+        try:
+            activity.heartbeat()
+        except Exception:
+            # No activity context (test / direct call) — nothing to ping.
+            return
+        await asyncio.sleep(_CLERK_HEARTBEAT_INTERVAL_SECONDS)
+
+
 async def _call_clerk(
     prompt: str,
     raw: bool = False,
@@ -660,6 +699,10 @@ async def _call_clerk(
     # timeout IS the completion budget. ``stream`` is omitted (defaults
     # false) — the non-streaming branch returns the final response JSON.
     timeout = httpx.Timeout(_CLERK_COMPLETION_BUDGET_SECONDS, connect=30.0)
+    # Heartbeat while the call is in flight so the enclosing activity's
+    # heartbeat_timeout reaps only a truly stalled run, never a working
+    # long one (FAILURE-MODES Hermes runtime, S2).
+    heartbeat_task = asyncio.ensure_future(_heartbeat_until_cancelled())
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
@@ -672,6 +715,10 @@ async def _call_clerk(
             f"Clerk run did not complete within "
             f"{int(_CLERK_COMPLETION_BUDGET_SECONDS)}s"
         ) from exc
+    finally:
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await heartbeat_task
 
     # Hermes returns 5xx with an ``error`` envelope when the agent run
     # itself raises; surface that as a run failure rather than a bare

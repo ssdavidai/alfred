@@ -21,6 +21,10 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from src.activities.braindump import detect_braindump, extract_braindump
     from src.activities.classify import classify_event, extract_metadata
+    from src.activities.clerk import (
+        CLERK_ACTIVITY_HEARTBEAT_SECONDS,
+        CLERK_ACTIVITY_TIMEOUT_SECONDS,
+    )
     from src.activities.media import (
         detect_file_type,
         process_audio,
@@ -29,6 +33,16 @@ with workflow.unsafe.imports_passed_through():
     )
     from src.activities.vault import ensure_entities_exist, write_vault_record
     from src.validators.frontmatter import validate_classification
+
+
+# The clerk-backed activities in this workflow (process_audio/document/image,
+# classify_event, extract_braindump) all block on ``_call_clerk`` (HTTP
+# ``POST /v1/responses``) up to the 900s completion budget, so a sub-budget
+# ``start_to_close`` would let Temporal kill + retry while the billable run
+# continued server-side → double spend. They are scheduled below with
+# ``start_to_close_timeout=CLERK_ACTIVITY_TIMEOUT_SECONDS`` and
+# ``heartbeat_timeout=CLERK_ACTIVITY_HEARTBEAT_SECONDS`` — the shared clerk
+# constants are the single source of truth (FAILURE-MODES Hermes runtime, S2).
 
 
 @dataclass
@@ -55,21 +69,24 @@ class MediaIngestionWorkflow:
             media_result = await workflow.execute_activity(
                 process_audio,
                 args=[event],
-                start_to_close_timeout=timedelta(seconds=120),
+                start_to_close_timeout=timedelta(seconds=CLERK_ACTIVITY_TIMEOUT_SECONDS),
+                heartbeat_timeout=timedelta(seconds=CLERK_ACTIVITY_HEARTBEAT_SECONDS),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
         elif file_type == "document":
             media_result = await workflow.execute_activity(
                 process_document,
                 args=[event],
-                start_to_close_timeout=timedelta(seconds=120),
+                start_to_close_timeout=timedelta(seconds=CLERK_ACTIVITY_TIMEOUT_SECONDS),
+                heartbeat_timeout=timedelta(seconds=CLERK_ACTIVITY_HEARTBEAT_SECONDS),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
         elif file_type == "image":
             media_result = await workflow.execute_activity(
                 process_image,
                 args=[event],
-                start_to_close_timeout=timedelta(seconds=120),
+                start_to_close_timeout=timedelta(seconds=CLERK_ACTIVITY_TIMEOUT_SECONDS),
+                heartbeat_timeout=timedelta(seconds=CLERK_ACTIVITY_HEARTBEAT_SECONDS),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
         else:
@@ -107,7 +124,8 @@ class MediaIngestionWorkflow:
         classification = await workflow.execute_activity(
             classify_event,
             args=[synth_event, metadata],
-            start_to_close_timeout=timedelta(seconds=60),
+            start_to_close_timeout=timedelta(seconds=CLERK_ACTIVITY_TIMEOUT_SECONDS),
+            heartbeat_timeout=timedelta(seconds=CLERK_ACTIVITY_HEARTBEAT_SECONDS),
             retry_policy=RetryPolicy(maximum_attempts=2),
         )
 
@@ -135,7 +153,8 @@ class MediaIngestionWorkflow:
             braindump_results = await workflow.execute_activity(
                 extract_braindump,
                 args=[synth_event, metadata, classification],
-                start_to_close_timeout=timedelta(seconds=120),
+                start_to_close_timeout=timedelta(seconds=CLERK_ACTIVITY_TIMEOUT_SECONDS),
+                heartbeat_timeout=timedelta(seconds=CLERK_ACTIVITY_HEARTBEAT_SECONDS),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
             for br in braindump_results:
