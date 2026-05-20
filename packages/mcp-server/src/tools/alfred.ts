@@ -47,10 +47,10 @@ const vaultTools: ToolDef[] = [
   {
     name: "list_vault_by_type",
     description:
-      "List every record of a given vault type (matter, task, project, note, person, org, instinct, chore, observation, reflection, decision, event, …). Returns one entry per record with `path` (vault-relative, suitable for get_vault_record / update_vault_record), `name`, `status`, full `frontmatter`, a truncated `body_preview` (default 500 chars, max 2000 via `preview` query), and `created`. Use this when Sir asks 'what matters am I working on?', 'what tasks are open?', or before creating a record so you don't duplicate an existing one. Cheap, idempotent, no pagination — the list is bounded by what the type directory holds. Backing: filesystem walk of /vault/<type>/.",
+      "List every record of a given vault type (matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision, …). Returns one entry per record with `path` (vault-relative, suitable for get_vault_record / update_vault_record), `name`, `status`, full `frontmatter`, a truncated `body_preview` (default 500 chars, max 2000 via `preview` query), and `created`. Use this when Sir asks 'what matters am I working on?', 'what tasks are open?', or before creating a record so you don't duplicate an existing one. Cheap, idempotent, no pagination — the list is bounded by what the type directory holds. Backing: filesystem walk of /vault/<type>/.",
     inputSchema: z.object({
       type: z.string().min(1).describe(
-        "One of: person, org, project, task, event, note, location, process, account, asset, conversation, input, run, session, decision, triage, assumption, constraint, contradiction, synthesis, observation, instinct, reflection, matter, ledger_entry, chore. Unknown types return 400.",
+        "One of: matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision (the 12 canonical types). Legacy/derived directories (event, observation, reflection, triage, …) may also still resolve. Unknown types return 400.",
       ),
       preview: z.number().int().min(0).max(2000).optional().describe(
         "Body-preview character count; 0 to omit, max 2000. Default 500.",
@@ -103,10 +103,13 @@ const vaultTools: ToolDef[] = [
   {
     name: "create_vault_record",
     description:
-      "Create a new vault record. Two modes: (1) high-level, pass `type` + `name` + optional `fields` to let the alfred CLI scaffold the file with default frontmatter (`type`, `name`, `created`, `status`, …); or (2) raw, pass `type` + `name` + `content` where `content` is the entire file body INCLUDING frontmatter — used when you already have a fully-formed record (typical when migrating or transcribing). Returns 201 with the new record's path. Side effects: matter/* and task/* records mirror to Plane via the 15s forward-sync cron. Pre-reqs: search_vault first to avoid duplicates; check the vault schema if unsure which fields a type needs (every record needs `type`, `name`, `created`; tasks additionally need `owner: alfred|human`). Backing: docker exec alfred CLI for mode 1, direct fs.writeFile for mode 2.",
+      "Create a new vault record. `type` MUST be one of the 12 canonical vault types — matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision. Anything else (observation, reflection, project, event, …) is rejected by ctrl-api with a 422; those classes are NOT principal-facing vault records (observations/audit live in state.db, not the vault). Two modes: (1) high-level, pass `type` + `name` + optional `fields` to let the alfred CLI scaffold the file with default frontmatter (`type`, `name`, `created`, `status`, …); or (2) raw, pass `type` + `name` + `content` where `content` is the entire file body INCLUDING frontmatter — used when you already have a fully-formed record (typical when migrating or transcribing). Returns 201 with the new record's path. Side effects: matter/* and task/* records mirror to Plane via the 15s forward-sync cron. Pre-reqs: search_vault first to avoid duplicates; check the vault schema if unsure which fields a type needs (every record needs `type`, `name`, `created`; tasks additionally need `owner: alfred|human`). Backing: docker exec alfred CLI for mode 1, direct fs.writeFile for mode 2.",
     inputSchema: z.object({
-      type: z.string().min(1).describe(
-        "Record type — one of the known types (matter, task, project, note, person, org, instinct, chore, …).",
+      type: z.enum([
+        "matter", "task", "note", "person", "org", "place", "asset",
+        "chore", "instinct", "briefing", "daybook", "decision",
+      ]).describe(
+        "Record type — one of the 12 canonical vault types: matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision. Non-canonical types (observation, reflection, project, event) are 422'd by ctrl-api.",
       ),
       name: z.string().min(1).describe(
         "Slug or filename. May include the `.md` extension or a `<type>/` prefix; backend normalises both. Use lowercase-with-dashes.",

@@ -281,8 +281,12 @@ services:
       # Temporal execution_timeout before #48 moves any workflow to cron.
       - HERMES_CRON_TIMEOUT=1800
     healthcheck:
-      # the hermes image (python:3.12-slim base) ships curl, not wget
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18789/health >/dev/null 2>&1 || exit 1"]
+      # the hermes image (python:3.12-slim base) ships curl, not wget.
+      # Probe BOTH gateways: main :18789 (chat/onboarding) AND workers :18790
+      # (clerk/background). alfred-learn depends_on hermes service_healthy, so a
+      # dead workers gateway must keep the container UNhealthy — otherwise learn
+      # boots against a dead clerk gateway (FAILURE-MODES §Hermes runtime).
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18789/health >/dev/null 2>&1 && curl -fsS http://127.0.0.1:18790/health >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
@@ -1122,6 +1126,13 @@ services:
     init: true
     # runtime-api spawns Vexa-bot containers as docker children — it needs
     # the docker socket. Bot containers attach to the alfred-black network.
+    # The socket grants root-equivalent host control, so on this 3rd-party
+    # image at minimum forbid privilege escalation (no setuid/file-caps gain).
+    # We keep the RW socket mount (required to spawn bots) but do NOT cap_drop
+    # ALL — the upstream runtime-api's internal cap needs are unaudited and a
+    # blanket drop risks silently breaking bot spawning (FAILURE-MODES §Vexa).
+    security_opt:
+      - no-new-privileges:true
     environment:
       - DOCKER_NETWORK=alfred-black_default
       - BROWSER_IMAGE=vexaai/vexa-bot:0.10.6
