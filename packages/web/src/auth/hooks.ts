@@ -5,6 +5,7 @@
  */
 
 import type {
+  OnBeforeSignupHook,
   OnAfterSignupHook,
   OnAfterLoginHook,
 } from "wasp/server/auth";
@@ -125,6 +126,30 @@ async function storeGoogleCredential(
  *     users still verify by email as normal.
  *  2. Capture Google tokens so Gmail works immediately.
  */
+/**
+ * Single-VM registration lockdown (FAILURE-MODES web bug #1).
+ *
+ * Registration was open and `isOwner`/`isAdmin` were only cosmetic (no
+ * server-side role check), so ANY visitor who reached the domain could sign up
+ * and get full read/write to the owner's vault, RULES.md, decisions and Gmail
+ * data. Per the owner's decision ("lock signups now, invites later"): once the
+ * box is claimed (a user exists) registration is closed. `onBeforeSignup` runs
+ * before the user row is created, so throwing here cleanly rejects the signup
+ * across every auth provider. Set `ALLOW_SIGNUP_AFTER_OWNER=true` to re-open it
+ * (e.g. to add a household member by hand) until a real invite flow lands.
+ */
+export const onBeforeSignup: OnBeforeSignupHook = async () => {
+  if ((process.env.ALLOW_SIGNUP_AFTER_OWNER ?? "").toLowerCase() === "true") {
+    return;
+  }
+  const existing = await prisma.user.count();
+  if (existing > 0) {
+    throw new Error(
+      "Registration is closed: this Alfred is already claimed by its owner.",
+    );
+  }
+};
+
 export const onAfterSignup: OnAfterSignupHook = async (args) => {
   const { oauth, user } = args;
   const providerId = (args as any).providerId;

@@ -64,6 +64,7 @@ app AlfredSaaS {
     // does return a refresh_token. Non-Google signups + already-reconnected
     // users fall through immediately to /dashboard.
     onAuthSucceededRedirectTo: "/post-signup",
+    onBeforeSignup: import { onBeforeSignup } from "@src/auth/hooks",
     onAfterSignup: import { onAfterSignup } from "@src/auth/hooks",
     onAfterLogin: import { onAfterLogin } from "@src/auth/hooks",
   },
