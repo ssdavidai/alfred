@@ -571,7 +571,7 @@ def cmd_tui(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # Get version
-    version = "0.2.1"
+    version = "0.4.0"
     try:
         from importlib.metadata import version as pkg_version
         version = pkg_version("alfred-vault")

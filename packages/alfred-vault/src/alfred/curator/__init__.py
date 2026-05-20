@@ -1,3 +1,3 @@
 """Curator — Vault inbox processor."""
 
-__version__ = "0.1.7"
+__version__ = "0.4.0"
