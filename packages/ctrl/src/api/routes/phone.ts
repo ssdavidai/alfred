@@ -11,19 +11,33 @@ import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
 
-// Defaults match the ctrl-api container's actual mounts (see
-// packages/ctrl/src/templates/docker-compose.yaml.njk): vault is bind-mounted
-// from the host at /mnt/encrypted/vault, and the openclaw state dir at
-// /mnt/encrypted/openclaw. Env-var overrides are honoured.
-//
-// Prior defaults (`/vault`, `/openclaw-state/...`) were wrong for the ctrl-api
-// container and caused `/api/v1/phone/voice-context` to silently return empty
-// MEMORY.md, empty voice skill, and zero matters/tasks — making the voice
-// agent "not know who Sir is" at call start.
+// Defaults match the merged single-VM stack's ctrl-api mounts: vault at
+// /vault (vault_data volume) and alfred-data at /alfred-data (alfred_data
+// volume). Env-var overrides are honoured. Skills + SOUL/MEMORY are resolved
+// separately below — see the split comment on SKILLS_DIR.
 const VAULT_PATH = process.env.VAULT_PATH ?? "/vault";
 const STREAMS_DIR = `${process.env.ALFRED_DATA_DIR ?? "/alfred-data"}/streams`;
-const WORKSPACE_DIR =
-  process.env.OPENCLAW_WORKSPACE_DIR ?? "/mnt/encrypted/openclaw/workspace";
+
+// Skills vs SOUL/MEMORY split (merged single-VM stack — no openclaw mount):
+//   * SKILLS (alfred-composio-*, alfred-voice) live under the Hermes
+//     per-profile workspace skills dir — the SAME location integrations.ts
+//     WRITES them to. Mirror its authoritative constants or the voice/SMS
+//     context bundle finds zero skills.
+//   * SOUL.md / MEMORY.md are vault-canonical top-level files → vault root.
+// The old `/mnt/encrypted/openclaw/workspace` host path does not exist here,
+// which is what made the voice agent "not know who Sir is" at call start.
+const HERMES_HOME = process.env.HERMES_HOME ?? "/opt/data";
+const HERMES_PROFILES_DIR =
+  process.env.HERMES_CONFIG_DIR ?? `${HERMES_HOME}/profiles`;
+const SKILLS_DIR = `${HERMES_PROFILES_DIR}/main/workspace/skills`;
+
+// Exported for the path-resolution regression test (see
+// tests/skills-soul-memory-paths.test.ts).
+export const RESOLVED_SKILLS_DIR = SKILLS_DIR;
+export const RESOLVED_VAULT_PATH = VAULT_PATH;
+export const RESOLVED_MEMORY_PATH = `${VAULT_PATH}/MEMORY.md`;
+export const RESOLVED_SOUL_PATH = `${VAULT_PATH}/SOUL.md`;
+export const RESOLVED_VOICE_SKILL_PATH = `${SKILLS_DIR}/alfred-voice/SKILL.md`;
 const OPENCLAW_GATEWAY_URL =
   process.env.OPENCLAW_GATEWAY_URL ?? "http://openclaw:18789";
 // Gateway token lookup paths. ctrl-api mounts the same file as
@@ -70,7 +84,7 @@ function readComposioToolkits(): Array<{
   toolkit: string;
   actions: Array<{ name: string; description: string }>;
 }> {
-  const skillsDir = `${WORKSPACE_DIR}/skills`;
+  const skillsDir = SKILLS_DIR;
   let dirs: string[];
   try {
     dirs = fs
@@ -182,9 +196,9 @@ function parseFrontmatter(raw: string): Record<string, unknown> {
 }
 
 function buildVoiceContext(): VoiceContextBundle {
-  const memoryMd = readFileSafe(`${WORKSPACE_DIR}/MEMORY.md`, 8_000);
+  const memoryMd = readFileSafe(`${VAULT_PATH}/MEMORY.md`, 8_000);
   const voiceSkill = readFileSafe(
-    `${WORKSPACE_DIR}/skills/alfred-voice/SKILL.md`,
+    `${SKILLS_DIR}/alfred-voice/SKILL.md`,
     8_000,
   );
   const openMatters = listVaultRecords("matter", "active");
@@ -347,10 +361,10 @@ function readMainAgentModel(): string {
 }
 
 function buildSmsSystemPrompt(): string {
-  const memoryMd = readFileSafe(`${WORKSPACE_DIR}/MEMORY.md`, 6_000);
+  const memoryMd = readFileSafe(`${VAULT_PATH}/MEMORY.md`, 6_000);
   // No voice persona — SMS is text. Use SOUL.md if present plus a tight
   // SMS overlay; fall back to the platform persona text.
-  const soul = readFileSafe(`${WORKSPACE_DIR}/SOUL.md`, 6_000);
+  const soul = readFileSafe(`${VAULT_PATH}/SOUL.md`, 6_000);
 
   const overlay = [
     "You are Alfred, replying to Sir over SMS.",
