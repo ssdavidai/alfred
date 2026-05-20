@@ -179,3 +179,66 @@ class TestPersonalizeOpusPartialFailure:
                 _run_activity(lambda: personalize_opus(onboard))
         # All writes attempted before raising so we collect every failure.
         assert client.put.await_count == 5
+
+
+class TestPersonalizeOpusJsonParse:
+    """#BUG-6 — personalize_opus must use the hardened, string-aware JSON
+    parser. The naive brace-counter mis-tracks depth when a value contains
+    literal ``{``/``}`` (e.g. a TOOLS template mentioning ``{userId}``) and
+    gives up on mild truncation, dropping all five files."""
+
+    def test_literal_braces_in_values_parse(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AAS_API_KEY", "test-token")
+        onboard = _write_onboard(tmp_path)
+        # tools_md value mentions a brace placeholder — the naive counter
+        # would treat ``{userId}`` as a nested object and desync depth.
+        raw = json.dumps({
+            "user_md": "# User Profile\n\nSir runs Example LLC.",
+            "soul_md": "# Alfred's Soul\n\nAddress him as Sir.",
+            "memory_md": "# Memory Index\n\n[[Sam Lee]] — partner.",
+            "tools_md": "# Tools\n\nDigest endpoint /api/users/{userId}/summary {scope}.",
+            "rules_md": "# Standing Rules\n\n- Protect quiet hours.",
+        })
+        # Wrap in prose + a code fence AND add trailing prose that itself
+        # contains braces — the greedy ``\{...\}`` regex would over-match to
+        # the trailing brace and fail to parse; the string-aware scanner
+        # recovers the real object.
+        wrapped = (
+            f"Here are the files:\n```json\n{raw}\n```\n"
+            "Let me know if {anything} needs changing."
+        )
+        client = _mock_client_with_response(_make_response(200, '{"ok":true}'))
+
+        with patch("src.activities.onboarding_v3._call_llm",
+                   new=AsyncMock(return_value=wrapped)), \
+             patch("httpx.AsyncClient", return_value=client):
+            result = _run_activity(lambda: personalize_opus(onboard))
+
+        assert sorted(result["files_written"]) == [
+            "MEMORY.md", "RULES.md", "SOUL.md", "TOOLS.md", "USER.md"
+        ]
+
+    def test_mild_truncation_recovers_load_bearing(self, tmp_path, monkeypatch):
+        """A response truncated mid-rules (max_tokens) must still yield the
+        complete leading files rather than parsing to zero files."""
+        monkeypatch.setenv("AAS_API_KEY", "test-token")
+        onboard = _write_onboard(tmp_path)
+        # Valid up to rules_md, then cut off mid-string with no closer.
+        truncated = (
+            '{\n'
+            '  "user_md": "# User Profile\\n\\nSir runs Example LLC.",\n'
+            '  "soul_md": "# Alfred\'s Soul\\n\\nAddress him as Sir.",\n'
+            '  "memory_md": "# Memory Index\\n\\n[[Sam Lee]] partner.",\n'
+            '  "tools_md": "# Tools\\n\\nWeekly Stripe digest.",\n'
+            '  "rules_md": "# Standing Rules\\n\\n- Protect quiet ho'
+        )
+        client = _mock_client_with_response(_make_response(200, '{"ok":true}'))
+
+        with patch("src.activities.onboarding_v3._call_llm",
+                   new=AsyncMock(return_value=truncated)), \
+             patch("httpx.AsyncClient", return_value=client):
+            result = _run_activity(lambda: personalize_opus(onboard))
+
+        # The load-bearing files survived truncation.
+        assert "USER.md" in result["files_written"]
+        assert "SOUL.md" in result["files_written"]

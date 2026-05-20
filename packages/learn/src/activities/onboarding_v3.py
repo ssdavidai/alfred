@@ -154,7 +154,7 @@ def _string_aware_json_object_span(text: str, start: int) -> int | None:
     return None
 
 
-def _parse_json_with_key(raw: str, key: str) -> dict:
+def _parse_json_with_key(raw: str, key: str, expect: type = list) -> dict:
     """Parse a JSON object containing a specific key from LLM output.
 
     Tolerates the variety of envelopes Opus emits — bare JSON, JSON
@@ -168,6 +168,11 @@ def _parse_json_with_key(raw: str, key: str) -> dict:
     and the parser would give up — silently degrading every Opus pack
     to the rule-based fallback (the production symptom Sir saw as
     eight domain-named matters instead of eight Opus-authored ones).
+
+    ``expect`` is the type the value at ``key`` must have for a candidate
+    to be accepted (``list`` for facts/patterns/packs; ``str`` for the
+    personalize stage's ``user_md`` etc., #BUG-6). The final array-element
+    salvage stage only applies when ``expect`` is ``list``.
     """
     if not raw or f'"{key}"' not in raw:
         logger.error("onboarding_v3: no '%s' key found in LLM response (len=%d)", key, len(raw))
@@ -191,7 +196,7 @@ def _parse_json_with_key(raw: str, key: str) -> dict:
     # standalone JSON object.
     try:
         parsed = json.loads(text)
-        if isinstance(parsed.get(key), list):
+        if isinstance(parsed.get(key), expect):
             return parsed
     except (json.JSONDecodeError, AttributeError):
         pass
@@ -213,7 +218,7 @@ def _parse_json_with_key(raw: str, key: str) -> dict:
         if f'"{key}"' in candidate:
             try:
                 parsed = json.loads(candidate)
-                if isinstance(parsed.get(key), list):
+                if isinstance(parsed.get(key), expect):
                     return parsed
             except json.JSONDecodeError:
                 pass
@@ -265,7 +270,7 @@ def _parse_json_with_key(raw: str, key: str) -> dict:
                 tail += stack.pop()
             repaired = fragment + tail
             parsed = json.loads(repaired)
-            if isinstance(parsed.get(key), list):
+            if isinstance(parsed.get(key), expect):
                 logger.info(
                     "onboarding_v3: parsed %s via brace repair (added %r)",
                     key,
@@ -279,9 +284,10 @@ def _parse_json_with_key(raw: str, key: str) -> dict:
     # mid-element (e.g. a key with no value yet), brace-repair can't produce
     # valid JSON — but every COMPLETE {...} object before the cutoff is still
     # good. Walk the `key` array, collect each fully-closed object, and drop the
-    # partial tail. Better a few hundred real facts than zero.
+    # partial tail. Better a few hundred real facts than zero. Only meaningful
+    # for list-valued keys.
     try:
-        kpos = text.find(f'"{key}"')
+        kpos = text.find(f'"{key}"') if expect is list else -1
         arr_start = text.find("[", kpos) if kpos >= 0 else -1
         if arr_start >= 0:
             items: list = []
@@ -706,22 +712,14 @@ Make each file genuinely useful — not generic templates. Reference specific na
 
     raw = await _call_llm(prompt, max_tokens=16384)
 
-    files = {}
-    try:
-        match = re.search(r'\{[\s\S]*"user_md"[\s\S]*\}', raw)
-        if match:
-            files = json.loads(match.group())
-    except Exception:
-        try:
-            first = raw.find("{")
-            if first >= 0:
-                fragment = raw[first:]
-                ob = fragment.count("[") - fragment.count("]")
-                oc = fragment.count("{") - fragment.count("}")
-                repaired = fragment + ("]" * max(0, ob)) + ("}" * max(0, oc))
-                files = json.loads(repaired)
-        except Exception:
-            logger.error("onboarding_v3: failed to parse personalization")
+    # Use the hardened, string-aware parser the facts/patterns/packs stages
+    # already rely on instead of the naive brace-counting regex that desynced
+    # on literal braces in values and gave up on max_tokens truncation —
+    # the facts→0 truncation class that dropped all five files (#BUG-6).
+    # ``user_md`` is the anchor key; its value is a string, so expect=str.
+    files = _parse_json_with_key(raw, "user_md", expect=str)
+    if not files:
+        logger.error("onboarding_v3: failed to parse personalization")
 
     # Write files to vault
     config = load_config()
