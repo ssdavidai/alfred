@@ -1,0 +1,125 @@
+---
+title: "Layer 1 — Infrastructure"
+description: "Your dedicated machine: encryption, network isolation, and container hardening."
+icon: "server"
+---
+
+<Note>
+This is **Layer 1** of Alfred's [six-layer architecture](/architecture). Infrastructure is the foundation everything else runs on.
+</Note>
+
+## Your dedicated machine
+
+Every Alfred subscriber gets their own Hetzner VPS (cx53). No shared databases, no multi-tenant containers, no commingled data. Your instance is yours alone.
+
+The server runs Ubuntu with a minimal package set. All persistent data lives on an encrypted volume. All application services bind to localhost. External access is exclusively through your Tailscale mesh network.
+
+## Encryption at rest
+
+All persistent data is stored on a **LUKS2-encrypted volume**:
+
+| Property | Value |
+|----------|-------|
+| **Algorithm** | AES-XTS-PLAIN64 |
+| **Key size** | 512-bit |
+| **Passphrase** | Auto-generated 64-character random string, unique per instance |
+| **Auto-unlock** | Systemd unit with passphrase from keyfile |
+
+The encrypted volume contains:
+- Obsidian vault (`/mnt/encrypted/vault/`)
+- Alfred worker state (`/mnt/encrypted/data/`)
+- OpenClaw state (`/mnt/encrypted/openclaw/`)
+- Secrets (`/mnt/encrypted/secrets/`)
+- Restic backup metadata
+
+<Tip>
+The LUKS passphrase is backed up to the control plane for disaster recovery. Even if the server is lost, your data can be restored from encrypted backups.
+</Tip>
+
+## Encryption in transit
+
+Three layers of transport encryption protect data in motion:
+
+- **Tailscale** — End-to-end encrypted mesh network using the WireGuard protocol. All inter-node traffic is encrypted at the network layer.
+- **HTTPS** — TLS 1.3 with automatically provisioned certificates via Tailscale Serve. Certificate rotation is handled automatically.
+- **SSH** — Ed25519 keys only, generated per-instance. Password authentication is disabled.
+
+## Network isolation
+
+Alfred instances have **zero public ports** for application services:
+
+**Hetzner Cloud Firewall** (applied at server creation):
+- Inbound: SSH (port 22) and ICMP only
+- Outbound: Unrestricted
+
+**UFW** on the instance:
+- Default deny inbound
+- Allow SSH (port 22) and ICMP
+
+All application services bind to `127.0.0.1`:
+
+| Port | Service | External Access |
+|------|---------|-----------------|
+| 3100 | Tenant API | Tailscale Serve (HTTPS) |
+| 443 | OpenClaw Gateway | Tailscale Serve (HTTPS) |
+| 8233 | Temporal UI | Tailscale Serve (HTTPS) |
+
+<Note>
+The double-firewall approach (cloud + host) provides redundancy. Even if UFW is misconfigured, the cloud firewall blocks everything except SSH and ICMP.
+</Note>
+
+## Container hardening
+
+Docker containers run with restricted privileges:
+
+- `no-new-privileges` — prevents privilege escalation inside containers
+- `cap_drop: ALL` — drops all Linux capabilities
+- Memory and PID limits — prevents resource exhaustion
+- Read-only root filesystem where possible
+- No container has access to the Docker socket
+
+## Health monitoring
+
+The control plane monitors every instance:
+
+- **Frequency**: Health checks every 2 minutes over the encrypted Tailscale mesh
+- **Scope**: Container status, worker health, system resources (CPU, memory, disk)
+- **Alerts**: Webhook notifications (Slack or Discord) on status changes
+- **Status levels**: `healthy` → `degraded` → `down` → `unreachable`
+
+Health data drives automated responses — if a container crashes, it's automatically restarted. If an instance becomes unreachable, the control plane alerts immediately.
+
+## Backup strategy
+
+Automated daily backups protect against data loss:
+
+- **Tool**: Restic with AES-256 encryption
+- **Backend**: Hetzner S3 (Object Storage)
+- **Schedule**: Daily at 3:00 AM
+- **Retention**: 7 daily, 4 weekly, 12 monthly snapshots
+- **Consistency**: Containers are stopped during backup
+
+Backups are encrypted independently of LUKS — even if the S3 bucket is compromised, backup data cannot be read without the Restic password.
+
+On-demand backups are available via `POST /api/v1/admin/backups/trigger`.
+
+## Data lifecycle
+
+| Event | What happens |
+|-------|-------------|
+| **Subscription starts** | Dedicated VPS provisioned, LUKS volume created, secrets generated and uploaded via SSH |
+| **Active subscription** | Continuous operation, daily encrypted backups, health monitoring |
+| **Subscription cancelled** | Data export available, then server and volume destroyed |
+
+Secrets are **never** included in cloud-init user data (readable via Hetzner metadata API). They are generated on the control plane and uploaded via SSH after the server is ready.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Security Model" icon="lock" href="/concepts/security-model">
+    Full security architecture, threat model, and incident response
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/guides/monitoring">
+    Health checks, log streaming, and system metrics
+  </Card>
+</CardGroup>

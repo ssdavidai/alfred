@@ -1,0 +1,33 @@
+---
+title: "Restart Gateway"
+description: "Restart the OpenClaw gateway container"
+api: "POST /api/v1/openclaw/restart"
+---
+
+Gracefully restarts the OpenClaw gateway container. All active connections will be terminated and devices will need to reconnect.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/openclaw/restart \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "message": "OpenClaw gateway restart initiated",
+  "estimatedDowntime": "10-15 seconds",
+  "timestamp": "2026-02-26T14:37:15Z"
+}
+```
+
+</ResponseExample>

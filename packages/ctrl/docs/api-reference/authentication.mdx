@@ -1,0 +1,164 @@
+---
+title: "Authentication"
+description: "How to authenticate with the Alfred tenant API."
+icon: "key"
+---
+
+## Overview
+
+Every API request must include a Bearer token in the `Authorization` header. The token is a secret API key provided during instance provisioning.
+
+<Warning>
+  The API will not start without `AAS_API_KEY` configured. There is no "open access" mode. All endpoints (except OPTIONS for CORS preflight) require authentication.
+</Warning>
+
+## Getting your API key
+
+Your API key is generated during instance provisioning and stored in the instance's `.env` file. You can retrieve it using the control plane CLI:
+
+```bash
+# On the control plane (where alfred-ctrl is running)
+aas api-key <instance-name>
+```
+
+Or by SSH'ing into the instance and reading the environment:
+
+```bash
+ssh deploy@alfred-acme.tailnet.ts.net
+grep AAS_API_KEY /opt/alfred/.env
+```
+
+## Making authenticated requests
+
+Include the API key as a Bearer token in the `Authorization` header:
+
+<CodeGroup>
+```bash cURL
+curl https://alfred-acme.tailnet.ts.net:3100/api/vault/context \
+  -H "Authorization: Bearer your_api_key_here"
+```
+
+```javascript JavaScript (fetch)
+const response = await fetch('https://alfred-acme.tailnet.ts.net:3100/api/vault/context', {
+  headers: {
+    'Authorization': 'Bearer your_api_key_here'
+  }
+});
+
+const data = await response.json();
+```
+
+```python Python (requests)
+import requests
+
+response = requests.get(
+    'https://alfred-acme.tailnet.ts.net:3100/api/vault/context',
+    headers={'Authorization': 'Bearer your_api_key_here'}
+)
+
+data = response.json()
+```
+
+```typescript TypeScript (axios)
+import axios from 'axios';
+
+const response = await axios.get(
+  'https://alfred-acme.tailnet.ts.net:3100/api/vault/context',
+  {
+    headers: {
+      'Authorization': 'Bearer your_api_key_here'
+    }
+  }
+);
+
+const data = response.data;
+```
+</CodeGroup>
+
+## Security
+
+<Note>
+  Token comparison uses `crypto.timingSafeEqual` for constant-time comparison, making the API resistant to timing attacks.
+</Note>
+
+### Best practices
+
+- Store API keys in environment variables or secret management systems — never hardcode them
+- Rotate keys periodically by updating `AAS_API_KEY` in the instance's `.env` and restarting the API container
+- Use Tailscale ACLs to restrict which devices can reach the API (default: all devices in your tailnet)
+- The API serves over HTTPS using Tailscale's auto-generated certificates
+
+### Network security
+
+The API is only accessible via Tailscale. Even with the API key, requests from outside your tailnet will fail (no route to host). This provides defense-in-depth:
+
+1. Network boundary (Tailscale mesh)
+2. Transport security (HTTPS/TLS)
+3. Application authentication (Bearer token)
+
+## Error responses
+
+Missing or invalid authentication returns a 401 status with the `UNAUTHORIZED` error code:
+
+<ResponseExample>
+```json Missing Authorization header
+{
+  "error": {
+    "code": "UNAUTHORIZED",
+    "message": "Missing Authorization header"
+  }
+}
+```
+
+```json Invalid token format
+{
+  "error": {
+    "code": "UNAUTHORIZED",
+    "message": "Invalid Authorization header format. Expected: Bearer <token>"
+  }
+}
+```
+
+```json Invalid API key
+{
+  "error": {
+    "code": "UNAUTHORIZED",
+    "message": "Invalid API key"
+  }
+}
+```
+</ResponseExample>
+
+## Testing authentication
+
+Use the `/api/admin/health` endpoint to verify your credentials:
+
+```bash
+curl https://alfred-acme.tailnet.ts.net:3100/api/admin/health \
+  -H "Authorization: Bearer your_api_key_here"
+```
+
+A successful response confirms authentication is working:
+
+```json
+{
+  "healthy": true,
+  "timestamp": "2026-02-26T12:34:56.789Z",
+  "services": {
+    "alfred": "running",
+    "openclaw": "running",
+    "temporal": "running"
+  }
+}
+```
+
+## Next steps
+
+<Columns cols={2}>
+  <Card title="Vault endpoints" icon="vault" href="/api-reference/vault/get-context">
+    Start with vault operations
+  </Card>
+  <Card title="Workers endpoints" icon="gears" href="/api-reference/workers/status">
+    Control Alfred daemons
+  </Card>
+</Columns>

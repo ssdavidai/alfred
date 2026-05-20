@@ -1,0 +1,356 @@
+---
+title: "Security Model"
+description: "Comprehensive security architecture for Alfred tenant instances"
+icon: "lock"
+---
+
+## Overview
+
+Alfred tenant instances implement defense-in-depth security across network, transport, authentication, and data layers. All services are isolated within a Tailscale mesh network with zero public exposure.
+
+<Warning>
+Alfred instances are designed for **zero public exposure**. All network services bind to localhost and are only accessible via the Tailscale mesh network.
+</Warning>
+
+## Network Layer
+
+### Tailscale Mesh Network
+
+Every Alfred instance joins a private Tailscale mesh network on provision:
+
+- All services (API, Temporal UI, OpenClaw) bind to `127.0.0.1` (localhost)
+- External access is **only** via Tailscale Serve, which provides authenticated HTTPS endpoints
+- No public IPs are exposed for application services
+- Inter-instance communication can leverage Tailscale's encrypted mesh
+
+<Tip>
+Tailscale Serve automatically provisions TLS certificates for your instance's `.ts.net` domain, providing zero-config HTTPS.
+</Tip>
+
+### Firewall Rules
+
+**Hetzner Cloud Firewall** (applied at server creation):
+- **Inbound**: SSH (port 22) and ICMP only
+- **Outbound**: Unrestricted
+
+**UFW (Uncomplicated Firewall)** on the instance:
+- Default deny inbound
+- Allow SSH (port 22)
+- Allow ICMP (ping)
+- All application services bind to localhost only
+
+<Note>
+The double-firewall approach (Hetzner Cloud Firewall + UFW) provides redundancy. Even if UFW is misconfigured, the cloud firewall blocks everything except SSH and ICMP.
+</Note>
+
+### Network Diagram
+
+```
+┌─────────────────────────────────────────────┐
+│ Tailscale Mesh Network (encrypted)         │
+│                                             │
+│  ┌─────────────────────────────────────┐   │
+│  │ Alfred Instance                     │   │
+│  │                                     │   │
+│  │  ┌──────────────────────────────┐  │   │
+│  │  │ Tailscale Serve (HTTPS)      │  │   │
+│  │  │ *.ts.net                      │  │   │
+│  │  └────────┬─────────────────────┘  │   │
+│  │           │                         │   │
+│  │  ┌────────▼─────────────────────┐  │   │
+│  │  │ localhost:3000 (AAS API)     │  │   │
+│  │  │ localhost:8080 (Temporal UI) │  │   │
+│  │  │ localhost:8000 (OpenClaw)    │  │   │
+│  │  └──────────────────────────────┘  │   │
+│  └─────────────────────────────────────┘   │
+└─────────────────────────────────────────────┘
+         │
+         │ SSH (port 22)
+         │ ICMP (ping)
+         ▼
+    Public Internet (Hetzner Cloud Firewall)
+```
+
+## Transport Layer
+
+### HTTPS via Tailscale Serve
+
+All HTTP services are exposed via Tailscale Serve, which provides:
+
+- **TLS 1.3** with automatically provisioned certificates
+- Certificate rotation handled by Tailscale (no manual intervention)
+- HTTPS-only (HTTP is not exposed)
+- Domain format: `https://<instance-name>.tail<hash>.ts.net`
+
+Example configuration (`/etc/systemd/system/tailscale-serve.service`):
+
+```bash
+tailscale serve https:443 http://127.0.0.1:3000 &
+tailscale serve --bg https:8443 http://127.0.0.1:8080 &
+tailscale serve --bg https:8000 http://127.0.0.1:8000 &
+```
+
+### SSH Access
+
+SSH access is restricted to:
+
+- **Ed25519 keys only** (generated per-instance by alfred-ctrl)
+- `PermitRootLogin no` (root login disabled)
+- `PasswordAuthentication no` (password login disabled)
+- `PubkeyAuthentication yes` (public key authentication only)
+- **fail2ban** enabled for brute-force protection
+
+Private keys are stored in alfred-ctrl at `data/ssh_keys/<instance_id>/id_ed25519`.
+
+## Authentication Layer
+
+### API Key Authentication
+
+The Alfred API (AAS) requires a **bearer token** for all requests:
+
+**Environment Variable**:
+```bash
+AAS_API_KEY=<random-token>
+```
+
+**Request Header**:
+```bash
+Authorization: Bearer <random-token>
+```
+
+**Validation**:
+- Constant-time comparison via `crypto.timingSafeEqual` (prevents timing attacks)
+- API refuses to start if `AAS_API_KEY` is not set
+- 401 Unauthorized returned for missing or invalid tokens
+
+<Warning>
+The API will **not start** if `AAS_API_KEY` is unset. This prevents accidental exposure of an unauthenticated API.
+</Warning>
+
+### API Key Rotation
+
+To rotate the API key:
+
+1. Generate a new random token (e.g., `openssl rand -hex 32`)
+2. Update `AAS_API_KEY` in `/mnt/encrypted/secrets/api.env`
+3. Restart the AAS service: `docker compose restart alfred-api`
+4. Update clients with the new key
+
+### API Key Confidentiality
+
+The API key is protected from self-exposure:
+
+- **Filtered from `GET /admin/config/env` responses** (returns `***FILTERED***`)
+- Never logged or included in error messages
+- Not accessible to vault operations or agent backends
+
+## Authorization & Scope Enforcement
+
+The vault operations layer enforces **scope-based authorization**:
+
+| Scope | Create | Read | Edit | Delete | Notes |
+|-------|--------|------|------|--------|-------|
+| `curator` | ✅ | ✅ | ✅ | ❌ | Can create/edit entity types, cannot delete |
+| `janitor` | ❌ | ✅ | ✅ | ✅ | Can edit/delete, cannot create |
+| `distiller` | ✅ (learning types only) | ✅ | ❌ | ❌ | Can only create learning types |
+| `api` | ✅ | ✅ | ✅ | ✅ | Full access (used by tenant API) |
+
+<Note>
+Scope enforcement prevents the AI agent backends from performing unauthorized operations. For example, the Curator agent cannot delete records, even if it tries.
+</Note>
+
+## Command Execution Safety
+
+All command execution uses Node's `child_process.execFile` with **array arguments**, not shell strings:
+
+**Safe** (no shell interpretation):
+```javascript
+execFile('/usr/bin/alfred', ['vault', 'create', 'person', '--data', JSON.stringify(data)])
+```
+
+**Unsafe** (vulnerable to injection):
+```javascript
+exec(`alfred vault create person --data '${data}'`)
+```
+
+This prevents shell injection attacks even if user-controlled data is passed to commands.
+
+## Data Layer
+
+### Encryption at Rest
+
+All persistent data is stored on a **LUKS2-encrypted volume**:
+
+- **Algorithm**: AES-XTS-PLAIN64
+- **Key size**: 512-bit
+- **Passphrase**: Auto-generated 64-character random string per instance
+- **Auto-unlock**: Systemd unit with passphrase from `/mnt/encrypted/luks.key`
+
+Encrypted volume contents:
+- Obsidian vault (`/mnt/encrypted/vault/`)
+- Alfred data (`/mnt/encrypted/data/`)
+- OpenClaw state (`/mnt/encrypted/openclaw/`)
+- Secrets (`/mnt/encrypted/secrets/`)
+- Restic backup metadata
+
+<Tip>
+The LUKS passphrase is backed up to alfred-ctrl's control plane at `data/ssh_keys/<instance_id>/luks.key` for disaster recovery.
+</Tip>
+
+### Encryption in Transit
+
+- **Tailscale**: End-to-end encrypted mesh network (WireGuard protocol)
+- **HTTPS**: TLS 1.3 for all HTTP traffic
+- **SSH**: Ed25519 with encrypted transport
+
+### Secret Management
+
+Secrets are **never** included in cloud-init `user_data` (readable via Hetzner metadata API). Instead:
+
+1. **Provisioning**: Secrets generated by alfred-ctrl during provisioning
+2. **Upload**: Secrets uploaded via SSH after server is ready
+3. **Storage**: Secrets stored in `/mnt/encrypted/secrets/` (LUKS-encrypted)
+4. **Injection**: Docker Compose reads secrets via `env_file` directive
+
+Secrets managed this way:
+- `AAS_API_KEY` (API authentication)
+- `OPENROUTER_API_KEY` (LLM backend)
+- `TAILSCALE_AUTH_KEY` (Tailscale mesh join)
+- `HETZNER_S3_*` (Restic backup credentials)
+- LUKS passphrase
+
+<Warning>
+Never modify cloud-init templates to include secrets in `user_data`. Secrets must only be uploaded via SSH post-provision.
+</Warning>
+
+## Audit & Logging
+
+### Mutation Log
+
+All vault operations are logged to an **append-only audit log**:
+
+**Location**: `data/vault_audit.log`
+
+**Format**: JSONL (one JSON object per line)
+
+**Fields**:
+```json
+{
+  "timestamp": "2026-02-26T10:30:00Z",
+  "operation": "create",
+  "type": "person",
+  "title": "Alice Smith",
+  "scope": "api",
+  "session": "abc123",
+  "path": "vault/person/Alice Smith.md"
+}
+```
+
+Operations logged: `create`, `edit`, `delete`, `move`
+
+<Note>
+The audit log is immutable (append-only). To tamper with history, an attacker would need root access to the encrypted volume.
+</Note>
+
+### Application Logs
+
+Per-tool logs are written to `data/`:
+- `data/curator.log`
+- `data/janitor.log`
+- `data/distiller.log`
+- `data/surveyor.log`
+
+Logs are **not** encrypted at rest (they're on the LUKS volume) and may contain sensitive vault content. Access is restricted via filesystem permissions (owned by `alfred` user).
+
+## Backup Security
+
+### Restic Encrypted Backups
+
+Backups use **Restic** with encryption:
+
+- **Backend**: Hetzner S3 (Object Storage)
+- **Encryption**: AES-256 with per-repository password
+- **Deduplication**: Content-defined chunking
+- **Retention**: 7 daily, 4 weekly, 12 monthly
+
+Backup credentials are stored in `/mnt/encrypted/secrets/restic.env` and backed up to alfred-ctrl at `data/ssh_keys/<instance_id>/restic.env`.
+
+<Tip>
+Even if the S3 bucket is compromised, backup data is encrypted and cannot be read without the Restic password.
+</Tip>
+
+## Threat Model
+
+### In Scope
+
+✅ Unauthorized API access (requires valid API key)
+✅ Network eavesdropping (encrypted via Tailscale)
+✅ Shell injection attacks (array-based execFile)
+✅ Secrets in metadata service (secrets uploaded post-provision)
+✅ Data at rest exfiltration (LUKS encryption)
+✅ Brute-force SSH attacks (fail2ban, key-only auth)
+
+### Out of Scope
+
+❌ Compromised Hetzner Cloud account (attacker has root access)
+❌ Compromised alfred-ctrl control plane (holds all instance keys)
+❌ Compromised Tailscale account (attacker joins mesh network)
+❌ Physical server access (Hetzner datacenter security)
+❌ Side-channel attacks (timing, cache, speculative execution)
+
+## Security Checklist
+
+When deploying Alfred instances:
+
+<AccordionGroup>
+<Accordion title="Pre-Provision" icon="clipboard-check">
+- [ ] Generate strong `AAS_API_KEY` (≥32 bytes random)
+- [ ] Rotate `TAILSCALE_AUTH_KEY` (use ephemeral or reusable keys, not permanent)
+- [ ] Verify `HETZNER_API_TOKEN` has minimum required scopes
+- [ ] Review firewall rules in `src/infra/firewall.ts`
+</Accordion>
+
+<Accordion title="Post-Provision" icon="server">
+- [ ] Verify Tailscale connectivity: `tailscale status`
+- [ ] Verify HTTPS endpoints: `curl https://<instance>.ts.net/health`
+- [ ] Verify API authentication: `curl -H "Authorization: Bearer <key>" https://<instance>.ts.net/api/v1/vault/schema`
+- [ ] Verify encrypted volume: `lsblk` (check for `crypt` device)
+- [ ] Verify SSH key-only auth: `ssh deploy@<instance-ip>` (should require key)
+</Accordion>
+
+<Accordion title="Ongoing Operations" icon="rotate">
+- [ ] Rotate API key quarterly
+- [ ] Review audit log (`data/vault_audit.log`) monthly
+- [ ] Test backup restoration quarterly
+- [ ] Update SSH keys if compromised
+- [ ] Monitor health check failures (may indicate compromise)
+</Accordion>
+</AccordionGroup>
+
+## Incident Response
+
+If an instance is compromised:
+
+1. **Isolate**: Remove from Tailscale network (`tailscale logout`)
+2. **Snapshot**: Create Hetzner snapshot for forensics
+3. **Rotate**: Rotate API key, SSH keys, Tailscale auth key
+4. **Audit**: Review `vault_audit.log` for unauthorized mutations
+5. **Restore**: Provision new instance and restore from Restic backup
+6. **Investigate**: Analyze logs and snapshot to identify attack vector
+
+<Warning>
+Do **not** delete the compromised instance until forensic analysis is complete. Create a snapshot first.
+</Warning>
+
+## Security Roadmap
+
+Planned enhancements (not yet implemented):
+
+- [ ] Vault operation rate limiting (per-scope)
+- [ ] Multi-factor authentication for API access
+- [ ] Webhook signing for alerts (prevent spoofing)
+- [ ] Automatic security updates via unattended-upgrades
+- [ ] Certificate pinning for Tailscale Serve
+- [ ] Anomaly detection in audit logs (ML-based)
+
+For detailed security findings and remediation priorities, see `/Users/administrator/c/alfred/alfred-ctrl/SECURITY.md`.

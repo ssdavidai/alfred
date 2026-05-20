@@ -1,0 +1,160 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id                        String          @id @default(uuid())
+  createdAt                 DateTime        @default(now())
+
+  email                     String?         @unique
+  username                  String?         @unique
+  isAdmin                   Boolean         @default(false)
+
+  // The first account created on a fresh single-VM install becomes the
+  // owner (see src/auth/userSignupFields.ts). There is exactly one owner.
+  isOwner                   Boolean         @default(false)
+
+  // Last briefing the principal dismissed (e.g. "2026-05-13-morning").
+  // /desk shows the brief envelope only when the most-recent briefing's
+  // slug_date != this. Bumped when sir clicks Continue.
+  lastDismissedBriefingSlugDate String?
+
+  contactFormMessages       ContactFormMessage[]
+  apiKeys                   ApiKey[]
+  streams                   Stream[]
+  streamEvents              StreamEvent[]
+  oauthCredentials          OAuthCredential[]
+  composioConnections       ComposioConnection[]
+}
+
+model ApiKey {
+  id                String    @id @default(uuid())
+  userId            String
+  user              User      @relation(fields: [userId], references: [id])
+  name              String                   // user-given name e.g. "My Script"
+  keyHash           String    @unique        // SHA-256 hash of the full key
+  keyPrefix         String                   // first 8 chars for display (e.g. "alf_a1b2...")
+  lastUsedAt        DateTime?
+  createdAt         DateTime  @default(now())
+}
+
+model Logs {
+  id                       Int             @id @default(autoincrement())
+  createdAt                DateTime        @default(now())
+
+  message                  String
+  level                    String
+}
+
+model ContactFormMessage {
+  id                        String          @id @default(uuid())
+  createdAt                 DateTime        @default(now())
+
+  user                      User            @relation(fields: [userId], references: [id])
+  userId                    String
+
+  content                   String
+  isRead                    Boolean         @default(false)
+  repliedAt                 DateTime?
+}
+
+model Stream {
+  id           String        @id @default(uuid())
+  userId       String
+  user         User          @relation(fields: [userId], references: [id])
+  name         String        // "Gmail", "Omi Ambient", "OpenClaw Sessions"
+  type         String        // "scheduled"|"webhook"|"realtime"|"system"|"file"
+  source       String        // "gmail"|"omi"|"openclaw-sessions"|"polar"|"custom"
+  isSystem     Boolean       @default(false)
+  enabled      Boolean       @default(true)
+  config       Json          // source-specific: {interval, credentialRef, webhookSecret, etc.}
+  webhookToken String?       @unique  // for webhook streams — used in URL
+  lastRunAt    DateTime?
+  lastEventAt  DateTime?
+  status       String        @default("idle")  // "idle"|"running"|"error"|"paused"
+  errorMessage String?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  events       StreamEvent[]
+
+  @@unique([userId, source])
+}
+
+model StreamEvent {
+  id          String   @id @default(uuid())
+  streamId    String
+  stream      Stream   @relation(fields: [streamId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+  receivedAt  DateTime @default(now())
+  sourceRef   String?  // for dedup
+  type        String
+  raw         Json
+  summary     String?
+  processed   Boolean  @default(false)
+  inboxItemId String?  // linked once Alfred processes it
+
+  // Intuition (learning engine) fields
+  vaultRecord     String?
+  processedAt     DateTime?
+  classification  String?
+  quarantined     Boolean  @default(false)
+  quarantineError String?
+
+  @@index([streamId, receivedAt])
+  @@index([userId, processed])
+  @@unique([streamId, sourceRef])
+}
+
+/// SaaS-side source of truth for each Composio connection's auto-config state.
+/// The actual connection lives at Composio and the auto-config side-effects
+/// (streams, tools, skills) live on the tenant filesystem — this row stitches
+/// them together so the dashboard can answer "is this app fully live?" with
+/// a single query and survive page refreshes. Created on initiateConnect,
+/// updated on autoConfigIntegration, deleted on disconnectIntegration.
+model ComposioConnection {
+  id               String    @id @default(uuid())
+  userId           String
+  user             User      @relation(fields: [userId], references: [id])
+  connectionId     String    @unique          // Composio's connected_account id
+  toolkit          String                     // "gmail", "slack", "notion", …
+  label            String?                    // human-readable (toolkit display name)
+  iconUrl          String?                    // toolkit logo URL
+  authScheme       String?                    // "oauth2" | "api_key" | …
+  status           String    @default("INITIATED") // mirror of Composio status: INITIATED|ACTIVE|INACTIVE|…
+  autoConfigState  String    @default("pending")   // "pending" | "running" | "configured" | "error"
+  autoConfigError  String?
+  autoConfiguredAt DateTime?
+  streamsCreated   Int       @default(0)
+  toolsEnabled     Int       @default(0)
+  skillName        String?                    // e.g. "alfred-composio-gmail"
+  lastSyncedAt     DateTime  @default(now())  // updated whenever we re-read tenant state
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@unique([userId, toolkit])
+  @@index([userId, status])
+}
+
+model OAuthCredential {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id])
+  provider     String    // "google", "microsoft", "slack", "github"
+  accessToken  String    // encrypted with AES-256-GCM (same as apiKey)
+  refreshToken String?   // encrypted
+  tokenType    String    @default("Bearer")
+  expiresAt    DateTime?
+  scopes       String[]
+  accountLabel String?   // e.g. "david@gmail.com" for display
+  raw          Json?     // full token response for provider-specific fields
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([userId, provider])
+}

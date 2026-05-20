@@ -1,0 +1,53 @@
+---
+title: "List Workflows"
+description: "Retrieve a list of workflows with optional filtering"
+api: "GET https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows"
+---
+
+Returns a list of workflows in the Temporal namespace. Supports optional filtering using Temporal query syntax.
+
+<ParamField query="query" type="string" optional>
+  Temporal query string for filtering workflows. Examples:
+  - `ExecutionStatus='Running'`
+  - `WorkflowType='CuratorWorkflow' AND ExecutionStatus='Completed'`
+  - `StartTime > '2026-01-01T00:00:00Z'`
+</ParamField>
+
+<RequestExample>
+```bash cURL
+# List all workflows
+curl -X GET \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows
+
+# List running workflows
+curl -X GET \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  "https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows?query=ExecutionStatus%3D%27Running%27"
+```
+</RequestExample>
+
+<ResponseExample>
+```json 200 OK
+{
+  "workflows": [
+    {
+      "workflowId": "curator-sweep-20260226-143022",
+      "type": "CuratorWorkflow",
+      "status": "Running",
+      "startTime": "2026-02-26T14:30:22.154Z",
+      "runId": "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+    },
+    {
+      "workflowId": "janitor-scan-20260226-120000",
+      "type": "JanitorWorkflow",
+      "status": "Completed",
+      "startTime": "2026-02-26T12:00:00.000Z",
+      "closeTime": "2026-02-26T12:05:13.442Z",
+      "runId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    }
+  ],
+  "count": 2
+}
+```
+</ResponseExample>

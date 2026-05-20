@@ -1,0 +1,1128 @@
+# Image tag strategy: all custom images intentionally use :latest.
+# Version management is handled by the alfred-update.timer systemd unit on each tenant,
+# which runs `docker compose pull && docker compose up -d` on a schedule.
+# This rolling update mechanism ensures tenants stay current without manual intervention.
+# Pinning to SHA or semver tags here would require reprovisioning or manual ssh to update each tenant.
+services:
+  init:
+    image: ssdavidai00/alfred-init:latest
+    volumes:
+      - /mnt/encrypted/vault:/vault
+      - /mnt/encrypted/openclaw:/openclaw-state
+      - /mnt/encrypted/openclaw-workers:/openclaw-workers-state
+      - /mnt/encrypted/alfred:/alfred-data
+    env_file:
+      - .env
+
+  temporal:
+    # temporalio/temporal is also kept at :latest so alfred-update.timer picks up patch releases automatically.
+    #
+    # blobSize / historySize bumps from defaults (2MB warn / 4MB error blob,
+    # 50MB / 50K events history) up to 16MB / 8MB blob and 200MB / 100K
+    # history. Driven by the composio_pull activity returning Gmail
+    # responses with full HTML bodies — at max_results=30 a busy tenant's
+    # response was hitting Temporal's 4MB blob limit, the activity
+    # `composio_pull` failed nonRetryable with "Complete result exceeds
+    # size limit", the schedule kept firing every 5 min but `last_pull_at`
+    # never advanced, and Gmail went stale for 22+ hours on tenant-a before
+    # the daily-brief skill's stream-pull-health check surfaced it. Same
+    # class of failure can hit any high-fanout activity (Plane sync, Notion
+    # backfill, large vault list responses), so the fix is applied at the
+    # Temporal layer rather than per-activity truncation that would lose
+    # user data.
+    image: temporalio/temporal:latest
+    command:
+      - "server"
+      - "start-dev"
+      - "--db-filename"
+      - "/data/temporal.db"
+      - "--ip"
+      - "0.0.0.0"
+      - "--port"
+      - "7233"
+      - "--ui-port"
+      - "8233"
+      - "--dynamic-config-value"
+      - "limit.blobSize.warn=8388608"
+      - "--dynamic-config-value"
+      - "limit.blobSize.error=16777216"
+      - "--dynamic-config-value"
+      - "limit.historySize.warn=104857600"
+      - "--dynamic-config-value"
+      - "limit.historySize.error=209715200"
+      - "--dynamic-config-value"
+      - "limit.historyCount.warn=51200"
+      - "--dynamic-config-value"
+      - "limit.historyCount.error=102400"
+      - "--dynamic-config-value"
+      - "frontend.rpc.maxReceivedMessageSize=33554432"
+      - "--dynamic-config-value"
+      - "history.rpc.maxReceivedMessageSize=33554432"
+    volumes:
+      - /mnt/encrypted/temporal:/data
+    ports:
+      - "127.0.0.1:7233:7233"
+      - "127.0.0.1:8233:8233"
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    # Bumped from 256 → 1024 (2026-04-24). Temporal's Go runtime multiplexes
+    # goroutines onto OS threads (M:N scheduler), and under fleet load —
+    # many concurrent workflow executions + SQLite background writers +
+    # HTTP/2 streams to the UI — 256 was exhausting the pid budget with
+    # ``runtime: failed to create new OS thread (have 2 already; errno=11)``
+    # on tenant-b + tenant-a. Live-patched via `docker update --pids-limit`
+    # on tenant-a/tenant-b/tenant-c; this bakes the fix into the template so the
+    # starvation doesn't return on container recreate.
+    pids_limit: 1024
+
+  ollama:
+    # Local embedding server for surveyor (and future local-LLM uses).
+    # On startup: boots ollama, waits for ready, pulls nomic-embed-text
+    # (~275MB, 768 dims). `ollama pull` is idempotent — skips if the model
+    # is already in the persistent volume.
+    image: ollama/ollama:latest
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        SERVE_PID=$$!
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull nomic-embed-text || echo "[ollama] pull failed, will retry next boot"
+        wait $$SERVE_PID
+    volumes:
+      - /mnt/encrypted/ollama:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    # Bumped from 256 → 512 (2026-04-24). Ollama's runtime spawns a pytorch
+    # threadpool sized to CPU count for embedding inference; with surveyor
+    # batching requests every few minutes 256 was too tight.
+    pids_limit: 512
+
+  openclaw:
+    image: ssdavidai00/alfred-openclaw:latest
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+    volumes:
+      - /mnt/encrypted/openclaw:/home/node/.openclaw
+      - /mnt/encrypted/openclaw/qmd-cache:/home/node/.cache/qmd
+      - /mnt/encrypted/vault:/home/node/.openclaw/workspace/vault
+      - /mnt/encrypted/vault:/vault
+      - /mnt/encrypted/alfred:/alfred-data
+    tmpfs:
+      - /tmp:size=256m
+    ports:
+      - "127.0.0.1:18789:18789"
+    environment:
+      - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
+      - NODE_OPTIONS=--max-old-space-size=3072
+    env_file:
+      - .env
+    command: ["sh", "-c", "node -e \"const fs=require('fs'),p='/home/node/.openclaw/agents',src=p+'/main/agent/auth-profiles.json';if(fs.existsSync(src)){const d=fs.readFileSync(src,'utf8');fs.readdirSync(p).forEach(a=>{if(a==='main')return;const dir=p+'/'+a+'/agent',dest=dir+'/auth-profiles.json';if(!fs.existsSync(dest)){fs.mkdirSync(dir,{recursive:true});fs.writeFileSync(dest,d);console.log('auth-profiles propagated to '+a)}})}\" 2>/dev/null; exec node openclaw.mjs gateway --bind lan --port 18789 --allow-unconfigured"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:18789/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    mem_limit: 4g
+    # Bumped from 256 → 2048 (2026-04-24) to match openclaw-workers (see
+    # #593 reasoning below). Main gateway has the same PID spawn profile
+    # — healthcheck fork every 10s + MCP subprocesses + ephemeral session
+    # nodes — and fronts all user-facing traffic (Slack DMs, webchat,
+    # email, voice), so it needs the same headroom.
+    pids_limit: 2048
+
+  openclaw-workers:
+    image: ssdavidai00/alfred-openclaw:latest
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+    volumes:
+      - /mnt/encrypted/openclaw-workers:/home/node/.openclaw
+      - /mnt/encrypted/openclaw-workers/qmd-cache:/home/node/.cache/qmd
+      - /mnt/encrypted/vault:/home/node/.openclaw/workspace/vault
+      - /mnt/encrypted/vault:/vault
+      - /mnt/encrypted/alfred:/alfred-data
+    tmpfs:
+      - /tmp:size=256m
+    environment:
+      # Heap bumped to 4096 (from 3072) to give headroom for the openclaw
+      # gateway's `loadTaskRegistryStateFromSqlite`, which does an unbounded
+      # `SELECT * FROM task_runs` + `SELECT * FROM flow_runs` on boot. On a
+      # busy worker queue (e.g. Sir at ~1700 task_runs/day with ~136KB
+      # avg `task` column) the materialized UTF-16 string heap can exceed
+      # 3GB within ~7 days. 4GB heap → ~14 days of headroom against the
+      # default cleanup_after retention window. See issue for the upstream
+      # fix (LIMIT + streaming load) + in-tenant periodic prune follow-up.
+      - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
+      - NODE_OPTIONS=--max-old-space-size=4096
+      # MCP-child reaper threshold (seconds). Any stdio-app.js or
+      # ctrl-server.mjs process whose elapsed time exceeds this gets
+      # SIGKILLed by the in-container watchdog. Ephemeral subagent
+      # sessions on the workers gateway typically close inside 2 min;
+      # the upstream openclaw session manager fails to reap their MCP
+      # children on close (observed: 16+ orphaned stdio-app processes
+      # accumulating ~5% CPU each → openclaw-workers pegs at 100% CPU
+      # → learn-clerk timeouts cascade). 600s = 10 min headroom past
+      # the longest legitimate ephemeral session.
+      - OPENCLAW_MCP_REAP_AFTER_SECONDS=600
+    env_file:
+      - .env
+    # Wrap the gateway start with a background watchdog that periodically
+    # SIGKILLs orphaned MCP child processes. The watchdog runs every
+    # 60s, finds stdio-app.js / ctrl-server.mjs processes whose elapsed
+    # time exceeds OPENCLAW_MCP_REAP_AFTER_SECONDS, and kills them. Logs
+    # to stdout so docker logs reveals the reaps. node remains PID 1
+    # (post-exec) so SIGTERM still propagates correctly to the gateway.
+    # NB: `$$` escapes docker-compose's own ${VAR} interpolation so the
+    # literal `$VAR` reaches the shell. Without it, compose substitutes
+    # at parse time and the shell loop sees empty strings.
+    command:
+      - "sh"
+      - "-c"
+      - |
+        (
+          while true; do
+            sleep 60
+            ps -eo pid,etimes,comm,args 2>/dev/null \
+              | awk -v lim="$${OPENCLAW_MCP_REAP_AFTER_SECONDS:-600}" '
+                  /stdio-app\.js|ctrl-server\.mjs/ && $$2+0 > lim+0 { print $$1 }' \
+              | while read pid; do
+                  if [ -n "$$pid" ] && [ "$$pid" != "1" ]; then
+                    echo "[mcp-reaper] killing orphan pid=$$pid (older than $${OPENCLAW_MCP_REAP_AFTER_SECONDS:-600}s)" >&2
+                    kill -9 "$$pid" 2>/dev/null || true
+                  fi
+                done
+          done
+        ) &
+        exec node openclaw.mjs gateway --bind lan --port 18790 --allow-unconfigured
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:18790/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    # mem_limit matches heap ceiling + ~2G for RSS overhead (native sqlite,
+    # v8 metadata, code, libuv buffers). Raised from 4g to 6g in lockstep
+    # with NODE_OPTIONS bump above.
+    mem_limit: 6g
+    # 256 was saturation-prone: the gateway spawns a fresh node PID per
+    # healthcheck (every 10s) + per ephemeral session + per MCP subprocess,
+    # and exhaustion manifests as `uv_thread_create` assertion failures that
+    # crash the healthcheck while the main process keeps running → container
+    # stuck `Up (unhealthy)` blocking depends_on gates.
+    pids_limit: 2048
+
+  alfred:
+    image: ssdavidai00/alfred-worker:latest
+    depends_on:
+      openclaw-workers:
+        condition: service_healthy
+      ctrl-api:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - /mnt/encrypted/vault:/vault
+      - /mnt/encrypted/alfred:/app/data
+      - /mnt/encrypted/openclaw-workers:/root/.openclaw
+    tmpfs:
+      - /tmp:size=256m
+    environment:
+      # alfred (vault daemon) calls openclaw-wrapper which spawns
+      # vault-curator/janitor/distiller subagents via sessions_spawn.
+      # These subagents MUST run on the workers gateway, NOT main:
+      # - workers is where the agents (vault-curator etc.) are defined
+      # - workers' auto-announce on subagent completion lands inside
+      #   workers gateway and never touches main's user-facing session
+      # - PR #715 wrongly pointed this at main to bypass an
+      #   "agentId is not allowed for sessions_spawn (allowed: none)"
+      #   error on workers; the actual fix is to set workers'
+      #   agents.defaults.subagents.allowAgents=["*"] (see
+      #   openclaw-workers-config.json.njk), which permits external
+      #   spawns. Pre-revert, vault-curator subagent completions were
+      #   announced to agent:main:main and dumped 84K tokens of
+      #   curator-skill text into Sir's chat session per fire,
+      #   causing context overflow on his Slack/Telegram conversations.
+      - OPENCLAW_GATEWAY_URL=http://openclaw-workers:18790
+      - ALFRED_CTRL_URL=http://ctrl-api:3100
+    env_file:
+      - .env
+    entrypoint: ["bash", "-c", "rm -f /app/data/alfred.pid && set -a && [ -f /app/data/.env ] && source /app/data/.env; [ -f /app/data/.gateway-token ] && export OPENCLAW_GATEWAY_TOKEN=$(cat /app/data/.gateway-token); set +a && exec alfred --config /app/data/config.yaml up --foreground"]
+    command: []
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - FOWNER
+      - CHOWN
+    mem_limit: 6g
+    # mem_limit: 2g → 6g (2026-04-29). Surveyor OOMKilled (-9) on Sir's
+    # 10K+ vault during the HDBSCAN clustering pass — the cosine-distance
+    # matrix on 10K × 768-dim vectors plus embedder caches and Leiden
+    # graph state pushed peak RSS to ~3.4 GB, well above the 2 GB limit.
+    # 6g gives ~1.75× headroom over observed peak and room for vault
+    # growth (next obvious step is fitting 20K+ files). Hot-applied to
+    # tenant-a/tenant-b/tenant-c same day; template updated to keep all
+    # future tenants on the same architecture.
+    # pids_limit bumped 256 → 512 (2026-04-24). The alfred worker runs
+    # multiple long-lived daemon processes (curator, janitor, distiller,
+    # surveyor) plus periodic child processes for vault CLI calls,
+    # embedding generation via ollama, and openclaw gateway sessions.
+    pids_limit: 512
+
+  ctrl-api:
+    image: node:22-slim
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - /opt/alfred/api.mjs:/app/api.mjs:ro
+      - /opt/alfred:/opt/alfred
+      - /mnt/encrypted/vault:/mnt/encrypted/vault
+      - /mnt/encrypted/alfred:/mnt/encrypted/alfred
+      - /mnt/encrypted/openclaw:/mnt/encrypted/openclaw
+      - /mnt/encrypted/openclaw-workers:/mnt/encrypted/openclaw-workers
+      - /opt/alfred/compose:/opt/alfred/compose
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /usr/bin/docker:/usr/bin/docker:ro
+      - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro
+    working_dir: /opt/alfred/compose
+    command: ["bash", "-c", "apt-get update -qq && apt-get install -y -qq procps jq curl python3-yaml >/dev/null 2>&1; exec node --max-old-space-size=768 /app/api.mjs"]
+    env_file:
+      - .env
+    environment:
+      - AAS_HOST=0.0.0.0
+      - AAS_PORT=3100
+      - NODE_ENV=production
+      # AgentMail channels/email inbound needs the gateway token to start an
+      # agent run. The file lives on the shared /mnt/encrypted/alfred mount
+      # (same path inside this container — we don't remap to /alfred-data here
+      # like alfred-learn does).
+      - OPENCLAW_GATEWAY_TOKEN_FILE=/mnt/encrypted/alfred/.gateway-token
+      # Semantic vault search (POST /api/v1/state/embeddings/search-text)
+      # embeds the query via the shared Ollama sidecar before the sqlite-vec
+      # k-NN lookup — same nomic-embed-text model the surveyor writes with.
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - EMBED_MODEL=nomic-embed-text
+    ports:
+      - "127.0.0.1:3100:3100"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3100/api/v1/learning/status -H \"Authorization: Bearer $AAS_API_KEY\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    mem_limit: 1g
+    # Higher pids_limit than peer services because ctrl-api fronts all
+    # docker-exec traffic into the alfred container (vault writes, worker
+    # operations, chore runs). Under fleet load — plane forward+reverse
+    # sync, hourly_enrichment, composio sync, stream pullers — 256 was
+    # saturating the fork budget and surfacing as 500s with
+    # ``fork/exec … resource temporarily unavailable`` or the more
+    # confusing ``unknown shorthand flag: 'f' in -f`` when the compose
+    # plugin failed to load mid-parse (see #593). 1024 leaves headroom
+    # above the 8-way in-process semaphore in helpers.ts while staying
+    # safely below the host's default 32k cap.
+    pids_limit: 1024
+
+  alfred-learn:
+    image: ssdavidai00/alfred-learn:latest
+    # Run as the same uid as openclaw-workers' node user (1000:1000).
+    # The bind mounts (/vault, /alfred-data, /openclaw-workers-state) are
+    # all owned by 1000 on the host; running as root inside the container
+    # was a quiet anomaly that worked for read+write to /vault + /alfred-data
+    # but blocked listing /openclaw-workers-state (drwx------ uid 1000).
+    # Needed by OpenclawSessionSweepWorkflow — see
+    # packages/learn/src/activities/openclaw_sessions.py.
+    user: "1000:1000"
+    depends_on:
+      temporal:
+        condition: service_healthy
+      openclaw-workers:
+        condition: service_healthy
+      ctrl-api:
+        condition: service_healthy
+    volumes:
+      - /mnt/encrypted/vault:/vault
+      - /mnt/encrypted/alfred:/alfred-data
+      - /mnt/encrypted/openclaw-workers:/openclaw-workers-state
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      # alfred-learn talks to BOTH gateways:
+      #
+      # * OPENCLAW_GATEWAY_URL → MAIN (:18789). Used by notify_eod_prompt,
+      #   the Plane @alfred trigger spawn (agentId=main), and any other
+      #   user-facing Alfred session. The workers gateway rejects
+      #   agentId=main, so this MUST NOT point at :18790.
+      # * OPENCLAW_WORKERS_GATEWAY_URL → WORKERS (:18790). Used by clerk
+      #   (agentId=learn-clerk) and task execution subagents.
+      #
+      # EXECUTION_GATEWAY_URL is the older name for the same workers
+      # endpoint, consumed by the ephemeral-subagent activity stack
+      # (chore_actions.py, ephemeral_agent.py).
+      - OPENCLAW_GATEWAY_URL=http://openclaw:18789
+      - OPENCLAW_WORKERS_GATEWAY_URL=http://openclaw-workers:18790
+      - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
+      - VAULT_PATH=/vault
+      - TASK_QUEUE=alfred-learn
+      - ALFRED_LEARN_ENABLED=${ALFRED_LEARN_ENABLED:-true}
+      - ALFRED_CTRL_URL=http://ctrl-api:3100
+      # Composio Python SDK writes its module-load cache to ~/.composio. The
+      # alfred-learn container has no writable $HOME, which resolves to "/"
+      # and the SDK crashes at IMPORT time with PermissionError on /.composio.
+      # Pin the cache to /tmp (always writable) so any Composio import — via
+      # composio_client._get_client OR via composio_execute's docker-exec
+      # script (ctrl-api integrations.ts:2914) — initialises cleanly.
+      - COMPOSIO_CACHE_DIR=/tmp/composio
+      - HOME=/tmp
+      - SAAS_API_URL=https://alfred.black
+      - WORKERS_OPENCLAW_CONFIG=/openclaw-workers-state/openclaw.json
+      - EXECUTION_GATEWAY_URL=http://openclaw-workers:18790
+      # Steward Phase 4 (#840) — Vexa transcript intake. VEXA_ENABLED
+      # gates schedule registration; when false the meeting_capture +
+      # transcript_intake schedules are not created and the activities
+      # are dormant. VEXA_API_URL points at the Vexa stack's api-gateway
+      # alias on the alfred_default network (the standalone Vexa compose
+      # joins this network — see packages/hermes/vexa-example.yaml).
+      # VEXA_API_KEY and VEXA_WEBHOOK_SECRET come from .env (provisioned
+      # via Vaultwarden alongside other tenant secrets).
+      - VEXA_ENABLED=${VEXA_ENABLED:-false}
+      - VEXA_API_URL=${VEXA_API_URL:-http://vexa-api-gateway:8000}
+      - VEXA_BOT_DISPLAY_NAME=${VEXA_BOT_DISPLAY_NAME:-Alfred}
+      - VEXA_GCAL_STREAM_ID=${VEXA_GCAL_STREAM_ID:-composio-googlecalendar}
+      - ALFRED_OWNER_EMAIL=${ALFRED_OWNER_EMAIL:-}
+    env_file:
+      - .env
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 4g
+    # Bumped from 128 → 512 (2026-04-24). alfred-learn runs the Temporal
+    # Python worker which spawns threads per activity execution, plus
+    # httpx connection pools per workflow (EventProcessor, Hourly
+    # Enrichment, Daily Digest, Judgment, Reflection all active
+    # concurrently). 128 was the tightest budget in the stack and was
+    # saturating under the zero-LLM ingest + hourly enrichment pattern
+    # that landed in #394/#395.
+    pids_limit: 512
+
+{% if plane_enabled %}
+  # ── Plane self-hosted PM (stable) ───────────────────────────────────
+  # Opt-in sidecar stack (see issue #536). All services bind to the internal
+  # compose network; external reach-in is only via plane-proxy:8080 which the
+  # provisioner's setup_plane step then talks to over localhost.
+  #
+  # Secrets (DJANGO_SECRET_KEY, REDIS_PASSWORD, POSTGRES_PASSWORD,
+  # MINIO_ROOT_PASSWORD, PLANE_WEBHOOK_SECRET, PLANE_ADMIN_EMAIL,
+  # PLANE_ADMIN_PASSWORD, PLANE_API_TOKEN, PLANE_WORKSPACE_SLUG,
+  # PLANE_ALFRED_USER_ID) all live in /opt/alfred/compose/.env — generated by
+  # the provisioner post-boot, never in cloud-init. Interpolated here via
+  # docker compose's ${VAR} syntax from env_file.
+
+  plane-db:
+    image: postgres:15.7-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=plane
+      - POSTGRES_USER=plane
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - PGDATA=/var/lib/postgresql/data
+    volumes:
+      - /mnt/encrypted/plane/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U plane -d plane"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    mem_limit: 1g
+    pids_limit: 512
+
+  plane-redis:
+    image: valkey/valkey:7.2.11-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
+    volumes:
+      - /mnt/encrypted/plane/redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a ${REDIS_PASSWORD} ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    mem_limit: 256m
+    pids_limit: 512
+
+  plane-mq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      - RABBITMQ_DEFAULT_USER=plane
+      - RABBITMQ_DEFAULT_PASS=${REDIS_PASSWORD}
+      - RABBITMQ_DEFAULT_VHOST=plane
+    volumes:
+      - /mnt/encrypted/plane/rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    mem_limit: 512m
+    pids_limit: 512
+
+  plane-minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/export", "--console-address", ":9090"]
+    environment:
+      - MINIO_ROOT_USER=plane
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    volumes:
+      - /mnt/encrypted/plane/uploads:/export
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    mem_limit: 256m
+    pids_limit: 512
+
+  # One-shot migrator. plane-api's entrypoint calls `wait_for_migrations` which
+  # blocks until `python manage.py migrate` has run — Plane's official compose
+  # factors this into a dedicated service so the api/worker/beat don't each try
+  # to apply migrations on boot (which caused deadlock during the first deploy
+  # attempt on tenant-a, issue #555).
+  plane-migrator:
+    image: makeplane/plane-backend:stable
+    restart: "no"
+    depends_on:
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=plane.settings.production
+      - DEBUG=0
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DATABASE_URL=postgresql://plane:${POSTGRES_PASSWORD}@plane-db:5432/plane
+      - POSTGRES_USER=plane
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=plane
+      - POSTGRES_HOST=plane-db
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+      - REDIS_HOST=plane-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    command: ["/bin/sh", "-c", "./bin/docker-entrypoint-migrator.sh"]
+    mem_limit: 512m
+    pids_limit: 512
+
+  plane-api:
+    image: makeplane/plane-backend:stable
+    restart: unless-stopped
+    depends_on:
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+      plane-mq:
+        condition: service_healthy
+      plane-minio:
+        condition: service_healthy
+      plane-migrator:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=plane.settings.production
+      - DEBUG=0
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DATABASE_URL=postgresql://plane:${POSTGRES_PASSWORD}@plane-db:5432/plane
+      - POSTGRES_USER=plane
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=plane
+      - POSTGRES_HOST=plane-db
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+      - REDIS_HOST=plane-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - AMQP_URL=amqp://plane:${REDIS_PASSWORD}@plane-mq:5672/plane
+      - USE_MINIO=1
+      - AWS_ACCESS_KEY_ID=plane
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      - AWS_S3_ENDPOINT_URL=http://plane-minio:9000
+      - AWS_S3_BUCKET_NAME=uploads
+      - AWS_REGION=us-east-1
+      # WEB_URL is what Plane uses to build absolute URLs for browser
+      # redirects (after login, in email links, etc.). It must point at the
+      # PUBLIC tenant URL — using http://plane-proxy:8080 (the internal
+      # alias) sends Sir's browser into the void after login. Internal
+      # plane→plane traffic uses the per-service compose aliases, not
+      # WEB_URL, so it's safe to set this to the public URL.
+      - WEB_URL=https://{{ subdomain }}-plane.{{ domain }}
+      - ENABLE_SIGNUP=0
+      - ENABLE_EMAIL_PASSWORD=1
+      - ENABLE_MAGIC_LINK_LOGIN=0
+      - API_KEY_RATE_LIMIT=600/minute
+      - GUNICORN_WORKERS=2
+    command: ["/bin/sh", "-c", "./bin/docker-entrypoint-api.sh"]
+    networks:
+      default:
+        aliases:
+          - api
+    healthcheck:
+      # plane-backend image ships wget but NOT curl.
+      # wget resolves "localhost" to ::1 first but gunicorn binds IPv4 only,
+      # so use 127.0.0.1 explicitly. The root endpoint returns {"status":"OK"}.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    mem_limit: 1g
+    pids_limit: 512
+
+  plane-worker:
+    image: makeplane/plane-backend:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-migrator:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=plane.settings.production
+      - DEBUG=0
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DATABASE_URL=postgresql://plane:${POSTGRES_PASSWORD}@plane-db:5432/plane
+      - POSTGRES_HOST=plane-db
+      - POSTGRES_USER=plane
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=plane
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+      - REDIS_HOST=plane-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - AMQP_URL=amqp://plane:${REDIS_PASSWORD}@plane-mq:5672/plane
+      - USE_MINIO=1
+      - AWS_ACCESS_KEY_ID=plane
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      - AWS_S3_ENDPOINT_URL=http://plane-minio:9000
+      - AWS_S3_BUCKET_NAME=uploads
+      - AWS_REGION=us-east-1
+    command: ["/bin/sh", "-c", "./bin/docker-entrypoint-worker.sh"]
+    # 1g was OOM-killed on boot (celery + bgtask registry). 2g holds steady.
+    mem_limit: 2g
+    pids_limit: 512
+
+  plane-beat:
+    image: makeplane/plane-backend:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-migrator:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=plane.settings.production
+      - DEBUG=0
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DATABASE_URL=postgresql://plane:${POSTGRES_PASSWORD}@plane-db:5432/plane
+      - POSTGRES_HOST=plane-db
+      - POSTGRES_USER=plane
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=plane
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+      - REDIS_HOST=plane-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - AMQP_URL=amqp://plane:${REDIS_PASSWORD}@plane-mq:5672/plane
+    command: ["/bin/sh", "-c", "./bin/docker-entrypoint-beat.sh"]
+    mem_limit: 256m
+    pids_limit: 512
+
+  plane-web:
+    # plane-frontend:stable is a pre-built nginx image serving static Next.js
+    # export. Image ships its own /etc/nginx/nginx.conf with `listen 3000;`
+    # (NOT :80 — the /etc/nginx/conf.d/default.conf stub is unused). CMD is
+    # `nginx -g daemon off;` — do not override.
+    image: makeplane/plane-frontend:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=
+      - NEXT_PUBLIC_DEPLOY_URL=
+    networks:
+      default:
+        aliases:
+          - web
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    mem_limit: 512m
+    pids_limit: 512
+
+  plane-space:
+    # plane-space:stable runs `npx react-router-serve ./build/server/index.js`
+    # on :3000 via its own entrypoint — don't override CMD.
+    image: makeplane/plane-space:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=
+      - NEXT_PUBLIC_DEPLOY_URL=
+    networks:
+      default:
+        aliases:
+          - space
+    mem_limit: 256m
+    pids_limit: 512
+
+  plane-admin:
+    # plane-admin:stable is nginx on :80, same pattern as plane-web.
+    image: makeplane/plane-admin:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=
+      - NEXT_PUBLIC_DEPLOY_URL=
+    networks:
+      default:
+        aliases:
+          - admin
+    mem_limit: 256m
+    pids_limit: 512
+
+  plane-live:
+    image: makeplane/plane-live:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+    environment:
+      - API_BASE_URL=http://plane-api:8000
+      - LIVE_BASE_PATH=/live
+      - LIVE_SERVER_SECRET_KEY=${LIVE_SERVER_SECRET_KEY}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+    networks:
+      default:
+        aliases:
+          - live
+    mem_limit: 256m
+    pids_limit: 512
+
+  plane-proxy:
+    image: makeplane/plane-proxy:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-web:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:80"
+    environment:
+      # Caddyfile globals need SITE_ADDRESS populated or the empty-brace `{ ... }`
+      # block gets re-parsed as a second "server block without any key", which
+      # Caddy rejects ("global configuration, if used, must be first"). `:80` makes
+      # the Caddyfile a plain-HTTP listener with no ACME, which matches how we
+      # expose plane-proxy — bound to 127.0.0.1:8080 only, no public TLS.
+      # TRUSTED_PROXIES silences a separate global-config warning. See B9 on
+      # tenant-a 2026-04-23.
+      - SITE_ADDRESS=:80
+      - TRUSTED_PROXIES=0.0.0.0/0
+      - FILE_SIZE_LIMIT=5242880
+      - BUCKET_NAME=uploads
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    mem_limit: 128m
+    pids_limit: 512
+{% endif %}
+
+{% if sure_enabled %}
+  # ── Sure self-hosted personal-finance (stable) ──────────────────────
+  # Sidecar stack mirroring the Plane block above. Default-on for every
+  # tenant (alongside Plane). Public reach-in is via cloudflared:
+  # <subdomain>-sure.alfred.black → 127.0.0.1:3001 → sure-web :3000.
+  #
+  # Env-var names (DB_HOST, DB_PORT, POSTGRES_USER, POSTGRES_PASSWORD,
+  # POSTGRES_DB, REDIS_URL, SECRET_KEY_BASE, SELF_HOSTED, RAILS_*) come
+  # from the upstream compose.example.yml in we-promise/sure — do not
+  # rename. Sure-specific secrets (SURE_POSTGRES_PASSWORD,
+  # SURE_REDIS_PASSWORD, SURE_SECRET_KEY_BASE) live in
+  # /opt/alfred/compose/.env, generated by the provisioner's setupSure
+  # step. They are NOT shared with Plane's POSTGRES_PASSWORD /
+  # REDIS_PASSWORD — each sidecar owns its own datastore credentials.
+
+  sure-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=sure
+      - POSTGRES_USER=sure
+      - POSTGRES_PASSWORD=${SURE_POSTGRES_PASSWORD}
+      - PGDATA=/var/lib/postgresql/data
+    volumes:
+      - /mnt/encrypted/sure/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sure -d sure"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    mem_limit: 1g
+    pids_limit: 512
+
+  sure-redis:
+    image: valkey/valkey:7.2.11-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--requirepass", "${SURE_REDIS_PASSWORD}", "--appendonly", "yes"]
+    volumes:
+      - /mnt/encrypted/sure/redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a ${SURE_REDIS_PASSWORD} ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    mem_limit: 256m
+    pids_limit: 512
+
+  sure-web:
+    image: ghcr.io/we-promise/sure:stable
+    restart: unless-stopped
+    depends_on:
+      sure-db:
+        condition: service_healthy
+      sure-redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - SECRET_KEY_BASE=${SURE_SECRET_KEY_BASE}
+      - SELF_HOSTED=true
+      - RAILS_ENV=production
+      - RAILS_FORCE_SSL=false
+      - RAILS_ASSUME_SSL=false
+      - DB_HOST=sure-db
+      - DB_PORT=5432
+      - POSTGRES_DB=sure
+      - POSTGRES_USER=sure
+      - POSTGRES_PASSWORD=${SURE_POSTGRES_PASSWORD}
+      - REDIS_URL=redis://:${SURE_REDIS_PASSWORD}@sure-redis:6379/0
+    # Mount /alfred-data so ctrl-api's Rails-runner-backed account CRUD
+    # endpoints can hand sure-web a JSON payload via the shared volume.
+    # Same path the sure-init one-shot uses; long-running sure-web reads
+    # the script + payload on demand for create/update/delete.
+    volumes:
+      - /mnt/encrypted/alfred:/alfred-data
+    ports:
+      - "127.0.0.1:3001:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/up >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    mem_limit: 2g
+    pids_limit: 512
+
+  sure-worker:
+    image: ghcr.io/we-promise/sure:stable
+    restart: unless-stopped
+    depends_on:
+      sure-db:
+        condition: service_healthy
+      sure-redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - SECRET_KEY_BASE=${SURE_SECRET_KEY_BASE}
+      - SELF_HOSTED=true
+      - RAILS_ENV=production
+      - RAILS_FORCE_SSL=false
+      - RAILS_ASSUME_SSL=false
+      - DB_HOST=sure-db
+      - DB_PORT=5432
+      - POSTGRES_DB=sure
+      - POSTGRES_USER=sure
+      - POSTGRES_PASSWORD=${SURE_POSTGRES_PASSWORD}
+      - REDIS_URL=redis://:${SURE_REDIS_PASSWORD}@sure-redis:6379/0
+    command: ["bundle", "exec", "sidekiq"]
+    mem_limit: 1g
+    pids_limit: 512
+
+  # One-shot bootstrap. Reuses the sure-web image because it needs Rails +
+  # Postgres credentials. Waits for sure-web's /up endpoint via depends_on,
+  # then runs bootstrap.rb (staged into /alfred-data by the alfred-init
+  # container's step 12). Idempotent — rerunning is safe; the Ruby script
+  # short-circuits if /alfred-data/.sure-api-key already exists.
+  sure-init:
+    image: ghcr.io/we-promise/sure:stable
+    depends_on:
+      sure-web:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      - SECRET_KEY_BASE=${SURE_SECRET_KEY_BASE}
+      - SELF_HOSTED=true
+      - RAILS_ENV=production
+      - DB_HOST=sure-db
+      - DB_PORT=5432
+      - POSTGRES_DB=sure
+      - POSTGRES_USER=sure
+      - POSTGRES_PASSWORD=${SURE_POSTGRES_PASSWORD}
+      - REDIS_URL=redis://:${SURE_REDIS_PASSWORD}@sure-redis:6379/0
+    volumes:
+      - /mnt/encrypted/alfred:/alfred-data
+    entrypoint: ["bin/rails", "runner", "/alfred-data/sure-bootstrap/bootstrap.rb"]
+    restart: "no"
+    mem_limit: 512m
+    pids_limit: 256
+{% endif %}
+
+{% if vexa_enabled %}
+  # ── Vexa transcript bot (Steward Phase 4 — #840) ────────────────────
+  # Sidecar stack that joins Google Meet calls as "Alfred", transcribes
+  # via Groq Whisper, surfaces a web UI at https://<sub>-vexa.<domain>,
+  # and POSTs ``meeting.completed`` webhooks to ctrl-api at
+  # http://ctrl-api:3100/api/v1/webhooks/vexa.
+  #
+  # Vexa runs as a SEPARATE compose project at /opt/alfred/vexa/, NOT in
+  # this file. Why: vexa-0.10.6 is a 9-container stack (postgres, redis,
+  # minio, admin-api, runtime-api, meeting-api, api-gateway, vexa-bot
+  # spawner, vexa-dashboard). Folding all of that into the per-tenant
+  # alfred stack would balloon the resource footprint by ~3 GB even when
+  # no meetings are active, and would entangle two unrelated lifecycles.
+  #
+  # The provisioner's ``setupVexa`` step in
+  # packages/ctrl/src/infra/provisioner.ts renders the canonical Vexa
+  # stack template (packages/ctrl/src/templates/vexa-stack.yaml.njk) to
+  # /opt/alfred/vexa/docker-compose.yaml on the tenant VPS, generates
+  # /opt/alfred/vexa/.env, and brings the stack up via
+  # ``cd /opt/alfred/vexa && docker compose up -d``. See
+  # packages/hermes/vexa-example.yaml for the original example-direct
+  # deploy that the fleet template was extracted from.
+  #
+  # alfred-learn talks to Vexa over the alfred_default network alias
+  # ``vexa-api-gateway`` (the standalone vexa stack joins this network
+  # via its `external: true` declaration). The env-passthrough that
+  # makes that work lives on the alfred-learn block above (search for
+  # VEXA_ENABLED) — present even when {% raw %}{% if vexa_enabled %}{% endraw %} is
+  # false so a manual flip on the VPS works without a compose regen.
+{% endif %}
+
+  # alfred-mcp-server — per-tenant MCP HTTP server for Claude Custom
+  # Connectors. Cloudflared routes <subdomain>.<domain>/<app>/mcp +
+  # the OAuth + .well-known paths to this container on :8787; everything
+  # else stays on ctrl-api / openclaw. Per-tenant deploy gives true
+  # isolation (one tenant's compromise doesn't expose another's API key).
+  mcp-server:
+    image: ssdavidai00/alfred-mcp-server:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - PORT=8787
+      - CTRL_URL=http://ctrl-api:3100
+      - DATA_DIR=/data
+      - PUBLIC_URL=https://{{ subdomain }}.{{ domain }}
+      - TENANT_LABEL={{ customer_name }}
+      # AAS_API_KEY + MCP_APPROVAL_SECRET come from .env (provisioner writes
+      # MCP_APPROVAL_SECRET; AAS_API_KEY is shared with ctrl-api itself)
+    volumes:
+      - /mnt/encrypted/mcp-server:/data
+    depends_on:
+      ctrl-api:
+        condition: service_started
+    mem_limit: 256m
+    pids_limit: 256
+
+{% if vaultwarden_enabled %}
+  # ── Vaultwarden — per-tenant secrets manager ────────────────────────
+  # Bitwarden-compatible vault server. Single SQLite-backed binary. Holds
+  # every secret currently in `.env` plus future credentials. Sir reaches
+  # the web UI at https://vault.{{ subdomain }}.{{ domain }} (behind
+  # Cloudflare Access — Google SSO scoped to the owner's email).
+  #
+  # Bound to 127.0.0.1:18080 so cloudflared (the only public ingress for
+  # this hostname) can reach it; also reachable to other compose services
+  # via the `vaultwarden` alias on the default network — vault-init talks
+  # to it that way without round-tripping through cloudflared.
+  #
+  # ADMIN_TOKEN, SIGNUPS_ALLOWED=false (Sir signs up via the pre-existing
+  # /admin/invite record), DOMAIN set to the public URL (Bitwarden clients
+  # are picky about origin). Database under /mnt/encrypted/vaultwarden so
+  # restic picks it up automatically (no restic config change needed).
+  vaultwarden:
+    # Pinned digest is policy across the rest of the stack but Vaultwarden
+    # publishes :latest as a moving alpine tag; alfred-update.timer pulls
+    # this on schedule. If we ever need to roll back, replace with a
+    # specific tag (e.g. 1.34.4-alpine) and force-recreate.
+    image: vaultwarden/server:latest
+    restart: unless-stopped
+    environment:
+      - DOMAIN=https://{{ subdomain }}-vault.{{ domain }}
+      - SIGNUPS_ALLOWED=false
+      - INVITATIONS_ALLOWED=true
+      - WEB_VAULT_ENABLED=true
+      - SHOW_PASSWORD_HINT=false
+      # SMTP intentionally LEFT UNSET — setting SMTP_HOST="" (empty) trips
+      # Vaultwarden's "partial SMTP config" validation since it treats empty
+      # as "set but invalid". Unset = SMTP disabled, which is what we want
+      # for a self-hosted single-user deployment. /admin/invite creates a
+      # stub Invitation that the bootstrap-signup script accepts via
+      # /api/accounts/register; no email is ever sent.
+      #
+      # Vaultwarden reads ADMIN_TOKEN, but our .env stores it as
+      # VAULTWARDEN_ADMIN_TOKEN to keep the namespace explicit. Map via
+      # docker-compose's ${VAR} interpolation (works because env_file values
+      # are resolvable via ${...} during compose render).
+      - ADMIN_TOKEN=${VAULTWARDEN_ADMIN_TOKEN}
+    env_file:
+      - .env
+    volumes:
+      - /mnt/encrypted/vaultwarden:/data
+    ports:
+      - "127.0.0.1:18080:80"
+    healthcheck:
+      # /alive is vaultwarden's tiny liveness path; cheap, always-200. Use
+      # curl rather than wget — the vaultwarden:latest image (Debian-based
+      # alpine variant) has curl but not wget.
+      test: ["CMD-SHELL", "curl -sSf http://127.0.0.1:80/alive >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+    mem_limit: 256m
+    pids_limit: 256
+
+  # vault-init — one-shot. Pulls every secret out of vaultwarden and
+  # rewrites /opt/alfred/compose/.env. Soft dep: if vaultwarden is wedged
+  # at boot, vault-init exits non-fatally and the existing .env (last
+  # successful sync) is what other services read. Other services do NOT
+  # depends_on vault-init for this reason.
+  vault-init:
+    image: ssdavidai00/alfred-vault-init:latest
+    restart: "no"
+    env_file:
+      - .env
+    depends_on:
+      vaultwarden:
+        condition: service_healthy
+    volumes:
+      - /opt/alfred/compose:/host/compose
+    # The fetch-and-write script (vault-init.sh) is baked into the image as
+    # the default CMD. Soft-failure semantics: if vaultwarden is unreachable
+    # vault-init exits non-zero and leaves the existing .env in place, so
+    # tenant boot keeps working with last-good secrets.
+    mem_limit: 128m
+    pids_limit: 128
+
+  # vault-cli — long-running side-container that holds an unlocked bw
+  # session and exposes Vaultwarden over `bw serve` (the Bitwarden CLI's
+  # built-in REST API). ctrl-api proxies the Vaultwarden MCP tool calls to
+  # this service over the compose internal network at http://vault-cli:8087.
+  # Avoids the ~3-second login + unlock latency on every Vaultwarden tool
+  # call from claude.ai while keeping the bearer-token surface flat (the
+  # bw serve endpoint is reachable only from inside the compose network).
+  vault-cli:
+    image: ssdavidai00/alfred-vault-init:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      vaultwarden:
+        condition: service_healthy
+    entrypoint: ["bash", "/opt/vault-init/serve.sh"]
+    healthcheck:
+      # bw serve responds to GET /status with {"data": ...} on auth-success.
+      # Curl is in the alpine image; jq isn't strictly needed here.
+      test: ["CMD-SHELL", "curl -sSf http://127.0.0.1:8087/status >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    mem_limit: 256m
+    pids_limit: 256
+{% endif %}
+
+volumes: {}

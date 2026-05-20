@@ -1,0 +1,556 @@
+---
+title: "Worker Operations"
+description: "Managing Curator, Janitor, and Distiller workers"
+icon: "gears"
+---
+
+Alfred has three AI-powered workers that maintain your vault. Each runs as a daemon with auto-restart, health checks, and manual control via API.
+
+## The Three Workers
+
+<CardGroup cols={3}>
+  <Card title="Curator" icon="inbox">
+    Processes raw inputs from inbox into structured records
+  </Card>
+  <Card title="Janitor" icon="broom">
+    Scans for structural issues and fixes them
+  </Card>
+  <Card title="Distiller" icon="flask">
+    Extracts latent knowledge from operational records
+  </Card>
+</CardGroup>
+
+## Worker Status
+
+### Check All Workers
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/workers/status \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "workers": {
+    "curator": {
+      "status": "running",
+      "uptime_seconds": 7200,
+      "last_run": "2026-02-26T15:30:00Z",
+      "processed_count": 42
+    },
+    "janitor": {
+      "status": "running",
+      "uptime_seconds": 7200,
+      "last_run": "2026-02-26T15:25:00Z",
+      "fixed_issues": 8
+    },
+    "distiller": {
+      "status": "running",
+      "uptime_seconds": 7200,
+      "last_run": "2026-02-26T15:20:00Z",
+      "extracted_count": 15
+    }
+  }
+}
+```
+
+### Check Individual Worker
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/status \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "status": "running",
+  "uptime_seconds": 7200,
+  "last_run": "2026-02-26T15:30:00Z",
+  "processed_count": 42,
+  "config": {
+    "watch_interval": 60,
+    "inbox_path": "/mnt/encrypted/vault/inbox",
+    "backend": "openclaw"
+  }
+}
+```
+
+## Starting and Stopping
+
+### Start a Worker
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/janitor/start \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "status": "running",
+  "message": "Janitor started successfully"
+}
+```
+
+### Stop a Worker
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/janitor/stop \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "status": "stopped",
+  "message": "Janitor stopped"
+}
+```
+
+### Restart a Worker
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/restart \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "status": "running",
+  "message": "Curator restarted"
+}
+```
+
+<Tip>
+Restart a worker after updating configuration to apply changes.
+</Tip>
+
+## Curator Operations
+
+Curator watches the inbox and processes raw inputs into structured vault records.
+
+### Manual Processing
+
+Trigger immediate processing:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/process \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "message": "Curator processing triggered",
+  "processed": 3,
+  "created_records": [
+    "person/Charlie Davis",
+    "project/Mobile App Redesign",
+    "task/Update onboarding flow"
+  ]
+}
+```
+
+### Ingest Command
+
+Force re-ingestion of specific files:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/ingest \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "files": [
+      "/mnt/encrypted/vault/inbox/meeting-notes.md",
+      "/mnt/encrypted/vault/inbox/transcript.txt"
+    ]
+  }'
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "ingested": 2,
+  "created_records": [
+    "decision/Use React for frontend",
+    "person/Eve Martinez"
+  ]
+}
+```
+
+### Processing History
+
+Get recent processing runs:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/history?limit=10 \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "history": [
+    {
+      "timestamp": "2026-02-26T15:30:00Z",
+      "processed": 3,
+      "created": 5,
+      "duration_seconds": 45
+    },
+    {
+      "timestamp": "2026-02-26T14:30:00Z",
+      "processed": 1,
+      "created": 2,
+      "duration_seconds": 22
+    }
+  ]
+}
+```
+
+## Janitor Operations
+
+Janitor scans the vault for structural issues (broken links, invalid frontmatter, orphans) and fixes them.
+
+### Scan for Issues
+
+Run a vault scan without fixing:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/janitor/scan \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "issues": [
+    {
+      "type": "broken_link",
+      "file": "project/API Redesign.md",
+      "line": 12,
+      "target": "[[person/Unknown Person]]",
+      "severity": "warning"
+    },
+    {
+      "type": "invalid_frontmatter",
+      "file": "task/Fix bug.md",
+      "field": "status",
+      "value": "completed",
+      "expected": ["todo", "in-progress", "blocked", "done", "cancelled"],
+      "severity": "error"
+    },
+    {
+      "type": "orphan",
+      "file": "note/Random thought.md",
+      "severity": "info"
+    }
+  ],
+  "summary": {
+    "total": 3,
+    "broken_links": 1,
+    "invalid_frontmatter": 1,
+    "orphans": 1
+  }
+}
+```
+
+### Fix Issues
+
+Run Janitor to fix detected issues:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/janitor/fix \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "fixed": 2,
+  "changes": [
+    {
+      "file": "task/Fix bug.md",
+      "issue": "invalid_frontmatter",
+      "action": "Updated status from 'completed' to 'done'"
+    },
+    {
+      "file": "project/API Redesign.md",
+      "issue": "broken_link",
+      "action": "Removed broken link [[person/Unknown Person]]"
+    }
+  ],
+  "skipped": 1,
+  "skipped_reasons": [
+    {
+      "file": "note/Random thought.md",
+      "issue": "orphan",
+      "reason": "Orphans require manual review"
+    }
+  ]
+}
+```
+
+<Warning>
+Janitor can modify or delete records. Review scan results before running fix.
+</Warning>
+
+### Janitor History
+
+Get recent fix runs:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/workers/janitor/history?limit=5 \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "history": [
+    {
+      "timestamp": "2026-02-26T15:25:00Z",
+      "issues_found": 3,
+      "issues_fixed": 2,
+      "duration_seconds": 18
+    }
+  ]
+}
+```
+
+## Distiller Operations
+
+Distiller extracts latent knowledge (assumptions, decisions, constraints) from operational records.
+
+### Find Candidates
+
+Scan for records that may contain extractable knowledge:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/distiller/scan \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "candidates": [
+    {
+      "file": "project/API Redesign.md",
+      "score": 0.85,
+      "signals": ["contains decision language", "mentions constraints"]
+    },
+    {
+      "file": "note/Architecture discussion.md",
+      "score": 0.78,
+      "signals": ["contains assumptions", "technical discussion"]
+    }
+  ],
+  "total": 2
+}
+```
+
+### Extract Knowledge
+
+Run Distiller to extract learning records:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/distiller/extract \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "extracted": 4,
+  "created_records": [
+    "decision/Use REST over GraphQL for API",
+    "assumption/Mobile users prefer native apps",
+    "constraint/Must support offline mode",
+    "contradiction/Performance vs feature richness tradeoff"
+  ],
+  "sources": [
+    "project/API Redesign.md",
+    "note/Architecture discussion.md"
+  ]
+}
+```
+
+### Extraction History
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/workers/distiller/history?limit=5 \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "history": [
+    {
+      "timestamp": "2026-02-26T15:20:00Z",
+      "candidates": 2,
+      "extracted": 4,
+      "duration_seconds": 62
+    }
+  ]
+}
+```
+
+## Workflow Examples
+
+### Janitor Workflow
+
+<Steps>
+  <Step title="Scan for issues">
+    ```bash
+    curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/janitor/scan \
+      -H "X-API-Key: YOUR_API_KEY"
+    ```
+  </Step>
+  <Step title="Review issues">
+    Check the severity and type of each issue. Critical issues should be fixed immediately.
+  </Step>
+  <Step title="Fix issues">
+    ```bash
+    curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/janitor/fix \
+      -H "X-API-Key: YOUR_API_KEY"
+    ```
+  </Step>
+  <Step title="Verify fixes">
+    Run another scan to ensure all fixable issues are resolved.
+  </Step>
+</Steps>
+
+### Distiller Workflow
+
+<Steps>
+  <Step title="Identify candidates">
+    ```bash
+    curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/distiller/scan \
+      -H "X-API-Key: YOUR_API_KEY"
+    ```
+  </Step>
+  <Step title="Review candidate scores">
+    Higher scores indicate more extractable knowledge. Focus on scores above 0.7.
+  </Step>
+  <Step title="Run extraction">
+    ```bash
+    curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/distiller/extract \
+      -H "X-API-Key: YOUR_API_KEY"
+    ```
+  </Step>
+  <Step title="Review extracted records">
+    ```bash
+    curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/vault/list?type=decision \
+      -H "X-API-Key: YOUR_API_KEY"
+    ```
+  </Step>
+</Steps>
+
+### Daily Maintenance Routine
+
+Run all workers in sequence:
+
+```bash
+# 1. Process inbox
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/process \
+  -H "X-API-Key: YOUR_API_KEY"
+
+# 2. Fix structural issues
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/janitor/fix \
+  -H "X-API-Key: YOUR_API_KEY"
+
+# 3. Extract knowledge
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/distiller/extract \
+  -H "X-API-Key: YOUR_API_KEY"
+
+# 4. Check status
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/workers/status \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+## Troubleshooting
+
+### Worker Stuck
+
+If a worker is stuck (uptime increases but last_run doesn't update):
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/restart \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+### Worker Crashed
+
+Check logs:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/logs/stream?service=curator&tail=100 \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+If the worker hit the retry limit (5 crashes), it won't auto-restart. Manual start required:
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/start \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+### Slow Processing
+
+Curator/Distiller can be slow for large inputs (60+ seconds). This is normal for complex extractions. Check history to see average duration:
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/workers/curator/history?limit=20 \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
+### No Issues Found
+
+If Janitor scan returns no issues but you see problems manually:
+
+- Janitor only detects specific issue types (broken links, invalid frontmatter, orphans)
+- Custom validation rules require code changes
+- Check Janitor logs for scan errors
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Monitoring" icon="chart-line" href="/guides/monitoring">
+    Monitor worker health and logs
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/guides/configuration">
+    Configure worker behavior
+  </Card>
+</CardGroup>

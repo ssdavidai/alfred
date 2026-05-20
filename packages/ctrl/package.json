@@ -1,0 +1,33 @@
+{
+  "name": "alfred-ctrl-api",
+  "version": "0.1.0",
+  "description": "alfred-black tenant API server",
+  "type": "module",
+  "main": "dist/api.mjs",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "start": "node --experimental-sqlite dist/api.mjs",
+    "test": "node --experimental-sqlite --experimental-test-module-mocks --import tsx/esm --experimental-loader ./tests/text-loader.mjs --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "commander": "^13.1.0",
+    "ink": "^5.1.0",
+    "ink-spinner": "^5.0.0",
+    "js-yaml": "^4.1.1",
+    "nunjucks": "^3.2.4",
+    "react": "^18.3.1",
+    "ssh2": "^1.16.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/nunjucks": "^3.2.6",
+    "@types/react": "^18.3.12",
+    "@types/ssh2": "^1.15.4",
+    "@types/ws": "^8.5.13",
+    "esbuild": "^0.24.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

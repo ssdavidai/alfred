@@ -1,0 +1,88 @@
+---
+title: "Get Vault Context"
+description: "Returns a summary of vault structure and contents"
+api: "GET /api/v1/vault/context"
+---
+
+## Overview
+
+Returns a high-level summary of the vault's structure and contents, including record counts by type, recent activity, and vault statistics.
+
+## Response
+
+<ResponseField name="summary" type="string">
+  Human-readable summary of vault contents
+</ResponseField>
+
+<ResponseField name="counts" type="object">
+  Record counts by type
+  <ResponseField name="person" type="number">
+    Number of person records
+  </ResponseField>
+  <ResponseField name="org" type="number">
+    Number of organization records
+  </ResponseField>
+  <ResponseField name="project" type="number">
+    Number of project records
+  </ResponseField>
+  <ResponseField name="task" type="number">
+    Number of task records
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="total_records" type="number">
+  Total number of records across all types
+</ResponseField>
+
+<ResponseField name="vault_path" type="string">
+  Absolute path to the vault directory
+</ResponseField>
+
+## Request Example
+
+<RequestExample>
+
+```bash cURL
+curl -X GET \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/vault/context \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+```javascript JavaScript
+const response = await fetch('https://alfred-acme.tailnet.ts.net:3100/api/v1/vault/context', {
+  method: 'GET',
+  headers: {
+    'Authorization': 'Bearer YOUR_API_KEY'
+  }
+});
+
+const context = await response.json();
+console.log(context);
+```
+
+</RequestExample>
+
+## Response Example
+
+<ResponseExample>
+
+```json 200 OK
+{
+  "summary": "Vault contains 127 records across 18 types. Most recent activity: 3 tasks updated today, 2 people added this week.",
+  "counts": {
+    "person": 23,
+    "org": 8,
+    "project": 12,
+    "task": 45,
+    "meeting": 18,
+    "decision": 7,
+    "assumption": 9,
+    "constraint": 3,
+    "document": 2
+  },
+  "total_records": 127,
+  "vault_path": "/home/deploy/vault"
+}
+```
+
+</ResponseExample>

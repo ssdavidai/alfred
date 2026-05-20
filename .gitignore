@@ -1,0 +1,25 @@
+# secrets / env
+.env
+.env.*
+!.env.example
+
+# node
+node_modules/
+dist/
+.wasp/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# sqlite / local data
+*.db
+*.db-wal
+*.db-shm
+
+# os
+.DS_Store
+
+# staged Wasp SPA bundle (CI build artifact)
+web-app-build/

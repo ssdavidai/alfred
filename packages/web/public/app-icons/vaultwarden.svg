@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="#F0EDE8">
+  <!-- Shield outline -->
+  <path d="M32 4 L8 12 V30 C8 44 18 54 32 60 C46 54 56 44 56 30 V12 Z" />
+  <!-- Keyhole inset (knocked-out via even-odd) -->
+  <path d="M32 22 C28.69 22 26 24.69 26 28 C26 30.42 27.46 32.5 29.5 33.45 V42 C29.5 43.38 30.62 44.5 32 44.5 C33.38 44.5 34.5 43.38 34.5 42 V33.45 C36.54 32.5 38 30.42 38 28 C38 24.69 35.31 22 32 22 Z" fill="#0a0a0a" />
+</svg>

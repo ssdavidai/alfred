@@ -1,0 +1,376 @@
+# Vexa transcript-bot stack — example-owner-direct deploy (#840 Phase 4).
+#
+# THIS IS A SEPARATE COMPOSE PROJECT, run alongside the main alfred
+# stack on example-owner. It is NOT folded into ``docker-compose.yaml.njk`` for
+# fleet rollout yet — the .njk template carries a minimal gated stub
+# (see below) that flips on once Phase 4 is verified end-to-end on
+# example-owner.
+#
+# Why a separate project?
+# -----------------------
+# Vexa upstream (vexa-0.10.6) is a multi-service stack — at minimum:
+# postgres, redis, minio, admin-api, runtime-api, meeting-api,
+# api-gateway. Cramming all of that into the per-tenant alfred stack
+# would balloon the resource footprint by ~3 GB even when no meetings
+# are active. Running Vexa as its own compose project (project name
+# ``vexa``) lets us:
+#
+#   1. Size it independently (mem_limits tuned for Vexa's hot path).
+#   2. Tear it down without touching alfred-learn / openclaw / ctrl-api.
+#   3. Connect to alfred's compose network via the
+#      ``alfred_default`` external network so ``alfred-learn`` and
+#      ``ctrl-api`` can hit ``http://vexa-api-gateway:8000`` directly
+#      and the Vexa bot can hit
+#      ``http://ctrl-api:3100/api/v1/webhooks/vexa`` for completion
+#      callbacks.
+#
+# Deploy on example-owner
+# ---------------
+# 1. SSH to example-owner. Ensure the alfred stack is up and the
+#    ``alfred_default`` network exists:
+#
+#        docker network ls | grep alfred_default
+#
+#    (Compose creates this automatically when ``docker compose up`` runs
+#    in /opt/alfred/compose; verify before continuing.)
+#
+# 2. Drop this file at /opt/alfred/vexa/docker-compose.yaml on example-owner
+#    and create /opt/alfred/vexa/.env with:
+#
+#        IMAGE_TAG=0.10.6
+#        BROWSER_IMAGE=vexaai/vexa-bot:0.10.6
+#        ADMIN_API_TOKEN=<random 32-hex>
+#        INTERNAL_API_SECRET=<random 32-hex>
+#        # Groq Whisper transcription — the only env var Vexa needs
+#        # outside its internal services. See Vexa's
+#        # services/meeting-api README for the env contract.
+#        TRANSCRIPTION_SERVICE_URL=https://api.groq.com/openai/v1/audio/transcriptions
+#        TRANSCRIPTION_SERVICE_TOKEN=${GROQ_API_KEY}
+#        # Webhook target — sent on meeting.completed back into ctrl-api.
+#        VEXA_WEBHOOK_SECRET=<from Vaultwarden — same as ctrl-api .env>
+#
+# 3. Bring it up:
+#
+#        cd /opt/alfred/vexa
+#        docker compose pull
+#        docker compose up -d
+#
+# 4. Verify the api-gateway is reachable on the alfred network:
+#
+#        docker exec ctrl-api curl -s http://vexa-api-gateway:8000/
+#        # → {"message": "Welcome to the Vexa API Gateway"}
+#
+# 5. Provision a Vexa API key + register the webhook url. From inside
+#    the vexa project (the admin api is on :8057 inside the network):
+#
+#        # Create a user + token
+#        ADMIN_TOKEN="$(grep ADMIN_API_TOKEN .env | cut -d= -f2)"
+#        docker exec vexa-admin-api curl -sX POST \
+#          -H "X-Admin-API-Key: $ADMIN_TOKEN" \
+#          -H "Content-Type: application/json" \
+#          -d '{"email":"alfred@'$(hostname)'.local","max_concurrent_bots":3}' \
+#          http://localhost:8001/admin/users
+#        # Capture the api_token from the response → save as VEXA_API_KEY
+#        # in /opt/alfred/compose/.env so alfred-learn can call /bots.
+#
+#        # Register the webhook url. The user-scoped PUT /user/webhook
+#        # endpoint goes through api-gateway (X-API-Key auth):
+#        VEXA_API_KEY="<from previous step>"
+#        WEBHOOK_SECRET="$(grep VEXA_WEBHOOK_SECRET .env | cut -d= -f2)"
+#        docker exec ctrl-api curl -sX PUT \
+#          -H "X-API-Key: $VEXA_API_KEY" \
+#          -H "Content-Type: application/json" \
+#          -d "{\"url\":\"http://ctrl-api:3100/api/v1/webhooks/vexa\",\"secret\":\"$WEBHOOK_SECRET\"}" \
+#          http://vexa-api-gateway:8000/user/webhook
+#
+# 6. Configure alfred-learn:
+#
+#        # /opt/alfred/compose/.env
+#        VEXA_ENABLED=true
+#        VEXA_API_URL=http://vexa-api-gateway:8000
+#        VEXA_API_KEY=<from step 5>
+#        VEXA_BOT_DISPLAY_NAME=Alfred
+#        VEXA_GCAL_STREAM_ID=composio-googlecalendar  # adjust if different
+#        ALFRED_OWNER_EMAIL=owner@example.com
+#
+#        docker compose restart alfred-learn
+#        docker exec alfred-learn python -m scripts.register_schedules
+#
+# 7. Schedule a 1-minute test Meet for the next 5 minutes. Watch:
+#
+#        docker logs -f alfred-learn 2>&1 | grep -E 'meeting_capture|transcript'
+#        docker logs -f vexa-meeting-api 2>&1 | grep -E 'bot|transcript'
+#
+# Notes
+# -----
+# * /mnt/encrypted/vexa is the per-tenant data root; it must exist
+#   before bringing the stack up. The cloud-init template already
+#   creates it (see packages/ctrl/src/templates/cloud-init.yaml.njk
+#   and cloud-init-snapshot.yaml.njk — added in this PR). On example-owner the
+#   directory was created manually as part of the Phase 4 deploy:
+#
+#       mkdir -p /mnt/encrypted/vexa
+#       chown -R deploy:deploy /mnt/encrypted/vexa
+#
+# * All Vexa container ports are bound to 127.0.0.1 only — the
+#   api-gateway port forward at :18056 lets a human poke at the OpenAPI
+#   docs at http://127.0.0.1:18056/docs from a Tailscale shell. No public
+#   ingress is configured.
+#
+# * Memory totals (with all services running): ~2.5 GB peak. Tested on
+#   an example-owner-class VM (8 vCPU / 32 GB RAM); leaves 6+ GB headroom
+#   over the existing alfred stack's footprint.
+
+name: vexa
+services:
+  # --- Infrastructure ---
+
+  vexa-redis:
+    image: redis:7.0-alpine
+    container_name: vexa-redis
+    mem_limit: 512m
+    pids_limit: 256
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - /mnt/encrypted/vexa/redis:/data
+    networks:
+      - vexa-internal
+    restart: unless-stopped
+
+  vexa-postgres:
+    image: postgres:17-alpine
+    container_name: vexa-postgres
+    mem_limit: 1g
+    pids_limit: 256
+    command: ["postgres", "-c", "idle_in_transaction_session_timeout=60000"]
+    environment:
+      - POSTGRES_DB=vexa
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vexa"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - /mnt/encrypted/vexa/postgres:/var/lib/postgresql/data
+    networks:
+      - vexa-internal
+    restart: unless-stopped
+
+  vexa-minio:
+    image: minio/minio:latest
+    container_name: vexa-minio
+    mem_limit: 1g
+    pids_limit: 256
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=vexa-access-key
+      - MINIO_ROOT_PASSWORD=vexa-secret-key
+    volumes:
+      - /mnt/encrypted/vexa/minio:/data
+    networks:
+      - vexa-internal
+    restart: unless-stopped
+
+  vexa-minio-init:
+    image: minio/mc:latest
+    container_name: vexa-minio-init
+    depends_on:
+      - vexa-minio
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sleep 5
+        mc alias set vexa http://vexa-minio:9000 vexa-access-key vexa-secret-key
+        mc mb --ignore-existing vexa/vexa
+        exit 0
+    networks:
+      - vexa-internal
+    restart: "no"
+
+  # --- Vexa core services (pinned to upstream tag 0.10.6 — see
+  # https://github.com/Vexa-ai/vexa/releases/tag/vexa-0.10.6) ---
+
+  vexa-admin-api:
+    image: vexaai/admin-api:${IMAGE_TAG:-0.10.6}
+    container_name: vexa-admin-api
+    mem_limit: 512m
+    pids_limit: 256
+    environment:
+      - DB_HOST=vexa-postgres
+      - DB_PORT=5432
+      - DB_NAME=vexa
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_SSL_MODE=disable
+      - ADMIN_API_TOKEN=${ADMIN_API_TOKEN:-changeme}
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-vexa-internal-secret}
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    init: true
+    depends_on:
+      vexa-postgres:
+        condition: service_healthy
+    networks:
+      - vexa-internal
+    restart: unless-stopped
+
+  vexa-runtime-api:
+    image: vexaai/runtime-api:${IMAGE_TAG:-0.10.6}
+    container_name: vexa-runtime-api
+    mem_limit: 1g
+    pids_limit: 512
+    # The runtime-api spawns Vexa-bot containers as docker children.
+    # It needs the docker socket plus group membership for the alfred
+    # docker GID (deploy:deploy on example-owner is gid 1000; docker group
+    # gid is typically 998 — adjust DOCKER_GID below if different).
+    group_add:
+      - "${DOCKER_GID:-998}"
+    environment:
+      # Use the SHARED alfred network so spawned bots can reach
+      # ctrl-api at http://ctrl-api:3100 for the webhook callback
+      # without traversing host networking.
+      - DOCKER_NETWORK=alfred_default
+      - BROWSER_IMAGE=${BROWSER_IMAGE:-vexaai/vexa-bot:0.10.6}
+      - REDIS_URL=redis://vexa-redis:6379
+      - MINIO_ENDPOINT=vexa-minio:9000
+      - MINIO_ACCESS_KEY=vexa-access-key
+      - MINIO_SECRET_KEY=vexa-secret-key
+      - MINIO_BUCKET=vexa
+      - DB_HOST=vexa-postgres
+      - DB_PORT=5432
+      - DB_NAME=vexa
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_SSL_MODE=disable
+      - ALLOW_PRIVATE_CALLBACKS=1
+      - LOG_LEVEL=INFO
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    init: true
+    depends_on:
+      vexa-redis:
+        condition: service_started
+      vexa-postgres:
+        condition: service_healthy
+    networks:
+      - vexa-internal
+      - alfred_default
+    restart: unless-stopped
+
+  vexa-meeting-api:
+    image: vexaai/meeting-api:${IMAGE_TAG:-0.10.6}
+    container_name: vexa-meeting-api
+    mem_limit: 1g
+    pids_limit: 512
+    environment:
+      - DB_HOST=vexa-postgres
+      - DB_PORT=5432
+      - DB_NAME=vexa
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_SSL_MODE=disable
+      - REDIS_URL=redis://vexa-redis:6379/0
+      - REDIS_HOST=vexa-redis
+      - REDIS_PORT=6379
+      - ADMIN_TOKEN=${ADMIN_API_TOKEN:-changeme}
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-vexa-internal-secret}
+      - RUNTIME_API_URL=http://vexa-runtime-api:8090
+      - MEETING_API_URL=http://vexa-meeting-api:8080
+      - BOT_IMAGE_NAME=${BROWSER_IMAGE:-vexaai/vexa-bot:0.10.6}
+      - DOCKER_NETWORK=alfred_default
+      - STORAGE_BACKEND=minio
+      - MINIO_ENDPOINT=vexa-minio:9000
+      - MINIO_ACCESS_KEY=vexa-access-key
+      - MINIO_SECRET_KEY=vexa-secret-key
+      - MINIO_BUCKET=vexa
+      - MINIO_SECURE=false
+      - RECORDING_ENABLED=true
+      - CAPTURE_MODES=audio
+      # Groq Whisper for transcription. Vexa speaks the
+      # OpenAI-Audio-Transcriptions wire shape, which Groq emulates
+      # (https://console.groq.com/docs/api-reference#audio-transcription).
+      - TRANSCRIPTION_SERVICE_URL=${TRANSCRIPTION_SERVICE_URL:-https://api.groq.com/openai/v1/audio/transcriptions}
+      - TRANSCRIPTION_SERVICE_TOKEN=${TRANSCRIPTION_SERVICE_TOKEN}
+      - LOG_LEVEL=INFO
+    volumes:
+      - /mnt/encrypted/vexa/recordings:/data/recordings
+    init: true
+    depends_on:
+      vexa-redis:
+        condition: service_started
+      vexa-postgres:
+        condition: service_healthy
+      vexa-runtime-api:
+        condition: service_started
+    networks:
+      - vexa-internal
+      - alfred_default
+    restart: unless-stopped
+
+  vexa-api-gateway:
+    image: vexaai/api-gateway:${IMAGE_TAG:-0.10.6}
+    container_name: vexa-api-gateway
+    mem_limit: 1g
+    pids_limit: 512
+    # Bind to localhost only — alfred-learn reaches the gateway via the
+    # alfred_default network alias ``vexa-api-gateway``. The published
+    # port is for human poking at /docs on a Tailscale shell.
+    ports:
+      - "127.0.0.1:18056:8000"
+    environment:
+      - ADMIN_API_URL=http://vexa-admin-api:8001
+      - MEETING_API_URL=http://vexa-meeting-api:8080
+      - TRANSCRIPTION_COLLECTOR_URL=http://vexa-meeting-api:8080
+      - REDIS_URL=redis://vexa-redis:6379/0
+      - INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-vexa-internal-secret}
+      - RATE_LIMIT_RPM=600
+      - LOG_LEVEL=INFO
+      - CORS_ORIGINS=*
+      # Vexa expects MCP_URL even when MCP isn't running — set to a
+      # bogus localhost so api-gateway boots. (The MCP service block
+      # is intentionally omitted from this stack — alfred has its own
+      # MCP server.)
+      - MCP_URL=http://127.0.0.1:1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    init: true
+    depends_on:
+      vexa-admin-api:
+        condition: service_healthy
+      vexa-meeting-api:
+        condition: service_started
+      vexa-redis:
+        condition: service_started
+    networks:
+      - vexa-internal
+      # alfred_default is where ctrl-api + alfred-learn live — placing
+      # api-gateway here exposes ``http://vexa-api-gateway:8000`` to
+      # them without going through the host.
+      - alfred_default
+    restart: unless-stopped
+
+networks:
+  vexa-internal:
+    driver: bridge
+  # External: created by the alfred compose project. Bring the alfred
+  # stack up FIRST so this network exists. (`docker compose up` in
+  # /opt/alfred/compose creates ``alfred_default`` automatically.)
+  alfred_default:
+    external: true

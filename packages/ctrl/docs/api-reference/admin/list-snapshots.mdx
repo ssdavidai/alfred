@@ -1,0 +1,81 @@
+---
+title: "List Backup Snapshots"
+description: "List all restic backup snapshots"
+api: "GET /api/v1/admin/backups/snapshots"
+---
+
+List all backup snapshots stored in the restic repository. This shows the history of all backups taken for this Alfred instance.
+
+<RequestExample>
+
+```bash curl
+curl -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/backups/snapshots
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+[
+  {
+    "time": "2026-02-26T10:00:15.123456789Z",
+    "tree": "abc123def456",
+    "paths": [
+      "/mnt/encrypted"
+    ],
+    "hostname": "alfred-acme",
+    "username": "deploy",
+    "uid": 1000,
+    "gid": 1000,
+    "tags": [
+      "automated"
+    ],
+    "id": "abc123def456789",
+    "short_id": "abc123de"
+  },
+  {
+    "time": "2026-02-25T10:00:12.987654321Z",
+    "tree": "def456ghi789",
+    "paths": [
+      "/mnt/encrypted"
+    ],
+    "hostname": "alfred-acme",
+    "username": "deploy",
+    "uid": 1000,
+    "gid": 1000,
+    "tags": [
+      "automated"
+    ],
+    "id": "def456ghi789012",
+    "short_id": "def456gh"
+  },
+  {
+    "time": "2026-02-24T15:30:45.112233445Z",
+    "tree": "ghi789jkl012",
+    "paths": [
+      "/mnt/encrypted"
+    ],
+    "hostname": "alfred-acme",
+    "username": "deploy",
+    "uid": 1000,
+    "gid": 1000,
+    "tags": [
+      "manual"
+    ],
+    "id": "ghi789jkl012345",
+    "short_id": "ghi789jk"
+  }
+]
+```
+
+</ResponseExample>
+
+<Note>
+  Snapshots are sorted by time (newest first). Automated backups are tagged with "automated", while manual backups (triggered via the API) are tagged with "manual".
+</Note>
+
+<Tip>
+  To restore from a snapshot, SSH into the instance and use restic directly: `restic -r s3:... restore <snapshot-id> --target /path/to/restore`
+</Tip>

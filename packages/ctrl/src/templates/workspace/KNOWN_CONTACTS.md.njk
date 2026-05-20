@@ -1,0 +1,52 @@
+# Known Contacts
+
+Cached identifiers for Sir's known channels, so Alfred can deliver to them
+without spending turns walking workspace directories. Read this BEFORE attempting
+`users.list` / `channels.list` / pairing handshakes.
+
+## Sir
+
+- **Display name:** {{ owner_display_name or customer_name }}
+- **Email:** {{ owner_email or customer_email or "(unknown — capture from Sir on first contact)" }}
+
+### Channels
+
+| Channel    | Address / ID                                       | Notes                                                                       |
+|------------|----------------------------------------------------|-----------------------------------------------------------------------------|
+| Slack      | _(populate after first paired DM — `userId`, `dmChannelId`)_ | Read from a paired session jsonl, or ask Sir to send a DM and capture from the inbound payload. |
+| Telegram   | _(populate after first paired DM — `chatId`)_      | Captured from `chat.id` on first inbound message; bot account name from `channels.telegram.accounts.<name>`. |
+| AgentMail  | {% if agentmail_inbox %}`{{ agentmail_inbox }}`{% else %}_(set when AgentMail inbox is provisioned)_{% endif %} | Tenant inbox under `mail.alfred.black` (or legacy custom domain). |
+| AgentPhone | {% if agentphone_number %}`{{ agentphone_number }}`{% else %}_(set when AgentPhone number is provisioned)_{% endif %} | Twilio subnumber. SMS + voice both work. |
+
+## Machine-readable
+
+```json
+{
+  "sir": {
+    "displayName": "{{ owner_display_name or customer_name }}",
+    "email": "{{ owner_email or customer_email or '' }}",
+    "channels": {
+      "slack":      { "userId": "", "dmChannelId": "" },
+      "telegram":   { "chatId": "", "botAccount": "default" },
+      "agentmail":  { "address": "{{ agentmail_inbox or '' }}" },
+      "agentphone": { "e164": "{{ agentphone_number or '' }}" }
+    }
+  }
+}
+```
+
+## How to use this file
+
+When Sir tells you to deliver something to him on a channel ("send this to me on Slack",
+"text me when it's done", "drop me an email"), use the cached IDs above. **Do not search
+Slack's user directory, do not call Telegram `getUpdates`, do not page through email
+contacts** — you'll waste turns and still not find what you need. The values here are
+authoritative.
+
+If a channel below isn't in the table (cell shows a placeholder like `_(populate after…)_`,
+or the JSON value is empty), THEN fall back to discovery / pairing for that channel only.
+Once you've found the value, ask Sir if you can save it here for next time — then
+overwrite this file via `self({ endpoint: "/api/v1/admin/workspace/KNOWN_CONTACTS.md",
+method: "PUT", body: { content: "<full markdown>" } })`.
+
+See the `alfred-channel-delivery` skill for end-to-end `self()` call shapes per channel.

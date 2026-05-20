@@ -1,0 +1,83 @@
+---
+title: "List Hooks"
+description: "List all registered event hooks"
+api: "GET /api/v1/openclaw/hooks"
+---
+
+Returns a list of all event hooks registered in the OpenClaw gateway. Hooks are triggered on specific events and can execute custom actions.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/openclaw/hooks \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "hooks": [
+    {
+      "hookId": "hook_device_paired",
+      "name": "Device Paired Notification",
+      "event": "device.paired",
+      "enabled": true,
+      "action": {
+        "type": "webhook",
+        "url": "https://hooks.slack.com/services/XXX/YYY/ZZZ",
+        "method": "POST"
+      },
+      "stats": {
+        "totalTriggers": 5,
+        "successRate": 1.0,
+        "lastTriggered": "2026-02-25T09:15:42Z"
+      }
+    },
+    {
+      "hookId": "hook_vault_mutation",
+      "name": "Vault Mutation Logger",
+      "event": "vault.mutation",
+      "enabled": true,
+      "action": {
+        "type": "log",
+        "destination": "/mnt/encrypted/logs/vault_audit.log",
+        "format": "jsonl"
+      },
+      "stats": {
+        "totalTriggers": 1247,
+        "successRate": 1.0,
+        "lastTriggered": "2026-02-26T14:35:42Z"
+      }
+    },
+    {
+      "hookId": "hook_agent_error",
+      "name": "Agent Error Alert",
+      "event": "agent.error",
+      "enabled": true,
+      "action": {
+        "type": "webhook",
+        "url": "https://discord.com/api/webhooks/XXX/YYY",
+        "method": "POST"
+      },
+      "stats": {
+        "totalTriggers": 3,
+        "successRate": 1.0,
+        "lastTriggered": "2026-02-24T16:42:18Z"
+      }
+    }
+  ],
+  "total": 3,
+  "enabled": 3,
+  "disabled": 0
+}
+```
+
+</ResponseExample>

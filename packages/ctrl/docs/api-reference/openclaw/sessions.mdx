@@ -1,0 +1,57 @@
+---
+title: "List Sessions"
+description: "List all conversation sessions"
+api: "GET /api/v1/openclaw/sessions"
+---
+
+Returns a list of all conversation sessions managed by OpenClaw, including active and completed sessions.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/openclaw/sessions \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "sessions": [
+    {
+      "sessionId": "sess_3k7m9n2p4q",
+      "agentId": "agent_curator",
+      "deviceId": "dev_a1b2c3d4e5",
+      "status": "active",
+      "startedAt": "2026-02-26T14:20:15Z",
+      "lastActivity": "2026-02-26T14:35:42Z",
+      "messageCount": 12,
+      "toolCalls": 8
+    },
+    {
+      "sessionId": "sess_8x5y2z9w1v",
+      "agentId": "agent_janitor",
+      "deviceId": "dev_x9y8z7w6v5",
+      "status": "completed",
+      "startedAt": "2026-02-26T13:45:20Z",
+      "lastActivity": "2026-02-26T14:12:35Z",
+      "completedAt": "2026-02-26T14:12:35Z",
+      "messageCount": 24,
+      "toolCalls": 15,
+      "outcome": "success"
+    }
+  ],
+  "total": 2,
+  "active": 1,
+  "completed": 1
+}
+```
+
+</ResponseExample>

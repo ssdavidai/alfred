@@ -1,0 +1,98 @@
+---
+title: "Layer 2 — Agent"
+description: "OpenClaw runtime, specialist workers, scope enforcement, and sandboxing."
+icon: "robot"
+---
+
+<Note>
+This is **Layer 2** of Alfred's [six-layer architecture](/architecture). The Agent layer hosts the AI specialists that do the work.
+</Note>
+
+## OpenClaw — the agent runtime
+
+OpenClaw is Alfred's AI agent gateway. It manages sessions, skills, device pairing, and agent execution. Every specialist worker runs through OpenClaw, which provides a consistent interface to the underlying LLM backends.
+
+OpenClaw binds to localhost and is accessible externally only via Tailscale Serve. It handles:
+- Agent session management
+- Skill file loading and prompt construction
+- Device pairing and authentication
+- Plugin and hook execution
+
+## The four specialists
+
+Each specialist is a purpose-built AI worker with a defined role and strict permissions.
+
+| Specialist | Purpose | When it runs |
+|-----------|---------|-------------|
+| **Curator** | Processes raw inbox files into typed vault records with proper frontmatter and wikilinks | Watches `inbox/` for new files |
+| **Janitor** | Scans the vault for broken links, invalid frontmatter, orphaned records, and other structural issues — then fixes them | Periodic sweeps |
+| **Distiller** | Analyzes operational records and extracts latent knowledge: assumptions, decisions, constraints, contradictions, syntheses | On-demand or scheduled |
+| **Surveyor** | Embeds records, clusters them, labels clusters, and discovers cross-record relationships | Pipeline execution |
+
+Each specialist:
+1. Receives work (inbox file, scan trigger, extraction request)
+2. Builds a prompt from bundled skill files + vault context
+3. Invokes an AI agent backend through OpenClaw
+4. The agent reads/writes vault files via `alfred vault` CLI commands
+5. Changes are tracked in a JSONL mutation log
+
+## Scope enforcement
+
+Every specialist operates within strictly defined permissions. The vault operations layer enforces scope-based authorization — specialists cannot exceed their permissions even if the underlying LLM attempts to.
+
+| Scope | Create | Read | Edit | Delete |
+|-------|--------|------|------|--------|
+| **Curator** | Entity types | All | All | Never |
+| **Janitor** | Never | All | All | Yes |
+| **Distiller** | Learning types only | All | Never | Never |
+| **API** | All | All | All | All |
+
+<Note>
+The Curator can create and edit records but can never delete them. The Distiller can only create learning-type records (assumption, decision, constraint, contradiction, synthesis). These constraints are enforced at the vault operations layer, not by the LLM prompt.
+</Note>
+
+## The vault CLI gate
+
+Agents never touch the filesystem directly. All vault operations go through the `alfred vault` CLI, which enforces:
+
+- **Type validation** — records must match a known type with valid frontmatter
+- **Scope checking** — the calling agent's scope determines what operations are allowed
+- **Mutation logging** — every create, edit, delete, and move is logged to an append-only JSONL audit log
+- **Wikilink validation** — references must use the `[[type/Record Name]]` format
+
+This gate ensures that even if an agent's prompt is manipulated, it cannot perform unauthorized operations.
+
+## Command execution safety
+
+All command execution uses Node's `child_process.execFile` with **array arguments**, not shell strings. This prevents shell injection attacks even if user-controlled data reaches a command.
+
+```javascript
+// Safe — no shell interpretation
+execFile('/usr/bin/alfred', ['vault', 'create', 'person', '--data', JSON.stringify(data)])
+
+// Unsafe — vulnerable to injection (Alfred never does this)
+exec(`alfred vault create person --data '${data}'`)
+```
+
+## Third-party access
+
+Alfred instances connect only to:
+- **Configured LLM providers** (via OpenClaw's API key management)
+- **Hetzner S3** (for encrypted backups)
+- **Tailscale** (for mesh network connectivity)
+
+No browser plugins, no third-party marketplace, no extension system. The attack surface is deliberately minimal.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Worker Operations" icon="gears" href="/guides/worker-operations">
+    Start, stop, restart, and troubleshoot specialists
+  </Card>
+  <Card title="Device Pairing" icon="mobile" href="/guides/device-pairing">
+    Manage OpenClaw device access
+  </Card>
+  <Card title="Security Model" icon="lock" href="/concepts/security-model">
+    Full threat model and authorization details
+  </Card>
+</CardGroup>

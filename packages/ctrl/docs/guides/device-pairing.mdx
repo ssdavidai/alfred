@@ -1,0 +1,91 @@
+---
+title: "DM Pairing & Command Approval"
+description: "Hermes-native channel pairing and per-command safety gating"
+icon: "mobile"
+---
+
+Alfred runs on the [Hermes](https://hermes-agent.nousresearch.com) agent
+runtime. Two distinct Hermes-native features replace the OpenClaw-era
+"device" path:
+
+1. **DM pairing** — letting a messaging account talk to the gateway.
+2. **Command approval** — gating risky shell commands the agent wants to run.
+
+These are separate concerns; the sections below keep them apart.
+
+## DM Pairing
+
+When an account Alfred does not recognise sends it a direct message, Hermes
+issues that account a one-hour, 8-character pairing code (unambiguous
+alphabet — no `0/O/1/I`). The code is rate-limited (one per user per ten
+minutes; at most three pending per platform). The principal then approves
+that code, after which the conversation can reach Alfred.
+
+This is controlled in the Hermes profile config by `unauthorized_dm_behavior`
+(`pair` — the default — or `ignore`). There is no per-device token: a paired
+*account* is the unit of access, not a paired *device*.
+
+### List Pairings
+
+```bash
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/v1/devices \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+The native `hermes pairing list` CLI prints human-readable text — there is
+no JSON form — so the endpoint returns it verbatim:
+
+```json
+{
+  "raw": "Pending pairing codes:\n  telegram  XKGH5N7P  (expires in 47m)\n\nApproved users:\n  telegram  123456789  david"
+}
+```
+
+### Approve a Pairing Code
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/approve \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "platform": "telegram", "code": "XKGH5N7P" }'
+```
+
+### Revoke an Approved User
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/revoke \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "platform": "telegram", "userId": "123456789" }'
+```
+
+### Clear Pending Codes
+
+```bash
+curl -X POST https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/clear-pending \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+## Command Approval
+
+Command approval is **not** an API surface — it is Hermes runtime config.
+The `approvals.mode` key in each profile's `config.yaml` controls how risky
+shell commands are gated:
+
+| Mode | Behaviour |
+|------|-----------|
+| `manual` | Always prompt before running a flagged command. |
+| `smart` | An auxiliary LLM risk-assesses each command — low-risk auto-approves, dangerous auto-denies, ambiguous escalates to a prompt. |
+| `off` | No approval checks (equivalent to `--yolo`). |
+
+Alfred sets this per profile in `packages/hermes/hermes-config.yaml.njk`:
+
+- **`main`** (user-facing) → `smart`. A live principal can answer the rare
+  escalation prompt; routine commands are not slowed down.
+- **`workers`** (background agents) → `off`. Workers run unattended on
+  cron/batch pipelines with no TTY, so a prompt would deadlock the run.
+  Their safety net is `tool_loop_guardrails` (a hard stop on stuck loops),
+  not interactive approval.
+
+There is no parallel approval implementation in ctrl-api — command approval
+lives entirely in the Hermes runtime.

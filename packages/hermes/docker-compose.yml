@@ -1,0 +1,61 @@
+services:
+  init:
+    build:
+      context: .
+      dockerfile: init/Dockerfile
+    volumes:
+      - vault_data:/vault
+      - openclaw_state:/openclaw-state
+      - alfred_data:/alfred-data
+    env_file:
+      - .env
+
+  openclaw:
+    build:
+      context: .
+      dockerfile: dockerfiles/openclaw.Dockerfile
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - openclaw_state:/home/node/.openclaw
+      - vault_data:/home/node/.openclaw/workspace/vault
+    ports:
+      - "${OPENCLAW_PORT:-18789}:18789"
+    environment:
+      - OPENCLAW_GATEWAY_TOKEN
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+      - OPENROUTER_API_KEY
+    command: ["node", "openclaw.mjs", "gateway", "--bind", "lan", "--port", "18789", "--allow-unconfigured"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:18789/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  alfred:
+    build:
+      context: .
+      dockerfile: dockerfiles/alfred.Dockerfile
+    depends_on:
+      openclaw:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - vault_data:/vault
+      - alfred_data:/app/data
+    environment:
+      - OPENROUTER_API_KEY
+      - ANTHROPIC_API_KEY
+      - OPENCLAW_GATEWAY_TOKEN
+      - OPENCLAW_GATEWAY_URL=ws://openclaw:18789
+    restart: unless-stopped
+
+volumes:
+  vault_data:
+  openclaw_state:
+  alfred_data:

@@ -1,0 +1,17 @@
+{
+  "name": "alfred-setup",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Interactive onboarding wizard for alfred-black — collects keys, validates them live, picks models, generates secrets, writes .env.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/wizard.mjs"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.2.1",
+    "picocolors": "^1.1.1"
+  }
+}

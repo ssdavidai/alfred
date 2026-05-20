@@ -1,0 +1,64 @@
+---
+title: "List Containers"
+description: "List all Docker Compose containers and their status"
+api: "GET /api/v1/admin/containers"
+---
+
+Retrieve the status of all Docker Compose containers running in the Alfred stack.
+
+<RequestExample>
+
+```bash curl
+curl -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/containers
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+[
+  {
+    "Name": "alfred-init-1",
+    "Service": "init",
+    "State": "exited",
+    "Health": "",
+    "ExitCode": 0
+  },
+  {
+    "Name": "alfred-worker-1",
+    "Service": "worker",
+    "State": "running",
+    "Health": "healthy",
+    "ExitCode": 0
+  },
+  {
+    "Name": "alfred-openclaw-1",
+    "Service": "openclaw",
+    "State": "running",
+    "Health": "",
+    "ExitCode": 0
+  },
+  {
+    "Name": "alfred-temporal-1",
+    "Service": "temporal",
+    "State": "running",
+    "Health": "healthy",
+    "ExitCode": 0
+  },
+  {
+    "Name": "alfred-temporal-ui-1",
+    "Service": "temporal-ui",
+    "State": "running",
+    "Health": "",
+    "ExitCode": 0
+  }
+]
+```
+
+</ResponseExample>
+
+<Note>
+  Container field names use PascalCase (matching Docker Compose JSON output). The init container typically shows `State: "exited"` with `ExitCode: 0` after successful vault initialization.
+</Note>

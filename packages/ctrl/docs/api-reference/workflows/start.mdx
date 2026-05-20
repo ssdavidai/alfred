@@ -1,0 +1,59 @@
+---
+title: "Start Workflow"
+description: "Start a new workflow execution"
+api: "POST https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows"
+---
+
+Initiates a new workflow execution. Returns immediately with workflow run information.
+
+<ParamField body="workflow_type" type="string" required>
+  The workflow type to execute. Must match a registered workflow name.
+
+  Common types: `CuratorWorkflow`, `JanitorWorkflow`, `DistillerWorkflow`, `SurveyorWorkflow`
+</ParamField>
+
+<ParamField body="task_queue" type="string" required>
+  The task queue where this workflow should be executed.
+
+  Common queues: `alfred-curator`, `alfred-janitor`, `alfred-distiller`, `alfred-surveyor`
+</ParamField>
+
+<ParamField body="workflow_id" type="string" optional>
+  Custom workflow ID. If omitted, a unique ID will be generated.
+
+  Must be unique unless workflow ID reuse policy allows it.
+</ParamField>
+
+<ParamField body="input" type="any" optional>
+  Input data for the workflow. Structure depends on workflow type.
+</ParamField>
+
+<RequestExample>
+```bash cURL
+curl -X POST \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "workflow_type": "CuratorWorkflow",
+    "task_queue": "alfred-curator",
+    "workflow_id": "manual-curator-run-001",
+    "input": {
+      "vault_path": "/app/data/vault",
+      "inbox_path": "/app/data/vault/inbox",
+      "force_reprocess": true
+    }
+  }' \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/workflows
+```
+</RequestExample>
+
+<ResponseExample>
+```json 201 Created
+{
+  "workflowId": "manual-curator-run-001",
+  "runId": "9b8e7f6a-5d4c-3b2a-1f0e-9d8c7b6a5f4e",
+  "firstExecutionRunId": "9b8e7f6a-5d4c-3b2a-1f0e-9d8c7b6a5f4e",
+  "started": true
+}
+```
+</ResponseExample>

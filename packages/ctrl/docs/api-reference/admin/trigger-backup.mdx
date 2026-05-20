@@ -1,0 +1,43 @@
+---
+title: "Trigger Manual Backup"
+description: "Start a manual backup of the Alfred instance"
+api: "POST /api/v1/admin/backups/trigger"
+---
+
+Trigger a manual backup using restic. This is a fire-and-forget operation that returns immediately (202 Accepted). The backup runs in the background, stopping containers, creating a restic snapshot, and restarting containers.
+
+<RequestExample>
+
+```bash curl
+curl -X POST -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/backups/trigger
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "message": "Backup started in background"
+}
+```
+
+</ResponseExample>
+
+<Warning>
+  The backup process will:
+  1. Stop all Alfred containers (including the worker)
+  2. Create a restic snapshot of `/mnt/encrypted`
+  3. Restart all containers
+
+  This process typically takes 2-5 minutes depending on vault size. Services will be unavailable during this time.
+</Warning>
+
+<Note>
+  Automated daily backups are scheduled via cron during provisioning. Manual backups are useful for creating snapshots before major configuration changes or updates.
+</Note>
+
+<Tip>
+  Check backup completion and snapshot status using the list snapshots endpoint.
+</Tip>

@@ -1,0 +1,47 @@
+---
+title: "Revoke Pairing"
+description: "Revoke an approved user's channel access"
+api: "POST /api/v1/devices/revoke"
+---
+
+Revokes a previously-approved messaging account's access to Alfred. Proxies
+the native `hermes pairing revoke <platform> <user-id>` CLI.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<ParamField body="platform" type="string" required>
+  The messaging platform the user is on — e.g. `telegram`, `slack`,
+  `discord`, `whatsapp`, `signal`.
+</ParamField>
+
+<ParamField body="userId" type="string" required>
+  The platform-specific user id of the approved account to revoke. Shown in
+  the approved-users section of `GET /api/v1/devices`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request POST \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices/revoke \
+  --header 'Authorization: Bearer YOUR_API_KEY' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "platform": "telegram",
+    "userId": "123456789"
+  }'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "message": "Access revoked"
+}
+```
+
+</ResponseExample>

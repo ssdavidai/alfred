@@ -1,0 +1,61 @@
+---
+title: "Gateway Status"
+description: "Get detailed OpenClaw gateway status information"
+api: "GET /api/v1/openclaw/status"
+---
+
+Returns detailed status information about the OpenClaw gateway, including configuration, active connections, and runtime metrics.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/openclaw/status \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "gatewayId": "alfred-acme",
+  "version": "0.2.1",
+  "uptime": 345672,
+  "startedAt": "2026-02-22T10:12:30Z",
+  "config": {
+    "bind": "lan",
+    "port": 3100,
+    "allowUnconfigured": false,
+    "dataPath": "/home/node/.openclaw"
+  },
+  "connections": {
+    "active": 3,
+    "total": 127
+  },
+  "devices": {
+    "pending": 1,
+    "paired": 5
+  },
+  "agents": {
+    "active": 2,
+    "total": 4
+  },
+  "sessions": {
+    "active": 1,
+    "total": 89
+  },
+  "metrics": {
+    "requestsPerMinute": 4.2,
+    "averageResponseTime": 245,
+    "errorRate": 0.02
+  }
+}
+```
+
+</ResponseExample>

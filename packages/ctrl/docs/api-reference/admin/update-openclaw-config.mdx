@@ -1,0 +1,58 @@
+---
+title: "Update OpenClaw Configuration"
+description: "Update the OpenClaw gateway configuration"
+api: "PATCH /api/v1/admin/config/openclaw"
+---
+
+Update the OpenClaw configuration at `/mnt/encrypted/openclaw/openclaw.json`. The provided JSON is deep-merged into the existing configuration.
+
+## Request Body
+
+The request body should contain the configuration properties to update. Nested objects are deep-merged, not replaced.
+
+<RequestExample>
+
+```bash curl
+# Enable OpenClaw control UI
+curl -X PATCH -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "gateway": {
+      "controlUi": {
+        "enabled": true,
+        "dangerouslyAllowHostHeaderOriginFallback": true
+      }
+    }
+  }' \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/config/openclaw
+
+# Change gateway port
+curl -X PATCH -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "gateway": {
+      "port": 9090
+    }
+  }' \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/config/openclaw
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "message": "OpenClaw config updated"
+}
+```
+
+</ResponseExample>
+
+<Warning>
+  Changes to OpenClaw configuration require restarting the openclaw container to take effect. Use the container restart endpoint after updating this configuration.
+</Warning>
+
+<Note>
+  Device management (approving/rejecting devices) should be done through the OpenClaw CLI or control UI, not by directly editing this configuration file.
+</Note>

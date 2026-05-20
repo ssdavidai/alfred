@@ -1,0 +1,264 @@
+# Build + push the alfred-web images (the Wasp dashboard).
+#
+# `wasp build` compiles the app into packages/web/.wasp/build/, which holds
+# BOTH artefacts:
+#   * the server  → .wasp/build/Dockerfile        → alfred-web
+#   * the client  → .wasp/build/web-app/ (Vite)   → alfred-web-client
+#
+# Job graph:
+#   prepare       — wasp build + Prisma baseline + SPA client build (arch-agnostic),
+#                   uploads the server and client build contexts as artifacts.
+#   build-server  — matrix {amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm};
+#                   each NATIVE runner builds its arch and pushes BY DIGEST.
+#   merge-server  — `docker buildx imagetools create` merges the two per-arch
+#                   digests into the multi-arch :latest manifest.
+#   build-client  — multi-arch buildx of the static-only client image.
+#
+# Why per-arch native runners for the server: the Wasp server Dockerfile runs
+# `npm install` (native-heavy: prisma generate, node-gyp). Cross-emulating
+# arm64 via QEMU on an amd64 runner SIGILLs intermittently
+# (`qemu: uncaught target signal 4 (Illegal instruction)`, exit 132).
+# Building each arch on its own native runner eliminates QEMU entirely for
+# the server. The client image only PACKAGES static output (no in-Docker
+# `npm install`), so it stays a cheap multi-arch buildx build.
+name: build-web
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/web/**"
+      - ".github/workflows/build-web.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: build-web-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SERVER_IMAGE: ssdavidai00/alfred-web
+  CLIENT_IMAGE: ssdavidai00/alfred-web-client
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # prepare — run the Wasp toolchain once. `wasp build`, the Prisma baseline
+  # migration, and the SPA client build all emit JS / static assets + a
+  # Dockerfile; none of it is arch-specific. The outputs are uploaded as
+  # artifacts and consumed by the per-arch Docker build jobs below.
+  # ---------------------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Wasp
+        run: curl -sSL https://get.wasp.sh/installer.sh | sh -s -- -v 0.19.0
+
+      - name: wasp build
+        working-directory: packages/web
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          wasp build
+
+      - name: Generate Prisma baseline migration
+        # The repo ships no migration files (the multi-tenant SaaS history
+        # was dropped). Generate a baseline `0_init` from the Wasp-expanded
+        # schema so the web container's `prisma migrate deploy` creates the
+        # full schema on a fresh database.
+        working-directory: packages/web/.wasp/build/db
+        run: |
+          mkdir -p migrations/0_init
+          npx -y prisma@5.19.1 migrate diff \
+            --from-empty \
+            --to-schema-datamodel schema.prisma \
+            --script > migrations/0_init/migration.sql
+          printf 'provider = "postgresql"\n' > migrations/migration_lock.toml
+          echo "baseline migration: $(wc -l < migrations/0_init/migration.sql) lines"
+          head -3 migrations/0_init/migration.sql
+
+      - name: Build the Wasp SPA client
+        # The Wasp client is an npm-workspace project — building it inside a
+        # standalone Docker stage is fragile (the `wasp/*` SDK + hoisted
+        # node_modules don't resolve). Build it here on the runner, where the
+        # Wasp toolchain works natively, then the client image just packages
+        # the static output. REACT_APP_API_URL is a placeholder substituted
+        # at container start (keeps the image domain-agnostic).
+        working-directory: packages/web/.wasp/build/web-app
+        run: |
+          npm install --no-audit --no-fund
+          # A valid-URL sentinel (.invalid is a reserved TLD) so Wasp's
+          # client env validation passes; the entrypoint rewrites it at
+          # container start to the real API URL.
+          REACT_APP_API_URL=https://alfred-api-url.placeholder.invalid npm run build
+          test -d build
+          rm -rf "$GITHUB_WORKSPACE/packages/web/web-app-build"
+          cp -r build "$GITHUB_WORKSPACE/packages/web/web-app-build"
+
+      - name: Upload server build context
+        # The full .wasp/build tree IS the server Docker build context: it
+        # contains the Dockerfile plus everything it COPYs — src/, package.json,
+        # package-lock.json, tsconfig*.json, server/, sdk/, and db/ (with the
+        # baseline migrations/ generated above). include-hidden-files keeps
+        # .dockerignore / .waspinfo / .waspchecksums.
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-context
+          path: packages/web/.wasp/build
+          include-hidden-files: true
+          retention-days: 1
+
+      - name: Upload client build context
+        # The client Docker build context is packages/web; Dockerfile.client
+        # COPYs only web-app-build/ (staged above), nginx-spa.conf and
+        # web-client-entrypoint.sh. Upload exactly those four paths.
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-context
+          path: |
+            packages/web/Dockerfile.client
+            packages/web/web-app-build
+            packages/web/nginx-spa.conf
+            packages/web/web-client-entrypoint.sh
+          include-hidden-files: true
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # build-server — build the Wasp server image PER ARCH on a NATIVE runner.
+  # No QEMU: each runner's host architecture matches the image it builds, so
+  # the Dockerfile's `npm install` runs natively. Each job pushes its image
+  # BY DIGEST (no tag) and exports the digest as an artifact for the merge.
+  # ---------------------------------------------------------------------------
+  build-server:
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Download server build context
+        uses: actions/download-artifact@v4
+        with:
+          name: server-context
+          path: server-context
+
+      - name: Set up Docker Buildx
+        # No setup-qemu-action: the runner is native to ${{ matrix.arch }}.
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push alfred-web (server) by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: server-context
+          platforms: linux/${{ matrix.arch }}
+          # push-by-digest: push the image content without a tag; the digest
+          # is what merge-server stitches into the multi-arch manifest.
+          outputs: type=image,push-by-digest=true,name-canonical=true,name=${{ env.SERVER_IMAGE }},push=true
+          cache-from: type=gha,scope=web-server-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=web-server-${{ matrix.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${RUNNER_TEMP}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # merge-server — combine the per-arch digests into one multi-arch manifest
+  # tagged :latest. `imagetools create` does this purely at the registry
+  # level (no rebuild, no QEMU).
+  # ---------------------------------------------------------------------------
+  merge-server:
+    needs: build-server
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: digests
+          pattern: server-digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create multi-arch manifest
+        working-directory: digests
+        run: |
+          docker buildx imagetools create \
+            -t "${SERVER_IMAGE}:latest" \
+            $(printf "${SERVER_IMAGE}@sha256:%s " *)
+
+      - name: Inspect manifest
+        run: docker buildx imagetools inspect ${SERVER_IMAGE}:latest
+
+  # ---------------------------------------------------------------------------
+  # build-client — the alfred-web-client image only PACKAGES the static SPA
+  # bundle (no in-Docker `npm install`), so a multi-arch buildx build under
+  # QEMU is trivial and safe. Kept as a single multi-arch build.
+  # ---------------------------------------------------------------------------
+  build-client:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download client build context
+        uses: actions/download-artifact@v4
+        with:
+          name: client-context
+          path: client-context
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push alfred-web-client (SPA)
+        uses: docker/build-push-action@v6
+        with:
+          # context is client-context — the downloaded artifact holds the
+          # staged web-app-build/ bundle, nginx-spa.conf, the entrypoint and
+          # Dockerfile.client. No build step inside Docker → fast multi-arch.
+          context: client-context
+          file: client-context/Dockerfile.client
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.CLIENT_IMAGE }}:latest
+          cache-from: type=gha,scope=web-client
+          cache-to: type=gha,mode=max,scope=web-client

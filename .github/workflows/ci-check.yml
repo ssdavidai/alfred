@@ -1,0 +1,98 @@
+# Lint + type-check + test gate for alfred-black.
+#
+#   * esbuild bundle     — packages/ctrl (dist/api.mjs compiles)
+#   * pytest             — packages/learn
+#   * docker compose config — the root compose file parses clean
+#   * shellcheck         — scripts/bootstrap.sh
+#
+# Runs on every PR and on push to main. Does NOT build or deploy images
+# (that is the build-*.yml workflows' job). The Wasp web app is type-checked
+# by build-web.yml's `wasp build` — bare `tsc` cannot resolve the generated
+# `wasp/*` modules without Wasp codegen, so it is not checked here.
+name: ci-check
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-ctrl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install deps
+        working-directory: packages/ctrl
+        run: npm ci
+      - name: esbuild bundle (dist/api.mjs)
+        # The real compile check — the same bundle the ctrl-api image ships.
+        # `tsc --noEmit` is not used: node:sqlite is esbuild-external and has
+        # no tsc-resolvable types, so bare tsc reports false positives.
+        working-directory: packages/ctrl
+        run: node build.mjs
+
+  pytest-learn:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        working-directory: packages/learn
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+      - name: pytest
+        working-directory: packages/learn
+        run: pytest tests/ -v -m "not slow"
+
+  compose-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Synthesize a dummy .env
+        # docker compose config resolves env_file + ${VAR} interpolation; a
+        # placeholder .env lets the parser run without real secrets.
+        run: |
+          cp .env.example .env
+          # Fill required + auto fields with dummy values so interpolation
+          # never resolves to empty (compose warns, but config still parses).
+          {
+            echo "DOMAIN=example.com"
+            echo "ACME_EMAIL=ci@example.com"
+            echo "OWNER_NAME=CI"
+            echo "ANTHROPIC_API_KEY=sk-ci-dummy"
+            echo "OPENROUTER_API_KEY=sk-ci-dummy"
+            echo "COMPOSIO_API_KEY=ci-dummy"
+            for k in AAS_API_KEY COLUMN_ENCRYPTION_KEY JWT_SECRET \
+                     HERMES_API_SERVER_KEY WEB_DATABASE_PASSWORD \
+                     VAULTWARDEN_ADMIN_TOKEN MCP_APPROVAL_SECRET \
+                     DJANGO_SECRET_KEY POSTGRES_PASSWORD REDIS_PASSWORD \
+                     MINIO_ROOT_PASSWORD LIVE_SERVER_SECRET_KEY \
+                     SURE_SECRET_KEY_BASE SURE_POSTGRES_PASSWORD \
+                     SURE_REDIS_PASSWORD VEXA_POSTGRES_PASSWORD \
+                     VEXA_MINIO_PASSWORD VEXA_ADMIN_API_TOKEN \
+                     VEXA_INTERNAL_API_SECRET; do
+              echo "${k}=cidummy0000000000000000000000000000"
+            done
+          } >> .env
+      - name: docker compose config (default profile)
+        run: docker compose config --quiet
+      - name: docker compose config (vexa profile)
+        run: docker compose --profile vexa config --quiet
+
+  bootstrap-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck bootstrap.sh
+        run: shellcheck scripts/bootstrap.sh

@@ -1,0 +1,1255 @@
+# alfred-black — single-VM stack.
+#
+# `docker compose up -d` PULLS only — never builds. Every service references a
+# published image tag. Custom images are built + pushed by CI
+# (.github/workflows/build-*.yml); third-party images come from public
+# registries.
+#
+# This file is the static, de-templated merge of:
+#   * packages/ctrl/src/templates/docker-compose.yaml.njk  (the tenant stack)
+#   * deploy/docker-compose.yaml                            (the Wasp web app)
+# from alfred-platform. Nunjucks `{% if %}` → compose `profiles`; `{{ }}` →
+# `${ENV}`; `/mnt/encrypted/*` bind mounts → named Docker volumes.
+#
+# Profiles:
+#   * (default — no profile)  always-on services. `docker compose up -d`.
+#   * vexa                    the 9-container transcript stack.
+#                             `docker compose --profile vexa up -d`.
+#
+# Minimum VM spec: 16-32 GB RAM, 4+ vCPU, 80+ GB disk (+~3 GB with `vexa`).
+#
+# Host port bindings: only `caddy` (80/443). Every other service talks over
+# the compose default network by service DNS (e.g. http://ctrl-api:3100).
+
+name: alfred-black
+
+services:
+  # ── Caddy — public ingress + automatic Let's Encrypt TLS ────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_started
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - DOMAIN=${DOMAIN}
+      - ACME_EMAIL=${ACME_EMAIL}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 0"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    mem_limit: 256m
+    pids_limit: 256
+
+  # ── web-db — Postgres for the Wasp web app (auth, ApiKey, OAuth) ────
+  web-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=alfred
+      - POSTGRES_PASSWORD=${WEB_DATABASE_PASSWORD}
+      - POSTGRES_DB=alfred_web
+      - PGDATA=/var/lib/postgresql/data
+    volumes:
+      - web_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alfred -d alfred_web"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    mem_limit: 1g
+    pids_limit: 512
+
+  # ── web — the Wasp dashboard (SPA + API server) ─────────────────────
+  # Wasp runs `prisma migrate deploy` against web-db on container start.
+  web:
+    image: ssdavidai00/alfred-web:latest
+    restart: unless-stopped
+    depends_on:
+      web-db:
+        condition: service_healthy
+      ctrl-api:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://alfred:${WEB_DATABASE_PASSWORD}@web-db:5432/alfred_web
+      - PORT=3000
+      - WASP_WEB_CLIENT_URL=https://${DOMAIN}
+      # the server is reached on its own subdomain; the SPA (apex) calls it
+      # cross-origin — WASP_WEB_CLIENT_URL above configures Wasp's CORS.
+      - WASP_SERVER_URL=https://api.${DOMAIN}
+      - JWT_SECRET=${JWT_SECRET}
+      - CTRL_API_URL=http://ctrl-api:3100
+      - AAS_API_KEY=${AAS_API_KEY}
+      - COLUMN_ENCRYPTION_KEY=${COLUMN_ENCRYPTION_KEY}
+    volumes:
+      # read-only — the chat proxy reads /alfred-data/.gateway-token to
+      # authenticate to the Hermes /v1 API.
+      - alfred_data:/alfred-data:ro
+    healthcheck:
+      # the Wasp server image is slim (no wget/curl) and exposes no fixed
+      # 200 route — a TCP-connect probe via the bundled Node is robust.
+      test: ["CMD-SHELL", "node -e \"require('net').connect(3000,'127.0.0.1').on('connect',function(){process.exit(0)}).on('error',function(){process.exit(1)})\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+    mem_limit: 2g
+    pids_limit: 512
+
+  # ── web-client — the Wasp React SPA (static, nginx) ─────────────────
+  # `wasp build` emits the client separately from the server; this nginx
+  # image serves the static bundle with SPA history-fallback. Caddy routes
+  # the apex domain here and api.<domain> to the `web` server.
+  web-client:
+    image: ssdavidai00/alfred-web-client:latest
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_started
+    environment:
+      # baked into the SPA bundle at container start (replaces the
+      # __ALFRED_API_URL__ placeholder) — must match the api subdomain.
+      - WASP_SERVER_URL=https://api.${DOMAIN}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    mem_limit: 128m
+    pids_limit: 256
+
+  # ── init — one-shot bootstrap gate ──────────────────────────────────
+  # Scaffolds the vault, deploys skills + the MCP bundle, renders Hermes
+  # profile configs, writes /alfred-data/.gateway-token. Every long-running
+  # service that needs a scaffolded vault/config gates on this completing.
+  init:
+    image: ssdavidai00/alfred-init:latest
+    restart: "no"
+    volumes:
+      - vault_data:/vault
+      - hermes_data:/hermes-state
+      - alfred_data:/alfred-data
+    env_file:
+      - .env
+    environment:
+      # hermes_data is mounted at /hermes-state; the init container writes
+      # the rendered Hermes profile configs under /hermes-state/profiles/<p>/
+      # and the hermes runtime sees the same volume at the same path.
+      - HERMES_DATA_DIR=/hermes-state
+      - HERMES_RUNTIME_HOME=/hermes-state
+
+  # ── temporal — workflow engine for alfred-learn ─────────────────────
+  temporal:
+    # blobSize / historySize bumps from defaults (2MB warn / 4MB error blob,
+    # 50MB / 50K events history) up to 16MB / 8MB blob and 200MB / 100K
+    # history — driven by composio_pull returning full-HTML Gmail bodies
+    # that hit Temporal's 4MB blob limit on a busy mailbox.
+    image: temporalio/temporal:latest
+    # start-dev writes its SQLite DB to the temporal_data volume; Docker
+    # creates named volumes root-owned, and the image's default user cannot
+    # write there (SQLITE_CANTOPEN). Run as root so the DB file is created.
+    user: "0:0"
+    command:
+      - "server"
+      - "start-dev"
+      - "--db-filename"
+      - "/data/temporal.db"
+      - "--ip"
+      - "0.0.0.0"
+      - "--port"
+      - "7233"
+      - "--ui-port"
+      - "8233"
+      - "--dynamic-config-value"
+      - "limit.blobSize.warn=8388608"
+      - "--dynamic-config-value"
+      - "limit.blobSize.error=16777216"
+      - "--dynamic-config-value"
+      - "limit.historySize.warn=104857600"
+      - "--dynamic-config-value"
+      - "limit.historySize.error=209715200"
+      - "--dynamic-config-value"
+      - "limit.historyCount.warn=51200"
+      - "--dynamic-config-value"
+      - "limit.historyCount.error=102400"
+      - "--dynamic-config-value"
+      - "frontend.rpc.maxReceivedMessageSize=33554432"
+      - "--dynamic-config-value"
+      - "history.rpc.maxReceivedMessageSize=33554432"
+    volumes:
+      - temporal_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "temporal operator cluster health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    # Temporal's Go runtime multiplexes goroutines onto OS threads; under
+    # concurrent workflow load 256 exhausted the pid budget. 1024 holds.
+    pids_limit: 1024
+
+  # ── ollama — local embedding server (nomic-embed-text) ──────────────
+  ollama:
+    image: ollama/ollama:latest
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        SERVE_PID=$$!
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull nomic-embed-text || echo "[ollama] pull failed, will retry next boot"
+        wait $$SERVE_PID
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 120s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    pids_limit: 512
+
+  # ── hermes — the single AI runtime (replaces openclaw + openclaw-workers) ─
+  # One image runs two `hermes -p <profile> gateway` processes; each binds
+  # its OpenAI-compatible /v1 API server on the canonical port:
+  #   * main profile    — user-facing chat, API on :18789
+  #   * workers profile — background agents, API on :18790
+  # The supervised entrypoint baked into the image launches both. The
+  # hermes-shim compat layer was retired in issue #40 — callers speak the
+  # Hermes /v1 API directly.
+  hermes:
+    image: ssdavidai00/alfred-black-hermes:latest
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      temporal:
+        condition: service_healthy
+    volumes:
+      - hermes_data:/hermes-state
+      - vault_data:/vault
+      - alfred_data:/alfred-data
+    tmpfs:
+      - /tmp:size=256m
+    environment:
+      - HERMES_API_SERVER_KEY=${HERMES_API_SERVER_KEY}
+      - HERMES_HOME=/hermes-state
+      - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - NODE_OPTIONS=--max-old-space-size=3072
+      - CTRL_API_URL=http://ctrl-api:3100
+      # Per-job timeout (seconds) Hermes applies to every `cron` job. This is
+      # the cron analogue of the Temporal `execution_timeout` the `learn`
+      # schedules set today. Issue #56 audited every workflow in the
+      # cron-eligible set (WORKFLOW-DURABILITY.md) + the two #51 movers: the
+      # largest Temporal timeout being replaced is SignalExtractWorkflow at
+      # 25 min (register_schedules.py register_signal_extract — 10 chunks ×
+      # 120 s ≈ 1200 s worst case, 25-min envelope); StreamEventPurgeWorkflow
+      # is 10 min; most others set no Temporal timeout at all. 1800 s = the
+      # 25-min ceiling + a 5-min margin, so a long-tail signal-extract tick is
+      # never killed mid-flight (silent data loss). MUST stay ≥ the largest
+      # Temporal execution_timeout before #48 moves any workflow to cron.
+      - HERMES_CRON_TIMEOUT=1800
+    healthcheck:
+      # the hermes image (python:3.12-slim base) ships curl, not wget
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:18789/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    # Sized for two Python gateway processes + MCP stdio children. The
+    # workers side carries the heavier task-registry boot path.
+    mem_limit: 6g
+    pids_limit: 2048
+
+  # ── alfred — the vault daemon (curator / janitor / distiller / surveyor) ─
+  alfred:
+    image: ssdavidai00/alfred-worker:latest
+    depends_on:
+      hermes:
+        condition: service_healthy
+      ctrl-api:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - vault_data:/vault
+      - alfred_data:/app/data
+      - hermes_data:/root/.hermes
+    tmpfs:
+      - /tmp:size=256m
+    environment:
+      # Vault subagents (curator/janitor/distiller) run on the workers
+      # gateway — :18790, never main.
+      - OPENCLAW_GATEWAY_URL=http://hermes:18790
+      - ALFRED_CTRL_URL=http://ctrl-api:3100
+    env_file:
+      - .env
+    entrypoint: ["bash", "-c", "rm -f /app/data/alfred.pid && set -a && [ -f /app/data/.env ] && source /app/data/.env; [ -f /app/data/.gateway-token ] && export OPENCLAW_GATEWAY_TOKEN=$(cat /app/data/.gateway-token); set +a && exec alfred --config /app/data/config.yaml up --foreground"]
+    command: []
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - FOWNER
+      - CHOWN
+    # 6g — surveyor's HDBSCAN clustering pass peaks ~3.4 GB on a 10K+ vault.
+    mem_limit: 6g
+    pids_limit: 512
+
+  # ── ctrl-api — the dashboard backend / tenant API (:3100) ───────────
+  ctrl-api:
+    image: ssdavidai00/alfred-ctrl-api:latest
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - vault_data:/vault
+      - alfred_data:/alfred-data
+      - hermes_data:/hermes-state
+      - state_data:/state
+      - ingest_data:/ingest
+      - cold_data:/cold
+      # ctrl-api restarts sibling containers (worker ops, chore runs).
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - .env
+    environment:
+      - AAS_HOST=0.0.0.0
+      - AAS_PORT=3100
+      - NODE_ENV=production
+      - COMPOSE_PROJECT_NAME=alfred-black
+      - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
+      # ctrl-api reads/writes Hermes profile config.yaml at ${dir}/<profile>/;
+      # point it at the profiles parent so paths resolve to
+      # /hermes-state/profiles/{main,workers}/config.yaml
+      - HERMES_CONFIG_DIR=/hermes-state/profiles
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3100/api/v1/learning/status -H \"Authorization: Bearer $AAS_API_KEY\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    mem_limit: 1g
+    # ctrl-api fronts all docker-exec traffic into sibling containers; a
+    # higher fork budget than peer services.
+    pids_limit: 1024
+
+  # ── alfred-learn — the Temporal intelligence worker ─────────────────
+  alfred-learn:
+    image: ssdavidai00/alfred-learn:latest
+    # Run as uid 1000 to match the bind-mount ownership convention.
+    user: "1000:1000"
+    depends_on:
+      temporal:
+        condition: service_healthy
+      hermes:
+        condition: service_healthy
+      ctrl-api:
+        condition: service_healthy
+    volumes:
+      - vault_data:/vault
+      - alfred_data:/alfred-data
+      - hermes_data:/hermes-state
+    environment:
+      - TEMPORAL_HOST=temporal:7233
+      # Both gateway URLs point at the Hermes /v1 API ports (see
+      # packages/learn/src/config.py). main = :18789, workers = :18790.
+      - OPENCLAW_GATEWAY_URL=http://hermes:18789
+      - OPENCLAW_WORKERS_GATEWAY_URL=http://hermes:18790
+      - EXECUTION_GATEWAY_URL=http://hermes:18790
+      - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
+      - VAULT_PATH=/vault
+      - TASK_QUEUE=alfred-learn
+      - ALFRED_LEARN_ENABLED=${ALFRED_LEARN_ENABLED:-true}
+      - ALFRED_CTRL_URL=http://ctrl-api:3100
+      # Signal pipeline (#78): stream events → signals → decision cards.
+      # Both default ON so the Desk fills; gate at registration time, so a
+      # change requires an alfred-learn restart to re-run register_schedules.
+      - STEWARD_SIGNAL_EXTRACT_ENABLED=${STEWARD_SIGNAL_EXTRACT_ENABLED:-true}
+      - STEWARD_SIGNAL_ROUTER_ENABLED=${STEWARD_SIGNAL_ROUTER_ENABLED:-true}
+      # Composio Python SDK writes its module-load cache under $HOME; the
+      # container has no writable $HOME, so pin both to /tmp.
+      - COMPOSIO_CACHE_DIR=/tmp/composio
+      - HOME=/tmp
+      - WORKERS_OPENCLAW_CONFIG=/hermes-state/profiles/workers/config.yaml
+      # Vexa transcript intake — gated by VEXA_ENABLED. When false the
+      # meeting_capture + transcript_intake schedules are not registered.
+      - VEXA_ENABLED=${VEXA_ENABLED:-false}
+      - VEXA_API_URL=${VEXA_API_URL:-http://vexa-api-gateway:8000}
+      - VEXA_BOT_DISPLAY_NAME=${VEXA_BOT_DISPLAY_NAME:-Alfred}
+      - VEXA_GCAL_STREAM_ID=${VEXA_GCAL_STREAM_ID:-composio-googlecalendar}
+      - ALFRED_OWNER_EMAIL=${ALFRED_OWNER_EMAIL:-}
+    env_file:
+      - .env
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 4g
+    pids_limit: 512
+
+  # ── mcp-server — MCP HTTP server for Claude Custom Connectors (:8787) ─
+  mcp-server:
+    image: ssdavidai00/alfred-mcp-server:latest
+    restart: unless-stopped
+    depends_on:
+      ctrl-api:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      - PORT=8787
+      - CTRL_URL=http://ctrl-api:3100
+      - DATA_DIR=/data
+      - PUBLIC_URL=https://mcp.${DOMAIN}
+      - TENANT_LABEL=${OWNER_NAME}
+    volumes:
+      - mcp_server_data:/data
+    mem_limit: 256m
+    pids_limit: 256
+
+  # ── vaultwarden — the user-facing secrets manager ───────────────────
+  vaultwarden:
+    image: vaultwarden/server:latest
+    restart: unless-stopped
+    environment:
+      - DOMAIN=https://vault.${DOMAIN}
+      # signups allowed so the one-shot vault-signup can register the owner
+      # account on first boot. Set false post-bootstrap if you want to lock
+      # the instance (it is your own single-tenant Vaultwarden).
+      - SIGNUPS_ALLOWED=true
+      - INVITATIONS_ALLOWED=true
+      - WEB_VAULT_ENABLED=true
+      - SHOW_PASSWORD_HINT=false
+      # SMTP intentionally left unset — Vaultwarden treats an empty
+      # SMTP_HOST as "set but invalid". Unset = SMTP disabled.
+      - ADMIN_TOKEN=${VAULTWARDEN_ADMIN_TOKEN}
+    env_file:
+      - .env
+    volumes:
+      - vaultwarden_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sSf http://127.0.0.1:80/alive >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+    mem_limit: 256m
+    pids_limit: 256
+
+  # ── vault-signup — one-shot: register the Vaultwarden owner account ─
+  # Runs the Bitwarden registration crypto (bootstrap-signup.mjs, baked
+  # into the image) so vault-cli has an account to `bw login` with.
+  vault-signup:
+    image: ssdavidai00/alfred-vault-init:latest
+    restart: "no"
+    depends_on:
+      vaultwarden:
+        condition: service_healthy
+    environment:
+      - BW_SERVER_URL=http://vaultwarden:80
+      - BW_USER=${ACME_EMAIL}
+      - BW_PASSWORD=${VAULTWARDEN_BW_PASSWORD}
+      - VAULTWARDEN_NAME=${OWNER_NAME}
+      - VAULTWARDEN_ADMIN_TOKEN=${VAULTWARDEN_ADMIN_TOKEN}
+    # Idempotent: if the account already logs in, skip registration — so
+    # re-running this one-shot (compose re-evaluates service_completed_
+    # successfully deps) is always safe. The `bw logout` fences are load-
+    # bearing: `bw config server` fails ("Logout required") if a prior
+    # `bw login` left a session, so clear it before every config/login.
+    # $$ escapes compose interpolation.
+    entrypoint:
+      - bash
+      - -c
+      - |
+        bw logout >/dev/null 2>&1 || true
+        bw config server "$$BW_SERVER_URL" >/dev/null 2>&1 || true
+        if bw login "$$BW_USER" "$$BW_PASSWORD" --raw </dev/null >/dev/null 2>&1; then
+          echo "[vault-signup] Vaultwarden account already registered — skipping"
+          bw logout >/dev/null 2>&1 || true
+        else
+          bw logout >/dev/null 2>&1 || true
+          node /opt/vault-init/bootstrap-signup.mjs
+        fi
+    mem_limit: 256m
+    pids_limit: 256
+
+  # ── vault-cli — long-running `bw serve` side-container ──────────────
+  # Holds an unlocked bw session; ctrl-api proxies the Vaultwarden MCP
+  # tool calls here over http://vault-cli:8087.
+  vault-cli:
+    image: ssdavidai00/alfred-vault-init:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - BW_SERVER_URL=http://vaultwarden:80
+      - BW_USER=${ACME_EMAIL}
+      - BW_PASSWORD=${VAULTWARDEN_BW_PASSWORD}
+    depends_on:
+      vaultwarden:
+        condition: service_healthy
+      vault-signup:
+        condition: service_completed_successfully
+    entrypoint: ["bash", "/opt/vault-init/serve.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sSf http://127.0.0.1:8087/status >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    mem_limit: 256m
+    pids_limit: 256
+
+  # ── Plane — self-hosted project management ──────────────────────────
+  plane-db:
+    image: postgres:15.7-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=plane
+      - POSTGRES_USER=plane
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - PGDATA=/var/lib/postgresql/data
+    volumes:
+      - plane_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U plane -d plane"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    mem_limit: 1g
+    pids_limit: 512
+
+  plane-redis:
+    image: valkey/valkey:7.2.11-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
+    volumes:
+      - plane_redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a ${REDIS_PASSWORD} ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    mem_limit: 256m
+    pids_limit: 512
+
+  plane-mq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      - RABBITMQ_DEFAULT_USER=plane
+      - RABBITMQ_DEFAULT_PASS=${REDIS_PASSWORD}
+      - RABBITMQ_DEFAULT_VHOST=plane
+    volumes:
+      - plane_rabbitmq:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    mem_limit: 512m
+    pids_limit: 512
+
+  plane-minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/export", "--console-address", ":9090"]
+    environment:
+      - MINIO_ROOT_USER=plane
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+    volumes:
+      - plane_uploads:/export
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    mem_limit: 256m
+    pids_limit: 512
+
+  # One-shot migrator — Plane factors migrations into a dedicated service
+  # so the api/worker/beat don't deadlock racing to migrate on boot (#555).
+  plane-migrator:
+    image: makeplane/plane-backend:stable
+    restart: "no"
+    depends_on:
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=plane.settings.production
+      - DEBUG=0
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DATABASE_URL=postgresql://plane:${POSTGRES_PASSWORD}@plane-db:5432/plane
+      - POSTGRES_USER=plane
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=plane
+      - POSTGRES_HOST=plane-db
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+      - REDIS_HOST=plane-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    command: ["/bin/sh", "-c", "./bin/docker-entrypoint-migrator.sh"]
+    mem_limit: 512m
+    pids_limit: 512
+
+  plane-api:
+    image: makeplane/plane-backend:stable
+    restart: unless-stopped
+    depends_on:
+      plane-db:
+        condition: service_healthy
+      plane-redis:
+        condition: service_healthy
+      plane-mq:
+        condition: service_healthy
+      plane-minio:
+        condition: service_healthy
+      plane-migrator:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=plane.settings.production
+      - DEBUG=0
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DATABASE_URL=postgresql://plane:${POSTGRES_PASSWORD}@plane-db:5432/plane
+      - POSTGRES_USER=plane
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=plane
+      - POSTGRES_HOST=plane-db
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+      - REDIS_HOST=plane-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - AMQP_URL=amqp://plane:${REDIS_PASSWORD}@plane-mq:5672/plane
+      - USE_MINIO=1
+      - AWS_ACCESS_KEY_ID=plane
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      - AWS_S3_ENDPOINT_URL=http://plane-minio:9000
+      - AWS_S3_BUCKET_NAME=uploads
+      - AWS_REGION=us-east-1
+      # WEB_URL must be the PUBLIC URL — Plane builds browser redirects
+      # from it. Internal plane→plane traffic uses compose aliases.
+      - WEB_URL=https://plane.${DOMAIN}
+      - ENABLE_SIGNUP=0
+      - ENABLE_EMAIL_PASSWORD=1
+      - ENABLE_MAGIC_LINK_LOGIN=0
+      - API_KEY_RATE_LIMIT=600/minute
+      - GUNICORN_WORKERS=2
+    command: ["/bin/sh", "-c", "./bin/docker-entrypoint-api.sh"]
+    networks:
+      default:
+        aliases:
+          - api
+    healthcheck:
+      # plane-backend ships wget but not curl; gunicorn binds IPv4 only.
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    mem_limit: 1g
+    pids_limit: 512
+
+  plane-worker:
+    image: makeplane/plane-backend:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-migrator:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=plane.settings.production
+      - DEBUG=0
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DATABASE_URL=postgresql://plane:${POSTGRES_PASSWORD}@plane-db:5432/plane
+      - POSTGRES_HOST=plane-db
+      - POSTGRES_USER=plane
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=plane
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+      - REDIS_HOST=plane-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - AMQP_URL=amqp://plane:${REDIS_PASSWORD}@plane-mq:5672/plane
+      - USE_MINIO=1
+      - AWS_ACCESS_KEY_ID=plane
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      - AWS_S3_ENDPOINT_URL=http://plane-minio:9000
+      - AWS_S3_BUCKET_NAME=uploads
+      - AWS_REGION=us-east-1
+    command: ["/bin/sh", "-c", "./bin/docker-entrypoint-worker.sh"]
+    # celery + bgtask registry OOM-killed on boot at 1g; 2g holds.
+    mem_limit: 2g
+    pids_limit: 512
+
+  plane-beat:
+    image: makeplane/plane-backend:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-migrator:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=plane.settings.production
+      - DEBUG=0
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DATABASE_URL=postgresql://plane:${POSTGRES_PASSWORD}@plane-db:5432/plane
+      - POSTGRES_HOST=plane-db
+      - POSTGRES_USER=plane
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=plane
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+      - REDIS_HOST=plane-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - AMQP_URL=amqp://plane:${REDIS_PASSWORD}@plane-mq:5672/plane
+    command: ["/bin/sh", "-c", "./bin/docker-entrypoint-beat.sh"]
+    mem_limit: 256m
+    pids_limit: 512
+
+  plane-web:
+    # plane-frontend:stable is nginx serving a static Next.js export on
+    # :3000 (the image's own nginx.conf — do not override CMD).
+    image: makeplane/plane-frontend:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=
+      - NEXT_PUBLIC_DEPLOY_URL=
+    networks:
+      default:
+        aliases:
+          - plane-frontend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    mem_limit: 512m
+    pids_limit: 512
+
+  plane-space:
+    # plane-space:stable runs react-router-serve on :3000 — don't override CMD.
+    image: makeplane/plane-space:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=
+      - NEXT_PUBLIC_DEPLOY_URL=
+    networks:
+      default:
+        aliases:
+          - space
+    mem_limit: 256m
+    pids_limit: 512
+
+  plane-admin:
+    # plane-admin:stable is nginx on :80, same pattern as plane-web.
+    image: makeplane/plane-admin:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=
+      - NEXT_PUBLIC_DEPLOY_URL=
+    networks:
+      default:
+        aliases:
+          - admin
+    mem_limit: 256m
+    pids_limit: 512
+
+  plane-live:
+    image: makeplane/plane-live:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+    environment:
+      - API_BASE_URL=http://plane-api:8000
+      - LIVE_BASE_PATH=/live
+      - LIVE_SERVER_SECRET_KEY=${LIVE_SERVER_SECRET_KEY}
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+    networks:
+      default:
+        aliases:
+          - live
+    mem_limit: 256m
+    pids_limit: 512
+
+  plane-proxy:
+    image: makeplane/plane-proxy:stable
+    restart: unless-stopped
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-web:
+        condition: service_healthy
+    environment:
+      # SITE_ADDRESS=:80 makes the bundled Caddyfile a plain-HTTP listener
+      # with no ACME — alfred-black's own caddy service terminates TLS and
+      # reverse-proxies plane.${DOMAIN} → plane-proxy:80.
+      - SITE_ADDRESS=:80
+      - TRUSTED_PROXIES=0.0.0.0/0
+      - FILE_SIZE_LIMIT=5242880
+      - BUCKET_NAME=uploads
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    mem_limit: 128m
+    pids_limit: 512
+
+  # ── Sure — self-hosted personal finance ─────────────────────────────
+  sure-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=sure
+      - POSTGRES_USER=sure
+      - POSTGRES_PASSWORD=${SURE_POSTGRES_PASSWORD}
+      - PGDATA=/var/lib/postgresql/data
+    volumes:
+      - sure_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sure -d sure"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    mem_limit: 1g
+    pids_limit: 512
+
+  sure-redis:
+    image: valkey/valkey:7.2.11-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--requirepass", "${SURE_REDIS_PASSWORD}", "--appendonly", "yes"]
+    volumes:
+      - sure_redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a ${SURE_REDIS_PASSWORD} ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    mem_limit: 256m
+    pids_limit: 512
+
+  sure-web:
+    image: ghcr.io/we-promise/sure:stable
+    restart: unless-stopped
+    depends_on:
+      sure-db:
+        condition: service_healthy
+      sure-redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - SECRET_KEY_BASE=${SURE_SECRET_KEY_BASE}
+      - SELF_HOSTED=true
+      - RAILS_ENV=production
+      - RAILS_FORCE_SSL=false
+      - RAILS_ASSUME_SSL=false
+      - DB_HOST=sure-db
+      - DB_PORT=5432
+      - POSTGRES_DB=sure
+      - POSTGRES_USER=sure
+      - POSTGRES_PASSWORD=${SURE_POSTGRES_PASSWORD}
+      - REDIS_URL=redis://:${SURE_REDIS_PASSWORD}@sure-redis:6379/0
+    # /alfred-data is shared with ctrl-api's Rails-runner-backed account
+    # CRUD endpoints and the sure-init one-shot.
+    volumes:
+      - alfred_data:/alfred-data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/up >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    mem_limit: 2g
+    pids_limit: 512
+
+  sure-worker:
+    image: ghcr.io/we-promise/sure:stable
+    restart: unless-stopped
+    depends_on:
+      sure-db:
+        condition: service_healthy
+      sure-redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - SECRET_KEY_BASE=${SURE_SECRET_KEY_BASE}
+      - SELF_HOSTED=true
+      - RAILS_ENV=production
+      - RAILS_FORCE_SSL=false
+      - RAILS_ASSUME_SSL=false
+      - DB_HOST=sure-db
+      - DB_PORT=5432
+      - POSTGRES_DB=sure
+      - POSTGRES_USER=sure
+      - POSTGRES_PASSWORD=${SURE_POSTGRES_PASSWORD}
+      - REDIS_URL=redis://:${SURE_REDIS_PASSWORD}@sure-redis:6379/0
+    command: ["bundle", "exec", "sidekiq"]
+    mem_limit: 1g
+    pids_limit: 512
+
+  # One-shot bootstrap. Reuses the sure-web image; idempotent — bootstrap.rb
+  # short-circuits if /alfred-data/.sure-api-key already exists.
+  sure-init:
+    image: ghcr.io/we-promise/sure:stable
+    restart: "no"
+    depends_on:
+      sure-web:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      - SECRET_KEY_BASE=${SURE_SECRET_KEY_BASE}
+      - SELF_HOSTED=true
+      - RAILS_ENV=production
+      - DB_HOST=sure-db
+      - DB_PORT=5432
+      - POSTGRES_DB=sure
+      - POSTGRES_USER=sure
+      - POSTGRES_PASSWORD=${SURE_POSTGRES_PASSWORD}
+      - REDIS_URL=redis://:${SURE_REDIS_PASSWORD}@sure-redis:6379/0
+    volumes:
+      - alfred_data:/alfred-data
+    entrypoint: ["bin/rails", "runner", "/alfred-data/sure-bootstrap/bootstrap.rb"]
+    mem_limit: 512m
+    pids_limit: 256
+
+  # ── Vexa — transcript bot stack (profile: vexa) ─────────────────────
+  # `docker compose --profile vexa up -d`. 9 services, ~3 GB resident.
+  # Folded inline here (the alfred-platform fleet ran Vexa as a separate
+  # compose project; a single-VM stack has no reason to).
+  vexa-redis:
+    image: redis:7.0-alpine
+    profiles: ["vexa"]
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    volumes:
+      - vexa_redis:/data
+    mem_limit: 512m
+    pids_limit: 256
+
+  vexa-postgres:
+    image: postgres:17-alpine
+    profiles: ["vexa"]
+    restart: unless-stopped
+    command: ["postgres", "-c", "idle_in_transaction_session_timeout=60000"]
+    environment:
+      - POSTGRES_DB=vexa
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${VEXA_POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d vexa"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - vexa_postgres:/var/lib/postgresql/data
+    mem_limit: 1g
+    pids_limit: 256
+
+  vexa-minio:
+    image: minio/minio:latest
+    profiles: ["vexa"]
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      - MINIO_ROOT_USER=vexa-access-key
+      - MINIO_ROOT_PASSWORD=${VEXA_MINIO_PASSWORD}
+    volumes:
+      - vexa_minio:/data
+    mem_limit: 1g
+    pids_limit: 256
+
+  vexa-minio-init:
+    image: minio/mc:latest
+    profiles: ["vexa"]
+    restart: "no"
+    depends_on:
+      vexa-minio:
+        condition: service_started
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sleep 5
+        mc alias set vexa http://vexa-minio:9000 vexa-access-key ${VEXA_MINIO_PASSWORD}
+        mc mb --ignore-existing vexa/vexa
+        exit 0
+    mem_limit: 128m
+    pids_limit: 128
+
+  vexa-admin-api:
+    image: vexaai/admin-api:0.10.6
+    profiles: ["vexa"]
+    restart: unless-stopped
+    init: true
+    environment:
+      - DB_HOST=vexa-postgres
+      - DB_PORT=5432
+      - DB_NAME=vexa
+      - DB_USER=postgres
+      - DB_PASSWORD=${VEXA_POSTGRES_PASSWORD}
+      - DB_SSL_MODE=disable
+      - ADMIN_API_TOKEN=${VEXA_ADMIN_API_TOKEN}
+      - INTERNAL_API_SECRET=${VEXA_INTERNAL_API_SECRET}
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      vexa-postgres:
+        condition: service_healthy
+    mem_limit: 512m
+    pids_limit: 256
+
+  vexa-runtime-api:
+    image: vexaai/runtime-api:0.10.6
+    profiles: ["vexa"]
+    restart: unless-stopped
+    init: true
+    # runtime-api spawns Vexa-bot containers as docker children — it needs
+    # the docker socket. Bot containers attach to the alfred-black network.
+    environment:
+      - DOCKER_NETWORK=alfred-black_default
+      - BROWSER_IMAGE=vexaai/vexa-bot:0.10.6
+      - REDIS_URL=redis://vexa-redis:6379
+      - MINIO_ENDPOINT=vexa-minio:9000
+      - MINIO_ACCESS_KEY=vexa-access-key
+      - MINIO_SECRET_KEY=${VEXA_MINIO_PASSWORD}
+      - MINIO_BUCKET=vexa
+      - DB_HOST=vexa-postgres
+      - DB_PORT=5432
+      - DB_NAME=vexa
+      - DB_USER=postgres
+      - DB_PASSWORD=${VEXA_POSTGRES_PASSWORD}
+      - DB_SSL_MODE=disable
+      - ALLOW_PRIVATE_CALLBACKS=1
+      - LOG_LEVEL=INFO
+      - TRANSCRIPTION_SERVICE_URL=${VEXA_TRANSCRIPTION_URL:-https://api.groq.com/openai/v1/audio/transcriptions}
+      - TRANSCRIPTION_SERVICE_TOKEN=${VEXA_TRANSCRIPTION_TOKEN:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      vexa-redis:
+        condition: service_started
+      vexa-postgres:
+        condition: service_healthy
+    mem_limit: 1g
+    pids_limit: 512
+
+  vexa-meeting-api:
+    image: ssdavidai00/vexa-meeting-api:latest
+    profiles: ["vexa"]
+    restart: unless-stopped
+    init: true
+    environment:
+      - DB_HOST=vexa-postgres
+      - DB_PORT=5432
+      - DB_NAME=vexa
+      - DB_USER=postgres
+      - DB_PASSWORD=${VEXA_POSTGRES_PASSWORD}
+      - DB_SSL_MODE=disable
+      - REDIS_URL=redis://vexa-redis:6379/0
+      - REDIS_HOST=vexa-redis
+      - REDIS_PORT=6379
+      - ADMIN_TOKEN=${VEXA_ADMIN_API_TOKEN}
+      - INTERNAL_API_SECRET=${VEXA_INTERNAL_API_SECRET}
+      - RUNTIME_API_URL=http://vexa-runtime-api:8090
+      - MEETING_API_URL=http://vexa-meeting-api:8080
+      - BOT_IMAGE_NAME=vexaai/vexa-bot:0.10.6
+      - DOCKER_NETWORK=alfred-black_default
+      - STORAGE_BACKEND=minio
+      - MINIO_ENDPOINT=vexa-minio:9000
+      - MINIO_ACCESS_KEY=vexa-access-key
+      - MINIO_SECRET_KEY=${VEXA_MINIO_PASSWORD}
+      - MINIO_BUCKET=vexa
+      - MINIO_SECURE=false
+      - RECORDING_ENABLED=true
+      - CAPTURE_MODES=audio
+      - TRANSCRIPTION_SERVICE_URL=${VEXA_TRANSCRIPTION_URL:-https://api.groq.com/openai/v1/audio/transcriptions}
+      - TRANSCRIPTION_SERVICE_TOKEN=${VEXA_TRANSCRIPTION_TOKEN:-}
+      - LOG_LEVEL=INFO
+    volumes:
+      - vexa_recordings:/data/recordings
+    depends_on:
+      vexa-redis:
+        condition: service_started
+      vexa-postgres:
+        condition: service_healthy
+      vexa-runtime-api:
+        condition: service_started
+    mem_limit: 1g
+    pids_limit: 512
+
+  vexa-api-gateway:
+    image: vexaai/api-gateway:0.10.6
+    profiles: ["vexa"]
+    restart: unless-stopped
+    init: true
+    environment:
+      - ADMIN_API_URL=http://vexa-admin-api:8001
+      - MEETING_API_URL=http://vexa-meeting-api:8080
+      - TRANSCRIPTION_COLLECTOR_URL=http://vexa-meeting-api:8080
+      - REDIS_URL=redis://vexa-redis:6379/0
+      - INTERNAL_API_SECRET=${VEXA_INTERNAL_API_SECRET}
+      - RATE_LIMIT_RPM=600
+      - LOG_LEVEL=INFO
+      - CORS_ORIGINS=*
+      # Vexa expects MCP_URL even when MCP isn't running.
+      - MCP_URL=http://127.0.0.1:1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      vexa-admin-api:
+        condition: service_healthy
+      vexa-meeting-api:
+        condition: service_started
+      vexa-redis:
+        condition: service_started
+    mem_limit: 1g
+    pids_limit: 512
+
+  vexa-dashboard:
+    image: ssdavidai00/vexa-dashboard:latest
+    profiles: ["vexa"]
+    restart: unless-stopped
+    init: true
+    environment:
+      - VEXA_API_URL=http://vexa-api-gateway:8000
+      - VEXA_ADMIN_API_URL=http://vexa-admin-api:8001
+      - VEXA_ADMIN_API_KEY=${VEXA_ADMIN_API_TOKEN}
+      - VEXA_API_KEY=${VEXA_API_KEY:-}
+      - DEFAULT_BOT_NAME=${VEXA_BOT_DISPLAY_NAME:-Alfred}
+      - ALLOW_REGISTRATIONS=false
+      - AI_BASE_URL=http://hermes:18789/v1
+      - AI_MODEL=openai/hermes/main
+      - NEXT_PUBLIC_APP_URL=https://vexa.${DOMAIN}
+      - NEXT_PUBLIC_VEXA_WS_URL=https://vexa.${DOMAIN}
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      vexa-api-gateway:
+        condition: service_started
+      vexa-admin-api:
+        condition: service_healthy
+    mem_limit: 512m
+    pids_limit: 256
+
+volumes:
+  vault_data:
+  hermes_data:
+  alfred_data:
+  temporal_data:
+  ollama_data:
+  web_db_data:
+  caddy_data:
+  caddy_config:
+  vaultwarden_data:
+  mcp_server_data:
+  state_data:
+  ingest_data:
+  cold_data:
+  plane_pgdata:
+  plane_redis:
+  plane_rabbitmq:
+  plane_uploads:
+  sure_pgdata:
+  sure_redis:
+  vexa_redis:
+  vexa_postgres:
+  vexa_minio:
+  vexa_recordings:

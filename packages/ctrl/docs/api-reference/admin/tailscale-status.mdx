@@ -1,0 +1,58 @@
+---
+title: "Get Tailscale Status"
+description: "Retrieve Tailscale connection and peer information"
+api: "GET /api/v1/admin/tailscale/status"
+---
+
+Get the current Tailscale status, including information about this node and connected peers. Returns the output of `tailscale status --json`.
+
+<RequestExample>
+
+```bash curl
+curl -H "X-API-Key: YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/admin/tailscale/status
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json
+{
+  "Self": {
+    "ID": "nABcDeFgHiJ",
+    "PublicKey": "nodekey:abc123...",
+    "HostName": "alfred-acme",
+    "DNSName": "alfred-acme.tailnet.ts.net.",
+    "OS": "linux",
+    "UserID": 12345,
+    "TailscaleIPs": ["100.64.1.2", "fd7a:115c:a1e0::1"],
+    "AllowedIPs": ["100.64.1.2/32", "fd7a:115c:a1e0::1/128"],
+    "Online": true
+  },
+  "Peer": {
+    "nXyZaBcDeF": {
+      "ID": "nXyZaBcDeF",
+      "PublicKey": "nodekey:xyz789...",
+      "HostName": "macbook-pro",
+      "DNSName": "macbook-pro.tailnet.ts.net.",
+      "OS": "macOS",
+      "TailscaleIPs": ["100.64.1.3"],
+      "Online": true,
+      "LastSeen": "2026-02-26T10:15:30Z",
+      "ExitNode": false
+    }
+  },
+  "MagicDNSSuffix": "tailnet.ts.net",
+  "CurrentTailnet": {
+    "Name": "acme.org",
+    "MagicDNSSuffix": "tailnet.ts.net"
+  }
+}
+```
+
+</ResponseExample>
+
+<Note>
+  The Tailscale status endpoint is useful for verifying connectivity, checking which devices are online, and retrieving the node's Tailscale IP addresses and DNS name.
+</Note>

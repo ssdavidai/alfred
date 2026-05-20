@@ -1,0 +1,345 @@
+import { useState } from "react";
+import { Link, useLocation } from "react-router-dom";
+import { logout } from "wasp/client/auth";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Home,
+  Radio,
+  Settings,
+  Menu,
+  X,
+  LogOut,
+  Brain,
+  FolderTree,
+  Puzzle,
+  Wrench,
+  LayoutDashboard,
+} from "lucide-react";
+import { cn } from "../client/utils";
+import VaultNebula from "../components/nebula/VaultNebula";
+
+// ---------------------------------------------------------------------------
+// Types & Nav definitions
+// ---------------------------------------------------------------------------
+
+interface NavItem {
+  path: string;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+}
+
+const dashboardNavItems: NavItem[] = [
+  { path: "/dashboard", label: "Alfred", icon: Home },
+  { path: "/dashboard/command-center", label: "Command Center", icon: LayoutDashboard },
+  { path: "/dashboard/vault", label: "Vault", icon: FolderTree },
+  { path: "/dashboard/tasks", label: "Intelligence", icon: Brain },
+  { path: "/dashboard/streams", label: "Streams", icon: Radio },
+  { path: "/dashboard/tools", label: "Tools", icon: Wrench },
+  { path: "/dashboard/integrations", label: "Apps", icon: Puzzle },
+  { path: "/dashboard/settings", label: "Settings", icon: Settings },
+];
+
+// ---------------------------------------------------------------------------
+// Orb intensity per route
+// ---------------------------------------------------------------------------
+
+function getNebulaOpacity(pathname: string): number {
+  // Home page renders its own full VaultNebula — hide the layout one
+  if (pathname === "/dashboard") return 0;
+  // All other pages: subtle nebula background at 20%
+  return 0.2;
+}
+
+/** On the nebula homepage, the sidebar should be fully transparent glass */
+function isNebulaPage(pathname: string): boolean {
+  return pathname === "/dashboard";
+}
+
+// ---------------------------------------------------------------------------
+// Collapsible Icon Rail Sidebar
+// ---------------------------------------------------------------------------
+
+function CollapsibleSidebar({
+  navItems,
+  isActive,
+  glassMode,
+}: {
+  navItems: NavItem[];
+  isActive: (path: string) => boolean;
+  glassMode?: boolean;
+}) {
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  return (
+    <motion.aside
+      onMouseEnter={() => setIsExpanded(true)}
+      onMouseLeave={() => setIsExpanded(false)}
+      animate={{ width: isExpanded ? 280 : 60 }}
+      transition={{ type: "spring" as const, stiffness: 200, damping: 25 }}
+      className={cn(
+        "fixed inset-y-0 left-0 z-20 hidden flex-col border-r backdrop-blur-xl md:flex",
+        glassMode
+          ? "border-white/[0.03] bg-black/10"
+          : "border-white/[0.06] bg-black/30",
+      )}
+    >
+      {/* Logo */}
+      <div className="flex h-16 items-center px-4">
+        <Link
+          to="/"
+          className="flex items-center transition-opacity duration-300 hover:opacity-80"
+        >
+          <img
+            src="/images/alfred-logo.png"
+            alt="ALFRED"
+            className="h-7 w-7 object-contain"
+          />
+          <AnimatePresence>
+            {isExpanded && (
+              <motion.span
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -10 }}
+                transition={{ duration: 0.2 }}
+                className="ml-3 font-mono text-xs font-light uppercase tracking-[0.3em] text-[#F0EDE8]"
+              >
+                Alfred
+              </motion.span>
+            )}
+          </AnimatePresence>
+        </Link>
+      </div>
+
+      {/* Nav icons */}
+      <nav className="mt-4 flex flex-1 flex-col items-stretch gap-1 px-2">
+        {navItems.map((item) => {
+          const active = isActive(item.path);
+          return (
+            <Link
+              key={item.path}
+              to={item.path}
+              className={cn(
+                "group relative flex items-center gap-3 rounded-lg px-3 py-2.5 transition-all duration-200",
+                active
+                  ? "text-[#C9A84C]"
+                  : "text-[#F0EDE8]/60 hover:text-[#C9A84C]",
+              )}
+            >
+              {/* Active indicator */}
+              {active && (
+                <motion.div
+                  layoutId="sidebar-active"
+                  className="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-[#C9A84C]"
+                  transition={{ type: "spring" as const, stiffness: 300, damping: 25 }}
+                />
+              )}
+              <item.icon className="h-5 w-5 flex-shrink-0" />
+              <AnimatePresence>
+                {isExpanded && (
+                  <motion.span
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -10 }}
+                    transition={{ duration: 0.15 }}
+                    className="whitespace-nowrap font-sans text-sm font-light"
+                  >
+                    {item.label}
+                  </motion.span>
+                )}
+              </AnimatePresence>
+            </Link>
+          );
+        })}
+      </nav>
+
+      {/* Logout at bottom */}
+      <div className="px-2 pb-4">
+        <button
+          type="button"
+          onClick={() => logout()}
+          className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-[#F0EDE8]/40 transition-colors duration-200 hover:text-[#F0EDE8]/70"
+        >
+          <LogOut className="h-5 w-5 flex-shrink-0" />
+          <AnimatePresence>
+            {isExpanded && (
+              <motion.span
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: -10 }}
+                transition={{ duration: 0.15 }}
+                className="whitespace-nowrap font-mono text-[0.6rem] font-light uppercase tracking-[0.2em]"
+              >
+                Log Out
+              </motion.span>
+            )}
+          </AnimatePresence>
+        </button>
+      </div>
+    </motion.aside>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Mobile sidebar (full overlay, preserved from original)
+// ---------------------------------------------------------------------------
+
+function MobileSidebar({
+  navItems,
+  isActive,
+  isOpen,
+  onClose,
+}: {
+  navItems: NavItem[];
+  isActive: (path: string) => boolean;
+  isOpen: boolean;
+  onClose: () => void;
+}) {
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 md:hidden">
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      {/* Sidebar panel */}
+      <aside className="absolute inset-y-0 left-0 w-64 border-r border-white/[0.06] bg-black/90 backdrop-blur-xl">
+        <div className="flex items-center justify-between p-6">
+          <Link
+            to="/"
+            onClick={onClose}
+            className="transition-opacity duration-300 hover:opacity-80"
+          >
+            <img
+              src="/images/alfred-logo.png"
+              alt="ALFRED"
+              className="h-5 w-auto"
+            />
+          </Link>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-[#E8E4DE] transition-colors hover:text-[#C9A84C]"
+          >
+            <span className="sr-only">Close menu</span>
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <nav className="mt-4 space-y-1 px-3">
+          {navItems.map((item) => (
+            <Link
+              key={item.path}
+              to={item.path}
+              onClick={onClose}
+              className={cn(
+                "flex items-center gap-3 rounded-sm px-3 py-2 font-sans text-sm font-light transition-all duration-200",
+                isActive(item.path)
+                  ? "border-l-2 border-[#C9A84C] bg-[#C9A84C]/5 text-[#C9A84C]"
+                  : "text-[#8A8680] hover:bg-[#C9A84C]/5 hover:text-[#E8E4DE]",
+              )}
+            >
+              <item.icon className="h-4 w-4" />
+              {item.label}
+            </Link>
+          ))}
+        </nav>
+      </aside>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main Layout
+// ---------------------------------------------------------------------------
+
+export default function DashboardLayout({
+  children,
+  hideSidebar,
+}: {
+  children: React.ReactNode;
+  hideSidebar?: boolean;
+}) {
+  const location = useLocation();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  // Single-VM: there is no fleet and no provisioning step — the local
+  // ctrl-api is always the (one) running instance, so the dashboard renders
+  // immediately with no "wait for provisioning" gate.
+
+  const isActive = (path: string) => {
+    if (path === "/dashboard") return location.pathname === "/dashboard";
+    return location.pathname.startsWith(path);
+  };
+
+  const nebulaOpacity = getNebulaOpacity(location.pathname);
+  const glassMode = isNebulaPage(location.pathname);
+
+  return (
+    <div className="min-h-screen bg-black">
+      {/* Persistent nebula background — same Alfred visualization on all pages */}
+      {nebulaOpacity > 0 && (
+        <div className="fixed inset-0 z-0" style={{ opacity: nebulaOpacity }}>
+          <VaultNebula />
+        </div>
+      )}
+
+      {/* Content layer */}
+      <div className="relative z-10 flex min-h-screen">
+        {/* Desktop collapsible sidebar */}
+        {!hideSidebar && (
+          <CollapsibleSidebar
+            navItems={dashboardNavItems}
+            isActive={isActive}
+            glassMode={glassMode}
+          />
+        )}
+
+        {/* Mobile header */}
+        {!hideSidebar && (
+          <header className="fixed left-0 right-0 top-0 z-40 flex items-center justify-between border-b border-white/[0.06] bg-black/50 px-4 py-3 backdrop-blur-xl md:hidden">
+            <Link
+              to="/"
+              className="transition-opacity duration-300 hover:opacity-80"
+            >
+              <img
+                src="/images/alfred-logo.png"
+                alt="ALFRED"
+                className="h-6 w-auto"
+              />
+            </Link>
+            <button
+              type="button"
+              onClick={() => setMobileMenuOpen(true)}
+              className="text-[#E8E4DE] transition-colors hover:text-[#C9A84C]"
+            >
+              <span className="sr-only">Open menu</span>
+              <Menu className="h-5 w-5" />
+            </button>
+          </header>
+        )}
+
+        {/* Mobile sidebar overlay */}
+        {!hideSidebar && (
+          <MobileSidebar
+            navItems={dashboardNavItems}
+            isActive={isActive}
+            isOpen={mobileMenuOpen}
+            onClose={() => setMobileMenuOpen(false)}
+          />
+        )}
+
+        {/* Main content area */}
+        <main className={cn(
+          "flex-1",
+          hideSidebar ? "ml-0 pt-0" : "ml-0 pt-14 md:ml-[60px] md:pt-0",
+        )}>
+          {hideSidebar ? (
+            children
+          ) : (
+            <div className="p-6 lg:p-8">
+              {children}
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+}

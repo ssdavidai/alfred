@@ -1,0 +1,52 @@
+---
+title: "List Schedules"
+description: "Retrieve all workflow schedules"
+api: "GET https://alfred-acme.tailnet.ts.net:3100/api/v1/schedules"
+---
+
+Returns a list of all workflow schedules configured in the Temporal namespace.
+
+<RequestExample>
+```bash cURL
+curl -X GET \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  https://alfred-acme.tailnet.ts.net:3100/api/v1/schedules
+```
+</RequestExample>
+
+<ResponseExample>
+```json 200 OK
+{
+  "schedules": [
+    {
+      "scheduleId": "curator-hourly",
+      "workflowType": "CuratorWorkflow",
+      "cron": "0 * * * *",
+      "state": "Active",
+      "nextRunTime": "2026-02-26T15:00:00.000Z",
+      "lastRunTime": "2026-02-26T14:00:00.000Z",
+      "recentRuns": 142
+    },
+    {
+      "scheduleId": "janitor-daily",
+      "workflowType": "JanitorWorkflow",
+      "cron": "0 2 * * *",
+      "state": "Active",
+      "nextRunTime": "2026-02-27T02:00:00.000Z",
+      "lastRunTime": "2026-02-26T02:00:00.000Z",
+      "recentRuns": 26
+    },
+    {
+      "scheduleId": "distiller-weekly",
+      "workflowType": "DistillerWorkflow",
+      "cron": "0 3 * * 0",
+      "state": "Paused",
+      "pauseNote": "Paused for maintenance",
+      "lastRunTime": "2026-02-23T03:00:00.000Z",
+      "recentRuns": 4
+    }
+  ],
+  "count": 3
+}
+```
+</ResponseExample>

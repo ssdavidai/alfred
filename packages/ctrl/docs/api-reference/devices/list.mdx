@@ -1,0 +1,37 @@
+---
+title: "List Pairings"
+description: "Retrieve the Hermes DM-pairing status (pending codes + approved users)"
+api: "GET /api/v1/devices"
+---
+
+Returns the Hermes-native DM-pairing status. Hermes pairs a messaging
+account with the principal by a one-hour pairing code rather than issuing
+per-device gateway tokens.
+
+The native `hermes pairing list` CLI emits human-readable text — there is no
+JSON output — so this endpoint returns that text verbatim under a `raw`
+field. Render it as a read-only status surface.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url https://alfred-acme.tailnet.ts.net:3100/api/v1/devices \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "raw": "Pending pairing codes:\n  telegram  XKGH5N7P  (expires in 47m)\n\nApproved users:\n  telegram  123456789  david\n  slack     U04AB12CD  david"
+}
+```
+
+</ResponseExample>

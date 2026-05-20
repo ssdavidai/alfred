@@ -1,0 +1,481 @@
+#!/usr/bin/env python3
+"""openclaw-wrapper — runs an Alfred agent task via the Hermes `/v1/runs` API.
+
+Despite the legacy filename (kept so `config.yaml.tpl`'s `OPENCLAW_WRAPPER_PATH`
+and the `alfred.Dockerfile` COPY both keep resolving), this no longer speaks
+the OpenClaw `POST /tools/invoke` `sessions_spawn`/`sessions_history` contract.
+
+It calls Hermes natively:
+
+    create:  POST  <gateway>/v1/runs        {input, session_id, instructions}
+    poll:    GET   <gateway>/v1/runs/{id}    → {status, output, ...}
+
+The alfred vault daemon runs in its own container and reaches the Hermes
+runtime over the compose network on its canonical port (the Hermes API
+server binds `:18789`/`:18790` directly — the hermes-shim that used to
+front it was retired in issue #40). So `<gateway>` here is the same URL
+legacy callers used — only the request shape changed.
+
+Alfred (the curator pipeline) calls:
+    openclaw-wrapper agent --agent <id> --session-id <sid> --message "<prompt>" --local --json
+
+The double-encoded `result.content[].text` envelope parsing is gone — Hermes
+returns a flat JSON run object. The manifest-extraction logic (shared `/tmp`
+volume file + conversation-history fallback) is kept intact.
+"""
+
+import glob
+import json
+import os
+import re
+import sys
+import time
+import urllib.request
+import urllib.error
+
+
+def resolve_gateway():
+    """Resolve the Hermes gateway base URL and bearer token from the environment.
+
+    The gateway URL is the same value legacy callers used (the env var name is
+    kept stable to minimise compose churn — see PLAN.md Part F). ws:// is
+    normalised to http:// because Hermes' `/v1` surface is plain HTTP.
+    """
+    url = (
+        os.environ.get("HERMES_GATEWAY_URL")
+        or os.environ.get("OPENCLAW_GATEWAY_URL")
+        or "http://hermes:18790"
+    )
+    url = url.replace("ws://", "http://").replace("wss://", "https://").rstrip("/")
+
+    # Read the token directly from disk — the entrypoint's export does not
+    # always propagate through the daemon's subprocess chain.
+    token = ""
+    for path in ["/app/data/.gateway-token", "/alfred-data/.gateway-token"]:
+        if os.path.exists(path):
+            token = open(path).read().strip()
+            if token:
+                break
+    if not token:
+        token = os.environ.get("HERMES_API_KEY") or os.environ.get(
+            "OPENCLAW_GATEWAY_TOKEN", ""
+        )
+        if not token:
+            token_file = os.environ.get("OPENCLAW_GATEWAY_TOKEN_FILE", "")
+            if token_file and os.path.exists(token_file):
+                token = open(token_file).read().strip()
+
+    return url, token
+
+
+def _request(method, url, token, body=None, timeout=30):
+    """Issue an HTTP request to the Hermes API and return the parsed JSON."""
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method=method,
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    return json.loads(raw) if raw else {}
+
+
+def create_run(gateway_url, token, input_text, session_id, instructions, timeout=30):
+    """POST /v1/runs — start a Hermes run. Returns the run JSON."""
+    body = {"input": input_text}
+    if session_id:
+        body["session_id"] = session_id
+    if instructions:
+        body["instructions"] = instructions
+    return _request("POST", f"{gateway_url}/v1/runs", token, body, timeout)
+
+
+def get_run(gateway_url, token, run_id, timeout=15):
+    """GET /v1/runs/{id} — fetch current run status. Returns the run JSON."""
+    return _request("GET", f"{gateway_url}/v1/runs/{run_id}", token, None, timeout)
+
+
+# ---------------------------------------------------------------------------
+# Run-output parsing — Hermes returns a flat run object, not the OpenClaw
+# double-encoded envelope. `output` is either a plain string (the final
+# answer) or an OpenAI-Responses-style list of structured items.
+# ---------------------------------------------------------------------------
+
+def extract_run_text(run):
+    """Extract the final assistant text from a Hermes run object.
+
+    Returns "" when the run has produced no text yet (still running, or a
+    tool-only turn).
+    """
+    output = run.get("output")
+    if isinstance(output, str):
+        return output
+    if isinstance(output, list):
+        parts = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "message":
+                content = item.get("content", [])
+                if isinstance(content, list):
+                    for c in content:
+                        if isinstance(c, dict) and c.get("type") in (
+                            "output_text",
+                            "text",
+                        ):
+                            parts.append(c.get("text", ""))
+                elif isinstance(content, str):
+                    parts.append(content)
+        return "\n".join(p for p in parts if p)
+    # Some Hermes builds surface the final answer under a flat `text` key.
+    if isinstance(run.get("text"), str):
+        return run["text"]
+    return ""
+
+
+def _extract_entities_json(text):
+    """Find a JSON object with an "entities" array anywhere in text.
+
+    Uses brace-depth tracking to handle nested objects.
+    Returns the JSON string if found, else None.
+    """
+    for m in re.finditer(r'\{[^{}]*"entities"\s*:\s*\[', text):
+        start = m.start()
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    try:
+                        data = json.loads(candidate)
+                        if isinstance(data.get("entities"), list):
+                            return candidate
+                    except json.JSONDecodeError:
+                        continue
+                    break
+    return None
+
+
+def extract_manifest_from_run(run):
+    """Try to extract manifest JSON from a Hermes run's structured output.
+
+    Hermes runs expose their tool calls in `output` as items of type
+    `function_call` / `tool_call` (input under `arguments` or `input`), and
+    the final answer text as `message` items. We search both — the curator
+    pipeline writes the manifest via a Write or Bash tool call, and the model
+    sometimes also echoes the JSON in its final text.
+
+    This replaces the OpenClaw `extract_manifest_from_history` walk over the
+    `result.content[].text` message envelope.
+    """
+    manifest_pattern = re.compile(
+        r'/alfred-data/alfred-curator-[0-9a-f]+-manifest\.json'
+    )
+    output = run.get("output")
+    if not isinstance(output, list):
+        # Fall back to scanning the final answer text directly.
+        text = extract_run_text(run)
+        if text and '"entities"' in text:
+            for block in re.finditer(
+                r'```(?:json)?\s*\n(.*?)\n```', text, re.DOTALL
+            ):
+                result = _extract_entities_json(block.group(1).strip())
+                if result:
+                    return result
+            return _extract_entities_json(text)
+        return None
+
+    # Pass 1 — tool-call items. Hermes names these `function_call`,
+    # `tool_call`, or `tool_use` depending on build; the call arguments live
+    # under `arguments` (often a JSON string) or `input` (an object).
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") not in ("function_call", "tool_call", "tool_use"):
+            continue
+        name = str(item.get("name", "")).lower()
+        raw_args = item.get("arguments")
+        if isinstance(raw_args, str):
+            try:
+                args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                args = {}
+        elif isinstance(raw_args, dict):
+            args = raw_args
+        else:
+            args = item.get("input") if isinstance(item.get("input"), dict) else {}
+
+        # Write tool — file_path + content fields.
+        if name in ("write", "write_file"):
+            file_path = str(args.get("file_path") or args.get("path") or "")
+            file_content = args.get("content", "")
+            if (
+                isinstance(file_content, str)
+                and manifest_pattern.search(file_path)
+                and '"entities"' in file_content
+            ):
+                result = _extract_entities_json(file_content)
+                if result:
+                    return result
+
+        # Bash / shell tool — command field carries a heredoc / echo.
+        cmd_text = ""
+        for key in ("command", "content", "code", "script"):
+            v = args.get(key)
+            if isinstance(v, str) and v:
+                cmd_text = v
+                break
+        if cmd_text and '"entities"' in cmd_text and manifest_pattern.search(cmd_text):
+            result = _extract_entities_json(cmd_text)
+            if result:
+                return result
+
+    # Pass 2 — the final answer text (model echoed the JSON inline).
+    text = extract_run_text(run)
+    if text and '"entities"' in text:
+        for block in re.finditer(r'```(?:json)?\s*\n(.*?)\n```', text, re.DOTALL):
+            result = _extract_entities_json(block.group(1).strip())
+            if result:
+                return result
+        result = _extract_entities_json(text)
+        if result:
+            return result
+
+    return None
+
+
+_MANIFEST_DELIMITER = "\n---ALFRED_MANIFEST_JSON---\n"
+
+
+def collect_manifest_files(explicit_path=None):
+    """Read curator manifest JSON files from the shared /alfred-data volume.
+
+    If *explicit_path* is given (via --manifest-path), read only that file.
+    Otherwise glob /alfred-data/alfred-curator-*-manifest.json.
+
+    The pipeline generates a unique manifest_path and embeds it in the prompt.
+    The agent writes the JSON there inside the Hermes runtime; both containers
+    share the volume so the file is visible here. We relay the contents on
+    stdout so the pipeline can parse it even if its own direct file read
+    races or fails. Does NOT delete the file — the pipeline owns cleanup.
+    """
+    if explicit_path:
+        paths = [explicit_path]
+    else:
+        paths = sorted(glob.glob("/alfred-data/alfred-curator-*-manifest.json"))
+
+    results = []
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if content:
+                results.append(content)
+                print(
+                    f"[openclaw-wrapper] read manifest: {path} ({len(content)} bytes)",
+                    file=sys.stderr,
+                )
+        except OSError:
+            pass
+    return results
+
+
+def main():
+    agent_id = ""
+    session_id = ""
+    prompt = ""
+    manifest_path = ""
+
+    # The alfred curator pipeline calls:
+    #   openclaw-wrapper agent --agent <id> --session-id <sid> --message "<prompt>" --local --json
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] == "--agent":
+            agent_id = args[i + 1]
+            i += 2
+        elif args[i] == "--workspace":
+            # accepted, unused — Hermes resolves the workspace per profile
+            i += 2
+        elif args[i] == "--message":
+            prompt = args[i + 1]
+            i += 2
+        elif args[i] == "--session-id":
+            session_id = args[i + 1]
+            i += 2
+        elif args[i] == "--manifest-path":
+            manifest_path = args[i + 1]
+            i += 2
+        elif args[i] in ("--local", "--json", "agent"):
+            i += 1
+        else:
+            if not prompt:
+                prompt = args[i]
+            i += 1
+
+    if not prompt:
+        print("Error: no prompt provided", file=sys.stderr)
+        sys.exit(1)
+
+    # The curator pipeline writes the prompt to a temp file and passes
+    # "--message 'Follow the instructions in /tmp/...'". The Hermes runtime
+    # runs in a different container, so resolve the file content here.
+    if prompt.startswith("Follow the instructions in "):
+        file_path = prompt.split("Follow the instructions in ", 1)[1].strip()
+        try:
+            prompt = open(file_path).read()
+        except FileNotFoundError:
+            print(f"Error: prompt file not found: {file_path}", file=sys.stderr)
+            sys.exit(1)
+
+    # If no explicit --manifest-path, extract it from the prompt text. The
+    # pipeline embeds a line like:
+    #   **Write the JSON to this exact file path:** `/alfred-data/alfred-curator-<id>-manifest.json`
+    if not manifest_path:
+        m = re.search(
+            r'/alfred-data/alfred-curator-[0-9a-f]+-manifest\.json', prompt
+        )
+        if m:
+            manifest_path = m.group(0)
+            print(
+                f"[openclaw-wrapper] extracted manifest_path from prompt: {manifest_path}",
+                file=sys.stderr,
+            )
+
+    gateway_url, token = resolve_gateway()
+    token_preview = f"{token[:8]}...{token[-4:]}" if len(token) > 12 else "(empty)"
+    print(
+        f"[openclaw-wrapper] gateway={gateway_url} token={token_preview} "
+        f"agent={agent_id or 'main'} prompt_len={len(prompt)}",
+        file=sys.stderr,
+    )
+    if not token:
+        print("Error: no gateway token found", file=sys.stderr)
+        sys.exit(1)
+
+    # Per-task scoping lives in `instructions` — the Hermes-native equivalent
+    # of OpenClaw's per-agent allowlist dance. `session_id` correlates the run.
+    effective_agent = agent_id or "main"
+    instructions = (
+        f"You are running as the `{effective_agent}` agent on the Alfred vault "
+        f"runtime. Complete the delegated task and return your final answer as "
+        f"your last assistant message."
+    )
+    run_session = session_id or effective_agent
+
+    # Step 1 — create the run (retry while the gateway is still starting).
+    run = None
+    last_error = None
+    for attempt in range(6):  # 6 attempts, ~30s total
+        try:
+            run = create_run(
+                gateway_url,
+                token,
+                input_text=prompt,
+                session_id=run_session,
+                instructions=instructions,
+                timeout=30,
+            )
+            break
+        except urllib.error.HTTPError as e:
+            body = e.read().decode() if e.fp else ""
+            if e.code in (401, 503) and attempt < 5:
+                print(
+                    f"[openclaw-wrapper] retry {attempt+1}/5: HTTP {e.code}",
+                    file=sys.stderr,
+                )
+                time.sleep(5)
+                continue
+            print(f"POST /v1/runs failed ({e.code}): {body}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:  # noqa: BLE001
+            last_error = e
+            if attempt < 5:
+                print(
+                    f"[openclaw-wrapper] retry {attempt+1}/5: {e}", file=sys.stderr
+                )
+                time.sleep(5)
+            else:
+                print(
+                    f"POST /v1/runs error after 6 attempts: {e}", file=sys.stderr
+                )
+                sys.exit(1)
+
+    if run is None:
+        print(f"POST /v1/runs failed: {last_error}", file=sys.stderr)
+        sys.exit(1)
+
+    run_id = run.get("id") or run.get("run_id")
+    if not run_id:
+        # Created but no id — soft failure. Exit 0 so the curator daemon still
+        # marks the file processed (issue #107).
+        print(f"No run id in response: {json.dumps(run)}", file=sys.stderr)
+        print(
+            '{"error": "no_run_id", "message": "POST /v1/runs did not return a run id"}'
+        )
+        sys.exit(0)
+
+    # Step 2 — poll GET /v1/runs/{id} until the run reaches a terminal state.
+    terminal = {"completed", "succeeded", "failed", "cancelled", "error"}
+    max_attempts = 60  # 60 * 10s = 600s, matches the curator wrapper timeout
+    for _ in range(max_attempts):
+        time.sleep(10)
+        try:
+            run = get_run(gateway_url, token, run_id, timeout=15)
+        except Exception:  # noqa: BLE001 — transient; keep polling
+            continue
+
+        status = str(run.get("status", "")).lower()
+        text = extract_run_text(run)
+
+        if status in terminal or text:
+            if status in ("failed", "error") and not text:
+                err = run.get("error") or run.get("detail") or "run failed"
+                print(f"Hermes run {run_id} failed: {err}", file=sys.stderr)
+                print(
+                    json.dumps({"error": "run_failed", "message": str(err)})
+                )
+                sys.exit(0)
+
+            # Emit the agent's final answer on stdout.
+            if text:
+                print(text)
+
+            # Append manifest JSON so the pipeline can parse it from stdout.
+            # 1. The manifest FILE on the shared /alfred-data volume.
+            # 2. The manifest JSON extracted from the run's tool-call output.
+            manifests = collect_manifest_files(manifest_path or None)
+            if not manifests:
+                run_manifest = extract_manifest_from_run(run)
+                if run_manifest:
+                    manifests = [run_manifest]
+                    print(
+                        "[openclaw-wrapper] manifest extracted from run output",
+                        file=sys.stderr,
+                    )
+            for m in manifests:
+                print(_MANIFEST_DELIMITER, end="")
+                print(m)
+
+            sys.exit(0)
+
+    # Timeout — soft failure. The agent may have done useful work (wrote
+    # files / vault records) even without a final answer. Exit 0 so the
+    # curator daemon still marks the file processed (issue #107).
+    print("Timed out waiting for Hermes run to finish", file=sys.stderr)
+    print(
+        '{"error": "timeout", "message": "Hermes run did not finish before the wrapper timeout"}'
+    )
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

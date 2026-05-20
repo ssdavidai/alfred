@@ -1,0 +1,88 @@
+---
+title: "Search Agent Memory"
+description: "Vector search over agent memory and conversation history"
+api: "GET /api/v1/openclaw/memory"
+---
+
+Performs semantic vector search over agent memory and conversation history using embeddings. Returns relevant memory entries ranked by similarity.
+
+<ParamField header="Authorization" type="string" required>
+  Bearer token for API authentication. Use `Bearer YOUR_API_KEY`.
+</ParamField>
+
+<ParamField query="query" type="string" required>
+  The search query text. Will be embedded and used for semantic similarity search.
+</ParamField>
+
+<ParamField query="limit" type="number" default={10}>
+  Maximum number of results to return.
+</ParamField>
+
+<ParamField query="threshold" type="number" default={0.7}>
+  Minimum similarity score threshold (0.0 to 1.0). Only results above this threshold are returned.
+</ParamField>
+
+<ParamField query="agent_id" type="string">
+  Optional filter to search only within a specific agent's memory.
+</ParamField>
+
+<RequestExample>
+
+```bash cURL
+curl --request GET \
+  --url 'https://alfred-acme.tailnet.ts.net:3100/api/v1/openclaw/memory?query=vault%20organization%20patterns&limit=5&threshold=0.75' \
+  --header 'Authorization: Bearer YOUR_API_KEY'
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "query": "vault organization patterns",
+  "resultsCount": 3,
+  "searchTime": 42,
+  "results": [
+    {
+      "memoryId": "mem_8k3n7p2q9m",
+      "agentId": "agent_curator",
+      "sessionId": "sess_3k7m9n2p4q",
+      "content": "Created hierarchical folder structure: entities organized by type (person/, org/, project/), learning types in learning/ subdirectory. Templates stored in _templates/ for consistency.",
+      "timestamp": "2026-02-26T10:15:30Z",
+      "similarity": 0.89,
+      "metadata": {
+        "operation": "vault_organize",
+        "recordsAffected": 47
+      }
+    },
+    {
+      "memoryId": "mem_5y9z2w6v1x",
+      "agentId": "agent_janitor",
+      "sessionId": "sess_8x5y2z9w1v",
+      "content": "Discovered naming convention: entity records use '{{type}}/{{title}}' format, learning records use 'learning/{{type}}/{{title}}'. Enforced via vault_move operations.",
+      "timestamp": "2026-02-25T16:42:18Z",
+      "similarity": 0.82,
+      "metadata": {
+        "operation": "vault_scan",
+        "issuesFound": 12,
+        "issuesFixed": 12
+      }
+    },
+    {
+      "memoryId": "mem_7m4k3j8h2n",
+      "agentId": "agent_curator",
+      "sessionId": "sess_1a5b9c3d7e",
+      "content": "Processed inbox item about documentation structure. Extracted assumption: Dataview bases in _bases/ provide reusable query fragments. Created assumption record 'learning/assumption/Dataview Base Pattern'.",
+      "timestamp": "2026-02-24T14:28:45Z",
+      "similarity": 0.78,
+      "metadata": {
+        "operation": "vault_create",
+        "recordType": "assumption"
+      }
+    }
+  ]
+}
+```
+
+</ResponseExample>

@@ -1,0 +1,103 @@
+---
+title: "Get Janitor Status"
+description: "Retrieve janitor sweep status and statistics"
+api: "GET /api/v1/workers/janitor/status"
+---
+
+Returns the current status of the janitor daemon, including the most recent sweep results, issue statistics, and ignored files.
+
+<RequestExample>
+
+```bash cURL
+curl -X GET https://alfred-acme.tailnet.ts.net:3100/api/v1/workers/janitor/status \
+  -H "Authorization: Bearer YOUR_API_KEY"
+```
+
+</RequestExample>
+
+<ResponseExample>
+
+```json Response
+{
+  "status": "ok",
+  "daemon_running": true,
+  "last_sweep": {
+    "timestamp": "2026-02-26T10:15:00Z",
+    "duration_seconds": 8.3,
+    "files_scanned": 423,
+    "issues_found": 12,
+    "issues_fixed": 0,
+    "sweep_type": "auto"
+  },
+  "current_issues": {
+    "broken_links": 3,
+    "invalid_frontmatter": 2,
+    "orphaned_files": 4,
+    "missing_required_fields": 3,
+    "total": 12
+  },
+  "ignored_files": [
+    {
+      "file": "projects/archive/old-project.md",
+      "reason": "Archived project, broken links intentional",
+      "added": "2026-02-20T14:30:00Z"
+    }
+  ],
+  "next_sweep_in_seconds": 1785,
+  "timestamp": "2026-02-26T10:30:00Z"
+}
+```
+
+</ResponseExample>
+
+<ResponseField name="status" type="string">
+  Overall status: `ok` or `error`
+</ResponseField>
+
+<ResponseField name="daemon_running" type="boolean">
+  Whether the janitor daemon is currently running
+</ResponseField>
+
+<ResponseField name="last_sweep" type="object">
+  Information about the most recent sweep
+
+  <ResponseField name="timestamp" type="string">
+    ISO 8601 timestamp when sweep started
+  </ResponseField>
+
+  <ResponseField name="duration_seconds" type="number">
+    How long the sweep took
+  </ResponseField>
+
+  <ResponseField name="files_scanned" type="number">
+    Number of vault files scanned
+  </ResponseField>
+
+  <ResponseField name="issues_found" type="number">
+    Number of issues detected
+  </ResponseField>
+
+  <ResponseField name="issues_fixed" type="number">
+    Number of issues fixed (0 for scan-only sweeps)
+  </ResponseField>
+
+  <ResponseField name="sweep_type" type="string">
+    Type of sweep: `auto` (daemon), `manual` (API), or `cli`
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="current_issues" type="object">
+  Breakdown of currently detected issues by category
+</ResponseField>
+
+<ResponseField name="ignored_files" type="object[]">
+  List of files excluded from janitor scans
+</ResponseField>
+
+<ResponseField name="next_sweep_in_seconds" type="number">
+  Seconds until the next automatic sweep (only present if daemon is running)
+</ResponseField>
+
+<ResponseField name="timestamp" type="string">
+  ISO 8601 timestamp of status check
+</ResponseField>

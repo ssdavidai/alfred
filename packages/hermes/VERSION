@@ -1,0 +1,12 @@
+# Pinned upstream dependency refs for the alfred-black hermes package
+# Docker builds. Update these when bumping upstream dependencies and open
+# a PR. CI reads these values and passes them as --build-arg to docker build.
+
+# Hermes Agent — the AI runtime. Installed via pip from this git tag.
+# https://github.com/NousResearch/hermes-agent
+# v2026.5.16 == release v0.14.0 (latest at time of writing).
+HERMES_REF=v2026.5.16
+
+# Alfred — the vault scaffold + vault-worker skills, used by the init
+# container. https://github.com/ssdavidai/alfred
+ALFRED_SHA=320e6864a0ce84169e9839f15d15888b7d848c34
