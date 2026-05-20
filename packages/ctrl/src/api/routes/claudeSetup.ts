@@ -38,8 +38,22 @@ interface ComposioSkill {
   content: string;
 }
 
-const OPENCLAW_SKILLS_DIR = "/mnt/encrypted/openclaw/workspace/skills";
+// Composio skills live under the Hermes per-profile workspace skills dir —
+// the SAME location integrations.ts WRITES the alfred-composio-<toolkit>
+// folders to. This reader MUST resolve to the writer's path or the bundle
+// shows zero skills. Mirror integrations.ts's authoritative constants
+// (HERMES_HOME default /opt/data; HERMES_CONFIG_DIR override; main profile,
+// workspace/skills). The old `/mnt/encrypted/openclaw/workspace/skills` host
+// path does not exist on the merged single-VM stack (no openclaw mount).
+const HERMES_HOME = process.env.HERMES_HOME ?? "/opt/data";
+const HERMES_PROFILES_DIR =
+  process.env.HERMES_CONFIG_DIR ?? `${HERMES_HOME}/profiles`;
+const OPENCLAW_SKILLS_DIR = `${HERMES_PROFILES_DIR}/main/workspace/skills`;
 const COMPOSIO_SKILL_PREFIX = "alfred-composio-";
+
+// Exported for the path-resolution regression test (see
+// tests/skills-soul-memory-paths.test.ts).
+export const RESOLVED_SKILLS_DIR = OPENCLAW_SKILLS_DIR;
 
 function readComposioSkills(): ComposioSkill[] {
   if (!fs.existsSync(OPENCLAW_SKILLS_DIR)) return [];

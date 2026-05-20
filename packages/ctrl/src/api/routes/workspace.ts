@@ -3,8 +3,20 @@ import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 
-const WORKSPACE_DIR = "/mnt/encrypted/openclaw/workspace";
+// This route is a read/write surface for the principal's top-level workspace
+// markdown — SOUL.md, MEMORY.md plus the identity/operating files (USER,
+// AGENTS, TOOLS, KNOWN_CONTACTS). None of these are skills; SOUL.md and
+// MEMORY.md are vault-canonical top-level singletons (see CLAUDE.md), and the
+// rest are read as top-level identity files alongside them. So the whole set
+// lives at the vault root. The old `/mnt/encrypted/openclaw/workspace` host
+// path does not exist on the merged single-VM stack (no openclaw mount), so
+// every read returned empty and every write went to a dead directory.
+const WORKSPACE_DIR = process.env.VAULT_PATH ?? "/vault";
 const ALLOWED_FILES = new Set(["SOUL.md", "USER.md", "MEMORY.md", "AGENTS.md", "TOOLS.md", "KNOWN_CONTACTS.md"]);
+
+// Exported for the path-resolution regression test (see
+// tests/skills-soul-memory-paths.test.ts).
+export const RESOLVED_WORKSPACE_DIR = WORKSPACE_DIR;
 
 function validateFilename(filename: string): void {
   if (!filename || !ALLOWED_FILES.has(filename)) {
