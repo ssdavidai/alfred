@@ -214,9 +214,15 @@ function mirrorEventToIngestDb(event: StreamEvent): void {
   } catch (err) {
     // UNIQUE(stream, external_id) → already mirrored, idempotent success.
     if (String(err).includes("UNIQUE")) return;
+    // #8: any OTHER failure means the event never landed in ingest.db (Store 4)
+    // — the ONLY path that feeds the extractor. Swallowing it left the event
+    // visible in the UI (JSONL) but invisible to the signal pipeline forever.
+    // Rethrow so POST /streams/ingest 5xx's instead of falsely 201-ing a
+    // dropped event; the caller retries.
     console.error(
       `[streams] ingest.db mirror failed for ${event.stream_id}/${event.source_ref}: ${String(err).slice(0, 200)}`,
     );
+    throw err;
   }
 }
 

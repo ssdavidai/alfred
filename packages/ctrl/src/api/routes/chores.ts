@@ -308,6 +308,32 @@ const STANDARD_LIBRARY_DEFAULTS: Record<
 const STANDARD_LIBRARY_BUILTIN_PATH = (template: string): string =>
   `packages/learn/src/workflows/chores/${template}.py`;
 
+/**
+ * C10 — `temporal schedule create --input <JSON>` value for a standard-library
+ * template.
+ *
+ * Most chore workflows take the `{chore_slug, ...params}` envelope dict. The
+ * two briefing slots are different: `BriefingWorkflow.run(self, slot)` expects
+ * a **positional string** ("morning" / "evening") and does `slot.strip()`, so
+ * passing the dict crashed the workflow on every fire. For those two templates
+ * the input is the bare slot string; for everything else it stays the dict.
+ *
+ * Returns the JSON-encoded value to hand to `--input`.
+ */
+const BRIEFING_SLOT_BY_TEMPLATE: Record<string, "morning" | "evening"> = {
+  briefing_morning: "morning",
+  briefing_evening: "evening",
+};
+
+export function scheduleInputForTemplate(
+  template: string,
+  workflowInput: Record<string, unknown>,
+): string {
+  const slot = BRIEFING_SLOT_BY_TEMPLATE[template];
+  if (slot) return JSON.stringify(slot); // positional "morning" / "evening"
+  return JSON.stringify(workflowInput);
+}
+
 interface ChoreSummary {
   slug: string;
   name: string;
@@ -1609,7 +1635,9 @@ export function registerChoreRoutes(): void {
         "--task-queue", "alfred-learn",
         "--cron", cron,
         "--overlap-policy", "Skip",
-        "--input", JSON.stringify(workflowInput),
+        // C10: BriefingWorkflow.run(self, slot) takes a positional "morning"/
+        // "evening" string; other workflows take the {chore_slug,...} dict.
+        "--input", scheduleInputForTemplate(template, workflowInput),
       ]);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

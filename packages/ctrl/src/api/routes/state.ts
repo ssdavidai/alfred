@@ -150,7 +150,9 @@ export function registerStateRoutes(): void {
       reqStr(b, "headline"),
       optStr(b, "body"),
       optNum(b, "salience") ?? 0.5,
-      optStr(b, "status") ?? "open",
+      // C2: absent status defaults to 'unrouted' — SignalRouterWorkflow only
+      // routes status='unrouted', so an 'open' default was never surfaced.
+      optStr(b, "status") ?? "unrouted",
       optJson(b, "payload"),
     );
     sendJson(res, 201, { ok: true, id });
@@ -360,21 +362,26 @@ export function registerStateRoutes(): void {
   // ─────────────────────────────────────────────────────────────
   addRoute("POST", "/api/v1/state/audit", async ({ res, body }) => {
     const b = asObj(body);
-    const id = appendAudit({
-      ts: optStr(b, "ts") ?? nowIso(),
-      action_type: reqStr(b, "action_type"),
-      actor: reqStr(b, "actor"),
-      source: optStr(b, "source"),
-      target_path: optStr(b, "target_path"),
-      target_kind: optStr(b, "target_kind"),
-      subject_ref: optStr(b, "subject_ref"),
-      summary: reqStr(b, "summary"),
-      changes: b.changes ?? null,
-      mode: optStr(b, "mode") ?? "live",
-      confidence: optNum(b, "confidence"),
-      undo: b.undo ?? null,
-      payload: b.payload ?? null,
-    });
+    // strict:true — the audit row is the primary write here, so a failed
+    // insert must 5xx (not return a false 201). See appendAudit.
+    const id = appendAudit(
+      {
+        ts: optStr(b, "ts") ?? nowIso(),
+        action_type: reqStr(b, "action_type"),
+        actor: reqStr(b, "actor"),
+        source: optStr(b, "source"),
+        target_path: optStr(b, "target_path"),
+        target_kind: optStr(b, "target_kind"),
+        subject_ref: optStr(b, "subject_ref"),
+        summary: reqStr(b, "summary"),
+        changes: b.changes ?? null,
+        mode: optStr(b, "mode") ?? "live",
+        confidence: optNum(b, "confidence"),
+        undo: b.undo ?? null,
+        payload: b.payload ?? null,
+      },
+      { strict: true },
+    );
     sendJson(res, 201, { ok: true, id });
   });
 
@@ -696,7 +703,21 @@ export interface AuditInput {
   payload?: unknown;
 }
 
-export function appendAudit(input: AuditInput): string {
+/**
+ * Append an audit row.
+ *
+ * Default (no opts) is **best-effort**: an insert failure is logged and
+ * swallowed, returning the would-be id, so a vault write is never broken by a
+ * failed audit mirror (decisions.ts / attention.ts / stateChanges.ts).
+ *
+ * `{ strict: true }` is for callers where the audit row IS the primary write
+ * (the POST /api/v1/state/audit route): a failed insert RETHROWS so the request
+ * surfaces a 5xx instead of a false 201 {ok,id}.
+ */
+export function appendAudit(
+  input: AuditInput,
+  opts?: { strict?: boolean },
+): string {
   const id = ulid();
   const toJson = (v: unknown): string | null => {
     if (v === undefined || v === null) return null;
@@ -733,9 +754,12 @@ export function appendAudit(input: AuditInput): string {
         toJson(input.payload),
       );
   } catch (err) {
-    // Best-effort mirror — never break a vault write because the audit row
-    // failed. Logged so the gap is visible.
+    // Logged so the gap is always visible.
     console.error(`[audit] appendAudit failed: ${err}`);
+    // Strict callers (the primary-write POST /audit route) must NOT report a
+    // false success — rethrow so the request 5xx's. Best-effort callers (vault
+    // write mirrors) swallow and return the id.
+    if (opts?.strict) throw err;
   }
   return id;
 }

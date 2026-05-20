@@ -50,14 +50,19 @@ function readHermesConfig(configPath: string): Record<string, any> {
 }
 
 export function registerHermesRoutes(): void {
-  // Register each handler under the canonical /api/v1/hermes/* prefix.
-  // The Phase-1 /api/v1/openclaw/* alias was retired in Phase 2 (issue #25).
+  // Register each handler under the canonical /api/v1/hermes/* prefix AND the
+  // legacy /api/v1/openclaw/* alias (C7). The alias was retired in Phase 2
+  // (issue #25), but ~7 callers still hit it — the MCP `alfred.ts` tools and
+  // learn `briefing.py:1711` — and 404 without it. Registering the same handler
+  // reference under both prefixes makes the alias a genuine thin forward (no
+  // divergent copy): both routes dispatch to the identical closure.
   const dual = (
     method: string,
     suffix: string,
     handler: Parameters<typeof addRoute>[2],
   ) => {
     addRoute(method, `/api/v1/hermes/${suffix}`, handler);
+    addRoute(method, `/api/v1/openclaw/${suffix}`, handler);
   };
 
   // ── Gateway health ────────────────────────────────────────────
