@@ -139,7 +139,7 @@ pip install "alfred-vault[all]"             # everything
 
 ```bash
 git clone https://github.com/ssdavidai/alfred.git
-cd alfred && pip install -e ".[all]"
+cd alfred/packages/alfred-vault && pip install -e ".[all]"
 ```
 </details>
 

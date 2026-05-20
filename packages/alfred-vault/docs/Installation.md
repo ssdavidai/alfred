@@ -25,7 +25,7 @@ The base install includes the semantic layer workers (curator, janitor, distille
 
 ```bash
 git clone https://github.com/ssdavidai/alfred.git
-cd alfred
+cd alfred/packages/alfred-vault
 pip install -e .          # base (semantic layer workers)
 pip install -e ".[all]"   # full (surveyor + temporal)
 ```

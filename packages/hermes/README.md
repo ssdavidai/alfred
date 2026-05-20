@@ -1,16 +1,12 @@
-# Alfred + OpenClaw — One-Click Deploy
+# hermes — Alfred Black AI gateway package
 
-Deploy [Alfred](https://github.com/ssdavidai/alfred) (Obsidian vault operations suite) with [OpenClaw](https://github.com/openclaw/openclaw) (personal AI assistant) as its agent backend.
+This is the `hermes` package inside the [Alfred Black monorepo](https://github.com/ssdavidai/alfred). It packages the AI gateway and agent-backend wiring for the full platform. The standalone OpenClaw deploy repo it once lived in is retired; everything now ships from this monorepo.
+
+To build and deploy the full platform, see the **"Building the images (maintainers only)"** section of the [root README](https://github.com/ssdavidai/alfred#building-the-images-maintainers-only). The notes below describe this package's contents and configuration.
 
 ## Path A: Shell Script (Existing OpenClaw Users)
 
-If you already have OpenClaw installed locally:
-
-```bash
-git clone https://github.com/ssdavidai/alfred-openclaw.git
-cd alfred-openclaw
-./setup.sh
-```
+If you already have OpenClaw installed locally, run `setup.sh` from this package directory (`packages/hermes/`) after cloning the monorepo. See the [root README's maintainers section](https://github.com/ssdavidai/alfred#building-the-images-maintainers-only) for clone instructions.
 
 **Prerequisites:** Python 3.11+, OpenClaw on PATH, git
 
@@ -29,14 +25,7 @@ cd ~/.alfred && alfred up   # Terminal 2: start Alfred
 
 ## Path B: Docker Compose (Fresh Deploy)
 
-For deploying both OpenClaw and Alfred from scratch:
-
-```bash
-git clone https://github.com/ssdavidai/alfred-openclaw.git
-cd alfred-openclaw
-cp .env.example .env    # Fill in your API keys
-docker compose up --build
-```
+For deploying both OpenClaw and Alfred from scratch, use the `docker-compose.yml` in this package directory after cloning the monorepo (`cd packages/hermes`, fill `.env` from `.env.example`, then `docker compose up --build`). See the [root README's maintainers section](https://github.com/ssdavidai/alfred#building-the-images-maintainers-only) for the full build flow.
 
 **Services:**
 - **init** (one-shot) — scaffolds vault, copies skills, generates config

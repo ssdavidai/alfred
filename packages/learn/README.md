@@ -161,8 +161,8 @@ All configuration is via environment variables.
 
 ```bash
 # Clone
-git clone https://github.com/ssdavidai/alfred-platform.git
-cd alfred-platform/packages/learn
+git clone https://github.com/ssdavidai/alfred
+cd alfred/packages/learn
 
 # Virtual environment
 python3.12 -m venv .venv
