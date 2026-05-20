@@ -53,7 +53,7 @@ function Section({
 // ---------------------------------------------------------------------------
 
 function RulesSection() {
-  const { data, isLoading, refetch } = useQuery(
+  const { data, isLoading, isError, refetch } = useQuery(
     getWorkspaceFile,
     { filename: "RULES.md" },
     { refetchInterval: false, retry: false },
@@ -114,7 +114,30 @@ function RulesSection() {
 
   return (
     <Section title="Standing rules">
-      {isLoading && !seeded ? (
+      {isError && !seeded ? (
+        // Fetch failed (retry:false, so it won't self-recover) — show an
+        // explicit retry instead of hanging on "A moment." or rendering an
+        // empty list that reads as "no rules" (FAILURE-MODES web bug #5).
+        <p
+          className="font-body italic text-[15px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Alfred couldn't load your standing rules just now.{" "}
+          <button
+            onClick={() => refetch()}
+            className="underline"
+            style={{
+              color: "var(--brass)",
+              background: "none",
+              border: "none",
+              padding: 0,
+              cursor: "pointer",
+            }}
+          >
+            Retry
+          </button>
+        </p>
+      ) : isLoading && !seeded ? (
         <p
           className="font-body italic text-[15px]"
           style={{ color: "var(--marginalia)" }}
