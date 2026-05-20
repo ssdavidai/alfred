@@ -538,6 +538,17 @@ Be EXHAUSTIVE on the facts. This is about the WHOLE person — their family dinn
     onboard["progress"]["facts_count"] = len(facts)
     _write_onboard(onboard_path, onboard)
 
+    # Stage narration — Alfred working out who you are (best-effort, via Hermes).
+    try:
+        from src.activities.inbox_narration import generate_facts_narration
+
+        lines = await generate_facts_narration(facts, key_identity_facts)
+        if lines:
+            onboard["narration"] = onboard.get("narration", []) + lines
+            _write_onboard(onboard_path, onboard)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("onboarding_v3: facts narration skipped: %s", e)
+
     return {"facts": len(facts), "key_identity_facts": len(key_identity_facts)}
 
 
@@ -632,6 +643,17 @@ Be insightful. Look for non-obvious connections. A great butler notices what the
     onboard["patterns"] = patterns
     onboard["progress"]["patterns_count"] = len(patterns)
     _write_onboard(onboard_path, onboard)
+
+    # Stage narration — Alfred noticing the rhythms of your days.
+    try:
+        from src.activities.inbox_narration import generate_patterns_narration
+
+        lines = await generate_patterns_narration(patterns)
+        if lines:
+            onboard["narration"] = onboard.get("narration", []) + lines
+            _write_onboard(onboard_path, onboard)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("onboarding_v3: patterns narration skipped: %s", e)
 
     return {"patterns": len(patterns)}
 
@@ -729,6 +751,19 @@ Make each file genuinely useful — not generic templates. Reference specific na
     onboard["user_md"] = files.get("user_md", "")
     onboard["soul_md"] = files.get("soul_md", "")
     _write_onboard(onboard_path, onboard)
+
+    # Stage narration — Alfred composing your profile + shaping its own soul.
+    try:
+        from src.activities.inbox_narration import generate_personalize_narration
+
+        lines = await generate_personalize_narration(
+            onboard.get("key_identity_facts", [])
+        )
+        if lines:
+            onboard["narration"] = onboard.get("narration", []) + lines
+            _write_onboard(onboard_path, onboard)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("onboarding_v3: personalize narration skipped: %s", e)
 
     return {"files_written": written}
 
