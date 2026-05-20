@@ -3,6 +3,8 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, ConflictError, NotFoundError } from "../errors.js";
+import { getIngestDb } from "../../db/ingest.js";
+import { ulid } from "../../db/ulid.js";
 
 // alfred-black named volumes (PLAN.md Part E) — env-configurable.
 const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
@@ -180,6 +182,42 @@ function saveStreamConfig(config: StreamConfig): void {
 function appendEvent(streamId: string, event: StreamEvent): void {
   const filePath = getStreamEventsPath(streamId);
   fs.appendFileSync(filePath, JSON.stringify(event) + "\n");
+}
+
+// Mirror an ingested stream event into ingest.db (Store 4) so the signal
+// pipeline (SignalExtractWorkflow → GET /api/v1/ingest/events/pending) has a
+// canonical, contract-compliant source to consume. The JSONL file above stays
+// as the mirror that backs the /streams/:id/events UI reads. (#78)
+//
+// Best-effort: a Store-4 write failure must NOT fail the ingest request — the
+// JSONL append already succeeded, and the puller's contract is "event
+// accepted". We log and continue. (stream, external_id) is the dedup key, so a
+// re-delivered event is idempotent.
+function mirrorEventToIngestDb(event: StreamEvent): void {
+  try {
+    const externalId = event.source_ref ?? null;
+    getIngestDb()
+      .prepare(
+        `INSERT INTO stream_event
+           (id, ts, stream, channel, external_id, kind, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        ulid(),
+        event.received_at,
+        event.stream_id,
+        event.stream_type ?? null,
+        externalId,
+        (event.metadata?.event_type as string | undefined) ?? "message",
+        JSON.stringify(event),
+      );
+  } catch (err) {
+    // UNIQUE(stream, external_id) → already mirrored, idempotent success.
+    if (String(err).includes("UNIQUE")) return;
+    console.error(
+      `[streams] ingest.db mirror failed for ${event.stream_id}/${event.source_ref}: ${String(err).slice(0, 200)}`,
+    );
+  }
 }
 
 function readRecentEvents(streamId: string, limit: number = 50): StreamEvent[] {
@@ -817,6 +855,8 @@ export function registerStreamRoutes(): void {
     };
 
     appendEvent(streamId, event);
+    // Also land it in ingest.db (Store 4) for the signal pipeline (#78).
+    mirrorEventToIngestDb(event);
 
     // Update stream meta
     const streams = loadStreamsMeta();

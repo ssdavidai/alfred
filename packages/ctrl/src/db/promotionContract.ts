@@ -50,7 +50,23 @@ const CANONICAL_SET = new Set<string>(CANONICAL_RECORD_TYPES);
  * the soul/rules singletons and the template directory the seed scaffolds.
  */
 export const CANONICAL_TOP_LEVEL_FILES = new Set<string>(["SOUL.md", "RULES.md"]);
-export const CANONICAL_NON_RECORD_DIRS = new Set<string>(["_templates"]);
+// Directories ctrl-api itself manages that are NOT principal-authored record
+// types but are still legitimate vault writes:
+//   _templates/       — the seed scaffolds these.
+//   needs_attention/  — the Desk "please decide" queue. ctrl-api OWNS this
+//     directory: it lists it (GET /api/v1/admin/needs-attention), reads each
+//     card off the filesystem, and exposes done/dispatch/skip handlers for it
+//     (routes/attention.ts). The signal router writes a card here when a
+//     signal needs a human decision. The promotion contract's long-term
+//     intent is to move these into state.db as routed signals (storage epic
+//     cutover #28), but the entire READ + Desk-UI path is still built around
+//     vault markdown — so until that cutover lands, blocking the WRITE just
+//     breaks the Desk (a routed signal could never surface). Allowing
+//     ctrl-api's own managed dir is the coherent interim posture. (#78)
+export const CANONICAL_NON_RECORD_DIRS = new Set<string>([
+  "_templates",
+  "needs_attention",
+]);
 
 /**
  * Demoted types and where each one now lives. Surfaced in error messages so a
@@ -73,7 +89,10 @@ export const DEMOTED_TYPES: Record<string, string> = {
   contradiction: "alfred-state.db observation table (kind=contradiction)",
   assumption: "alfred-state.db observation table (kind=assumption)",
   constraint: "alfred-state.db observation table (kind=constraint)",
-  needs_attention: "alfred-state.db signal table (a needs_attention card is a routed signal)",
+  // NOTE: `needs_attention` is intentionally NOT demoted here — it is an
+  // allowed ctrl-api-managed dir (see CANONICAL_NON_RECORD_DIRS above). The
+  // state.db migration of the Desk queue is storage-epic cutover #28; until
+  // the READ path moves, the card must be writable as vault markdown. (#78)
   // → ingest.db
   stream_event: "ingest.db stream_event table (POST /api/v1/ingest/events)",
   streams: "ingest.db stream_event table (POST /api/v1/ingest/events)",
