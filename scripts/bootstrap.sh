@@ -49,6 +49,24 @@ env_get() {
 	grep -E "^${key}=" "${ENV_FILE}" 2>/dev/null | tail -n1 | cut -d= -f2- || true
 }
 
+# Strip leading + trailing whitespace from a value. Used so a "present but
+# blank" field — e.g. `DOMAIN= ` with a stray space, which `[[ -z ]]` alone
+# treats as set — is caught as empty and regenerated rather than passing
+# validation and leaking the space into the container env.
+trim() {
+	local s="$1"
+	s="${s#"${s%%[![:space:]]*}"}"   # leading
+	s="${s%"${s##*[![:space:]]}"}"   # trailing
+	printf '%s' "${s}"
+}
+
+# Self-check: trim() must reduce a whitespace-only string to empty. A broken
+# trim would silently re-enable the blank-field bug, so fail loud at boot.
+if [[ -n "$(trim "   ")" || "$(trim "  x  ")" != "x" ]]; then
+	red "ERROR: bootstrap trim() self-check failed — refusing to validate."
+	exit 1
+fi
+
 # ── 1. validate required fields ─────────────────────────────────────
 REQUIRED=(
 	DOMAIN
@@ -63,7 +81,7 @@ REQUIRED=(
 bold "Validating required fields in .env ..."
 MISSING=()
 for key in "${REQUIRED[@]}"; do
-	value="$(env_get "${key}")"
+	value="$(trim "$(env_get "${key}")")"
 	if [[ -z "${value}" ]]; then
 		MISSING+=("${key}")
 	fi
@@ -126,8 +144,9 @@ bold "Generating auto-secrets ..."
 GENERATED=0
 KEPT=0
 for key in "${AUTO_SECRETS[@]}"; do
-	# An existing non-empty `KEY=value` line means "already set" — skip.
-	existing="$(env_get "${key}")"
+	# An existing non-blank `KEY=value` line means "already set" — skip.
+	# Trim first so a whitespace-only secret is regenerated, not kept.
+	existing="$(trim "$(env_get "${key}")")"
 	if [[ -n "${existing}" ]]; then
 		KEPT=$((KEPT + 1))
 		continue
@@ -158,7 +177,7 @@ done
 # ctrl-api rejects the onboarding "connect Gmail" flow without it, and a
 # shared "default" would let separate installs collide on one Composio
 # account. init mirrors it to /alfred-data/.composio-user-id for the worker.
-existing_uid="$(env_get COMPOSIO_USER_ID)"
+existing_uid="$(trim "$(env_get COMPOSIO_USER_ID)")"
 if [[ -z "${existing_uid}" || "${existing_uid}" == "default" ]]; then
 	uid="alfred-owner-$(openssl rand -hex 4)"
 	if grep -qE "^#?COMPOSIO_USER_ID=" "${ENV_FILE}" 2>/dev/null; then
