@@ -40,7 +40,7 @@ test("buildInboxUsername strips and normalises common email patterns", () => {
     buildInboxUsername("owner.example@example.com"),
     "alfred.owner.example",
   );
-  assert.equal(buildInboxUsername("Raj313@Gmail.com"), "alfred.tenant-c");
+  assert.equal(buildInboxUsername("TenantC@Gmail.com"), "alfred.tenantc");
 });
 
 test("buildInboxUsername handles edge cases without crashing", () => {
@@ -144,7 +144,7 @@ test("ensureInstanceHasAgentMail mints fresh creds + persists on success", async
       return new Response(
         JSON.stringify({
           inbox_id: "ibx_new_123",
-          email: "alfred.tenant-c@mail.alfred.black",
+          email: "alfred.tenantc@mail.alfred.black",
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
@@ -169,13 +169,13 @@ test("ensureInstanceHasAgentMail mints fresh creds + persists on success", async
         },
       },
       instance: { id: "i1", userId: "u1" },
-      user: { id: "u1", email: "tenant-c@gmail.com" },
+      user: { id: "u1", email: "tenantc@gmail.com" },
     });
     assert.equal(result.status, "ok");
     assert.equal(result.inboxId, "ibx_new_123");
-    assert.equal(result.inboxAddress, "alfred.tenant-c@mail.alfred.black");
+    assert.equal(result.inboxAddress, "alfred.tenantc@mail.alfred.black");
     assert.equal(result.apiKey, "am_key_secret_321");
-    assert.deepEqual(inboxBody?.username, "alfred.tenant-c");
+    assert.deepEqual(inboxBody?.username, "alfred.tenantc");
     assert.equal(inboxBody?.client_id, "tenant-u1");
     assert.match(keyBody?.name, /^tenant-u1-main-/);
     assert.equal(persisted?.where?.id, "i1");
@@ -210,7 +210,7 @@ test("ensureInstanceHasAgentMail captures failure on Instance row + returns 'fai
         },
       },
       instance: { id: "i1", userId: "u1" },
-      user: { id: "u1", email: "tenant-c@gmail.com" },
+      user: { id: "u1", email: "tenantc@gmail.com" },
     });
     assert.equal(result.status, "failed");
     assert.match(result.error || "", /429|rate/);

@@ -79,9 +79,9 @@ export interface InstanceConfig {
   /**
    * Deploy Vaultwarden (self-hosted Bitwarden-compatible vault) on the tenant
    * VPS so Sir can manage tenant secrets through a web UI instead of editing
-   * `.env` over SSH. Default-on for new tenants since the david canary soaked
+   * `.env` over SSH. Default-on for new tenants since the tenant-a canary soaked
    * cleanly through a full down/up cycle (#808). Existing tenants
-   * (miguel/tenant-a/tenant-c) keep their pre-Vaultwarden flow until manually
+   * (tenant-a/tenant-b/tenant-c) keep their pre-Vaultwarden flow until manually
    * cut over. Pass `false` explicitly to opt out — useful for staging.
    * See `setupVaultwarden` in `infra/provisioner.ts` for the full story.
    */

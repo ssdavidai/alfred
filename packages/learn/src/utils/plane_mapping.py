@@ -24,7 +24,7 @@ VAULT_TASK_TO_PLANE_STATE_GROUP = {
     "blocked":   "unstarted",   # + "blocked" label
     "done":      "completed",
     "cancelled": "cancelled",
-    # Fleet-drift value seen on Sir's mature vault (1212 records on
+    # Fleet-drift value seen on example-owner's mature vault (1212 records on
     # 2026-04-23). Not in the canonical schema but we round-trip it as
     # backlog so these records don't silently fall off forward sync.
     "pending":   "backlog",

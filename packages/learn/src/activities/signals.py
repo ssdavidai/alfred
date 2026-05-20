@@ -863,8 +863,8 @@ def _candidate_haystack(record: dict[str, Any]) -> str:
     """Build the ranking string for a single matter/task candidate.
 
     We rank against the union of (slug, name, title) so a target_hint
-    of "acme-shop orders" can match either a task whose name is "Investigate
-    Acme Shop duplicate orders" or whose slug is "acme-shop-orders-2026-04".
+    of "shopify orders" can match either a task whose name is "Investigate
+    Shopify duplicate orders" or whose slug is "shopify-orders-2026-04".
     Tags are NOT included — they're too generic to discriminate between
     candidates and inflate similarity scores spuriously.
     """
@@ -954,7 +954,7 @@ async def _resolve_target(
 
     Inputs come from the LLM's classification pass:
       * ``target_hint`` — free text the LLM thinks names the target
-        (e.g. "acme-shop duplicate orders investigation").
+        (e.g. "shopify duplicate orders investigation").
       * ``target_kind_hint`` — the LLM's guess: "task" | "matter" |
         "" (unknown).
 

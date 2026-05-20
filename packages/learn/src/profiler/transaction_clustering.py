@@ -91,7 +91,7 @@ DEFAULT_CATEGORY_RULES: list[tuple[str, str, str | None, str]] = [
     # Groceries
     (r"\btesco\b", "Groceries", "Grocery", "merchant"),
     (r"\baldi\b", "Groceries", "Grocery", "merchant"),
-    (r"\blidl\b", "Groceries", "Grocery", "merchant"),
+    (r"\bexample\W*grocer\b", "Groceries", "Grocery", "merchant"),
     (r"\bspar\b", "Groceries", "Grocery", "merchant"),
     (r"\bauchan\b", "Groceries", "Grocery", "merchant"),
     (r"\bcba\b", "Groceries", "Grocery", "merchant"),
@@ -99,7 +99,7 @@ DEFAULT_CATEGORY_RULES: list[tuple[str, str, str | None, str]] = [
     (r"\bcoop\b", "Groceries", "Grocery", "merchant"),
     (r"\bkifli\b", "Groceries", "Grocery", "merchant"),
     # Food & Drink
-    (r"\bwolt\b", "Food & Drink", "Food Delivery", "merchant"),
+    (r"\bfoodco\b", "Food & Drink", "Food Delivery", "merchant"),
     (r"\bfoodora\b", "Food & Drink", "Food Delivery", "merchant"),
     (r"\bbolt\s*food\b", "Food & Drink", "Food Delivery", "merchant"),
     (r"\bstarbucks\b", "Food & Drink", None, "merchant"),
@@ -132,7 +132,7 @@ DEFAULT_CATEGORY_RULES: list[tuple[str, str, str | None, str]] = [
     (r"name\W?cheap", "Subscriptions", "Subscription", "merchant"),
     (r"\bcanva\b", "Subscriptions", "Subscription", "merchant"),
     (r"\blovable\b", "Subscriptions", "Subscription", "merchant"),
-    (r"\bhetzner\b", "Subscriptions", "Subscription", "merchant"),
+    (r"\bacme\W*cloud\b", "Subscriptions", "Subscription", "merchant"),
     (r"\bopenai|chatgpt", "Subscriptions", "Subscription", "merchant"),
     (r"\bsuno\b", "Subscriptions", "Subscription", "merchant"),
     (r"\breplicate\b", "Subscriptions", "Subscription", "merchant"),
@@ -192,20 +192,20 @@ DEFAULT_CATEGORY_RULES: list[tuple[str, str, str | None, str]] = [
     (r"\bcsed\b|\bgyed\b|\ballamkincstar\b", "Income", "Salary / Income", "income"),
     (r"\brefund\b|\bvisszateritest?\b", "Income", None, "income"),
     # Loan / Mortgage
-    (r"\bcib\b.*\belorelep\b|\belorelep\b", "Loan Payments", None, "merchant"),
-    (r"\bjbc\b|\bjelzalog\b|\bmortgage\b", "Mortgage / Rent", None, "merchant"),
-    # Internal transfers — Example Bank, Example Bank, Example Bank, Apple/Google Pay
-    (r"\bwise\b", "Transfers", "Transfer", "transfer"),
+    (r"\bexample\W*bank\b.*\bloan\b|\bexample\W*loan\b", "Loan Payments", None, "merchant"),
+    (r"\bexample\W*mortgage\b|\bjelzalog\b|\bmortgage\b", "Mortgage / Rent", None, "merchant"),
+    # Internal transfers — bank-to-bank, Apple/Google Pay. Several
+    # distinct payment providers all genericize to "Example Bank" so a
+    # single bank-name rule covers them.
+    (r"\bexample\W*bank\b", "Transfers", "Transfer", "transfer"),
     (r"\bexchanged?\b.*\bto\b|\bcurrency\W*exchange\b", "Transfers", "Transfer", "transfer"),
-    (r"\brevolut\b", "Transfers", "Transfer", "transfer"),
-    (r"\bvault\b.*\b(transfer|in|out)\b|\brevolut\W*vault\b", "Transfers", "Transfer", "transfer"),
+    (r"\bvault\b.*\b(transfer|in|out)\b|\bexample\W*bank\W*vault\b", "Transfers", "Transfer", "transfer"),
     (r"\bpay\W*top\W*up\b|\btop[\W_]*up\b.*\bby\b", "Transfers", "Transfer", "transfer"),
-    (r"\berste\W*bank\b", "Transfers", "Transfer", "transfer"),
     (r"\bstripe\b.*\btransfer\b", "Transfers", "Transfer", "transfer"),
-    # Self-name transfers (Hungarian variations of "Sir/Sam Lee Szabó-Stubán")
-    (r"\bdavid\b.*\bszabo\b|\bszabo\b.*\bstuban\b|\bszab[oó]\W*stub[aá]n\b", "Transfers", "Transfer", "transfer"),
-    (r"\beszter\b.*\bszabo\b|\beszter\b.*\bstuban\b", "Transfers", "Transfer", "transfer"),
-    # Cashback/balance lines (Example Bank interest, top-ups, balance adjustments)
+    # Self-name transfers (variations of the account owner's own name)
+    (r"\bjane\b.*\bdoe\b|\bdoe\b.*\bjane\b", "Transfers", "Transfer", "transfer"),
+    (r"\bsam\b.*\blee\b|\bsam\b.*\bdoe\b", "Transfers", "Transfer", "transfer"),
+    # Cashback/balance lines (interest, top-ups, balance adjustments)
     (r"\bbalance\W*[-_]?cashback\b|\bbalance[-_]\d+\b|\bcashback\b", "Income", None, "income"),
     # Hungarian Telekom abbreviation in bank descriptions
     (r"\btelekomszaml\b", "Utilities", "Hungarian Utility", "merchant"),
@@ -608,7 +608,7 @@ def proposals_to_dicts(proposals: Iterable[ClusterProposal]) -> list[dict[str, A
 # from the same account with the same magnitude (within ±5%) recurring
 # monthly are almost certainly the same payee — even if the bank-feed
 # strings are entirely different (e.g. "Sp Mind Lab Pro" / "Sp Mind Lab
-# Pro Eu", or "MÓNIKA ARTAI" / "Acme Payee Bt." in different formats).
+# Pro Eu", or "ACME PAYEE" / "Acme Payee Ltd." in different formats).
 #
 # Strategy:
 #   1. Group transactions by (account_id, amount_band).

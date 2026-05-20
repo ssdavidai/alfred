@@ -105,7 +105,7 @@ export const ALL_VAULTWARDEN_TOOLS: ToolDef[] = [
   {
     name: "create_vault_item",
     description:
-      "Create a new login item. Required: name + value (the password / secret). Optional: notes, username, uris (array of URLs), folder_id. Use when Sir says 'save this API key as <name>' or 'add a Example Bank password'. NOT idempotent — re-running creates duplicates; if retrying after a network error, search by name first. Returns the created item with its new id. Backing: POST /api/v1/vaultwarden/items.",
+      "Create a new login item. Required: name + value (the password / secret). Optional: notes, username, uris (array of URLs), folder_id. Use when Sir says 'save this API key as <name>' or 'add a Wise password'. NOT idempotent — re-running creates duplicates; if retrying after a network error, search by name first. Returns the created item with its new id. Backing: POST /api/v1/vaultwarden/items.",
     inputSchema: z.object({
       name: z.string().min(1).describe("Display name; this becomes the env-var name when migrate.sh imports back"),
       value: z.string().describe("The password / secret value"),

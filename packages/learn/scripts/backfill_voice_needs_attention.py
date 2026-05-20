@@ -176,8 +176,8 @@ async def _load_user_md(cfg) -> str:
 
     The voicing prompt cannot use "you" correctly without identifying the
     principal. Without this, the model treats Sir's own name in email
-    `**To**:` / `**From**:` fields as a third party and writes "tenant-a
-    tenant-a forwarded the FAVO NDA for your review" (where tenant-a IS
+    `**To**:` / `**From**:` fields as a third party and writes "Jane Doe
+    forwarded the NDA for your review" (where Jane Doe IS
     Sir). Loading USER.md per-tenant fixes that.
     """
     base_url = getattr(cfg, "alfred_ctrl_url", None)

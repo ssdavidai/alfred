@@ -388,7 +388,7 @@ describe("GET /api/v1/vault/records/* — YAML plain-scalar continuation (#611)"
       "description: Example Bank Agentic Coding Makerspace program—your February-prepared proposal",
       "  accepted 2026-04-18—requires IT security kickoff to initiate 12-week training for",
       "  20–30 Example Bank developers in compliant agentic coding harnesses using GitHub Copilot.",
-      "  Involves Peti and Alexa; leverages GitHub and Microsoft. Originates from Omi's 2026-04-17",
+      "  Involves Sam and Alex; leverages GitHub and Microsoft. Originates from Omi's 2026-04-17",
       "  conversation affirming Copilot as safe compliance choice.",
       "name: organize IT security kickoff",
       "status: todo",
@@ -405,7 +405,7 @@ describe("GET /api/v1/vault/records/* — YAML plain-scalar continuation (#611)"
     assert.strictEqual(status, 200);
     assert.strictEqual(
       data.frontmatter.description,
-      "Example Bank Agentic Coding Makerspace program—your February-prepared proposal accepted 2026-04-18—requires IT security kickoff to initiate 12-week training for 20–30 Example Bank developers in compliant agentic coding harnesses using GitHub Copilot. Involves Peti and Alexa; leverages GitHub and Microsoft. Originates from Omi's 2026-04-17 conversation affirming Copilot as safe compliance choice.",
+      "Example Bank Agentic Coding Makerspace program—your February-prepared proposal accepted 2026-04-18—requires IT security kickoff to initiate 12-week training for 20–30 Example Bank developers in compliant agentic coding harnesses using GitHub Copilot. Involves Sam and Alex; leverages GitHub and Microsoft. Originates from Omi's 2026-04-17 conversation affirming Copilot as safe compliance choice.",
     );
     // Sibling fields after the multi-line scalar must parse normally.
     assert.strictEqual(data.frontmatter.name, "organize IT security kickoff");

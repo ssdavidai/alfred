@@ -35,5 +35,5 @@ How to extract people, organizations, and places from incoming content.
 
 ## Deduplication
 - Check vault person/ and org/ folders before creating
-- Match on name similarity (not exact — "Dave" = "Sir")
+- Match on name similarity (not exact — "Sam" = "Samuel")
 - When unsure, create the record — better to merge later than lose data

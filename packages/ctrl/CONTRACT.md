@@ -39,7 +39,7 @@ Fleet management tool (runs locally or on SaaS host):
 | Command | Purpose |
 |---------|---------|
 | `provision <name>` | 17-step provisioning orchestrator |
-| `destroy <name>` | Tear down instance + Acme Cloud resources |
+| `destroy <name>` | Tear down instance + Hetzner resources |
 | `health [name]` | SSH-based health checks across fleet |
 | `deploy-api [name]` | Deploy ctrl API to a tenant |
 | `update [name]` | Rolling Docker image update (--all for fleet) |
@@ -74,11 +74,11 @@ Periodic background checks via SSH into each tenant:
 ### 17-Step Provisioning Orchestrator
 
 1. `generate_keypair` — Generate Ed25519 keypair
-2. `upload_ssh_key` — Upload SSH key to Acme Cloud
+2. `upload_ssh_key` — Upload SSH key to Hetzner
 3. `ensure_firewall` — Ensure shared firewall
 4. `create_volume` — Create encrypted volume
 5. `render_cloud_init` — Render cloud-init template
-6. `create_server` — Create Acme Cloud server
+6. `create_server` — Create Hetzner server
 7. `wait_cloud_init` — Wait for cloud-init completion
 8. `upload_env` — Upload secrets via SSH
 9. `configure_backups` — Configure restic backup credentials
@@ -131,7 +131,7 @@ The generated `docker-compose.yaml` defines a `shared_tmp` Docker volume mounted
 
 | Variable | Required | Default | Purpose |
 |----------|----------|---------|---------|
-| `HETZNER_API_TOKEN` | yes | — | Acme Cloud Cloud API |
+| `HETZNER_API_TOKEN` | yes | — | Hetzner Cloud API |
 | `TAILSCALE_API_KEY` | yes | — | Tailscale auth key generation |
 | `CLOUDFLARE_API_TOKEN` | no | — | Tunnel + DNS management |
 | `OPENROUTER_API_KEY` | no | — | AI features |

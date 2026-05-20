@@ -789,7 +789,7 @@ async def fetch_changed_matters(since_mtime: float) -> list[dict[str, Any]]:
 # workflow slices these into chunks and feeds each chunk to
 # ``fetch_task_records_batch`` to materialise the full TaskRecord shape
 # on demand. Two-stage design replaces the old single-shot
-# ``fetch_changed_tasks`` activity, which on mature tenants (Sir:
+# ``fetch_changed_tasks`` activity, which on mature tenants (example-owner:
 # ~2545 tasks) blew Temporal's 2 MB activity-result ceiling and froze
 # the cursor permanently. PR #591 capped the return at 300 records as a
 # stop-gap; this is the proper fix.

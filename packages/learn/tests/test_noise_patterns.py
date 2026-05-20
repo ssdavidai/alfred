@@ -49,10 +49,10 @@ def test_gmail_signature_from_body_when_frontmatter_lacks_sender() -> None:
 
 def test_gmail_signature_body_scrape_handles_quoted_display_name() -> None:
     fm = {"source_type": "gmail"}
-    body = '**From**: "Acme Video HQ Inc." <invoice+statements@acme-video.tv>\n**To**: x@y.z\n'
+    body = '**From**: "Tella HQ Inc." <invoice+statements@tella.tv>\n**To**: x@y.z\n'
     sig = derive_signature(fm, event_body=body)
     assert sig["kind"] == "gmail_sender"
-    assert sig["value"] == "invoice+statements@acme-video.tv"
+    assert sig["value"] == "invoice+statements@tella.tv"
 
 
 def test_gmail_signature_body_scrape_composio_source_type() -> None:

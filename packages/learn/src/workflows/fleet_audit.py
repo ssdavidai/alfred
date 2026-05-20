@@ -7,7 +7,7 @@ Runs once a day (02:00 UTC) against every tenant's own streams. For each
 ``composio-*.jsonl`` file under ``/alfred-data/streams/`` it pulls out
 every Google-origin event with a ``self: true`` attendee and compares
 that attendee's email against the tenant's canonical owner email. A
-mismatch is the signature of the April 2026 tenant-a-vs-Sir leak: another
+mismatch is the signature of the April 2026 tenant-a-vs-owner leak: another
 tenant's Composio user_id was misconfigured and their calendar/email
 events got ingested under the wrong tenant.
 

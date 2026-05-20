@@ -325,7 +325,7 @@ def _make_brief_onboard(tmp_path: Path) -> str:
                 "patterns": [
                     {"name": "p1", "description": "reviews stats on Tuesdays"}
                 ],
-                "user_md": "# User\n\nDavid.",
+                "user_md": "# User\n\nJane Doe.",
                 "soul_md": "# Soul\n\nAddress as Sir.",
             }
         )

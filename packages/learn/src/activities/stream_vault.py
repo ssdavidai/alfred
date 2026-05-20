@@ -678,7 +678,7 @@ def _template_omi(
     The Omi ingest activity packs the date, time range, language, and part
     number into `raw.text` as a prefix, followed by the full transcript.
     We keep the whole thing so downstream enrichment can see mid-transcript
-    content (e.g. ambient "Example Bank" / "makerspace" mentions that never appear
+    content (e.g. ambient "Erste" / "makerspace" mentions that never appear
     in the first sentence).
 
     Metadata fields like `conversation_id`, `languages`, `duration_seconds`,

@@ -248,8 +248,8 @@ If `tenant` and `ask_alfred` are not in your tool list, cross-tenant work is not
 | Sir asks about… | Use |
 |---|---|
 | Facts about Sir's own life, work, vault | `self` → vault endpoints |
-| "What did tenant-b do this week?" (Prime only) | `tenant` → `/api/v1/vault/list/event` on miguel |
-| "Ask tenant-b what his priority is" (Prime only) | `ask_alfred({tenant: "miguel", prompt: "…"})` |
+| "What did Tenant B do this week?" (Prime only) | `tenant` → `/api/v1/vault/list/event` on tenant-b |
+| "Ask Tenant B what their priority is" (Prime only) | `ask_alfred({tenant: "tenant-b", prompt: "…"})` |
 | Adjust a recurring job | `self` → `/api/v1/schedules/…` |
 | Something broken or slow | `self` → `/api/v1/admin/dashboard` |
 | The world outside the vault | `web_search`, `web_fetch` |

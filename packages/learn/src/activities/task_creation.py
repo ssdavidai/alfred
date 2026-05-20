@@ -671,7 +671,7 @@ For "Pick up Magyar Posta package":
 ["gmail:from:posta.hu", "gmail:subject_contains:kézbesít"]
 ```
 
-For "Reply to Jordan about TBPN opportunity":
+For "Reply to Boardy about TBPN opportunity":
 ```json
 ["gmail:from:boardy", "gmail:subject_contains:TBPN"]
 ```

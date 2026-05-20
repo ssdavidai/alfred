@@ -53,7 +53,7 @@ conn.connect({
 });
 ```
 
-**Recommendation:** Pin the host key fingerprint at server creation time (Acme Cloud returns it in the server creation response or it can be retrieved on first connection). Store in the database. Verify on every subsequent connection using the `hostVerify` callback.
+**Recommendation:** Pin the host key fingerprint at server creation time (Hetzner returns it in the server creation response or it can be retrieved on first connection). Store in the database. Verify on every subsequent connection using the `hostVerify` callback.
 
 ---
 
@@ -195,7 +195,7 @@ Classic supply chain risk. If the Tailscale CDN is compromised, DNS is poisoned,
 
 **File:** `src/infra/firewall.ts`, lines 8-10; `src/templates/cloud-init.yaml.njk`, line 36
 
-Both the Acme Cloud cloud firewall and UFW allow SSH from `0.0.0.0/0`. After Tailscale is configured, SSH should only be accessible via the tailnet.
+Both the Hetzner cloud firewall and UFW allow SSH from `0.0.0.0/0`. After Tailscale is configured, SSH should only be accessible via the tailnet.
 
 **Recommendation:** After Tailscale bootstrap completes, restrict SSH to the Tailscale interface only. Long-term: use Tailscale SSH to eliminate the public SSH port entirely.
 
@@ -233,11 +233,11 @@ The docker-compose.yaml is uploaded without specifying a file mode, defaulting t
 
 #### 15. No API Token Rotation Mechanism
 
-**File:** `src/infra/acme-cloud.ts`, lines 208-216
+**File:** `src/infra/hetzner.ts`, lines 208-216
 
-The Acme Cloud API token is loaded once and cached in a module-level singleton. No rotation mechanism, no expiry check. If compromised, an attacker has full read/write access to all Acme Cloud resources (create/delete servers, volumes, etc.).
+The Hetzner API token is loaded once and cached in a module-level singleton. No rotation mechanism, no expiry check. If compromised, an attacker has full read/write access to all Hetzner resources (create/delete servers, volumes, etc.).
 
-**Recommendation:** Document token rotation procedures. Monitor for unauthorized API usage via Acme Cloud audit logs.
+**Recommendation:** Document token rotation procedures. Monitor for unauthorized API usage via Hetzner audit logs.
 
 ---
 
@@ -287,7 +287,7 @@ The `alfred-backup.service` has no `User=` directive, so it runs as root. The ba
 
 UFW allows all outgoing traffic. If a container is compromised, it can freely exfiltrate data or establish C2 connections.
 
-**Recommendation:** Restrict outgoing to required destinations (Docker Hub, Tailscale coordination, Acme Cloud API, S3 backup endpoint). Consider a Squid egress proxy.
+**Recommendation:** Restrict outgoing to required destinations (Docker Hub, Tailscale coordination, Hetzner API, S3 backup endpoint). Consider a Squid egress proxy.
 
 ---
 
@@ -343,9 +343,9 @@ Only root login is disabled. Missing hardening: `MaxAuthTries`, `ClientAliveInte
 
 #### 25. Error Messages Leak Infrastructure Details
 
-**File:** `src/infra/acme-cloud.ts`, lines 68-72; `src/infra/tailscale.ts`, lines 34-35
+**File:** `src/infra/hetzner.ts`, lines 68-72; `src/infra/tailscale.ts`, lines 34-35
 
-API error responses include full error bodies from Acme Cloud and Tailscale, which could leak API endpoints, token validity status, and internal details if surfaced to users.
+API error responses include full error bodies from Hetzner and Tailscale, which could leak API endpoints, token validity status, and internal details if surfaced to users.
 
 **Recommendation:** Sanitize error messages before user-facing display. Log full details internally only.
 
@@ -375,7 +375,7 @@ API error responses include full error bodies from Acme Cloud and Tailscale, whi
 | 8 | No Container Hardening | FIXED | All containers have `no-new-privileges`, `cap_drop: ALL`, mem/pid limits |
 | 9 | Restic Password Backup Silently Ignored | FIXED | Now a hard error — provisioning aborts if local backup fails |
 | 10 | Tailscale curl\|sh | FIXED | Installed via APT with GPG key verification |
-| 11 | SSH Open to Internet | FIXED | Acme Cloud firewall restricts SSH to admin CIDRs (`ADMIN_SSH_CIDRS` env var) |
+| 11 | SSH Open to Internet | FIXED | Hetzner firewall restricts SSH to admin CIDRs (`ADMIN_SSH_CIDRS` env var) |
 | 12 | IPs in Alert Webhooks | OPEN | |
 | 13 | Fail2ban Bantime | OPEN | |
 | 14 | docker-compose World-Readable | FIXED | Uploaded with mode 0600 |
@@ -413,7 +413,7 @@ Each tenant VM runs a `cloudflared` daemon that creates an outbound-only tunnel 
 - HTTPS termination at Cloudflare edge
 - DNS records: CNAME `{subdomain}.alfred.black` → `{tunnel-id}.cfargotunnel.com`
 
-### Layer 3: Acme Cloud Cloud Firewall
+### Layer 3: Hetzner Cloud Firewall
 
 Inbound rules (everything else denied):
 
@@ -425,7 +425,7 @@ Inbound rules (everything else denied):
 
 ### Layer 4: Host Firewall (UFW)
 
-Mirrors Acme Cloud firewall rules plus Tailscale UDP. SSH hardened with:
+Mirrors Hetzner firewall rules plus Tailscale UDP. SSH hardened with:
 - MaxAuthTries 3, MaxSessions 3
 - X11Forwarding, AllowTcpForwarding disabled
 - ClientAlive 5min timeout
@@ -434,7 +434,7 @@ Mirrors Acme Cloud firewall rules plus Tailscale UDP. SSH hardened with:
 ### Provisioning Flow
 
 1. Generate Ed25519 keypair
-2. Upload SSH key to Acme Cloud
+2. Upload SSH key to Hetzner
 3. Create hardened firewall (Tailscale UDP + admin SSH)
 4. Create LUKS-encrypted volume
 5. Render cloud-init (installs Docker, Tailscale APT, cloudflared APT, SSH hardening)
@@ -455,9 +455,9 @@ Mirrors Acme Cloud firewall rules plus Tailscale UDP. SSH hardened with:
 1. Delete Cloudflare Access app (if configured)
 2. Delete Cloudflare DNS record
 3. Delete Cloudflare Tunnel
-4. Delete Acme Cloud server
-5. Delete Acme Cloud volume
-6. Delete Acme Cloud SSH key
+4. Delete Hetzner server
+5. Delete Hetzner volume
+6. Delete Hetzner SSH key
 
 ## Priority Remediation Order (Remaining)
 

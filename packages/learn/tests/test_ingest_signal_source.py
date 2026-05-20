@@ -38,7 +38,7 @@ def _gmail_ingest_row() -> dict:
             "from": '"Acme" <ceo@acme.com>',
             "to": "owner@example.com",
             "subject": "Q2 contract — please review by Friday",
-            "body": "Hi Sir, attached is the Q2 contract. We need your "
+            "body": "Hi Jane, attached is the Q2 contract. We need your "
             "signature by Friday to keep the project on schedule. Let me "
             "know if anything needs adjusting before then.",
             "event_type": "email",

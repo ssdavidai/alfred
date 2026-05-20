@@ -66,7 +66,7 @@ Alfred Black uses butler-appropriate language, not academic jargon.
                      │ proxyToTenant()
                      ▼
 ┌──────────────────────────────────────────────────────────────┐
-│                TENANT INSTANCE (Acme Cloud VPS)                  │
+│                TENANT INSTANCE (Acme Cloud VPS)               │
 │                                                               │
 │  ┌───────────┐  ┌──────────┐  ┌────────────┐  ┌───────────┐│
 │  │ OPENCLAW   │  │ TEMPORAL  │  │ ALFRED-CTRL│  │ALFRED-LEARN││
@@ -1117,7 +1117,7 @@ File: `hooks/alfred-learn-observer/handler.js` (maintained with Alfred Learn cha
 
 **Module:** `src/profiler/transaction_clustering.py`, `src/profiler/iterative.py`, `src/profiler/llm_inference.py`, `src/cli/sure_cluster.py`.
 
-**Purpose:** classify Sir's bank-feed transactions into Sure family-merchants + categories + tags without requiring him to write rules by hand. Coverage target: ≥80% on a typical Hungarian household.
+**Purpose:** classify Sir's bank-feed transactions into Sure family-merchants + categories + tags without requiring him to write rules by hand. Coverage target: ≥80% on a typical household.
 
 **Architecture:** sister of the existing `clustering.py` (which clusters email senders into priority tiers). Same skeleton (TF-IDF → cluster → feature-extract → role inference) re-tuned for short bank-feed name strings instead of email behaviour vectors.
 
@@ -1126,11 +1126,11 @@ File: `hooks/alfred-learn-observer/handler.js` (maintained with Alfred Learn cha
 1. **Pass 1 — Keyword + word-TFIDF clustering** (`cluster_transactions`):
    - `clean_name()`: strips card numbers, postcodes, currency tokens, all digit runs, punctuation, 1-2 char leftover tokens.
    - `_alias_groups()`: TF-IDF on word tokens (≥3 chars) with sublinear TF, then agglomerative cosine clustering. On corpora <50 docs falls back to union-find token-overlap merging (TF-IDF math degenerates without IDF context).
-   - `_classify_group()`: matches the canonical name + raw + cleaned member samples against ~80 keyword regex rules covering Hungarian + English merchants. Each rule maps to `(category, tag, role)`.
+   - `_classify_group()`: matches the canonical name + raw + cleaned member samples against ~80 keyword regex rules covering localized + English merchants. Each rule maps to `(category, tag, role)`.
    - Cheap, deterministic, no external calls.
 
 2. **Pass 2 — Behavioural co-occurrence** (`behavioural_groups`):
-   - Groups transactions by `(account_id, amount_band_1k_HUF)`.
+   - Groups transactions by `(account_id, amount_band_1k)`.
    - Keeps groups with ≥3 occurrences spanning ≥2 different months — that's "recurring monthly cadence" without requiring name overlap.
    - Catches behaviour-equivalent variants of the same payee that name-tokens miss.
    - Returns proposals with role (merchant vs income from signed direction) but no category — the LLM pass fills those.
@@ -1138,7 +1138,7 @@ File: `hooks/alfred-learn-observer/handler.js` (maintained with Alfred Learn cha
 3. **Pass 3 — LLM category inference** (`llm_inference.infer_categories_for_clusters`):
    - For any group still missing a category and with ≥2 transactions: batched (50 per call) into a structured prompt sent to the OpenClaw gateway's OpenAI-compatible `/v1/chat/completions` endpoint.
    - Default model: `x-ai/grok-4.1-fast` (override via `SURE_CLUSTER_LLM_MODEL` env or request body `llm_model`).
-   - Prompt grounds the LLM in the tenant's actual category + tag list; explicit rules for Hungarian patika/orvosi/etterem/fizetés patterns and internal-transfer detection.
+   - Prompt grounds the LLM in the tenant's actual category + tag list; explicit rules for localized pharmacy/medical/restaurant/payroll patterns and internal-transfer detection.
    - Returns `[{canonical_name, proposed_category, proposed_tag, role, confidence}]` per group.
    - Uses `/v1/chat/completions` (one-shot, ~5-15s) NOT `sessions_spawn` (subagent, 30-180s) — clustering is pure inference, no tool use needed.
 
@@ -1169,7 +1169,7 @@ Returns the union of proposals across all iterations, deduplicated by canonical 
 - The pipeline runs entirely inside `compose-alfred-learn-1`. No new ports, no new Temporal workflows. ctrl-api invokes via `dockerExecWithStdin` (mirrors the existing Rails-runner pattern for `sure-*-mutate.rb` scripts).
 - LLM uses `model: "openclaw"` (NOT a raw upstream id like `x-ai/grok-4.1-fast`). The gateway selects the actual upstream model from its per-agent `auth-profiles.json` config; arbitrary upstream ids return HTTP 400.
 
-**Measured baseline (david's tenant, 3,267 transactions, 2026-04-30):**
+**Measured baseline (a reference tenant, 3,267 transactions, 2026-04-30):**
 - Pipeline run: 15min, 357 proposals, 70% raw coverage at proposal level.
 - After `_cluster/apply` quality filter (default `min_confidence=0.85`, drop low-confidence transfer-role proposals): 162 rules created, 90 family merchants created, **78.2% of all transactions categorised end-to-end** (2,555 of 3,267).
 - Distribution of categorised transactions: Subscriptions 543, Transfers 500, Food & Drink 216, Income 202, Groceries 201, Healthcare 132, Services 130, Shopping 129, Investment Contributions 121, Transportation 93, Taxes 57, Personal Care 55, Home Improvement 45, Entertainment 43, Utilities 37, Sports & Fitness 19, Fees 15, Travel 6, Insurance 4, Loan Payments 4, Mortgage / Rent 3.

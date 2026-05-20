@@ -36,7 +36,7 @@ Returns:
   "mime_type": "audio/m4a",
   "size": 482317,
   "vault_path": "inbox/voice-memo-2026-04-23.m4a",
-  "transcript": "Hey Alfred, I wanted to follow up on the Example Bank meeting...",
+  "transcript": "Hey Alfred, I wanted to follow up on the Erste meeting...",
   "text": "(same as transcript, or text content for docs)"
 }
 ```

@@ -245,7 +245,7 @@ _VALID_TASK_STATUSES = frozenset({"active", "blocked", "cancelled", "done", "tod
 # tasks derived from sessions / observations / notes carry their own
 # type prefixes. Accept ``[[<any-word-chars>/`` so one pattern covers
 # every current + future record type without needing a fresh PR each
-# time the curator gains a new source type. (On Sir 2026-04-24: 2413
+# time the curator gains a new source type. (On one tenant 2026-04-24: 2413
 # ``event/`` stubs + 80 ``conversation/`` stubs; the 80 conversation-
 # refs silently leaked their stub body to Plane pre-fix.)
 _STUB_BODY_PATTERNS = [

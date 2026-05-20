@@ -75,7 +75,7 @@ create_vault_item({name: "STRIPE_WEBHOOK_SECRET", value: "<returned>"})
 vault_refresh({services: ["alfred-learn"]})  // pick the right consumer
 ```
 
-**4. "I just changed the Example Bank password in the web UI"**
+**4. "I just changed the Wise password in the web UI"**
 
 ```
 vaultwarden_sync({})

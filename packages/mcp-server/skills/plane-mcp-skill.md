@@ -14,7 +14,7 @@ You have **10 Plane tools** through the MCP `plane` connector. Three originals (
 
 ### Read & resolve (cheap, call freely)
 
-- `list_projects` — every workspace project. **First call when Sir names a project** ("what's open in Galerius?"); you need the UUID.
+- `list_projects` — every workspace project. **First call when Sir names a project** ("what's open in Apollo?"); you need the UUID.
 - `list_cycles` — cycles in one project. Resolve "Sprint 12" → cycle UUID; find the active cycle (`status === "CURRENT"`).
 - `list_states` — workflow states in one project. Resolve "In Review" → state UUID. Group taxonomy is `backlog`|`unstarted`|`started`|`completed`|`cancelled`. Skip if you're using `state_groups` in `search_issues` — that resolves server-side.
 - `list_labels` — labels in one project. Resolve "blocked", "p0", etc. to UUIDs.
@@ -48,7 +48,7 @@ Plane's API is UUID-driven. **You almost never have UUIDs at the start of a conv
 
 ## When to use `list_issues` vs `search_issues`
 
-- **`list_issues`**: you have one project, one optional filter, just want the page. "List Sir's open tickets in Galerius."
+- **`list_issues`**: you have one project, one optional filter, just want the page. "List Sir's open tickets in Apollo."
 - **`search_issues`**: any of — multiple projects (or all-workspace), multiple filter dimensions, state-group filters, time-range filters, text search, blocked-tickets queries, assigned-to-me. Default to this if you're combining ≥2 dimensions.
 
 The cross-project fan-out is **capped at 15 projects** — if the workspace has more, `search_issues` returns 400 `FANOUT_TOO_LARGE` and you must pass `project_ids` explicitly. List projects, decide what's relevant, scope the search.

@@ -37,7 +37,7 @@ def _write_onboard(tmp_path: Path) -> str:
 
 
 _GOOD_OPUS_RESPONSE = json.dumps({
-    "user_md": "# User Profile\n\nDavid runs Example LLC.",
+    "user_md": "# User Profile\n\nSir runs Example LLC.",
     "soul_md": "# Alfred's Soul\n\nAddress him as Sir.",
     "memory_md": "# Memory Index\n\n[[Sam Lee]] — partner.",
     "tools_md": "# Suggested Tools\n\nWeekly Stripe digest.",

@@ -5,7 +5,7 @@
 # Sure supports sharing an account with another user in the same
 # family. The web UI (Settings → Account → Sharing) creates/updates/
 # destroys `AccountShare` rows. This script gives Alfred programmatic
-# access so Sir can say "share Example Bank EUR with my spouse, view-only".
+# access so Sir can say "share Wise EUR with my spouse, view-only".
 #
 # Usage:
 #   bin/rails runner sure-share-mutate.rb <op> <payload-json-path>

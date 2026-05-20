@@ -48,7 +48,7 @@ dig +short acme.alfred.black
 
 ### 5. SaaS App DNS
 
-The SaaS app itself should be served from `alfred.black` (or `app.example.com`).
+The SaaS app itself should be served from `alfred.black` (or `app.alfred.black`).
 Tenant subdomains are auto-generated: `{customer-name}.alfred.black`.
 
 ## DNS Record Overview

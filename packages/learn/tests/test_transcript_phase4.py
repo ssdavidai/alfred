@@ -108,7 +108,7 @@ class TestIsSirAttendee:
         evt = {
             "attendees": [
                 {"email": "alex@vendor.com"},
-                {"email": "DAVID@SZABOSTUBAN.COM"},
+                {"email": "OWNER@EXAMPLE.COM"},
             ],
         }
         assert is_sir_attendee(evt, "owner@example.com") is True

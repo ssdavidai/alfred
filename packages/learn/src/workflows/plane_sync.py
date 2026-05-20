@@ -20,7 +20,7 @@ cleanly.
 
 Pagination (#592)
 -----------------
-Mature tenants (Sir: ~2545 tasks at ~2 KB each) used to overflow
+Mature tenants (example-owner: ~2545 tasks at ~2 KB each) used to overflow
 Temporal's 2 MB activity-result ceiling on the legacy single-shot
 ``fetch_changed_tasks`` activity, freezing the cursor permanently. PR
 #591 capped the return at 300 records as a stop-gap; this workflow
@@ -81,7 +81,7 @@ class PlaneSyncResult:
     skipped_reason: str = ""
     error_messages: list[str] = field(default_factory=list)
     # Number of paginated task batches the workflow processed this run.
-    # Useful for verifying cold-start backfills — e.g. Sir's ~2545
+    # Useful for verifying cold-start backfills — e.g. example-owner's ~2545
     # tasks should land in ~26 batches with TASK_FETCH_BATCH_SIZE=100.
     task_batches: int = 0
 

@@ -4,7 +4,7 @@
  *
  * Exposes between 2 and 4 tools depending on whether this tenant is
  * "Alfred Prime" (controlled by the ALFRED_PRIME env var, only set on
- * Sir's instance):
+ * the Prime instance):
  *
  *   self        — always present. Call THIS tenant's ctrl-api. Generic
  *                 HTTP proxy: { endpoint, method?, body?, query? }.
@@ -36,11 +36,11 @@
  *
  * PeerConfig shape (matches packages/ctrl/src/api/routes/crossTenant.ts):
  *   {
- *     "id": "miguel",
- *     "tailscaleHost": "alfred-alfred-miguel-mnd9thwe.tail5ec603.ts.net",
- *     "tailscaleIp":   "100.72.147.32",
+ *     "id": "tenant-b",
+ *     "tailscaleHost": "alfred-alfred-tenant-b.tailnet.ts.net",
+ *     "tailscaleIp":   "100.64.0.2",
  *     "apiKey":        "<peer tenant's AAS_API_KEY>",
- *     "label":         "tenant-b"
+ *     "label":         "Tenant B"
  *   }
  */
 
@@ -246,14 +246,14 @@ const vaultSearchTool = {
 const tenantTool = {
   name: "tenant",
   description:
-    "Alfred Prime only — call a NAMED PEER tenant's ctrl-api via Tailscale. Same endpoint catalogue as `self`, but routed to the peer. Use this when Sir explicitly asks you to inspect or modify another tenant (e.g. \"what does tenant-b have in his inbox?\"). Executes as a direct tool call using YOUR tokens; does NOT invoke the peer's Alfred. For a reasoning response from the peer's Alfred, use `ask_alfred`.",
+    "Alfred Prime only — call a NAMED PEER tenant's ctrl-api via Tailscale. Same endpoint catalogue as `self`, but routed to the peer. Use this when Sir explicitly asks you to inspect or modify another tenant (e.g. \"what does Tenant B have in his inbox?\"). Executes as a direct tool call using YOUR tokens; does NOT invoke the peer's Alfred. For a reasoning response from the peer's Alfred, use `ask_alfred`.",
   inputSchema: {
     type: "object",
     properties: {
       tenant: {
         type: "string",
         description:
-          "Peer tenant id (e.g. \"miguel\", \"tenant-a\"). Use the alfred-prime-federation skill's peer list.",
+          "Peer tenant id (e.g. \"tenant-b\", \"tenant-a\"). Use the alfred-prime-federation skill's peer list.",
       },
       endpoint: {
         type: "string",
@@ -283,13 +283,13 @@ const tenantTool = {
 const askAlfredTool = {
   name: "ask_alfred",
   description:
-    "Alfred Prime only — hand a PROMPT to a named peer tenant's Alfred and return his answer. Use this when Sir wants the peer's Alfred to think, reason, or synthesise something from the peer's vault (e.g. \"ask tenant-b what his top priority is this week\"). The peer's Alfred processes the prompt using HIS tokens and vault context, then returns the reply. For direct CRUD without invoking the peer's LLM, use `tenant`.",
+    "Alfred Prime only — hand a PROMPT to a named peer tenant's Alfred and return his answer. Use this when Sir wants the peer's Alfred to think, reason, or synthesise something from the peer's vault (e.g. \"ask Tenant B what his top priority is this week\"). The peer's Alfred processes the prompt using HIS tokens and vault context, then returns the reply. For direct CRUD without invoking the peer's LLM, use `tenant`.",
   inputSchema: {
     type: "object",
     properties: {
       tenant: {
         type: "string",
-        description: "Peer tenant id (e.g. \"miguel\").",
+        description: "Peer tenant id (e.g. \"tenant-b\").",
       },
       prompt: {
         type: "string",

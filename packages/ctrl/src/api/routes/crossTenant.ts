@@ -16,7 +16,7 @@ import { sendJson, ValidationError } from "../errors.js";
 interface PeerConfig {
   id: string;
   tailscaleIp: string;
-  tailscaleHost?: string; // e.g. "alfred-alfred-miguel-mnd9thwe.tail5ec603.ts.net"
+  tailscaleHost?: string; // e.g. "alfred-tenant-b-example.tailnet.ts.net"
   apiKey: string;
   label: string;
 }

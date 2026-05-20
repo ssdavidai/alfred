@@ -168,7 +168,7 @@ Only ever delete `user-*` skills. Never delete an `alfred-*` or
 When Sir says "make that a skill" or you propose one and he says yes:
 
 1. **Sketch the shape out loud first.** "I'd call it `user-example-co-forward`. It would trigger when an email from `*@example.com` arrives, draft a forward to Riley at `accountant@example.com` with the subject `Example Co invoice — please process`, and quote the body. Sound right?"
-2. **Wait for refinements.** Sir might add: "Also tag it in the vault as a Example Co matter." Roll those in.
+2. **Wait for refinements.** Sir might add: "Also tag it in the vault as an Example Co matter." Roll those in.
 3. **Draft the SKILL.md privately.** Don't paste 200 lines into the chat unless he asks to see them. Show him the frontmatter + section headings + one worked example so he can see the structure.
 4. **Write the file when he confirms.** Then confirm to Sir: "Done — `user-example-co-forward` is live. Next Example Co email will go to Riley." If you got the slug or frontmatter shape wrong, fix it and rewrite without bothering him.
 5. **Don't restart anything.** Hermes hot-reloads the skills directory on its own. If Sir asks "do I need to restart?", say no.
@@ -211,17 +211,17 @@ metadata:
 
 # User — Example Co invoice forward
 
-When a Example Co email arrives that looks like an invoice, forward it to Riley so it lands in the accountant firm's intake without Sir's involvement.
+When an Example Co email arrives that looks like an invoice, forward it to Riley so it lands in the accountant firm's intake without Sir's involvement.
 
 ## Gather
 
 - The triggering email — already in your context if you were spawned by `alfred-email-channel`.
-- Riley's address — `accountant@example.com`. (Cached in person/Riley-Reyes.md; verify with `self({endpoint: "/api/v1/vault/person/klara-reyes"})` if missing.)
+- Riley's address — `accountant@example.com`. (Cached in person/riley-reyes.md; verify with `self({endpoint: "/api/v1/vault/person/riley-reyes"})` if missing.)
 
 ## Reason
 
 - "Looks like an invoice" = subject contains `factura`, `invoice`, or `Rechnung`, OR the email has a PDF attachment whose filename contains `factura` / `invoice`.
-- If the invoice is over €10,000, also CC Devon at `marco@example.com` (Riley's senior).
+- If the invoice is over €10,000, also CC Devon at `devon@example.com` (Riley's senior).
 - Skip if the email already has Riley CC'd.
 
 ## Deliver
@@ -230,10 +230,10 @@ Use `self({endpoint: "/api/v1/email/forward", method: "POST", body: {message_id:
 
 ## Worked example
 
-Inbound email: from `facturacion@example.com`, subject `Factura 2026-Q1`, PDF attached.
+Inbound email: from `billing@example.com`, subject `Factura 2026-Q1`, PDF attached.
 → POST `/api/v1/email/forward` to Riley with the structured subject. Done. No notification to Sir.
 
-If the PDF amount is €18,500: same forward, but CC `marco@example.com`.
+If the PDF amount is €18,500: same forward, but CC `devon@example.com`.
 ```
 
 Write that file. Hermes picks it up. Confirm "Done — `user-example-co-forward` is live." Move on.

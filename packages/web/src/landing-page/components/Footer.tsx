@@ -8,14 +8,14 @@ export default function Footer() {
           className="mx-auto h-8 w-auto"
         />
         <p className="mt-3 font-sans text-sm font-light text-[#8A8680]">
-          Built by the{" "}
+          Built by{" "}
           <a
             href="https://example.com"
             target="_blank"
             rel="noopener noreferrer"
             className="underline underline-offset-2 hover:text-[#C4A265] transition-colors"
           >
-            Screenless Dad
+            Example Co
           </a>
         </p>
         <div className="mt-5 flex flex-wrap justify-center gap-5 text-xs text-[#5A5650]">

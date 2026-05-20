@@ -763,14 +763,14 @@ class TestVaultTaskToPlaneUpdateRich:
         assert isinstance(result["assignees"], list)
 
     def test_critical_priority_maps_to_urgent(self):
-        """Fleet-drift: Sir vault has ~4 'critical' records. Must not
+        """Fleet-drift: example-owner vault has ~4 'critical' records. Must not
         collapse to 'none' — map to Plane's strongest tier."""
         fm = {"name": "Task", "status": "todo", "priority": "critical"}
         result = vault_task_to_plane_update(fm)
         assert result["priority"] == "urgent"
 
     def test_pending_status_maps_to_backlog(self):
-        """Fleet-drift: Sir has 1212 'pending' tasks. Route them to
+        """Fleet-drift: example-owner has 1212 'pending' tasks. Route them to
         backlog rather than letting them fall through to default."""
         fm = {"name": "Task", "status": "pending"}
         result = vault_task_to_plane_update(fm)

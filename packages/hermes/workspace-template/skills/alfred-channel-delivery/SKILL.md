@@ -1,7 +1,7 @@
 ---
 name: alfred-channel-delivery
 description: How to deliver a message to Sir on a specific channel (Slack DM, Telegram, SMS, voice call, email) using cached contact IDs from KNOWN_CONTACTS.md instead of walking workspace directories. Read this whenever Sir says "send/text/call/email me…".
-triggers: deliver, send to me, text me, slack me, telegram me, dm me, call me, email me, ping me, post to slack, send sms, drop me an email, U08, D0AQ
+triggers: deliver, send to me, text me, slack me, telegram me, dm me, call me, email me, ping me, post to slack, send sms, drop me an email
 ---
 
 # Channel Delivery — Use the Cached IDs
@@ -43,7 +43,7 @@ If a channel sub-object is missing or its values are empty strings, that channel
 
 Sessions on Alfred are isolated. When you send a Slack DM at 15:27 in session A, **session B at 15:35 cannot see your prior session — at all**. If Sir asks "what did you just send me?" in a new session, you have no memory of the send unless you wrote it somewhere a future session can read.
 
-This has actually happened on tenant-a: Alfred sent a Slack DM at 15:27 UTC; eight minutes later in a fresh session, when Sir asked Alfred to quote what he'd sent, Alfred replied *"I have reviewed my logs and do not have a record of sending a Slack message to Mr. tenant-a."* — the send happened, but only inside one session jsonl that the next session never opened.
+This has actually happened on a tenant: Alfred sent a Slack DM at 15:27 UTC; eight minutes later in a fresh session, when Sir asked Alfred to quote what he'd sent, Alfred replied *"I have reviewed my logs and do not have a record of sending a Slack message to you, Sir."* — the send happened, but only inside one session jsonl that the next session never opened.
 
 **Mandate**: after EVERY successful outbound delivery (Slack DM, Telegram, voice call init, email send/reply/forward), you MUST also POST to `/api/v1/streams/ingest` to write a tiny audit record. SMS is the only exception — `/api/v1/phone/sms` already auto-ingests to `sms-outbound`. For everything else, you do it.
 
@@ -58,7 +58,7 @@ self({
     summary: "<channel> to <recipient>: <first 80 chars of message>",
     raw: {
       channel: "slack",                  // "slack" | "telegram" | "email" | "voice"
-      to: "D0AQYNQCJ5A",                 // the same `to` you sent on
+      to: "D0123456789",                 // the same `to` you sent on
       message: "Sir, the weekly report is ready.",
       session_id: "<your current session id, if known>",
       direction: "outbound"
@@ -78,7 +78,7 @@ const send = await self({
   method: "POST",
   body: {
     channel: "slack",
-    to: "D0AQYNQCJ5A",
+    to: "D0123456789",
     message: "Sir, the weekly report is ready.",
     urgency: "normal"
   }
@@ -91,11 +91,11 @@ await self({
   body: {
     stream_id: "outbound-deliveries",
     stream_type: "outbound-delivery",
-    source_ref: `slack:D0AQYNQCJ5A:${Date.now()}`,
+    source_ref: `slack:D0123456789:${Date.now()}`,
     summary: "slack DM to Sir: Sir, the weekly report is ready.",
     raw: {
       channel: "slack",
-      to: "D0AQYNQCJ5A",
+      to: "D0123456789",
       message: "Sir, the weekly report is ready.",
       direction: "outbound"
     }
@@ -127,7 +127,7 @@ self({
   method: "POST",
   body: {
     channel: "slack",
-    to: "<knownContacts.sir.channels.slack.dmChannelId>",   // e.g. "D0AQYNQCJ5A"
+    to: "<knownContacts.sir.channels.slack.dmChannelId>",   // e.g. "D0123456789"
     message: "Sir, the weekly report is ready.",
     urgency: "normal"
   }
@@ -144,7 +144,7 @@ self({
   method: "POST",
   body: {
     channel: "telegram",
-    to: "<knownContacts.sir.channels.telegram.chatId>",     // e.g. "432094090"
+    to: "<knownContacts.sir.channels.telegram.chatId>",     // e.g. "100000000"
     message: "Sir — quick heads-up: …",
     urgency: "normal"
   }
@@ -220,7 +220,7 @@ Read the file first, edit the relevant cell + the JSON block, then PUT the whole
 
 ## Don't
 
-- **Don't search Slack's user directory.** No `users.list`, no fuzzy name matching on `"Sir"`. The cached `dmChannelId` is the answer.
+- **Don't search Slack's user directory.** No `users.list`, no fuzzy name matching on the principal's name. The cached `dmChannelId` is the answer.
 - **Don't assume `auto` channel selection.** When Sir names a channel, pass it explicitly (`channel: "slack"`). Auto-pick is for system-initiated notifications, not user requests.
 - **Don't invent IDs.** If `KNOWN_CONTACTS.md` has an empty value, do the pair-then-cache flow above. Never fill in a guess.
 - **Don't post the same message on two channels** unless Sir asked you to. Pick one.

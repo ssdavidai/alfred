@@ -5,7 +5,7 @@ for your calendar, email, finances, household logistics, and everything else
 you currently keep in your head.
 
 This is a standalone reframing of the `alfred-platform` SaaS fleet: **one repo,
-one VM, one `docker compose up`** — no Acme Cloud auto-provisioning, no Tailscale,
+one VM, one `docker compose up`** — no Hetzner auto-provisioning, no Tailscale,
 no Cloudflare, no billing. You bring a fresh Linux VM and a domain; the stack
 brings everything else and serves the web app on your domain over HTTPS.
 
@@ -19,7 +19,7 @@ The full design lives in [`docs/PLAN.md`](docs/PLAN.md) (Parts A–I).
 
 ## Prerequisites
 
-- **A Linux VM** you can SSH into with `sudo`/root. Any cloud (Acme Cloud, AWS,
+- **A Linux VM** you can SSH into with `sudo`/root. Any cloud (Hetzner, AWS,
   GCP, DigitalOcean, …) or bare metal works — `amd64` or `arm64`.
 - **Docker Engine 24+** and the **Docker Compose v2** plugin (`docker compose`,
   not the legacy `docker-compose`).

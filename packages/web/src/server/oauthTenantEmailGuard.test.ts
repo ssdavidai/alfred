@@ -34,11 +34,11 @@ test("verifyGoogleEmailMatch: identical emails pass", () => {
 
 test("verifyGoogleEmailMatch: case differences are ignored", () => {
   assert.equal(
-    verifyGoogleEmailMatch("Alfred@Lumberjack.SO", "alfred@example.com"),
+    verifyGoogleEmailMatch("Alfred@Example.COM", "alfred@example.com"),
     "alfred@example.com",
   );
   assert.equal(
-    verifyGoogleEmailMatch("alfred@example.com", "ALFRED@LUMBERJACK.SO"),
+    verifyGoogleEmailMatch("alfred@example.com", "ALFRED@EXAMPLE.COM"),
     "alfred@example.com",
   );
 });

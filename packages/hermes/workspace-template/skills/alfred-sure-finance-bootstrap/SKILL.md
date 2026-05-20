@@ -19,7 +19,7 @@ Before doing anything else, ask Sir:
 
 > Sir, before I bootstrap your finances I need to confirm two things are in place — connections you have to set up yourself in the Sure web UI:
 >
-> 1. **Bank-feed provider connected?** Sure supports providers like Lunchflow, SimpleFIN, Plaid, and others depending on Sir's region. All of Sir's bank, credit-card, and money-app accounts (Example Bank, Example Bank, etc.) should be visible in Sure with a recent balance and several days of transaction history.
+> 1. **Bank-feed provider connected?** Sure supports providers like Lunchflow, SimpleFIN, Plaid, and others depending on Sir's region. All of Sir's bank, credit-card, and money-app accounts (Wise, Revolut, etc.) should be visible in Sure with a recent balance and several days of transaction history.
 > 2. **Securities provider connected?** *(Optional — only if Sir tracks investments in Sure.)* Twelve Data is the typical recommendation for live price syncing of stocks/ETFs/crypto.
 >
 > Have you completed the bank-feed setup in the Sure UI? Are all your accounts showing the right balances?
@@ -129,7 +129,7 @@ Don't invent classifications. If Sir doesn't know who someone is, leave them unc
 
 ## STEP 4 — Set up auto-exclusion of internal flows from reports
 
-Sir typically wants intra-account transfers (Example Bank→Example Bank, top-ups between his own accounts, paying off his own credit-card / mortgage / loan) **not counted** as income or expense in cashflow reports. Create one mega-rule that catches the Transfers category and excludes:
+Sir typically wants intra-account transfers (Wise→Revolut, top-ups between his own accounts, paying off his own credit-card / mortgage / loan) **not counted** as income or expense in cashflow reports. Create one mega-rule that catches the Transfers category and excludes:
 
 ```
 self({endpoint:"/api/v1/sure/categories", method:"GET"})

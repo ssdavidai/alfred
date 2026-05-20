@@ -3,7 +3,7 @@
 A "cold" task is one whose most recent touch (frontmatter ``as_of``,
 ``updated``, or ``created``) is older than --threshold-days (default 30).
 These are tasks the system extracted at some point but nothing has acted
-on, narratively or operationally, in a month or more. On Sir's vault
+on, narratively or operationally, in a month or more. On a large vault
 this pool is ~75% of the open-task population.
 
 This script PATCHes four fields onto each cold task's frontmatter:

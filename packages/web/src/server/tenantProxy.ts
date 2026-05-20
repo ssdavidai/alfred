@@ -1,7 +1,7 @@
 import { HttpError } from "wasp/server";
 import { encryptApiKey, decryptApiKey } from "./columnCrypto";
 
-// Single-VM reframe. There is no fleet, no per-user Acme Cloud instance, no
+// Single-VM reframe. There is no fleet, no per-user Hetzner instance, no
 // Tailscale/Cloudflare ingress — the Wasp app, ctrl-api, and every other
 // service share one Docker compose network. Every dashboard query/action
 // proxies to the same local ctrl-api at a fixed service-DNS address.

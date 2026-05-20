@@ -1,6 +1,6 @@
 import type { InstanceStatus, HealthStatus, Screen } from "./types.js";
 
-export const HETZNER_API_BASE = "https://api.acme-cloud.cloud/v1";
+export const HETZNER_API_BASE = "https://api.hetzner.cloud/v1";
 
 export const LABEL_SELECTOR = "managed-by=alfred-ctrl";
 
@@ -12,9 +12,9 @@ export const DEFAULTS = {
   cloudflaredDir: "/etc/cloudflared",
   sshUser: "deploy",
   cloudflareDomain: "alfred.black",
-  cloudInitTimeout: 1_200_000, // 20 minutes (snapshot deploys take 10+ min on Acme Cloud before cloud-init starts)
+  cloudInitTimeout: 1_200_000, // 20 minutes (snapshot deploys take 10+ min on Hetzner before cloud-init starts)
   healthInterval: 60_000, // 1 minute
-  // Default Acme Cloud volume size for new tenants. Raised 20 → 50 GB (#781) so
+  // Default Hetzner volume size for new tenants. Raised 20 → 50 GB (#781) so
   // the first quarter of organic data growth + a few sidecars (Sure, Plane,
   // Vaultwarden, etc.) doesn't immediately blow past /mnt/encrypted capacity.
   // Existing tenants live-resize via `alfred-ctrl volume-resize <name> <gb>`.

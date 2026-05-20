@@ -844,7 +844,7 @@ The tool for vault I/O is `alfred-ctrl__self` (MCP-namespaced — NOT plain `sel
 2. Scan related records:
    `alfred-ctrl__self({{"endpoint": "/api/v1/vault/search", "query": {{"q": "{name}"}}}})` — look at recent events, persons, orgs.
 3. Synthesise these fields (best effort — empty lists are fine if nothing found):
-   - `domains`: list of email/website domains associated with this matter (e.g. ["bakerynext.hu", "invoicing.example.com"])
+   - `domains`: list of email/website domains associated with this matter (e.g. ["example.com", "invoicing.example.com"])
    - `related_persons`: list of person names OR emails that appear in events about this matter
    - `related_orgs`: list of organisation names referenced
    - `keywords`: 3-5 short tags (single words or hyphenated) that a router could match against email subjects
@@ -983,8 +983,8 @@ For each event, decide:
       When in doubt between attention and fyi for a human-sent item on a specific matter: classify as attention. Over-surfacing costs Sir 5 seconds to skim; under-surfacing costs him a missed message.
   (c) One 8-12 word "why_it_needs_attention" note (ONLY for attention items).
       Describe what the item IS and what makes it relevant, not what Sir
-      should do about it. E.g. "Bakehouse Q3 packaging reply from Laszlo"
-      or "Sean Fagan announces gym closure in one week".
+      should do about it. E.g. "Example Co Q3 packaging reply from a vendor"
+      or "your coach announces gym closure in one week".
 
 Also produce:
   - `headline`: ONE sentence — the single most important thing Sir should know if he only reads one line. Empty string if nothing urgent.
@@ -1002,7 +1002,7 @@ Be brutally honest about silence. It's OK for most matters to have zero attentio
   "has_any_attention": true/false,
   "buckets": [
     {{
-      "matter_slug": "avenir-solutions-kft",
+      "matter_slug": "apex-solutions-kft",
       "matter_name": "Apex Solutions Kft",
       "attention": [
         {{ "subject": "Re: Q3 packaging update", "from": "user@example.com", "why_it_needs_attention": "awaiting yes/no decision by noon" }}

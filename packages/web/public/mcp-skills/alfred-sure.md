@@ -17,7 +17,7 @@ The full tool list is much longer than this skill — `tools/list` from the conn
 
 ## Tool families (high-level)
 
-- **Accounts**: list, get, create, update, destroy. CRUD over Sure accounts (Example Bank EUR, JBC mortgage, etc.).
+- **Accounts**: list, get, create, update, destroy. CRUD over Sure accounts (Wise EUR, JBC mortgage, etc.).
 - **Transactions / entries**: list, get, split, unsplit, bulk_update, bulk_delete. The bulk surface is the right tool for "categorize all 47 of last month's Tesco transactions as Groceries".
 - **Transfers**: create, confirm, reject, destroy, match. Two-leg primitive — creating a transfer flips both sides' `kind` to `funds_movement`.
 - **Categories / tags / merchants**: bootstrap, create, update, replace_and_destroy, merge. Replace-and-destroy is the right tool for "merge these four duplicate Tesco merchants into one".
@@ -42,7 +42,7 @@ search Sure transactions where merchant.name == "Tesco" and date in [last month]
 bulk_update({ids: [...], category_name: "Groceries"})
 ```
 
-**2. "Mark this Example Bank→JBC outflow as a loan transfer"**
+**2. "Mark this Wise→JBC outflow as a loan transfer"**
 
 Creating a transfer requires the source + destination account ids and the matching dates. Use `transfers.match` if both sides already exist as standard transactions; use `transfers.create` if only one side does.
 

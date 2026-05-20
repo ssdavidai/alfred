@@ -5,7 +5,7 @@ Guidance for Claude Code (claude.ai/code) working in the `alfred-black` repo.
 ## What this repo is
 
 `alfred-black` is the single-VM, `docker compose up` reframing of the
-`alfred-platform` SaaS fleet: **one repo, one VM, one stack** — no Acme Cloud
+`alfred-platform` SaaS fleet: **one repo, one VM, one stack** — no Hetzner
 auto-provisioning, no Tailscale, no Cloudflare, no billing. The AI runtime is
 **Hermes Agent** (`NousResearch/hermes-agent`), which replaces OpenClaw's
 two-container split with a single isolated runtime running two profiles.

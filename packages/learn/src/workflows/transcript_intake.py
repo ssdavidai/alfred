@@ -56,7 +56,7 @@ class TranscriptIntakeResult:
 class TranscriptIntakeWorkflow:
     """Vexa transcript stream → Steward action-candidate signals.
 
-    Schedule: every 60 seconds. Phase 4 (#840). Sir-only via
+    Schedule: every 60 seconds. Phase 4 (#840). Owner-only via
     ``VEXA_ENABLED`` registration-time gate.
     """
 

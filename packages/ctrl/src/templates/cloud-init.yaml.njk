@@ -309,7 +309,7 @@ runcmd:
   - |
     cat > /etc/systemd/system/alfred-backup.service << 'BACKUP_SVC'
     [Unit]
-    Description=Restic backup of Alfred data to Acme Cloud Object Storage
+    Description=Restic backup of Alfred data to Hetzner Object Storage
     After=docker.service alfred-luks.service
 
     [Service]

@@ -94,7 +94,7 @@ def test_belongs_to_owner_no_identity_claim_accepts() -> None:
 
 
 def test_belongs_to_owner_case_insensitive_match() -> None:
-    event = {"attendees": [{"email": "Alfred@Lumberjack.SO", "self": True}]}
+    event = {"attendees": [{"email": "Alfred@Example.com", "self": True}]}
     assert _event_belongs_to_owner(event, "alfred@example.com") is True
 
 
@@ -258,7 +258,7 @@ async def test_ingest_case_insensitive_owner_match(
 ) -> None:
     # Google occasionally normalises capitalisation differently than how
     # the operator typed OWNER_EMAIL. Must match case-insensitively.
-    monkeypatch.setenv("OWNER_EMAIL", "Alfred@Lumberjack.SO")
+    monkeypatch.setenv("OWNER_EMAIL", "Alfred@Example.com")
     raw = _wrap_composio(_calendar_event("alfred@example.com"))
     result = await ingest_events("s1", "calendar", "composio", [raw])
     assert result == {"ingested": 1, "rejected": 0}

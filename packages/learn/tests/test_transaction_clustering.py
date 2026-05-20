@@ -58,7 +58,7 @@ def test_clean_name_handles_none():
 
 
 def test_clean_name_collapses_whitespace():
-    assert clean_name("FoodCo   \t  Hungary") == "wolt hungary"
+    assert clean_name("FoodCo   \t  Hungary") == "foodco hungary"
 
 
 # ---------------------------------------------------------------------------
@@ -92,10 +92,10 @@ def test_separate_merchants_stay_separate():
     ]
     props = cluster_transactions(txns, min_group_size=2)
     tescos = [p for p in props if "tesco" in p.canonical_name.lower()]
-    wolts = [p for p in props if "wolt" in p.canonical_name.lower()]
+    foodcos = [p for p in props if "foodco" in p.canonical_name.lower()]
     assert len(tescos) == 1
-    assert len(wolts) == 1
-    assert wolts[0].proposed_category == "Food & Drink"
+    assert len(foodcos) == 1
+    assert foodcos[0].proposed_category == "Food & Drink"
 
 
 def test_empty_input_returns_empty_list():
@@ -119,7 +119,7 @@ def test_unknown_merchant_role_when_no_rule_matches():
     assert props[0].role == "unknown"
 
 
-def test_transfer_role_for_wise():
+def test_transfer_role_for_bank_name():
     txns = [
         _txn(id="1", name="Example Bank"),
         _txn(id="2", name="Example Bank"),

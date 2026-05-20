@@ -58,9 +58,9 @@ Drop receipts, marketing, newsletters, auto-notifications, GitHub digests, Sir's
 This is the digest's analytical core. You have *"what the morning expected"* (pass 1) and *"what actually happened"* (pass 2). The digest narrates the difference.
 
 **Per matter that the morning brief mentioned:**
-- Did the expected delta land? *"Apex — HBO confirmed in writing, contract draft circulated."* Confirms forward movement.
-- Did the expected delta NOT land? *"Bakehouse — line still down at end of day; Lőrincz hasn't responded."* That's the news.
-- Did something unexpected happen on this matter? *"Penthouse — Galérius surfaced after the morning brief with a revised timeline."* That's news the morning didn't predict.
+- Did the expected delta land? *"Apex — the network confirmed in writing, contract draft circulated."* Confirms forward movement.
+- Did the expected delta NOT land? *"Bakehouse — line still down at end of day; Lawson hasn't responded."* That's the news.
+- Did something unexpected happen on this matter? *"Riverside — Carter surfaced after the morning brief with a revised timeline."* That's news the morning didn't predict.
 
 **Per matter the morning didn't mention but had movement today:**
 - New matter activity that wasn't on the radar this morning. Worth surfacing.
@@ -73,7 +73,7 @@ This is the digest's analytical core. You have *"what the morning expected"* (pa
 - What's on Sir's calendar tomorrow that needs preparation tonight?
 - What's still open from today that should be the morning brief's lead?
 
-**Reference the actions you actually took.** The digest is the place to acknowledge work done on Sir's behalf during the day. For each outbound notification you sent today, weave it in: *"I confirmed the Bakehouse mixer fix with Lőrincz at 14:30."* Don't enumerate every nudge — pick the ones load-bearing for tomorrow's hand-off. If Sir explicitly asked you to do something today (visible in pass-1 sessions) and you did it, name the follow-through. If you didn't, name the blocker.
+**Reference the actions you actually took.** The digest is the place to acknowledge work done on Sir's behalf during the day. For each outbound notification you sent today, weave it in: *"I confirmed the Bakehouse mixer fix with Lawson at 14:30."* Don't enumerate every nudge — pick the ones load-bearing for tomorrow's hand-off. If Sir explicitly asked you to do something today (visible in pass-1 sessions) and you did it, name the follow-through. If you didn't, name the blocker.
 
 **Strict matter labelling — non-negotiable.** A line in the body labelled `Matter Name —` MUST correspond to a real matter slug from your pass-1 `/api/v1/vault/list/matter` results. **Never attach a matter label to a line whose underlying event has `related_matters: []` or whose source you cannot verify against an actual matter record.** Misattributing a loose event to a matter just to satisfy the matter-led shape is a failure mode worse than not mentioning it — the surveyor will then wire the digest's `related_matters` frontmatter to the wrong matter, reinforcing the bad link permanently. Use non-matter headings (`Web`, `Comms`, `Ops`, `Personal`) for inputs that don't fit any existing matter, and consider closing with a "worth tracking X as its own matter" nudge.
 
@@ -98,22 +98,22 @@ A short message — plain prose, **≤ ~1000 characters, hard limit**, Slack-saf
 **Body — matter-led outcomes.** One line per matter that either moved today or had a notable non-movement. Frame as outcome relative to this morning's expectation.
 
 ```
-Apex — HBO confirmed in writing this afternoon; contract draft circulated.
+Apex — the network confirmed in writing this afternoon; contract draft circulated.
 The morning's question about Mason is still open — they replied at 16:30
 asking for a call tomorrow.
 
-Bakehouse — line is still down at end of day. Lőrincz hasn't surfaced.
+Bakehouse — line is still down at end of day. Lawson hasn't surfaced.
 We should pick this up first thing tomorrow.
 
-Nova onboarding — Boris call went long; he wants to revisit clauses 4 and
+Vertex onboarding — Chris call went long; he wants to revisit clauses 4 and
 7. Notes are in the matter, but you'll want a fresh look before you reply.
 ```
 
 **Personal / family.** Anything that closes a loop on a morning item or that should be in the morning brief tomorrow.
 
 ```
-Taylor took Jázmin to the doctor — minor flu, she's clear by Tuesday.
-Camille's camp form is still on your desk; deadline Sunday hasn't moved.
+Taylor took Jamie to the doctor — minor flu, she's clear by Tuesday.
+Casey's camp form is still on your desk; deadline Sunday hasn't moved.
 ```
 
 **System pulse — only if there's drift.** Same idea as the brief, end-of-day flavour. If anything from pass 1's health checks showed drift during the day, name it in a short heads-up BEFORE tomorrow's anchor:
@@ -185,7 +185,7 @@ self({
   body: {
     type: "event",
     name: "daily-digest-<today-YYYY-MM-DD>",   // no .md, no event/ prefix
-    content: "---\ntype: event\nkind: daily-digest\ngenerated_at: \"<iso>\"\nrelated_matters:\n  - matter/bakerynext.md\nmorning_brief_path: event/daily-brief-<today>.md\nopen_for_tomorrow:\n  - Bakehouse line\n  - Mason reply\ndelta_count: 3\n---\n\n<the prose you're about to send>"
+    content: "---\ntype: event\nkind: daily-digest\ngenerated_at: \"<iso>\"\nrelated_matters:\n  - matter/bakehouse.md\nmorning_brief_path: event/daily-brief-<today>.md\nopen_for_tomorrow:\n  - Bakehouse line\n  - Mason reply\ndelta_count: 3\n---\n\n<the prose you're about to send>"
   }
 })
 
@@ -207,13 +207,13 @@ Your reply IS the delivery. The cron runtime that invoked you has `--announce --
 
 > End of day, sir. A productive one — most of what we expected this morning landed cleanly.
 >
-> Apex — HBO confirmed in writing this afternoon; contract draft circulated. The morning's question about Mason is still open — they replied at 16:30 asking for a call tomorrow.
+> Apex — the network confirmed in writing this afternoon; contract draft circulated. The morning's question about Mason is still open — they replied at 16:30 asking for a call tomorrow.
 >
-> Bakehouse — line is still down at end of day. Lőrincz hasn't surfaced. We should pick this up first thing tomorrow.
+> Bakehouse — line is still down at end of day. Lawson hasn't surfaced. We should pick this up first thing tomorrow.
 >
-> Nova onboarding — Boris call went long; he wants to revisit clauses 4 and 7. Notes are in the matter; you'll want a fresh look before you reply.
+> Vertex onboarding — Chris call went long; he wants to revisit clauses 4 and 7. Notes are in the matter; you'll want a fresh look before you reply.
 >
-> Personal: Taylor took Jázmin to the doctor — minor flu, clear by Tuesday. Camille's camp form is still on your desk; deadline Sunday hasn't moved.
+> Personal: Taylor took Jamie to the doctor — minor flu, clear by Tuesday. Casey's camp form is still on your desk; deadline Sunday hasn't moved.
 >
 > Tomorrow's lead: Bakehouse production line + Mason reply window. Easy calendar otherwise — nothing before your 11:00.
 
@@ -221,7 +221,7 @@ Your reply IS the delivery. The cron runtime that invoked you has `--announce --
 
 > End of day, sir. Quiet stretch after lunch; mostly closed cleanly.
 >
-> The Apex thank-you to Jordan went out, no reply yet. Penthouse silence I flagged this morning is still silence — your call whether to nudge.
+> The Apex thank-you to Jordan went out, no reply yet. Riverside silence I flagged this morning is still silence — your call whether to nudge.
 >
 > Tomorrow's calendar is clear until 14:00. Nothing else carrying over.
 

@@ -10,7 +10,7 @@ This is **Layer 1** of Alfred's [six-layer architecture](/architecture). Infrast
 
 ## Your dedicated machine
 
-Every Alfred subscriber gets their own Acme Cloud VPS (cx53). No shared databases, no multi-tenant containers, no commingled data. Your instance is yours alone.
+Every Alfred subscriber gets their own Hetzner VPS (cx53). No shared databases, no multi-tenant containers, no commingled data. Your instance is yours alone.
 
 The server runs Ubuntu with a minimal package set. All persistent data lives on an encrypted volume. All application services bind to localhost. External access is exclusively through your Tailscale mesh network.
 
@@ -48,7 +48,7 @@ Three layers of transport encryption protect data in motion:
 
 Alfred instances have **zero public ports** for application services:
 
-**Acme Cloud Cloud Firewall** (applied at server creation):
+**Hetzner Cloud Firewall** (applied at server creation):
 - Inbound: SSH (port 22) and ICMP only
 - Outbound: Unrestricted
 
@@ -94,7 +94,7 @@ Health data drives automated responses — if a container crashes, it's automati
 Automated daily backups protect against data loss:
 
 - **Tool**: Restic with AES-256 encryption
-- **Backend**: Acme Cloud S3 (Object Storage)
+- **Backend**: Hetzner S3 (Object Storage)
 - **Schedule**: Daily at 3:00 AM
 - **Retention**: 7 daily, 4 weekly, 12 monthly snapshots
 - **Consistency**: Containers are stopped during backup
@@ -111,7 +111,7 @@ On-demand backups are available via `POST /api/v1/admin/backups/trigger`.
 | **Active subscription** | Continuous operation, daily encrypted backups, health monitoring |
 | **Subscription cancelled** | Data export available, then server and volume destroyed |
 
-Secrets are **never** included in cloud-init user data (readable via Acme Cloud metadata API). They are generated on the control plane and uploaded via SSH after the server is ready.
+Secrets are **never** included in cloud-init user data (readable via Hetzner metadata API). They are generated on the control plane and uploaded via SSH after the server is ready.
 
 ## Next steps
 

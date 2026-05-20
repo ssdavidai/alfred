@@ -60,7 +60,7 @@ def _sample_onboard() -> dict:
     return {
         "profile": {
             "summary": {
-                "inner_circle": ["eszter@example.com", "sam.lee@example.com"],
+                "inner_circle": ["sam.lee@example.com", "pat@example.com"],
                 "communication_style": "selective",
                 "work_hours": "9am-6pm CET",
                 "top_subscriptions": ["stripe.com", "polar.sh"],
@@ -80,7 +80,7 @@ def _sample_onboard() -> dict:
         ],
         "key_identity_facts": [
             {"field": "name", "display": "Full name", "value": "Jane Doe"},
-            {"field": "location", "display": "Location", "value": "Anytown, Hungary"},
+            {"field": "location", "display": "Location", "value": "Anytown"},
         ],
         "brief": "Welcome — I'll watch your Stripe billing each Tuesday and remind you about Robin's nursery pickups.",
     }
@@ -95,7 +95,7 @@ _OPUS_GOOD_RESPONSE = json.dumps({
             "description": "Core product direction for the Alfred Black personal-agent platform.",
             "context": (
                 "Alfred Black is Sir's main project — a personal AI butler platform "
-                "he's building through Example LLC. Active tenants include david@ "
+                "he's building through Example LLC. Active tenants include owner@ "
                 "(dogfood) and early adopters. The product is still pre-launch; the "
                 "current push is around the generated chore system and the Intelligence "
                 "dashboard rework."
@@ -449,7 +449,7 @@ class TestGenerateMatterPackOpus:
         # Verify the two matters got written with expected slugs
         slugs = [slug for (_, slug, _) in fake_client.written]
         assert "alfred-black-product-vision" in slugs
-        assert "hanna-nursery-logistics" in slugs
+        assert "robin-nursery-logistics" in slugs
         # Verify the written content has real sections
         for (_, _, content) in fake_client.written:
             assert "## Context" in content

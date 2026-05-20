@@ -26,7 +26,7 @@ export type MarkdownProps = {
   /**
    * Reverse lookup used to render a wikilink as a human title when the
    * source text is a slug (e.g., `[[matter/family-life-hannas-first-year]]`
-   * → "Robin's First Year"). Returns undefined when no nicer display is
+   * → "Hanna's First Year"). Returns undefined when no nicer display is
    * known; the renderer falls back to the raw `[[...]]` content.
    */
   resolveDisplay?: (raw: string) => string | undefined;

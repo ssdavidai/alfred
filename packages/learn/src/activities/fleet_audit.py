@@ -4,11 +4,11 @@ Background
 ----------
 
 In April 2026 we discovered that ~8 days of tenant-a's Gmail/Calendar events
-had been ingested under Sir's tenant due to a misconfigured Composio
+had been ingested under the owner's tenant due to a misconfigured Composio
 user_id. The leak went unnoticed because the streams look like ordinary
-Google events — there's no surface-level difference between "Sir's own
+Google events — there's no surface-level difference between "the owner's own
 calendar event" and "an event from tenant-a's account that happened to land
-on Sir's stream JSONL".
+on the owner's stream JSONL".
 
 This module is the after-the-fact tripwire. Once a day every tenant runs
 ``audit_streams_for_owner_mismatch`` against its own ``composio-*.jsonl``
@@ -16,7 +16,7 @@ files. For every Google-origin event we extract the ``self: true``
 attendee (which Google fills in with the authenticated account's email)
 and compare it against the tenant's canonical owner email. A mismatch
 means the stream contains events for someone else's Google account —
-the exact signature of the tenant-a-vs-Sir leak.
+the exact signature of the tenant-a-vs-owner leak.
 
 Scope
 -----

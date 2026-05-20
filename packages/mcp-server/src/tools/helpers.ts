@@ -1,4 +1,4 @@
-// Shared helper for all Sure tools: build a fetch request to david's
+// Shared helper for all Sure tools: build a fetch request to the tenant's
 // ctrl-api with the right auth headers, parse the response, return a
 // uniform MCP `content` payload.
 //
@@ -8,7 +8,7 @@
 //      grant's `props` payload (set at /authorize approval time), not
 //      from a global env secret.
 //   2. CF-Access-Client-Id + CF-Access-Client-Secret (optional)
-//      — only attached if the OAuth grant's `props` carry both. Sir's
+//      — only attached if the OAuth grant's `props` carry both. The tenant's
 //      subdomain has no Access policy today, so these are unset.
 
 import type { CtrlContext } from "./types.js";
@@ -57,7 +57,7 @@ export function buildUrl(baseUrl: string, path: string, query?: ProxyOptions["qu
 }
 
 /**
- * Make an authenticated request to david's ctrl-api.
+ * Make an authenticated request to the tenant's ctrl-api.
  *
  * Returns the raw status + parsed body. Tools convert this into the MCP
  * tool-result shape (text content). Non-2xx responses are NOT thrown —

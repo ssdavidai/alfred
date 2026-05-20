@@ -21,7 +21,7 @@ import {
 // but cross-tenant concurrency is fine — different VPSes.
 const DEFAULT_CONCURRENCY = 4;
 
-// Single-VM: there is no fleet, no per-user Acme Cloud instance. The auto-config
+// Single-VM: there is no fleet, no per-user Hetzner instance. The auto-config
 // reconciler always hits the one local ctrl-api. This sentinel keeps the
 // `fetchAutoConfig` seam (and its unit tests) signature-stable; the value is
 // not consulted any more.

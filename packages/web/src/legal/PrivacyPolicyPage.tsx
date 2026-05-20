@@ -94,8 +94,8 @@ export default function PrivacyPolicyPage() {
 
             <div className="mt-4 space-y-4">
               <div>
-                <p className="font-display italic text-lg">Infrastructure (Acme Cloud Cloud)</p>
-                <p className="font-body text-[15px] mt-1" style={{ color: "var(--marginalia)" }}>Your AI instance runs on dedicated virtual machines hosted by Acme Cloud Cloud GmbH. Acme Cloud processes data under EU data protection law (GDPR). Data center locations: EU (Germany, Finland) by default.</p>
+                <p className="font-display italic text-lg">Infrastructure (Hetzner Cloud)</p>
+                <p className="font-body text-[15px] mt-1" style={{ color: "var(--marginalia)" }}>Your AI instance runs on dedicated virtual machines hosted by Hetzner Cloud GmbH. Hetzner processes data under EU data protection law (GDPR). Data center locations: EU (Germany, Finland) by default.</p>
               </div>
               <div>
                 <p className="font-display italic text-lg">Networking (Tailscale)</p>
@@ -188,7 +188,7 @@ export default function PrivacyPolicyPage() {
 
           <section>
             <h2 className="font-display text-2xl tracking-tight mb-3">10. International Transfers</h2>
-            <p>We are based in the United States. If you are accessing the Service from outside the US, your information may be transferred to and processed in the US and EU (Acme Cloud infrastructure). We apply appropriate safeguards for international transfers in compliance with applicable data protection laws.</p>
+            <p>We are based in the United States. If you are accessing the Service from outside the US, your information may be transferred to and processed in the US and EU (Hetzner infrastructure). We apply appropriate safeguards for international transfers in compliance with applicable data protection laws.</p>
           </section>
 
           <section>

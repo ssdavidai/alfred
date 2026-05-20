@@ -15,13 +15,13 @@ for (const r of all) {
   console.log(`  ${r.id}: ${r.customer_name} | ip=${r.ip_address} | status=${r.status}`);
 }
 
-// Find Sir's instance
+// Find the target instance (edit the LIKE filter to match your customer_name)
 const rows = db.prepare(
-  `SELECT id, customer_name, ip_address, ssh_key_path FROM instances WHERE customer_name LIKE '%david%' AND status='running' AND ip_address IS NOT NULL`
+  `SELECT id, customer_name, ip_address, ssh_key_path FROM instances WHERE customer_name LIKE '%example%' AND status='running' AND ip_address IS NOT NULL`
 ).all();
 db.close();
 
-if (!rows.length) { console.log("No matching Sir instance"); process.exit(1); }
+if (!rows.length) { console.log("No matching instance"); process.exit(1); }
 
 for (const row of rows) {
   const { customer_name: name, ip_address: ip, id } = row;

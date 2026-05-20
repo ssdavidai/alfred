@@ -21,7 +21,7 @@ in 80 seconds gets dispatched on this tick (and the local state file
 suppresses the next tick from re-dispatching). 90 > 60 ensures we never
 miss a meeting just because its start lands between tick boundaries.
 
-Feature-gated by ``VEXA_ENABLED`` (default off — david-only flag for
+Feature-gated by ``VEXA_ENABLED`` (default off — owner-only flag for
 Phase 4). The workflow short-circuits immediately when disabled so
 tenants without Vexa never pay activity cost.
 """
@@ -71,7 +71,7 @@ class MeetingCaptureResult:
 class MeetingCaptureWorkflow:
     """Calendar → Vexa bot dispatch. Schedule: every 60 seconds.
 
-    Phase 4 (#840). Sir only initially — gated on ``VEXA_ENABLED``.
+    Phase 4 (#840). Owner only initially — gated on ``VEXA_ENABLED``.
     """
 
     @workflow.run

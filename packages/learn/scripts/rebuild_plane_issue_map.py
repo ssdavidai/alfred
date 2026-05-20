@@ -8,7 +8,7 @@ maps vault task slugs → Plane issue UUIDs so the archive cascade in
 ``plane_sync.sync_task_to_plane`` can find and DELETE the Plane issue
 when a vault task flips to ``archived: true``.
 
-On Sir's fleet the cursor's ``issue_map`` has drifted: many entries
+On a large fleet the cursor's ``issue_map`` has drifted: many entries
 are keyed on stale slugs that no longer match what ``_slug_from_path``
 returns for the corresponding vault task (filenames shifted across
 renames, curator mergers, etc.). The cascade's ``issue_map.get(slug)``
@@ -471,7 +471,7 @@ async def _run(args: argparse.Namespace) -> RebuildStats:
             )
 
             # Breathe between projects too — otherwise the
-            # twelve-project walk on Sir saturates the proxy
+            # twelve-project walk on a busy tenant saturates the proxy
             # immediately and the rest of the walk gets throttled.
             await asyncio.sleep(_THROTTLE_SECONDS)
 

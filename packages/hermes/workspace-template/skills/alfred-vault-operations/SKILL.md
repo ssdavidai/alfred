@@ -15,7 +15,7 @@ The vault is Sir's personal knowledge graph. Every important fact, relationship,
 
 | Type | Directory | What it is |
 |---|---|---|
-| `matter` | `matter/` | Long-lived areas of Sir's life/work that need standing attention (e.g. "Acme Tools Community Champion Role", "Growing Family & Second Baby Preparation"). |
+| `matter` | `matter/` | Long-lived areas of Sir's life/work that need standing attention (e.g. "Community Champion Role", "Home Renovation Project"). |
 | `task` (errand) | `task/` | Specific actionable items derived from emails, meetings, or streams. Can be linked to a matter. |
 | `instinct` | `instinct/` | Learned routing rules ("flag Stripe payment failures as urgent"). Observed by the learning system. |
 | `chore` | `chore/` | Recurring scheduled workflows (Temporal-backed). Each has a generated Python workflow. |
@@ -34,7 +34,7 @@ All vault operations on THIS tenant go through the `self` MCP tool. Never bypass
 - **`self endpoint="/api/v1/vault/context"`** — one-shot overview: counts per type + recent records. Use this FIRST if you don't know what's in the vault.
 - **`self endpoint="/api/v1/vault/list/{type}"`** — list all records of a given type. Replace `{type}` with `matter`, `task`, `chore`, `note`, `person`, `org`, etc. Returns path, name, status, frontmatter, and a body preview.
 - **`self endpoint="/api/v1/vault/records/{path}"`** — read a full record by its path relative to the vault root. Example: `self endpoint="/api/v1/vault/records/matter/growing-family.md"`.
-- **`self endpoint="/api/v1/vault/search" query={"grep": "Acme", "type": "decision"}`** — full-text search. Optional `type` filter scopes to one kind of record.
+- **`self endpoint="/api/v1/vault/search" query={"grep": "Acme Corp", "type": "decision"}`** — full-text search. Optional `type` filter scopes to one kind of record.
 - **`self endpoint="/api/v1/vault/graph"`** — fetch the relationship graph (who/what links to what). Useful when Sir asks "what's related to X".
 - **`self endpoint="/api/v1/vault/schema"`** — look up the allowed fields + status enums for a given record type before you write one.
 - **`self endpoint="/api/v1/vault/inbox"`** — list files sitting in the inbox waiting for processing.
@@ -77,16 +77,16 @@ If the task needs human approval before execution (either because the instinct h
 **Sir: "What matters am I actively working on?"**
 → `self endpoint="/api/v1/vault/list/matter"` → filter `status=active` → format as a list grouped by category.
 
-**Sir: "Remind me what we decided about the Acme move."**
-→ `self endpoint="/api/v1/vault/search" query={"grep": "Acme", "type": "decision"}` → read the top result with `self endpoint="/api/v1/vault/records/{path}"`.
+**Sir: "Remind me what we decided about the Acme Corp move."**
+→ `self endpoint="/api/v1/vault/search" query={"grep": "Acme Corp", "type": "decision"}` → read the top result with `self endpoint="/api/v1/vault/records/{path}"`.
 
-**Sir: "Add an errand to follow up with Sam Park next week."**
-→ `self endpoint="/api/v1/vault/schema"` → `self endpoint="/api/v1/vault/records" method="POST" body={"type": "task", "name": "follow-up-sam-park", "content": "---\ntype: task\nname: Follow up with Sam Park\nstatus: todo\nowner: human\n---\n\n# Follow up with Sam Park\n\n[[person/Sam Park]]\n"}`
+**Sir: "Add an errand to follow up with Robert Clarke next week."**
+→ `self endpoint="/api/v1/vault/schema"` → `self endpoint="/api/v1/vault/records" method="POST" body={"type": "task", "name": "follow-up-robert-clarke", "content": "---\ntype: task\nname: Follow up with Robert Clarke\nstatus: todo\nowner: human\n---\n\n# Follow up with Robert Clarke\n\n[[person/Robert Clarke]]\n"}`
 (owner=human because Sir's the one following up.)
 
 **Sir: "Can you draft me a reply to Robert's email?"**
-→ `self endpoint="/api/v1/vault/records" method="POST" body={"type": "task", "name": "draft-reply-robert-clarke", "content": "---\ntype: task\nname: Draft reply to Sam Park\nstatus: todo\nowner: alfred\n---\n\n# Draft reply to Sam Park\n\n[[person/Sam Park]]\n"}`
+→ `self endpoint="/api/v1/vault/records" method="POST" body={"type": "task", "name": "draft-reply-robert-clarke", "content": "---\ntype: task\nname: Draft reply to Robert Clarke\nstatus: todo\nowner: alfred\n---\n\n# Draft reply to Robert Clarke\n\n[[person/Robert Clarke]]\n"}`
 (owner=alfred because Sir handed the work to you. You'd typically then proceed to draft inline rather than just creating the task, but the record captures the work for the task queue.)
 
-**Sir: "Show me everything related to Ania."**
-→ `self endpoint="/api/v1/vault/search" query={"grep":"Ania"}` → for each result, read + present as a linked brief.
+**Sir: "Show me everything related to Jane Smith."**
+→ `self endpoint="/api/v1/vault/search" query={"grep":"Jane Smith"}` → for each result, read + present as a linked brief.

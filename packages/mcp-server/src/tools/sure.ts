@@ -64,7 +64,7 @@ const accountTools: ToolDef[] = [
   {
     name: "create_manual_account",
     description:
-      "Create a manual account that Sure's REST API can't (Sure's REST is GET-only for accounts; creates go through a Rails-runner that calls Sure's ActiveRecord models). Use when Sir says 'add my Example Bank mortgage' or 'track my Budapest flat'. For liabilities, pass the outstanding balance as a positive number — Sure stores liability balances as positives and the classification handles the sign. Backing: Rails-runner.",
+      "Create a manual account that Sure's REST API can't (Sure's REST is GET-only for accounts; creates go through a Rails-runner that calls Sure's ActiveRecord models). Use when Sir says 'add my Erste mortgage' or 'track my Budapest flat'. For liabilities, pass the outstanding balance as a positive number — Sure stores liability balances as positives and the classification handles the sign. Backing: Rails-runner.",
     inputSchema: z.object({
       name: z.string().min(1),
       balance: z.number(),
@@ -687,7 +687,7 @@ const transferTools: ToolDef[] = [
   {
     name: "create_transfer",
     description:
-      "Create a fresh transfer — pairs an outflow on source_account_id with an inflow on destination_account_id. Sure auto-derives the transfer kind from the destination: liability → loan_payment, credit card → cc_payment, investment → investment_contribution, otherwise funds_movement. Use for 'log the May mortgage payment, 370,847 Ft from Example Bank to Example Mortgage'. Both legs are generated; transfers are excluded from spending totals. Backing: Rails-runner.",
+      "Create a fresh transfer — pairs an outflow on source_account_id with an inflow on destination_account_id. Sure auto-derives the transfer kind from the destination: liability → loan_payment, credit card → cc_payment, investment → investment_contribution, otherwise funds_movement. Use for 'log the May mortgage payment, 370,847 Ft from Wise to JBC Mortgage'. Both legs are generated; transfers are excluded from spending totals. Backing: Rails-runner.",
     inputSchema: z.object({
       source_account_id: z.string(),
       destination_account_id: z.string(),

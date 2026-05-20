@@ -66,7 +66,7 @@ Alfred Black uses butler-appropriate language, not academic jargon.
                      │ proxyToTenant()
                      ▼
 ┌──────────────────────────────────────────────────────────────┐
-│                TENANT INSTANCE (Acme Cloud VPS)                  │
+│                TENANT INSTANCE (Acme Cloud VPS)               │
 │                                                               │
 │  ┌───────────┐  ┌──────────┐  ┌────────────┐  ┌───────────┐│
 │  │ OPENCLAW   │  │ TEMPORAL  │  │ ALFRED-CTRL│  │ALFRED-LEARN││

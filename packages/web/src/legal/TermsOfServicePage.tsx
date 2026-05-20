@@ -71,7 +71,7 @@ export default function TermsOfServicePage() {
 
           <section>
             <h2 className="font-display text-2xl tracking-tight mb-3">6. Infrastructure and Instance Provisioning</h2>
-            <p>Upon activation, we provision a dedicated virtual machine on Acme Cloud Cloud infrastructure in your selected region, running your personal Alfred instance. The instance is connected to a private Tailscale network and assigned a subdomain (e.g., yourname.alfred.black).</p>
+            <p>Upon activation, we provision a dedicated virtual machine on Hetzner Cloud infrastructure in your selected region, running your personal Alfred instance. The instance is connected to a private Tailscale network and assigned a subdomain (e.g., yourname.alfred.black).</p>
             <p className="mt-3">We reserve the right to migrate instances to equivalent or superior hardware. Downtime during maintenance will be minimized and communicated in advance where feasible.</p>
             <p className="mt-3">You are responsible for the third-party credentials you store in your instance. We encrypt credentials at rest but cannot guarantee security against all attack vectors. Use strong, unique passwords and revoke credentials you no longer need.</p>
           </section>

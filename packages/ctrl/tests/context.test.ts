@@ -264,7 +264,7 @@ describe("POST /api/v1/context/cross-channel", () => {
       "event/2026-04-25-planecomment.md",
       record(
         { type: "event", stream_type: "plane-comment", summary: "alfred replied on issue" },
-        "Reply on [[matter/galerius-furdo]] referencing [[person/Taylor Herke]].",
+        "Reply on [[matter/galerius-furdo]] referencing [[person/Andrea Herke]].",
       ),
       recent,
     );
@@ -280,7 +280,7 @@ describe("POST /api/v1/context/cross-channel", () => {
       "session/voice-1.md",
       record(
         { type: "session", stream_type: "voice-call", duration_seconds: 600, summary: "Call with Sir" },
-        "[[person/Taylor Herke]]",
+        "[[person/Andrea Herke]]",
       ),
       recent,
     );
@@ -333,7 +333,7 @@ describe("POST /api/v1/context/cross-channel", () => {
     assert.ok(data.active_matters.includes("matter/favo.md"));
     assert.ok(!data.active_matters.includes("matter/should-not-show.md"));
     assert.ok(data.active_persons.includes("person/Boris.md"));
-    assert.ok(data.active_persons.includes("person/Taylor Herke.md"));
+    assert.ok(data.active_persons.includes("person/Andrea Herke.md"));
 
     // Caps echoed in the response so the agent knows when truncation
     // may have occurred.

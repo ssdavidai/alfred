@@ -2104,7 +2104,7 @@ class TestPaginatedTaskFetch:
     These tests pin the new pagination behaviour so a future refactor
     can't silently regress to the single-shot ``fetch_changed_tasks``
     pattern that overflowed Temporal's 2 MB activity-result ceiling on
-    Sir's vault (~2545 tasks).
+    example-owner's vault (~2545 tasks).
     """
 
     def test_empty_result_no_changes_since_cursor(self):

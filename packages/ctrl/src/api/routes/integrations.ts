@@ -226,7 +226,7 @@ const CATEGORY_MAP: Record<string, string> = {
   googledrive: "storage", dropbox: "storage", box: "storage", onedrive: "storage",
   hubspot: "crm", salesforce: "crm", pipedrive: "crm", zoho: "crm",
   airtable: "database", supabase: "database", firebase: "database",
-  acme-shop: "ecommerce", woocommerce: "ecommerce",
+  shopify: "ecommerce", woocommerce: "ecommerce",
   twitter: "social", linkedin: "social", facebook: "social", instagram: "social",
   youtube: "social", tiktok: "social", reddit: "social",
   zendesk: "support", intercom: "support", freshdesk: "support",

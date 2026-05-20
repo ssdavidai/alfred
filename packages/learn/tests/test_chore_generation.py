@@ -2,7 +2,7 @@
 
 Most coverage is on the helpers (envelope validator, profile slicer, JSON
 parser) since the actual `_call_llm` invocation requires OpenRouter and is
-exercised end-to-end in the smoke test on david.
+exercised end-to-end in the smoke test on the owner tenant.
 """
 from __future__ import annotations
 
@@ -351,7 +351,7 @@ class TestSliceProfileForOpportunity:
 class TestValidateCronMatchesDescription:
     # ----- Real-world tenant-a bugs that motivated the validator -----
 
-    def test_rapali_daily_morning_briefing_misalignment_caught(self):
+    def test_tenant_a_daily_morning_briefing_misalignment_caught(self):
         """The exact bug from issue #478: 'every day at 05:30 CET' but cron
         is `0 18 * * 0` (Sundays at 18:00 UTC = Mondays 00:00 Budapest).
         """
@@ -365,7 +365,7 @@ class TestValidateCronMatchesDescription:
         assert not ok
         assert "daily" in err.lower() or "day-of-week" in err.lower()
 
-    def test_rapali_weekly_wellness_misalignment_caught(self):
+    def test_tenant_a_weekly_wellness_misalignment_caught(self):
         """'Every Friday at 18:00 CET' but cron is `0 18 * * 0` (Sundays)."""
         ok, err = _validate_cron_matches_description(
             "0 18 * * 0",
@@ -781,7 +781,7 @@ class TestValidatorHonorsDescriptionTimezone:
     """When the description names a timezone (city / phrase / parenthetical
     abbrev), the validator must use it instead of the tenant_timezone arg."""
 
-    def test_rapali_family_calendar_watch_passes(self):
+    def test_tenant_a_family_calendar_watch_passes(self):
         """The exact cron + description that produced a false positive on
         tenant-a. Cron `0 16 * * 0` fires Sunday 16:00 UTC = 18:00 Budapest
         CEST. Description says "18:00 (Budapest time, 16:00 UTC)" so the
@@ -796,7 +796,7 @@ class TestValidatorHonorsDescriptionTimezone:
         )
         assert ok, err
 
-    def test_rapali_monday_strategy_brief_passes(self):
+    def test_tenant_a_monday_strategy_brief_passes(self):
         ok, err = _validate_cron_matches_description(
             "30 4 * * 1",
             "Every Monday at 06:30 local time (Budapest, ~04:30 UTC), this "
@@ -805,7 +805,7 @@ class TestValidatorHonorsDescriptionTimezone:
         )
         assert ok, err
 
-    def test_rapali_penthouse_project_tracker_passes(self):
+    def test_tenant_a_penthouse_project_tracker_passes(self):
         ok, err = _validate_cron_matches_description(
             "0 12 * * 5",
             "Every Friday at 2pm Budapest time, this chore pulls all events "
@@ -814,7 +814,7 @@ class TestValidatorHonorsDescriptionTimezone:
         )
         assert ok, err
 
-    def test_rapali_site_health_patrol_passes(self):
+    def test_tenant_a_site_health_patrol_passes(self):
         ok, err = _validate_cron_matches_description(
             "0 6 * * 3",
             "Every Wednesday at 8:00 AM Budapest time, this chore scans the "
@@ -823,7 +823,7 @@ class TestValidatorHonorsDescriptionTimezone:
         )
         assert ok, err
 
-    def test_rapali_italy_trip_planner_passes(self):
+    def test_tenant_a_italy_trip_planner_passes(self):
         ok, err = _validate_cron_matches_description(
             "0 8 * * 1,4",
             "Every Monday and Thursday at 10:00 AM (Central European time), "
@@ -832,7 +832,7 @@ class TestValidatorHonorsDescriptionTimezone:
         )
         assert ok, err
 
-    def test_rapali_watch_subscriptions_passes(self):
+    def test_tenant_a_watch_subscriptions_passes(self):
         ok, err = _validate_cron_matches_description(
             "0 7 * * 5",
             "Every Friday at 9:00 AM (Central European time), this chore "

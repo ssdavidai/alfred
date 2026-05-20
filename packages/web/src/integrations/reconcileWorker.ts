@@ -12,7 +12,7 @@
  *   failure) with the connection LIVE but the tenant having no stream / skill
  *   / Temporal schedule.
  *
- *   Live evidence: tenant-c connected Gmail, Calendar, and Drive ~5h before we
+ *   Live evidence: raj313 connected Gmail, Calendar, and Drive ~5h before we
  *   noticed; all three sat in `pending` until a manual auto-config sweep.
  *
  *   This job runs on a 1-minute cron (see main.wasp). For every

@@ -4,7 +4,7 @@ An orphan is any vault task with no scalar ``matter`` / ``related_matter`` AND
 no non-empty ``related_matters`` list. These tasks have accumulated over time
 from curator runs that couldn't resolve a matter, speculative "while you're at
 it" nudges from the generator, and stream-ingested nudges that never got
-linked. On Sir's vault this pool numbers in the thousands.
+linked. On a large vault this pool numbers in the thousands.
 
 Running this script is **destructive-ish**: it PATCHes `archived: true`,
 `status: cancelled`, `archived_at`, and `archived_reason` onto every orphan's
@@ -350,8 +350,8 @@ def _is_agent_managed(fm: dict[str, Any]) -> bool:
     to Plane + appear in archive/backfill passes normally.
 
     The previous version also treated bare ``agent_id`` as "agent-
-    managed", which hid 368 real learn-clerk-authored errands on Sir's
-    vault from Plane. ``skill_entry`` alone is the correct marker.
+    managed", which hid 368 real learn-clerk-authored errands on a
+    busy vault from Plane. ``skill_entry`` alone is the correct marker.
     """
     return bool(fm.get("skill_entry"))
 

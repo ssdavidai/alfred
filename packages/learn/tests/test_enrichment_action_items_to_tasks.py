@@ -67,8 +67,8 @@ def test_slug_differs_by_action_text() -> None:
 
 
 def test_slug_survives_unicode() -> None:
-    slug = _slug_for_action_item("event/x.md", "Küldj emlékeztetőt Csabának péntekig")
-    assert slug  # no crash on Hungarian chars
+    slug = _slug_for_action_item("event/x.md", "Küldj emlékeztetőt holnap péntekig")
+    assert slug  # no crash on non-ASCII chars
     # Non-ASCII gets replaced by hyphens after lowercase → only hash + empty summary → "<hash>-task" fallback
     assert "-" in slug
 
@@ -86,8 +86,8 @@ async def test_creates_task_with_propagated_related_fields() -> None:
     ok = await _create_task_for_action_item(
         client=client,
         action_item="Follow up with Sam on equipment order",
-        source_event_path="event/2026-04-22-erste-meeting.md",
-        related_matters=["matter/erste-agentic-coding-makerspace.md"],
+        source_event_path="event/2026-04-22-example-bank-meeting.md",
+        related_matters=["matter/example-bank-agentic-coding-makerspace.md"],
         related_persons=["person/Sam Riley.md"],
         related_orgs=["org/Example Bank.md"],
     )
@@ -98,7 +98,7 @@ async def test_creates_task_with_propagated_related_fields() -> None:
     assert record_type == "task"
     assert "type: task" in content
     assert "Follow up with Sam on equipment order" in content
-    assert "matter/erste-agentic-coding-makerspace.md" in content
+    assert "matter/example-bank-agentic-coding-makerspace.md" in content
     assert "person/Sam Riley.md" in content
     assert "org/Example Bank.md" in content
     assert "source_event:" in content
@@ -134,7 +134,7 @@ async def test_extracts_inline_wikilinks_as_related() -> None:
 
     await _create_task_for_action_item(
         client=client,
-        action_item="Email [[person/Pat Brown]] about [[matter/trkblint-property-land-development]] budget",
+        action_item="Email [[person/Pat Brown]] about [[matter/anytown-property-land-development]] budget",
         source_event_path="event/x.md",
         related_matters=[],
         related_persons=[],
@@ -143,7 +143,7 @@ async def test_extracts_inline_wikilinks_as_related() -> None:
     args, _ = client.write_record.call_args
     _, _, content = args
     assert "person/Pat Brown.md" in content
-    assert "matter/trkblint-property-land-development.md" in content
+    assert "matter/anytown-property-land-development.md" in content
 
 
 @pytest.mark.asyncio
@@ -181,7 +181,7 @@ async def test_yaml_safe_when_ref_contains_brackets() -> None:
         action_item="Review PR for issue 37",
         source_event_path="event/some-pr.md",
         related_matters=["matter/alfred-platform.md"],
-        related_persons=["person/ssdavidai.md"],
+        related_persons=["person/octocat.md"],
         related_orgs=["org/claude[bot].md", "org/alfred-platform.md"],
     )
     _, _, content = client.write_record.call_args[0]
@@ -198,9 +198,9 @@ def test_format_fm_line_yaml_safe_with_specials() -> None:
     import yaml
     from src.activities.enrichment import _format_fm_line  # noqa: WPS433
 
-    line = _format_fm_line("entities", ["org/claude[bot]", "person/ssdavidai", "org/foo, bar"])
+    line = _format_fm_line("entities", ["org/claude[bot]", "person/octocat", "org/foo, bar"])
     parsed = yaml.safe_load(line)
-    assert parsed["entities"] == ["org/claude[bot]", "person/ssdavidai", "org/foo, bar"]
+    assert parsed["entities"] == ["org/claude[bot]", "person/octocat", "org/foo, bar"]
 
 
 @pytest.mark.asyncio
@@ -209,13 +209,13 @@ async def test_deduplicates_wikilinks_with_passed_related() -> None:
     client.read_record = AsyncMock(side_effect=Exception("not found"))
     client.write_record = AsyncMock(return_value="task/slug.md")
 
-    # Caller passed erste; action text ALSO mentions erste — should not
+    # Caller passed the matter; action text ALSO mentions it — should not
     # appear twice in related_matters
     await _create_task_for_action_item(
         client=client,
-        action_item="Update [[matter/erste-agentic-coding-makerspace]] notes",
+        action_item="Update [[matter/example-bank-agentic-coding-makerspace]] notes",
         source_event_path="event/x.md",
-        related_matters=["matter/erste-agentic-coding-makerspace.md"],
+        related_matters=["matter/example-bank-agentic-coding-makerspace.md"],
         related_persons=[],
         related_orgs=[],
     )
@@ -224,4 +224,4 @@ async def test_deduplicates_wikilinks_with_passed_related() -> None:
     # Count occurrences on the related_matters line
     lines = [l for l in content.splitlines() if l.startswith("related_matters:")]
     assert len(lines) == 1
-    assert lines[0].count("erste-agentic-coding-makerspace") == 1
+    assert lines[0].count("example-bank-agentic-coding-makerspace") == 1

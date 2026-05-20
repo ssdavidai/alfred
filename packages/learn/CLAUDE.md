@@ -61,7 +61,7 @@ Before merging any PR that touches `packages/learn/src/workflows/**` or `package
 - Pre-deploy plan documented for in-flight workflows: terminate, drain, OR rely on patched-version compat
 - Tested locally with a workflow started under old code + replayed under new code, if the change is non-additive
 
-Worked example: PR #628 (paginate `plane_sync.fetch_changed_tasks`) renamed activities and rewrote workflow logic without `workflow.patched()`. In-flight workflows hit `NonDeterministicError` post-deploy on Sir + tenant-a, stalled for 12+ minutes, and required manual termination.
+Worked example: PR #628 (paginate `plane_sync.fetch_changed_tasks`) renamed activities and rewrote workflow logic without `workflow.patched()`. In-flight workflows hit `NonDeterministicError` post-deploy on two tenants, stalled for 12+ minutes, and required manual termination.
 
 ### Adding NEW activity calls is just as load-bearing as renames
 

@@ -489,7 +489,7 @@ waiting for has happened. Examples:
     referencing the same invoice → satisfies.
   - Task "RSVP to Tuesday lunch" + Signal kind=calendar_response_accepted
     for that event → satisfies.
-  - Task "Reply to Anna's question" + Signal kind=gmail_sent reply
+  - Task "Reply to Jane's question" + Signal kind=gmail_sent reply
     to that thread → satisfies.
 A loose topical match is NOT enough. The signal must represent the
 specific completing event.

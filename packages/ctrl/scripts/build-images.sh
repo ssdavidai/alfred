@@ -24,7 +24,7 @@ echo "Registry: $REGISTRY"
 echo "Tag: $TAG"
 echo ""
 
-# Force amd64 — Acme Cloud servers are x86_64, local Mac is ARM
+# Force amd64 — Hetzner servers are x86_64, local Mac is ARM
 PLATFORM="linux/amd64"
 
 # --- Init container ---

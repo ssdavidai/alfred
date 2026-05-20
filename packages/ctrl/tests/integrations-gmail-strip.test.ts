@@ -81,7 +81,7 @@ const { stripGmailMetadataResponse } = await import("../src/api/routes/integrati
 
 // ---------------------------------------------------------------------------
 // Realistic fixtures — sanitised from a live response captured via:
-//   ssh deploy@<david> 'curl -X POST .../integrations/execute \
+//   ssh deploy@<host> 'curl -X POST .../integrations/execute \
 //     -d {"action":"GMAIL_FETCH_EMAILS",
 //         "arguments":{"userId":"me","format":"metadata","maxResults":3}}'
 // PII redacted; sizes preserved.

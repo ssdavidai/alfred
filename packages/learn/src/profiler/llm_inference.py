@@ -101,8 +101,8 @@ Rules:
 - Hungarian "patika" / "gyógyszertár" / "orvosi" → Healthcare.
 - Hungarian "etterem" / "kebab" / "burger" / "pizza" / "pekseg" → Food & Drink.
 - "fizetés" / "fizetõ" / "fizetoaut" / "Pm-abacus" → Income (salary).
-- Internal account-to-account moves (Example Bank, Example Bank, "Exchanged to", currency tickers, "Top-Up") → Transfers.
-- Cashback / reward / "BALANCE-" / Example Bank interest → Income.
+- Internal account-to-account moves (Wise, Revolut, "Exchanged to", currency tickers, "Top-Up") → Transfers.
+- Cashback / reward / "BALANCE-" / Revolut interest → Income.
 - If genuinely ambiguous, return null category and role "unknown".
 
 Return ONLY a JSON array, one object per cluster, in the SAME ORDER as the input. Schema:

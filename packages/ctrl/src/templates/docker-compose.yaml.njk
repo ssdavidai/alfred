@@ -78,8 +78,8 @@ services:
     # many concurrent workflow executions + SQLite background writers +
     # HTTP/2 streams to the UI — 256 was exhausting the pid budget with
     # ``runtime: failed to create new OS thread (have 2 already; errno=11)``
-    # on miguel + tenant-a. Live-patched via `docker update --pids-limit`
-    # on david/miguel/tenant-a; this bakes the fix into the template so the
+    # on tenant-b + tenant-a. Live-patched via `docker update --pids-limit`
+    # on tenant-a/tenant-b/tenant-c; this bakes the fix into the template so the
     # starvation doesn't return on container recreate.
     pids_limit: 1024
 
@@ -303,7 +303,7 @@ services:
     # graph state pushed peak RSS to ~3.4 GB, well above the 2 GB limit.
     # 6g gives ~1.75× headroom over observed peak and room for vault
     # growth (next obvious step is fitting 20K+ files). Hot-applied to
-    # david/miguel/tenant-a/tenant-c same day; template updated to keep all
+    # tenant-a/tenant-b/tenant-c same day; template updated to keep all
     # future tenants on the same architecture.
     # pids_limit bumped 256 → 512 (2026-04-24). The alfred worker runs
     # multiple long-lived daemon processes (curator, janitor, distiller,
@@ -425,7 +425,7 @@ services:
       # transcript_intake schedules are not created and the activities
       # are dormant. VEXA_API_URL points at the Vexa stack's api-gateway
       # alias on the alfred_default network (the standalone Vexa compose
-      # joins this network — see packages/openclaw/vexa-david.yaml).
+      # joins this network — see packages/hermes/vexa-example.yaml).
       # VEXA_API_KEY and VEXA_WEBHOOK_SECRET come from .env (provisioned
       # via Vaultwarden alongside other tenant secrets).
       - VEXA_ENABLED=${VEXA_ENABLED:-false}
@@ -537,7 +537,7 @@ services:
   # blocks until `python manage.py migrate` has run — Plane's official compose
   # factors this into a dedicated service so the api/worker/beat don't each try
   # to apply migrations on boot (which caused deadlock during the first deploy
-  # attempt on david, issue #555).
+  # attempt on tenant-a, issue #555).
   plane-migrator:
     image: makeplane/plane-backend:stable
     restart: "no"
@@ -789,7 +789,7 @@ services:
       # the Caddyfile a plain-HTTP listener with no ACME, which matches how we
       # expose plane-proxy — bound to 127.0.0.1:8080 only, no public TLS.
       # TRUSTED_PROXIES silences a separate global-config warning. See B9 on
-      # david 2026-04-23.
+      # tenant-a 2026-04-23.
       - SITE_ADDRESS=:80
       - TRUSTED_PROXIES=0.0.0.0/0
       - FILE_SIZE_LIMIT=5242880
@@ -970,7 +970,7 @@ services:
   # /opt/alfred/vexa/docker-compose.yaml on the tenant VPS, generates
   # /opt/alfred/vexa/.env, and brings the stack up via
   # ``cd /opt/alfred/vexa && docker compose up -d``. See
-  # packages/openclaw/vexa-david.yaml for the original david-direct
+  # packages/hermes/vexa-example.yaml for the original example-direct
   # deploy that the fleet template was extracted from.
   #
   # alfred-learn talks to Vexa over the alfred_default network alias

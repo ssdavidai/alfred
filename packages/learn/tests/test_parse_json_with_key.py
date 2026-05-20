@@ -77,8 +77,8 @@ def test_parse_json_with_literal_braces_in_string_value() -> None:
         '  {"name": "alfred-black product", '
         '   "description": "uses {userId} and {tenantId} placeholders, '
         'cron schedule like 30 4 * * * compiled from {schedule}"},'
-        '  {"name": "acme engagement", '
-        '   "description": "weekly with Rob and Pat"}'
+        '  {"name": "neoterra engagement", '
+        '   "description": "weekly with Rob and Caddie"}'
         ']}\n'
         '```'
     )

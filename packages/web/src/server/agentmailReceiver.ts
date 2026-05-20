@@ -23,8 +23,8 @@ const AUTHORIZED_CACHE_MS = 60_000; // 60s — list changes slowly
 /**
  * Extract the bare email address from an RFC 5322-ish `from` field.
  *   "Jane Doe <owner@example.com>"  → "owner@example.com"
- *   "owner@example.com"                       → "owner@example.com"
- *   ""                                            → ""
+ *   "owner@example.com"             → "owner@example.com"
+ *   ""                              → ""
  * Returns lowercased, trimmed. Empty string on no match.
  */
 function extractEmailAddress(raw: string): string {

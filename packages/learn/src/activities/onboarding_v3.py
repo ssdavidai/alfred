@@ -457,10 +457,10 @@ Return JSON:
   "key_identity_facts": [
     {{"field": "name", "value": "Jane Doe", "display": "Full name"}},
     {{"field": "age", "value": "35", "display": "Age"}},
-    {{"field": "location", "value": "Anytown, Hungary", "display": "Location"}},
+    {{"field": "location", "value": "Anytown", "display": "Location"}},
     {{"field": "partner", "value": "Sam Lee", "display": "Partner"}},
     {{"field": "children", "value": "Robin (6 months)", "display": "Children"}},
-    {{"field": "pets", "value": "Madonna", "display": "Pets"}},
+    {{"field": "pets", "value": "Biscuit", "display": "Pets"}},
     {{"field": "company", "value": "Example LLC", "display": "Company/Role"}},
     {{"field": "main_project", "value": "Alfred Black", "display": "Main project"}}
   ]

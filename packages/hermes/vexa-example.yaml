@@ -1,10 +1,10 @@
-# Vexa transcript-bot stack — david-direct deploy (#840 Phase 4).
+# Vexa transcript-bot stack — example-owner-direct deploy (#840 Phase 4).
 #
 # THIS IS A SEPARATE COMPOSE PROJECT, run alongside the main alfred
-# stack on david. It is NOT folded into ``docker-compose.yaml.njk`` for
+# stack on example-owner. It is NOT folded into ``docker-compose.yaml.njk`` for
 # fleet rollout yet — the .njk template carries a minimal gated stub
 # (see below) that flips on once Phase 4 is verified end-to-end on
-# david.
+# example-owner.
 #
 # Why a separate project?
 # -----------------------
@@ -24,9 +24,9 @@
 #      ``http://ctrl-api:3100/api/v1/webhooks/vexa`` for completion
 #      callbacks.
 #
-# Deploy on david
+# Deploy on example-owner
 # ---------------
-# 1. SSH to david. Ensure the alfred stack is up and the
+# 1. SSH to example-owner. Ensure the alfred stack is up and the
 #    ``alfred_default`` network exists:
 #
 #        docker network ls | grep alfred_default
@@ -34,7 +34,7 @@
 #    (Compose creates this automatically when ``docker compose up`` runs
 #    in /opt/alfred/compose; verify before continuing.)
 #
-# 2. Drop this file at /opt/alfred/vexa/docker-compose.yaml on david
+# 2. Drop this file at /opt/alfred/vexa/docker-compose.yaml on example-owner
 #    and create /opt/alfred/vexa/.env with:
 #
 #        IMAGE_TAG=0.10.6
@@ -106,7 +106,7 @@
 # * /mnt/encrypted/vexa is the per-tenant data root; it must exist
 #   before bringing the stack up. The cloud-init template already
 #   creates it (see packages/ctrl/src/templates/cloud-init.yaml.njk
-#   and cloud-init-snapshot.yaml.njk — added in this PR). On david the
+#   and cloud-init-snapshot.yaml.njk — added in this PR). On example-owner the
 #   directory was created manually as part of the Phase 4 deploy:
 #
 #       mkdir -p /mnt/encrypted/vexa
@@ -118,7 +118,7 @@
 #   ingress is configured.
 #
 # * Memory totals (with all services running): ~2.5 GB peak. Tested on
-#   a david-class VM (cx53 = 8 vCPU / 32 GB RAM); leaves 6+ GB headroom
+#   an example-owner-class VM (8 vCPU / 32 GB RAM); leaves 6+ GB headroom
 #   over the existing alfred stack's footprint.
 
 name: vexa
@@ -234,7 +234,7 @@ services:
     pids_limit: 512
     # The runtime-api spawns Vexa-bot containers as docker children.
     # It needs the docker socket plus group membership for the alfred
-    # docker GID (deploy:deploy on david is gid 1000; docker group
+    # docker GID (deploy:deploy on example-owner is gid 1000; docker group
     # gid is typically 998 — adjust DOCKER_GID below if different).
     group_add:
       - "${DOCKER_GID:-998}"

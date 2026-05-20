@@ -284,7 +284,7 @@ class TestValidationImports:
 
 # ---------------------------------------------------------------------------
 # Import ordering — `with workflow.unsafe.imports_passed_through()` must
-# come AFTER `from temporalio import workflow`. Regression: tenant-c
+# come AFTER `from temporalio import workflow`. Regression: raj313
 # incident 2026-04-29, two of nine generated chore files were emitted
 # with the with-block before the workflow import, raising NameError at
 # import time → workflow class never registered → Temporal fires
@@ -292,9 +292,9 @@ class TestValidationImports:
 # ---------------------------------------------------------------------------
 
 class TestValidationImportOrdering:
-    """Guard against the tenant-c import-ordering bug.
+    """Guard against the raj313 import-ordering bug.
 
-    The buggy shape Opus emitted (verbatim from tenant-c's broken files):
+    The buggy shape Opus emitted (verbatim from raj313's broken files):
 
         with workflow.unsafe.imports_passed_through():   # workflow undefined!
             from temporalio import workflow
@@ -307,7 +307,7 @@ class TestValidationImportOrdering:
     """
 
     def _bad_ordering_source(self) -> str:
-        """Reproduce the exact shape from the tenant-c incident."""
+        """Reproduce the exact shape from the raj313 incident."""
         return '''"""Bad ordering — workflow used in with-block context expr before import."""
 from __future__ import annotations
 
@@ -344,7 +344,7 @@ class BadOrderWorkflow:
 '''
 
     def test_with_block_before_workflow_import_rejected(self):
-        """The exact tenant-c shape must be rejected."""
+        """The exact raj313 shape must be rejected."""
         result = validate_template_source(self._bad_ordering_source())
         assert not result.ok
         # Must mention the with-block / NameError mechanism so Opus can fix it

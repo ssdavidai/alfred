@@ -36,9 +36,9 @@ export function isAgentMailEnabled(): boolean {
 }
 
 // Primary username: email local part, normalized.
-// `owner@example.com`       -> `alfred.owner`
+// `owner@example.com`           -> `alfred.owner`
 // `owner2@example.com`          -> `alfred.owner2`
-// `owner.example@example.com` -> `alfred.owner.example`
+// `owner.example@example.com`   -> `alfred.owner.example`
 export function buildInboxUsername(email: string | null | undefined): string {
   const local = (email ?? "user")
     .split("@")[0]
@@ -186,7 +186,7 @@ export async function provisionAgentMailForTenant(params: {
 /**
  * Idempotent worker-side AgentMail provisioning.
  *
- * Called from `provisionInstanceJob` BEFORE the Acme Cloud CLI is spawned so
+ * Called from `provisionInstanceJob` BEFORE the Hetzner CLI is spawned so
  * the resulting credentials can be threaded through as TENANT_AGENTMAIL_*
  * env vars on the ctrl process (consumed at packages/ctrl/src/infra/
  * provisioner.ts:294 to write the tenant `.env` + the

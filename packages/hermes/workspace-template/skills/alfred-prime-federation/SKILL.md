@@ -9,7 +9,7 @@ metadata:
 
 # Alfred — Prime Federation
 
-This skill is **only present on Alfred Prime** (Sir's instance). Its tools (`tenant`, `ask_alfred`) are only registered when the server is started with `ALFRED_PRIME=true` and a populated `CROSS_TENANT_PEERS` env var.
+This skill is **only present on Alfred Prime** (the principal's instance). Its tools (`tenant`, `ask_alfred`) are only registered when the server is started with `ALFRED_PRIME=true` and a populated `CROSS_TENANT_PEERS` env var.
 
 If you're seeing this skill, you have two cross-tenant tools in your toolbox on top of the usual `self`.
 
@@ -21,15 +21,15 @@ If you're seeing this skill, you have two cross-tenant tools in your toolbox on 
 | `ask_alfred({tenant, prompt, timeout_seconds?})` | Hand a prompt to the peer's Alfred and return his reply. | **Peer's** (his Alfred reasons over his own vault) |
 
 ### Use `tenant` when…
-- Sir asks a direct factual question about a peer's vault ("how many active matters does tenant-b have?")
+- Sir asks a direct factual question about a peer's vault ("how many active matters does Tenant B have?")
 - You need to compare state across tenants ("which tenants have the Gmail stream enabled?")
 - You need to modify a peer's vault/streams/schedules (creating a record, pausing a chore)
 - You want the answer in structured JSON (same shape as `self`)
 
 ### Use `ask_alfred` when…
 - The question requires the peer's Alfred to reason over his own vault in natural language
-  - "Ask tenant-b what his top priority is this week"
-  - "Have tenant-a summarize his meetings with Pat from April"
+  - "Ask Tenant B what their top priority is this week"
+  - "Have Tenant A summarize their meetings with Pat from April"
 - The peer's Alfred has context (SOUL.md, USER.md, session memory) that shapes the answer in a way raw data doesn't
 - The work is genuinely delegated — you want the peer's Alfred to OWN the task and respond like a colleague would
 
@@ -41,9 +41,9 @@ Example response:
 ```json
 {
   "peers": [
-    {"id": "miguel",   "label": "Sam Park (Upstring)"},
-    {"id": "tenant-a",   "label": "tenant-a"},
-    {"id": "daveszab", "label": "Dave Szabó"}
+    {"id": "tenant-a", "label": "Tenant A"},
+    {"id": "tenant-b", "label": "Tenant B"},
+    {"id": "tenant-c", "label": "Tenant C"}
   ]
 }
 ```
@@ -51,16 +51,16 @@ Example response:
 ## Worked examples
 
 ### Direct read
-**Sir: "How many unprocessed events are in tenant-b's inbox right now?"**
+**Sir: "How many unprocessed events are in Tenant B's inbox right now?"**
 ```
-tenant({ tenant: "miguel", endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
+tenant({ tenant: "tenant-b", endpoint: "/api/v1/streams/events", query: { status: "unprocessed" } })
 ```
 
 ### Direct write
-**Sir: "Create a note on tenant-b's vault about the Example Co workshop prep."**
+**Sir: "Create a note on Tenant B's vault about the Example Co workshop prep."**
 ```
 tenant({
-  tenant: "miguel",
+  tenant: "tenant-b",
   endpoint: "/api/v1/vault/records",
   method: "POST",
   body: {
@@ -72,10 +72,10 @@ tenant({
 ```
 
 ### Delegated reasoning
-**Sir: "Ask tenant-b's Alfred what should get tenant-b's attention first thing Monday."**
+**Sir: "Ask Tenant B's Alfred what should get Tenant B's attention first thing Monday."**
 ```
 ask_alfred({
-  tenant: "miguel",
+  tenant: "tenant-b",
   prompt: "Sir wants to know: what should I be paying attention to first thing Monday morning? Think it through based on my matters, open tasks, and anything urgent in the last 48 hours of streams.",
   timeout_seconds: 90
 })
@@ -85,7 +85,7 @@ ask_alfred({
 **Sir: "Which tenants have a chore that references Acme Tools?"**
 ```
 // Loop in your head over peers returned by /cross-tenant/peers:
-for peerId of ["miguel", "tenant-a", "daveszab"] {
+for peerId of ["tenant-a", "tenant-b", "tenant-c"] {
   tenant({ tenant: peerId, endpoint: "/api/v1/vault/search", query: { grep: "Acme Tools", type: "chore" } })
 }
 // Then synthesize a summary across the results.
@@ -93,7 +93,7 @@ for peerId of ["miguel", "tenant-a", "daveszab"] {
 
 ## Hard rules
 
-1. **Never use `tenant` to write without Sir's explicit approval for THAT specific write.** Cross-tenant writes are high-stakes — mistakes land in the wrong vault and are hard to untangle (we learned this from the Example Co99 incident). Read-before-write applies double here.
+1. **Never use `tenant` to write without Sir's explicit approval for THAT specific write.** Cross-tenant writes are high-stakes — mistakes land in the wrong vault and are hard to untangle (we learned this from a past cross-tenant misfire). Read-before-write applies double here.
 2. **Never use `self` with a `tenant` argument — that's not how `self` works.** `self` is hard-coded to this tenant. Cross-tenant ops go through `tenant`, full stop.
 3. **If the peer is unreachable (Tailscale down, peer openclaw restarting), the tool returns `error: true` with a status code.** Surface the error to Sir plainly — don't retry silently.
 4. **`ask_alfred` calls can take up to 90s by default.** Raise `timeout_seconds` if the peer's Alfred needs to think longer. Don't panic if it's slow — the peer is reasoning, not just fetching data.

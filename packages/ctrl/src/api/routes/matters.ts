@@ -511,7 +511,7 @@ function buildMatterIndex(): MatterIndexResult {
       // Originally we attached it to EVERY candidate path, which polluted
       // matter timelines with tangentially-related signals (e.g. a Miro
       // password reset showed up on /matters/erste-agentic-coding-makerspace
-      // because Example Bank was its #2 candidate with score 0.19). Fix: only the
+      // because Erste was its #2 candidate with score 0.19). Fix: only the
       // top candidate, and only if its score clears MIN_SIGNAL_SCORE.
       const MIN_SIGNAL_SCORE = 0.4;
       if (Array.isArray(candidates) && candidates.length > 0) {

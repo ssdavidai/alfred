@@ -76,9 +76,9 @@ Pitfall: Sure expects the sign on `amount` to match Sir's intent. €400 cash wi
 
 `self({endpoint: "/api/v1/sure/transactions/{id}", method: "PATCH", body: {transaction: {category_id: "<groceries-id>"}}})`
 
-Use this when Sir wants to recategorize ("that Tesco run was groceries, not entertainment"), correct an amount, attach a tag, or rename a transaction. Same `transaction.{field}` body shape as create — only include the fields you're changing.
+Use this when Sir wants to recategorize ("that Example Grocer run was groceries, not entertainment"), correct an amount, attach a tag, or rename a transaction. Same `transaction.{field}` body shape as create — only include the fields you're changing.
 
-Pitfall: don't issue a PATCH without first reading the transaction to confirm it's the one Sir means. Multiple Tesco runs land each week.
+Pitfall: don't issue a PATCH without first reading the transaction to confirm it's the one Sir means. Multiple Example Grocer runs land each week.
 
 ### 6. List categories (with budget status)
 
@@ -95,7 +95,7 @@ Returns categories with `{id, name, classification, color, icon, parent, subcate
 
 `self({endpoint: "/api/v1/sure/merchants", method: "GET"})`
 
-Returns `{id, name, type}` per merchant. Use this when Sir asks "how much did I spend at Tesco this year?" — resolve "Tesco" to its merchant id, then call `/transactions?merchant_id=<id>&start_date=...`. Cheaper than `search` for repeat merchants.
+Returns `{id, name, type}` per merchant. Use this when Sir asks "how much did I spend at Example Grocer this year?" — resolve "Example Grocer" to its merchant id, then call `/transactions?merchant_id=<id>&start_date=...`. Cheaper than `search` for repeat merchants.
 
 ### 8. Trigger a sync
 
@@ -109,7 +109,7 @@ Use it before generating a Money Day brief so the figures Sir sees are fresh. On
 
 `self({endpoint: "/api/v1/sure/valuations", method: "POST", body: {valuation: {account_id: "<property-id>", amount: 165000000, date: "2026-04-29", notes: "Q2 2026 mark"}}})`
 
-Use this for assets that don't have a live feed — the Budapest flat, crypto held in a cold wallet outside connected exchanges, a private-company stake. Posting a valuation re-marks the account's balance to that amount on that date; the balance sheet picks it up on the next read.
+Use this for assets that don't have a live feed — the flat, crypto held in a cold wallet outside connected exchanges, a private-company stake. Posting a valuation re-marks the account's balance to that amount on that date; the balance sheet picks it up on the next read.
 
 Pitfall: `amount` is in currency-native units (HUF for a HUF property account, USD for USD-denominated). Ask Sir for the currency if it isn't obvious from the account.
 
@@ -191,11 +191,11 @@ self({
 })
 ```
 
-Sum `signed_amount_cents` per currency (Sir's groceries split across HUF and EUR — Tesco runs in Budapest are HUF, FoodCo in Vienna is EUR). Reply with each currency total and the combined picture if a clean FX rate is available: "Sir, March groceries: Ft 412,300 in Hungary plus €218 in the EU — roughly €1,250 total at current FX. Tesco was the largest single merchant at Ft 187,000 across nine visits."
+Sum `signed_amount_cents` per currency (Sir's groceries split across HUF and EUR — Example Grocer runs at home are HUF, FoodCo abroad is EUR). Reply with each currency total and the combined picture if a clean FX rate is available: "Sir, March groceries: Ft 412,300 at home plus €218 abroad — roughly €1,250 total at current FX. Example Grocer was the largest single merchant at Ft 187,000 across nine visits."
 
 ## Connecting bank feeds via Lunchflow
 
-Sure handles bank feeds through provider plugins — Plaid (US/CA), SimpleFIN, Sophtron, Enable Banking (EU), Binance, Coinbase, CoinStats, and **Lunchflow**. For Sir, who runs across HUF, EUR, GBP, and USD with accounts at Hungarian and pan-European banks, Lunchflow is the recommended option because it consolidates 25,000+ banks across 40+ countries through a single BYOK key (PSD2 in EU/UK, MX/Plaid for US/CA, regional providers elsewhere).
+Sure handles bank feeds through provider plugins — Plaid (US/CA), SimpleFIN, Sophtron, Enable Banking (EU), Binance, Coinbase, CoinStats, and **Lunchflow**. For Sir, who runs across HUF, EUR, GBP, and USD with accounts at multiple European banks, Lunchflow is the recommended option because it consolidates 25,000+ banks across 40+ countries through a single BYOK key (PSD2 in EU/UK, MX/Plaid for US/CA, regional providers elsewhere).
 
 **Setup is BYOK and Alfred has no Lunchflow-specific code** — Sure handles the entire integration:
 
@@ -207,7 +207,7 @@ Sure handles bank feeds through provider plugins — Plaid (US/CA), SimpleFIN, S
 
 Once configured, calling `POST /api/v1/sure/sync` fans out to every Lunchflow-connected institution alongside the other providers — you don't speak to Lunchflow directly.
 
-**Banks Sir uses that Lunchflow covers:** Example Bank (Hungary), Example Bank (Hungary), Example Bank, Example Bank, Example Bank. The 25,000+ catalog also covers most other European retail banks Sir might add later.
+**Banks Sir uses that Lunchflow covers:** Example Bank, Example Bank (a second institution), and several pan-European fintech accounts. The 25,000+ catalog also covers most other European retail banks Sir might add later.
 
 When Sir asks "how do I hook up my bank?", walk him through the five steps above. Don't try to paste his API key for him — he must enter it directly into the Sure UI; ctrl-api does not proxy that screen.
 
@@ -294,7 +294,7 @@ Sure's *upstream* REST API is read-only for accounts (only `GET /accounts`). The
 **Create a manual account** — `self({endpoint: "/api/v1/sure/accounts", method: "POST", body: {…}})`
 
 Required body fields:
-- `name` *(string)* — display name, e.g. `"Example Bank Mortgage"`.
+- `name` *(string)* — display name, e.g. `"Example Mortgage"`.
 - `balance` *(number)* — current balance in currency-native units. For liabilities, this is the **outstanding balance** (positive number — Sure stores liability balances as positives and the classification flag does the sign).
 - `currency` *(string)* — three-letter ISO, e.g. `"HUF"`.
 - `accountable_type` *(string)* — one of `"Depository"`, `"Investment"`, `"Crypto"`, `"Property"`, `"Vehicle"`, `"Loan"`, `"CreditCard"`, `"OtherAsset"`, `"OtherLiability"`. Determines what kind of account this is.
@@ -311,7 +311,7 @@ self({
   endpoint: "/api/v1/sure/accounts",
   method: "POST",
   body: {
-    name: "Example Bank Mortgage",
+    name: "Example Mortgage",
     balance: 58500000,
     currency: "HUF",
     accountable_type: "Loan",
@@ -359,7 +359,7 @@ Sure's Rules engine watches new transactions and applies actions when conditions
 3. Conditions (all must match):
    - `Account = Example Bank HUF` (or whichever account the payment leaves)
    - `Amount = -370,847 Ft` (exact monthly payment, signed for outflow) — or use a tight range like `-370,000 to -371,000`
-   - Optional: `Merchant contains "JBC"` or `Date day-of-month = 5` to disambiguate from other 370k outflows
+   - Optional: `Merchant contains "MORTGAGE"` or `Date day-of-month = 5` to disambiguate from other 370k outflows
 4. Action: **Mark as transfer to → Example Mortgage** (Sure picks `loan_payment` as the transfer kind automatically because the destination is a Loan account).
 5. Save. The rule runs on every newly-imported transaction matching the conditions.
 
@@ -393,8 +393,8 @@ A `Transfer` pairs an outflow on one account with an inflow on another. Sure aut
 
 ```
 {
-  "source_account_id":      "<wise-huf-account-id>",
-  "destination_account_id": "<jbc-mortgage-account-id>",
+  "source_account_id":      "<example-bank-huf-account-id>",
+  "destination_account_id": "<example-mortgage-account-id>",
   "amount":                 "370847",         // string or number, currency-native units
   "date":                   "2026-04-30",     // ISO yyyy-mm-dd
   "exchange_rate":          "395.42"          // optional; required if accounts have different currencies and Sure has no rate for the date
@@ -408,8 +408,8 @@ self({
   endpoint: "/api/v1/sure/transfers",
   method: "POST",
   body: {
-    source_account_id:      "<wise-huf-id>",
-    destination_account_id: "<jbc-mortgage-id>",
+    source_account_id:      "<example-bank-huf-id>",
+    destination_account_id: "<example-mortgage-id>",
     amount:                 "370847",
     date:                   "2026-05-05"
   }
@@ -426,7 +426,7 @@ The mortgage's outstanding balance drops by 370,847 Ft after the next account ma
 
 ### Confirm / reject
 
-For pending transfers (Sure's auto-matcher creates these in `pending` status when it sees probable pairs in incoming sync data), Sir asks "is this Example Bank→Example Bank actually the same transfer?" Use `confirm` to accept, `reject` to record a RejectedTransfer (the matcher learns and stops suggesting it). Always preview with `GET /transactions/{id}` on each leg before confirming, so Sir hears: "Example Bank outflow of 1,200 USD on April 28 ↔ Example Bank inflow of 1,200 USD on April 29 — confirm?"
+For pending transfers (Sure's auto-matcher creates these in `pending` status when it sees probable pairs in incoming sync data), Sir asks "is this Example Bank HUF→USD actually the same transfer?" Use `confirm` to accept, `reject` to record a RejectedTransfer (the matcher learns and stops suggesting it). Always preview with `GET /transactions/{id}` on each leg before confirming, so Sir hears: "Example Bank HUF outflow of 1,200 USD on April 28 ↔ Example Bank USD inflow of 1,200 USD on April 29 — confirm?"
 
 ## Transaction splits and bulk edits (platform extension)
 
@@ -434,7 +434,7 @@ For pending transfers (Sure's auto-matcher creates these in `pending` status whe
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/v1/sure/transactions/{id}/split` | Split a parent transaction into multiple children (e.g. a 25,000 Ft Tesco run was 18,000 Ft groceries + 7,000 Ft cleaning supplies). |
+| POST | `/api/v1/sure/transactions/{id}/split` | Split a parent transaction into multiple children (e.g. a 25,000 Ft Example Grocer run was 18,000 Ft groceries + 7,000 Ft cleaning supplies). |
 | POST | `/api/v1/sure/transactions/{id}/unsplit` | Restore a split parent — destroys all children. |
 | POST | `/api/v1/sure/transactions/bulk_update` | Reclassify many transactions in one call (date, notes, name, category_id, merchant_id, tag_ids). |
 | POST | `/api/v1/sure/transactions/bulk_delete` | Delete many transactions in one call. Refuses split children. |
@@ -459,7 +459,7 @@ Sum of `amount` across splits must equal parent `amount`. Sure enforces this and
   "transaction_ids": ["t1", "t2", "t3"],
   "attributes": {
     "category_id": "<groceries>",
-    "merchant_id": "<tesco>",     // optional
+    "merchant_id": "<example-grocer>",     // optional
     "tag_ids":    ["<weekly>"],   // optional; presence triggers tag replacement (vs no-op when absent)
     "notes":      "March audit"   // optional
   }
@@ -468,11 +468,11 @@ Sum of `amount` across splits must equal parent `amount`. Sure enforces this and
 
 Permitted attribute keys: `date`, `notes`, `name`, `category_id`, `merchant_id`, `tag_ids`. Anything else is silently ignored. The `update_tags` flag is set automatically when `tag_ids` is present in the body — pass an empty array to **clear** all tags, or omit the key to leave tags untouched.
 
-### Worked example — Sir asks "categorize all my Tesco transactions from last month as Groceries"
+### Worked example — Sir asks "categorize all my Example Grocer transactions from last month as Groceries"
 
 ```
 // 1. find them
-self({endpoint: "/api/v1/sure/transactions", method: "GET", query: {start_date: "2026-03-01", end_date: "2026-03-31", merchant_ids: ["<tesco-id>"]}})
+self({endpoint: "/api/v1/sure/transactions", method: "GET", query: {start_date: "2026-03-01", end_date: "2026-03-31", merchant_ids: ["<example-grocer-id>"]}})
 
 // 2. bulk reclassify
 self({
@@ -486,7 +486,7 @@ self({
 // → 200 {ok: true, updated_count: 23, transaction_ids: [...]}
 ```
 
-Confirm to Sir: "Recategorised 23 March Tesco transactions as Groceries, Sir."
+Confirm to Sir: "Recategorised 23 March Example Grocer transactions as Groceries, Sir."
 
 ### Why prefer rules over manual bulk for recurring patterns
 
@@ -516,12 +516,12 @@ Sure's Rules engine matches transactions against a set of conditions and applies
   "resource_type": "transaction",        // only "transaction" supported today
   "effective_date": "2024-01-01",        // optional; only transactions on/after this date evaluated
   "conditions": [                        // ALL must match (AND)
-    {"condition_type": "transaction_account", "operator": "=", "value": "<wise-huf-account-id>"},
+    {"condition_type": "transaction_account", "operator": "=", "value": "<example-bank-huf-account-id>"},
     {"condition_type": "transaction_amount",  "operator": "=", "value": "370847"},
-    {"condition_type": "transaction_name",    "operator": "like", "value": "%JBC%"}
+    {"condition_type": "transaction_name",    "operator": "like", "value": "%MORTGAGE%"}
   ],
   "actions": [
-    {"action_type": "set_as_transfer_or_payment", "value": "<jbc-mortgage-account-id>"}
+    {"action_type": "set_as_transfer_or_payment", "value": "<example-mortgage-account-id>"}
   ]
 }
 ```
@@ -602,7 +602,7 @@ self({endpoint: "/api/v1/sure/rules/<new-rule-id>/apply", method: "POST", body: 
 
 1. **Preview before create — every time.** Don't save a rule that would affect 200 transactions when Sir asked for "the mortgage". Confirm `affected_resource_count` matches your expectation.
 2. **One purpose per rule.** A rule that does both "mark as transfer" and "set category to X" should usually be two rules. Easier to delete or refine later.
-3. **Tight conditions for transfers, loose for categories.** A loan-payment rule should be narrow (account + amount + name) so it never mis-fires; a "categorize all Tesco transactions as Groceries" rule can be a single merchant condition.
+3. **Tight conditions for transfers, loose for categories.** A loan-payment rule should be narrow (account + amount + name) so it never mis-fires; a "categorize all Example Grocer transactions as Groceries" rule can be a single merchant condition.
 4. **Don't auto-create rules without confirmation.** The analysis is yours; the decision is Sir's. Always show the preview and ask.
 5. **Use names Sir will recognise.** "Example Mortgage auto-classifier" beats "Rule 7". The name shows up in Sure's UI when Sir browses rules.
 6. **Don't fight Sir's existing rules.** Before creating, list existing rules (`GET /api/v1/sure/rules`) and skip patterns Sir has already covered.
@@ -633,13 +633,13 @@ Sure's REST surface for taxonomy is read-only. These platform extension routes g
 | `/api/v1/sure/merchants/enhance` | POST | Enqueue `EnhanceProviderMerchantsJob` to refresh provider-merchant logos/metadata |
 | `/api/v1/sure/rules/apply_all` | POST | Run every family rule against historical transactions in one pass. Body: `{ignore_attribute_locks: false}` |
 
-### Worked example — merge four duplicate Tesco merchants
+### Worked example — merge four duplicate Example Grocer merchants
 
-Sir has somehow accumulated `Tesco`, `Tesco Express`, `TESCO`, and `Tesco Stores Ltd` as four separate family-merchant rows because his bank descriptions vary. Pick the canonical one and merge:
+Sir has somehow accumulated `Example Grocer`, `Example Grocer Express`, `EXAMPLE GROCER`, and `Example Grocer Stores Ltd` as four separate family-merchant rows because his bank descriptions vary. Pick the canonical one and merge:
 
 ```
 self({endpoint: "/api/v1/sure/merchants", method: "GET"})
-// → finds m1=Tesco, m2=Tesco Express, m3=TESCO, m4=Tesco Stores Ltd
+// → finds m1=Example Grocer, m2=Example Grocer Express, m3=EXAMPLE GROCER, m4=Example Grocer Stores Ltd
 self({endpoint: "/api/v1/sure/merchants/merge", method: "POST", body: {
   target_merchant_id: "m1",
   source_merchant_ids: ["m2", "m3", "m4"]
@@ -785,13 +785,13 @@ self({endpoint: "/api/v1/sure/transactions/<id>/merge_duplicate", method: "POST"
 self({endpoint: "/api/v1/sure/transactions/<id>/dismiss_duplicate", method: "POST"})
 ```
 
-### Worked example — Sir cancelled Netflix, deactivate the pattern
+### Worked example — Sir cancelled a streaming subscription, deactivate the pattern
 
 ```
 self({endpoint: "/api/v1/sure/recurring", method: "GET"})
-// find Netflix recurring, id=r-netflix
-self({endpoint: "/api/v1/sure/recurring/r-netflix/deactivate", method: "POST"})
-// → {ok: true, recurring: {id: "r-netflix", status: "inactive"}}
+// find the StreamCo recurring, id=r-streamco
+self({endpoint: "/api/v1/sure/recurring/r-streamco/deactivate", method: "POST"})
+// → {ok: true, recurring: {id: "r-streamco", status: "inactive"}}
 ```
 
 When Sir starts a new subscription, run `POST /recurring/identify` after the second occurrence and it'll be picked up automatically.
@@ -813,7 +813,7 @@ Sure supports per-account sharing within a family — Sir can grant view-only or
 ### Worked example — share Example Bank EUR with spouse, view-only
 
 ```
-self({endpoint: "/api/v1/sure/accounts/<wise-eur-id>/shares", method: "POST", body: {
+self({endpoint: "/api/v1/sure/accounts/<example-bank-eur-id>/shares", method: "POST", body: {
   email: "spouse@example.com",
   permission: "read_only",
   include_in_finances: false
@@ -926,7 +926,7 @@ self({endpoint: "/api/v1/sure/exports/fx1", method: "GET"})
 
 ## Transaction clustering pipeline (alfred-learn)
 
-When Sir's transaction list grows past a few hundred, manually-written rules get expensive to maintain. The `alfred-sure-operations` skill ships with a **clustering pipeline** that does the heavy lifting: it harvests every transaction in Sure, runs TF-IDF alias merging on the bank-feed name strings to collapse variants like `TESCO` / `BUDAORS TESCO 41520` / `Tesco Express` into a single canonical merchant, infers a category from a built-in keyword rulebook, and returns *proposals* — one canonical merchant + one rule per cluster — that you (and Sir) can review before executing.
+When Sir's transaction list grows past a few hundred, manually-written rules get expensive to maintain. The `alfred-sure-operations` skill ships with a **clustering pipeline** that does the heavy lifting: it harvests every transaction in Sure, runs TF-IDF alias merging on the bank-feed name strings to collapse variants like `EXAMPLE GROCER` / `EXAMPLE GROCER ANYTOWN 41520` / `Example Grocer Express` into a single canonical merchant, infers a category from a built-in keyword rulebook, and returns *proposals* — one canonical merchant + one rule per cluster — that you (and Sir) can review before executing.
 
 The pipeline lives in `alfred-learn` (the Temporal worker container) and is invoked by ctrl-api via `docker exec`. Two endpoints:
 
@@ -943,7 +943,7 @@ Sir just connected his bank feed and now has 3,000+ transactions sitting in Sure
 self({endpoint: "/api/v1/sure/_cluster", method: "POST", body: {}})
 // → {
 //     proposals: [
-//       {canonical_name: "Tesco", pattern_keyword: "tesco",
+//       {canonical_name: "Example Grocer", pattern_keyword: "example-grocer",
 //        proposed_category: "Groceries", proposed_tag: "Grocery",
 //        role: "merchant", txn_count: 45, confidence: 0.95, ...},
 //       {canonical_name: "FoodCo", ..., proposed_category: "Food & Drink",
@@ -969,22 +969,22 @@ self({endpoint: "/api/v1/sure/_cluster/apply", method: "POST", body: {
 //   }
 ```
 
-Coverage on the typical Hungarian household runs ~55% — the rest is one-off contractor names and unique-merchant purchases that can't be pattern-matched. Top up over time as Sir reviews the long-tail himself.
+Coverage on the typical household runs ~55% — the rest is one-off contractor names and unique-merchant purchases that can't be pattern-matched. Top up over time as Sir reviews the long-tail himself.
 
 ### Pitfalls
 
 - **The pipeline is *proposals* — review before applying.** It infers from a keyword rulebook. For ambiguous names (a person's name that could be either "contractor I paid" or "income from"), the role might be wrong. Always sanity-check the top 20 by volume before approving.
 - **TF-IDF needs corpus density.** On <50 transactions it falls back to shared-token merging, which works but is less discriminating. Don't run the pipeline on a freshly-bootstrapped account with one week of data.
 - **`apply_all` runs synchronously after creates.** A 50-rule batch over 3,000 transactions takes ~30 seconds. Acceptable for a Money Day brief, less so for an interactive chat — fire it during quiet hours.
-- **Internal transfers (Example Bank, Example Bank, Apple Pay Top-Up, name-based self-transfers) are categorised as "Transfers".** This is convenience-only — Sure's own auto-transfer detection will pair them properly on next sync, at which point the category becomes redundant but not harmful.
+- **Internal transfers (Example Bank, Apple Pay Top-Up, name-based self-transfers) are categorised as "Transfers".** This is convenience-only — Sure's own auto-transfer detection will pair them properly on next sync, at which point the category becomes redundant but not harmful.
 
 ### Iterative loop (default mode — multi-pass)
 
-The pipeline now runs as an **iterative loop** by default. Single-pass keyword-only clustering tops out around 50-55% on a real Hungarian household; the loop pushes coverage to **78%+ end-to-end** (measured on david's 3,267 transactions) by combining three signals:
+The pipeline now runs as an **iterative loop** by default. Single-pass keyword-only clustering tops out around 50-55% on a real household; the loop pushes coverage to **78%+ end-to-end** (measured on a reference tenant's 3,267 transactions) by combining three signals:
 
-1. **Pass 1 — Keyword + word-TFIDF clustering** (the original pipeline). Cheap, deterministic, catches the obvious anchor-word merchants (Tesco, FoodCo, Apple, etc.).
-2. **Pass 2 — Behavioural co-occurrence**. Same account + same amount-band + monthly cadence → recurring payment, even if the names differ ("Sp Mind Lab Pro" vs "Sp Mind Lab Pro Eu", "MÓNIKA ARTAI" vs "Acme Payee Bt."). Returns a group with role but no category.
-3. **Pass 3 — LLM category inference**. For any group still without a category (typical: Hungarian individual names, single-occurrence phrases), batched into a single Claude prompt via OpenClaw's `/v1/chat/completions` — returns `{category, tag, role, confidence}` per group. Highest impact on Hungarian-language data.
+1. **Pass 1 — Keyword + word-TFIDF clustering** (the original pipeline). Cheap, deterministic, catches the obvious anchor-word merchants (Example Grocer, FoodCo, Apple, etc.).
+2. **Pass 2 — Behavioural co-occurrence**. Same account + same amount-band + monthly cadence → recurring payment, even if the names differ ("Acme Supplement Co" vs "Acme Supplement Co Eu", "JANE SMITH" vs "Jane Smith Ltd."). Returns a group with role but no category.
+3. **Pass 3 — LLM category inference**. For any group still without a category (typical: individual names, single-occurrence phrases), batched into a single Claude prompt via OpenClaw's `/v1/chat/completions` — returns `{category, tag, role, confidence}` per group. Highest impact on non-English merchant data.
 
 After each iteration, transactions matched by any high-confidence proposal are removed from the residual corpus and the three passes re-run. The loop stops when:
 - coverage ≥ target (default 80%), OR
@@ -1022,7 +1022,7 @@ self({endpoint: "/api/v1/sure/_cluster", method: "POST", body: {
 
 ### `_cluster/apply` — automatic quality filter
 
-The apply route runs a quality filter before creating any merchants or rules. Verified on david's tenant: an unfiltered apply mis-categorises ~5% of high-volume groups (canonical bad case: a behavioural cluster of 41 unrelated restaurants + baby stores all in the same amount-band gets labelled "Transfers"). The defaults below were the smallest set of filters that dropped all such groups in the david sample without losing any correct ones.
+The apply route runs a quality filter before creating any merchants or rules. Verified on a reference tenant: an unfiltered apply mis-categorises ~5% of high-volume groups (canonical bad case: a behavioural cluster of 41 unrelated restaurants + baby stores all in the same amount-band gets labelled "Transfers"). The defaults below were the smallest set of filters that dropped all such groups in the reference sample without losing any correct ones.
 
 | Body param | Default | Effect |
 |---|---|---|
@@ -1091,5 +1091,5 @@ All bootstrap params from `/_cluster` and `/_cluster/apply` pass through to `/_b
 
 - **LLM pass needs the gateway token mounted in alfred-learn.** It is, on every tenant — but a freshly-bootstrapped instance might race the token write. The pass silently falls back to "no LLM" if `OPENCLAW_GATEWAY_TOKEN_FILE` is empty.
 - **Each iteration costs ~3k–10k LLM tokens.** A typical 5-iteration run on 3,000 transactions burns ~30k tokens (~$0.10–0.30 depending on model). Acceptable as a one-shot bootstrap; not as a per-Money-Day chore.
-- **The LLM is non-deterministic.** Running the same input twice can produce slightly different category assignments at the margin (especially for ambiguous Hungarian phrases). For deterministic builds, use `iterative: false` or pin a temperature lower than the default 0.1 (not currently exposed — would need a new request param).
+- **The LLM is non-deterministic.** Running the same input twice can produce slightly different category assignments at the margin (especially for ambiguous non-English phrases). For deterministic builds, use `iterative: false` or pin a temperature lower than the default 0.1 (not currently exposed — would need a new request param).
 - **Ctrl-api timeout is 9 minutes.** A 5-iteration run with LLM is typically 2-4 minutes on 3,000 transactions, but a slow model + large corpus can exceed this. If you hit a 502 timeout, retry with `max_iterations: 3` or split the corpus by date range.

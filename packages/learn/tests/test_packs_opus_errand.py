@@ -341,7 +341,7 @@ class TestGenerateErrandPackOpus:
         onboard = _write_onboard(tmp_path, _sample_onboard())
 
         fake_client = _FakeVaultClient()
-        fake_client.existing_slugs.add("reply-to-stans-contract-revision")
+        fake_client.existing_slugs.add("reply-to-pats-contract-revision")
 
         with patch("src.activities.packs_opus._call_llm",
                    new=AsyncMock(return_value=_OPUS_GOOD_ERRAND_RESPONSE)), \

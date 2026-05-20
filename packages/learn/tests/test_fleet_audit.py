@@ -1,7 +1,7 @@
 """Tests for the fleet audit activity + helpers.
 
 The audit is the after-the-fact tripwire for the April 2026 tenant-a-vs-
-Sir Composio user_id leak. These tests cover:
+owner Composio user_id leak. These tests cover:
 
 * owner-email resolution from env vs onboard.json vs nothing
 * the streams scanner: empty file, owner-only, mismatch, malformed JSON
@@ -302,7 +302,7 @@ class TestAuditStreamsActivity:
     async def test_detects_mismatch_in_composio_file(
         self, monkeypatch, tmp_path,
     ):
-        monkeypatch.setenv("OWNER_EMAIL", "david@example.com")
+        monkeypatch.setenv("OWNER_EMAIL", "owner@example.com")
         streams = tmp_path / "streams"
         streams.mkdir()
 
@@ -310,10 +310,10 @@ class TestAuditStreamsActivity:
         calendar = streams / "composio-calendar.jsonl"
         calendar.write_text("\n".join([
             json.dumps({
-                "source_ref": "evt-david-own",
+                "source_ref": "evt-owner-own",
                 "raw": {
                     "attendees": [
-                        {"email": "david@example.com", "self": True},
+                        {"email": "owner@example.com", "self": True},
                     ],
                 },
             }),
@@ -347,7 +347,7 @@ class TestAuditStreamsActivity:
 
         out = await _run_audit(str(streams))
         assert out["status"] == "ok"
-        assert out["owner_email"] == "david@example.com"
+        assert out["owner_email"] == "owner@example.com"
         assert out["files_scanned"] == 2  # only composio-*.jsonl
         assert out["total_mismatches"] == 1
 
@@ -356,7 +356,7 @@ class TestAuditStreamsActivity:
         assert len(entries) == 1
         assert entries[0]["event_id"] == "evt-leaked-from-tenant-a"
         assert entries[0]["self_email"] == "tenant-a@example.com"
-        assert entries[0]["expected_email"] == "david@example.com"
+        assert entries[0]["expected_email"] == "owner@example.com"
 
     async def test_malformed_jsonl_doesnt_crash(self, monkeypatch, tmp_path):
         monkeypatch.setenv("OWNER_EMAIL", "owner@example.com")

@@ -14,7 +14,7 @@ closes that gap going forward, but existing tenants have a pool of
 Plane-Inbox issues whose vault counterparts were archived before the fix
 shipped. This script mops them up.
 
-On Sir's vault the pool is ~432 Inbox issues.
+On a large vault the pool is ~432 Inbox issues.
 
 Strategy
 --------

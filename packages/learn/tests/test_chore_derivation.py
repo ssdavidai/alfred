@@ -206,8 +206,8 @@ class TestInferDefaultSessionId:
 # ---------------------------------------------------------------------------
 
 class TestDecideChoresIntegration:
-    def _david_like_profile(self) -> dict:
-        """A profile similar to david@example-owner's actual shape (Apr 2026)."""
+    def _owner_like_profile(self) -> dict:
+        """A profile similar to owner@example's actual shape (Apr 2026)."""
         return {
             "meta": {"email_count": 3140},
             "rhythm": {
@@ -222,7 +222,7 @@ class TestDecideChoresIntegration:
             "relationships": {
                 "top_correspondents": [
                     {"name": "GitHub", "domain": "github.com", "email_count": 426},
-                    {"name": "Pat", "domain": "stan.store", "email_count": 242},
+                    {"name": "Stan", "domain": "stan.store", "email_count": 242},
                     {"name": "Stripe", "domain": "stripe.com", "email_count": 127},
                 ],
                 "communication_style": "responsive",
@@ -231,7 +231,7 @@ class TestDecideChoresIntegration:
                 "service": [
                     {"domain": "stripe.com"},
                     {"domain": "polar.sh"},
-                    {"domain": "mercury.com"},
+                    {"domain": "examplebank.com"},
                     {"domain": "whoop.com"},
                     {"domain": "mongodb.com"},
                     {"domain": "notion.so"},
@@ -248,7 +248,7 @@ class TestDecideChoresIntegration:
         }
 
     def test_subscription_chore_uses_derived_schedule(self):
-        profile = self._david_like_profile()
+        profile = self._owner_like_profile()
         chores = _decide_chores(profile, [])
         sub_chores = [c for c in chores if c["template"] == "subscription_watcher"]
         assert len(sub_chores) == 1
@@ -258,14 +258,14 @@ class TestDecideChoresIntegration:
         assert sub_chores[0]["schedule"] != "0 9 * * 5"
 
     def test_subscription_chore_uses_derived_threshold(self):
-        profile = self._david_like_profile()
+        profile = self._owner_like_profile()
         chores = _decide_chores(profile, [])
         sub_chores = [c for c in chores if c["template"] == "subscription_watcher"]
         # "responsive" style → 0.70 (same as old default, but derived not hardcoded)
         assert sub_chores[0]["params"]["alert_threshold"] == 0.70
 
     def test_subscription_chore_with_selective_style_has_tight_threshold(self):
-        profile = self._david_like_profile()
+        profile = self._owner_like_profile()
         profile["relationships"]["communication_style"] = "selective"
         profile["summary"]["communication_style"] = "selective"
         chores = _decide_chores(profile, [])
@@ -273,7 +273,7 @@ class TestDecideChoresIntegration:
         assert sub_chores[0]["params"]["alert_threshold"] == 0.85
 
     def test_digest_chore_uses_derived_schedule(self):
-        profile = self._david_like_profile()
+        profile = self._owner_like_profile()
         chores = _decide_chores(profile, [])
         digest_chores = [c for c in chores if c["template"] == "weekly_matter_digest"]
         assert len(digest_chores) >= 1
@@ -283,21 +283,21 @@ class TestDecideChoresIntegration:
         assert digest_chores[0]["schedule"] != "0 18 * * 0"
 
     def test_digest_chore_uses_derived_min_events(self):
-        profile = self._david_like_profile()
+        profile = self._owner_like_profile()
         chores = _decide_chores(profile, [])
         digest_chores = [c for c in chores if c["template"] == "weekly_matter_digest"]
         # email_count=3140 → high volume → min_events=5
         assert digest_chores[0]["params"]["min_events_for_digest"] == 5
 
     def test_all_chores_use_inferred_session_id(self):
-        profile = self._david_like_profile()
+        profile = self._owner_like_profile()
         chores = _decide_chores(profile, [])
         for chore in chores:
             assert chore["params"]["session_id"] == "main"
 
-    def test_david_like_profile_produces_4_chores(self):
-        # Regression check: david's profile should still produce 1 sub + 3 digests
-        profile = self._david_like_profile()
+    def test_owner_like_profile_produces_4_chores(self):
+        # Regression check: owner's profile should still produce 1 sub + 3 digests
+        profile = self._owner_like_profile()
         chores = _decide_chores(profile, [])
         assert len(chores) == 4
         assert sum(1 for c in chores if c["template"] == "subscription_watcher") == 1
@@ -433,7 +433,7 @@ class TestChoreSpecFromOpportunity:
                 ],
             },
             "sender_tiers": {
-                "service": [{"domain": "mercury.com"}, {"domain": "whoop.com"}],
+                "service": [{"domain": "examplebank.com"}, {"domain": "whoop.com"}],
             },
             "relationships": {"communication_style": "responsive"},
         }
@@ -443,7 +443,7 @@ class TestChoreSpecFromOpportunity:
         assert spec["schedule"] == "0 18 * * 5"  # work_end+1, Friday
         assert "stripe.com" in spec["params"]["matter_domains"]
         assert "polar.sh" in spec["params"]["matter_domains"]
-        assert "mercury.com" in spec["params"]["matter_domains"]
+        assert "examplebank.com" in spec["params"]["matter_domains"]
         assert spec["params"]["alert_threshold"] == 0.70  # responsive
         assert spec["params"]["session_id"] == "main"
         assert "chore" in spec["tags"]

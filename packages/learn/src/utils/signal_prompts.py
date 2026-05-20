@@ -45,9 +45,9 @@ Design decisions encoded in the prompt
    before it sees the body.
 5. **Few-shot examples are real.** Sampled from
    ``/mnt/encrypted/vault/event/`` and
-   ``/mnt/encrypted/vault/conversation/`` on david. Synthetic examples
+   ``/mnt/encrypted/vault/conversation/`` on the owner. Synthetic examples
    are flagged explicitly so a future calibration pass can replace
-   them with real ones once david has produced matching events.
+   them with real ones once the owner has produced matching events.
 
 What ``raw_quote`` is (and isn't)
 ---------------------------------
@@ -79,7 +79,7 @@ CORRECTION_TAXONOMY: list[str] = [
     "task_blocked_on",        # "X is waiting on Y"
     "matter_context_edit",    # "the M thing isn't about A, it's about B"
     "matter_state_change",    # "park M for now" / "M is done"
-    "matter_creation",        # "the Berlin thing should be its own matter"
+    "matter_creation",        # "the Anytown thing should be its own matter"
     "matter_membership",      # "X belongs under M, not where it is"
 ]
 
@@ -98,7 +98,7 @@ EFFECT_CLASSES: list[str] = [
 
 
 # ---------------------------------------------------------------------------
-# Few-shot examples — REAL events from david's vault unless flagged synthetic.
+# Few-shot examples — REAL events from the owner's vault unless flagged synthetic.
 # ---------------------------------------------------------------------------
 
 # Each tuple is (input_dict, expected_output_dict). ``input_dict``
@@ -158,7 +158,7 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
         {
             "source_type": "gmail",
             "frontmatter": {
-                "from": '"Acme Video HQ Inc." <failed-payments@acme-video.tv>',
+                "from": '"Acme Video HQ Inc." <failed-payments@acme-video.example.com>',
                 "subject": "$26.00 payment to Acme Video HQ Inc. was unsuccessful again",
             },
             "body": (
@@ -208,7 +208,7 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
         {
             "source_type": "gmail",
             "frontmatter": {
-                "from": '"Acme Clinic Kft." <villanyi.medical@invoicing.example.com>',
+                "from": '"Acme Clinic Kft." <billing@invoicing.example.com>',
                 "subject": "A rendelőnk most az Ön segítségét kéri! Számla és köszönetnyilvánítás",
             },
             "body": (
@@ -253,7 +253,7 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
     #    Source: /mnt/encrypted/vault/conversation/2026-04-02-1676adbd5443.md
     #    Reasoning: Sir is *narrating an essay*, not asserting a
     #    decision. Long internal monologue about the onboarding tax,
-    #    Oliver Bruce, AI butler thinking. No mutation, no action.
+    #    a podcast guest, AI butler thinking. No mutation, no action.
     #    Classic OMI narration → noise.
     (
         {
@@ -337,7 +337,7 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
 
     # 6. Synthetic — openclaw-chat: Sir explicitly tells Alfred a
     #    project should be its own matter. No real openclaw-chat events
-    #    exist in david's vault yet (T6.1 ships the emitter), so this
+    #    exist in the owner's vault yet (T6.1 ships the emitter), so this
     #    is hand-crafted from the v0 spec example. Replace with real
     #    once Phase 6.1 produces them.
     #    Reasoning: openclaw-chat assertions to Alfred are almost
@@ -349,12 +349,12 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
                 "session_id": "synthetic-example",
             },
             "body": (
-                "Hey Alfred — the Berlin trip planning conversations "
+                "Hey Alfred — the Anytown trip planning conversations "
                 "should be their own matter, not buried under "
                 "household-life. Spin one up."
             ),
             "raw_quote": (
-                "the Berlin trip planning conversations should be their "
+                "the Anytown trip planning conversations should be their "
                 "own matter, not buried under household-life. Spin one up"
             ),
         },
@@ -362,12 +362,12 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
             "classification": "matter_creation",
             "effect": "mutation",
             "target_kind": "matter",
-            "target_hint": "Berlin trip planning",
+            "target_hint": "Anytown trip planning",
             "mutation_proposal": {
-                "decision": "create_matter:matter/berlin-trip-planning",
+                "decision": "create_matter:matter/anytown-trip-planning",
                 "details": (
                     "Sir asked to spin up a dedicated matter for "
-                    "Berlin trip planning, currently lumped under "
+                    "Anytown trip planning, currently lumped under "
                     "household-life."
                 ),
             },
@@ -458,15 +458,15 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
         {
             "source_type": "plane",
             "frontmatter": {
-                "name": "Plane: ALFRED-200 reassigned to Sir",
+                "name": "Plane: ALFRED-200 reassigned to Jane Doe",
             },
             "body": (
                 "Plane issue ALFRED-200: 'Configure CloudFront for "
-                "assets' reassigned from Jane Smith to Sir "
-                "Szabo-Stuban. Priority: high. Due: Friday May 9, 2026."
+                "assets' reassigned from Jane Smith to Jane "
+                "Doe. Priority: high. Due: Friday May 9, 2026."
             ),
             "raw_quote": (
-                "Plane issue ALFRED-200 reassigned from Jane Smith to "
+                "Plane issue ALFRED-200 reassigned from Jane Smith to Jane Doe "
                 "Jane Doe — priority high, due Friday May 9"
             ),
         },
@@ -501,18 +501,18 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
         {
             "source_type": "gcal",
             "frontmatter": {
-                "name": "Strategy review w/ Alex Kim",
+                "name": "Strategy review w/ Alex",
             },
             "body": (
-                "Event: Strategy review w/ Alex Kim. Time: Mon May 12, "
+                "Event: Strategy review w/ Alex. Time: Mon May 12, "
                 "2026, 4:00pm-5:00pm CEST. Attendees: "
                 "owner@example.com, user@example.com, "
                 "user@example.com. Status: not yet responded. "
                 "Description: Quarterly strategy alignment."
             ),
             "raw_quote": (
-                "Strategy review w/ Alex Kim — Mon May 12 4-5pm CEST, "
-                "attendees include Sir, Alex Kim, Anna; Sir has not yet "
+                "Strategy review w/ Alex — Mon May 12 4-5pm CEST, "
+                "attendees include Sir, Alex, Jane; Sir has not yet "
                 "responded"
             ),
         },
@@ -520,7 +520,7 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
             "classification": None,
             "effect": "action",
             "target_kind": None,
-            "target_hint": "RSVP to strategy review with Alex Kim May 12",
+            "target_hint": "RSVP to strategy review with Alex May 12",
             "mutation_proposal": None,
             "action_proposal": {
                 "what": (
@@ -547,17 +547,17 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
         {
             "source_type": "vault_edit",
             "frontmatter": {
-                "name": "Vault edit: matter/berlin-relocation.md (new)",
+                "name": "Vault edit: matter/anytown-relocation.md (new)",
             },
             "body": (
-                "Sir created matter/berlin-relocation.md: status: "
+                "Sir created matter/anytown-relocation.md: status: "
                 "active, created_by: human, summary: 'Relocation of "
-                "household + workshop from Budapest to Berlin over Q3 "
+                "household + workshop from Oldtown to Anytown over Q3 "
                 "2026; covers logistics, paperwork, schools.'"
             ),
             "raw_quote": (
-                "Sir created matter/berlin-relocation.md — active, "
-                "created_by human, summary covers Budapest→Berlin "
+                "Sir created matter/anytown-relocation.md — active, "
+                "created_by human, summary covers Oldtown→Anytown "
                 "relocation Q3 2026"
             ),
         },
@@ -565,12 +565,12 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
             "classification": "matter_creation",
             "effect": "mutation",
             "target_kind": "matter",
-            "target_hint": "berlin relocation",
+            "target_hint": "anytown relocation",
             "mutation_proposal": {
-                "decision": "create_matter:matter/berlin-relocation",
+                "decision": "create_matter:matter/anytown-relocation",
                 "details": (
                     "Sir's hand-edit creates a new matter for the "
-                    "Berlin relocation; matter_creation."
+                    "Anytown relocation; matter_creation."
                 ),
             },
             "action_proposal": None,
@@ -642,7 +642,7 @@ FEW_SHOT_EXAMPLES: list[tuple[dict[str, Any], dict[str, Any]]] = [
 _SOURCE_FRAMES: dict[str, str] = {
     "gmail": (
         "This is a Gmail message Sir received or sent. Sir is the "
-        "user (owner@example.com, owner@example.com, alfred@example.com); "
+        "user (owner@example.com, owner2@example.com, alfred@example.com); "
         "the sender is the counterparty unless 'from' matches Sir. "
         "Receipts, marketing, and newsletters are noise. Invoices, "
         "account warnings, failed-payment notices, security alerts, "
@@ -694,7 +694,7 @@ _SOURCE_FRAMES: dict[str, str] = {
         "commits (e.g. counterparty asks 'can you send X?', Sir "
         "replies 'yeah, I'll send it Friday' → action). Sir's own "
         "in-meeting decisions ('let's drop Acme Notes', 'that task is "
-        "closed', 'spin up a matter for Berlin') ARE mutations."
+        "closed', 'spin up a matter for Anytown') ARE mutations."
     ),
     "sure": (
         "This is a Sure (finance app) event — usually a categorized "
@@ -756,7 +756,7 @@ _SOURCE_FRAME_GENERIC: str = (
 def _frontmatter_excerpt(frontmatter: dict[str, Any]) -> str:
     """Render a small, prompt-safe excerpt of the event frontmatter.
 
-    The full frontmatter on a david vault event can run 30+ lines.
+    The full frontmatter on an owner vault event can run 30+ lines.
     We cherry-pick the fields that meaningfully change classification.
     Notably we INCLUDE ``action_items``, ``topic_tags``, ``alfred_tags``,
     ``related_persons``, ``related_orgs``, ``related_projects``: the
@@ -1001,12 +1001,12 @@ def build_signal_extraction_prompt(
         '- Alfred (right): headline `"Slack wants their money — '
         'or they\'ll close the workspace."` body `"Their renewal '
         "charge didn't go through on Friday. I'd update the card "
-        'in Slack billing — unless Lumberjack is wrapping up, in '
+        'in Slack billing — unless Example Co is wrapping up, in '
         'which case this is a clean moment to cancel."`\n\n'
         "Two more shapes:\n\n"
         '- Calendar invite needing RSVP: headline `"Acme Consulting '
-        'check-in wants an RSVP by Friday."` body `"Andrew '
-        "Newton put a 30-min hold on Friday 3pm — I'd accept "
+        'check-in wants an RSVP by Friday."` body `"Devon '
+        "Park put a 30-min hold on Friday 3pm — I'd accept "
         "unless you want me to push it; you've got the kids "
         'pickup at 4."`\n'
         '- Medical invoice: headline `"Acme Clinic sent the '
@@ -1353,7 +1353,7 @@ def build_signal_extraction_prompt_multi(
         "vault edit / Sir's own upstream status change (e.g. he "
         "moved a Plane issue himself).\n"
         "  - gmail: `frontmatter.from` matches a Sir-owned address "
-        "(`owner@example.com`, `owner@example.com`, "
+        "(`owner@example.com`, `owner2@example.com`, "
         "`alfred@example.com`).\n"
         "  - openclaw-chat: anything inside a `### Sir` heading or "
         "an unstructured chat body Sir authored.\n"
@@ -1376,7 +1376,7 @@ def build_signal_extraction_prompt_multi(
         "Default rules by actor:\n"
         "- `actor=principal` → `decision_required=false`. Sir already "
         "acted. The signal is bookkeeping — it updates the matter "
-        "timeline (e.g. 'Sir contacted Acme re EIN on May 14') "
+        "timeline (e.g. 'Sir contacted Acme Filing re EIN on May 14') "
         "but doesn't put a card on /desk asking him to decide what "
         "he already decided. Override to `true` ONLY if Sir's "
         "outbound action explicitly creates a future Sir-side "
@@ -1407,11 +1407,11 @@ def build_signal_extraction_prompt_multi(
         "### Worked examples\n"
         "- Sir emails `tax@example.com` asking about the EIN. "
         "→ `actor=principal`, `decision_required=false`. Bookkeeping "
-        "entry on the tax matter timeline: \"Sent Acme the "
+        "entry on the tax matter timeline: \"Sent Acme Filing the "
         "EIN question.\" No card.\n"
-        "- Acme replies to Sir with the EIN answer. "
+        "- Acme Filing replies to Sir with the EIN answer. "
         "→ `actor=counterparty`, `decision_required=true`. /desk "
-        "card: \"Acme answered on the EIN — you can finish "
+        "card: \"Acme Filing answered on the EIN — you can finish "
         "the form.\"\n"
         "- Stripe webhook: payment Sir initiated yesterday "
         "settled. → `actor=system` echoing Sir's own action, "
@@ -1471,7 +1471,7 @@ def build_signal_extraction_prompt_multi(
         '"You\'ve got an unresponded invite" — never "He has an '
         'unresponded invite". The headline can be subjectless.\n'
         "- **Never narrate Sir's past actions back to him.** If the "
-        "card opens with \"He hit a wall on the Acme form\" or "
+        "card opens with \"He hit a wall on the Acme Filing form\" or "
         '"Sir sent an email about X", you got it wrong — that signal '
         "should have been `decision_required=false`. Cards face "
         "forward; bookkeeping lines face backward. See Section 3.5.\n"
@@ -1483,11 +1483,11 @@ def build_signal_extraction_prompt_multi(
         "task timeline as silent state-updates. Sir reads them only "
         "if he opens the matter detail page. The register is "
         "different:\n"
-        "- **Brief past-tense descriptive.** *\"Sent Acme the "
+        "- **Brief past-tense descriptive.** *\"Sent Acme Filing the "
         "EIN question.\"* / *\"Stripe payment for $400 settled.\"* / "
         "*\"Closed the Acme Cloud billing task.\"*\n"
         "- **First person fine** when Alfred is summarising "
-        "(*\"I'll watch for Acme's reply.\"*) but third person "
+        "(*\"I'll watch for Acme Filing's reply.\"*) but third person "
         "in past tense is OK too here — the timeline is a record, "
         "not a conversation.\n"
         "- **Even shorter.** Headline: ≤ 9 words. Body: ONE sentence, "
@@ -1505,15 +1505,15 @@ def build_signal_extraction_prompt_multi(
         "on a single target.\n\n"
         "Examples of multi-signal events:\n"
         "- An openclaw-chat turn where Sir says \"close the Acme Cloud "
-        "billing task, and also spin up a matter for the Berlin "
+        "billing task, and also spin up a matter for the Anytown "
         "trip\" → 2 signals: 1 mutation (task_resolution) + 1 "
         "mutation (matter_creation).\n"
         "- A long email thread where the counterparty asks Sir to "
         "RSVP for a meeting AND to confirm a payment plan → 2 "
         "action signals.\n"
         "- An Omi clip where Sir says \"the Acme Notes thing is dead, "
-        "drop it\" AND \"actually the Anna onboarding belongs under "
-        "Berlin not under household\" → 2 mutations "
+        "drop it\" AND \"actually the Jane onboarding belongs under "
+        "Anytown not under household\" → 2 mutations "
         "(task_dismissal + matter_membership).\n\n"
         "Examples of zero-signal events (emit `\"signals\": []`):\n"
         "- Receipts, newsletters, marketing.\n"
@@ -1646,13 +1646,13 @@ def build_signal_extraction_prompt_multi(
                 "body": (
                     "Alfred — the Acme Cloud billing dispute is resolved, "
                     "they credited the account, close that task. Also "
-                    "the Berlin trip planning conversations should be "
+                    "the Anytown trip planning conversations should be "
                     "their own matter, not buried under household-life. "
                     "Spin one up."
                 ),
                 "raw_quote": (
                     "Acme Cloud billing dispute is resolved... close that "
-                    "task ... Berlin trip planning should be its own "
+                    "task ... Anytown trip planning should be its own "
                     "matter ... Spin one up"
                 ),
             },
@@ -1693,20 +1693,20 @@ def build_signal_extraction_prompt_multi(
                     },
                     {
                         "raw_quote": (
-                            "Berlin trip planning conversations should "
+                            "Anytown trip planning conversations should "
                             "be their own matter, not buried under "
                             "household-life. Spin one up"
                         ),
                         "classification": "matter_creation",
                         "effect": "mutation",
                         "target_kind": "matter",
-                        "target_hint": "Berlin trip planning",
+                        "target_hint": "Anytown trip planning",
                         "mutation_proposal": {
                             "decision": (
-                                "create_matter:matter/berlin-trip-planning"
+                                "create_matter:matter/anytown-trip-planning"
                             ),
                             "details": (
-                                "Sir asked to split Berlin trip "
+                                "Sir asked to split Anytown trip "
                                 "planning out of household-life into "
                                 "its own matter."
                             ),
@@ -1719,11 +1719,11 @@ def build_signal_extraction_prompt_multi(
                             "mutation — matter_creation."
                         ),
                         "display_headline": (
-                            "Berlin trip deserves its own matter."
+                            "Anytown trip deserves its own matter."
                         ),
                         "display_body": (
                             "You asked to split it out of household-"
-                            "life. I'll spin up matter/berlin-trip-"
+                            "life. I'll spin up matter/anytown-trip-"
                             "planning and move the thread there."
                         ),
                     },
@@ -1740,10 +1740,10 @@ def build_signal_extraction_prompt_multi(
                     ),
                 },
                 "body": (
-                    "1) Event: Strategy review w/ Alex Kim. Mon May 12, "
+                    "1) Event: Strategy review w/ Alex. Mon May 12, "
                     "2026 4:00pm-5:00pm CEST. Status: not yet "
                     "responded.\n"
-                    "2) Event: Dentist — Dr. Nagy. Tue May 13, 2026 "
+                    "2) Event: Dentist — Dr. Lee. Tue May 13, 2026 "
                     "9:00am-9:30am CEST. Status: not yet responded."
                 ),
                 "raw_quote": (
@@ -1755,7 +1755,7 @@ def build_signal_extraction_prompt_multi(
                 "signals": [
                     {
                         "raw_quote": (
-                            "Strategy review w/ Alex Kim. Mon May 12, "
+                            "Strategy review w/ Alex. Mon May 12, "
                             "2026 4:00pm-5:00pm CEST. Status: not yet "
                             "responded"
                         ),
@@ -1763,13 +1763,13 @@ def build_signal_extraction_prompt_multi(
                         "effect": "action",
                         "target_kind": None,
                         "target_hint": (
-                            "RSVP to strategy review with Alex Kim May 12"
+                            "RSVP to strategy review with Alex May 12"
                         ),
                         "mutation_proposal": None,
                         "action_proposal": {
                             "what": (
                                 "RSVP to the May 12 strategy review "
-                                "with Alex Kim."
+                                "with Alex."
                             ),
                             "suggested_actor": "human",
                             "due_at": None,
@@ -1781,7 +1781,7 @@ def build_signal_extraction_prompt_multi(
                             "attendee — needs RSVP."
                         ),
                         "display_headline": (
-                            "Alex Kim wants an RSVP for Monday's review."
+                            "Alex wants an RSVP for Monday's review."
                         ),
                         "display_body": (
                             "Mon 4-5pm CEST. I'd accept unless you "
@@ -1791,7 +1791,7 @@ def build_signal_extraction_prompt_multi(
                     },
                     {
                         "raw_quote": (
-                            "Dentist — Dr. Nagy. Tue May 13, 2026 "
+                            "Dentist — Dr. Lee. Tue May 13, 2026 "
                             "9:00am-9:30am CEST. Status: not yet "
                             "responded"
                         ),
@@ -1805,7 +1805,7 @@ def build_signal_extraction_prompt_multi(
                         "action_proposal": {
                             "what": (
                                 "Confirm the May 13 dentist "
-                                "appointment with Dr. Nagy."
+                                "appointment with Dr. Lee."
                             ),
                             "suggested_actor": "human",
                             "due_at": None,
@@ -1817,7 +1817,7 @@ def build_signal_extraction_prompt_multi(
                             "second action signal."
                         ),
                         "display_headline": (
-                            "Dr. Nagy is holding a 9am slot Tuesday."
+                            "Dr. Lee is holding a 9am slot Tuesday."
                         ),
                         "display_body": (
                             "Half-hour dental check. I'd confirm "
@@ -1834,14 +1834,14 @@ def build_signal_extraction_prompt_multi(
     # This is the load-bearing example for the new actor +
     # decision_required schema. Without it the model has no
     # calibration anchor for "outbound from Sir → bookkeeping, no
-    # card". The Acme EIN scenario is taken from the real
+    # card". The Acme Filing EIN scenario is taken from the real
     # signal that triggered this whole refactor.
     multi_examples.append(
         (
             {
                 "source_type": "gmail",
                 "frontmatter": {
-                    "from": "Admin Szabo-Stuban <admin@example.com>",
+                    "from": "Admin Doe <admin@example.com>",
                     "to": "tax@example.com",
                     "subject": "EIN question for the tax filing",
                 },
@@ -1849,10 +1849,10 @@ def build_signal_extraction_prompt_multi(
                     "Hi — we have a question about the tax filing. "
                     "I wanted to start the form but hit a wall on "
                     "the EIN field — wasn't sure of the address on "
-                    "file. Could you confirm? Thanks, Sir."
+                    "file. Could you confirm? Thanks, Jane."
                 ),
                 "raw_quote": (
-                    "Sir → Acme: EIN question, address-on-file "
+                    "Sir → Acme Filing: EIN question, address-on-file "
                     "confirmation requested before continuing the "
                     "tax filing form"
                 ),
@@ -1876,7 +1876,7 @@ def build_signal_extraction_prompt_multi(
                         "mutation_proposal": None,
                         "action_proposal": {
                             "what": (
-                                "Wait for Acme to confirm the "
+                                "Wait for Acme Filing to confirm the "
                                 "EIN address on file; resume the "
                                 "tax form once they reply."
                             ),
@@ -1887,14 +1887,14 @@ def build_signal_extraction_prompt_multi(
                         "effect_confidence": 0.85,
                         "reasoning": (
                             "Outbound email from Sir (sender is a "
-                            "Sir-owned address) asking Acme a "
+                            "Sir-owned address) asking Acme Filing a "
                             "question. Sir has already acted by "
                             "sending. Bookkeeping for the tax "
                             "matter timeline; no /desk card because "
-                            "the next move is on Acme, not Sir."
+                            "the next move is on Acme Filing, not Sir."
                         ),
                         "display_headline": (
-                            "Asked Acme about the EIN."
+                            "Asked Acme Filing about the EIN."
                         ),
                         "display_body": (
                             "I'll watch for their reply and surface "
@@ -1909,7 +1909,7 @@ def build_signal_extraction_prompt_multi(
     # Phase 3 — inject actor + decision_required defaults into any
     # legacy multi_examples entry that predates the new schema, so
     # all rendered examples teach the same shape. The first two
-    # multi-signal examples (Acme Cloud+Berlin, Strategy+Dentist) were
+    # multi-signal examples (Acme Cloud+Anytown, Strategy+Dentist) were
     # written before Phase 3 and don't carry the new fields.
     def _ensure_actor_fields(example_out: dict[str, Any]) -> dict[str, Any]:
         signals = example_out.get("signals")

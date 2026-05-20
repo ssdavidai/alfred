@@ -1,7 +1,7 @@
 # Phase 6.7 regression fixture for the signal extractor.
 #
 # 100 hand-crafted stream-event examples grounded in real shapes from
-# david's vault (under /mnt/encrypted/vault/stream_event/) and a few
+# the owner's vault (under /mnt/encrypted/vault/stream_event/) and a few
 # synthetic edge cases. Each example carries:
 #
 #   id, description, stream_event_frontmatter, stream_event_body,
@@ -35,9 +35,9 @@
 #     plane-self-echo   3   (ex_098..ex_100)
 #
 # Synthetic-vs-real:
-#   Most positives are derived from real david records (shape, sender
+#   Most positives are derived from real owner records (shape, sender
 #   patterns, language); a handful (vexa, sure, vault_edit) are
-#   plausible-construction because david has no live records on those
+#   plausible-construction because the owner has no live records on those
 #   source types yet — those are flagged with synthetic: true.
 #
 # Schema rules every fixture follows:
@@ -60,20 +60,20 @@
 # ===========================================================================
 
 - id: ex_001_gmail_payment_failed_anthropic
-  description: "Real shape — repeat-failure billing email from Anthropic. Should produce action."
+  description: "Real shape — repeat-failure billing email from an AI provider. Should produce action."
   stream_event_frontmatter:
     type: stream_event
     source_type: gmail
     source_ref: "composio:19daf0305fb819be"
-    from: '"Anthropic, PBC" <failed-payments@mail.anthropic.com>'
-    subject: "Anthropic, PBC: $200.00 payment to Anthropic, PBC was unsuccessful again"
+    from: '"Acme AI, Inc." <failed-payments@mail.acme-ai.com>'
+    subject: "Acme AI, Inc.: $200.00 payment to Acme AI, Inc. was unsuccessful again"
     created: "2026-04-21T09:18:14Z"
   stream_event_body: |
-    **From**: "Anthropic, PBC" <failed-payments@mail.anthropic.com>
+    **From**: "Acme AI, Inc." <failed-payments@mail.acme-ai.com>
     **To**: alfred@example.com
 
     We weren't able to charge the credit card you provided for your
-    Anthropic Max subscription. Please update your payment method to
+    Acme AI Max subscription. Please update your payment method to
     keep the subscription active.
   expected:
     should_produce_signal: true
@@ -90,11 +90,11 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: gmail
-    from: '"Acme Clinic Kft." <villanyi.medical@invoicing.example.com>'
+    from: '"Acme Clinic Kft." <billing@invoicing.example.com>'
     subject: "Számla és köszönetnyilvánítás"
     created: "2026-05-05T08:00:00Z"
   stream_event_body: |
-    **From**: "Acme Clinic Kft." <villanyi.medical@invoicing.example.com>
+    **From**: "Acme Clinic Kft." <billing@invoicing.example.com>
     **To**: owner@example.com
 
     Tisztelt Páciensünk! Mellékelten küldjük a kórházi vizsgálathoz
@@ -111,7 +111,7 @@
     notes: "Real invoice with deadline → action."
 
 - id: ex_003_gmail_student_loan_arrears
-  description: "Real shape — Example Loans arrears notice. Action."
+  description: "Real shape — student-loan arrears notice. Action."
   stream_event_frontmatter:
     type: stream_event
     source_type: gmail
@@ -141,11 +141,11 @@
     type: stream_event
     source_type: gmail
     from: Jane Doe <notifications@github.com>
-    subject: "[ssdavidai/alfred-platform] PR run failed: CI Build + Test (PR)"
+    subject: "[example-org/alfred-platform] PR run failed: CI Build + Test (PR)"
     created: "2026-05-04T10:45:12Z"
   stream_event_body: |
     **From**: Jane Doe <notifications@github.com>
-    **To**: "ssdavidai/alfred-platform" <alfred-platform@noreply.github.com>
+    **To**: "example-org/alfred-platform" <alfred-platform@noreply.github.com>
 
     Run failed at startup for branch fix(learn): graceful fallthrough.
     The CI Build + Test (PR) workflow exited with status code 1 in
@@ -165,14 +165,14 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: gmail
-    from: '"ATROX_Sam Lee" <vendor@example.com>'
+    from: '"Example Vendor" <vendor@example.com>'
     subject: "Re: cegadatok"
     created: "2026-05-06T08:23:50Z"
   stream_event_body: |
-    **From**: "ATROX_Sam Lee" <vendor@example.com>
+    **From**: "Example Vendor" <vendor@example.com>
     **To**: Jane Doe <owner@example.com>
 
-    Szia Dávid! A Example Kft. cégbejegyzéséhez kérlek küldd át
+    Szia Jane! A Example Kft. cégbejegyzéséhez kérlek küldd át
     a tulajdonosi struktúrát és a TAJ számokat. Sürgős, mert a
     határidő holnap.
   expected:
@@ -194,10 +194,10 @@
     subject: "Invitation: Strategy review @ Mon May 10, 2026 4pm (CEST)"
     created: "2026-05-06T09:00:00Z"
   stream_event_body: |
-    **From**: Alex Kim via Google Calendar <invitations@google.com>
+    **From**: Alex via Google Calendar <invitations@google.com>
     **To**: owner@example.com
 
-    Alex Kim has invited you to "Strategy review" on Monday May 10, 2026
+    Alex has invited you to "Strategy review" on Monday May 10, 2026
     from 4:00pm to 5:00pm. Please respond yes/no/maybe.
 
     Other attendees: maya@example.com, owner@example.com.
@@ -224,7 +224,7 @@
     **To**: owner@example.com
 
     A new sign-in to your Google Account owner@example.com from a
-    Linux device in Berlin, Germany. If this wasn't you, secure your
+    Linux device in Anytown, Germany. If this wasn't you, secure your
     account immediately.
   expected:
     should_produce_signal: true
@@ -298,7 +298,7 @@
     **From**: Acme Notes Support <support@acme-notes.ai>
     **To**: owner@example.com
 
-    Hi Sir, this confirms that your Acme Notes Pro subscription has
+    Hi Jane, this confirms that your Acme Notes Pro subscription has
     been cancelled per your request. You'll retain access until the
     end of your current billing cycle (May 28, 2026).
   expected:
@@ -312,7 +312,7 @@
     notes: "Confirmation that Sir-driven cancellation happened — closes a renew/cancel-decision task."
 
 # ===========================================================================
-# POSITIVES — slack (8) (synthetic-construction; david has no slack live yet)
+# POSITIVES — slack (8) (synthetic-construction; the owner has no slack live yet)
 # ===========================================================================
 
 - id: ex_011_slack_dm_direct_ask
@@ -321,12 +321,12 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: slack
-    channel: dm-anna
-    from: "Anna"
+    channel: dm-jane
+    from: "Jane"
     created: "2026-05-05T09:00:00Z"
   stream_event_body: |
-    **Channel**: dm-anna
-    **From**: Anna
+    **Channel**: dm-jane
+    **From**: Jane
 
     Hey, can you sign off on the Acme Cloud cluster sizing doc by EOD?
     I need it for the Wednesday board pre-read.
@@ -346,12 +346,12 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: slack
-    channel: dm-anna
-    from: "david"
+    channel: dm-jane
+    from: "owner"
     created: "2026-05-05T17:30:00Z"
   stream_event_body: |
-    **Channel**: dm-anna
-    **From**: david
+    **Channel**: dm-jane
+    **From**: owner
 
     Done — pushed the cluster sizing doc to confluence. The
     cluster-bringup matter is closed from my side.
@@ -372,11 +372,11 @@
     type: stream_event
     source_type: slack
     channel: dm-team
-    from: "david"
+    from: "owner"
     created: "2026-05-04T10:00:00Z"
   stream_event_body: |
     **Channel**: dm-team
-    **From**: david
+    **From**: owner
 
     Drop the Acme Video billing automation track entirely — we're cancelling
     that subscription this month, no point automating it.
@@ -396,12 +396,12 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: slack
-    channel: dm-anna
-    from: "david"
+    channel: dm-jane
+    from: "owner"
     created: "2026-05-03T15:20:00Z"
   stream_event_body: |
-    **Channel**: dm-anna
-    **From**: david
+    **Channel**: dm-jane
+    **From**: owner
 
     The Acme Clinic invoice payment is blocked until we get the IBAN
     confirmation from their accountant. Parking it for now.
@@ -422,11 +422,11 @@
     type: stream_event
     source_type: slack
     channel: dm-team
-    from: "david"
+    from: "owner"
     created: "2026-05-02T11:00:00Z"
   stream_event_body: |
     **Channel**: dm-team
-    **From**: david
+    **From**: owner
 
     The "investigate Acme Shop duplicate orders" task isn't really
     about duplicates — it's about webhook retries firing twice. Let's
@@ -448,11 +448,11 @@
     type: stream_event
     source_type: slack
     channel: dm-team
-    from: "david"
+    from: "owner"
     created: "2026-05-01T14:00:00Z"
   stream_event_body: |
     **Channel**: dm-team
-    **From**: david
+    **From**: owner
 
     The "configure CloudFront for assets" task should live under the
     Alfred product launch matter, not under the cost-cutting matter.
@@ -473,12 +473,12 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: slack
-    channel: dm-anna
-    from: "Anna"
+    channel: dm-jane
+    from: "Jane"
     created: "2026-05-05T19:00:00Z"
   stream_event_body: |
-    **Channel**: dm-anna
-    **From**: Anna
+    **Channel**: dm-jane
+    **From**: Jane
 
     Can you Example Bank me €312 for the joint Acme Cloud bill this month?
     No rush, just before Friday.
@@ -498,12 +498,12 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: slack
-    channel: dm-anna
-    from: "Anna"
+    channel: dm-jane
+    from: "Jane"
     created: "2026-05-04T16:00:00Z"
   stream_event_body: |
-    **Channel**: dm-anna
-    **From**: Anna
+    **Channel**: dm-jane
+    **From**: Jane
 
     All set — I shipped the cloud-init revision and tested it against
     the tenant-a tenant. The "validate cloud-init" task on your side
@@ -553,7 +553,7 @@
     speaker_attribution: ambient
     created: "2026-04-30T14:35:00Z"
   stream_event_body: |
-    Right — so I committed to send Anna the cluster sizing doc by
+    Right — so I committed to send Jane the cluster sizing doc by
     Wednesday. Need to actually do that. Also told her I'd review the
     legal entity restructure draft from Smith by end of week.
   expected:
@@ -597,7 +597,7 @@
     speaker_attribution: ambient
     created: "2026-05-02T11:01:00Z"
   stream_event_body: |
-    The Berlin office relocation thing — that should be its own
+    The Anytown office relocation thing — that should be its own
     matter. It's bleeding into household-life and conflating two
     really different threads. Spin one up.
   expected:
@@ -670,7 +670,7 @@
     **Session**: phase6-7-test-1
 
     ### Sir
-    Hey Alfred — the Berlin trip planning conversations should be their
+    Hey Alfred — the Anytown trip planning conversations should be their
     own matter, not buried under household-life. Spin one up.
   expected:
     should_produce_signal: true
@@ -845,7 +845,7 @@
     notes: "matter_membership."
 
 # ===========================================================================
-# POSITIVES — vexa (6) (synthetic — no live vexa stream events on david)
+# POSITIVES — vexa (6) (synthetic — no live vexa stream events on the owner)
 # ===========================================================================
 
 - id: ex_033_vexa_sir_commitment
@@ -857,10 +857,10 @@
     name: "Vexa transcript — Strategy review 2026-05-04"
     created: "2026-05-04T16:00:00Z"
   stream_event_body: |
-    [Sir]: Yeah, I'll send the cluster sizing doc to Anna by EOD
+    [Sir]: Yeah, I'll send the cluster sizing doc to Jane by EOD
     Wednesday. I have it 80% drafted already.
-    [Anna]: Perfect, I'll wait for it.
-    [Sir]: And I'll loop in Alex Kim on the legal entity question.
+    [Jane]: Perfect, I'll wait for it.
+    [Sir]: And I'll loop in Alex on the legal entity question.
   expected:
     should_produce_signal: true
     effect: action
@@ -880,10 +880,10 @@
     name: "Vexa — leadership sync 2026-05-05"
     created: "2026-05-05T14:00:00Z"
   stream_event_body: |
-    [Anna]: Should we keep investing in the Acme Notes integration?
+    [Jane]: Should we keep investing in the Acme Notes integration?
     [Sir]: No — let's drop it. We'll go with Acme Audio instead. Close
     the Acme Notes track.
-    [Anna]: Got it.
+    [Jane]: Got it.
   expected:
     should_produce_signal: true
     effect: mutation
@@ -905,7 +905,7 @@
   stream_event_body: |
     [Sir]: The Acme Cloud billing dispute — they credited us yesterday,
     so that's closed out. Account is back active.
-    [Alex Kim]: Good. Moving on.
+    [Alex]: Good. Moving on.
   expected:
     should_produce_signal: true
     effect: mutation
@@ -925,7 +925,7 @@
     name: "Vexa — partner sync 2026-05-03"
     created: "2026-05-03T15:00:00Z"
   stream_event_body: |
-    [Alex Kim]: Could you have the financial model draft ready by Friday?
+    [Alex]: Could you have the financial model draft ready by Friday?
     [Sir]: Yeah, I can do that. I'll send it Friday morning your time.
   expected:
     should_produce_signal: true
@@ -968,10 +968,10 @@
     name: "Vexa — strategy 2026-05-01"
     created: "2026-05-01T11:00:00Z"
   stream_event_body: |
-    [Sir]: The Berlin office relocation is its own beast — let's
+    [Sir]: The Anytown office relocation is its own beast — let's
     spin it up as a separate matter rather than keep tucking it under
     household-life.
-    [Anna]: Agreed.
+    [Jane]: Agreed.
   expected:
     should_produce_signal: true
     effect: mutation
@@ -983,7 +983,7 @@
     notes: "matter_creation from meeting."
 
 # ===========================================================================
-# POSITIVES — sure (6) (synthetic — no live sure events on david)
+# POSITIVES — sure (6) (synthetic — no live sure events on the owner)
 # ===========================================================================
 
 - id: ex_039_sure_large_unusual_charge
@@ -1041,7 +1041,7 @@
     name: "Sure — failed payment: Acme Cloud"
     created: "2026-05-02T05:00:00Z"
   stream_event_body: |
-    Scheduled payment failed: -€312 to Acme Cloud. Bank
+    Scheduled payment failed: -€312 to Acme Cloud GmbH. Bank
     response: insufficient funds. Status: retry_in_24h.
   expected:
     should_produce_signal: true
@@ -1062,7 +1062,7 @@
     name: "Sure — duplicate charge alert"
     created: "2026-05-01T09:00:00Z"
   stream_event_body: |
-    Duplicate transaction detected: -€32.40 to "Example Grocer Berlin Mitte"
+    Duplicate transaction detected: -€32.40 to "Example Grocer Anytown Mitte"
     appears twice within 4 minutes today. Likely a POS retry bug.
     Please review.
   expected:
@@ -1127,10 +1127,10 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: gcal
-    name: "Strategy review w/ Alex Kim"
+    name: "Strategy review w/ Alex"
     created: "2026-05-06T09:00:00Z"
   stream_event_body: |
-    Event: Strategy review w/ Alex Kim
+    Event: Strategy review w/ Alex
     Time: Mon May 12, 2026, 4:00pm-5:00pm CEST
     Attendees: owner@example.com, user@example.com, user@example.com
     Status: not yet responded
@@ -1179,7 +1179,7 @@
   stream_event_body: |
     Event: Re-invite: Investor coffee Tue 9am
     Time: Tue May 13, 2026, 9:00am-9:30am CEST
-    Attendees: owner@example.com, alex@vc.com
+    Attendees: owner@example.com, user@example.com
     Status: needs_response
     Description: Quick coffee to discuss the seed round timeline.
     Please confirm by EOD Monday.
@@ -1201,7 +1201,7 @@
     name: "Schedule conflict alert"
     created: "2026-05-04T09:00:00Z"
   stream_event_body: |
-    Event: Schedule conflict — "1:1 with Anna" overlaps "Strategy review".
+    Event: Schedule conflict — "1:1 with Jane" overlaps "Strategy review".
     Both at Wed May 7, 2026, 4:00pm-5:00pm CEST.
     Description: One needs to move. Please reschedule one of the two.
   expected:
@@ -1242,7 +1242,7 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: gcal
-    name: "Anna accepted: Strategy review"
+    name: "Jane accepted: Strategy review"
     created: "2026-05-06T08:00:00Z"
   stream_event_body: |
     Jane Smith <user@example.com> has accepted your invite for
@@ -1274,7 +1274,7 @@
     Plane issue ALFRED-128: "Validate cloud-init on tenant-a"
     New comment from Alex Kim:
 
-    > Sir — can you confirm the encrypted-mount path for vaultwarden?
+    > Jane — can you confirm the encrypted-mount path for vaultwarden?
     > Should it be /mnt/encrypted/vaultwarden or /mnt/encrypted/data/vaultwarden?
     > Need this before merging.
   expected:
@@ -1292,7 +1292,7 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: plane
-    name: "Plane: ALFRED-200 reassigned to Sir"
+    name: "Plane: ALFRED-200 reassigned to Jane Doe"
     created: "2026-05-05T15:00:00Z"
   stream_event_body: |
     Plane issue ALFRED-200: "Configure CloudFront for assets" reassigned
@@ -1358,8 +1358,8 @@
     name: "Plane: ALFRED-180 overdue"
     created: "2026-05-06T08:00:00Z"
   stream_event_body: |
-    Plane issue ALFRED-180: "Ship Phase 6.7 fixture" assigned to Sir
-    Szabo-Stuban is now 2 days overdue. Status: in_progress. Last
+    Plane issue ALFRED-180: "Ship Phase 6.7 fixture" assigned to Jane
+    Doe is now 2 days overdue. Status: in_progress. Last
     update: 2026-05-04. Please update or push the deadline.
   expected:
     should_produce_signal: true
@@ -1379,7 +1379,7 @@
     name: "Plane: ALFRED-210 priority changed"
     created: "2026-05-05T11:00:00Z"
   stream_event_body: |
-    Plane issue ALFRED-210: "Run migration on miguel/tenant-a/tenant-c"
+    Plane issue ALFRED-210: "Run migration on tenant-b/tenant-a/tenant-c"
     priority changed from "normal" to "high" by Jane Smith. Comment:
     "Need this done before fleet rollout this week."
   expected:
@@ -1446,19 +1446,19 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: vault_edit
-    name: "Vault edit: matter/berlin-relocation.md (new)"
+    name: "Vault edit: matter/anytown-relocation.md (new)"
     created: "2026-05-02T16:00:00Z"
   stream_event_body: |
-    Sir created matter/berlin-relocation.md:
+    Sir created matter/anytown-relocation.md:
       status: active
       created_by: human
-      summary: "Relocation of household + workshop from Budapest to Berlin
+      summary: "Relocation of household + workshop from Oldtown to Anytown
       over Q3 2026; covers logistics, paperwork, schools."
   expected:
     should_produce_signal: true
     effect: mutation
     target_kind: matter
-    target_path_contains: ["berlin"]
+    target_path_contains: ["anytown"]
     mutation_decision: create_matter
     target_confidence_min: 0.0
     effect_confidence_min: 0.7
@@ -1519,11 +1519,11 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: gmail
-    from: Pat Store <newsletter@stan.store>
+    from: Stan Store <newsletter@stan.store>
     subject: "5 ways to grow your creator income"
     created: "2026-04-20T10:00:00Z"
   stream_event_body: |
-    **From**: Pat Store <newsletter@stan.store>
+    **From**: Stan Store <newsletter@stan.store>
     **To**: owner@example.com
 
     Hey there! Here are five ways top creators in our community grew
@@ -1576,7 +1576,7 @@
     **From**: Linear <hello@linear.app>
     **To**: owner@example.com
 
-    Hi Sir, get 25% off Linear Plus this month! Upgrade now to
+    Hi Jane, get 25% off Linear Plus this month! Upgrade now to
     unlock advanced workflows, sub-issues, and custom views.
   expected:
     should_produce_signal: false
@@ -1618,14 +1618,14 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: gmail
-    from: jane@talenthouse.io
+    from: recruiter@example.com
     subject: "Senior AI Engineer roles for you"
     created: "2026-04-25T14:00:00Z"
   stream_event_body: |
-    **From**: Jane Smith <jane@talenthouse.io>
+    **From**: Morgan Reed <recruiter@example.com>
     **To**: owner@example.com
 
-    Hi Sir! I'm reaching out because we've got several Senior AI
+    Hi Jane! I'm reaching out because we've got several Senior AI
     Engineer openings at Series-B startups in your area. Would you
     have 15 minutes this week to chat?
   expected:
@@ -1669,7 +1669,7 @@
     type: stream_event
     source_type: gmail
     from: noreply@superhuman.com
-    subject: "Your friend Alex Kim has invited you to Superhuman"
+    subject: "Your friend Alex has invited you to Superhuman"
     created: "2026-04-22T08:00:00Z"
   stream_event_body: |
     **From**: Superhuman <noreply@superhuman.com>
@@ -1724,7 +1724,7 @@
     **Channel**: dashboard
 
     ### Sir
-    Can you show me everything I told Anna about the cluster sizing
+    Can you show me everything I told Jane about the cluster sizing
     last week?
   expected:
     should_produce_signal: false
@@ -1759,16 +1759,16 @@
 
 - id: ex_072_slack_dm_open_question
   synthetic: true
-  description: "Sir asks Anna an open question — no decision."
+  description: "Sir asks Jane an open question — no decision."
   stream_event_frontmatter:
     type: stream_event
     source_type: slack
-    channel: dm-anna
-    from: "david"
+    channel: dm-jane
+    from: "owner"
     created: "2026-05-05T13:00:00Z"
   stream_event_body: |
-    **Channel**: dm-anna
-    **From**: david
+    **Channel**: dm-jane
+    **From**: owner
 
     Quick question — is there a cleaner way to model the multi-currency
     cash flow than what we have today? Just thinking out loud.
@@ -1840,7 +1840,7 @@
     speaker_attribution: ambient
     created: "2026-05-03T16:00:00Z"
   stream_event_body: |
-    We could consider moving the office to Berlin sooner — like over
+    We could consider moving the office to Anytown sooner — like over
     summer instead of waiting for Q4. There are tradeoffs. Worth
     thinking about, but no rush to decide.
   expected:
@@ -1860,11 +1860,11 @@
     type: stream_event
     source_type: slack
     channel: dm-team
-    from: "david"
+    from: "owner"
     created: "2026-05-02T11:30:00Z"
   stream_event_body: |
     **Channel**: dm-team
-    **From**: david
+    **From**: owner
 
     I'm thinking we should drop Acme Notes. Maybe. Let me sleep on it
     and decide tomorrow.
@@ -1962,7 +1962,7 @@
     ...and now over to traffic. Eastbound on the M3 we've got a
     backup at exit 7 due to roadworks. Westbound is clear through to
     the city centre. Weather: 14 degrees, light rain expected by
-    afternoon. This was Magyar Rádió...
+    afternoon. This was Example Radio...
   expected:
     should_produce_signal: false
     effect: none
@@ -2012,7 +2012,7 @@
     **To**: owner@example.com
 
     Auto-reply: I'm on vacation through May 12, 2026, with limited
-    email access. For urgent matters, please contact Alex Kim at
+    email access. For urgent matters, please contact Alex at
     user@example.com. I'll respond when I'm back.
   expected:
     should_produce_signal: false
@@ -2037,7 +2037,7 @@
     **To**: owner@example.com
 
     Automatikus válasz: szabadságon vagyok 2026. május 10-ig.
-    Sürgős esetben kérlek hívd Helga kollégát a +15555550100
+    Sürgős esetben kérlek hívd Robin kollégát a +15555550100
     számon.
   expected:
     should_produce_signal: false
@@ -2154,8 +2154,8 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: slack
-    channel: dm-anna
-    from: "Anna"
+    channel: dm-jane
+    from: "Jane"
     created: "2026-05-05T10:00:00Z"
   stream_event_body: |
     👍
@@ -2277,7 +2277,7 @@
     **From**: Google <no-reply@accounts.google.com>
     **To**: owner@example.com
 
-    You signed in on your usual MacBook Pro from Budapest. If this
+    You signed in on your usual MacBook Pro from Oldtown. If this
     was you, no action needed.
   expected:
     should_produce_signal: false
@@ -2294,11 +2294,11 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: gmail
-    from: notifications@acme-cloud.com
+    from: notifications@acme-cloud.example.com
     subject: "Server vm-1 maintenance window completed"
     created: "2026-05-04T03:00:00Z"
   stream_event_body: |
-    **From**: Acme Cloud Online <notifications@acme-cloud.com>
+    **From**: Acme Cloud <notifications@acme-cloud.example.com>
     **To**: owner@example.com
 
     The scheduled maintenance window for server vm-1 has been
@@ -2320,13 +2320,13 @@
     type: stream_event
     source_type: gmail
     from: calendar-noreply@google.com
-    subject: "Reminder: 1:1 with Anna in 15 minutes"
+    subject: "Reminder: 1:1 with Jane in 15 minutes"
     created: "2026-05-04T13:45:00Z"
   stream_event_body: |
     **From**: Google Calendar <calendar-noreply@google.com>
     **To**: owner@example.com
 
-    Reminder: your "1:1 with Anna" meeting starts in 15 minutes at
+    Reminder: your "1:1 with Jane" meeting starts in 15 minutes at
     14:00. You previously accepted this invite. No action required.
   expected:
     should_produce_signal: false
@@ -2396,7 +2396,7 @@
   stream_event_frontmatter:
     type: stream_event
     source_type: plane
-    name: "Plane: ALFRED-180 status changed by Sir"
+    name: "Plane: ALFRED-180 status changed by Jane Doe"
     created: "2026-05-06T08:00:00Z"
   stream_event_body: |
     Plane issue ALFRED-180: "Ship Phase 6.7 fixture" status changed
@@ -2443,7 +2443,7 @@
     created: "2026-05-06T08:35:00Z"
   stream_event_body: |
     Plane issue ALFRED-180: label "infra" added by automation. No
-    other change. Issue still in_progress, still assigned to Sir.
+    other change. Issue still in_progress, still assigned to Jane Doe.
   expected:
     should_produce_signal: false
     effect: none

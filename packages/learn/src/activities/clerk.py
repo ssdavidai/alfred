@@ -212,7 +212,7 @@ Extract a structured observation. Return JSON only:
   "source": "chat",
   "tags": ["{item_type}"],
   "instruction_type": "{item_type}",
-  "rule_summary": "One-sentence summary of the rule the user is teaching (e.g. 'flag Acme Cloud emails as infrastructure')"
+  "rule_summary": "One-sentence summary of the rule the user is teaching (e.g. 'flag Hetzner emails as infrastructure')"
 }}"""
 
     return await _call_clerk(prompt)

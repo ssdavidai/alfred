@@ -383,7 +383,7 @@ describe("Rules apply_all", () => {
     setEnvelope({
       ok: true, rules_applied: 2,
       results: [
-        { id: "r1", name: "JBC", affected_resource_count: 12 },
+        { id: "r1", name: "Example Mortgage", affected_resource_count: 12 },
         { id: "r2", name: "Example Bank", affected_resource_count: 4 },
       ],
     });
@@ -696,7 +696,7 @@ describe("Cluster apply route", () => {
     // route returns 500 NOT_CONFIGURED before we reach the filter.
     // That confirms the filter at least *runs* when proposals are
     // structurally valid; the deeper logic is exercised in the
-    // measured-on-david rollout.
+    // measured-on-tenant-a rollout.
     const { status, data } = await req("POST", "/api/v1/sure/_cluster/apply", { proposals });
     // 500 NOT_CONFIGURED is fine (no SURE_API_KEY in test env);
     // the failure mode we want to avoid is a 400 VALIDATION_ERROR,

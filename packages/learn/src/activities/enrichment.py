@@ -25,7 +25,7 @@ logger = logging.getLogger("alfred-learn")
 # Per-event body cap. Long transcripts (Omi 30-min meetings can run
 # 30-50k chars) still need to be trimmed somewhere, but 20k chars is
 # roughly 5-7k tokens — enough to cover mid-transcript matter mentions
-# (Example Bank/makerspace cases) without blowing a single event's cost.
+# (Erste/makerspace cases) without blowing a single event's cost.
 MAX_BODY_CHARS_PER_EVENT = 20_000
 
 # Size-based batch target. Clerk (fast-tier OpenRouter models) comfortably

@@ -215,7 +215,7 @@ MAX_MATTER_PREVIEW_CHARS = 200
 
 # Task statuses that the vault schema REJECTS on edit. If a task carries
 # one of these we coerce it to `todo` during the backfill patch so the
-# vault-edit validator doesn't bounce the whole request. On Sir's vault
+# vault-edit validator doesn't bounce the whole request. On a large vault
 # ~1200 legacy tasks still carry `status: pending`.
 _VALID_TASK_STATUSES = frozenset({"active", "blocked", "cancelled", "done", "todo"})
 
@@ -264,7 +264,7 @@ Respond with JSON only, no preamble. Schema:
 
 Guidelines:
 - Only assign a matter when the task is clearly about that matter. Err on the side of null for ambiguous cases.
-- Match by topic/entity overlap: "Family Life" if the task is about Robin or family logistics; "Household Cash Flow" if it's about a specific bill or payment; "Acme Co Apartment Sale" if it mentions the apartment.
+- Match by topic/entity overlap: "Family Life" if the task is about Robin or family logistics; "Household Cash Flow" if it's about a specific bill or payment; "Apartment Sale" if it mentions the apartment.
 - Use the EXACT slug from the matter list — not a description, not an invented slug.
 - One matter per task (the single best fit). Return null if no matter fits confidently.
 """
@@ -646,7 +646,7 @@ async def _process_batch(
         #
         # If the task's current `status` is not in the vault schema's
         # allowed set for tasks (active/blocked/cancelled/done/todo),
-        # ANY edit will fail with `_validate_status`. On Sir's vault
+        # ANY edit will fail with `_validate_status`. On a large vault
         # ~1200 tasks carry `status: pending` (legacy curator output,
         # pre-schema-tightening) and would all be un-patchable. Coerce
         # such tasks to `todo` so our edit goes through.
