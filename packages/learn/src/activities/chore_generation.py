@@ -1850,17 +1850,21 @@ async def restart_learn_worker() -> dict[str, Any]:
 
     Returns:
         {
-            "ok": bool,
+            "ok": bool,               # True ONLY on a confirmed (200) restart
+            "status": str,            # "restarted" | "in_progress" | "failed"
+            "in_progress": bool,      # True when indeterminate (429/connect)
             "status_code": int | None,
             "response_body": str,     # first 500 chars
             "duration_seconds": float,
-            "error": str,             # on failure
+            "error": str,             # on failure / indeterminate
         }
 
-    Note: because this activity KILLS its own worker, the HTTP response
-    may not come back before the process dies. The caller's retry policy
-    handles recovery — on the second attempt the ctrl-api rate limiter
-    (30-second window, S4-2) returns 429 and we treat that as success.
+    Note: because this activity KILLS its own worker, the HTTP response may
+    not come back before the process dies. That ConnectError — and a 429 from
+    the ctrl-api rate limiter (30-second window, S4-2) — are *indeterminate*,
+    not confirmed successes (#S2-2): they report ``status="in_progress"`` with
+    ``ok=False`` so a genuine restart failure surfaces and the schedule-vs-
+    register race (S2-1) stays detectable, instead of being masked as success.
     """
     import httpx  # local import — keeps worker startup fast
 
@@ -1870,6 +1874,8 @@ async def restart_learn_worker() -> dict[str, Any]:
     if not token:
         return {
             "ok": False,
+            "status": "failed",
+            "in_progress": False,
             "status_code": None,
             "response_body": "",
             "duration_seconds": 0.0,
@@ -1885,25 +1891,31 @@ async def restart_learn_worker() -> dict[str, Any]:
                 headers={"Authorization": f"Bearer {token}"},
             )
     except httpx.ConnectError as exc:
-        # Likely the ctrl-api already killed us before the HTTP response
-        # came back. Treat as a "probably succeeded" outcome — the next
-        # retry of this activity on the restarted worker will confirm.
+        # The ctrl-api may have killed us before the HTTP response came back —
+        # OR ctrl-api is genuinely unreachable. We CANNOT tell the two apart
+        # here, so this is indeterminate, not a confirmed success (#S2-2). Mark
+        # it in_progress (ok=False) so a real outage isn't masked; a follow-up
+        # check / retry on the restarted worker confirms the actual outcome.
         logger.info(
-            "restart_learn_worker: connect error (likely expected — worker restart in flight): %s",
+            "restart_learn_worker: connect error (restart may be in flight, or ctrl-api unreachable): %s",
             exc,
         )
         return {
-            "ok": True,
+            "ok": False,
+            "status": "in_progress",
+            "in_progress": True,
             "status_code": None,
             "response_body": "",
             "duration_seconds": time.monotonic() - started,
             "error": f"ConnectError: {exc}",
-            "note": "connection dropped during restart — assuming success",
+            "note": "connection dropped during restart — outcome unconfirmed",
         }
     except Exception as exc:
         logger.error("restart_learn_worker: unexpected error: %s", exc)
         return {
             "ok": False,
+            "status": "failed",
+            "in_progress": False,
             "status_code": None,
             "response_body": "",
             "duration_seconds": time.monotonic() - started,
@@ -1913,20 +1925,37 @@ async def restart_learn_worker() -> dict[str, Any]:
     duration = time.monotonic() - started
     body_snippet = resp.text[:500] if resp.text else ""
 
-    # Rate-limited (429) means a restart already happened in the last
-    # 30 seconds — treat as success for our purposes (the worker IS
-    # being restarted by someone). The rate limit exists precisely to
-    # make the restart idempotent during Temporal retry storms.
-    if resp.status_code in (200, 429):
+    # 200 is the only CONFIRMED restart. A 429 means the ctrl-api rate limiter
+    # rejected us because a restart happened in the last 30s — a restart is
+    # underway, but THIS call did not perform/confirm it, so it is in_progress
+    # (ok=False), not success (#S2-2). Reporting 429 as success was how a stuck
+    # retry storm looked green while chores stayed unregistered (S2-1).
+    if resp.status_code == 200:
         logger.info(
-            "restart_learn_worker: ctrl-api responded %d (%.2fs)",
-            resp.status_code, duration,
+            "restart_learn_worker: ctrl-api confirmed restart 200 (%.2fs)", duration,
         )
         return {
             "ok": True,
-            "status_code": resp.status_code,
+            "status": "restarted",
+            "in_progress": False,
+            "status_code": 200,
             "response_body": body_snippet,
             "duration_seconds": duration,
+        }
+
+    if resp.status_code == 429:
+        logger.info(
+            "restart_learn_worker: ctrl-api 429 rate-limited — restart underway "
+            "elsewhere, outcome unconfirmed (%.2fs)", duration,
+        )
+        return {
+            "ok": False,
+            "status": "in_progress",
+            "in_progress": True,
+            "status_code": 429,
+            "response_body": body_snippet,
+            "duration_seconds": duration,
+            "error": "rate-limited (429) — restart in progress, unconfirmed",
         }
 
     logger.error(
@@ -1935,6 +1964,8 @@ async def restart_learn_worker() -> dict[str, Any]:
     )
     return {
         "ok": False,
+        "status": "failed",
+        "in_progress": False,
         "status_code": resp.status_code,
         "response_body": body_snippet,
         "duration_seconds": duration,
