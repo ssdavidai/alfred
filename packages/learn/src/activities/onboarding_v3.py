@@ -110,23 +110,85 @@ def _write_onboard(path: str, data: dict) -> None:
         json.dump(data, f, indent=2)
 
 
+def _string_aware_json_object_span(text: str, start: int) -> int | None:
+    """Find the closing ``}`` of the JSON object that opens at ``text[start]``.
+
+    Returns the index of the matching closing brace, or ``None`` if no
+    balanced object is found before the end of the text. Unlike a naive
+    ``{``/``}`` counter, this respects JSON string literals: braces that
+    appear inside ``"..."`` strings (e.g. an Opus matter description
+    containing ``"uses curly-brace placeholders like {userId}"``) do not
+    affect the depth counter, and an escaped quote (``\\"``) does not
+    end the string.
+
+    This is the difference between the matter_pack_opus output parsing
+    cleanly and silently degrading to ``source: rule_based_parse_error``
+    when an Opus-authored description happened to mention literal braces.
+    """
+    if start >= len(text) or text[start] != "{":
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
 def _parse_json_with_key(raw: str, key: str) -> dict:
     """Parse a JSON object containing a specific key from LLM output.
 
-    Uses brace-depth tracking instead of greedy regex. Handles markdown
-    code blocks and truncated JSON (brace repair).
+    Tolerates the variety of envelopes Opus emits — bare JSON, JSON
+    wrapped in ``` ```json ``` ``` fences, JSON with leading or trailing
+    prose, truncated JSON (max_tokens), and most notably JSON whose
+    string values themselves contain literal ``{``/``}`` characters
+    (Opus often mentions code snippets, URL templates, etc. in matter
+    descriptions). The previous brace-depth tracker counted every
+    ``{`` character regardless of string context, so a single
+    `"description": "..{placeholder}.."` would push depth out of sync
+    and the parser would give up — silently degrading every Opus pack
+    to the rule-based fallback (the production symptom Sir saw as
+    eight domain-named matters instead of eight Opus-authored ones).
     """
     if not raw or f'"{key}"' not in raw:
         logger.error("onboarding_v3: no '%s' key found in LLM response (len=%d)", key, len(raw))
         return {}
 
-    # Strip markdown code fences if present
+    # Strip markdown code fences if present. Tolerate both fully-closed
+    # ``` ```json ... ``` ``` blocks AND opening-only fences (Opus sometimes
+    # forgets the closer when it stops at max_tokens).
     text = raw
     code_block = re.search(r'```(?:json)?\s*\n(.*?)\n```', raw, re.DOTALL)
     if code_block and f'"{key}"' in code_block.group(1):
         text = code_block.group(1).strip()
+    else:
+        open_fence = re.search(r'```(?:json)?\s*\n', raw)
+        if open_fence:
+            tail = raw[open_fence.end():]
+            if f'"{key}"' in tail:
+                text = tail.strip()
 
-    # Try direct parse first
+    # Try direct parse first — the happy path when Opus returns a clean
+    # standalone JSON object.
     try:
         parsed = json.loads(text)
         if isinstance(parsed.get(key), list):
@@ -134,37 +196,81 @@ def _parse_json_with_key(raw: str, key: str) -> dict:
     except (json.JSONDecodeError, AttributeError):
         pass
 
-    # Brace-depth tracking
-    pattern = r'\{[^{}]*"' + re.escape(key) + r'"\s*:\s*\['
-    for match in re.finditer(pattern, text):
-        start = match.start()
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == '{':
-                depth += 1
-            elif text[i] == '}':
-                depth -= 1
-                if depth == 0:
-                    candidate = text[start:i + 1]
-                    try:
-                        parsed = json.loads(candidate)
-                        if isinstance(parsed.get(key), list):
-                            return parsed
-                    except json.JSONDecodeError:
-                        continue
-                    break
+    # String-aware object scan. For every ``{`` candidate, look for a
+    # matching ``}`` that respects string literals; try to parse what
+    # we get out. Returns the first candidate that actually contains
+    # ``key`` as a list — protects against false matches in nested
+    # objects that share unrelated braces.
+    pos = 0
+    while True:
+        ob = text.find("{", pos)
+        if ob == -1:
+            break
+        cb = _string_aware_json_object_span(text, ob)
+        if cb is None:
+            break
+        candidate = text[ob:cb + 1]
+        if f'"{key}"' in candidate:
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed.get(key), list):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+        pos = ob + 1
 
-    # Brace repair for truncated JSON (may hit max_tokens)
+    # Brace repair for truncated JSON (may hit max_tokens). Walks
+    # the fragment with string-awareness, keeping a LIFO stack of
+    # open ``{`` / ``[`` characters, then closes them in the correct
+    # order. The previous repair counted open vs close characters
+    # globally and appended ``]`` ``s before ``}`` — wrong for any
+    # nested object that got truncated mid-string, because the inner
+    # ``{`` needs to close BEFORE the surrounding ``[``. This left
+    # ``"matters": [{"name": "A"}, {"name": "B"`` unrepairable even
+    # though only two closers and one bracket-closer were missing.
     try:
         first = text.find("{")
         if first >= 0:
             fragment = text[first:]
-            ob = fragment.count("[") - fragment.count("]")
-            oc = fragment.count("{") - fragment.count("}")
-            repaired = fragment + ("]" * max(0, ob)) + ("}" * max(0, oc))
+            stack: list[str] = []
+            in_string = False
+            escape = False
+            for ch in fragment:
+                if in_string:
+                    if escape:
+                        escape = False
+                        continue
+                    if ch == "\\":
+                        escape = True
+                        continue
+                    if ch == '"':
+                        in_string = False
+                    continue
+                if ch == '"':
+                    in_string = True
+                    continue
+                if ch == "{":
+                    stack.append("}")
+                elif ch == "[":
+                    stack.append("]")
+                elif ch in ("}", "]"):
+                    if stack and stack[-1] == ch:
+                        stack.pop()
+            tail = ""
+            # If we ran off the end mid-string, close the string first.
+            if in_string:
+                tail += '"'
+            # Close any unclosed container in LIFO order.
+            while stack:
+                tail += stack.pop()
+            repaired = fragment + tail
             parsed = json.loads(repaired)
             if isinstance(parsed.get(key), list):
-                logger.info("onboarding_v3: parsed %s via brace repair", key)
+                logger.info(
+                    "onboarding_v3: parsed %s via brace repair (added %r)",
+                    key,
+                    tail,
+                )
                 return parsed
     except Exception:
         pass
