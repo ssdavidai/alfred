@@ -94,15 +94,23 @@ function ritualPathForStage(stage: string): string {
   switch (stage) {
     // Email backfill / behavioural profiling / fact extraction — the
     // "reading the room" scan page renders all of these.
+    // All the pre-verify "Alfred is working" stages render on the theatre
+    // page, whose act indicator follows the real stage (reading → working out
+    // who you are → patterns → composing his soul). personalize is BEFORE
+    // awaiting_verification, so it must NOT route to /composing (the
+    // post-verify brief interstitial) — that skipped /verify and dumped the
+    // user on an empty brief.
+    case "metadata":
     case "backfill":
     case "processing":
+    case "facts":
     case "patterns":
+    case "personalize":
       return "/reading-the-room";
     // Facts are ready — pause here for the principal to confirm them.
     case "awaiting_verification":
       return "/verify";
-    // Personalisation + brief composition.
-    case "personalize":
+    // The brief generates AFTER the principal verifies facts.
     case "automations":
     case "brief":
       return "/composing";

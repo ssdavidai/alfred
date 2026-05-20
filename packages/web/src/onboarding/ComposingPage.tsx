@@ -22,16 +22,23 @@ export default function ComposingPage() {
     progress?.stage === "done" ||
     (typeof progress?.brief === "string" && progress.brief.length > 0);
 
+  // Advance ONLY when the brief is actually written — never on a bare timer
+  // (the old unconditional fallback dumped the user on an empty /first-brief
+  // while the brief was still composing).
   useEffect(() => {
     if (briefReady) {
       navigate("/first-brief");
     }
   }, [briefReady, navigate]);
 
+  // Safety net: if the brief is genuinely stuck for a long time, return to the
+  // Desk (NOT an empty brief) so the user is never trapped on this interstitial.
   useEffect(() => {
-    const t = setTimeout(() => navigate("/first-brief"), FALLBACK_MS);
+    const t = setTimeout(() => {
+      if (!briefReady) navigate("/desk");
+    }, 600_000);
     return () => clearTimeout(t);
-  }, [navigate]);
+  }, [briefReady, navigate]);
 
   return (
     <div className="paper min-h-screen flex flex-col">
