@@ -396,6 +396,11 @@ services:
       - TASK_QUEUE=alfred-learn
       - ALFRED_LEARN_ENABLED=${ALFRED_LEARN_ENABLED:-true}
       - ALFRED_CTRL_URL=http://ctrl-api:3100
+      # Signal pipeline (#78): stream events → signals → decision cards.
+      # Both default ON so the Desk fills; gate at registration time, so a
+      # change requires an alfred-learn restart to re-run register_schedules.
+      - STEWARD_SIGNAL_EXTRACT_ENABLED=${STEWARD_SIGNAL_EXTRACT_ENABLED:-true}
+      - STEWARD_SIGNAL_ROUTER_ENABLED=${STEWARD_SIGNAL_ROUTER_ENABLED:-true}
       # Composio Python SDK writes its module-load cache under $HOME; the
       # container has no writable $HOME, so pin both to /tmp.
       - COMPOSIO_CACHE_DIR=/tmp/composio

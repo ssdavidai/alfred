@@ -241,7 +241,14 @@ elif [[ ! -f "$TOKEN_FILE" ]]; then
 else
     echo "[init] Using existing gateway token"
 fi
-chmod 600 "$TOKEN_FILE" 2>/dev/null || true
+# 644, not 600: the token is the shared inter-container bearer for the Hermes
+# gateway. ctrl-api runs as root (could read 600) but alfred-learn runs as
+# uid 1000 — with 600 root:root, clerk-based signal extraction in alfred-learn
+# got "Permission denied: /alfred-data/.gateway-token" and the whole
+# stream→signal→decision pipeline died silently (#78). The file lives inside a
+# private Docker named volume on a single-owner VM; readable-within-the-stack
+# is the correct posture, and it is no looser than its 777 siblings here.
+chmod 644 "$TOKEN_FILE" 2>/dev/null || true
 GATEWAY_TOKEN=$(tr -d '[:space:]' < "$TOKEN_FILE")
 
 # =============================================================================
@@ -310,8 +317,10 @@ chown -R 10000:10000 /vault 2>/dev/null || true
 
 mkdir -p /alfred-data
 chmod -R 777 /alfred-data 2>/dev/null || true
-# Re-tighten the token after the broad chmod — it must not be world-readable.
-chmod 600 "$TOKEN_FILE" 2>/dev/null || true
+# Keep the token readable by every service in the stack (alfred-learn is
+# uid 1000 and needs it for clerk → Hermes gateway auth, #78). 644 is the
+# tightest mode that still lets a non-root sibling read it.
+chmod 644 "$TOKEN_FILE" 2>/dev/null || true
 
 # Chore-system directories — pre-created so the loaders never log a
 # spurious "directory not found" on a fresh VM.
