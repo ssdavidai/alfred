@@ -470,13 +470,12 @@ async def generate_matter_pack_opus(onboard_path: str) -> dict[str, Any]:
                 continue
 
             try:
-                existing = await client.search_records(slug, record_type="matter")
-                if existing:
+                if await client.record_exists("matter", slug):
                     skipped_existing += 1
                     continue
             except Exception as exc:
                 logger.warning(
-                    "matter_pack_opus: search failed for %s: %s (proceeding anyway)",
+                    "matter_pack_opus: existence check failed for %s: %s (proceeding anyway)",
                     slug, exc,
                 )
 
@@ -891,13 +890,12 @@ async def generate_errand_pack_opus(onboard_path: str) -> dict[str, Any]:
                 continue
 
             try:
-                existing = await client.search_records(slug, record_type="task")
-                if existing:
+                if await client.record_exists("task", slug):
                     skipped_existing += 1
                     continue
             except Exception as exc:
                 logger.warning(
-                    "errand_pack_opus: search failed for %s: %s (proceeding)",
+                    "errand_pack_opus: existence check failed for %s: %s (proceeding)",
                     slug, exc,
                 )
 
@@ -1390,13 +1388,12 @@ async def generate_instinct_pack_opus(onboard_path: str) -> dict[str, Any]:
                 continue
 
             try:
-                existing = await client.search_records(slug, record_type="instinct")
-                if existing:
+                if await client.record_exists("instinct", slug):
                     skipped_existing += 1
                     continue
             except Exception as exc:
                 logger.warning(
-                    "instinct_pack_opus: search failed for %s: %s (proceeding)",
+                    "instinct_pack_opus: existence check failed for %s: %s (proceeding)",
                     slug, exc,
                 )
 

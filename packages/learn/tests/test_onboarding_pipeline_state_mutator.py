@@ -157,11 +157,14 @@ def test_onboarding_pack_writers_check_for_existing_records() -> None:
     packs_opus = _ROOT / "activities" / "packs_opus.py"
     for path in (packs, packs_opus):
         source = _read(path)
-        # Both files use ``client.search_records(slug, record_type="matter")``
-        # / ``record_type="task"`` and skip-on-existing. Pin the search +
-        # skip shape.
-        assert "search_records" in source, (
-            f"{path.name} dropped search_records-based dedup — onboarding "
+        # Both files dedup-before-write and skip-on-existing. The mechanism
+        # is either the legacy grep ``client.search_records(slug, ...)`` or
+        # the exact-slug ``client.record_exists(type, slug)`` (#BUG-3, which
+        # replaced the grep substring check in packs_opus to stop drifted-
+        # name re-runs writing duplicates). Pin the dedup + skip invariant,
+        # not the specific call.
+        assert "search_records" in source or "record_exists" in source, (
+            f"{path.name} dropped existence-check dedup — onboarding "
             f"pack writers MUST skip existing matter/task records to "
             f"preserve the 'creation only, no mutation' contract."
         )

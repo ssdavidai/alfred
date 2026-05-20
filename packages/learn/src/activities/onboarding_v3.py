@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -105,9 +106,34 @@ def _read_onboard(path: str) -> dict:
 
 
 def _write_onboard(path: str, data: dict) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    """Atomically persist ``data`` to ``path`` (#BUG-5).
+
+    Serialize fully to a temp file in the same directory, fsync, then
+    ``os.replace`` it over the destination. ``os.replace`` is an atomic
+    rename on POSIX, so a concurrent ``/onboarding/progress`` reader sees
+    either the old file or the complete new one — never the torn,
+    half-written file an in-place ``open(w)`` + ``json.dump`` exposes.
+    Serialization happens before any rename, so an unserializable payload
+    raises without disturbing the existing good file, and the temp file is
+    cleaned up on any failure.
+    """
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=".onboard-", suffix=".tmp", dir=directory
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _string_aware_json_object_span(text: str, start: int) -> int | None:
@@ -154,7 +180,7 @@ def _string_aware_json_object_span(text: str, start: int) -> int | None:
     return None
 
 
-def _parse_json_with_key(raw: str, key: str) -> dict:
+def _parse_json_with_key(raw: str, key: str, expect: type = list) -> dict:
     """Parse a JSON object containing a specific key from LLM output.
 
     Tolerates the variety of envelopes Opus emits — bare JSON, JSON
@@ -168,6 +194,11 @@ def _parse_json_with_key(raw: str, key: str) -> dict:
     and the parser would give up — silently degrading every Opus pack
     to the rule-based fallback (the production symptom Sir saw as
     eight domain-named matters instead of eight Opus-authored ones).
+
+    ``expect`` is the type the value at ``key`` must have for a candidate
+    to be accepted (``list`` for facts/patterns/packs; ``str`` for the
+    personalize stage's ``user_md`` etc., #BUG-6). The final array-element
+    salvage stage only applies when ``expect`` is ``list``.
     """
     if not raw or f'"{key}"' not in raw:
         logger.error("onboarding_v3: no '%s' key found in LLM response (len=%d)", key, len(raw))
@@ -191,7 +222,7 @@ def _parse_json_with_key(raw: str, key: str) -> dict:
     # standalone JSON object.
     try:
         parsed = json.loads(text)
-        if isinstance(parsed.get(key), list):
+        if isinstance(parsed.get(key), expect):
             return parsed
     except (json.JSONDecodeError, AttributeError):
         pass
@@ -213,7 +244,7 @@ def _parse_json_with_key(raw: str, key: str) -> dict:
         if f'"{key}"' in candidate:
             try:
                 parsed = json.loads(candidate)
-                if isinstance(parsed.get(key), list):
+                if isinstance(parsed.get(key), expect):
                     return parsed
             except json.JSONDecodeError:
                 pass
@@ -265,7 +296,7 @@ def _parse_json_with_key(raw: str, key: str) -> dict:
                 tail += stack.pop()
             repaired = fragment + tail
             parsed = json.loads(repaired)
-            if isinstance(parsed.get(key), list):
+            if isinstance(parsed.get(key), expect):
                 logger.info(
                     "onboarding_v3: parsed %s via brace repair (added %r)",
                     key,
@@ -279,9 +310,10 @@ def _parse_json_with_key(raw: str, key: str) -> dict:
     # mid-element (e.g. a key with no value yet), brace-repair can't produce
     # valid JSON — but every COMPLETE {...} object before the cutoff is still
     # good. Walk the `key` array, collect each fully-closed object, and drop the
-    # partial tail. Better a few hundred real facts than zero.
+    # partial tail. Better a few hundred real facts than zero. Only meaningful
+    # for list-valued keys.
     try:
-        kpos = text.find(f'"{key}"')
+        kpos = text.find(f'"{key}"') if expect is list else -1
         arr_start = text.find("[", kpos) if kpos >= 0 else -1
         if arr_start >= 0:
             items: list = []
@@ -706,49 +738,63 @@ Make each file genuinely useful — not generic templates. Reference specific na
 
     raw = await _call_llm(prompt, max_tokens=16384)
 
-    files = {}
-    try:
-        match = re.search(r'\{[\s\S]*"user_md"[\s\S]*\}', raw)
-        if match:
-            files = json.loads(match.group())
-    except Exception:
-        try:
-            first = raw.find("{")
-            if first >= 0:
-                fragment = raw[first:]
-                ob = fragment.count("[") - fragment.count("]")
-                oc = fragment.count("{") - fragment.count("}")
-                repaired = fragment + ("]" * max(0, ob)) + ("}" * max(0, oc))
-                files = json.loads(repaired)
-        except Exception:
-            logger.error("onboarding_v3: failed to parse personalization")
+    # Use the hardened, string-aware parser the facts/patterns/packs stages
+    # already rely on instead of the naive brace-counting regex that desynced
+    # on literal braces in values and gave up on max_tokens truncation —
+    # the facts→0 truncation class that dropped all five files (#BUG-6).
+    # ``user_md`` is the anchor key; its value is a string, so expect=str.
+    files = _parse_json_with_key(raw, "user_md", expect=str)
+    if not files:
+        logger.error("onboarding_v3: failed to parse personalization")
 
     # Write files to vault
     config = load_config()
     api_key = os.environ.get("AAS_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
-    written = []
+    # USER.md and SOUL.md are load-bearing — the brief, the butler's bearing,
+    # and every downstream stage assume they exist. MEMORY/TOOLS/RULES are
+    # valuable but not blocking. Attempt ALL five writes, collect failures,
+    # and only abort the stage (so Temporal retries) if a load-bearing write
+    # failed. A transient MEMORY/TOOLS/RULES failure must NOT strand the user
+    # pre-verification with partial vault state (#BUG-2).
+    LOAD_BEARING = {"USER.md", "SOUL.md"}
+    written: list[str] = []
+    failed: list[str] = []
+    load_bearing_failures: list[str] = []
     async with httpx.AsyncClient(base_url=config.alfred_ctrl_url, timeout=30.0, headers=headers) as client:
         for filename, key in [("USER.md", "user_md"), ("SOUL.md", "soul_md"), ("MEMORY.md", "memory_md"), ("TOOLS.md", "tools_md"), ("RULES.md", "rules_md")]:
             content = files.get(key, "")
             if not content:
                 continue
-            resp = await client.put(
-                f"/api/v1/admin/workspace/{filename}",
-                json={"content": content},
-            )
-            if not resp.is_success:
-                logger.error(
-                    "onboarding_v3: %s write failed status=%d body=%s",
-                    filename, resp.status_code, resp.text[:300],
+            try:
+                resp = await client.put(
+                    f"/api/v1/admin/workspace/{filename}",
+                    json={"content": content},
                 )
-                raise RuntimeError(
-                    f"personalize_opus: {filename} write failed "
-                    f"status={resp.status_code} body={resp.text[:300]}"
-                )
+                ok = resp.is_success
+                detail = f"status={resp.status_code} body={resp.text[:300]}"
+            except Exception as exc:  # noqa: BLE001 — network/transport error
+                ok = False
+                detail = f"transport error: {exc}"
+            if not ok:
+                logger.error("onboarding_v3: %s write failed %s", filename, detail)
+                failed.append(filename)
+                if filename in LOAD_BEARING:
+                    load_bearing_failures.append(
+                        f"{filename} write failed {detail}"
+                    )
+                continue
             written.append(filename)
             logger.info("onboarding_v3: wrote %s (%d chars)", filename, len(content))
+
+    # A load-bearing write failure aborts so Temporal retries the whole stage;
+    # the user does not advance to awaiting_verification on half a vault.
+    if load_bearing_failures:
+        raise RuntimeError(
+            "personalize_opus: load-bearing vault write(s) failed: "
+            + "; ".join(load_bearing_failures)
+        )
 
     onboard["user_md"] = files.get("user_md", "")
     onboard["soul_md"] = files.get("soul_md", "")
@@ -767,7 +813,12 @@ Make each file genuinely useful — not generic templates. Reference specific na
     except Exception as e:  # noqa: BLE001
         logger.warning("onboarding_v3: personalize narration skipped: %s", e)
 
-    return {"files_written": written}
+    if failed:
+        logger.warning(
+            "onboarding_v3: personalize completed with non-blocking write "
+            "failures: %s", failed,
+        )
+    return {"files_written": written, "files_failed": failed}
 
 
 # ---------------------------------------------------------------------------

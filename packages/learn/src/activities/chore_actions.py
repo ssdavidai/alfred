@@ -28,6 +28,55 @@ SNAPSHOT_DIR = "/alfred-data/chore-snapshots"
 
 
 # ---------------------------------------------------------------------------
+# S1-3 — generated-code Composio safety gate. A generated chore is LLM-authored
+# Python; call_composio could dispatch ANY action (incl. destructive writes
+# against mail/calendar/finance/PM) and the only protection was the unenforced
+# quarantine convention. This makes it a real check: a destructive action only
+# dispatches when the caller confirms it (confirm=True, quarantine cleared) or
+# is simulated (dry_run=True). Read-only actions pass through untouched.
+# ---------------------------------------------------------------------------
+
+# Verb fragments that indicate a write/side-effecting Composio action. Matched
+# against the action name's token stream so ``GMAIL_SEND_EMAIL`` (SEND) and
+# ``NOTION_DELETE_PAGE`` (DELETE) gate, while ``GMAIL_FETCH_EMAILS`` does not.
+_DESTRUCTIVE_VERBS: frozenset[str] = frozenset({
+    "SEND", "SENDS", "CREATE", "CREATES", "DELETE", "DELETES", "UPDATE",
+    "UPDATES", "POST", "POSTS", "REPLY", "REPLIES", "ADD", "ADDS", "REMOVE",
+    "REMOVES", "MOVE", "MOVES", "ARCHIVE", "TRASH", "MODIFY", "MODIFIES",
+    "EDIT", "EDITS", "WRITE", "WRITES", "INSERT", "INSERTS", "PATCH", "PUT",
+    "SET", "SETS", "DRAFT", "DRAFTS", "INVITE", "INVITES", "CANCEL", "CANCELS",
+    "DISABLE", "ENABLE", "REVOKE", "GRANT", "UPLOAD", "PUBLISH", "MERGE",
+    "CLOSE", "CHANGE", "CHANGES", "RENAME", "DUPLICATE", "COPY", "ASSIGN",
+    "SCHEDULE", "RESCHEDULE", "MARK", "MARKS", "FORWARD",
+})
+
+
+class ChoreActionBlocked(Exception):
+    """A generated chore tried to dispatch a destructive Composio action
+    without confirming it (and not as a dry-run). Surfaced so the failure
+    is loud rather than a silent unattended write on real systems."""
+
+
+def _is_destructive_action(action: str) -> bool:
+    """True if ``action`` names a write/side-effecting Composio action.
+
+    Tokenises the action name and checks each token against the verb set.
+    Conservative: an unknown verb is read-only (don't block legit fetches),
+    but every common write verb is covered so dangerous calls are gated.
+    """
+    if not isinstance(action, str) or not action:
+        return False
+    tokens = action.upper().replace("-", "_").split("_")
+    return any(tok in _DESTRUCTIVE_VERBS for tok in tokens)
+
+
+def _composio_gate_enforced() -> bool:
+    """Enforced by default; ``ALFRED_CHORE_COMPOSIO_GATE=audit`` downgrades a
+    block to a warning for operators who need to observe rather than reject."""
+    return os.environ.get("ALFRED_CHORE_COMPOSIO_GATE", "enforce").lower() != "audit"
+
+
+# ---------------------------------------------------------------------------
 # subscription_watcher activities
 # ---------------------------------------------------------------------------
 
@@ -376,17 +425,51 @@ async def call_self(
 async def call_composio(
     action: str,
     arguments: dict[str, Any] | None = None,
+    dry_run: bool = False,
+    confirm: bool = False,
 ) -> dict[str, Any]:
     """Execute any Composio action via ctrl-api's composio dispatcher.
 
-    `action` is the Composio action name (e.g. `GMAIL_SEND_EMAIL`,
-    `GOOGLECALENDAR_CREATE_EVENT`, `NOTION_CREATE_PAGE`). `arguments` is
-    the per-action payload — check the per-app SKILL.md or the Composio
-    docs for schemas.
+    `action` is the Composio action name (e.g. `GMAIL_SEND_EMAIL`); `arguments`
+    is the per-action payload.
 
-    Returns the action result as a dict. Delegates to `call_self` since
-    the composio dispatcher is just a ctrl-api endpoint.
+    Safety gate (S1-3): a destructive (send/create/delete/update/...) action
+    dispatches ONLY when sanctioned. ``dry_run=True`` (chore in quarantine)
+    simulates without reaching the real system; ``confirm=True`` is an
+    intentional live destructive call (quarantine cleared). A destructive call
+    that is neither raises ``ChoreActionBlocked`` so the omission is loud
+    rather than an unattended write. Read-only actions pass straight through.
+
+    Returns the action result as a dict via `call_self`.
     """
+    destructive = _is_destructive_action(action)
+    if destructive:
+        # Quarantine / dry-run wins over confirm: a chore still proving
+        # itself must never write, even if its body also passed confirm.
+        if dry_run:
+            activity.logger.info(
+                "call_composio: dry-run, NOT dispatching destructive action %s",
+                action,
+            )
+            return {
+                "ok": True,
+                "dry_run": True,
+                "dispatched": False,
+                "action": action,
+                "note": "destructive action simulated (quarantine/dry-run)",
+            }
+        if not confirm:
+            msg = (
+                f"call_composio: destructive action {action!r} blocked — it was "
+                f"neither confirmed (confirm=True) nor run as a dry-run "
+                f"(dry_run=True). Generated chores must explicitly confirm "
+                f"side-effecting Composio calls."
+            )
+            if _composio_gate_enforced():
+                activity.logger.warning(msg)
+                raise ChoreActionBlocked(msg)
+            activity.logger.warning("%s (gate in audit mode — dispatching anyway)", msg)
+
     return await call_self(
         endpoint="/api/v1/integrations/execute",
         method="POST",

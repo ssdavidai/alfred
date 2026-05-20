@@ -220,11 +220,13 @@ class TestRestartLearnWorker:
 
         assert result["ok"] is True
         assert result["status_code"] == 200
+        assert result["status"] == "restarted"
 
-    def test_rate_limited_treated_as_success(self, monkeypatch):
-        """429 means a restart already happened in the last 30 seconds — we
-        treat that as success for the Temporal retry path (prevents
-        thrashing if the workflow retries after worker kill)."""
+    def test_rate_limited_is_in_progress_not_success(self, monkeypatch):
+        """#S2-2: 429 means a restart is underway elsewhere, but THIS call did
+        not confirm one — it is in_progress (ok=False), not a confirmed
+        success. Reporting 429 as success masked stuck retry storms that left
+        chores unregistered (S2-1)."""
         monkeypatch.setenv("AAS_API_KEY", "test-token")
 
         mock_response = type("R", (), {
@@ -240,7 +242,9 @@ class TestRestartLearnWorker:
         with patch("httpx.AsyncClient", return_value=mock_client):
             result = _run_restart()
 
-        assert result["ok"] is True
+        assert result["ok"] is False
+        assert result["status"] == "in_progress"
+        assert result["in_progress"] is True
         assert result["status_code"] == 429
 
     def test_unexpected_status_treated_as_failure(self, monkeypatch):
@@ -261,13 +265,14 @@ class TestRestartLearnWorker:
 
         assert result["ok"] is False
         assert result["status_code"] == 500
+        assert result["status"] == "failed"
         assert "500" in result["error"]
 
-    def test_connection_error_treated_as_probable_success(self, monkeypatch):
-        """If the connection drops mid-request, it's likely because the
-        ctrl-api already killed our worker. The next Temporal retry will
-        confirm — but we return ok=True with a note so the caller doesn't
-        bail out of the workflow."""
+    def test_connection_error_is_in_progress_not_success(self, monkeypatch):
+        """#S2-2: a dropped connection might be our own worker dying — OR a
+        genuine ctrl-api outage. We cannot tell, so it's in_progress
+        (ok=False), not a confirmed success. The previous ok=True hid real
+        outages and made the schedule-vs-register race (S2-1) invisible."""
         import httpx as _httpx
         monkeypatch.setenv("AAS_API_KEY", "test-token")
 
@@ -281,6 +286,8 @@ class TestRestartLearnWorker:
         with patch("httpx.AsyncClient", return_value=mock_client):
             result = _run_restart()
 
-        assert result["ok"] is True
+        assert result["ok"] is False
+        assert result["status"] == "in_progress"
+        assert result["in_progress"] is True
         assert result["status_code"] is None
         assert "note" in result
