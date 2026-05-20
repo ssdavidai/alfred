@@ -566,7 +566,20 @@ def _attribute_chain(node: ast.Attribute) -> str:
 # Dynamic loader — scans the user-chores directory at worker startup
 # ---------------------------------------------------------------------------
 
-def load_user_chore_templates() -> list[type]:
+def _workflow_name_of(cls: type) -> str | None:
+    """Return the Temporal workflow name registered on a @workflow.defn class.
+
+    Temporal stores the definition (which carries ``.name``) on
+    ``__temporal_workflow_definition``. Returns None if it can't be read.
+    """
+    definition = getattr(cls, "__temporal_workflow_definition", None)
+    name = getattr(definition, "name", None)
+    return name if isinstance(name, str) and name else None
+
+
+def load_user_chore_templates(
+    reserved_names: set[str] | None = None,
+) -> list[type]:
     """Scan USER_CHORES_DIR, validate + stage each file, import, return workflow classes.
 
     Pipeline per file:
@@ -581,7 +594,17 @@ def load_user_chore_templates() -> list[type]:
     are deleted on each scan so the staged package mirrors the source of truth.
 
     Returns a list of workflow classes that worker.py appends to ALL_WORKFLOWS.
+
+    #S1-2 — workflow-name dedup. ``Worker(...)`` rejects two workflows that
+    register the SAME Temporal name and crash-loops the entire learn worker
+    (every chore + workflow dead — highest blast radius in the system). A
+    collision can come from two generated templates OR from a generated name
+    colliding with a static workflow. ``reserved_names`` carries the static
+    workflow names (worker.py passes them); any generated template whose name
+    is already reserved or already seen this scan is skipped (and logged),
+    never appended. The first occurrence wins; later colliders are dropped.
     """
+    seen_names: set[str] = set(reserved_names or set())
     base = Path(USER_CHORES_DIR)
     if not base.exists() or not base.is_dir():
         logger.debug("dynamic_loader: %s does not exist, skipping", base)
@@ -665,6 +688,22 @@ def load_user_chore_templates() -> list[type]:
                 continue
             # Temporal marks workflow classes by setting __temporal_workflow_definition
             if hasattr(attr, "__temporal_workflow_definition"):
+                # #S1-2 — drop a workflow whose Temporal name collides with a
+                # static workflow or another already-loaded template. Appending
+                # both would make Worker(...) reject the duplicate name and
+                # crash-loop the whole learn worker.
+                wf_name = _workflow_name_of(attr)
+                if wf_name and wf_name in seen_names:
+                    logger.warning(
+                        "dynamic_loader: SKIPPING %s — workflow name %r "
+                        "collision (already reserved/loaded); appending it "
+                        "would crash-loop the worker",
+                        py_file.name, wf_name,
+                    )
+                    skipped_count += 1
+                    continue
+                if wf_name:
+                    seen_names.add(wf_name)
                 loaded.append(attr)
                 found_in_file += 1
 

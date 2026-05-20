@@ -156,9 +156,12 @@ def signal_dict_to_create_kwargs(signal: dict[str, Any]) -> dict[str, Any]:
         salience = 0.0
 
     # The full extractor dict is the payload. We strip nothing — the
-    # rehydrator needs every field. ``status`` is stamped fresh as
-    # "unrouted" on the column; the payload copy (if any) is ignored on
-    # read so the column stays authoritative.
+    # rehydrator needs every field. ``status`` defaults to "unrouted" so a
+    # freshly extracted signal is routable (C2); an explicit non-blank
+    # status already on the dict (e.g. a re-projected/already-routed
+    # signal) is honoured rather than silently reset. The column stays
+    # authoritative on read; the payload copy is ignored.
+    status = str(signal.get("status") or "").strip() or "unrouted"
     payload = dict(signal)
     payload.setdefault("created", created)
 
@@ -178,7 +181,7 @@ def signal_dict_to_create_kwargs(signal: dict[str, Any]) -> dict[str, Any]:
             str(matter_path).strip() if isinstance(matter_path, str) and matter_path.strip() else None
         ),
         "salience": salience,
-        "status": "unrouted",
+        "status": status,
         "payload": payload,
     }
 

@@ -65,7 +65,10 @@ from src.workflows.chores._base import (
     load_chore_context,
     record_chore_run,
 )
-from src.workflows.chores._dynamic_loader import load_user_chore_templates
+from src.workflows.chores._dynamic_loader import (
+    _workflow_name_of,
+    load_user_chore_templates,
+)
 
 # Activities — chore assignment (onboarding Stage 7.5)
 from src.activities.assign_chores import assign_initial_chores
@@ -1119,7 +1122,18 @@ ALL_ACTIVITIES = [
 # when the activities are legitimate. Racy at startup because Python
 # module caching can mask the bug depending on import order — fix the
 # ordering so it's deterministic.
-_DYNAMIC_WORKFLOWS = load_user_chore_templates()
+# #S1-2 — reserve the static workflow names so a generated template that
+# collides with one (e.g. BriefingWorkflow) is dropped by the loader instead
+# of being appended and crash-looping the entire worker on Worker(...) dup
+# rejection. The loader also dedups generated-vs-generated collisions.
+_RESERVED_WORKFLOW_NAMES = {
+    name
+    for name in (_workflow_name_of(wf) for wf in _STATIC_WORKFLOWS)
+    if name
+}
+_DYNAMIC_WORKFLOWS = load_user_chore_templates(
+    reserved_names=_RESERVED_WORKFLOW_NAMES
+)
 
 ALL_WORKFLOWS = [*_STATIC_WORKFLOWS, *_DYNAMIC_WORKFLOWS]
 

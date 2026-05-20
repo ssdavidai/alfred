@@ -654,3 +654,112 @@ def _patch_loader_dirs(source: str, staged: Path):
     stack.enter_context(patch.object(_dynamic_loader, "USER_CHORES_DIR", source))
     stack.enter_context(patch.object(_dynamic_loader, "_STAGED_PACKAGE_DIR", staged))
     return stack
+
+
+def _wf_name(cls) -> str:
+    """Temporal workflow name of a loaded class (avoids name-mangling)."""
+    return getattr(cls, "__temporal_workflow_definition").name
+
+
+def _named_template_source(class_name: str, workflow_name: str) -> str:
+    """A valid template whose class name and Temporal workflow name differ.
+
+    Lets two distinct files (distinct stems/classes) declare the SAME
+    ``@workflow.defn(name=...)`` so we can exercise the name-collision dedup.
+    """
+    body = _good_template_source(class_name)
+    return body.replace(
+        f'@workflow.defn(name="{class_name}")',
+        f'@workflow.defn(name="{workflow_name}")',
+    )
+
+
+@pytest.fixture
+def real_staged_dir():
+    """Stage into the REAL `src.workflows.chores_dynamic` package path so
+    ``importlib.import_module`` can resolve the staged modules (the loader
+    imports by dotted name, which a temp dir off sys.path can't satisfy).
+    Cleaned up after the test."""
+    import shutil
+    from src.workflows.chores import _dynamic_loader
+
+    pkg_dir = Path(_dynamic_loader.__file__).resolve().parent.parent / "chores_dynamic"
+    yield pkg_dir
+    if pkg_dir.exists():
+        shutil.rmtree(pkg_dir, ignore_errors=True)
+
+
+class TestWorkflowNameDedup:
+    """#S1-2 — the loader must not return two classes with the same Temporal
+    workflow name. A collision (two generated templates, or a generated name
+    colliding with a static workflow) makes ``Worker(...)`` reject the
+    duplicate and crash-loop the entire learn worker — highest blast radius
+    in the system. The loader skips (and logs) the later collider."""
+
+    def test_two_generated_templates_same_name_deduped(
+        self, tmp_path, real_staged_dir, caplog
+    ):
+        import logging
+
+        source = tmp_path / "source"
+        source.mkdir()
+        # Two distinct files / classes, identical Temporal workflow name.
+        (source / "collide_a.py").write_text(
+            _named_template_source("CollideA", "DupWorkflow")
+        )
+        (source / "collide_b.py").write_text(
+            _named_template_source("CollideB", "DupWorkflow")
+        )
+
+        with caplog.at_level(logging.WARNING):
+            with _patch_loader_dirs(str(source), real_staged_dir):
+                loaded = load_user_chore_templates()
+
+        names = [_wf_name(wf) for wf in loaded]
+        # Exactly one survives — the duplicate is skipped, not appended.
+        assert names.count("DupWorkflow") == 1
+        assert len(loaded) == 1
+        assert any(
+            "DupWorkflow" in r.message and "collision" in r.message.lower()
+            for r in caplog.records
+        )
+
+    def test_generated_name_colliding_with_reserved_static_skipped(
+        self, tmp_path, real_staged_dir, caplog
+    ):
+        import logging
+
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "shadow.py").write_text(
+            _named_template_source("Shadow", "BriefingWorkflow")
+        )
+
+        with caplog.at_level(logging.WARNING):
+            with _patch_loader_dirs(str(source), real_staged_dir):
+                loaded = load_user_chore_templates(
+                    reserved_names={"BriefingWorkflow"}
+                )
+
+        # A generated template that shadows a static workflow is dropped.
+        assert loaded == []
+        assert any(
+            "BriefingWorkflow" in r.message and "collision" in r.message.lower()
+            for r in caplog.records
+        )
+
+    def test_distinct_names_all_loaded(self, tmp_path, real_staged_dir):
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "one.py").write_text(
+            _named_template_source("OneWf", "OneWorkflow")
+        )
+        (source / "two.py").write_text(
+            _named_template_source("TwoWf", "TwoWorkflow")
+        )
+
+        with _patch_loader_dirs(str(source), real_staged_dir):
+            loaded = load_user_chore_templates()
+
+        names = sorted(_wf_name(wf) for wf in loaded)
+        assert names == ["OneWorkflow", "TwoWorkflow"]
