@@ -139,6 +139,27 @@ for key in "${AUTO_SECRETS[@]}"; do
 	GENERATED=$((GENERATED + 1))
 done
 
+# ── 3. COMPOSIO_USER_ID ─────────────────────────────────────────────
+# A stable per-deploy identifier that scopes THIS install's Composio
+# connected accounts (managed OAuth). Not a random secret — it takes a
+# readable `alfred-owner-<rand>` form. It must never be empty or "default":
+# ctrl-api rejects the onboarding "connect Gmail" flow without it, and a
+# shared "default" would let separate installs collide on one Composio
+# account. init mirrors it to /alfred-data/.composio-user-id for the worker.
+existing_uid="$(env_get COMPOSIO_USER_ID)"
+if [[ -z "${existing_uid}" || "${existing_uid}" == "default" ]]; then
+	uid="alfred-owner-$(openssl rand -hex 4)"
+	if grep -qE "^#?COMPOSIO_USER_ID=" "${ENV_FILE}" 2>/dev/null; then
+		tmp="$(mktemp)"
+		awk -v v="${uid}" '$0 ~ "^#?COMPOSIO_USER_ID=" && !d { print "COMPOSIO_USER_ID=" v; d=1; next } { print }' "${ENV_FILE}" > "${tmp}"
+		mv "${tmp}" "${ENV_FILE}"
+	else
+		printf 'COMPOSIO_USER_ID=%s\n' "${uid}" >> "${ENV_FILE}"
+	fi
+	GENERATED=$((GENERATED + 1))
+	green "Generated COMPOSIO_USER_ID=${uid}"
+fi
+
 green "Auto-secrets: ${GENERATED} generated, ${KEPT} kept (already set)."
 bold ""
 green "Bootstrap complete. Next:  docker compose up -d"
