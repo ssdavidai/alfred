@@ -23,7 +23,7 @@ import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 
-const VAULT_ROOT = "/mnt/encrypted/vault";
+const VAULT_ROOT = process.env.VAULT_PATH ?? "/vault";
 const WEBHOOK_ENDPOINT_DIR = path.join(VAULT_ROOT, "webhook_endpoint");
 const STREAM_EVENT_DIR = path.join(VAULT_ROOT, "stream_event");
 

@@ -1227,7 +1227,10 @@ export function registerVaultRoutes(): void {
   // --- GRAPH: nodes + edges + agent activity ---
 
   addRoute("GET", "/api/v1/vault/graph", async ({ res }) => {
-    const AUDIT_LOG = "/mnt/encrypted/alfred/vault_audit.log";
+    const AUDIT_LOG = path.join(
+      process.env.ALFRED_DATA_DIR ?? "/alfred-data",
+      "vault_audit.log",
+    );
     const WIKILINK_RE = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
     const LINK_FIELDS = new Set([
       "related", "relationships", "participants", "outputs", "depends_on",
@@ -1364,7 +1367,10 @@ export function registerVaultRoutes(): void {
   // --- NEBULA: cluster + wikilink data for nebula visualization ---
 
   addRoute("GET", "/api/v1/vault/nebula-data", async ({ res }) => {
-    const SURVEYOR_STATE_PATH = "/mnt/encrypted/alfred/surveyor_state.json";
+    const SURVEYOR_STATE_PATH = path.join(
+      process.env.ALFRED_DATA_DIR ?? "/alfred-data",
+      "surveyor_state.json",
+    );
     const WIKILINK_RE = /\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/g;
 
     // Color mapping by record type
