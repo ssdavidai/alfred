@@ -259,8 +259,9 @@ class _FakeVaultClient:
         self.written: list[tuple[str, str, str]] = []
         self.existing_slugs: set[str] = set()
 
-    async def search_records(self, slug: str, record_type: str = ""):
-        return [slug] if slug in self.existing_slugs else []
+    async def record_exists(self, record_type: str, slug: str) -> bool:
+        # Exact-slug semantics (the real VaultClient.record_exists contract).
+        return slug in self.existing_slugs
 
     async def write_record(self, record_type: str, slug: str, content: str):
         self.written.append((record_type, slug, content))

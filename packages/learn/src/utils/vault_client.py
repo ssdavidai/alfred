@@ -175,6 +175,25 @@ class VaultClient:
 
         return results[:limit]
 
+    async def record_exists(self, record_type: str, slug: str) -> bool:
+        """Exact-slug existence check for a vault record.
+
+        ``search_records`` is a grep substring search — using it as an
+        existence guard means a slightly-renamed re-onboard run (e.g.
+        ``weekly-stripe-reviews`` vs an existing ``weekly-stripe-review``)
+        either false-positives (substring match → silently skips a real
+        new record) or false-negatives (no substring → writes a duplicate,
+        the matter 9→16 / chore 7→14 class). This compares the canonical
+        ``<record_type>/<slug>.md`` path and the record ``slug`` field
+        exactly against the typed listing, so a re-run dedups reliably.
+        """
+        target_path = f"{record_type}/{slug}.md"
+        records = await self.list_records(record_type, limit=1000)
+        for r in records:
+            if r.get("slug") == slug or r.get("path") == target_path:
+                return True
+        return False
+
     async def search_records(
         self,
         query: str,
