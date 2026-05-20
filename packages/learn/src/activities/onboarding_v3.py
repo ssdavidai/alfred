@@ -275,6 +275,42 @@ def _parse_json_with_key(raw: str, key: str) -> dict:
     except Exception:
         pass
 
+    # Final salvage: recover complete array elements. When the truncation lands
+    # mid-element (e.g. a key with no value yet), brace-repair can't produce
+    # valid JSON — but every COMPLETE {...} object before the cutoff is still
+    # good. Walk the `key` array, collect each fully-closed object, and drop the
+    # partial tail. Better a few hundred real facts than zero.
+    try:
+        kpos = text.find(f'"{key}"')
+        arr_start = text.find("[", kpos) if kpos >= 0 else -1
+        if arr_start >= 0:
+            items: list = []
+            i = arr_start + 1
+            n = len(text)
+            while i < n:
+                while i < n and text[i] in " \t\r\n,":
+                    i += 1
+                if i >= n or text[i] == "]":
+                    break
+                if text[i] != "{":
+                    break
+                end = _string_aware_json_object_span(text, i)
+                if end is None:
+                    break  # partial trailing object — stop, keep what we have
+                try:
+                    items.append(json.loads(text[i:end + 1]))
+                except json.JSONDecodeError:
+                    break
+                i = end + 1
+            if items:
+                logger.info(
+                    "onboarding_v3: salvaged %d complete '%s' element(s) from truncated JSON",
+                    len(items), key,
+                )
+                return {key: items}
+    except Exception:
+        pass
+
     logger.error("onboarding_v3: failed to parse '%s' from LLM response (len=%d)", key, len(raw))
     return {}
 
@@ -483,7 +519,12 @@ The key_identity_facts are the 8-12 most important facts about who this person I
 
 Be EXHAUSTIVE on the facts. This is about the WHOLE person — their family dinners matter as much as their business deals. Extract every person, place, service, habit, preference, and pattern you can find. Hundreds of facts expected from {len(emails)} emails."""
 
-    raw = await _call_llm(prompt, max_tokens=16384)
+    # The prompt asks for "hundreds of facts, be EXHAUSTIVE" — at 16384 the
+    # response truncated mid-array (observed: a 57.7k-char cutoff → unparseable
+    # → 0 facts → empty verify screen). Give it real headroom so the full
+    # facts + key_identity_facts object lands; the parser salvages anyway if a
+    # very large inbox still overruns.
+    raw = await _call_llm(prompt, max_tokens=32000)
 
     # Parse JSON — use brace-depth tracking (not greedy regex)
     parsed = _parse_json_with_facts(raw)
