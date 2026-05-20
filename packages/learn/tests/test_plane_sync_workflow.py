@@ -2697,6 +2697,77 @@ class TestStalenessCheck:
             f"update_issue must fire when our signature is authoritative; got {update_calls}"
         )
 
+    def test_one_stale_field_does_not_suppress_fresh_fields(
+        self, monkeypatch, tmp_path,
+    ):
+        """Regression: when Plane is the newer author the filter must still
+        push fields Plane holds NO competing value for (fresh vault edits),
+        deferring only the genuinely-conflicting field. Previously the loop
+        only populated ``deferred`` and returned ``({}, deferred)`` for the
+        whole body, so a single externally-touched field suppressed every
+        legitimate field push.
+        """
+        from src.activities import plane_sync as ps
+        # No signature file → we never authored last → Plane is newer.
+        sig_path = tmp_path / "sigs.json"
+        monkeypatch.setattr(ps, "_outbound_sigs_path", lambda: sig_path)
+
+        update_calls: list[dict] = []
+
+        class FakeClient:
+            async def get_issue(self, project_id, issue_id):
+                # Plane holds a real diverging NAME (externally edited =
+                # the stale/conflicting field). priority + target_date are
+                # absent/empty on Plane → no competing value → fresh.
+                return {
+                    "id": issue_id,
+                    "name": "renamed-by-sir-in-plane",
+                    "state": None,
+                    "priority": "none",
+                    "target_date": None,
+                    "updated_at": "2026-05-04T12:00:00.000000Z",
+                    "labels": [],
+                    "assignees": [],
+                }
+
+            async def update_issue(self, project_id, issue_id, body):
+                update_calls.append({"body": body})
+                return {}
+
+            async def resolve_state_id(self, project_id, state_group):
+                return None
+
+            async def close(self):
+                pass
+
+        out = self._run_activity(
+            task={
+                "slug": "pavilion",
+                "frontmatter": {
+                    "name": "pavilion-vault-name",  # diverges → stale (Plane has a real value)
+                    "priority": "high",             # fresh: Plane has 'none'/empty
+                    "due_date": "2026-06-01",       # fresh: Plane target_date is null
+                },
+                "matter_slug": "alpha",
+                "body": "",
+            },
+            project_map={"alpha": "prj-alpha"},
+            issue_map={"pavilion": "iss-pavilion"},
+            fake_client=FakeClient(),
+            monkeypatch=monkeypatch,
+        )
+
+        # The fresh fields must be pushed; the stale name must be deferred.
+        assert len(update_calls) == 1, (
+            f"fresh fields must still PATCH even when one field is stale; got {update_calls}"
+        )
+        body = update_calls[0]["body"]
+        assert "name" not in body, f"stale name must be deferred, not pushed; got {body}"
+        assert body.get("priority") == "high", f"fresh priority must be pushed; got {body}"
+        assert body.get("target_date") == "2026-06-01", f"fresh target_date must be pushed; got {body}"
+        assert out.get("action") == "update", out
+        assert "name" in (out.get("deferred_fields") or []), out
+
 
 class _AsyncReturn:
     """Tiny coroutine helper for monkeypatching async functions in tests."""

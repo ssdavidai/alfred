@@ -212,8 +212,15 @@ def _filter_stale_fields(
       - If our outbound signature is authoritative (most recent author
         was us): keep all fields. We own the state; the diff IS our
         latest intent.
-      - If Plane is the most recent author and the values differ: drop
-        the field, append to deferred.
+      - If Plane is the most recent author and the values differ: this
+        is per-FIELD, not whole-issue. A newer ``plane.updated_at`` means
+        SOMETHING was touched externally, but typically only one field.
+        Defer ONLY the fields where Plane already holds a real competing
+        value (pushing ours would stomp an external edit reverse-sync
+        hasn't yet mirrored). Fields where Plane holds no competing value
+        (null / empty / absent) are still pushed — our write cannot stomp
+        an edit that isn't there, so suppressing them just loses
+        legitimate vault changes.
     """
     plane_updated_ms = _parse_plane_updated_at_ms(plane_issue.get("updated_at"))
     we_authored_last = _our_signature_is_authoritative(plane_id, plane_updated_ms)
@@ -225,8 +232,9 @@ def _filter_stale_fields(
         # behaviour identical when our writes are the most recent.)
         return issue_body, []
 
-    # Plane was touched by an external actor since our last write. Drop
-    # any field where Plane's value diverges from ours.
+    # Plane was touched by an external actor since our last write — but
+    # only ever for the field(s) Plane now holds a real competing value
+    # for. Push the rest.
     filtered: dict[str, Any] = {}
     deferred: list[str] = []
     for field, our_value in issue_body.items():
@@ -235,14 +243,20 @@ def _filter_stale_fields(
         if plane_value == our_norm:
             # Identical — no diff to send. Drop.
             continue
-        # Plane is newer AND values differ → defer to reverse-sync.
-        deferred.append(field)
-        logger.info(
-            "plane_sync.deferred_by_staleness slug=%s plane_id=%s field=%s "
-            "(plane.updated_at newer than our last outbound signature; "
-            "letting reverse-sync land Plane's value first)",
-            slug, plane_id, field,
-        )
+        if _plane_holds_competing_value(plane_value):
+            # Plane has a real diverging value → defer to reverse-sync so
+            # it lands Plane's value into the vault first.
+            deferred.append(field)
+            logger.info(
+                "plane_sync.deferred_by_staleness slug=%s plane_id=%s field=%s "
+                "(plane.updated_at newer than our last outbound signature; "
+                "letting reverse-sync land Plane's value first)",
+                slug, plane_id, field,
+            )
+            continue
+        # Plane holds nothing competing here (null / empty / absent) — our
+        # write can't stomp an external edit, so push the fresh vault value.
+        filtered[field] = our_value
     return filtered, deferred
 
 
@@ -270,6 +284,24 @@ def _normalise_our_field(field: str, value: Any) -> Any:
     if field in ("labels", "assignees"):
         return list(value or [])
     return value
+
+
+def _plane_holds_competing_value(plane_value: Any) -> bool:
+    """True iff Plane currently holds a real value for this field that our
+    push would overwrite.
+
+    The staleness filter only defers a field when there is something on
+    Plane to protect. A field Plane left null / empty / absent (or, for
+    the ``priority`` enum, Plane's ``"none"`` default) cannot hold an
+    external edit, so pushing our fresh vault value into it is safe.
+    """
+    if plane_value is None:
+        return False
+    if isinstance(plane_value, str) and plane_value.strip() in ("", "none"):
+        return False
+    if isinstance(plane_value, (list, dict)) and not plane_value:
+        return False
+    return True
 
 
 def _record_outbound_signature(plane_id: str, payload: dict[str, Any]) -> None:
@@ -1440,9 +1472,15 @@ async def sync_task_to_plane(
         )
 
         existing_id = issue_map.get(slug)
+        # Stable copies of the logical intent — the staleness filter may
+        # drop these from ``issue_body`` (deferred fields), but the outbound
+        # signature hash below must always reflect what we LOGICALLY intend
+        # so reverse-sync can recognise the echo.
+        issue_name = _sanitize_plane_name(str(update.get("name") or slug))
+        issue_priority = update.get("priority") or "none"
         issue_body: dict[str, Any] = {
-            "name": _sanitize_plane_name(str(update.get("name") or slug)),
-            "priority": update.get("priority") or "none",
+            "name": issue_name,
+            "priority": issue_priority,
             "labels": label_ids,
         }
         if description_html:
@@ -1454,6 +1492,7 @@ async def sync_task_to_plane(
         if assignees:
             issue_body["assignees"] = assignees
 
+        deferred_fields: list[str] = []
         if existing_id:
             # ── Staleness check (per-field conflict resolution) ──────────
             #
@@ -1647,9 +1686,9 @@ async def sync_task_to_plane(
         # Build a guard-compatible payload — the hash only uses logical
         # (not UUID-bound) fields so labels/state_id are omitted.
         outbound_for_hash: dict[str, Any] = {
-            "name": issue_body["name"],
+            "name": issue_name,
             "description": description_html,
-            "priority": issue_body["priority"],
+            "priority": issue_priority,
             "state": state_group or "",
             "due_date": target_date or "",
             "assignees": assignees,
@@ -1660,6 +1699,7 @@ async def sync_task_to_plane(
             "plane_id": plane_id,
             "action": action,
             "project_id": project_id,
+            "deferred_fields": deferred_fields,
         }
     finally:
         await client.close()
