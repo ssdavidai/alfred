@@ -106,6 +106,11 @@ function ritualPathForStage(stage: string): string {
     case "automations":
     case "brief":
       return "/composing";
+    // Post-brief background generation (matter/instinct/errand packs, then
+    // chore code-gen). The brief is already composed — never bounce these to
+    // the top of the ritual; show the brief at worst.
+    case "packs":
+    case "chores":
     case "done":
       return "/first-brief";
     default:
@@ -179,7 +184,14 @@ export default function DeskOnboardingGate({
 
   const stage = String(progress?.stage ?? "");
   const isNotStarted = NOT_STARTED_STAGES.has(stage);
-  const isDone = stage === "done";
+  // The interactive ritual ends at the brief. The post-brief stages
+  // (packs / chores) generate matters, instincts, errands and bespoke chore
+  // workflows in the BACKGROUND — by then the principal has seen their brief
+  // and should be allowed onto the Desk, not bounced back into the ritual
+  // (the default ritual route for an unhandled stage is /awaken). Treat them,
+  // and "done", as complete for gating.
+  const COMPLETE_STAGES = new Set(["done", "packs", "chores"]);
+  const isDone = COMPLETE_STAGES.has(stage);
   const isRunning = !isNotStarted && !isDone && stage !== "";
 
   // Whichever mode is active, this is "Gmail is connected" — the gate's
