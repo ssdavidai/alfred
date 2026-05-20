@@ -22,6 +22,7 @@ const TICK_MS = 80;
 
 export default function ReadingTheRoomPage() {
   const [day, setDay] = useState(0);
+  const [revealed, setRevealed] = useState(0);
   const navigate = useNavigate();
 
   const { data: progress } = useQuery(getOnboardingProgress, undefined, {
@@ -45,23 +46,28 @@ export default function ReadingTheRoomPage() {
     progress?.progress?.total_days ??
     0) as number;
 
+  // Drip-reveal the narration on its OWN timer, starting when the lines
+  // arrive. The backend generates them only after the multi-minute email
+  // fetch — long after the 8s scan animation ends — so pacing the reveal off
+  // `day` dumped them all at once. This reveals one line at a time as they land.
+  useEffect(() => {
+    if (narration.length === 0 || revealed >= narration.length) return;
+    const t = setTimeout(() => setRevealed((r) => r + 1), 1600);
+    return () => clearTimeout(t);
+  }, [narration.length, revealed]);
+  const visible = narration.slice(0, revealed);
+
   const animationDone = day >= TOTAL_DAYS;
   const backendReady =
     stage === "awaiting_verification" || stage === "brief" || stage === "done";
   const done = animationDone && backendReady;
 
-  // Progressively reveal the REAL butler narration, paced by the scan.
-  const revealCount = narration.length
-    ? Math.min(
-        narration.length,
-        Math.floor((day / TOTAL_DAYS) * narration.length) + 1,
-      )
-    : 0;
-  const visible = narration.slice(0, revealCount);
-
-  // Real message counter ramps toward the real total as the scan animates.
+  // Message counter ramps with the reveal once narration is present (in step
+  // with the drip); before the lines arrive it tracks the scan animation.
   const shownMessages = messagesRead
-    ? Math.floor((day / TOTAL_DAYS) * messagesRead)
+    ? narration.length
+      ? Math.floor((revealed / narration.length) * messagesRead)
+      : Math.floor((day / TOTAL_DAYS) * messagesRead)
     : 0;
 
   useEffect(() => {
