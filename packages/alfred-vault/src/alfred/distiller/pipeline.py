@@ -23,8 +23,10 @@ from pathlib import Path
 
 from alfred.vault.mutation_log import log_mutation, read_mutations
 from alfred.vault.ops import VaultError, vault_edit
+from alfred.vault.schema import DISTILLER_CREATABLE_TYPES
 
 from .backends import VAULT_CLI_REFERENCE
+from .confidence import bump_confidence
 from .backends.openclaw import _clear_agent_sessions, _sync_workspace_claude_md
 from .candidates import (
     CandidateSignal,
@@ -541,11 +543,12 @@ def _stage2_dedup_merge(
                                 m["entity_links"].append(nested)
                     elif el not in m["entity_links"]:
                         m["entity_links"].append(el)
-                # Bump confidence when multiple sources agree
-                if m["source_count"] >= 3 and m["confidence"] == "low":
-                    m["confidence"] = "medium"
-                elif m["source_count"] >= 2 and m["confidence"] == "medium":
-                    m["confidence"] = "high"
+                # Bump confidence when multiple sources agree. Source count
+                # alone can lend modest support (low→medium) but must NEVER
+                # manufacture `high` — see confidence.bump_confidence (bug #12).
+                m["confidence"] = bump_confidence(
+                    m["confidence"], m["source_count"]
+                )
                 matched = True
                 break
 
@@ -580,6 +583,14 @@ def _stage2_dedup_merge(
 
     specs: list[LearningSpec] = []
     for m in merged:
+        # bug #12: the distiller must not author principal-facing `decision/`
+        # records (they are indistinguishable from the principal's own
+        # decisions). Drop them before Stage 3 — the scope gate would reject
+        # the write anyway; skipping here also avoids a wasted LLM call.
+        if m["type"] not in DISTILLER_CREATABLE_TYPES:
+            log.info("pipeline.s2_skip_non_creatable", type=m["type"], title=m["title"])
+            continue
+
         is_dup = False
         for existing_type, existing_title in existing_titles:
             if (
