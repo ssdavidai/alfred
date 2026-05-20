@@ -1019,8 +1019,12 @@ export const getOnboardingProgress: GetOnboardingProgress<void, any> = async (
     });
   } catch (e) {
     console.error("Failed to fetch onboarding progress:", e);
+    // A proxy/transport error must NOT read as "not_started" — that bounced an
+    // already-onboarded principal back to the Start-onboarding CTA on a transient
+    // ctrl-api hiccup (FAILURE-MODES web bug #4). Return a distinct sentinel the
+    // gate treats as indeterminate (keep the Desk); the 5s poll retries.
     return {
-      stage: "not_started",
+      stage: "fetch_error",
       progress: { current_day: 0, total_days: 0, facts_count: 0, patterns_count: 0 },
       facts_count: 0,
       patterns_count: 0,

@@ -192,6 +192,13 @@ export default function DeskOnboardingGate({
 
   const stage = String(progress?.stage ?? "");
   const isNotStarted = NOT_STARTED_STAGES.has(stage);
+  // A transient ctrl-api fetch error surfaces as stage="fetch_error"
+  // (operations.getOnboardingProgress) — indeterminate, NOT "not started".
+  // Treat it like the complete stages: render the Desk, show no CTA, do not
+  // bounce into the ritual. The 5s poll retries and resolves the real stage,
+  // so an onboarded principal is never kicked back to onboarding on a hiccup
+  // (FAILURE-MODES web bug #4).
+  const isFetchError = stage === "fetch_error";
   // The interactive ritual ends at the brief. The post-brief stages
   // (packs / chores) generate matters, instincts, errands and bespoke chore
   // workflows in the BACKGROUND — by then the principal has seen their brief
@@ -200,7 +207,7 @@ export default function DeskOnboardingGate({
   // and "done", as complete for gating.
   const COMPLETE_STAGES = new Set(["done", "packs", "chores"]);
   const isDone = COMPLETE_STAGES.has(stage);
-  const isRunning = !isNotStarted && !isDone && stage !== "";
+  const isRunning = !isNotStarted && !isDone && !isFetchError && stage !== "";
 
   // Whichever mode is active, this is "Gmail is connected" — the gate's
   // single connected-detection signal. In `google` mode it's the
