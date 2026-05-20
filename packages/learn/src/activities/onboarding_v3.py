@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -105,9 +106,34 @@ def _read_onboard(path: str) -> dict:
 
 
 def _write_onboard(path: str, data: dict) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    """Atomically persist ``data`` to ``path`` (#BUG-5).
+
+    Serialize fully to a temp file in the same directory, fsync, then
+    ``os.replace`` it over the destination. ``os.replace`` is an atomic
+    rename on POSIX, so a concurrent ``/onboarding/progress`` reader sees
+    either the old file or the complete new one — never the torn,
+    half-written file an in-place ``open(w)`` + ``json.dump`` exposes.
+    Serialization happens before any rename, so an unserializable payload
+    raises without disturbing the existing good file, and the temp file is
+    cleaned up on any failure.
+    """
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=".onboard-", suffix=".tmp", dir=directory
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _string_aware_json_object_span(text: str, start: int) -> int | None:
