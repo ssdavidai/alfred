@@ -710,33 +710,36 @@ def _vexa_enabled() -> bool:
 def _signal_extract_enabled() -> bool:
     """Feature flag for Phase 6 signal extraction (RFC #842).
 
-    Default OFF. Tenants opt in by setting
-    ``STEWARD_SIGNAL_EXTRACT_ENABLED=true``. On david this gets flipped
-    on at T6.0.6 deploy time. Fleet rollout is part of T6.fleet.3.
+    Default ON (#6). A fresh single-tenant box must register the
+    SignalExtract schedule or the whole signal pipeline never starts and
+    the Desk is silently empty. An operator can still disable it
+    explicitly by setting ``STEWARD_SIGNAL_EXTRACT_ENABLED`` to a falsy
+    value (``false``/``0``/``no``).
 
-    Same shape as ``_vexa_enabled`` — single-source registration-time
-    gate. Workflow itself does not re-check the env (would break
-    Temporal determinism), so flipping the flag off requires a deploy
-    that re-runs ``register_schedules`` to delete the schedule.
+    Single-source registration-time gate. The workflow itself does not
+    re-check the env (would break Temporal determinism), so flipping the
+    flag off requires a deploy that re-runs ``register_schedules`` to
+    delete the schedule.
     """
     return os.environ.get(
         "STEWARD_SIGNAL_EXTRACT_ENABLED", "",
-    ).strip().lower() in ("true", "1", "yes")
+    ).strip().lower() not in ("false", "0", "no", "off")
 
 
 def _signal_router_enabled() -> bool:
     """Feature flag for Phase 6 signal router (T6.3.3 / T6.3.4).
 
-    Default OFF. Tenants opt in by setting
-    ``STEWARD_SIGNAL_ROUTER_ENABLED=true``. Independent from
-    ``STEWARD_SIGNAL_EXTRACT_ENABLED`` so a tenant can run signal
-    extraction (write-only) for a soak period before flipping the
-    router on. Same single-source registration-time gate as the rest of
-    the Phase 6 flags.
+    Default ON (#6) — independent from ``STEWARD_SIGNAL_EXTRACT_ENABLED``
+    so a tenant can still run extraction (write-only) without the router
+    by disabling this flag alone. Without a routed signal there is no
+    Desk card, so a fresh box defaults the router on too. Disable
+    explicitly with a falsy value (``false``/``0``/``no``). Same
+    single-source registration-time gate as the rest of the Phase 6
+    flags.
     """
     return os.environ.get(
         "STEWARD_SIGNAL_ROUTER_ENABLED", "",
-    ).strip().lower() in ("true", "1", "yes")
+    ).strip().lower() not in ("false", "0", "no", "off")
 
 
 def _reversal_calibration_enabled() -> bool:
@@ -883,8 +886,8 @@ async def register_transcript_intake(client: Client, task_queue: str) -> None:
 async def register_signal_extract(client: Client, task_queue: str) -> None:
     """Create-or-delete ``al-signal-extract`` based on the Phase 6 flag.
 
-    Gate: ``STEWARD_SIGNAL_EXTRACT_ENABLED=true``. T6.0.6 enables this
-    on david only; T6.fleet.3 rolls it out fleet-wide.
+    Gate: ``STEWARD_SIGNAL_EXTRACT_ENABLED`` — default ON (#6), disable
+    with a falsy value (``false``/``0``/``no``).
 
     Uses a 25-minute execution timeout (not the 5-min singleton default)
     because the workflow processes up to 100 events in 10 serial chunks
@@ -967,8 +970,9 @@ async def register_reversal_calibration(
 async def register_signal_router(client: Client, task_queue: str) -> None:
     """Create-or-delete ``al-signal-router`` based on the Phase 6.3 flag.
 
-    Gate: ``STEWARD_SIGNAL_ROUTER_ENABLED=true``. Default OFF — flipping
-    it on triggers signal-mutation routing (and, after T6.4.x ships,
+    Gate: ``STEWARD_SIGNAL_ROUTER_ENABLED`` — default ON (#6), disable
+    with a falsy value (``false``/``0``/``no``). The router triggers
+    signal-mutation routing (and, after T6.4.x ships,
     signal-action routing). The mode (shadow vs. live) is governed by
     a SEPARATE env (``STEWARD_SIGNAL_ROUTER_LIVE_MODE``) which the
     activity reads on each invocation; the registration-time flag here
