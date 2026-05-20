@@ -94,7 +94,7 @@ All three images run as Docker containers within the tenant Docker Compose stack
 | Dependency | Source | Pinning Status |
 |-----------|--------|---------------|
 | OpenClaw | `git clone --depth 1 https://github.com/openclaw/openclaw.git` | **Unpinned** (HEAD of default branch) |
-| Alfred | `git clone --depth 1 https://github.com/ssdavidai/alfred.git` | **Unpinned** (HEAD of default branch) |
+| Alfred (vault CLI) | vendored in-repo at `packages/alfred-vault` (COPYd into the alfred-worker + init images at build time) | **In-repo** (no external fetch) |
 
 ### Consumed By
 

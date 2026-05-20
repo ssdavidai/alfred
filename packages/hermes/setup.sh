@@ -51,26 +51,20 @@ info "Checking prerequisites..."
 require_cmd python3 "Install Python 3.11+ first."
 check_python_version
 require_cmd openclaw "Install OpenClaw first: npm install -g openclaw"
-require_cmd git "Install git first."
 
-# --- Clone or locate Alfred ---
+# --- Locate the in-repo Alfred vault package ---
+# This script ships inside the Alfred monorepo; the alfred-vault package
+# lives at <repo>/packages/alfred-vault. No external clone — the source is
+# already here. Update by running `git pull` on the monorepo itself.
 
 echo ""
-ALFRED_DIR="${ALFRED_DIR:-$HOME/.alfred}"
-read -r -p "Alfred install directory [$ALFRED_DIR]: " user_alfred_dir
-ALFRED_DIR="${user_alfred_dir:-$ALFRED_DIR}"
-
-if [[ -d "$ALFRED_DIR/.git" ]]; then
-    ok "Alfred repo already exists at $ALFRED_DIR"
-    cd "$ALFRED_DIR"
-    info "Pulling latest..."
-    git pull --ff-only || warn "Could not pull latest (non-fast-forward). Using existing checkout."
-else
-    info "Cloning Alfred to $ALFRED_DIR..."
-    git clone https://github.com/ssdavidai/alfred.git "$ALFRED_DIR"
-    cd "$ALFRED_DIR"
-    ok "Cloned"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+ALFRED_DIR="${ALFRED_DIR:-$REPO_ROOT/packages/alfred-vault}"
+if [[ ! -f "$ALFRED_DIR/pyproject.toml" ]]; then
+    fail "alfred-vault package not found at $ALFRED_DIR — run this script from a checkout of the Alfred monorepo (or set ALFRED_DIR)."
 fi
+ok "Using in-repo alfred-vault at $ALFRED_DIR"
+cd "$ALFRED_DIR"
 
 # --- Install Alfred + surveyor deps ---
 
@@ -88,7 +82,9 @@ VAULT_PATH="${VAULT_PATH:-$DEFAULT_VAULT}"
 # Resolve to absolute path
 VAULT_PATH="$(cd "$(dirname "$VAULT_PATH")" 2>/dev/null && pwd)/$(basename "$VAULT_PATH")" 2>/dev/null || VAULT_PATH="$(realpath -m "$VAULT_PATH")"
 
-SCAFFOLD_DIR="$ALFRED_DIR/scaffold"
+# Resolve the bundled scaffold from the installed package (works regardless
+# of the package's on-disk layout).
+SCAFFOLD_DIR="$(python3 -c 'from alfred._data import get_scaffold_dir; print(get_scaffold_dir())')"
 
 if [[ ! -d "$VAULT_PATH" ]]; then
     info "Creating vault at $VAULT_PATH from scaffold..."
@@ -118,9 +114,10 @@ info "Copying Alfred skills to OpenClaw workspace..."
 OPENCLAW_SKILLS="$HOME/.openclaw/workspace/skills"
 mkdir -p "$OPENCLAW_SKILLS"
 
+ALFRED_SKILLS_DIR="$(python3 -c 'from alfred._data import get_skills_dir; print(get_skills_dir())')"
 for skill in vault-curator vault-janitor vault-distiller; do
     rm -rf "${OPENCLAW_SKILLS:?}/$skill"
-    cp -r "$ALFRED_DIR/skills/$skill" "$OPENCLAW_SKILLS/$skill"
+    cp -r "$ALFRED_SKILLS_DIR/$skill" "$OPENCLAW_SKILLS/$skill"
 done
 ok "Skills copied to $OPENCLAW_SKILLS"
 

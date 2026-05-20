@@ -33,12 +33,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /setup
 
-# Clone Alfred at a pinned commit — provides the vault scaffold + the
-# vault-worker skills (vault-curator / vault-janitor / vault-distiller).
-ARG ALFRED_SHA=e510cbe84217d091811c3e4217ed15a8a72234f2
-RUN git init /alfred-src && \
-    git -C /alfred-src fetch --depth 1 https://github.com/ssdavidai/alfred.git ${ALFRED_SHA} && \
-    git -C /alfred-src checkout FETCH_HEAD
+# Alfred vault package — vendored in-repo at packages/alfred-vault (no
+# external fetch). Provides the vault scaffold + the vault-worker skills
+# (vault-curator / vault-janitor / vault-distiller) via the package's
+# _bundled/ data. Installed --no-deps: the init container only needs the
+# scaffold + skills + alfred._data, not the daemon's runtime dependencies.
+COPY packages/alfred-vault /alfred-src
 RUN pip install --no-cache-dir --no-deps /alfred-src
 
 # Jinja2 — the init container renders the per-profile Hermes config.yaml +

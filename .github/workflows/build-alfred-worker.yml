@@ -1,8 +1,10 @@
 # Build + push the alfred-worker image (the Alfred vault daemon).
 #
 # Dockerfile: packages/hermes/dockerfiles/alfred.Dockerfile — Python + the
-# alfred-vault CLI + the Hermes-native openclaw-wrapper. Context is
-# packages/hermes (the Dockerfile COPYs openclaw-wrapper + the entrypoint).
+# alfred-vault CLI (vendored in-repo at packages/alfred-vault) + the
+# Hermes-native openclaw-wrapper. Context is the REPO ROOT (the Dockerfile
+# COPYs packages/alfred-vault for the CLI source and packages/hermes/* for
+# the wrapper + entrypoint).
 name: build-alfred-worker
 
 on:
@@ -12,6 +14,7 @@ on:
       - "packages/hermes/dockerfiles/alfred.Dockerfile"
       - "packages/hermes/dockerfiles/alfred-entrypoint.sh"
       - "packages/hermes/openclaw-wrapper"
+      - "packages/alfred-vault/**"
       - ".github/workflows/build-alfred-worker.yml"
   workflow_dispatch:
 
@@ -40,7 +43,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: packages/hermes
+          context: .
           file: packages/hermes/dockerfiles/alfred.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true

@@ -7,6 +7,6 @@
 # v2026.5.16 == release v0.14.0 (latest at time of writing).
 HERMES_REF=v2026.5.16
 
-# Alfred — the vault scaffold + vault-worker skills, used by the init
-# container. https://github.com/ssdavidai/alfred
-ALFRED_SHA=320e6864a0ce84169e9839f15d15888b7d848c34
+# NOTE: the Alfred vault CLI is no longer fetched at a pinned external SHA.
+# It is vendored in-repo at packages/alfred-vault and COPYd into the
+# alfred-worker + init images at build time (see those Dockerfiles).

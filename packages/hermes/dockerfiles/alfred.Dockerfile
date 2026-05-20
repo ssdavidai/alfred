@@ -3,12 +3,14 @@
 # alfred-worker — the Alfred vault daemon (vault-curator / janitor / distiller
 # / surveyor).
 #
-# Python runtime + the `alfred` CLI (alfred-vault, public repo) + the
-# openclaw-wrapper. The wrapper speaks Hermes `POST /v1/runs` over HTTP
-# (Phase 2) — so this image no longer builds or bundles OpenClaw at all.
+# Python runtime + the `alfred` CLI (alfred-vault, vendored in-repo at
+# packages/alfred-vault) + the openclaw-wrapper. The wrapper speaks Hermes
+# `POST /v1/runs` over HTTP (Phase 2) — so this image no longer builds or
+# bundles OpenClaw at all.
 #
-# Build context: packages/hermes (the Dockerfile COPYs openclaw-wrapper and
-# dockerfiles/alfred-entrypoint.sh relative to it).
+# Build context: REPO ROOT. The Dockerfile COPYs the alfred-vault source from
+# packages/alfred-vault and the wrapper + entrypoint from packages/hermes.
+# No external git fetch — the CLI source lives in this monorepo.
 # =============================================================================
 FROM python:3.11-slim-bookworm
 
@@ -22,21 +24,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-# Alfred vault CLI — pinned commit of the public alfred-vault repo.
+# Alfred vault CLI — vendored in-repo at packages/alfred-vault (no external
+# fetch). scaffold/ and skills/ ship via the package's _bundled/ data on
+# pip install.
 WORKDIR /app
-ARG ALFRED_SHA=cbedd04b1e988cb22fded1414661ff71e4d13cb2
-RUN git init /alfred-src && \
-    git -C /alfred-src fetch --depth 1 https://github.com/ssdavidai/alfred.git ${ALFRED_SHA} && \
-    git -C /alfred-src checkout FETCH_HEAD
-# scaffold/ and skills/ are bundled via _bundled/ by pip install.
-RUN cp /alfred-src/pyproject.toml /alfred-src/README.md /app/ && \
-    cp -r /alfred-src/src /app/src && \
-    rm -rf /alfred-src
+COPY packages/alfred-vault/pyproject.toml packages/alfred-vault/README.md /app/
+COPY packages/alfred-vault/src /app/src
 RUN pip install --no-cache-dir -e ".[all]"
 
 # The Hermes-native gateway wrapper (POST /v1/runs) + the daemon entrypoint.
-COPY openclaw-wrapper /usr/local/bin/openclaw-wrapper
-COPY dockerfiles/alfred-entrypoint.sh /app/entrypoint.sh
+COPY packages/hermes/openclaw-wrapper /usr/local/bin/openclaw-wrapper
+COPY packages/hermes/dockerfiles/alfred-entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /usr/local/bin/openclaw-wrapper /app/entrypoint.sh
 
 ENTRYPOINT ["/app/entrypoint.sh"]
