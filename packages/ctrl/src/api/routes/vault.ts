@@ -175,6 +175,13 @@ const KNOWN_TYPES = [
   //               writes through POST /api/v1/vault/records with the
   //               structured `content` body.
   "briefing",
+  // Canonical types (db/promotionContract.ts CANONICAL_RECORD_TYPES) that were
+  // missing from this read allowlist, so GET /vault/list/daybook and /place
+  // 400'd valid records:
+  //  - daybook : the principal's day-by-day journal entries.
+  //  - place   : a location/venue record.
+  // (Demoted legacy types above stay until the C11 contract-enforcement pass.)
+  "daybook", "place",
 ];
 
 const STATUS_BY_TYPE: Record<string, string[]> = {

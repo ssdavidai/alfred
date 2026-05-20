@@ -168,6 +168,23 @@ describe("GET /api/v1/vault/list/:type", () => {
     assert.strictEqual(status, 400);
     assert.ok(data.error.message.includes("Unknown vault type"));
   });
+
+  // KNOWN_TYPES was missing two canonical types (db/promotionContract.ts):
+  // daybook and place. Records of those types are valid writes, but the read
+  // route 400'd them because the read allowlist disagreed with the contract.
+  it("accepts canonical type 'daybook' (no longer Unknown vault type)", async () => {
+    readdirSyncFn.mock.mockImplementation(() => []);
+    const { status, data } = await req("GET", "/api/v1/vault/list/daybook");
+    assert.strictEqual(status, 200);
+    assert.ok(Array.isArray(data.results));
+  });
+
+  it("accepts canonical type 'place' (no longer Unknown vault type)", async () => {
+    readdirSyncFn.mock.mockImplementation(() => []);
+    const { status, data } = await req("GET", "/api/v1/vault/list/place");
+    assert.strictEqual(status, 200);
+    assert.ok(Array.isArray(data.results));
+  });
 });
 
 describe("POST /api/v1/vault/records", () => {
