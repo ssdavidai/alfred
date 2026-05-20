@@ -179,6 +179,13 @@ class OnboardingResult:
     facts_count: int = 0
     patterns_count: int = 0
     error: str | None = None
+    # #B3: durable, queryable record of whether the First Brief email was
+    # actually delivered. ``None`` = delivery not attempted on this run
+    # (e.g. a non-finale resume) or a pre-#B3 payload; ``True``/``False``
+    # = the send_first_brief_email outcome. A False here is a never-
+    # delivered brief — visible instead of swallowed in a warning.
+    brief_email_delivered: bool | None = None
+    brief_email_reason: str = ""
 
 
 @workflow.defn(name="OnboardingPipelineWorkflow")
@@ -513,14 +520,30 @@ class OnboardingPipelineWorkflow:
         # resend later. No retries: if AgentMail isn't configured, further
         # attempts won't help.
         # -----------------------------------------------------------------
+        # #B3: capture the delivery outcome so a never-delivered brief is
+        # visible on OnboardingResult instead of being swallowed here. The
+        # pipeline still does NOT crash on a delivery failure — Sir can read
+        # the brief on the dashboard and resend later — but the result now
+        # distinguishes delivered (True) from not-delivered (False).
+        brief_email_delivered: bool = False
+        brief_email_reason: str = "not attempted"
         try:
-            await workflow.execute_activity(
+            email_outcome = await workflow.execute_activity(
                 send_first_brief_email,
                 args=[brief_path],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=1),
             )
+            if isinstance(email_outcome, dict):
+                brief_email_delivered = bool(email_outcome.get("sent"))
+                brief_email_reason = str(email_outcome.get("reason", ""))
+            if not brief_email_delivered:
+                workflow.logger.warning(
+                    "First Brief email NOT delivered: %s", brief_email_reason
+                )
         except Exception as err:  # pragma: no cover — advisory
+            brief_email_delivered = False
+            brief_email_reason = f"activity error: {err}"
             workflow.logger.warning(
                 "send_first_brief_email failed, continuing with background: %s",
                 err,
@@ -601,4 +624,6 @@ class OnboardingPipelineWorkflow:
             brief_path=brief_path,
             facts_count=_state_count(current_state, "facts"),
             patterns_count=_state_count(current_state, "patterns"),
+            brief_email_delivered=brief_email_delivered,
+            brief_email_reason=brief_email_reason,
         )
