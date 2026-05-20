@@ -2,17 +2,52 @@
 
 # Alfred Black
 
-**The agent you can forget about.**
+### Your private chief of staff. Seen, not heard.
 
-An ambient butler for your calendar, email, finances, household logistics, and
-everything else you currently keep in your head — self-hosted, always on, on
-hardware you control.
+An agentic butler that runs your calendar, email, finances, and household
+logistics in the background — so you talk to it **less** over time, not more,
+and get to be present for your actual life.
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-green.svg)](https://python.org)
 [![PyPI: alfred-vault](https://img.shields.io/pypi/v/alfred-vault.svg)](https://pypi.org/project/alfred-vault/)
+[![Cloud: alfred.black](https://img.shields.io/badge/cloud-alfred.black-black.svg)](https://alfred.black)
+
+**[Website](https://alfred.black)** · **[Demo](https://www.youtube.com/watch?v=_Y2K5-zQKhk)** · **[Manifesto](https://screenlessdad.com/p/life-has-outgrown-your-nervous-system)** · **[Changelog](CHANGELOG.md)**
 
 </div>
+
+---
+
+<div align="center">
+
+[![Watch the Alfred Black demo walkthrough](https://img.youtube.com/vi/_Y2K5-zQKhk/maxresdefault.jpg)](https://www.youtube.com/watch?v=_Y2K5-zQKhk)
+
+*▶ Demo walkthrough (5 min)*
+
+</div>
+
+---
+
+## Presence, not productivity
+
+Alfred Black is **not a productivity tool.** It will not gamify your to-dos or
+nudge you toward inbox zero. It is built to do the opposite of most software:
+to need your attention *less* the longer you use it.
+
+Your life has outgrown your nervous system. The number of inputs — email,
+messages, calendars, bills, contracts, logistics — has scaled past what a human
+brain was built to hold. The usual answer is another app, another dashboard,
+another screen demanding you. Alfred's answer is a butler that quietly absorbs
+all of it and surfaces only what genuinely needs *you*.
+
+The goal is to become **seen, not heard** — a system that knows your life well
+enough to act on your behalf, so you spend less time looking at screens and more
+time being a human. Call it *presencemaxxing*: Alfred becomes your interface to
+the web, so you don't have to be.
+
+> This is the working philosophy behind the project. The longer version:
+> [**Life has outgrown your nervous system**](https://screenlessdad.com/p/life-has-outgrown-your-nervous-system).
 
 ---
 
@@ -23,13 +58,119 @@ the conversation record, updated three people, filed two tasks under the right
 matter, and linked everything together. Nobody asked. It just happened.
 
 That night, Alfred notices two records in the vault contradict each other and
-flags it. Fixes broken links. Finds a cluster of notes about the same theme
-that were never connected, and writes the relationships. By morning the
-knowledge graph is richer than when everyone went home.
+flags it. Fixes broken links. Finds a cluster of notes about the same theme that
+were never connected, and writes the relationships. By morning the knowledge
+graph is richer than when everyone went home.
 
-**This is what a butler does.** Not just tasks when asked — anticipatory
-attention, owning things so you don't have to hold them in your head. The goal
-isn't to talk to your AI more. It's to **prompt less and live more.**
+**This is what a chief of staff does.** Not tasks-on-demand — anticipatory
+attention, owning things so you don't have to hold them in your head.
+
+---
+
+## How it works
+
+Alfred Black is a private, self-hosted system. Everything below runs on **one
+VM you control** — your data never leaves it.
+
+### The Hermes runtime
+
+The reasoning core is **[Hermes Agent](https://github.com/NousResearch/hermes-agent)**
+— a single, isolated AI runtime. It runs in two profiles from one image: a
+**main** profile for the conversations you actually have (Telegram, Slack,
+email, web chat), and a concurrency-capped **workers** profile for the
+background agents that never bother you (the curator, the learner, ephemeral
+task runners). You choose the underlying model (any OpenRouter model, or your
+own provider) — Alfred is not locked to one LLM.
+
+### Memory — a vault you can read, and databases you don't have to
+
+Alfred's memory is split by *who reads it*:
+
+- **The vault** is an **Obsidian-compatible markdown directory** — the
+  principal's surface. ~12 record types (`matter`, `task`, `note`, `person`,
+  `org`, `place`, `asset`, `chore`, `instinct`, `decision`, `briefing`,
+  `daybook`), wikilinked together. You can open it in Obsidian, grep it, edit it
+  by hand, back it up with git. It is your second brain *and* the agent's
+  operational memory — the same artifact.
+- **`state.db`** (SQLite + vector search) is the **machine's working memory** —
+  signals, observations, the link graph, embeddings. The UI reads from here; you
+  never touch it.
+- **`cold.db`** is the forensic long tail — anything older than 90 days is rolled
+  out of working memory so context stays lean.
+- **`ingest.db`** is the raw inbound firehose, with a hard 7-day TTL.
+
+The rule is simple: *the vault holds what a human has a reason to read; everything
+else is a database.* That separation is what keeps Alfred's context small,
+fast, and grounded.
+
+### Signals — turning noise into attention
+
+This is the pipeline that makes 200 emails become 1:
+
+```
+Streams  →  stream events  →  signals  →  matched to Matters & Tasks  →  rolling state
+(raw pull)   (ingest.db)      (scored)     (your real concerns)          (lean context)
+```
+
+1. **Streams** pull raw data — Gmail, calendar, transcripts, messages.
+2. Each item becomes a **stream event** in `ingest.db`.
+3. An extractor turns events into **signals** — the decision-grade "something
+   here might matter" units, scored and deduped.
+4. Signals are **matched against your Matters and Tasks** — so a new email about
+   a contract attaches to the *matter* it belongs to, not a flat pile.
+5. Matters and Tasks carry **rolling state**: a compact, continuously-updated
+   summary instead of the full history. This is what keeps the agent's context
+   small and **prevents hallucination** — it reasons over curated state, not raw
+   noise.
+
+### Matters — your ongoing concerns
+
+A **Matter** is an ongoing concern that spans time and people — a deal, a move, a
+legal thing, a health thing, a relationship with a vendor. Matters are how Alfred
+aggregates everything related to one thread of your life in one place: the
+emails, the tasks, the people, the decisions, the documents. When something new
+arrives, Alfred files it under the right Matter and updates that Matter's rolling
+state — so you always have one current, coherent view instead of fragments.
+
+### Decisions and progressive autonomy
+
+Every time Alfred acts — or asks you to — it records a **Decision** (HANDLED /
+HELD / ASKED). Decisions are the audit trail of your life's judgment calls, and
+they are also how Alfred *learns*.
+
+By observing the decisions you make and how you make them, Alfred surfaces
+**patterns of behaviour** — your *instincts*. It then moves through tiers of
+trust:
+
+```
+Asking        →   Confirming        →   Acting
+"what should      "I'm about to do      "handled it; here's
+ I do here?"       X — ok?"               what I did"
+```
+
+This is **progressive autonomy**: Alfred starts by asking, learns your patterns,
+begins suggesting, then — only once it has earned it — quietly automates the
+things you've shown it you'd always approve. The more it learns, the less it
+asks. Seen, not heard.
+
+### Composio — 1000+ integrations, instantly
+
+Alfred connects to your world through **[Composio](https://composio.dev)**:
+**1000+ app integrations** (Gmail, Calendar, Notion, Slack, GitHub, Linear,
+Stripe, and on and on) available instantly with managed OAuth — no per-app
+client setup, no token plumbing on your VM. Credentials stay server-side with
+Composio; Alfred just calls the tools.
+
+### Sidecars — the back office
+
+Three best-in-class open-source services ship in the stack so Alfred can manage
+real domains of your life, not just notes:
+
+| Sidecar | What it is | What Alfred uses it for |
+|---|---|---|
+| **[Sure](https://github.com/we-promise/sure)** | Personal finance | Accounts, transactions, budgets — Alfred categorises and reconciles your money |
+| **[Plane](https://plane.so)** | Project management | The durable task/issue backbone behind Matters and chores |
+| **[Vaultwarden](https://github.com/dani-garcia/vaultwarden)** | Secrets manager | A real vault for credentials Alfred (and you) need |
 
 ---
 
@@ -40,15 +181,14 @@ that share one engine:
 
 | | What it is | Where |
 |---|---|---|
-| **`alfred-vault`** | The original pip-installable CLI. Turns *any* agentic runtime into an ambient butler over an Obsidian vault — four background workers (Curator · Janitor · Distiller · Surveyor) plus a Temporal workflow engine. Runs on a Mac Mini under your desk or any box with Python. | [`packages/alfred-vault/`](packages/alfred-vault/) · [`pip install alfred-vault`](https://pypi.org/project/alfred-vault/) |
-| **Alfred Black** | The full self-hosted **platform**: a web dashboard, the Hermes AI runtime, durable workflows, multi-channel delivery, and finance / project / secrets sidecars — all brought up with a single `docker compose up` on one VM, served on your own domain over HTTPS. | this repo · *the rest of `packages/`* |
+| **`alfred-vault`** | The pip-installable CLI. Turns *any* agentic runtime into an ambient butler over an Obsidian vault — the Curator / Janitor / Distiller / Surveyor workers + a Temporal workflow engine. Runs on a Mac Mini under your desk or any box with Python. | [`packages/alfred-vault/`](packages/alfred-vault/) · [`pip install alfred-vault`](https://pypi.org/project/alfred-vault/) |
+| **Alfred Black** | The full self-hosted **platform**: the web dashboard, the Hermes runtime, the signal pipeline, durable workflows, multi-channel delivery, and the Sure / Plane / Vaultwarden sidecars — brought up with a single `docker compose up`, served on your own domain over HTTPS. | this repo · *the rest of `packages/`* |
 
-> **2026-05-20 — the big one.** The project that gave you the `alfred` CLI is
-> now a complete, deployable platform. `alfred-vault` is the same dependable
-> engine it always was — `pip install alfred-vault` still works exactly as
-> before — and Alfred Black wraps it in everything you need to actually *live*
-> with an agentic butler: a real UI, onboarding, a daily Brief, and a
-> one-command self-hosted deploy. See [`CHANGELOG.md`](CHANGELOG.md).
+> **2026-05-20 — the platform release.** The project that gave you the `alfred`
+> CLI is now a complete, deployable platform. `alfred-vault` is the same
+> dependable engine it always was — `pip install alfred-vault` still works
+> exactly as before — and Alfred Black wraps it in everything you need to
+> actually live with an agentic butler. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
 
@@ -72,15 +212,15 @@ Three commands. Drop a file into `inbox/` and it's handled. Full docs:
 ### 2 · The full platform (Alfred Black)
 
 If you want the whole product — web dashboard, Hermes runtime, the daily Brief,
-multi-channel delivery, and the Plane / Sure / Vaultwarden sidecars — on a VM
+multi-channel delivery, and the Sure / Plane / Vaultwarden sidecars — on a VM
 you control: read on. You bring a fresh Linux VM and a domain; the stack brings
-everything else and serves the web app on your domain over HTTPS. No Hetzner
-auto-provisioning, no Tailscale, no Cloudflare, no billing — **one repo, one
-VM, one `docker compose up`.**
+everything else and serves the web app on your domain over HTTPS. No managed
+provisioning, no billing — **one repo, one VM, one `docker compose up`.**
 
-The AI runtime is **Hermes Agent**
-([`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent)),
-a single isolated runtime that replaces OpenClaw's two-container split.
+> **Don't want to run servers?** A fully-managed cloud version is in **private
+> beta at [alfred.black](https://alfred.black)** — we're working with a small
+> group of design partners. Self-hosting (this repo) is, and always will be, the
+> open path.
 
 ---
 
@@ -102,8 +242,7 @@ a single isolated runtime that replaces OpenClaw's two-container split.
   "Start onboarding" connects Gmail through Composio's managed Google OAuth,
   so you create no Google Cloud client. Set these two only for the cosmetic
   "Sign in with Google" login button, or to run onboarding's Gmail connect
-  through your own Google client instead of Composio's managed flow. See
-  *Onboarding* below.
+  through your own Google client instead of Composio's managed flow.
 - Optionally: a **Mailgun** API key + domain for transactional email (signup
   verification / password reset — see the note under *Install*).
 
@@ -141,10 +280,6 @@ your VM's public IP, where `example.com` is your domain:
 | `vault` | `vault.example.com` | Vaultwarden (secrets manager)     |
 | `mcp`   | `mcp.example.com`   | MCP server (Claude connector)     |
 
-`wasp build` produces the dashboard as two parts — a static React SPA and
-its API server — served on `@` and `api.` respectively. Both A-records are
-required; the SPA calls the API cross-subdomain.
-
 Caddy obtains a Let's Encrypt certificate per host using the HTTP-01
 challenge — **no DNS API token is needed**. If DNS hasn't propagated when the
 stack first starts, Caddy keeps retrying and self-heals once the records
@@ -172,8 +307,7 @@ no Node needed — and runs a containerized wizard that:
 - prompts every required and optional value, with inline help;
 - **validates your API keys live** — it actually calls OpenRouter, Anthropic,
   and Composio and tells you immediately if a key is wrong;
-- lets you **pick the Hermes models** from OpenRouter's live model catalogue
-  (autocomplete search);
+- lets you **pick the Hermes models** from OpenRouter's live model catalogue;
 - if you opt into your own Google OAuth client, prints the exact **redirect
   URI** to register for your domain (skip it to use Composio-managed Gmail);
 - generates every auto-secret with a cryptographically-secure
@@ -182,52 +316,38 @@ no Node needed — and runs a containerized wizard that:
 
 The wizard **doubles as a config editor** — re-run `./scripts/setup.sh` any
 time to change a value; it detects the existing `.env`, offers "edit existing
-values" (pre-filling every prompt) vs "start fresh", and keeps secrets you
-already have. At the end it offers to run `docker compose up -d` for you.
+values" vs "start fresh", and keeps secrets you already have. At the end it
+offers to run `docker compose up -d` for you.
 
 ### Non-interactive install (CI / automation)
 
-If you can't run an interactive terminal, the manual path still works:
-
 ```sh
-# 1. Clone, 2. copy the template
 cp .env.example .env
-
-# 3. Edit .env — fill the required values in the "USER MUST FILL" block:
-#      DOMAIN, ACME_EMAIL, OWNER_NAME, OPENROUTER_API_KEY, COMPOSIO_API_KEY
-#    Optional: ANTHROPIC_API_KEY, MAILGUN_API_KEY + MAILGUN_DOMAIN (email),
-#      GOOGLE_CLIENT_*, HERMES_MAIN_MODEL / HERMES_WORKERS_MODEL, VEXA_*
+# Edit .env — fill the "USER MUST FILL" block: DOMAIN, ACME_EMAIL, OWNER_NAME,
+# OPENROUTER_API_KEY, COMPOSIO_API_KEY (+ optional ANTHROPIC_API_KEY, Mailgun,
+# GOOGLE_CLIENT_*, HERMES_MAIN_MODEL / HERMES_WORKERS_MODEL, VEXA_*)
 nano .env
-
-# 4. Generate every auto-secret into .env (run once, before `up`)
-./scripts/bootstrap.sh
-
-# 5. Bring the whole stack up
+./scripts/bootstrap.sh    # generate every auto-secret into .env (run once)
 docker compose up -d
 ```
 
-`scripts/bootstrap.sh` validates that the required fields are filled and
-appends every auto-generated secret (`AAS_API_KEY`, `COLUMN_ENCRYPTION_KEY`,
-`JWT_SECRET`, the Hermes gateway token, Plane/Sure/Vexa datastore credentials,
-the Vaultwarden admin token, …) using `openssl rand -hex 32`. It is
-idempotent — re-running never overwrites an existing value — so every
-variable exists by the time `docker compose` parses `.env`. Unlike the wizard
-it does **not** verify keys against the provider APIs.
+`scripts/bootstrap.sh` validates the required fields and appends every
+auto-generated secret (`AAS_API_KEY`, `COLUMN_ENCRYPTION_KEY`, `JWT_SECRET`, the
+Hermes gateway token, Plane/Sure/Vexa datastore credentials, the Vaultwarden
+admin token, …) with `openssl rand -hex 32`. It is idempotent — re-running never
+overwrites an existing value.
 
-`docker compose up` only **pulls** images — it never builds. The first boot
-runs database migrations, scaffolds the vault, and requests TLS certificates;
-give it a few minutes. Check progress with `docker compose ps` and
-`docker compose logs -f`.
+`docker compose up` only **pulls** images — it never builds. First boot runs
+migrations, scaffolds the vault, and requests TLS certificates; give it a few
+minutes. Check progress with `docker compose ps` and `docker compose logs -f`.
 
 When the stack is healthy, open `https://<your-domain>` and **sign up**. The
-**first account created becomes the owner** with full administrative control;
-any later signups are plain members.
+**first account created becomes the owner**; later signups are plain members.
 
 > **Email:** the owner's account is auto-verified on signup, so you can log in
-> immediately with no mail provider configured. Later members receive a
-> verification email — that requires a real `MAILGUN_API_KEY` + `MAILGUN_DOMAIN`
-> in `.env` (or switch the provider in `packages/web/main.wasp`). Without one,
-> only the owner can log in.
+> immediately with no mail provider configured. Later members need a real
+> `MAILGUN_API_KEY` + `MAILGUN_DOMAIN` (or switch the provider in
+> `packages/web/main.wasp`) to receive verification email.
 
 ### Onboarding
 
@@ -235,65 +355,45 @@ Onboarding is automatic and runs once, for the owner:
 
 1. Sign up and log in — you land on `/desk`.
 2. The desk shows a **"Start onboarding"** card. Click it.
-3. You're sent to Google to **connect Gmail**. By default — whenever
-   `COMPOSIO_API_KEY` is set (it is required anyway) — this goes through
-   **Composio's managed Google OAuth**: no Google Cloud client of your own,
-   no Google app-verification. The consent screen is **Composio-branded**
-   (Composio's verified Google app) and requests **full Gmail access**
-   (`https://mail.google.com/`) plus Google contacts/profile scopes.
-4. On return, Alfred backfills ~100 days of email, builds a behavioural
-   profile, extracts facts, and composes your first Brief — you watch the
-   progress through the onboarding ritual (`/awaken → … → /first-brief`),
-   pausing once to confirm the facts Alfred inferred.
+3. You're sent to Google to **connect Gmail** — by default through Composio's
+   managed Google OAuth (no Google Cloud client of your own).
+4. On return, Alfred backfills ~100 days of email, builds a behavioural profile,
+   extracts facts, and composes your **first Brief** — you watch the progress
+   through the onboarding ritual, pausing once to confirm the inferred facts.
 5. When the first Brief lands you're dropped back on `/desk`, now live.
-
-Later (non-owner) members skip onboarding — it is the owner's setup.
-
-> **Using your own Google client instead.** If you set `GOOGLE_CLIENT_ID` /
-> `GOOGLE_CLIENT_SECRET` in `.env`, onboarding's Gmail connect switches to a
-> direct Google OAuth flow under *your* brand, requesting only the narrower
-> read-only `gmail.readonly` scope. That path needs a Web-application OAuth
-> client from console.cloud.google.com and Google's app-verification for the
-> `gmail.readonly` scope. If `COMPOSIO_API_KEY` is set, the Composio-managed
-> flow wins regardless.
 
 ### Choosing the LLM models
 
 `HERMES_MAIN_MODEL` (user-facing chat) and `HERMES_WORKERS_MODEL` (background
-agents) take **bare OpenRouter model IDs** (see `openrouter.ai/models`).
-Defaults: `x-ai/grok-4.3` and `openai/gpt-4.1-nano`. To change one, edit
-`.env` and run `docker compose up -d --force-recreate init hermes`.
-
-**Switching provider.** Hermes itself supports many providers (OpenAI,
-OpenAI Codex, Nous Portal, NovitaAI, NIM, a custom endpoint, …). To switch,
-use Hermes' own command inside the container —
-`docker compose exec hermes hermes model` (and `hermes auth add <provider>`
-for OAuth providers) — then `docker compose restart hermes`. The `init`
-container preserves a switched `model:` block across restarts, so the choice
-persists. (Note: as of Hermes `v2026.5.16`, the `openai-codex` provider is
-broken inside the agent loop — upstream issue #5736 — so a Codex
-subscription does not yet work for Alfred; OpenRouter is the supported path.)
+agents) take **bare OpenRouter model IDs**. Defaults: `x-ai/grok-4.3` and
+`openai/gpt-4.1-nano`. To change one, edit `.env` and run
+`docker compose up -d --force-recreate init hermes`. Hermes also supports
+switching provider entirely (`docker compose exec hermes hermes model`).
 
 ### Optional: the Vexa meeting-transcription stack
 
-Vexa (meeting-bot transcription) ships behind a Compose profile so it is
-off by default. To run it:
+Vexa (meeting-bot transcription) ships behind a Compose profile, off by default:
 
-1. Set `VEXA_ENABLED=true` (and `ALFRED_OWNER_EMAIL`, `VEXA_TRANSCRIPTION_*`)
-   in `.env`, then re-run `./scripts/bootstrap.sh`.
-2. Start the stack **with the profile**:
+```sh
+docker compose --profile vexa up -d
+```
 
-   ```sh
-   docker compose --profile vexa up -d
-   ```
-
-Without `--profile vexa`, the nine Vexa containers are simply not created.
+Without `--profile vexa`, its nine containers are simply not created.
 
 ### Restarting
 
-`docker compose down && docker compose up -d` is safe: all data lives in
-named Docker volumes and TLS certificates persist in `caddy_data`, so no
-re-bootstrap is needed and Let's Encrypt is not re-hit.
+`docker compose down && docker compose up -d` is safe: all data lives in named
+Docker volumes and TLS certificates persist in `caddy_data`, so no re-bootstrap
+is needed and Let's Encrypt is not re-hit.
+
+---
+
+## The cloud version
+
+Prefer not to run a VM? **[alfred.black](https://alfred.black)** is the
+fully-managed, hosted Alfred Black — currently in **private beta with design
+partners**. This repository is the open, self-hosted path and remains the source
+of truth for the platform.
 
 ---
 
@@ -301,59 +401,48 @@ re-bootstrap is needed and Let's Encrypt is not re-hit.
 
 A fresh VM never builds anything — `docker compose` only **pulls**. The custom
 `ssdavidai00/*` images are built and pushed by CI on every push to the default
-branch (`.github/workflows/build-*.yml`, multi-arch `linux/amd64,linux/arm64`).
-Note `alfred-setup` is the setup wizard — run by `./scripts/setup.sh`, never
-started by `docker compose`:
+branch (`.github/workflows/build-*.yml`, multi-arch `linux/amd64,linux/arm64`):
 
 | Image | Built from |
 |-------|-----------|
-| `alfred-web` | `wasp build` → the server half of `.wasp/build/` |
-| `alfred-web-client` | the SPA half of `.wasp/build/web-app/`, served by nginx |
+| `alfred-web` / `alfred-web-client` | `wasp build` → server + SPA halves |
 | `alfred-ctrl-api` | `packages/ctrl` (esbuild bundle + sqlite-vec) |
 | `alfred-black-hermes` | `packages/hermes` (Hermes runtime + shim) |
 | `alfred-worker` | `packages/hermes/dockerfiles/alfred.Dockerfile` (the vault daemon — bundles `packages/alfred-vault`) |
 | `alfred-learn` | `packages/learn` (Temporal worker) |
 | `alfred-mcp-server` | `packages/mcp-server` |
 | `alfred-init` | `packages/hermes/init` (one-shot bootstrap — bundles `packages/alfred-vault`) |
-| `alfred-setup` | `packages/setup` (the interactive setup wizard — run via `./scripts/setup.sh`, not a compose service) |
-
-`wasp build` needs no database — schema migrations (`prisma migrate deploy`)
-run inside the `web` container at startup against `web-db`. The `Makefile`
-has `build-*` targets that mirror CI for local rebuilds.
+| `alfred-setup` | `packages/setup` (the interactive wizard — run via `./scripts/setup.sh`) |
 
 The **`alfred-vault`** Python package has its own independent release train —
 it publishes to PyPI on an `alfred-vault-vX.Y.Z` tag via
-`.github/workflows/release-alfred-vault.yml`. Platform images and the PyPI
-package are versioned separately (date-based releases for the platform, semver
-for the package).
+`.github/workflows/release-alfred-vault.yml`. The platform uses date-based
+releases; the package uses semver.
 
 ---
 
 ## Architecture
 
-Three planes on one VM, behind a bundled Caddy reverse proxy with automatic
-TLS. Every service talks over the Compose network by service DNS; only Caddy
-binds host ports (`:80`/`:443`).
+Three planes on one VM, behind a bundled Caddy reverse proxy with automatic TLS.
+Every service talks over the Compose network by service DNS; only Caddy binds
+host ports (`:80`/`:443`).
 
-- **Web** (`packages/web`) — the Wasp dashboard. Auth + the UI; proxies all
-  data calls to the local `ctrl-api`.
+- **Web** (`packages/web`) — the Wasp dashboard. Auth + UI; proxies all data
+  calls to the local `ctrl-api`.
 - **Control** (`packages/ctrl`) — the `ctrl-api` service on `:3100`; owns the
-  vault and the operational SQLite store.
+  vault and the operational SQLite stores, and enforces the read/write contract.
 - **Data** — Hermes (AI runtime), Temporal, Ollama, the vault daemon
-  (`packages/alfred-vault`, run as `alfred-worker`), `alfred-learn`, the MCP
-  server, plus the Plane / Sure / Vaultwarden sidecars.
+  (`packages/alfred-vault`, run as `alfred-worker`), `alfred-learn` (the signal
+  pipeline + the learner), the MCP server, plus the Sure / Plane / Vaultwarden
+  sidecars.
 
-Four-store storage model:
-
-- **Vault** (markdown) — the principal's published knowledge surface.
-- **`state.db`** (SQLite + sqlite-vec) — the machine's working memory.
-- **`cold.db`** (zstd-compressed SQLite) — forensic long tail; a daily
-  compactor rolls `state.db` rows older than 90 days into it.
-- **`ingest.db`** (SQLite) — raw inbound stream, 7-day TTL.
+Four-store memory model: **vault** (markdown — the principal's surface),
+**`state.db`** (SQLite + vector search — working memory), **`cold.db`** (forensic
+long tail >90 days), **`ingest.db`** (raw inbound stream, 7-day TTL).
 
 ---
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE) · Built by [David Szabo-Stuban](https://screenlessdad.com).
 </content>
