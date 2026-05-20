@@ -38,7 +38,7 @@ The project now ships a complete self-hosted platform alongside the CLI:
 - A daily **Brief** surface, composed for the owner as the final onboarding step
   and on an ongoing basis thereafter.
 
-### Changed — `alfred-vault` 0.3.2 → 0.4.0
+### Changed — `alfred-vault` 0.3.2 → 1.0.0 (first stable release)
 
 - The pip-installable CLI moved into this monorepo at `packages/alfred-vault/`.
 - This is the engine the platform is built on — the platform's vault daemon runs
