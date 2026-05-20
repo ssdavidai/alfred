@@ -752,10 +752,17 @@ export function registerVaultRoutes(): void {
       const name = b.name as string;
       // name may already include type prefix and .md extension
       const filePath = name.endsWith(".md") ? name : `${b.type as string}/${name}.md`;
-      const fullPath = path.resolve(VAULT_PATH, filePath);
-      // Ensure parent directories exist
-      await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
-      await fs.promises.writeFile(fullPath, b.content, "utf-8");
+      const content = b.content;
+      // Take the same single-writer lock the PATCH json_set/body_set paths
+      // take (_withVaultPathLock, keyed by relPath) so a create racing an edit
+      // — or another create — on the same path is serialised. Without it the
+      // raw-content write was the one unguarded direct-fs write path.
+      await _withVaultPathLock(filePath, async () => {
+        const fullPath = path.resolve(VAULT_PATH, filePath);
+        // Ensure parent directories exist
+        await fs.promises.mkdir(path.dirname(fullPath), { recursive: true });
+        await fs.promises.writeFile(fullPath, content, "utf-8");
+      });
       sendJson(res, 201, { path: filePath });
       emitVaultEditSignal(filePath, "create");
       return;

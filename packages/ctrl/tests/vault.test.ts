@@ -213,6 +213,40 @@ describe("POST /api/v1/vault/records", () => {
     assert.strictEqual(mkdirFn.mock.callCount(), 1, "mkdir should be called once");
     assert.strictEqual(writeFileFn.mock.callCount(), 1, "writeFile should be called once");
   });
+
+  // Single-writer lock: two concurrent raw-`content` creates on the SAME path
+  // must not interleave their writeFile() calls. Without _withVaultPathLock
+  // (which the PATCH json_set/body_set paths already take) the create write is
+  // unserialised, so a create racing another create/edit on the same path can
+  // overlap. We instrument writeFile to record peak concurrency.
+  it("serialises concurrent raw-content creates on the same path (single-writer lock)", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    writeFileFn.mock.mockImplementation(async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      // Hold the "write" open briefly so an unserialised second write would
+      // overlap this one and drive peak to 2.
+      await new Promise((r) => setTimeout(r, 25));
+      inFlight -= 1;
+      return undefined as any;
+    });
+    try {
+      const post = () =>
+        req("POST", "/api/v1/vault/records", {
+          type: "note",
+          name: "race-note", // SAME path for both writers
+          content: "---\ntype: note\n---\nbody",
+        });
+      const [a, b] = await Promise.all([post(), post()]);
+      assert.strictEqual(a.status, 201);
+      assert.strictEqual(b.status, 201);
+      assert.strictEqual(peak, 1, "writes on the same path must not overlap (peak concurrency 1)");
+    } finally {
+      // Restore the simple no-op implementation for later tests.
+      writeFileFn.mock.mockImplementation(async () => undefined as any);
+    }
+  });
 });
 
 describe("GET /api/v1/vault/records/* (path traversal)", () => {
