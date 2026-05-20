@@ -436,7 +436,13 @@ def main():
         status = str(run.get("status", "")).lower()
         text = extract_run_text(run)
 
-        if status in terminal or text:
+        # Complete ONLY on a terminal run status. The old `or text` short-circuit
+        # finished the run as soon as it emitted any assistant text, truncating
+        # multi-step curator/clerk runs (interim narration before later tool
+        # calls) and marking the file processed (FAILURE-MODES §Hermes runtime).
+        # Interim text is ignored; the final answer is read once the run lands
+        # in a terminal state below.
+        if status in terminal:
             if status in ("failed", "error") and not text:
                 err = run.get("error") or run.get("detail") or "run failed"
                 print(f"Hermes run {run_id} failed: {err}", file=sys.stderr)
