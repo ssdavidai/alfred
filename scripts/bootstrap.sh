@@ -80,6 +80,18 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
 fi
 green "All required fields present."
 
+# ── 1b. recommended fields (warn, don't fail) ───────────────────────
+# OWNER_EMAIL is the canonical owner-identity var the code reads (pull.py,
+# first_brief_email.py, fleet_audit.py, init step 9, sure-bootstrap.rb;
+# compose also mirrors it into ALFRED_OWNER_EMAIL for transcript.py). It is
+# not strictly required to boot, but leaving it blank fails the first-brief
+# email open and disables the cross-tenant ingest guard — so warn loudly.
+if [[ -z "$(env_get OWNER_EMAIL | tr -d '[:space:]')" ]]; then
+	red "WARNING: OWNER_EMAIL is empty in ${ENV_FILE}."
+	red "  The first-brief email won't send and the cross-tenant ingest guard"
+	red "  fails open. Set OWNER_EMAIL to the principal's address, then re-run."
+fi
+
 # ── 2. generate auto-secrets ────────────────────────────────────────
 # Each entry is generated with `openssl rand -hex 32` if absent or empty.
 AUTO_SECRETS=(

@@ -151,6 +151,10 @@ services:
       # and the hermes runtime sees the same volume at the same path.
       - HERMES_DATA_DIR=/hermes-state
       - HERMES_RUNTIME_HOME=/hermes-state
+      # init step 9 seeds the sender allowlist + stages the Sure/owner email
+      # files from OWNER_EMAIL. env_file already injects it, but pin it
+      # explicitly so the canonical name is unambiguous at this boundary (C9).
+      - OWNER_EMAIL=${OWNER_EMAIL:-}
 
   # ── temporal — workflow engine for alfred-learn ─────────────────────
   temporal:
@@ -412,7 +416,13 @@ services:
       - VEXA_API_URL=${VEXA_API_URL:-http://vexa-api-gateway:8000}
       - VEXA_BOT_DISPLAY_NAME=${VEXA_BOT_DISPLAY_NAME:-Alfred}
       - VEXA_GCAL_STREAM_ID=${VEXA_GCAL_STREAM_ID:-composio-googlecalendar}
-      - ALFRED_OWNER_EMAIL=${ALFRED_OWNER_EMAIL:-}
+      # Owner identity. The code reads OWNER_EMAIL (pull.py, first_brief_email.py,
+      # fleet_audit.py, init step 9, sure-bootstrap.rb); transcript.py still
+      # reads ALFRED_OWNER_EMAIL. Set BOTH from the same .env OWNER_EMAIL so the
+      # cross-tenant ingest guard, first-brief sender allowlist, and Vexa
+      # attendee match all see the principal's address. (C9: canonical=OWNER_EMAIL.)
+      - OWNER_EMAIL=${OWNER_EMAIL:-}
+      - ALFRED_OWNER_EMAIL=${OWNER_EMAIL:-}
     env_file:
       - .env
     restart: unless-stopped
