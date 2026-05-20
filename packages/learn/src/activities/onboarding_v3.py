@@ -728,27 +728,49 @@ Make each file genuinely useful — not generic templates. Reference specific na
     api_key = os.environ.get("AAS_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
-    written = []
+    # USER.md and SOUL.md are load-bearing — the brief, the butler's bearing,
+    # and every downstream stage assume they exist. MEMORY/TOOLS/RULES are
+    # valuable but not blocking. Attempt ALL five writes, collect failures,
+    # and only abort the stage (so Temporal retries) if a load-bearing write
+    # failed. A transient MEMORY/TOOLS/RULES failure must NOT strand the user
+    # pre-verification with partial vault state (#BUG-2).
+    LOAD_BEARING = {"USER.md", "SOUL.md"}
+    written: list[str] = []
+    failed: list[str] = []
+    load_bearing_failures: list[str] = []
     async with httpx.AsyncClient(base_url=config.alfred_ctrl_url, timeout=30.0, headers=headers) as client:
         for filename, key in [("USER.md", "user_md"), ("SOUL.md", "soul_md"), ("MEMORY.md", "memory_md"), ("TOOLS.md", "tools_md"), ("RULES.md", "rules_md")]:
             content = files.get(key, "")
             if not content:
                 continue
-            resp = await client.put(
-                f"/api/v1/admin/workspace/{filename}",
-                json={"content": content},
-            )
-            if not resp.is_success:
-                logger.error(
-                    "onboarding_v3: %s write failed status=%d body=%s",
-                    filename, resp.status_code, resp.text[:300],
+            try:
+                resp = await client.put(
+                    f"/api/v1/admin/workspace/{filename}",
+                    json={"content": content},
                 )
-                raise RuntimeError(
-                    f"personalize_opus: {filename} write failed "
-                    f"status={resp.status_code} body={resp.text[:300]}"
-                )
+                ok = resp.is_success
+                detail = f"status={resp.status_code} body={resp.text[:300]}"
+            except Exception as exc:  # noqa: BLE001 — network/transport error
+                ok = False
+                detail = f"transport error: {exc}"
+            if not ok:
+                logger.error("onboarding_v3: %s write failed %s", filename, detail)
+                failed.append(filename)
+                if filename in LOAD_BEARING:
+                    load_bearing_failures.append(
+                        f"{filename} write failed {detail}"
+                    )
+                continue
             written.append(filename)
             logger.info("onboarding_v3: wrote %s (%d chars)", filename, len(content))
+
+    # A load-bearing write failure aborts so Temporal retries the whole stage;
+    # the user does not advance to awaiting_verification on half a vault.
+    if load_bearing_failures:
+        raise RuntimeError(
+            "personalize_opus: load-bearing vault write(s) failed: "
+            + "; ".join(load_bearing_failures)
+        )
 
     onboard["user_md"] = files.get("user_md", "")
     onboard["soul_md"] = files.get("soul_md", "")
@@ -767,7 +789,12 @@ Make each file genuinely useful — not generic templates. Reference specific na
     except Exception as e:  # noqa: BLE001
         logger.warning("onboarding_v3: personalize narration skipped: %s", e)
 
-    return {"files_written": written}
+    if failed:
+        logger.warning(
+            "onboarding_v3: personalize completed with non-blocking write "
+            "failures: %s", failed,
+        )
+    return {"files_written": written, "files_failed": failed}
 
 
 # ---------------------------------------------------------------------------

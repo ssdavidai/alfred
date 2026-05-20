@@ -41,6 +41,7 @@ _GOOD_OPUS_RESPONSE = json.dumps({
     "soul_md": "# Alfred's Soul\n\nAddress him as Sir.",
     "memory_md": "# Memory Index\n\n[[Sam Lee]] — partner.",
     "tools_md": "# Suggested Tools\n\nWeekly Stripe digest.",
+    "rules_md": "# Standing Rules\n\n- Protect quiet hours.",
 })
 
 
@@ -57,6 +58,21 @@ def _mock_client_with_response(response):
     client.__aenter__.return_value = client
     client.__aexit__.return_value = None
     client.put = AsyncMock(return_value=response)
+    return client
+
+
+def _mock_client_per_file(status_by_filename: dict[str, int]):
+    """Return a client whose PUT status depends on the workspace filename
+    in the request URL (``/api/v1/admin/workspace/<filename>``)."""
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = None
+
+    async def _put(url, *args, **kwargs):
+        filename = url.rsplit("/", 1)[-1]
+        return _make_response(status_by_filename.get(filename, 200))
+
+    client.put = AsyncMock(side_effect=_put)
     return client
 
 
@@ -112,5 +128,54 @@ class TestPersonalizeOpusWorkspaceWrites:
              patch("httpx.AsyncClient", return_value=client):
             result = _run_activity(lambda: personalize_opus(onboard))
 
-        assert sorted(result["files_written"]) == ["MEMORY.md", "SOUL.md", "TOOLS.md", "USER.md"]
-        assert client.put.await_count == 4
+        assert sorted(result["files_written"]) == ["MEMORY.md", "RULES.md", "SOUL.md", "TOOLS.md", "USER.md"]
+        assert client.put.await_count == 5
+
+
+class TestPersonalizeOpusPartialFailure:
+    """#BUG-2 — a transient failure on a non-load-bearing file (MEMORY /
+    TOOLS / RULES) must NOT abort the whole onboarding before
+    awaiting_verification. Only USER.md / SOUL.md are load-bearing."""
+
+    def test_memory_failure_does_not_abort(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AAS_API_KEY", "test-token")
+        onboard = _write_onboard(tmp_path)
+        client = _mock_client_per_file({"MEMORY.md": 500})
+
+        with patch("src.activities.onboarding_v3._call_llm",
+                   new=AsyncMock(return_value=_GOOD_OPUS_RESPONSE)), \
+             patch("httpx.AsyncClient", return_value=client):
+            result = _run_activity(lambda: personalize_opus(onboard))
+
+        # USER + SOUL (load-bearing) plus TOOLS + RULES all wrote; MEMORY failed.
+        assert sorted(result["files_written"]) == ["RULES.md", "SOUL.md", "TOOLS.md", "USER.md"]
+        assert "MEMORY.md" in result.get("files_failed", [])
+        # All 5 writes were attempted — failure of one didn't short-circuit.
+        assert client.put.await_count == 5
+
+    def test_tools_and_rules_failure_does_not_abort(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("AAS_API_KEY", "test-token")
+        onboard = _write_onboard(tmp_path)
+        client = _mock_client_per_file({"TOOLS.md": 502, "RULES.md": 503})
+
+        with patch("src.activities.onboarding_v3._call_llm",
+                   new=AsyncMock(return_value=_GOOD_OPUS_RESPONSE)), \
+             patch("httpx.AsyncClient", return_value=client):
+            result = _run_activity(lambda: personalize_opus(onboard))
+
+        assert sorted(result["files_written"]) == ["MEMORY.md", "SOUL.md", "USER.md"]
+        assert sorted(result.get("files_failed", [])) == ["RULES.md", "TOOLS.md"]
+
+    def test_soul_failure_still_raises(self, tmp_path, monkeypatch):
+        """SOUL.md is load-bearing: its failure must still abort + retry."""
+        monkeypatch.setenv("AAS_API_KEY", "test-token")
+        onboard = _write_onboard(tmp_path)
+        client = _mock_client_per_file({"SOUL.md": 500})
+
+        with patch("src.activities.onboarding_v3._call_llm",
+                   new=AsyncMock(return_value=_GOOD_OPUS_RESPONSE)), \
+             patch("httpx.AsyncClient", return_value=client):
+            with pytest.raises(RuntimeError, match="SOUL.md"):
+                _run_activity(lambda: personalize_opus(onboard))
+        # All writes attempted before raising so we collect every failure.
+        assert client.put.await_count == 5
