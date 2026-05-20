@@ -1,10 +1,13 @@
 // /reading-the-room — second ritual step (#852).
 //
-// Adapted from /tmp/alfred-black-redesign/src/routes/reading-the-room.tsx and
-// wired to the live `getOnboardingProgress` query. Until the backend reports
-// `stage === "awaiting_verification"` (or "done"), the canned scan animation
-// keeps cycling. Once the backend signals enough has been read, the user can
-// advance to /verify.
+// Wired to the live `getOnboardingProgress` query. The message count and the
+// scrolling log are now REAL: the backend (alfred-learn) reads the principal's
+// inbox, and a cheap pass through Hermes writes dry butler one-liners about the
+// actual mail into `onboard.json["narration"]`. We reveal those progressively,
+// paced by the scan animation, so it feels like Alfred is reading and
+// commenting on the inbox live. Until the backend reports
+// `stage === "awaiting_verification"` (or later), the scan keeps cycling; once
+// it's read enough, the user can advance to /verify.
 
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -12,32 +15,17 @@ import { useQuery, getOnboardingProgress } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { RitualNav } from "../client/components/ab/RitualNav";
 
-const RECORDS_LOG: Array<{ type: string; title: string }> = [
-  { type: "Person", title: "Karen Porter" },
-  { type: "Organisation", title: "Carter & Co." },
-  { type: "Project", title: "The Carter Sprint" },
-  { type: "Person", title: "Margaret Holloway" },
-  { type: "Organisation", title: "Holloway & Stone" },
-  { type: "Person", title: "Junichi Ito" },
-  { type: "Event", title: "Brutto — 23 May" },
-  { type: "Person", title: "Eliza Vance" },
-  { type: "Project", title: "Eliza's Wedding" },
-  { type: "Organisation", title: "Example Co" },
-  { type: "Task", title: "Example Co Invoice — May" },
-  { type: "Conversation", title: "Carter Sprint Standup — 11 May" },
-  { type: "Observation", title: "Sister rings on Sunday evenings" },
-  { type: "Assumption", title: "Karen prefers Thursday afternoons" },
-];
+type Narration = { line: string; domain?: string };
 
 const TOTAL_DAYS = 100;
-const TICK_MS = 50;
+const TICK_MS = 80;
 
 export default function ReadingTheRoomPage() {
   const [day, setDay] = useState(0);
   const navigate = useNavigate();
 
   const { data: progress } = useQuery(getOnboardingProgress, undefined, {
-    refetchInterval: 5_000,
+    refetchInterval: 4_000,
   });
 
   useEffect(() => {
@@ -46,21 +34,35 @@ export default function ReadingTheRoomPage() {
     return () => clearTimeout(t);
   }, [day]);
 
-  const animationDone = day >= TOTAL_DAYS;
   const stage = (progress?.stage ?? null) as string | null;
-  const factsCount = (progress?.progress?.facts_count ?? 0) as number;
+  const factsCount = (progress?.facts_count ??
+    progress?.progress?.facts_count ??
+    0) as number;
+  const narration = (((progress as any)?.narration ?? []) as Narration[]).filter(
+    (n) => n && n.line,
+  );
+  const messagesRead = ((progress as any)?.messages_read ??
+    progress?.progress?.total_days ??
+    0) as number;
+
+  const animationDone = day >= TOTAL_DAYS;
   const backendReady =
     stage === "awaiting_verification" || stage === "brief" || stage === "done";
   const done = animationDone && backendReady;
 
-  const visible = RECORDS_LOG.slice(
-    0,
-    Math.min(
-      RECORDS_LOG.length,
-      Math.floor((day / TOTAL_DAYS) * RECORDS_LOG.length) + 1,
-    ),
-  );
-  const messages = Math.floor((day / TOTAL_DAYS) * 14_812);
+  // Progressively reveal the REAL butler narration, paced by the scan.
+  const revealCount = narration.length
+    ? Math.min(
+        narration.length,
+        Math.floor((day / TOTAL_DAYS) * narration.length) + 1,
+      )
+    : 0;
+  const visible = narration.slice(0, revealCount);
+
+  // Real message counter ramps toward the real total as the scan animates.
+  const shownMessages = messagesRead
+    ? Math.floor((day / TOTAL_DAYS) * messagesRead)
+    : 0;
 
   useEffect(() => {
     if (!done) return;
@@ -92,14 +94,15 @@ export default function ReadingTheRoomPage() {
           style={{ color: "var(--marginalia)" }}
         >
           Alfred is learning the shape of your life so he can serve you best
-          — the people, the projects, the patterns. Nothing leaves your wallet.
+          — the people, the projects, the patterns. Nothing leaves your VM.
         </p>
 
         <div className="border-t border-rule pt-6 mb-10">
           <div className="font-mono text-[12px] flex items-baseline justify-between">
             <span>
-              Day {String(day).padStart(3, "0")} of {TOTAL_DAYS} ·{" "}
-              {messages.toLocaleString()} messages read
+              {messagesRead
+                ? `${shownMessages.toLocaleString()} of ${messagesRead.toLocaleString()} messages read`
+                : "Opening the post…"}
             </span>
             <span style={{ color: "var(--marginalia)" }}>
               {Math.round((day / TOTAL_DAYS) * 100)}%
@@ -114,7 +117,7 @@ export default function ReadingTheRoomPage() {
               style={{
                 background: "var(--brass)",
                 width: `${(day / TOTAL_DAYS) * 100}%`,
-                transition: "width 60ms linear",
+                transition: "width 80ms linear",
               }}
             />
           </div>
@@ -128,26 +131,36 @@ export default function ReadingTheRoomPage() {
           )}
         </div>
 
-        <ul className="space-y-2">
+        {/* Live butler narration of the principal's real inbox. */}
+        <ul className="space-y-3">
           {visible.map((r, i) => (
             <li
               key={i}
-              className="grid grid-cols-[110px_1fr] gap-4 font-mono text-[13px] items-baseline"
+              className="grid grid-cols-[150px_1fr] gap-4 font-mono text-[13px] items-baseline"
             >
               <span
-                className="uppercase tracking-[0.18em] text-[10px]"
+                className="uppercase tracking-[0.16em] text-[10px] truncate"
                 style={{ color: "var(--marginalia)" }}
+                title={r.domain}
               >
-                {r.type}
+                {r.domain || "inbox"}
               </span>
               <span
                 className="font-display italic text-[18px]"
                 style={{ color: "var(--ink)" }}
               >
-                {r.title}
+                {r.line}
               </span>
             </li>
           ))}
+          {narration.length === 0 && (
+            <li
+              className="font-body italic text-[15px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Alfred is opening the post, one envelope at a time…
+            </li>
+          )}
         </ul>
 
         {animationDone && !backendReady && (

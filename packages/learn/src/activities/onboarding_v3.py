@@ -381,7 +381,20 @@ async def fetch_email_metadata(user_id: str) -> dict[str, Any]:
     onboard["top_domains"] = sorted(by_domain.items(), key=lambda x: -x[1])[:30]
     onboard["progress"]["current_day"] = len(emails)
     onboard["progress"]["total_days"] = len(emails)
+    onboard["progress"]["messages_read"] = len(emails)
     _write_onboard(onboard_path, onboard)
+
+    # Live butler narration of the real inbox — one cheap pass through Hermes
+    # (workers gateway). Best effort; never blocks or fails the fetch.
+    try:
+        from src.activities.inbox_narration import generate_inbox_narration
+
+        narration = await generate_inbox_narration(emails)
+        if narration:
+            onboard["narration"] = narration
+            _write_onboard(onboard_path, onboard)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("fetch_email_metadata: narration skipped: %s", e)
 
     return {
         "count": len(emails),

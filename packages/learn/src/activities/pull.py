@@ -976,9 +976,24 @@ async def composio_fetch_email_metadata(user_id: str) -> dict[str, Any]:
     onboard["top_domains"] = sorted(by_domain.items(), key=lambda x: -x[1])[:30]
     onboard["progress"]["current_day"] = len(emails)
     onboard["progress"]["total_days"] = len(emails)
+    onboard["progress"]["messages_read"] = len(emails)
     os.makedirs(os.path.dirname(onboard_path), exist_ok=True)
     with open(onboard_path, "w", encoding="utf-8") as f:
         json.dump(onboard, f, indent=2)
+
+    # Live butler narration of the real inbox for the onboarding "reading the
+    # room" screen — one cheap pass through Hermes (workers gateway). Best
+    # effort: never blocks or fails the fetch.
+    try:
+        from src.activities.inbox_narration import generate_inbox_narration
+
+        narration = await generate_inbox_narration(emails)
+        if narration:
+            onboard["narration"] = narration
+            with open(onboard_path, "w", encoding="utf-8") as f:
+                json.dump(onboard, f, indent=2)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("composio_fetch_email_metadata: narration skipped: %s", e)
 
     return {"count": len(emails), "domains": len(by_domain)}
 

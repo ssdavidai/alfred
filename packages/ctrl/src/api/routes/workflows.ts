@@ -206,6 +206,10 @@ export function registerWorkflowRoutes(): void {
         automations_count: data.automations?.length ?? 0,
         brief: data.brief ?? "",
         key_identity_facts: data.key_identity_facts ?? [],
+        // Live butler narration of the real inbox + real message count, shown
+        // on the onboarding "reading the room" screen (see inbox_narration).
+        narration: data.narration ?? [],
+        messages_read: data.progress?.messages_read ?? 0,
       });
     } catch {
       // File doesn't exist yet — onboarding hasn't started
