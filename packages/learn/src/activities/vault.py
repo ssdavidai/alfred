@@ -838,20 +838,23 @@ async def apply_instinct_change(proposal: dict[str, Any]) -> None:
 
 @activity.defn
 async def mark_observations_processed(observations: list[dict[str, Any]]) -> None:
-    """Mark observations as processed."""
+    """Mark observations as processed in state.db (Store 2).
+
+    Storage cutover (#27): observations are state.db rows. The old code PATCHed
+    a vault path equal to the observation's ULID (which is NOT a vault record),
+    so the 'processed' flip never landed and ReflectionWorkflow re-fed the same
+    'unprocessed' set to Opus every night (FAILURE-MODES bug #2). Flip the status
+    through the observation PATCH endpoint instead.
+    """
     config = load_config()
-    client = VaultClient(config)
-    try:
+    from src.utils.signal_state import StateClient
+
+    async with StateClient(config) as sc:
         for obs in observations:
-            path = obs.get("path", "")
-            if not path:
+            obs_id = str(obs.get("id") or obs.get("path") or "")
+            if not obs_id:
                 continue
-            existing = await client.read_record(path)
-            raw = existing.get("content", "")
-            updated = _apply_frontmatter_updates(raw, {"status": "processed"})
-            await client.update_record(path, updated)
-    finally:
-        await client.close()
+            await sc.update_observation(obs_id, status="processed")
 
 
 @activity.defn
