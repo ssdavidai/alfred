@@ -16,7 +16,11 @@
 #   * vexa                    the 9-container transcript stack.
 #                             `docker compose --profile vexa up -d`.
 #
-# Minimum VM spec: 16-32 GB RAM, 4+ vCPU, 80+ GB disk (+~3 GB with `vexa`).
+# Minimum VM spec: the default-profile `mem_limit` ceilings sum to ~37 GB, so
+# 32 GB is below the hard cap and OOM-kills a container under load. Floor is
+# 48 GB RAM (32 GB only survives a near-idle box); 48 GB recommended.
+# The `vexa` profile adds ~7 GB of limits → plan on 56-64 GB with it on.
+# Also: 4+ vCPU, 80+ GB disk.
 #
 # Host port bindings: only `caddy` (80/443). Every other service talks over
 # the compose default network by service DNS (e.g. http://ctrl-api:3100).
