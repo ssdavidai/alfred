@@ -150,7 +150,9 @@ export function registerStateRoutes(): void {
       reqStr(b, "headline"),
       optStr(b, "body"),
       optNum(b, "salience") ?? 0.5,
-      optStr(b, "status") ?? "open",
+      // C2: absent status defaults to 'unrouted' — SignalRouterWorkflow only
+      // routes status='unrouted', so an 'open' default was never surfaced.
+      optStr(b, "status") ?? "unrouted",
       optJson(b, "payload"),
     );
     sendJson(res, 201, { ok: true, id });
