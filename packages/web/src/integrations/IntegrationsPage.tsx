@@ -889,7 +889,7 @@ function AppDrawer({
           <span className="text-[0.65rem] text-[#8A8680]">
             {caps?.composio_execute_enabled
               ? "Alfred can invoke these via composio_execute"
-              : "Waiting for composio_execute to be wired into the gateway"}
+              : "Connect this app to let Alfred act on it"}
           </span>
         </div>
         {capLoading ? (
