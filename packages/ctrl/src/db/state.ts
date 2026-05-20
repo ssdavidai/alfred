@@ -19,6 +19,7 @@ import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
 import schema from "./schema.sql";
+import { runMigrations } from "./migrate.js";
 
 const STATE_DB_PATH =
   process.env.STATE_DB_PATH ??
@@ -61,6 +62,11 @@ export function getStateDb(): DatabaseSync {
   db.exec("PRAGMA synchronous = NORMAL");
 
   db.exec(schema);
+
+  // Apply numbered migrations. schema.sql is CREATE-only and cannot evolve
+  // existing columns; runMigrations() carries every delta after the v0 baseline
+  // (see db/migrate.ts). Idempotent, transactional, gated on user_version.
+  runMigrations(db);
 
   // Load sqlite-vec and create the vec0 virtual table. A vec0 table cannot be
   // created by the plain schema.sql exec above — the extension must be loaded

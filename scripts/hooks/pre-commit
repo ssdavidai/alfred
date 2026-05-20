@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Alfred lane-enforcement gate (pre-commit).
+#
+# Installed by scripts/hooks/install.sh, which sets:
+#     git config core.hooksPath scripts/hooks
+# core.hooksPath is repo config shared by every linked worktree, so each lane
+# agent's worktree inherits this gate automatically.
+#
+# It rejects a commit BEFORE the orchestrator ever sees the diff if it jumps
+# lanes, touches the Phase-0 forbidden zone, blows the ~200-LOC scope limit, or
+# fails the lane's VERIFY (regression) command. All logic lives in check_lane.py.
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PY="$(command -v python3 || command -v python || true)"
+if [ -z "${PY}" ]; then
+  echo "✗ lane gate: python3 not found on PATH" >&2
+  exit 1
+fi
+exec "${PY}" "${DIR}/check_lane.py"

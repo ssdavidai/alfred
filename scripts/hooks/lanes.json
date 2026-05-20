@@ -1,0 +1,63 @@
+{
+  "_comment": "Lane definitions for the Alfred fix fan-out. Enforced by check_lane.py at pre-commit. forbidden_zone is Phase-0-owned and off-limits to every lane (except phase0). A staged file must match >=1 of its lane's `allowed` globs and 0 forbidden_zone globs. Glob rules: `a/b/**` = prefix match; `**/x` = suffix match; otherwise fnmatch; exact path = equality. `verify` is the regression gate (overridable per-task via .lane). scope_limit is net changed LOC.",
+  "forbidden_zone": [
+    "packages/ctrl/src/db/schema.sql",
+    "packages/ctrl/src/db/migrations/**",
+    "packages/ctrl/src/db/migrate.ts",
+    "packages/ctrl/src/api/server.ts",
+    "**/CONTRACT.md",
+    "docs/FIX-CONTRACTS.md",
+    "docs/FIX-PLAN.md",
+    "docs/FAILURE-MODES.md",
+    "scripts/hooks/**",
+    "CLAUDE.md"
+  ],
+  "lanes": {
+    "I": {
+      "name": "ctrl-api",
+      "allowed": ["packages/ctrl/**"],
+      "verify": "cd packages/ctrl && npm run build",
+      "scope_limit": 200
+    },
+    "II": {
+      "name": "learn",
+      "allowed": ["packages/learn/**"],
+      "verify": "cd packages/learn && python3 -m pytest -q",
+      "scope_limit": 200
+    },
+    "III": {
+      "name": "web",
+      "allowed": ["packages/web/**"],
+      "verify": "cd packages/web && npx tsc --noEmit",
+      "scope_limit": 200
+    },
+    "IV": {
+      "name": "alfred-vault",
+      "allowed": ["packages/alfred-vault/**"],
+      "verify": "cd packages/alfred-vault && python3 -m pytest -q",
+      "scope_limit": 200
+    },
+    "V": {
+      "name": "edges-infra",
+      "allowed": [
+        "packages/hermes/**",
+        "packages/mcp-server/**",
+        "packages/vault-init/**",
+        "scripts/**",
+        "caddy/**",
+        "docker-compose.yaml",
+        ".env.example",
+        "Makefile",
+        "docs/**"
+      ],
+      "verify": "docker compose config -q",
+      "scope_limit": 200
+    },
+    "phase0": {
+      "name": "orchestrator",
+      "allowed": ["**"],
+      "verify": "true",
+      "scope_limit": 100000
+    }
+  }
+}
