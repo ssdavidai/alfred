@@ -103,10 +103,13 @@ const vaultTools: ToolDef[] = [
   {
     name: "create_vault_record",
     description:
-      "Create a new vault record. Two modes: (1) high-level, pass `type` + `name` + optional `fields` to let the alfred CLI scaffold the file with default frontmatter (`type`, `name`, `created`, `status`, …); or (2) raw, pass `type` + `name` + `content` where `content` is the entire file body INCLUDING frontmatter — used when you already have a fully-formed record (typical when migrating or transcribing). Returns 201 with the new record's path. Side effects: matter/* and task/* records mirror to Plane via the 15s forward-sync cron. Pre-reqs: search_vault first to avoid duplicates; check the vault schema if unsure which fields a type needs (every record needs `type`, `name`, `created`; tasks additionally need `owner: alfred|human`). Backing: docker exec alfred CLI for mode 1, direct fs.writeFile for mode 2.",
+      "Create a new vault record. `type` MUST be one of the 12 canonical vault types — matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision. Anything else (observation, reflection, project, event, …) is rejected by ctrl-api with a 422; those classes are NOT principal-facing vault records (observations/audit live in state.db, not the vault). Two modes: (1) high-level, pass `type` + `name` + optional `fields` to let the alfred CLI scaffold the file with default frontmatter (`type`, `name`, `created`, `status`, …); or (2) raw, pass `type` + `name` + `content` where `content` is the entire file body INCLUDING frontmatter — used when you already have a fully-formed record (typical when migrating or transcribing). Returns 201 with the new record's path. Side effects: matter/* and task/* records mirror to Plane via the 15s forward-sync cron. Pre-reqs: search_vault first to avoid duplicates; check the vault schema if unsure which fields a type needs (every record needs `type`, `name`, `created`; tasks additionally need `owner: alfred|human`). Backing: docker exec alfred CLI for mode 1, direct fs.writeFile for mode 2.",
     inputSchema: z.object({
-      type: z.string().min(1).describe(
-        "Record type — one of the known types (matter, task, project, note, person, org, instinct, chore, …).",
+      type: z.enum([
+        "matter", "task", "note", "person", "org", "place", "asset",
+        "chore", "instinct", "briefing", "daybook", "decision",
+      ]).describe(
+        "Record type — one of the 12 canonical vault types: matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision. Non-canonical types (observation, reflection, project, event) are 422'd by ctrl-api.",
       ),
       name: z.string().min(1).describe(
         "Slug or filename. May include the `.md` extension or a `<type>/` prefix; backend normalises both. Use lowercase-with-dashes.",
