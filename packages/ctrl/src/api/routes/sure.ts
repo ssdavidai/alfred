@@ -106,7 +106,15 @@ function requireParam(params: Record<string, string>, name: string): string {
 // script reads JSON from a file in the shared /alfred-data volume,
 // invokes Sure's ActiveRecord models directly, and prints a single
 // JSON line on stdout. See packages/openclaw/init/sure-*-mutate.rb.
-const MUTATE_HOST_DIR = "/mnt/encrypted/alfred";
+//
+// PATH NOTE: ctrl-api and sure-web both mount the `alfred_data` volume at
+// /alfred-data on the merged single-VM stack. ctrl-api MUST write the
+// payload to /alfred-data so sure-web can read it back through the SAME
+// shared volume — the runner is handed `/alfred-data/.sure-mutate-<id>.json`
+// (containerFile) below, so the writer dir has to match. Writing to the
+// old deploy-template host path /mnt/encrypted/alfred lands the payload in
+// ctrl-api's overlay FS, sure-web never sees it, and every mutate fails.
+const MUTATE_HOST_DIR = "/alfred-data";
 const ACCOUNT_MUTATE_CONTAINER_PATH =
   "/alfred-data/sure-bootstrap/sure-account-mutate.rb";
 const RULE_MUTATE_CONTAINER_PATH =
