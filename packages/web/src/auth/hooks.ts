@@ -9,7 +9,7 @@ import type {
   OnAfterSignupHook,
   OnAfterLoginHook,
 } from "wasp/server/auth";
-import { prisma } from "wasp/server";
+import { prisma, HttpError } from "wasp/server";
 import { encryptApiKey } from "../server/tenantProxy";
 
 /**
@@ -144,7 +144,11 @@ export const onBeforeSignup: OnBeforeSignupHook = async () => {
   }
   const existing = await prisma.user.count();
   if (existing > 0) {
-    throw new Error(
+    // HttpError → a clean 403 with the message, instead of a bare Error
+    // (which Wasp surfaces as an opaque 500). The signup is rejected either
+    // way; this just makes the rejection legible to the caller.
+    throw new HttpError(
+      403,
       "Registration is closed: this Alfred is already claimed by its owner.",
     );
   }
