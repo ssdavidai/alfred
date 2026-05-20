@@ -31,6 +31,7 @@ directly for signals/observations.
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -182,6 +183,29 @@ def signal_dict_to_create_kwargs(signal: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _coerce_payload(payload: Any) -> dict[str, Any]:
+    """Return a row's payload as a dict, parsing a JSON string if needed.
+
+    ctrl-api's GET routes return the ``payload_json`` column verbatim — a
+    JSON STRING, not a parsed object. The rehydrators below previously did
+    ``payload if isinstance(payload, dict) else {}``, which silently dropped
+    the ENTIRE payload (action_proposal, decision_required, display fields,
+    …) for every signal read back through the API. The router then saw no
+    ``action_proposal`` and skipped every actionable signal as
+    ``no_action_proposal`` — so no needs_attention card, no decision (#78).
+    Parse the string here so column-light fields survive the round-trip.
+    """
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str) and payload.strip():
+        try:
+            parsed = json.loads(payload)
+            return parsed if isinstance(parsed, dict) else {}
+        except (ValueError, json.JSONDecodeError):
+            return {}
+    return {}
+
+
 def signal_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     """Rehydrate a ``state.db`` ``signal`` row into a legacy record dict.
 
@@ -193,9 +217,7 @@ def signal_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     The column values are authoritative; the ``payload`` blob fills in
     everything the columns don't carry.
     """
-    payload = row.get("payload") or row.get("payload_json") or {}
-    if not isinstance(payload, dict):
-        payload = {}
+    payload = _coerce_payload(row.get("payload") or row.get("payload_json"))
 
     fm: dict[str, Any] = dict(payload)
 
@@ -331,9 +353,7 @@ def observation_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     intent/created/matter_ref/instinct/...) come from the ``payload``
     JSON blob; typed columns override where they carry the field.
     """
-    payload = row.get("payload") or row.get("payload_json") or {}
-    if not isinstance(payload, dict):
-        payload = {}
+    payload = _coerce_payload(row.get("payload") or row.get("payload_json"))
     fm: dict[str, Any] = dict(payload)
     fm["type"] = "observation"
     if row.get("subject") is not None:

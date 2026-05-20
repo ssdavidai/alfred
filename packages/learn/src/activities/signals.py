@@ -549,6 +549,145 @@ def _event_created_dt(event_dict: dict[str, Any]) -> "datetime | None":
     return _parse_iso_or_none(str(raw))
 
 
+# ---------------------------------------------------------------------------
+# Design-B (#78): consume stream events from ingest.db (Store 4) instead of
+# from vault `stream_event/` markdown. The puller lands every event in
+# ingest.db (ctrl-api `POST /api/v1/streams/ingest` mirrors to Store 4), and
+# the signal extractor reads them back via `GET /api/v1/ingest/events/*`.
+#
+# An ingest-backed event is addressed by the ref ``ingest:<id>`` so the
+# extractor + mark steps can branch on the prefix while the rest of the
+# pipeline (which is keyed on a path-shaped string) is untouched.
+# ---------------------------------------------------------------------------
+
+_INGEST_REF_PREFIX = "ingest:"
+
+
+def _ingest_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
+    """Adapt an ingest.db ``stream_event`` row to the extractor's event shape.
+
+    The extractor + its helpers (``_pre_filter`` / ``_infer_source_type`` /
+    ``_event_body`` / ``_gmail_sender_domain`` / prompt builders) all read a
+    ``{"frontmatter": {...}, "content": "..."}`` dict — the shape ctrl-api's
+    ``GET /api/v1/vault/records/<path>`` used to return for a vault
+    ``stream_event/`` record. ingest.db rows carry the full StreamEvent the
+    puller posted under ``payload_json``; this maps it onto that shape so the
+    downstream extraction logic needs no changes.
+    """
+    payload = row.get("payload_json")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except (ValueError, json.JSONDecodeError):
+            payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    meta = payload.get("metadata")
+    if not isinstance(meta, dict):
+        meta = {}
+
+    # source_type: the composio parser stamps metadata.event_type ("email" →
+    # gmail via _normalize_source_type); fall back to the stream's transport
+    # type / the ingest row's kind/channel.
+    source_type = str(
+        meta.get("event_type")
+        or payload.get("stream_type")
+        or row.get("kind")
+        or row.get("channel")
+        or ""
+    )
+    sender = str(meta.get("from") or payload.get("sender") or "")
+    subject = str(meta.get("subject") or payload.get("subject") or "")
+    body = str(meta.get("body") or "")
+    if not body and isinstance(payload.get("raw"), dict):
+        body = str(payload["raw"].get("messageText") or "")
+    if not body:
+        body = str(payload.get("summary") or "")
+    created = str(payload.get("received_at") or row.get("ts") or "")
+    tags = [source_type] if source_type else []
+
+    return {
+        "frontmatter": {
+            "source_type": source_type,
+            "stream_type": payload.get("stream_type") or source_type,
+            "from": sender,
+            "sender": sender,
+            "subject": subject,
+            "name": subject or (str(payload.get("summary") or "")[:80]),
+            "created": created,
+            "tags": tags,
+        },
+        "content": body,
+        "_ingest_id": row.get("id"),
+    }
+
+
+async def _fetch_ingest_event_as_record(event_id: str) -> dict[str, Any] | None:
+    """Fetch one ingest.db event by id and adapt it to the extractor shape."""
+    cfg = load_config()
+    api_key = __import__("os").environ.get("AAS_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(
+            base_url=cfg.alfred_ctrl_url, timeout=30.0, headers=headers
+        ) as client:
+            resp = await client.get(f"/api/v1/ingest/events/{event_id}")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            row = resp.json()
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "signals._fetch_ingest_event_as_record: fetch failed id=%s err=%s",
+            event_id, exc,
+        )
+        return None
+    if not isinstance(row, dict):
+        return None
+    return _ingest_row_to_record(row)
+
+
+async def _list_unprocessed_ingest_events(limit: int) -> list[str]:
+    """Return ``ingest:<id>`` refs for pending ingest.db events (oldest-first).
+
+    Pre-filtering / garbage detection happens in the extractor's
+    ``_pre_filter`` (the workflow marks even a dropped event processed so it
+    is consumed-then-deleted by the 7d TTL sweep). Listing stays a thin
+    pending-feed read so a slow vault scan can never starve the extractor.
+    """
+    cfg = load_config()
+    api_key = __import__("os").environ.get("AAS_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(
+            base_url=cfg.alfred_ctrl_url, timeout=60.0, headers=headers
+        ) as client:
+            resp = await client.get(
+                "/api/v1/ingest/events/pending", params={"limit": limit}
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "signals._list_unprocessed_ingest_events: pending fetch failed err=%s",
+            exc,
+        )
+        return []
+    events = payload.get("events") if isinstance(payload, dict) else None
+    if not isinstance(events, list):
+        return []
+    refs: list[str] = []
+    for ev in events:
+        if isinstance(ev, dict) and ev.get("id"):
+            refs.append(f"{_INGEST_REF_PREFIX}{ev['id']}")
+    logger.info(
+        "signals._list_unprocessed_ingest_events: %d pending ingest events",
+        len(refs),
+    )
+    return refs[:limit]
+
+
 def _pre_filter(event_dict: dict[str, Any]) -> tuple[bool, str]:
     """Decide whether to send this event to the LLM.
 
@@ -1718,26 +1857,39 @@ async def extract_signals_from_event(
     cfg = load_config()
     client = VaultClient(cfg)
     try:
-        try:
-            event = await client.read_record(stream_event_path)
-        except httpx.HTTPStatusError as exc:
-            if exc.response is not None and exc.response.status_code == 404:
+        # Design-B (#78): ``ingest:<id>`` refs come from ingest.db (Store 4);
+        # bare paths are legacy vault `stream_event/` records.
+        if stream_event_path.startswith(_INGEST_REF_PREFIX):
+            event = await _fetch_ingest_event_as_record(
+                stream_event_path[len(_INGEST_REF_PREFIX):]
+            )
+            if event is None:
                 logger.warning(
-                    "signals.extract_signals_from_event: 404 path=%s",
+                    "signals.extract_signals_from_event: ingest event missing ref=%s",
                     stream_event_path,
                 )
                 return []
-            logger.warning(
-                "signals.extract_signals_from_event: read failed path=%s err=%s",
-                stream_event_path, exc,
-            )
-            return []
-        except httpx.HTTPError as exc:
-            logger.warning(
-                "signals.extract_signals_from_event: read failed path=%s err=%s",
-                stream_event_path, exc,
-            )
-            return []
+        else:
+            try:
+                event = await client.read_record(stream_event_path)
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code == 404:
+                    logger.warning(
+                        "signals.extract_signals_from_event: 404 path=%s",
+                        stream_event_path,
+                    )
+                    return []
+                logger.warning(
+                    "signals.extract_signals_from_event: read failed path=%s err=%s",
+                    stream_event_path, exc,
+                )
+                return []
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "signals.extract_signals_from_event: read failed path=%s err=%s",
+                    stream_event_path, exc,
+                )
+                return []
 
         if not isinstance(event, dict):
             return []
@@ -2601,6 +2753,19 @@ async def list_unprocessed_stream_events(
       4. Slice to ``limit``.
     """
     cfg = load_config()
+
+    # Design-B (#78): default to consuming ingest.db (Store 4). The legacy
+    # vault `stream_event/` scan is kept behind STEWARD_SIGNAL_SOURCE=vault
+    # for back-compat / migration windows. Reading the env here (inside the
+    # activity, never the workflow body) is replay-safe.
+    signal_source = (
+        __import__("os").environ.get("STEWARD_SIGNAL_SOURCE", "ingest")
+        .strip()
+        .lower()
+    )
+    if signal_source != "vault":
+        return await _list_unprocessed_ingest_events(limit)
+
     scan_types = list(types) if types else list(_DEFAULT_STREAM_EVENT_TYPES)
     if not scan_types:
         return []
@@ -2906,6 +3071,36 @@ async def mark_stream_event_processed(
         logger.warning(
             "signals.mark_stream_event_processed: empty/invalid path %r",
             stream_event_path,
+        )
+        return
+
+    # Design-B (#78): an ``ingest:<id>`` ref is consumed in ingest.db
+    # (Store 4) — mark it processed there so the 7d TTL sweep can drop it
+    # and the pending feed never re-serves it.
+    if stream_event_path.startswith(_INGEST_REF_PREFIX):
+        event_id = stream_event_path[len(_INGEST_REF_PREFIX):]
+        cfg = load_config()
+        api_key = __import__("os").environ.get("AAS_API_KEY", "")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        try:
+            async with httpx.AsyncClient(
+                base_url=cfg.alfred_ctrl_url, timeout=30.0, headers=headers
+            ) as client:
+                resp = await client.post(
+                    f"/api/v1/ingest/events/{event_id}/processed",
+                    json={"processed_by": "signal_extract"},
+                )
+                resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "signals.mark_stream_event_processed: ingest mark failed "
+                "id=%s err=%s",
+                event_id, exc,
+            )
+            raise
+        logger.info(
+            "signals.mark_stream_event_processed: marked ingest id=%s signal=%s",
+            event_id, signal_path or "(none)",
         )
         return
 

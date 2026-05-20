@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
+import httpx
 from temporalio import activity
 
 from src.config import load_config
 from src.utils.vault_client import VaultClient
+
+logger = logging.getLogger("alfred-learn")
 
 
 _STREAM_LOG_HEADER = """\
@@ -41,16 +45,35 @@ async def append_to_stream_log(stream_type: str, log_line: str) -> str:
 
         entry = f"- **{time_str}** [{stream_type}] {log_line}\n"
 
-        # Try to append to existing log file
+        # NOTE (#78): ``memory/`` is NOT a canonical vault type, so ctrl-api's
+        # promotion contract 422s every write here. This activity is no longer
+        # called on the hot path (EventProcessor stopped invoking it), but it
+        # is kept tolerant: a contract rejection (422) or any other write
+        # failure is downgraded to a warning + early return so a stray caller
+        # can never wedge a workflow on infinite retries again (the original
+        # bug — observed at attempt #219). The stream log is an audit-class
+        # convenience, never load-bearing.
         try:
-            existing = await client.read_record(log_path)
-            # File exists — append the entry
-            await client.update_record(log_path, entry)
-        except Exception:
-            # File doesn't exist — create with header + first entry
-            header = _STREAM_LOG_HEADER.format(date=date_str)
-            content = header + entry
-            await client.write_record("memory", f"stream-log-{date_str}", content)
+            try:
+                await client.read_record(log_path)
+                await client.update_record(log_path, entry)
+            except httpx.HTTPStatusError as exc:
+                # 404 → file doesn't exist yet, create it. Any other status
+                # (incl. 422 contract rejection) falls through to the outer
+                # handler below.
+                if exc.response is not None and exc.response.status_code == 404:
+                    header = _STREAM_LOG_HEADER.format(date=date_str)
+                    await client.write_record(
+                        "memory", f"stream-log-{date_str}", header + entry
+                    )
+                else:
+                    raise
+        except Exception as exc:  # noqa: BLE001 — advisory, never fatal
+            logger.warning(
+                "stream_log.append_to_stream_log: write skipped (%s) — "
+                "non-fatal, stream log is audit-class",
+                str(exc)[:120],
+            )
 
         return log_path
     finally:

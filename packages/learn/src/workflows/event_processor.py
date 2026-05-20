@@ -116,33 +116,32 @@ class EventProcessorWorkflow:
                 result.paths.append(inbox_path)
                 continue
 
-            # --- Zero-LLM path for all other stream events ---
-
-            # 1. Stream log entry (one line, pure Python)
-            log_line = extract_log_line(event)
-            await workflow.execute_activity(
-                append_to_stream_log,
-                args=[event.get("stream_type", "unknown"), log_line],
-                start_to_close_timeout=timedelta(seconds=15),
-            )
-
-            # 2. Vault record (pure Python template, zero LLM)
-            vault_path: str = await workflow.execute_activity(
-                create_stream_vault_record,
-                args=[event],
-                start_to_close_timeout=timedelta(seconds=30),
-            )
-
-            # 3. Mark processed
+            # --- Non-inbox stream events ---
+            #
+            # Design-B (#78): a non-inbox stream event is NOT written to the
+            # vault. The promotion contract demotes `stream_event` to
+            # ingest.db (Store 4) and `event`/`memory` audit lines to
+            # state.db — both vault writes the old zero-LLM path performed
+            # (`create_stream_vault_record` → `stream_event/`,
+            # `append_to_stream_log` → `memory/stream-log-*`) now 422 and
+            # used to wedge this workflow on infinite retries.
+            #
+            # The puller already lands every event in ingest.db (ctrl-api
+            # mirrors `POST /api/v1/streams/ingest` into Store 4), and
+            # SignalExtractWorkflow consumes from there via
+            # `GET /api/v1/ingest/events/pending`. So EventProcessor's job
+            # for non-inbox events is simply: mark the JSONL-side event
+            # processed so the streams sidecar doesn't re-serve it. No vault
+            # write, no LLM. The system-inbox → curator path above is
+            # unchanged.
             await workflow.execute_activity(
                 mark_event_processed,
-                args=[event_id, vault_path, "stream-vault"],
+                args=[event_id, f"ingest:{event_id}", "ingest-store4"],
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=_MARK_RETRY,
             )
-
             result.vault_records += 1
-            result.paths.append(vault_path)
+            result.paths.append(f"ingest:{event_id}")
 
         result.processed = len(result.paths)
         return result
