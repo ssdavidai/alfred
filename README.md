@@ -1,19 +1,86 @@
-# alfred-black
+<div align="center">
 
-Single-VM, `docker compose up` deployment of Alfred Black — an agentic butler
-for your calendar, email, finances, household logistics, and everything else
-you currently keep in your head.
+# Alfred Black
 
-This is a standalone reframing of the `alfred-platform` SaaS fleet: **one repo,
-one VM, one `docker compose up`** — no Hetzner auto-provisioning, no Tailscale,
-no Cloudflare, no billing. You bring a fresh Linux VM and a domain; the stack
-brings everything else and serves the web app on your domain over HTTPS.
+**The agent you can forget about.**
+
+An ambient butler for your calendar, email, finances, household logistics, and
+everything else you currently keep in your head — self-hosted, always on, on
+hardware you control.
+
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-green.svg)](https://python.org)
+[![PyPI: alfred-vault](https://img.shields.io/pypi/v/alfred-vault.svg)](https://pypi.org/project/alfred-vault/)
+
+</div>
+
+---
+
+200 emails on Tuesday. Alfred surfaced the 1 that actually required attention.
+
+A meeting transcript drops into the inbox at 3pm. By 3:02, Alfred has created
+the conversation record, updated three people, filed two tasks under the right
+matter, and linked everything together. Nobody asked. It just happened.
+
+That night, Alfred notices two records in the vault contradict each other and
+flags it. Fixes broken links. Finds a cluster of notes about the same theme
+that were never connected, and writes the relationships. By morning the
+knowledge graph is richer than when everyone went home.
+
+**This is what a butler does.** Not just tasks when asked — anticipatory
+attention, owning things so you don't have to hold them in your head. The goal
+isn't to talk to your AI more. It's to **prompt less and live more.**
+
+---
+
+## What's in this repo
+
+This repository is the canonical home of **Alfred Black**. It ships two things
+that share one engine:
+
+| | What it is | Where |
+|---|---|---|
+| **`alfred-vault`** | The original pip-installable CLI. Turns *any* agentic runtime into an ambient butler over an Obsidian vault — four background workers (Curator · Janitor · Distiller · Surveyor) plus a Temporal workflow engine. Runs on a Mac Mini under your desk or any box with Python. | [`packages/alfred-vault/`](packages/alfred-vault/) · [`pip install alfred-vault`](https://pypi.org/project/alfred-vault/) |
+| **Alfred Black** | The full self-hosted **platform**: a web dashboard, the Hermes AI runtime, durable workflows, multi-channel delivery, and finance / project / secrets sidecars — all brought up with a single `docker compose up` on one VM, served on your own domain over HTTPS. | this repo · *the rest of `packages/`* |
+
+> **2026-05-20 — the big one.** The project that gave you the `alfred` CLI is
+> now a complete, deployable platform. `alfred-vault` is the same dependable
+> engine it always was — `pip install alfred-vault` still works exactly as
+> before — and Alfred Black wraps it in everything you need to actually *live*
+> with an agentic butler: a real UI, onboarding, a daily Brief, and a
+> one-command self-hosted deploy. See [`CHANGELOG.md`](CHANGELOG.md).
+
+---
+
+## Two ways to run Alfred
+
+### 1 · Just the CLI (`alfred-vault`)
+
+If you already run an agentic runtime ([Claude Code](https://docs.anthropic.com/en/docs/claude-code),
+[OpenClaw](https://openclaw.com), [Zo Computer](https://zo.computer)) and want
+the vault engine on a single machine:
+
+```bash
+pip install alfred-vault
+alfred quickstart
+alfred up
+```
+
+Three commands. Drop a file into `inbox/` and it's handled. Full docs:
+[`packages/alfred-vault/README.md`](packages/alfred-vault/README.md).
+
+### 2 · The full platform (Alfred Black)
+
+If you want the whole product — web dashboard, Hermes runtime, the daily Brief,
+multi-channel delivery, and the Plane / Sure / Vaultwarden sidecars — on a VM
+you control: read on. You bring a fresh Linux VM and a domain; the stack brings
+everything else and serves the web app on your domain over HTTPS. No Hetzner
+auto-provisioning, no Tailscale, no Cloudflare, no billing — **one repo, one
+VM, one `docker compose up`.**
 
 The AI runtime is **Hermes Agent**
 ([`NousResearch/hermes-agent`](https://github.com/NousResearch/hermes-agent)),
-which replaces OpenClaw's two-container split with a single isolated runtime.
-
-The full design lives in [`docs/PLAN.md`](docs/PLAN.md) (Parts A–I).
+a single isolated runtime that replaces OpenClaw's two-container split.
 
 ---
 
@@ -89,8 +156,8 @@ resolve; a stale record only delays the first certificate.
 
 ```sh
 # 1. Clone onto the VM
-git clone https://github.com/ssdavidai/alfred-black
-cd alfred-black
+git clone https://github.com/ssdavidai/alfred
+cd alfred
 
 # 2. Run the interactive setup wizard
 ./scripts/setup.sh
@@ -233,10 +300,10 @@ re-bootstrap is needed and Let's Encrypt is not re-hit.
 ## Building the images (maintainers only)
 
 A fresh VM never builds anything — `docker compose` only **pulls**. The custom
-`ssdavidai00/*` images are built and pushed by CI on every push to `main`
-(`.github/workflows/build-*.yml`, multi-arch `linux/amd64,linux/arm64`). Note
-`alfred-setup` is the setup wizard — run by `./scripts/setup.sh`, never started
-by `docker compose`:
+`ssdavidai00/*` images are built and pushed by CI on every push to the default
+branch (`.github/workflows/build-*.yml`, multi-arch `linux/amd64,linux/arm64`).
+Note `alfred-setup` is the setup wizard — run by `./scripts/setup.sh`, never
+started by `docker compose`:
 
 | Image | Built from |
 |-------|-----------|
@@ -244,16 +311,21 @@ by `docker compose`:
 | `alfred-web-client` | the SPA half of `.wasp/build/web-app/`, served by nginx |
 | `alfred-ctrl-api` | `packages/ctrl` (esbuild bundle + sqlite-vec) |
 | `alfred-black-hermes` | `packages/hermes` (Hermes runtime + shim) |
-| `alfred-worker` | `packages/hermes/dockerfiles/alfred.Dockerfile` |
+| `alfred-worker` | `packages/hermes/dockerfiles/alfred.Dockerfile` (the vault daemon — bundles `packages/alfred-vault`) |
 | `alfred-learn` | `packages/learn` (Temporal worker) |
 | `alfred-mcp-server` | `packages/mcp-server` |
-| `alfred-init` | `packages/hermes/init` (one-shot bootstrap) |
+| `alfred-init` | `packages/hermes/init` (one-shot bootstrap — bundles `packages/alfred-vault`) |
 | `alfred-setup` | `packages/setup` (the interactive setup wizard — run via `./scripts/setup.sh`, not a compose service) |
 
 `wasp build` needs no database — schema migrations (`prisma migrate deploy`)
 run inside the `web` container at startup against `web-db`. The `Makefile`
-has `build-*` targets that mirror CI for local rebuilds. See
-[`docs/PLAN.md`](docs/PLAN.md) Part G.
+has `build-*` targets that mirror CI for local rebuilds.
+
+The **`alfred-vault`** Python package has its own independent release train —
+it publishes to PyPI on an `alfred-vault-vX.Y.Z` tag via
+`.github/workflows/release-alfred-vault.yml`. Platform images and the PyPI
+package are versioned separately (date-based releases for the platform, semver
+for the package).
 
 ---
 
@@ -267,10 +339,11 @@ binds host ports (`:80`/`:443`).
   data calls to the local `ctrl-api`.
 - **Control** (`packages/ctrl`) — the `ctrl-api` service on `:3100`; owns the
   vault and the operational SQLite store.
-- **Data** — Hermes (AI runtime), Temporal, Ollama, the vault daemon,
-  `alfred-learn`, the MCP server, plus the Plane / Sure / Vaultwarden sidecars.
+- **Data** — Hermes (AI runtime), Temporal, Ollama, the vault daemon
+  (`packages/alfred-vault`, run as `alfred-worker`), `alfred-learn`, the MCP
+  server, plus the Plane / Sure / Vaultwarden sidecars.
 
-Four-store storage model — see [`docs/PLAN.md`](docs/PLAN.md) Part I:
+Four-store storage model:
 
 - **Vault** (markdown) — the principal's published knowledge surface.
 - **`state.db`** (SQLite + sqlite-vec) — the machine's working memory.
@@ -278,4 +351,9 @@ Four-store storage model — see [`docs/PLAN.md`](docs/PLAN.md) Part I:
   compactor rolls `state.db` rows older than 90 days into it.
 - **`ingest.db`** (SQLite) — raw inbound stream, 7-day TTL.
 
-See [`docs/PLAN.md`](docs/PLAN.md) for the complete plan (Parts A–I).
+---
+
+## License
+
+[MIT](LICENSE).
+</content>
