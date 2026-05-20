@@ -113,16 +113,16 @@ function appendDeliveryToDisk(deliveryId: string): void {
 // atomic (tmp + rename) so concurrent writes from multiple inflight
 // comment posts don't corrupt the file.
 //
-// PATH NOTE: the ctrl-api container does NOT remap /mnt/encrypted/alfred
-// to /alfred-data (unlike alfred-learn). Writing to /alfred-data/state/...
-// from ctrl-api would land in the container's overlay FS and never reach
-// the shared bind mount that plane_alfred_triggers reads from. Using the
-// host path /mnt/encrypted/alfred/... makes the file land at
-// /alfred-data/state/plane_self_comments.json inside the alfred-learn
-// container (where the Python trigger loader looks for it).
+// PATH NOTE: on the merged single-VM stack ctrl-api mounts the shared
+// `alfred_data` volume at /alfred-data (same mount alfred-learn sees). We
+// write the ledger to /alfred-data/state/... so plane_alfred_triggers.py
+// reads it from the identical shared volume. The old deploy-template path
+// /mnt/encrypted/alfred is NOT mounted in ctrl-api here, so writing there
+// would land the file in ctrl-api's overlay FS and the echo-defence would
+// silently break (Alfred would re-process its own Plane comments).
 // ---------------------------------------------------------------------------
 
-const SELF_COMMENTS_FILE = "/mnt/encrypted/alfred/state/plane_self_comments.json";
+const SELF_COMMENTS_FILE = "/alfred-data/state/plane_self_comments.json";
 const SELF_COMMENTS_CAP = 500;
 
 function appendSelfCommentId(commentId: string): void {
