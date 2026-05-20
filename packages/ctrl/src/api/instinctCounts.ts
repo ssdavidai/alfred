@@ -1,37 +1,27 @@
-// Live observation count per instinct, derived from the observation/
-// vault directory rather than a stored counter on the instinct record.
+// Live observation count per instinct, sourced from the state.db `observation`
+// table (Store 2) — the machine's working memory — NOT the vault.
 //
 // Trust signal: only count observations that came from a Sir decision
-// (source_kind == "decision") and are linked to the instinct via the
-// `instinct:` frontmatter field. Signal-sourced observations that
-// retroactively matched a pattern are weaker evidence ("would have
-// matched" ≠ "Sir consciously decided") and are excluded.
+// (state.db `kind = 'decision'`) and are linked to an instinct via
+// `instinct_ref`. Signal-sourced retroactive matches are weak evidence and
+// don't earn trust, so they're excluded.
 //
-// Why derived, not a stored counter:
-//   - No race on concurrent writes
-//   - No drift between counter and reality
-//   - Self-correcting if observations are deleted or moved
-//   - One source of truth (the observation files themselves)
+// Before the storage cutover this walked vault/observation/*.md, but the
+// decision-observation writer posts to state.db, so the vault directory was
+// empty and the count was frozen at 0 — which pinned the discretion gate at
+// 0.95 (get_discretion_threshold(0)) and froze progressive autonomy at
+// "Asking" forever (FAILURE-MODES bug #1). Querying state.db is the fix.
 //
-// Used by:
-//   - GET /api/v1/learning/instincts — enriches each instinct's
-//     frontmatter with `live_observation_count` for the /instincts UI
-//     stage classifier
-//   - GET /api/v1/vault/list/instinct — same enrichment, picked up by
-//     alfred-learn's signal_actions._instinct_threshold for the
-//     discretion-formula gate
-
-import path from "node:path";
-import { readRecord, walkMd } from "./routes/vault.js";
+// Consumers (key the returned Map by the instinct's vault path = instinct_ref):
+//   - GET /api/v1/learning/instincts — enriches each instinct's frontmatter
+//     with `live_observation_count` for the /instincts UI.
+//   - GET /api/v1/vault/list/instinct — same enrichment, read by
+//     alfred-learn's signal_actions._instinct_threshold for the discretion gate.
+import { getStateDb } from "../db/state.js";
 import { ttlCache } from "./cache.js";
 
-const VAULT_PATH = process.env.VAULT_PATH || "/vault";
-const IGNORE_DIRS = new Set([".git", ".obsidian", "node_modules"]);
-
-// 30s TTL is appropriate: signal_router runs every 2 min so a stale
-// count costs at most one cycle; the UI tolerates more. Bust on
-// observation writes via invalidateInstinctCounts() (wired into the
-// observation invalidator below).
+// 30s TTL: signal_router runs every 2 min so a stale count costs at most one
+// cycle; the UI tolerates more. Bust via invalidateInstinctCounts() on writes.
 const instinctCountsCache = ttlCache<Map<string, number>>({ ttlMs: 30_000 });
 
 export function invalidateInstinctCounts(): void {
@@ -41,20 +31,16 @@ export function invalidateInstinctCounts(): void {
 export async function getInstinctCounts(): Promise<Map<string, number>> {
   return instinctCountsCache.get("all", () => {
     const counts = new Map<string, number>();
-    const observationDir = path.join(VAULT_PATH, "observation");
-    const files = walkMd(observationDir, VAULT_PATH, IGNORE_DIRS);
-    for (const relPath of files) {
-      const rec = readRecord(relPath);
-      if (!rec) continue;
-      const fm = rec.fm;
-      if (String(fm.type ?? "") !== "observation") continue;
-      // Only decision-sourced. Signal-sourced retroactive matches are
-      // weak evidence and don't earn trust.
-      if (String(fm.source_kind ?? "") !== "decision") continue;
-      const instinctRef = String(fm.instinct ?? fm.matched_instinct ?? "").trim();
-      if (!instinctRef) continue;
-      counts.set(instinctRef, (counts.get(instinctRef) ?? 0) + 1);
-    }
+    const rows = getStateDb()
+      .prepare(
+        `SELECT instinct_ref AS ref, COUNT(*) AS n
+           FROM observation
+          WHERE kind = 'decision'
+            AND instinct_ref IS NOT NULL AND instinct_ref != ''
+          GROUP BY instinct_ref`,
+      )
+      .all() as { ref: string; n: number }[];
+    for (const r of rows) counts.set(r.ref, r.n);
     return counts;
   });
 }
