@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .schema import LEARN_TYPES
+from .schema import DISTILLER_CREATABLE_TYPES, LEARN_TYPES
 
 
 class ScopeError(Exception):
@@ -38,7 +38,10 @@ SCOPE_RULES: dict[str, dict[str, bool | str]] = {
         "search": True,
         "list": True,
         "context": True,
-        "create": "learn_types_only",
+        # bug #12: the distiller may create learn types EXCEPT `decision`,
+        # which lands in the principal's own decision/ directory and would be
+        # indistinguishable from a real principal decision.
+        "create": "distiller_create",
         # Distiller writes distiller_signals and distiller_learnings
         # back to source records (see distiller/pipeline.py).
         "edit": "distiller_fields_only",
@@ -111,6 +114,16 @@ def check_scope(
             raise ScopeError(
                 f"Scope '{scope}' can only create learn types "
                 f"({', '.join(sorted(LEARN_TYPES))}). Got: '{record_type}'"
+            )
+        return
+
+    if permission == "distiller_create":
+        if record_type not in DISTILLER_CREATABLE_TYPES:
+            raise ScopeError(
+                f"Scope '{scope}' can only create "
+                f"({', '.join(sorted(DISTILLER_CREATABLE_TYPES))}). "
+                f"Got: '{record_type}'. The distiller must not author "
+                f"principal-facing 'decision' records (bug #12)."
             )
         return
 

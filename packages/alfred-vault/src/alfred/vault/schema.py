@@ -15,6 +15,17 @@ LEARN_TYPES: set[str] = {
     "assumption", "decision", "constraint", "contradiction", "synthesis",
 }
 
+# Learn types the distiller is permitted to CREATE.
+#
+# `decision` is deliberately excluded (bug #12): TYPE_DIRECTORY maps `decision`
+# into the principal's own `decision/` directory, so a distiller-authored
+# decision record is indistinguishable from a decision the principal actually
+# made. The distiller may still READ `decision` records as evidence (that is
+# why `decision` stays in LEARN_TYPES), but it must never write one into the
+# principal-facing surface. Other learn types live in machine-owned
+# directories, so the distiller may author them.
+DISTILLER_CREATABLE_TYPES: set[str] = LEARN_TYPES - {"decision"}
+
 STATUS_BY_TYPE: dict[str, set[str]] = {
     "project": {"active", "paused", "completed", "abandoned", "proposed"},
     "task": {"todo", "active", "blocked", "done", "cancelled"},

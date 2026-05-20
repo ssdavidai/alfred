@@ -18,7 +18,11 @@ log = structlog.get_logger()
 # cluster contains one of these, its filename stem becomes a canonical
 # cluster tag so every member inherits the entity slug and downstream
 # consumers can match on `alfred_tags: [<entity-slug>]`.
-ENTITY_RECORD_TYPES = frozenset({"matter", "person", "org", "project"})
+# bug #13: "matter" was listed here but is NOT a canonical vault KNOWN_TYPE
+# (see alfred.vault.schema.KNOWN_TYPES). If the cluster path ever fired on a
+# "matter"-typed record it would write `related_matters` links pointing at a
+# type the rest of the system rejects. Only canonical entity types belong here.
+ENTITY_RECORD_TYPES = frozenset({"person", "org", "project"})
 
 
 def _slug_from_rel_path(rel_path: str) -> str:
