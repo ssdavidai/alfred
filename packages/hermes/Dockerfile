@@ -143,9 +143,11 @@ ENV HERMES_HOME=/opt/data \
 # caller speaks: the Hermes /v1 API on :18789 (main) / :18790 (workers).
 EXPOSE 18789 18790
 
-# Healthcheck hits the MAIN gateway's /health endpoint directly — a green
-# healthcheck means the real Hermes runtime is up.
+# Healthcheck probes BOTH gateways' /health endpoints — main :18789
+# (chat/onboarding) AND workers :18790 (clerk/background). A green healthcheck
+# means both real Hermes runtimes are up; a dead workers gateway must keep the
+# container UNhealthy so dependents don't start against a dead clerk gateway.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
-    CMD curl -fsS http://localhost:18789/health || exit 1
+    CMD curl -fsS http://localhost:18789/health && curl -fsS http://localhost:18790/health || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/opt/hermes-supervisor/supervisor.sh"]
