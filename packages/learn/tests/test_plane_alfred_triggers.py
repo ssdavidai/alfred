@@ -748,7 +748,10 @@ class TestMatterSlugForProject:
 
     def test_roundtrip(self, tmp_path: Path, monkeypatch):
         monkeypatch.setenv("ALFRED_DATA_DIR", str(tmp_path))
-        (tmp_path / "plane_sync_cursor.json").write_text(json.dumps({
+        # Cursor lives under state/ — same path plane_sync writes.
+        cursor = tmp_path / "state" / "plane_sync_cursor.json"
+        cursor.parent.mkdir(parents=True, exist_ok=True)
+        cursor.write_text(json.dumps({
             "last_vault_mtime": 0,
             "project_map": {
                 "alfred-platform": "proj-alfred-uuid",
@@ -1207,3 +1210,49 @@ class TestWorkflowIntegration:
         assert r2.alfred_approvals_resolved == 1
         assert r2.alfred_sessions_spawned == 0
         assert state_2["approval_calls"][0]["issue_id"] == "iss-gate"
+
+
+class TestPlaneSyncCursorPath:
+    """The matter-context lookup must read the SAME cursor file that
+    plane_sync writes. The cursor lives at ``<alfred_data>/state/
+    plane_sync_cursor.json``; a missing ``state/`` segment makes
+    ``_matter_slug_for_project`` always miss → Plane-triggered Alfred
+    sessions never get matter context.
+    """
+
+    def test_cursor_path_matches_plane_sync(self, monkeypatch, tmp_path):
+        from src.activities import plane_alfred_triggers as pat
+        from src.activities import plane_sync as ps
+
+        # Pin both modules to the same alfred-data dir.
+        monkeypatch.setattr(pat, "_alfred_data_dir", lambda: tmp_path)
+
+        class _Cfg:
+            alfred_data_dir = str(tmp_path)
+        monkeypatch.setattr(ps, "load_config", lambda: _Cfg())
+
+        assert pat._plane_sync_cursor_path() == ps._cursor_path(), (
+            "triggers must resolve the cursor at plane_sync's path "
+            f"(got {pat._plane_sync_cursor_path()} vs {ps._cursor_path()})"
+        )
+
+    def test_matter_slug_resolves_from_plane_sync_cursor(self, monkeypatch, tmp_path):
+        from src.activities import plane_alfred_triggers as pat
+        from src.activities import plane_sync as ps
+
+        monkeypatch.setattr(pat, "_alfred_data_dir", lambda: tmp_path)
+
+        class _Cfg:
+            alfred_data_dir = str(tmp_path)
+        monkeypatch.setattr(ps, "load_config", lambda: _Cfg())
+
+        # Write a cursor where plane_sync actually puts it.
+        cursor_path = ps._cursor_path()
+        cursor_path.parent.mkdir(parents=True, exist_ok=True)
+        cursor_path.write_text(json.dumps({
+            "last_vault_mtime": 0.0,
+            "project_map": {"the-pavilion": "prj-pav"},
+            "issue_map": {},
+        }))
+
+        assert pat._matter_slug_for_project("prj-pav") == "the-pavilion"

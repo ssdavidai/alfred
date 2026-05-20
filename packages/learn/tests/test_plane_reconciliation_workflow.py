@@ -36,10 +36,17 @@ class TestReconcileActivityStaleDetection:
     """Stale detection: issue_map entry whose plane_id isn't in the live
     set triggers the archive path."""
 
-    def _run(self, monkeypatch, *, cursor_state, live_ids, vault_records=None):
+    def _run(
+        self, monkeypatch, *, cursor_state, live_ids, vault_records=None,
+        on_archive=None,
+    ):
         """Drive reconcile_plane_deletes with in-memory fakes.
 
         ``vault_records`` is {path: frontmatter_dict} — missing paths 404.
+        ``on_archive`` is an optional callback invoked from inside the
+        archive hook (which runs DURING the reconciliation scan, before
+        the final cursor write) — used to simulate a concurrent
+        forward-sync mutation of the on-disk cursor.
         Returns (result_counters, captured_archives, cursor_written).
         """
         from src.activities import plane_reconciliation as pr
@@ -117,6 +124,8 @@ class TestReconcileActivityStaleDetection:
 
         async def fake_archive(slug, path):
             archive_calls.append((slug, path))
+            if on_archive is not None:
+                on_archive(tmp_cursor)
 
         monkeypatch.setattr(
             ps, "_archive_vault_task_from_plane_delete", fake_archive,
@@ -282,6 +291,51 @@ class TestReconcileActivityStaleDetection:
         assert archives == []  # archive helper NOT called
         written = json.loads(writes[0])
         assert "ghost" not in written["issue_map"]
+
+    def test_concurrent_forward_sync_update_preserved_on_write(self, monkeypatch):
+        """Lost-update regression: reconciliation reads the cursor, scans
+        Plane for minutes, then writes the cursor back. A 15s forward-sync
+        runs in between and persists a new issue_map entry + bumped
+        last_vault_mtime. Reconciliation must re-read + merge (apply only
+        its own deletes), NOT clobber the forward-sync's interim update
+        from its stale snapshot.
+        """
+        cursor = {
+            "last_vault_mtime": 500.0,
+            "project_map": {"alpha": "prj-alpha"},
+            "issue_map": {
+                "still-here": "iss-live",
+                "rest-deleted": "iss-gone",
+            },
+        }
+        live = {"prj-alpha": ["iss-live"]}  # iss-gone missing
+        vault = {"task/rest-deleted.md": {"name": "Gone", "archived": False}}
+
+        def concurrent_forward_sync(tmp_cursor):
+            # Forward-sync wrote a NEW cursor to disk while we paginated:
+            # a freshly-mapped task + a bumped mtime.
+            current = json.loads(tmp_cursor["contents"])
+            current["issue_map"]["new-task"] = "iss-new"
+            current["last_vault_mtime"] = 900.0
+            tmp_cursor["contents"] = json.dumps(current)
+
+        counters, archives, writes = self._run(
+            monkeypatch,
+            cursor_state=cursor,
+            live_ids=live,
+            vault_records=vault,
+            on_archive=concurrent_forward_sync,
+        )
+
+        assert counters["vault_archived"] == 1
+        written = json.loads(writes[-1])
+        # Reconciliation's own delete applied:
+        assert "rest-deleted" not in written["issue_map"]
+        # Concurrent forward-sync's interim update preserved (NOT clobbered):
+        assert written["issue_map"].get("new-task") == "iss-new", written
+        assert written["last_vault_mtime"] == 900.0, written
+        # Untouched live entry still present:
+        assert written["issue_map"].get("still-here") == "iss-live", written
 
 
 # ---------------------------------------------------------------------------

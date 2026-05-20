@@ -44,8 +44,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from temporalio import activity
@@ -162,6 +163,35 @@ def _iso(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _tenant_tz(config: Any = None) -> tzinfo:
+    """Resolve the tenant's IANA timezone (env ``TENANT_TIMEZONE``, via
+    ``Config.tenant_timezone``; default UTC). Falls back to UTC on an
+    unknown / unloadable zone so a misconfigured tenant never wedges the
+    brief.
+
+    Chore schedules fire at tenant-local time (ctrl ``chores.ts``), so the
+    brief's date/dateline + day-shape "today" must be derived in this zone,
+    not in UTC — otherwise a non-UTC tenant gets a brief named/dated to the
+    wrong calendar day (B7).
+    """
+    cfg = config or load_config()
+    name = getattr(cfg, "tenant_timezone", None) or "UTC"
+    try:
+        return ZoneInfo(str(name))
+    except Exception:  # noqa: BLE001 — bad zone string / missing tzdata
+        logger.warning(
+            "briefing: unknown TENANT_TIMEZONE=%r — falling back to UTC", name
+        )
+        return timezone.utc
+
+
+def _tenant_local(dt: datetime, config: Any = None) -> datetime:
+    """Convert an instant to the tenant's local wall-clock time."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(_tenant_tz(config))
 
 
 def _slug_from_matter_path(matter_path: str) -> str:
@@ -1801,13 +1831,16 @@ async def _gather_day_shape(now: datetime | None = None) -> dict[str, Any]:
     events_tomorrow}`` — empty events list when no commitments. The
     composer uses events_today to name the day's anchor in §Day's shape.
     """
+    # ``now`` carries the tenant-local wall clock (passed by the caller).
+    # Anchor "today" to its own tzinfo so the day boundaries are the
+    # tenant's local midnight, not UTC midnight — otherwise events get
+    # bucketed into the wrong calendar day for non-UTC tenants (B7).
     now = now or _now_utc()
+    tz = now.tzinfo or timezone.utc
     today = now.date()
-    time_min = datetime(today.year, today.month, today.day, tzinfo=timezone.utc).isoformat()
-    time_max = (
-        datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
-        + timedelta(days=2)
-    ).isoformat()
+    day_start = datetime(today.year, today.month, today.day, tzinfo=tz)
+    time_min = day_start.isoformat()
+    time_max = (day_start + timedelta(days=2)).isoformat()
     result = await _ctrl_call(
         "POST",
         "/api/v1/integrations/execute",
@@ -2022,7 +2055,7 @@ async def compose_and_write_briefing(
     money_envelope = await _gather_money_envelope(
         window_start=window_start, window_end=window_end,
     )
-    day_shape = await _gather_day_shape(now=_now_utc())
+    day_shape = await _gather_day_shape(now=_tenant_local(_now_utc(), config))
 
     visit_anomalies = _derive_anomalies_from_visits(visit_results)
     anomalies = visit_anomalies + signal_anomalies
@@ -2092,7 +2125,10 @@ async def compose_and_write_briefing(
 
     # Phase 2c — write the snapshot record.
     composed_at_iso = _iso(window_end)
-    date_str = window_end.date().isoformat()
+    # The brief's calendar day is the TENANT-LOCAL day of window_end — chore
+    # schedules fire at tenant-local time, so a UTC date mis-names the brief
+    # for non-UTC tenants (B7). composed_at stays the true UTC instant.
+    date_str = _tenant_local(window_end, config).date().isoformat()
     record_name = f"{date_str}-{slot_norm}"
     chore_run_ref = (
         f"alfred-data/chore-run-history.jsonl#daily-{slot_norm}-briefing@"

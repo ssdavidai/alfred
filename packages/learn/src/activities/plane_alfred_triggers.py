@@ -59,7 +59,7 @@ logger = logging.getLogger("alfred-learn")
 
 _SELF_COMMENTS_RELATIVE = "state/plane_self_comments.json"
 _PENDING_APPROVALS_RELATIVE = "state/plane_pending_approvals.json"
-_PLANE_SYNC_CURSOR_RELATIVE = "plane_sync_cursor.json"
+_PLANE_SYNC_CURSOR_RELATIVE = "state/plane_sync_cursor.json"
 
 # Bootstrap-context caps. These bound prompt growth so a pathological
 # issue (100+ comments, 50kb matter body) can't blow past the openclaw
