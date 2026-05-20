@@ -47,10 +47,10 @@ const vaultTools: ToolDef[] = [
   {
     name: "list_vault_by_type",
     description:
-      "List every record of a given vault type (matter, task, project, note, person, org, instinct, chore, observation, reflection, decision, event, …). Returns one entry per record with `path` (vault-relative, suitable for get_vault_record / update_vault_record), `name`, `status`, full `frontmatter`, a truncated `body_preview` (default 500 chars, max 2000 via `preview` query), and `created`. Use this when Sir asks 'what matters am I working on?', 'what tasks are open?', or before creating a record so you don't duplicate an existing one. Cheap, idempotent, no pagination — the list is bounded by what the type directory holds. Backing: filesystem walk of /vault/<type>/.",
+      "List every record of a given vault type (matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision, …). Returns one entry per record with `path` (vault-relative, suitable for get_vault_record / update_vault_record), `name`, `status`, full `frontmatter`, a truncated `body_preview` (default 500 chars, max 2000 via `preview` query), and `created`. Use this when Sir asks 'what matters am I working on?', 'what tasks are open?', or before creating a record so you don't duplicate an existing one. Cheap, idempotent, no pagination — the list is bounded by what the type directory holds. Backing: filesystem walk of /vault/<type>/.",
     inputSchema: z.object({
       type: z.string().min(1).describe(
-        "One of: person, org, project, task, event, note, location, process, account, asset, conversation, input, run, session, decision, triage, assumption, constraint, contradiction, synthesis, observation, instinct, reflection, matter, ledger_entry, chore. Unknown types return 400.",
+        "One of: matter, task, note, person, org, place, asset, chore, instinct, briefing, daybook, decision (the 12 canonical types). Legacy/derived directories (event, observation, reflection, triage, …) may also still resolve. Unknown types return 400.",
       ),
       preview: z.number().int().min(0).max(2000).optional().describe(
         "Body-preview character count; 0 to omit, max 2000. Default 500.",
