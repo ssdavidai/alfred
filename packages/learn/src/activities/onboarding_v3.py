@@ -855,21 +855,28 @@ Return ONLY the brief text. No JSON wrapping."""
     api_key = os.environ.get("AAS_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
+    # #B2: surface a failed vault write. The old `except: pass` swallowed
+    # everything AND never checked the status, so a 422 (or transport error)
+    # left the brief unpersisted while the activity returned success and the
+    # workflow reported `done`. Propagate transport errors; raise on non-2xx
+    # so the Temporal stage retries / surfaces the failure.
     async with httpx.AsyncClient(base_url=config.alfred_ctrl_url, timeout=30.0, headers=headers) as client:
-        try:
-            await client.post(
-                "/api/v1/vault/records",
-                json={
-                    # `briefing` is a canonical vault type; `event` is
-                    # demoted by the promotion contract and rejected with
-                    # a 422 by ctrl-api's assertCanonicalVaultPath (#75).
-                    "type": "briefing",
-                    "name": "First Brief",
-                    "content": f"---\ntype: briefing\nname: First Brief\nstatus: active\ntags: [onboarding, brief]\n---\n\n# First Brief\n\n{brief}\n",
-                },
-            )
-        except Exception:
-            pass
+        resp = await client.post(
+            "/api/v1/vault/records",
+            json={
+                # `briefing` is a canonical vault type; `event` is
+                # demoted by the promotion contract and rejected with
+                # a 422 by ctrl-api's assertCanonicalVaultPath (#75).
+                "type": "briefing",
+                "name": "First Brief",
+                "content": f"---\ntype: briefing\nname: First Brief\nstatus: active\ntags: [onboarding, brief]\n---\n\n# First Brief\n\n{brief}\n",
+            },
+        )
+    if resp.status_code < 200 or resp.status_code >= 300:
+        raise RuntimeError(
+            f"First Brief vault write failed (HTTP {resp.status_code}): "
+            f"{getattr(resp, 'text', '')[:300]}"
+        )
 
     return {"brief_length": len(brief)}
 
@@ -1155,25 +1162,29 @@ async def write_brief_and_opportunities_opus(onboard_path: str) -> dict[str, Any
     config = load_config()
     api_key = os.environ.get("AAS_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    # #B2: surface a failed brief write (see write_brief_opus). The old
+    # `except: …warning` made a never-persisted brief look like success.
     async with httpx.AsyncClient(base_url=config.alfred_ctrl_url, timeout=30.0, headers=headers) as client:
-        try:
-            await client.post(
-                "/api/v1/vault/records",
-                json={
-                    # `briefing` is a canonical vault type; `event` is
-                    # demoted by the promotion contract and rejected with
-                    # a 422 by ctrl-api's assertCanonicalVaultPath (#75).
-                    "type": "briefing",
-                    "name": "First Brief",
-                    "content": (
-                        f"---\ntype: briefing\nname: First Brief\nstatus: active\n"
-                        f"tags: [onboarding, brief]\n---\n\n"
-                        f"# First Brief\n\n{brief_text}\n"
-                    ),
-                },
-            )
-        except Exception as exc:
-            logger.warning("onboarding_v3: vault write for brief failed (non-fatal): %s", exc)
+        resp = await client.post(
+            "/api/v1/vault/records",
+            json={
+                # `briefing` is a canonical vault type; `event` is
+                # demoted by the promotion contract and rejected with
+                # a 422 by ctrl-api's assertCanonicalVaultPath (#75).
+                "type": "briefing",
+                "name": "First Brief",
+                "content": (
+                    f"---\ntype: briefing\nname: First Brief\nstatus: active\n"
+                    f"tags: [onboarding, brief]\n---\n\n"
+                    f"# First Brief\n\n{brief_text}\n"
+                ),
+            },
+        )
+    if resp.status_code < 200 or resp.status_code >= 300:
+        raise RuntimeError(
+            f"First Brief vault write failed (HTTP {resp.status_code}): "
+            f"{getattr(resp, 'text', '')[:300]}"
+        )
 
     return {
         "brief_length": len(brief_text),
