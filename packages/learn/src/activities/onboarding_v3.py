@@ -688,7 +688,7 @@ FACTS ({len(facts)} total):
 PATTERNS ({len(patterns)} total):
 {pattern_text}
 
-Write these four files. Return them in this exact JSON format:
+Write these five files. Return them in this exact JSON format:
 
 {{
   "user_md": "# User Profile\\n\\n[Rich markdown about who this person is — name, role, company, family, interests, communication style, daily routines. 800-1200 words. Specific and personal.]",
@@ -697,7 +697,9 @@ Write these four files. Return them in this exact JSON format:
 
   "memory_md": "# Memory Index\\n\\n[Key entities Alfred should remember: people (with relationships), organizations, projects, locations, accounts/services. Formatted as wikilinks like [[Person Name]] with brief context. 30-50 entries.]",
 
-  "tools_md": "# Suggested Tools\\n\\n[3-5 specific automations or workflows that would help THIS person based on their patterns. Each with: name, what it does, what triggers it, estimated time saved. Be practical and specific.]"
+  "tools_md": "# Suggested Tools\\n\\n[3-5 specific automations or workflows that would help THIS person based on their patterns. Each with: name, what it does, what triggers it, estimated time saved. Be practical and specific.]",
+
+  "rules_md": "# Standing Rules\\n\\n[8-15 standing house rules Alfred should follow for THIS person, inferred from their life: boundaries, preferences, do's and don'ts, who/what to prioritise or protect, quiet hours, financial caution, tone. Format as a markdown bullet list — exactly ONE clear rule per line starting with '- ', each a single imperative sentence the principal can keep, edit, or delete. Draft sensible defaults, not generic platitudes.]"
 }}
 
 Make each file genuinely useful — not generic templates. Reference specific names, projects, and patterns from the data."""
@@ -728,7 +730,7 @@ Make each file genuinely useful — not generic templates. Reference specific na
 
     written = []
     async with httpx.AsyncClient(base_url=config.alfred_ctrl_url, timeout=30.0, headers=headers) as client:
-        for filename, key in [("USER.md", "user_md"), ("SOUL.md", "soul_md"), ("MEMORY.md", "memory_md"), ("TOOLS.md", "tools_md")]:
+        for filename, key in [("USER.md", "user_md"), ("SOUL.md", "soul_md"), ("MEMORY.md", "memory_md"), ("TOOLS.md", "tools_md"), ("RULES.md", "rules_md")]:
             content = files.get(key, "")
             if not content:
                 continue
