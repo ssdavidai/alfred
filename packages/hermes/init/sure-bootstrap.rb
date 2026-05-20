@@ -95,19 +95,29 @@ else
 end
 
 # --- 2. Reuse an existing active monitoring key if present, else mint a new one ---
+# Prefer a pre-supplied SURE_API_KEY from the env (bootstrap.sh mints it into
+# the tenant .env, which sure-init inherits via env_file). Using the same value
+# Sure stores and ctrl-api reads (process.env.SURE_API_KEY) is what bridges the
+# integration — without it the key existed only in this file and ctrl-api's
+# SURE_API_KEY stayed unset, so every Sure REST proxy returned NOT_CONFIGURED.
+# Sure's own format is SecureRandom.hex(32) (64-char hex); openssl rand -hex 32
+# matches. Falls back to a freshly-generated key when the env var is unset.
+env_key = ENV["SURE_API_KEY"].to_s.strip
 existing = user.api_keys.active.where(source: KEY_SOURCE).first
 
 if existing
   log "User already has an active #{KEY_SOURCE} API key (id=#{existing.id}), reusing its display_key."
   plain_key = existing.display_key
 else
-  plain_key = ApiKey.generate_secure_key # 64-char hex (SecureRandom.hex(32))
+  plain_key = env_key.empty? ? ApiKey.generate_secure_key : env_key
+  log(env_key.empty? ? "Minting a new API key (SURE_API_KEY env unset)." \
+                     : "Using the SURE_API_KEY supplied via env (matches ctrl-api's env).")
   api_key = user.api_keys.build(name: KEY_NAME, scopes: KEY_SCOPES, source: KEY_SOURCE)
   api_key.key = plain_key
   unless api_key.save
     die "ApiKey creation failed: #{api_key.errors.full_messages.join('; ')}"
   end
-  log "Minted new API key (id=#{api_key.id}, name=#{KEY_NAME}, source=#{KEY_SOURCE}, scopes=#{KEY_SCOPES.inspect})"
+  log "Minted API key (id=#{api_key.id}, name=#{KEY_NAME}, source=#{KEY_SOURCE}, scopes=#{KEY_SCOPES.inspect})"
 end
 
 # --- 3. Persist the plaintext key to the shared volume ---

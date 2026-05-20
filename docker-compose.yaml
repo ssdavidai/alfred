@@ -360,6 +360,11 @@ services:
       # point it at the profiles parent so paths resolve to
       # /hermes-state/profiles/{main,workers}/config.yaml
       - HERMES_CONFIG_DIR=/hermes-state/profiles
+      # Sure REST proxy auth. sure-bootstrap.rb seeds this same value into
+      # Sure's DB; ctrl-api's sure.ts reads only process.env.SURE_API_KEY. Pin
+      # it explicitly (env_file also injects it) so the bridge is unambiguous —
+      # without it every Sure proxy returns NOT_CONFIGURED and finance is blank.
+      - SURE_API_KEY=${SURE_API_KEY:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3100/api/v1/learning/status -H \"Authorization: Bearer $AAS_API_KEY\" || exit 1"]
       interval: 10s
