@@ -104,6 +104,61 @@ TOOL_RUNNERS = {
 }
 
 
+def _build_workers_status(
+    tools: list[str],
+    processes: dict[str, Any],
+    restart_counts: dict[str, int],
+    dropped: dict[str, dict[str, Any]],
+    pid: int,
+    started_at: str,
+) -> dict[str, Any]:
+    """Build the workers.json payload from live state + the dropped registry.
+
+    A permanently-dropped worker is removed from ``tools`` but must stay
+    visible: it keeps a terminal ``status: "dropped"`` in the tools map (the
+    Ink TUI iterates ``tools``) plus a top-level ``dropped`` entry with the
+    reason for ctrl / programmatic consumers.
+    """
+    data: dict[str, Any] = {
+        "pid": pid,
+        "started_at": started_at,
+        "tools": {},
+        "dropped": dict(dropped),
+    }
+    for tool in tools:
+        p = processes.get(tool)
+        if p is None:
+            data["tools"][tool] = {
+                "pid": None,
+                "status": "stopped",
+                "restarts": restart_counts.get(tool, 0),
+            }
+            continue
+        alive = p.is_alive()
+        data["tools"][tool] = {
+            "pid": p.pid if alive else None,
+            "status": "running" if alive else "stopped",
+            "restarts": restart_counts.get(tool, 0),
+        }
+        if not alive and p.exitcode is not None:
+            data["tools"][tool]["exit_code"] = p.exitcode
+
+    # Surface permanently-dropped workers in the tools map too, with a terminal
+    # status, so the Ink TUI (which only iterates `tools`) keeps showing them.
+    for tool, info in dropped.items():
+        entry: dict[str, Any] = {
+            "pid": None,
+            "status": "dropped",
+            "restarts": info.get("restarts", restart_counts.get(tool, 0)),
+            "reason": info.get("reason", ""),
+        }
+        if info.get("exit_code") is not None:
+            entry["exit_code"] = info["exit_code"]
+        data["tools"][tool] = entry
+
+    return data
+
+
 def run_all(
     raw: dict[str, Any],
     only: str | None = None,
@@ -144,6 +199,9 @@ def run_all(
 
     processes: dict[str, multiprocessing.Process] = {}
     restart_counts: dict[str, int] = {}
+    # Permanently-dropped workers (exceeded restart limit / missing deps).
+    # Kept here so they remain visible in workers.json after removal from `tools`.
+    dropped: dict[str, dict[str, Any]] = {}
 
     suppress_stdout = live_mode
 
@@ -174,25 +232,15 @@ def run_all(
     started_at = datetime.now(timezone.utc).isoformat()
 
     def _write_workers_json() -> None:
-        """Write current process status to workers.json for the Ink TUI."""
-        data = {
-            "pid": os.getpid(),
-            "started_at": started_at,
-            "tools": {},
-        }
-        for tool in tools:
-            p = processes.get(tool)
-            if p is None:
-                data["tools"][tool] = {"pid": None, "status": "stopped", "restarts": restart_counts.get(tool, 0)}
-                continue
-            alive = p.is_alive()
-            data["tools"][tool] = {
-                "pid": p.pid if alive else None,
-                "status": "running" if alive else "stopped",
-                "restarts": restart_counts.get(tool, 0),
-            }
-            if not alive and p.exitcode is not None:
-                data["tools"][tool]["exit_code"] = p.exitcode
+        """Write current process status to workers.json for the Ink TUI / ctrl."""
+        data = _build_workers_status(
+            tools=tools,
+            processes=processes,
+            restart_counts=restart_counts,
+            dropped=dropped,
+            pid=os.getpid(),
+            started_at=started_at,
+        )
         try:
             workers_json_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except OSError:
@@ -249,7 +297,14 @@ def run_all(
                         exit_code = p.exitcode
                         if exit_code == _MISSING_DEPS_EXIT:
                             print(f"  [{tool}] missing dependencies, not restarting")
+                            dropped[tool] = {
+                                "reason": "missing optional dependencies",
+                                "exit_code": exit_code,
+                                "restarts": restart_counts.get(tool, 0),
+                                "dropped_at": datetime.now(timezone.utc).isoformat(),
+                            }
                             tools = [t for t in tools if t != tool]
+                            _write_workers_json()  # durable marker, don't wait for the tick
                             continue
                         restart_counts[tool] += 1
                         if restart_counts[tool] <= 5:
@@ -257,7 +312,14 @@ def run_all(
                             processes[tool] = start_process(tool)
                         else:
                             print(f"  [{tool}] exceeded restart limit, giving up")
+                            dropped[tool] = {
+                                "reason": "exceeded restart limit (5)",
+                                "exit_code": exit_code,
+                                "restarts": restart_counts.get(tool, 0),
+                                "dropped_at": datetime.now(timezone.utc).isoformat(),
+                            }
                             tools = [t for t in tools if t != tool]
+                            _write_workers_json()  # durable marker, don't wait for the tick
 
                 if not tools:
                     print("All daemons failed, exiting.")
