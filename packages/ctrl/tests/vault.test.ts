@@ -273,6 +273,54 @@ describe("PATCH /api/v1/vault/records/*", () => {
     assert.ok(execFileFn.mock.callCount() >= 1, "execFile should be called");
     assert.deepStrictEqual(data, { updated: true });
   });
+
+  // Promotion contract (PLAN.md Part I): the PATCH route — like POST and
+  // /vault/move — must reject a write whose target is a non-canonical type.
+  // The json_set / body_set / set branches all write markdown directly to
+  // `<type>/<name>.md`, so a PATCH at e.g. `signal/foo.md` or
+  // `observation/foo.md` could create / edit a demoted-type file as vault
+  // markdown, bypassing the contract. The check fires BEFORE any CLI run or
+  // filesystem touch and maps to a 422 PROMOTION_CONTRACT_VIOLATION.
+  it("rejects a PATCH on a demoted (non-canonical) path with 422", async () => {
+    execFileFn.mock.resetCalls();
+    const { status, data } = await req(
+      "PATCH",
+      "/api/v1/vault/records/observation/route-foo.md",
+      { json_set: { reviewed: true } }
+    );
+    assert.strictEqual(status, 422);
+    assert.strictEqual(data.error.code, "PROMOTION_CONTRACT_VIOLATION");
+    assert.strictEqual(
+      execFileFn.mock.callCount(),
+      0,
+      "no CLI run should fire on a contract violation",
+    );
+  });
+
+  it("rejects a PATCH-create at an arbitrary demoted path with 422", async () => {
+    execFileFn.mock.resetCalls();
+    const { status, data } = await req(
+      "PATCH",
+      "/api/v1/vault/records/signal/sig-123.md",
+      { set: { status: "routed" } }
+    );
+    assert.strictEqual(status, 422);
+    assert.strictEqual(data.error.code, "PROMOTION_CONTRACT_VIOLATION");
+  });
+
+  // A canonical edit must be unaffected by the new guard.
+  it("still allows a canonical-type edit (matter)", async () => {
+    execFileStdout = '{"updated":true}';
+    execFileFn.mock.resetCalls();
+    const { status, data } = await req(
+      "PATCH",
+      "/api/v1/vault/records/matter/acme.md",
+      { set: { status: "active" } }
+    );
+    assert.strictEqual(status, 200);
+    assert.ok(execFileFn.mock.callCount() >= 1, "execFile should run for canonical edit");
+    assert.deepStrictEqual(data, { updated: true });
+  });
 });
 
 describe("DELETE /api/v1/vault/records/*", () => {

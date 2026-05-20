@@ -817,6 +817,19 @@ export function registerVaultRoutes(): void {
     const b = body as Record<string, unknown> | undefined;
     if (!b) throw new ValidationError("Request body required");
 
+    // Promotion contract (PLAN.md Part I): PATCH is a vault write — its
+    // json_set / body_set / set branches each write `<type>/<name>.md`
+    // markdown directly (json_set/body_set even CREATE the file when the
+    // CLI `set` run is the one that materialises it). Like POST and
+    // /vault/move, the target type must be one of the ~12 canonical types;
+    // a demoted type (signal, observation, *-action audit, …) must never be
+    // written or edited as vault markdown via this route. Enforce BEFORE any
+    // CLI exec or filesystem touch so a contract violation is a clean 422
+    // with no side effect. (Every known PATCH caller — learn's
+    // patch_frontmatter, the SaaS editor, the MCP edit_record tool — targets
+    // a canonical type; signal-status writes were already moved to state.db.)
+    assertCanonicalVaultPath(recordPath);
+
     // State-mutation contract enforcement (#889 spec §5.2).
     //
     // If the target is a matter or task record AND any of the patch
