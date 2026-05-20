@@ -36,6 +36,38 @@ function coldInScope(table: string, since: string | null): boolean {
   return since < cutoffFor(COLD_TTL_DAYS[table] ?? 90);
 }
 
+/**
+ * B1: count rows that satisfy the same WHERE in BOTH the hot table and the
+ * cold archive. `total = hotTotal + coldTotal` double-counts every such
+ * straddling row (a mid-compaction crash writes cold then crashes before the
+ * hot delete). The entries[] are de-duped by id but the total was not.
+ *
+ * The straddle set is bounded by one compaction batch, so pulling the matching
+ * cold ids and probing hot existence is cheap. Capped defensively.
+ */
+function crossTierOverlap(
+  hot: import("node:sqlite").DatabaseSync,
+  cold: import("node:sqlite").DatabaseSync,
+  hotTable: string,
+  archiveTable: string,
+  whereSql: string,
+  whereArgs: unknown[],
+): number {
+  const CAP = 5000;
+  const coldIds = (
+    cold
+      .prepare(`SELECT id FROM ${archiveTable} ${whereSql} LIMIT ?`)
+      .all(...whereArgs, CAP) as Array<{ id: string }>
+  ).map((r) => r.id);
+  if (coldIds.length === 0) return 0;
+  let overlap = 0;
+  const probe = hot.prepare(`SELECT 1 FROM ${hotTable} WHERE id = ? LIMIT 1`);
+  for (const id of coldIds) {
+    if (probe.get(id)) overlap++;
+  }
+  return overlap;
+}
+
 export interface AuditQuery {
   action_type?: string | null;
   actor?: string | null;
@@ -105,6 +137,7 @@ export function queryAuditCrossTier(q: AuditQuery): CrossTierResult {
 
   // ── cold tier (only when the window reaches past the cutoff) ──────────────
   let coldTotal = 0;
+  let overlap = 0;
   let coldRows: Array<Record<string, unknown>> = [];
   if (coldInScope("audit", q.since ?? null)) {
     const cold = getColdDb();
@@ -115,6 +148,7 @@ export function queryAuditCrossTier(q: AuditQuery): CrossTierResult {
     ).n;
     if (coldTotal > 0) {
       tiers.push("cold");
+      overlap = crossTierOverlap(hot, cold, "audit", "archive_audit", whereSql, whereArgs);
       // Pull enough cold rows to satisfy limit+offset after the merge; the
       // archive table keeps the filter columns + ts uncompressed so this query
       // never inflates a body it won't return.
@@ -166,7 +200,9 @@ export function queryAuditCrossTier(q: AuditQuery): CrossTierResult {
 
   return {
     entries,
-    total: hotTotal + coldTotal,
+    // B1: subtract the hot∩cold straddle so a mid-compaction duplicate row is
+    // counted once, matching the de-duped entries[].
+    total: hotTotal + coldTotal - overlap,
     hot_total: hotTotal,
     cold_total: coldTotal,
     tiers,
@@ -279,6 +315,7 @@ export function queryCrossTier(table: string, q: GenericQuery): CrossTierResult 
 
   // ── cold tier (only when the window reaches past the cutoff) ──────────────
   let coldTotal = 0;
+  let overlap = 0;
   let coldRows: Array<Record<string, unknown>> = [];
   if (coldInScope(table, q.since ?? null)) {
     const cold = getColdDb();
@@ -289,6 +326,7 @@ export function queryCrossTier(table: string, q: GenericQuery): CrossTierResult 
     ).n;
     if (coldTotal > 0) {
       tiers.push("cold");
+      overlap = crossTierOverlap(hot, cold, cfg.hot, cfg.archive, whereSql, whereArgs);
       const coldRaw = cold
         .prepare(
           `SELECT id, ts, codec, body FROM ${cfg.archive} ${whereSql} ` +
@@ -330,7 +368,9 @@ export function queryCrossTier(table: string, q: GenericQuery): CrossTierResult 
 
   return {
     entries,
-    total: hotTotal + coldTotal,
+    // B1: subtract the hot∩cold straddle so a mid-compaction duplicate counts
+    // once, matching the de-duped entries[].
+    total: hotTotal + coldTotal - overlap,
     hot_total: hotTotal,
     cold_total: coldTotal,
     tiers,
