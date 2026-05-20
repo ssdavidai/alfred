@@ -1,0 +1,39 @@
+# gitleaks configuration for the Alfred Black monorepo.
+#
+# Inherits the full default ruleset (so real provider keys, JWTs, private
+# keys, etc. are still caught everywhere) and adds a narrow, PATH-scoped
+# allowlist for the synthetic placeholders that legitimately live in docs,
+# API examples, and test fixtures. The allowlist is deliberately path-based
+# rather than rule-disabling: a real secret committed to source code is still
+# flagged — only the known example/test locations are exempt.
+#
+# Run locally:  gitleaks detect --redact            (full git history)
+#               gitleaks detect --no-git --redact   (working tree only)
+
+title = "Alfred Black"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic placeholders: API-doc examples, the API-docs viewer page, and test fixtures — not real secrets."
+paths = [
+  # ctrl-api reference docs + guides: `curl -H "Authorization: Bearer <token>"`
+  # examples and sample env blocks (OPENROUTER_API_KEY, etc.).
+  '''packages/ctrl/docs/.*''',
+  # The dashboard page that renders those same API-doc curl examples.
+  '''packages/web/src/dashboard/ApiDocsPage\.tsx''',
+  # Test fixtures across the repo carry deliberately fake keys/tokens.
+  '''.*\.test\.(ts|tsx|js|mjs)$''',
+  '''packages/learn/tests/.*''',
+  '''.*/(tests|fixtures|__fixtures__)/.*''',
+  # Env + config templates ship example/placeholder values by design.
+  '''(^|/)\.env\.example$''',
+  '''.*\.example$''',
+]
+regexes = [
+  # Documentation IP ranges (RFC 5737) and shared-address space (RFC 6598)
+  # used as synthetic host/tailnet addresses throughout docs and configs.
+  '''203\.0\.113\.\d{1,3}''',
+  '''100\.64\.\d{1,3}\.\d{1,3}''',
+]

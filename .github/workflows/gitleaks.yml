@@ -1,0 +1,33 @@
+# Secret-scanning guard. Runs gitleaks over the full git history on every push
+# to the default branch and on every PR, failing the build if a credential is
+# detected. The repo-root `.gitleaks.toml` inherits gitleaks' default ruleset
+# and allowlists only the synthetic placeholders in docs / API examples / test
+# fixtures (path-scoped), so a real secret in source code is still caught.
+name: gitleaks
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history — scan every commit, not just the tip
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE is required ONLY if this repository is owned by a
+          # GitHub Organization. It is free for personal public repositories
+          # (which this is), so no secret is needed here. If the repo ever
+          # moves under an org, request a free key at gitleaks.io and add it as
+          # the GITLEAKS_LICENSE Actions secret.
