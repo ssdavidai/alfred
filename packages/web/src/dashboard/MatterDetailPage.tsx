@@ -8,7 +8,7 @@
 // is preserved (it writes a triage record with intent=matter_edit, existing
 // pattern).
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useNavigate } from "react-router-dom";
 import {
   useQuery,
   getMatterDetail,
@@ -226,6 +226,20 @@ export default function MatterDetailPage() {
   const [draft, setDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [timelineCap, setTimelineCap] = useState(50);
+  const navigate = useNavigate();
+  // History-aware back: return to wherever the principal came from (e.g.
+  // /household during onboarding), falling back to the matters index on a
+  // direct load. The back link was hardcoded to /matters and dropped the
+  // /household entry path (FAILURE-MODES web bug #7).
+  const goBack = () =>
+    window.history.length > 1 ? navigate(-1) : navigate("/matters");
+  const backLinkStyle = {
+    color: "var(--brass)",
+    background: "none",
+    border: "none",
+    padding: 0,
+    cursor: "pointer",
+  } as const;
   // Phase I: expand-in-place for state_change rows. Tracks the timeline
   // entry id (or composite key fallback) of the currently-open row.
   const [expandedRowKey, setExpandedRowKey] = useState<string | null>(null);
@@ -269,13 +283,13 @@ export default function MatterDetailPage() {
       <Frame>
         <section className="mx-auto max-w-[860px] px-8 pt-12 pt-20 text-center">
           <p className="font-display italic text-2xl">No such matter.</p>
-          <Link
-            to="/matters"
+          <button
+            onClick={goBack}
             className="font-mono text-[10px] uppercase tracking-[0.22em]"
-            style={{ color: "var(--brass)" }}
+            style={backLinkStyle}
           >
-            ← Back to matters
-          </Link>
+            ← Back
+          </button>
         </section>
       </Frame>
     );
@@ -295,13 +309,13 @@ export default function MatterDetailPage() {
   return (
     <Frame>
       <section className="mx-auto max-w-[860px] px-8 pt-12 pb-20">
-        <Link
-          to="/matters"
+        <button
+          onClick={goBack}
           className="font-mono text-[10px] uppercase tracking-[0.22em]"
-          style={{ color: "var(--brass)" }}
+          style={backLinkStyle}
         >
-          ← All matters
-        </Link>
+          ← Back
+        </button>
 
         <div className="mt-4">
           <PageOverture
