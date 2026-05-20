@@ -34,6 +34,49 @@ import pytest
 from src.activities.steward import apply_state_change
 
 
+# Captures every ``StateClient.append_audit(**kwargs)`` call across a single
+# test (the autouse fixture clears it per test). steward-action /
+# steward-source-pruned audits are audit-class records: under ctrl-api's
+# promotion contract they are demoted from the vault to the state.db audit
+# table, so the steward routes them through ``StateClient.append_audit``
+# (POST /api/v1/state/audit) instead of ``VaultClient.write_record``.
+_APPEND_AUDIT_CALLS: list[dict[str, Any]] = []
+
+# Deterministic audit-row id the fake StateClient returns; this is what
+# ``apply_state_change`` now surfaces as ``result["path"]`` (an opaque
+# audit-row id, no longer an ``event/steward-action-*.md`` filesystem path).
+_FAKE_AUDIT_ID = "audit/fake-steward-id"
+
+
+@pytest.fixture(autouse=True)
+def _mock_state_client(monkeypatch):
+    """Stub ``StateClient`` so the audit write makes no real HTTP call and
+    captures every ``append_audit`` invocation for assertions.
+
+    ``steward.py`` imports ``StateClient`` locally inside the audit-emit
+    sites (``from src.utils.state_client import StateClient``), so patching
+    ``src.utils.state_client.StateClient`` intercepts both the main
+    steward-action audit and the source-pruned audit.
+    """
+    _APPEND_AUDIT_CALLS.clear()
+
+    class _FakeStateClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def append_audit(self, **kwargs):
+            _APPEND_AUDIT_CALLS.append(kwargs)
+            return _FAKE_AUDIT_ID
+
+    monkeypatch.setattr("src.utils.state_client.StateClient", _FakeStateClient)
+
+
 class FakeVaultClient:
     """Stand-in for utils.vault_client.VaultClient — captures every call."""
 
@@ -217,18 +260,19 @@ async def test_shadow_mode_writes_audit_only(fake_vault_factory):
     assert result["mode"] == "shadow"
     assert result["live_action_taken"] is False
     assert result["pending_confirmation"] is False
-    assert len(fake.write_record_calls) == 1
+    # Audit is now an append_audit (state.db) call, not a vault write_record.
+    assert len(_APPEND_AUDIT_CALLS) == 1
+    assert fake.write_record_calls == []
     # No vault patches in shadow.
     assert fake.patch_structured_calls == []
     assert fake.patch_scalar_calls == []
     # No Plane write.
     assert fake.plane_post_calls == []
 
-    rec_type, name, content = fake.write_record_calls[0]
-    assert rec_type == "event"
-    assert name.startswith("steward-action-")
-    payload = _read_audit_payload(content)
-    assert payload["mode"] == "shadow"
+    audit = _APPEND_AUDIT_CALLS[0]
+    assert audit["action_type"] == "steward-action"
+    assert audit["mode"] == "shadow"
+    payload = audit["payload"]
     assert payload["plane_action"] is None
     assert payload["undo_recipe"]["plane_revert"] is None
 
@@ -417,8 +461,8 @@ async def test_undo_recipe_captures_prior_state_and_plane_handles(
     finally:
         ctx.stop()
 
-    rec_type, name, content = fake.write_record_calls[0]
-    payload = _read_audit_payload(content)
+    assert len(_APPEND_AUDIT_CALLS) == 1
+    payload = _APPEND_AUDIT_CALLS[0]["payload"]
     recipe = payload["undo_recipe"]
     assert recipe["vault_patch"]["target"] == "task/foo.md"
     # Vault undo restores prior state + clears pending.
@@ -481,8 +525,9 @@ async def test_skips_plane_when_no_issue_id(fake_vault_factory, monkeypatch):
 
     assert result["partially_applied"] is True
     assert fake.plane_post_calls == []
-    # Audit record still landed.
-    assert len(fake.write_record_calls) == 1
+    # Audit record still landed (now via append_audit, not write_record).
+    assert len(_APPEND_AUDIT_CALLS) == 1
+    assert _APPEND_AUDIT_CALLS[0]["action_type"] == "steward-action"
 
 
 # ---------------------------------------------------------------------------
@@ -750,7 +795,8 @@ async def test_phase_b_shadow_audit_emitted_no_plane_no_patch(
     but effective_mode is shadow), and the legacy audit lands.
 
     Verifies the Phase B contract under shadow:
-      * Legacy ``event/steward-action-*.md`` audit lands (1 write_record).
+      * The steward-action audit lands (1 append_audit, action-class →
+        state.db audit table, not the vault).
       * No Plane writes.
       * No legacy ``patch_frontmatter_structured`` (frontmatter
         unchanged on disk).
@@ -782,11 +828,10 @@ async def test_phase_b_shadow_audit_emitted_no_plane_no_patch(
     assert result["live_action_taken"] is False
     assert fake.patch_structured_calls == []
     assert fake.plane_post_calls == []
-    # Steward-action legacy audit lands.
-    assert len(fake.write_record_calls) == 1
-    rec_type, name, content = fake.write_record_calls[0]
-    assert rec_type == "event"
-    assert name.startswith("steward-action-")
+    # Steward-action audit lands (via append_audit, not write_record).
+    assert len(_APPEND_AUDIT_CALLS) == 1
+    assert fake.write_record_calls == []
+    assert _APPEND_AUDIT_CALLS[0]["action_type"] == "steward-action"
     # Shadow mode + no current_state composition → propose returns None
     # → no v2 envelope POSTed.
     assert transport.requests == []
@@ -932,7 +977,9 @@ async def test_phase_b_v1_shim_returns_legacy_dict_shape(
     assert result["mode"] == "live"
     assert isinstance(result["timestamp"], str) and result["timestamp"]
     assert isinstance(result["live_action_taken"], bool)
-    assert result["path"].startswith("event/steward-action-")
+    # ``result["path"]`` is now the opaque audit-row id returned by
+    # ``append_audit``, not an ``event/steward-action-*.md`` filesystem path.
+    assert result["path"] == _FAKE_AUDIT_ID
 
 
 @pytest.mark.asyncio
@@ -978,10 +1025,9 @@ async def test_phase_b_v2_409_retry_then_succeeds(
     # Legacy contract still holds end-to-end despite the retry.
     assert result["mode"] == "live"
     assert result["live_action_taken"] is True
-    # Steward-action legacy audit still lands.
-    assert len(fake.write_record_calls) == 1
-    rec_type, name, _content = fake.write_record_calls[0]
-    assert rec_type == "event"
-    assert name.startswith("steward-action-")
+    # Steward-action audit still lands (via append_audit, not write_record).
+    assert len(_APPEND_AUDIT_CALLS) == 1
+    assert fake.write_record_calls == []
+    assert _APPEND_AUDIT_CALLS[0]["action_type"] == "steward-action"
     # Plane fan-out still fired.
     assert len(fake.plane_post_calls) == 1

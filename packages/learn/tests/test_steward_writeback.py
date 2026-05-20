@@ -28,6 +28,29 @@ from src.activities.steward import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _mock_state_client(monkeypatch):
+    """steward-action audits are audit-class — written through
+    StateClient.append_audit (POST /api/v1/state/audit), not the vault.
+    Stub StateClient so the audit write makes no real HTTP call in unit
+    tests and returns a deterministic audit-row id."""
+
+    class _FakeStateClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def append_audit(self, **kwargs):
+            return "audit/fake-steward-id"
+
+    monkeypatch.setattr("src.utils.state_client.StateClient", _FakeStateClient)
+
+
 class FakeVaultClient:
     """Stand-in for utils.vault_client.VaultClient."""
 

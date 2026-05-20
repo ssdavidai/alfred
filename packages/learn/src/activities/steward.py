@@ -2202,9 +2202,26 @@ async def _emit_source_pruned_audit(
     )
 
     cfg = load_config()
-    client = VaultClient(cfg)
+    payload["narrative"] = narrative
     try:
-        written_path = await client.write_record("event", audit_name, content)
+        # Audit-class record → state.db audit table, not the vault (a vault
+        # write 422s under the promotion contract). Same routing as the main
+        # steward-action audit.
+        from src.utils.state_client import StateClient
+
+        async with StateClient(cfg) as sc:
+            written_path = await sc.append_audit(
+                action_type="steward-source-pruned",
+                actor="steward",
+                summary=(
+                    f"steward-source-pruned: {name} from "
+                    f"{canonical_task_path} ({reason})"
+                ),
+                ts=ts_iso,
+                target_path=canonical_task_path,
+                target_kind="task",
+                payload=payload,
+            )
         logger.info(
             "steward.source_pruned: task=%s source=%s reason=%s -> %s",
             canonical_task_path, name, reason, written_path,
@@ -4217,8 +4234,35 @@ async def apply_state_change(
             f"{narrative}\n"
         )
 
-        # ── 7. Write the audit record ───────────────────────────────────
-        written_path = await client.write_record("event", audit_name, content)
+        # ── 7. Write the audit row to state.db (audit table) ────────────
+        # steward-action is audit-class: the promotion contract demotes it
+        # from the vault to Store 2's audit table, so a vault write 422s
+        # (PROMOTION_CONTRACT_VIOLATION). Route it through StateClient's
+        # append_audit (POST /api/v1/state/audit) — the same migration
+        # signal-action got (#26). The narrative + full context ride in the
+        # `payload` blob; `written_path` becomes the opaque audit-row id
+        # (a ULID cross-ref), not a filesystem path. (`content` above is the
+        # legacy markdown body, retained only for the narrative text.)
+        from src.utils.state_client import StateClient
+
+        payload["narrative"] = narrative
+        async with StateClient(cfg) as sc:
+            written_path = await sc.append_audit(
+                action_type="steward-action",
+                actor="steward",
+                summary=(
+                    f"steward-action: {decision_label} on "
+                    f"{canonical_task_path} (conf={confidence:.2f}, "
+                    f"mode={effective_mode})"
+                ),
+                ts=ts_iso,
+                target_path=canonical_task_path,
+                target_kind=target_kind_normalized,
+                mode=effective_mode,
+                confidence=round(confidence, 4),
+                undo=undo_recipe,
+                payload=payload,
+            )
 
         # ── 8. Multi-matter dispatch (live mode only) ───────────────────
         # Fire dependency-change signals on every related task so the
