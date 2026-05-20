@@ -379,7 +379,13 @@ async function handleCallback(req: Request, res: Response) {
       },
       update: {
         accessToken: encryptApiKey(tokens.access_token),
-        refreshToken: tokens.refresh_token ? encryptApiKey(tokens.refresh_token) : null,
+        // Google returns refresh_token only on first consent; on re-auth it is
+        // omitted. NULLing it here wiped the working credential and broke Gmail
+        // ~1h later when the access token expired (FAILURE-MODES web bug #2).
+        // Only write it when present so the stored refresh token survives re-auth.
+        ...(tokens.refresh_token
+          ? { refreshToken: encryptApiKey(tokens.refresh_token) }
+          : {}),
         tokenType: tokens.token_type || "Bearer",
         expiresAt,
         scopes: pending.scopes,
