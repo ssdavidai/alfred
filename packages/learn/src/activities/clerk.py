@@ -819,7 +819,12 @@ def _extract_json(content: str) -> dict[str, Any]:
     # Last-resort: if content looks like a JSON array (starts with `[`),
     # salvage every complete object up to the truncation point. Used when
     # the clerk's response hit its output token budget mid-batch — rather
-    # than losing the entire enrichment run, return what we got.
+    # than losing the entire enrichment run, return what we got. The
+    # salvaged objects are returned WRAPPED as ``{"results": [...]}`` —
+    # never a bare list — so this function honours its ``-> dict`` contract
+    # and single-object callers (``classification.get(...)`` in
+    # media_ingestion) don't hit AttributeError. The one array-consumer
+    # (enrichment._call_clerk caller) already unwraps a ``results`` key.
     first_bracket = content.find("[")
     if first_bracket != -1:
         results: list = []
@@ -855,6 +860,6 @@ def _extract_json(content: str) -> dict[str, Any]:
             elif ch == "]" and depth == 0:
                 break
         if results:
-            return results
+            return {"results": results}
 
     raise ValueError(f"Could not parse JSON from Clerk response: {content[:200]}")
