@@ -330,9 +330,19 @@ services:
       # gateway — :18790, never main.
       - OPENCLAW_GATEWAY_URL=http://hermes:18790
       - ALFRED_CTRL_URL=http://ctrl-api:3100
+      # Surveyor cluster-labeling routes through Hermes (workers profile);
+      # the gateway owns the model + provider key. Empty = standalone mode.
+      - SURVEYOR_HERMES_GATEWAY_URL=http://hermes:18790
+      # Every LLM call from this container now goes through Hermes (vault
+      # subagents via OPENCLAW_GATEWAY_URL, surveyor via the line above), so
+      # the raw provider keys are not needed here. Blank them (env_file still
+      # supplies everything else) — Hermes is the sole holder of provider keys.
+      - OPENROUTER_API_KEY=
+      - OPENAI_API_KEY=
+      - ANTHROPIC_API_KEY=
     env_file:
       - .env
-    entrypoint: ["bash", "-c", "rm -f /app/data/alfred.pid && set -a && [ -f /app/data/.env ] && source /app/data/.env; [ -f /app/data/.gateway-token ] && export OPENCLAW_GATEWAY_TOKEN=$(cat /app/data/.gateway-token); set +a && exec alfred --config /app/data/config.yaml up --foreground"]
+    entrypoint: ["bash", "-c", "rm -f /app/data/alfred.pid && set -a && [ -f /app/data/.env ] && source /app/data/.env; [ -f /app/data/.gateway-token ] && export OPENCLAW_GATEWAY_TOKEN=$(cat /app/data/.gateway-token) && export HERMES_GATEWAY_TOKEN=$(cat /app/data/.gateway-token); set +a && exec alfred --config /app/data/config.yaml up --foreground"]
     command: []
     restart: unless-stopped
     security_opt:
@@ -410,11 +420,19 @@ services:
     environment:
       - TEMPORAL_HOST=temporal:7233
       # Both gateway URLs point at the Hermes /v1 API ports (see
-      # packages/learn/src/config.py). main = :18789, workers = :18790.
+      # packages/learn/src/config.py). main = :18789, workers = :18790,
+      # heavy = :18791 (Opus-class, onboarding/chore heavy reasoning).
       - OPENCLAW_GATEWAY_URL=http://hermes:18789
       - OPENCLAW_WORKERS_GATEWAY_URL=http://hermes:18790
       - EXECUTION_GATEWAY_URL=http://hermes:18790
+      - HERMES_HEAVY_GATEWAY_URL=http://hermes:18791
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
+      # Onboarding/chore heavy reasoning + clerk all route through Hermes now;
+      # no direct provider calls remain here. Blank the raw keys (env_file
+      # still supplies everything else) — Hermes is the sole key holder.
+      - OPENROUTER_API_KEY=
+      - OPENAI_API_KEY=
+      - ANTHROPIC_API_KEY=
       - VAULT_PATH=/vault
       - TASK_QUEUE=alfred-learn
       - ALFRED_LEARN_ENABLED=${ALFRED_LEARN_ENABLED:-true}
