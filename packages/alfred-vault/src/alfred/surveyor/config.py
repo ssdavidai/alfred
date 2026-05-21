@@ -59,6 +59,43 @@ class OpenRouterConfig:
     base_url: str = "https://openrouter.ai/api/v1"
     model: str = "x-ai/grok-4.1-fast"
     temperature: float = 0.3
+    # Dual transport. alfred-vault ships BOTH as the platform surveyor worker
+    # AND as the public `pip install alfred-vault` package. When running inside
+    # the Alfred platform the labeler routes its LLM calls through the Hermes
+    # WORKERS gateway (cheap profile) instead of hitting OpenRouter directly;
+    # the platform sets ``SURVEYOR_HERMES_GATEWAY_URL=http://hermes:18790``.
+    # An empty url (the default, and the standalone PyPI case) keeps the
+    # existing AsyncOpenAI direct path — Hermes is a platform-only dependency.
+    hermes_gateway_url: str = field(
+        default_factory=lambda: os.environ.get("SURVEYOR_HERMES_GATEWAY_URL", "")
+    )
+    # Gateway bearer token. Matches how alfred-learn reads it: env var first,
+    # else the shared token file written into the data dir by the platform.
+    # In standalone mode neither is set and the token stays empty (unused).
+    hermes_gateway_token: str = field(
+        default_factory=lambda: os.environ.get("HERMES_GATEWAY_TOKEN", "")
+    )
+    # Path to the gateway token file, read when ``hermes_gateway_token`` is
+    # empty (the platform writes the token here rather than into the env).
+    hermes_gateway_token_file: str = field(
+        default_factory=lambda: os.environ.get(
+            "OPENCLAW_GATEWAY_TOKEN_FILE", "/alfred-data/.gateway-token"
+        )
+    )
+
+    def resolved_gateway_token(self) -> str:
+        """Bearer token for Hermes — env var wins, else the token file.
+
+        Returns "" when neither is available (standalone mode, where the
+        token is never consulted because ``hermes_gateway_url`` is empty).
+        """
+        if self.hermes_gateway_token:
+            return self.hermes_gateway_token
+        try:
+            with open(self.hermes_gateway_token_file) as f:
+                return f.read().strip()
+        except (FileNotFoundError, OSError):
+            return ""
 
 
 @dataclass
