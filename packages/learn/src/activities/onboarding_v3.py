@@ -1,7 +1,9 @@
-"""Onboarding v3 — 4 Opus calls, 5-minute intelligence pipeline.
+"""Onboarding v3 — 4 heavy-reasoning calls, 5-minute intelligence pipeline.
 
-Replaces the 101-sequential-Clerk-call pipeline with direct OpenRouter
-API calls to claude-opus-4-6. Full email corpus as context.
+Replaces the 101-sequential-Clerk-call pipeline with 4 heavy-reasoning
+LLM calls. As of #118 those run through the HEAVY Hermes profile
+(``POST /v1/responses`` on :18791), not a direct OpenRouter call — the
+model is owned by the Hermes profile config. Full email corpus as context.
 
 Steps:
 1. Fetch metadata + snippets for all emails (30-60s)
@@ -26,6 +28,7 @@ from typing import Any
 import httpx
 from temporalio import activity
 
+from src.activities.clerk import _response_output_text
 from src.config import load_config
 
 logger = logging.getLogger("alfred-learn")
@@ -39,41 +42,54 @@ async def _call_llm(
     total_timeout: float = 600.0,
     heartbeat_message: str = "waiting on Opus",
 ) -> str:
-    """Call Opus via OpenRouter. Returns raw text response.
+    """Run the heavy-reasoning agent via Hermes. Returns raw text response.
+
+    #118: this no longer POSTs OpenRouter ``chat/completions`` with an
+    ``OPENROUTER_API_KEY`` and a hardcoded ``anthropic/claude-opus-4-6``
+    model. It now mirrors ``clerk._call_clerk``: a single synchronous
+    ``POST /v1/responses`` (the OpenAI Responses API) against the HEAVY
+    Hermes profile (:18791). Hermes runs the agent to completion
+    server-side and returns the final ``output`` in the HTTP response. The
+    model is owned by the Hermes profile config, so the request body
+    deliberately carries no ``model`` field — only ``{"input": prompt}``.
+    ``X-Hermes-Session-Key`` scopes the call to the ``onboarding`` agent.
+
+    ``max_tokens`` is retained in the signature for caller/Temporal
+    determinism stability; the Hermes profile owns generation limits, so it
+    is no longer forwarded.
 
     Uses an explicit total timeout (wait_for) because httpx's read timeout
-    applies *between bytes*, not total duration — a slow-streaming response
-    can hang the activity until Temporal's StartToClose kills it.
+    applies *between bytes*, not total duration — a slow run can hang the
+    activity until Temporal's StartToClose kills it.
 
     Also heartbeats periodically so the activity stays alive in Temporal and
     heartbeat_timeout can catch true stalls faster than StartToClose.
     """
-    api_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY not set")
+    config = load_config()
+    token = config.gateway_token()
+    base = config.heavy_gateway_url
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        # Stable per-channel scope for the onboarding/chore heavy agent.
+        "X-Hermes-Session-Key": "onboarding",
+    }
 
-    # Explicit per-phase timeouts. Note: httpx `read` is between bytes, so
-    # we also enforce a total budget below via asyncio.wait_for.
-    timeout = httpx.Timeout(connect=30.0, read=120.0, write=60.0, pool=30.0)
+    # POST /v1/responses blocks until the agent run completes, so the read
+    # timeout IS the completion budget; asyncio.wait_for below is the outer
+    # total bound. ``stream`` is omitted (defaults false) — the
+    # non-streaming branch returns the final response JSON.
+    timeout = httpx.Timeout(total_timeout, connect=30.0)
 
     async def _do_call() -> str:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "anthropic/claude-opus-4-6",
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.4,
-                    "max_tokens": max_tokens,
-                },
+                f"{base}/v1/responses",
+                headers=headers,
+                json={"input": prompt},
             )
             resp.raise_for_status()
-            data = resp.json()
-            return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return _response_output_text(resp.json())
 
     async def _heartbeat_loop() -> None:
         start = asyncio.get_event_loop().time()

@@ -34,6 +34,11 @@ class Config:
     # ``openclaw_workers_gateway_url``.
     openclaw_gateway_url: str = field(default_factory=lambda: os.environ.get("OPENCLAW_GATEWAY_URL", "http://hermes:18789"))
     openclaw_workers_gateway_url: str = field(default_factory=lambda: os.environ.get("OPENCLAW_WORKERS_GATEWAY_URL", "http://hermes:18790"))
+    # ``heavy_gateway_url`` → the HEAVY profile on :18791. Hosts the
+    # high-reasoning Opus agent used by the onboarding/chore pipeline
+    # (#118). The model lives in the Hermes profile config, not here — the
+    # body of a ``/v1/responses`` call deliberately omits ``model``.
+    heavy_gateway_url: str = field(default_factory=lambda: os.environ.get("HERMES_HEAVY_GATEWAY_URL", "http://hermes:18791"))
     openclaw_gateway_token_file: str = field(default_factory=lambda: os.environ.get("OPENCLAW_GATEWAY_TOKEN_FILE", "/alfred-data/.gateway-token"))
 
     # Vault (via alfred-ctrl API)
