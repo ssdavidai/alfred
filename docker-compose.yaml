@@ -240,11 +240,13 @@ services:
     pids_limit: 512
 
   # ── hermes — the single AI runtime (replaces openclaw + openclaw-workers) ─
-  # One image runs two `hermes -p <profile> gateway` processes; each binds
+  # One image runs three `hermes -p <profile> gateway` processes; each binds
   # its OpenAI-compatible /v1 API server on the canonical port:
   #   * main profile    — user-facing chat, API on :18789
   #   * workers profile — background agents, API on :18790
-  # The supervised entrypoint baked into the image launches both. The
+  #   * heavy profile   — Opus-class background reasoning, API on :18791
+  #                       (compose-network only — not published to the host)
+  # The supervised entrypoint baked into the image launches all three. The
   # hermes-shim compat layer was retired in issue #40 — callers speak the
   # Hermes /v1 API directly.
   hermes:
@@ -266,6 +268,10 @@ services:
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      # heavy profile (:18791, compose-network only) model seed. The init
+      # container renders profile config from this (via its env_file: .env);
+      # pinned here too so the value is unambiguous at the hermes boundary.
+      - HERMES_HEAVY_MODEL=${HERMES_HEAVY_MODEL:-anthropic/claude-opus-4-6}
       - NODE_OPTIONS=--max-old-space-size=3072
       - CTRL_API_URL=http://ctrl-api:3100
       # Per-job timeout (seconds) Hermes applies to every `cron` job. This is

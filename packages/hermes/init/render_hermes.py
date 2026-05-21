@@ -24,7 +24,7 @@ Environment (read for template variables):
     HERMES_API_CORS_ORIGINS  (optional CORS allowlist)
 
 Positional:
-    <profile>       "main" | "workers"
+    <profile>       "main" | "workers" | "heavy"
     <profile_dir>   absolute path where this process WRITES config.yaml +
                     .env (the init container's view of the volume,
                     e.g. /hermes-data/profiles/main)
@@ -33,8 +33,8 @@ Positional:
                     API_SERVER_KEY in the profile .env
 
 The Hermes API server binds the canonical ports 18789 (main) / 18790
-(workers) directly — the hermes-shim that used to front it was retired in
-issue #40.
+(workers) / 18791 (heavy) directly — the hermes-shim that used to front it
+was retired in issue #40.
 
 Path-baking: the absolute paths baked INTO the rendered config.yaml
 (mcp-stdio dir, ctrl-server.mjs, NODE_PATH) must be valid in the HERMES
@@ -44,12 +44,11 @@ runtime view (e.g. /opt/data/profiles/main); the script writes the files
 through <profile_dir> but bakes paths from HERMES_RUNTIME_PROFILE_DIR.
 When unset, it falls back to <profile_dir> (single-view setups).
 
-The script is idempotent: it re-renders config.yaml + .env on every run so
-template and .env changes propagate. The ONE exception: if the principal
-has switched the LLM provider away from the default (openrouter) using
-Hermes' own `hermes model` command, the `model:` block in config.yaml is
-preserved across re-renders rather than clobbered back to the template
-default. It never touches sessions, memory, skills, or auth.json.
+The script is idempotent. config.yaml is OPERATOR-OWNED: init only SEEDS it
+when absent and never overwrites an existing file (the operator / `hermes
+config` owns it once written). The .env file IS re-rendered on every run so
+deployment-managed values (ports/keys) always propagate. It never touches
+sessions, memory, skills, or auth.json.
 """
 
 from __future__ import annotations
@@ -64,7 +63,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined
 # The hermes-shim was retired (issue #40); the Hermes API server now binds
 # these ports directly. Must match docker/supervisor.sh and the EXPOSE in
 # the Dockerfile.
-_API_SERVER_PORT = {"main": 18789, "workers": 18790}
+_API_SERVER_PORT = {"main": 18789, "workers": 18790, "heavy": 18791}
 
 # The template renders the `model:` block with `provider: openrouter`. Hermes
 # owns provider/model selection natively (`hermes model`, with a live model
@@ -150,8 +149,11 @@ def main() -> int:
     template_dir = Path(sys.argv[3])
     gateway_token = sys.argv[4].strip()
 
-    if profile not in ("main", "workers"):
-        print(f"error: profile must be main|workers, got {profile!r}", file=sys.stderr)
+    if profile not in ("main", "workers", "heavy"):
+        print(
+            f"error: profile must be main|workers|heavy, got {profile!r}",
+            file=sys.stderr,
+        )
         return 2
     if not gateway_token:
         print("error: gateway token is empty", file=sys.stderr)
@@ -195,12 +197,21 @@ def main() -> int:
         # stale model ID is a one-line fix, not a rebuild.
         main_model=os.environ.get("HERMES_MAIN_MODEL", "x-ai/grok-4.3"),
         workers_model=os.environ.get("HERMES_WORKERS_MODEL", "openai/gpt-4.1-nano"),
+        heavy_model=os.environ.get("HERMES_HEAVY_MODEL", "anthropic/claude-opus-4-6"),
     )
     config_path = profile_dir / "config.yaml"
-    config_out = _preserve_switched_model_block(config_out, config_path)
-    config_path.write_text(config_out, encoding="utf-8")
-    config_path.chmod(0o640)
-    print(f"[render] wrote {config_path} ({len(config_out)} bytes)")
+    # config.yaml is operator-owned: once it exists, `hermes config` / the
+    # operator owns it, so init only SEEDS it when absent and never clobbers
+    # an existing file. The .env (below) stays deployment-managed and is
+    # always re-rendered. (When seeding, _preserve_switched_model_block is a
+    # no-op since config_path does not exist — kept for the symmetric path.)
+    if config_path.exists():
+        print(f"[render] config.yaml present at {config_path} — preserved (operator-owned)")
+    else:
+        config_out = _preserve_switched_model_block(config_out, config_path)
+        config_path.write_text(config_out, encoding="utf-8")
+        config_path.chmod(0o640)
+        print(f"[render] seeded {config_path} ({len(config_out)} bytes)")
 
     # --- .env ----------------------------------------------------------------
     env_tmpl = env.get_template("hermes-profile.env.njk")

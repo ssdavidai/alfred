@@ -2,14 +2,15 @@
 # =============================================================================
 # supervisor.sh — alfred-black-hermes process supervisor.
 #
-# Runs TWO long-lived processes in one container and keeps them alive:
+# Runs THREE long-lived processes in one container and keeps them alive:
 #
 #   1. hermes -p main    gateway run   — user-facing chat (Hermes API :18789)
 #   2. hermes -p workers gateway run   — background agents (Hermes API :18790)
+#   3. hermes -p heavy   gateway run   — heavy reasoning (Hermes API :18791)
 #
 # The hermes-shim was retired in issue #40: the Hermes API server binds the
-# canonical ports (:18789 / :18790) directly, so callers speak the Hermes
-# /v1 API natively — there is no compat layer to supervise.
+# canonical ports (:18789 / :18790 / :18791) directly, so callers speak the
+# Hermes /v1 API natively — there is no compat layer to supervise.
 #
 # SessionStore housekeeping is no longer a supervised process: Hermes
 # v2026.5.16 natively prunes its SQLite session store and VACUUMs, driven
@@ -21,7 +22,7 @@
 #
 # Profile state (config.yaml, .env, SOUL.md, sessions, skills, the MCP
 # bundle) is rendered/deployed by the init container into
-# ${HERMES_HOME}/profiles/{main,workers}/ BEFORE this container starts —
+# ${HERMES_HOME}/profiles/{main,workers,heavy}/ BEFORE this container starts —
 # `init` is a compose `service_completed_successfully` gate. This script
 # only waits for that state to appear, then launches.
 # =============================================================================
@@ -91,7 +92,7 @@ trap shutdown TERM INT
 # launch before that exists, Hermes boots with no API key / no MCP config.
 wait_for_profiles() {
     local waited=0
-    for profile in main workers; do
+    for profile in main workers heavy; do
         local cfg="${PROFILES_DIR}/${profile}/config.yaml"
         local env="${PROFILES_DIR}/${profile}/.env"
         while [[ ! -f "$cfg" || ! -f "$env" ]]; do
@@ -107,7 +108,7 @@ wait_for_profiles() {
             fi
         done
     done
-    log "both Hermes profiles provisioned under ${PROFILES_DIR}"
+    log "all Hermes profiles provisioned under ${PROFILES_DIR}"
 }
 
 # =============================================================================
@@ -116,20 +117,23 @@ wait_for_profiles() {
 log "alfred-black-hermes starting — HERMES_HOME=${HERMES_HOME}"
 wait_for_profiles
 
-# Launch the two Hermes gateways. Each `gateway run` owns its profile's
+# Launch the three Hermes gateways. Each `gateway run` owns its profile's
 # OpenAI-compatible API server, bound to the canonical port (18789 main /
-# 18790 workers) on 0.0.0.0 — callers reach the /v1 API directly.
+# 18790 workers / 18791 heavy) on 0.0.0.0 — callers reach the /v1 API
+# directly. The heavy port is reachable only over the compose network; it is
+# not published to the host (no host port binding in docker-compose.yaml).
 #
 # `gateway run --replace` runs in the FOREGROUND (so the supervisor owns the
 # process) and `--replace` clears any stale gateway.lock left by a previous
 # process — important when this script restarts a crashed gateway.
 start_proc "hermes-main"     "exec hermes -p main gateway run --replace"
 start_proc "hermes-workers"  "exec hermes -p workers gateway run --replace"
+start_proc "hermes-heavy"    "exec hermes -p heavy gateway run --replace"
 
 # =============================================================================
 # Supervise — restart any worker that exits while we are not shutting down.
 # =============================================================================
-log "both gateway processes running — entering supervise loop"
+log "all gateway processes running — entering supervise loop"
 while true; do
     # Block until SOME child exits. `wait -n` returns that child's status.
     wait -n

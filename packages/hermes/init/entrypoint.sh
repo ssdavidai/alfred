@@ -35,7 +35,7 @@ echo "=== alfred-black init container ==="
 HERMES_DATA_DIR="${HERMES_DATA_DIR:-/hermes-data}"
 # Where the HERMES RUNTIME container sees the same volume (its HERMES_HOME).
 HERMES_RUNTIME_HOME="${HERMES_RUNTIME_HOME:-/opt/data}"
-PROFILES=(main workers)
+PROFILES=(main workers heavy)
 
 # Resolve bundled paths via the installed alfred Python package.
 SCAFFOLD_DIR=$(python3 -c "from alfred._data import get_scaffold_dir; print(get_scaffold_dir())")

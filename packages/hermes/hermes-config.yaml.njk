@@ -6,9 +6,10 @@
   Rendered by the init container (packages/hermes/init/entrypoint.sh) to:
     ~/.hermes/profiles/main/config.yaml      (profile = "main")
     ~/.hermes/profiles/workers/config.yaml   (profile = "workers")
+    ~/.hermes/profiles/heavy/config.yaml     (profile = "heavy")
 
   Template variables:
-    profile          "main" | "workers"          (required)
+    profile          "main" | "workers" | "heavy"  (required)
     vault_path       absolute path to the vault   (default /vault)
     ctrl_api_url     ctrl-api base URL            (default http://ctrl-api:3100)
     mcp_stdio_dir    dir holding the 5-app stdio bundle
@@ -24,10 +25,13 @@
   Hermes — they are environment variables. They are rendered into the
   per-profile .env by hermes-profile.env.njk, not here.
 
-  Two profiles, one image, two `hermes -p <profile> gateway` processes:
+  Three profiles, one image, three `hermes -p <profile> gateway` processes:
     main    — user-facing chat. Memory + channels enabled. API on :18789.
     workers — background agents only. Memory minimal, concurrency capped
               at 1, no channels. API on :18790.
+    heavy   — background heavy-reasoning (onboarding + chore heavy steps).
+              Same minimal-memory / no-channels / capped-concurrency posture
+              as workers, but on an Opus-class model. API on :18791.
 #}
 {%- set is_main = (profile == "main") -%}
 {%- set vault_path = vault_path | default("/vault") -%}
@@ -47,6 +51,11 @@ model:
   # User-facing Alfred — a capable model for the live chat surface.
   # Bare OpenRouter model ID; provider/base_url below do the routing.
   default: "{{ main_model }}"
+{%- elif profile == "heavy" %}
+  # Heavy background reasoning (onboarding + chore heavy steps) — an
+  # Opus-class model. Background posture (no channels, minimal memory,
+  # capped concurrency) like workers, but a much stronger model.
+  default: "{{ heavy_model }}"
 {%- else %}
   # Background workers — a cheaper model; these agents are autonomous and
   # high-volume (clerk classification, vault curation, ephemeral executors).
