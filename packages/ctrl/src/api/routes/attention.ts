@@ -336,6 +336,15 @@ export function registerAttentionRoutes(): void {
         suggested_actor: rec.frontmatter.suggested_actor,
         target_path: rec.frontmatter.target_path,
         target_kind: rec.frontmatter.target_kind,
+        // C-B5 provenance — already on the NA frontmatter (signal_actions.py
+        // stamps them) but dropped at this layer until now. The Desk card and
+        // Decisions page bind to these names to show "from <signal> · Matter
+        // <m> / Task <t>". All nullable: advisory/open-ended cards carry no
+        // source signal, matched instinct, or matter/task target.
+        source_signal_path: rec.frontmatter.source_signal_path ?? null,
+        matched_instinct: rec.frontmatter.matched_instinct ?? null,
+        matter_ref: rec.frontmatter.matter_ref ?? null,
+        task_ref: rec.frontmatter.task_ref ?? null,
         confidence: rec.frontmatter.confidence,
         decision_reason: rec.frontmatter.decision_reason,
         // The model-written paragraph explaining *why* the steward

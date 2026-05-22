@@ -275,8 +275,12 @@ export function registerDecisionRoutes(): void {
     const isReversible = intent !== "delegate" ? true : false;
 
     const note = typeof b.note === "string" ? b.note.trim() : "";
-    const matterRef = typeof b.matter_ref === "string" ? b.matter_ref.trim() : "";
-    const taskRef = typeof b.task_ref === "string" ? b.task_ref.trim() : "";
+    // C-B5: matter/task provenance. The request may carry these explicitly,
+    // but ctrl also backfills them from the source needs_attention record's
+    // target_path/target_kind below so the decision carries its linkage even
+    // when the web omits it (target_kind=task cards in particular).
+    let matterRef = typeof b.matter_ref === "string" ? b.matter_ref.trim() : "";
+    let taskRef = typeof b.task_ref === "string" ? b.task_ref.trim() : "";
     const sourceHeadline =
       typeof b.source_headline === "string" ? b.source_headline.trim() : "";
     const ttd =
@@ -301,6 +305,23 @@ export function registerDecisionRoutes(): void {
           .replace(/\.md$/, "");
         const rec = readNeedsAttention(naId);
         if (rec) {
+          // C-B5: copy the NA record's matter/task linkage onto the decision
+          // when the request didn't supply it. target_kind tells us which.
+          const naTargetPath =
+            typeof rec.frontmatter.target_path === "string"
+              ? rec.frontmatter.target_path.trim()
+              : "";
+          const naTargetKind = String(rec.frontmatter.target_kind ?? "");
+          if (naTargetPath) {
+            if (naTargetKind === "task" && !taskRef) taskRef = naTargetPath;
+            if (naTargetKind === "matter" && !matterRef) matterRef = naTargetPath;
+          }
+          if (!matterRef && typeof rec.frontmatter.matter_ref === "string") {
+            matterRef = rec.frontmatter.matter_ref.trim();
+          }
+          if (!taskRef && typeof rec.frontmatter.task_ref === "string") {
+            taskRef = rec.frontmatter.task_ref.trim();
+          }
           if (intent === "done") {
             writeFrontmatterPatch(rec, {
               status: "done",
@@ -602,7 +623,15 @@ export function registerDecisionRoutes(): void {
       target_kind: "decision",
       subject_ref: sourceRecord,
       summary: `decision: ${intent} on ${source}`,
-      changes: { intent, state: initialState, note: note || null },
+      // C-B5: matter/task linkage rides explicitly on the audit row (not just
+      // inside payload) so the ledger carries a decision's provenance.
+      changes: {
+        intent,
+        state: initialState,
+        note: note || null,
+        matter_ref: matterRef || null,
+        task_ref: taskRef || null,
+      },
       payload: { ...fields },
     });
 
