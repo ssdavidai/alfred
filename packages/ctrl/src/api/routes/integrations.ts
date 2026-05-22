@@ -1005,6 +1005,58 @@ function collectStreamEventSourceTypes(): Set<string> {
   return out;
 }
 
+/**
+ * Fetch the credential field name(s) a toolkit's API_KEY / BEARER_TOKEN
+ * connection actually requires, from the toolkit detail's
+ * `auth_config_details[].fields.connected_account_initiation.required[].name`.
+ *
+ * The canonical field is `generic_api_key` for almost every API-key toolkit
+ * (SERP, Tavily, Exa, Perplexity), but it is NOT constant — Firecrawl needs
+ * `generic_api_key` AND a second field (`full`/base_url). Hardcoding
+ * `api_key`/`token` 400s with ConnectedAccount_MissingRequiredFields.
+ *
+ * Returns the matching auth_config_detail's required field names, or an empty
+ * array when the detail can't be read (caller falls back to a sane default).
+ */
+async function fetchRequiredCredentialFields(
+  toolkitSlug: string,
+  authScheme: string,
+  apiKey: string,
+): Promise<string[]> {
+  try {
+    const resp = await fetch(
+      `${COMPOSIO_API_V3}/toolkits/${encodeURIComponent(toolkitSlug)}`,
+      { headers: { "x-api-key": apiKey } },
+    );
+    if (!resp.ok) {
+      console.error(
+        `[integrations] toolkit detail fetch for ${toolkitSlug} failed: ${resp.status}`,
+      );
+      return [];
+    }
+    const data = (await resp.json()) as any;
+    const details: any[] = Array.isArray(data?.auth_config_details)
+      ? data.auth_config_details
+      : [];
+    // Prefer the detail whose mode matches the requested scheme; fall back to
+    // the first detail that exposes initiation fields.
+    const matching = details.find(
+      (d) => String(d?.mode ?? "").toUpperCase() === authScheme,
+    );
+    const detail = matching ?? details[0];
+    const required: any[] =
+      detail?.fields?.connected_account_initiation?.required ?? [];
+    return required
+      .map((f) => (typeof f?.name === "string" ? f.name : ""))
+      .filter(Boolean);
+  } catch (err: any) {
+    console.error(
+      `[integrations] toolkit detail fetch for ${toolkitSlug} threw: ${err?.message ?? err}`,
+    );
+    return [];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Scope endpoint — per-toolkit action cache
 // ---------------------------------------------------------------------------
@@ -1489,9 +1541,22 @@ export function registerIntegrationRoutes(): void {
       }
 
       // Step 2: Create a connected_account with the user's credential in
-      // connection.state.val. Composio's REST shape matches the SDK's
-      // initiate(config={auth_scheme, val:{...}}) helper.
-      const credentialField = authScheme === "BEARER_TOKEN" ? "token" : "api_key";
+      // connection.state.val. The credential field name(s) are NOT a constant
+      // — they come from the toolkit's connected_account_initiation.required
+      // (SERP/Tavily/Exa want `generic_api_key`; Firecrawl wants
+      // `generic_api_key` + `full`). Read them from the toolkit detail and map
+      // the user's single pasted credential onto every required field. Fall
+      // back to the legacy `generic_api_key`/`token` guess only when the detail
+      // is unreadable.
+      const requiredFields = await fetchRequiredCredentialFields(
+        toolkitSlug,
+        authScheme,
+        apiKey,
+      );
+      const fallbackField = authScheme === "BEARER_TOKEN" ? "token" : "generic_api_key";
+      const fields = requiredFields.length > 0 ? requiredFields : [fallbackField];
+      const val: Record<string, string> = {};
+      for (const field of fields) val[field] = credential;
       const connectResp = await fetch(`${COMPOSIO_API_V3}/connected_accounts`, {
         method: "POST",
         headers: {
@@ -1504,7 +1569,7 @@ export function registerIntegrationRoutes(): void {
             user_id: userId,
             state: {
               authScheme,
-              val: { [credentialField]: credential },
+              val,
             },
           },
         }),
