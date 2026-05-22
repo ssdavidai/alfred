@@ -277,6 +277,90 @@ def _score_signal_against_instinct(
     return len(overlap) / len(union)
 
 
+# ---------------------------------------------------------------------------
+# P0-2 — relevance/quality + de-dup gates before a signal becomes a card
+# ---------------------------------------------------------------------------
+# Prod runs the action router in shadow mode → every effect=action signal goes
+# to the human path → a card; gpt-4.1-nano over-classifies broadcast email and
+# emits dupes. These two deterministic gates run *within* the shadow path (we
+# do NOT flip shadow→live — that authorises autonomous acting) so junk/dupes
+# stop becoming cards regardless of mode. Conservative: we DROP only on an
+# explicit self-contradiction; otherwise we still card.
+
+# Substrings the extractor uses when it admits the signal is NOT actionable —
+# its reasoning self-contradicts the action+decision_required classification.
+# Deliberately specific; generic words ("review"/"consider") would over-trigger.
+_NON_ACTIONABLE_REASONING_MARKERS: tuple[str, ...] = (
+    "no concrete action",
+    "no action needed",
+    "no action required",
+    "no concrete next step",
+    "just broadcast",
+    "broadcast info",
+    "informational only",
+    "purely informational",
+    "no mutation for",
+    "fyi only",
+    "no decision required",
+)
+
+
+def _signal_is_cardworthy(fm: dict[str, Any]) -> tuple[bool, str]:
+    """Relevance gate: ``(True, "")`` to card, ``(False, reason)`` to drop.
+
+    Drops when the extractor's own reasoning/body self-contradicts the
+    classification ("no concrete action … just broadcast info") — exactly
+    what the live junk cards ("International HR Day", "VC's Scorecard")
+    carried. Deterministic, no LLM.
+    """
+    blob = " ".join(
+        str(fm.get(k)).lower()
+        for k in ("reasoning", "display_body", "body")
+        if isinstance(fm.get(k), str) and fm.get(k).strip()
+    )
+    for marker in _NON_ACTIONABLE_REASONING_MARKERS:
+        if marker in blob:
+            return False, "non_actionable_reasoning"
+    return True, ""
+
+
+def _card_dedup_key(fm: dict[str, Any]) -> set[str]:
+    """Token signature of a card's subject, for near-identical detection."""
+    text = " ".join(str(fm.get(k) or "") for k in ("display_headline", "raw_quote"))
+    proposal = _parse_action_proposal(fm.get("action_proposal")) or {}
+    return _tokenize(text + " " + str(proposal.get("what") or ""))
+
+
+async def _recent_open_card_exists(client: Any, fm: dict[str, Any]) -> str | None:
+    """De-dup: a recent OPEN card on the same subject → its path, else None.
+
+    Reuses the wired ``list_records("needs_attention")`` path. Matches on
+    (a) same ``source_event_path`` or (b) ≥0.7 token-overlap subject. Fails
+    open (returns None) on a read error — a ctrl-api blip must not drop a card.
+    """
+    src_event = str(fm.get("source_event_path") or "").strip()
+    my_tokens = _card_dedup_key(fm)
+    try:
+        existing = await client.list_records("needs_attention", limit=200)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("signal_actions._recent_open_card_exists: list failed "
+                       "err=%s — fail-open (will card)", exc)
+        return None
+    for rec in existing or []:
+        efm = rec.get("frontmatter") if isinstance(rec.get("frontmatter"), dict) else rec
+        efm = efm or {}
+        status = str(efm.get("status") or "").strip().lower()
+        if status and status not in ("pending", "open", "deferred"):
+            continue
+        path = str(rec.get("path") or efm.get("path") or "").strip()
+        if src_event and str(efm.get("source_event_path") or "").strip() == src_event:
+            return path or "duplicate"
+        other = _card_dedup_key(efm)
+        if my_tokens and other and len(my_tokens & other) / len(my_tokens | other) >= 0.7:
+            return path or "duplicate"
+    return None
+
+
 def _instinct_threshold(instinct: dict[str, Any]) -> float:
     """Compute the effective per-instinct discretion bar from frontmatter.
 
@@ -1800,7 +1884,43 @@ async def route_signal_action(
                         signal_path, exc,
                     )
         else:
-            # HUMAN path — write the needs_attention card.
+            # HUMAN path — write the needs_attention card, but ONLY after
+            # the P0-2 gates. These run inside the (shadow) promotion path
+            # so junk/dupes never reach the Desk regardless of mode.
+            #
+            # Gate 1 — relevance/quality: drop a signal whose own reasoning
+            # admits there's no concrete action (the over-classified
+            # broadcast/newsletter case). Conservative — only an explicit
+            # self-contradiction drops; otherwise we still card.
+            cardworthy, drop_reason = _signal_is_cardworthy(fm)
+            # Gate 2 — de-dup: skip if a recent OPEN card already covers the
+            # same source event / near-identical subject.
+            dupe_of = await _recent_open_card_exists(client, fm) if cardworthy else None
+
+            if not cardworthy or dupe_of:
+                skip_reason = "duplicate_open_card" if dupe_of else drop_reason
+                logger.info("signal_actions.route_signal_action: card "
+                            "SUPPRESSED id=%s reason=%s dupe_of=%s",
+                            signal_ref, skip_reason, dupe_of or "(n/a)")
+                try:
+                    await set_signal_status(signal_ref, "routed_suppressed",
+                                            applied_at=_now_utc_iso(),
+                                            audit_record_ref="", config=cfg)
+                except httpx.HTTPError as exc:
+                    logger.warning("signal_actions.route_signal_action: "
+                                   "suppressed status write failed id=%s "
+                                   "err=%s", signal_ref, exc)
+                return {
+                    "signal_path": signal_path,
+                    "signal_status": "routed_suppressed",
+                    "skip_reason": skip_reason,
+                    "chosen_path": "suppressed",
+                    "decision_reason": decision_reason,
+                    "needs_attention_path": None,
+                    "outcome_signal_path": None,
+                    "duplicate_of": dupe_of,
+                }
+
             needs_attention_path = await write_needs_attention_record(
                 record,
                 matched_path,
