@@ -503,6 +503,20 @@ export function registerStateRoutes(): void {
 
   // ─────────────────────────────────────────────────────────────
   // link — the cross-record graph edge
+  //
+  // F12 — LINK STORE OF RECORD (decided 2026-05-22):
+  // The UI relationship graph's single source of record is the FILE-WALK vault
+  // graph (`GET /api/v1/vault/graph`), derived per-request from frontmatter
+  // LINK_FIELDS (incl. key_people/related_persons/related_orgs/org — F10) + body
+  // [[wikilinks]], with ?focus=<path> → backlinks (F11/C19). The matter-detail
+  // and vault backlink panels read THAT endpoint exclusively.
+  //
+  // This `link` table is NOT a UI graph source. It was dead on both ends
+  // (learn's create_link had zero call sites → 0 rows live; no UI reader). It is
+  // retained only as an optional DURABLE machine-edge store for edges with no
+  // vault-frontmatter home — intentionally not wired into the UI graph. A future
+  // feature may write here and read it back directly via these endpoints, but
+  // must NOT assume the UI graph reflects these rows.
   // ─────────────────────────────────────────────────────────────
   addRoute("POST", "/api/v1/state/links", async ({ res, body }) => {
     const b = asObj(body);
