@@ -337,6 +337,31 @@ CALENDAR_SCHEDULES = [
             minute=[ScheduleRange(start=0)],
         ),
     },
+    {
+        # F33 — the daily brief is a mandatory built-in, not a chore.
+        # Morning slot: butler walks in with the coffee at 05:00 LOCAL
+        # (the calendar tz is the tenant's, set in register_all). The
+        # positional ``slot`` string matches BriefingWorkflow.run(self,
+        # slot) (C10). Onboarding no longer generates a brief chore, and
+        # the duplicate generated morning_briefing chore is swept.
+        "id": "al-briefing-morning",
+        "workflow": "BriefingWorkflow",
+        "args": ["morning"],
+        "calendar": ScheduleCalendarSpec(
+            hour=[ScheduleRange(start=5)],
+            minute=[ScheduleRange(start=0)],
+        ),
+    },
+    {
+        # F33 — evening wrap at 17:00 LOCAL.
+        "id": "al-briefing-evening",
+        "workflow": "BriefingWorkflow",
+        "args": ["evening"],
+        "calendar": ScheduleCalendarSpec(
+            hour=[ScheduleRange(start=17)],
+            minute=[ScheduleRange(start=0)],
+        ),
+    },
 ]
 
 
@@ -1472,8 +1497,11 @@ async def register_all() -> None:
         workflow_name = sched["workflow"]
         spec = sched["spec"]
 
+        # F33 — a schedule may carry positional workflow args (e.g. the
+        # briefing slot string per C10). Most schedules take none.
         action = ScheduleActionStartWorkflow(
             workflow_name,
+            args=sched.get("args") or [],
             id=f"{schedule_id}-run",
             task_queue=config.task_queue,
         )
