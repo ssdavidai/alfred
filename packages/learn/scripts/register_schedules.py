@@ -31,6 +31,10 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from src.config import load_config
 
+# F34 — chore-schedule reconciler constants. See reconcile_chore_schedules.
+CHORE_SCHEDULE_PREFIX = "chore-"
+_USER_CHORES_DIR = "/alfred-data/user-chores"
+
 PLANE_SYNC_SCHEDULE_ID = "al-plane-sync"
 PLANE_SYNC_WORKFLOW = "PlaneSyncWorkflow"
 PLANE_SYNC_NOTE = (
@@ -1259,6 +1263,112 @@ async def _delete_legacy_stream_pull_schedules(client: Client) -> int:
     return deleted
 
 
+def _slugify_chore(name: str) -> str:
+    """Mirror assign_chores._slugify (a .py stem → its chore-<slug> id)."""
+    import re
+    s = name.lower()
+    s = re.sub(r"[_\s]+", "-", s)
+    s = re.sub(r"[^a-z0-9-]", "", s)
+    s = re.sub(r"-+", "-", s)
+    return s.strip("-")
+
+
+async def _vault_chore_slugs() -> set[str]:
+    """Slugs of live vault ``chore/*`` records (canonical backing).
+
+    Best-effort: a failure returns ``set()`` so the reconciler degrades to
+    the ``.py``-only check rather than deleting a chore whose record just
+    couldn't be read this boot.
+    """
+    config = load_config()
+    api_key = os.environ.get("AAS_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    slugs: set[str] = set()
+    try:
+        async with httpx.AsyncClient(
+            base_url=config.alfred_ctrl_url, timeout=15.0, headers=headers
+        ) as client:
+            resp = await client.get("/api/v1/vault/list/chore")
+            resp.raise_for_status()
+            body = resp.json()
+        records = body.get("records") if isinstance(body, dict) else body
+        for rec in records or []:
+            path = str((rec or {}).get("path") or "").strip()
+            if path.startswith("chore/") and path.endswith(".md"):
+                slugs.add(path[len("chore/"):-len(".md")])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "reconcile_chore_schedules: vault chore list failed: %s "
+            "— falling back to .py-only backing check", exc,
+        )
+    return slugs
+
+
+async def _collect_live_chore_slugs() -> set[str]:
+    """Slugs with a backing artifact: a user-chores ``.py`` OR a vault record."""
+    slugs: set[str] = set()
+    try:
+        for fn in os.listdir(_USER_CHORES_DIR):
+            if fn.endswith(".py") and not fn.startswith("_"):
+                slugs.add(_slugify_chore(fn[:-len(".py")]))
+    except FileNotFoundError:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reconcile_chore_schedules: user-chores scan failed: %s", exc)
+    slugs |= await _vault_chore_slugs()
+    return slugs
+
+
+async def reconcile_chore_schedules(
+    client: Client, *, live_slugs: set[str] | None = None,
+) -> int:
+    """Delete orphaned ``chore-*`` Temporal schedules (F34).
+
+    An orphan is a ``chore-<slug>`` schedule whose slug has NO backing
+    artifact — neither a user-chores ``.py`` nor a vault ``chore/<slug>.md``
+    record (left behind by a reset/re-onboard; schedules live in Temporal's
+    own store, so they survive and churn 504 NotFound on an unregistered
+    workflow class). Conservative: any backing keeps the schedule; only the
+    ``chore-`` prefix is swept. Best-effort + idempotent. Returns the count.
+    """
+    if live_slugs is None:
+        live_slugs = await _collect_live_chore_slugs()
+
+    deleted = 0
+    try:
+        orphan_ids: list[str] = []
+        async for entry in client.list_schedules():
+            sid = getattr(entry, "id", None) or ""
+            if not sid.startswith(CHORE_SCHEDULE_PREFIX):
+                continue
+            slug = sid[len(CHORE_SCHEDULE_PREFIX):]
+            if slug not in live_slugs:
+                orphan_ids.append(sid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "reconcile_chore_schedules: list_schedules failed: %s "
+            "— skipping chore-schedule reconciliation this boot", exc,
+        )
+        return 0
+
+    for sid in orphan_ids:
+        try:
+            await client.get_schedule_handle(sid).delete()
+            logger.info(
+                "reconcile_chore_schedules: deleted orphan chore schedule %s "
+                "(no backing .py/record)", sid,
+            )
+            deleted += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "reconcile_chore_schedules: delete orphan %s failed: %s",
+                sid, exc,
+            )
+    if deleted:
+        logger.info("reconcile_chore_schedules: removed %d orphan schedule(s)", deleted)
+    return deleted
+
+
 async def register_stream_sweep_schedule(client: Client) -> None:
     """Register the single ``al-stream-sweep`` schedule (#53).
 
@@ -1441,6 +1551,10 @@ async def register_all() -> None:
     # soak, fleet rollout once the per-source-type confidence shifts
     # have been observed to track real reversal patterns.
     await register_reversal_calibration(client, config.task_queue)
+    try:  # F34 — sweep orphaned chore-* schedules; never blocks boot.
+        await reconcile_chore_schedules(client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("reconcile_chore_schedules: sweep failed: %s", exc)
 
 
 def main() -> None:
