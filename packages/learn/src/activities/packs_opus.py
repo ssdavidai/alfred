@@ -33,6 +33,7 @@ from typing import Any
 
 from temporalio import activity
 
+from src.activities.clerk import _call_clerk
 from src.activities.onboarding_v3 import _call_llm, _parse_json_with_key
 from src.config import load_config
 from src.utils.vault_client import VaultClient
@@ -603,6 +604,10 @@ async def generate_matter_pack_opus(onboard_path: str) -> dict[str, Any]:
 # ``related``), person→``[[org/Name]]``.
 
 
+# Canonical entity types ctrl-api will accept (place, NOT location; never
+# project/observation — see promotionContract.ts). Pass B filters to these.
+_CANONICAL_ENTITY_TYPES = {"person", "org", "place"}
+
 # Base-view embeds matching the curator schema (vault-curator/SKILL.md). A
 # person/org record the curator would author carries these so the dashboard
 # base views render and the curator treats a seeded record as one of its own
@@ -848,6 +853,61 @@ async def _create_or_merge_entity(
     return "created"
 
 
+def _kg_seed_enabled() -> bool:
+    """Pass B (LLM corpus seeding) gate. Default on, env-overridable."""
+    return os.environ.get("ONBOARDING_KG_SEED", "true").strip().lower() != "false"
+
+
+def _kg_seed_cap() -> int:
+    """Max entities Pass B will materialise (bounds cost/scale on a huge corpus)."""
+    try:
+        return max(0, int(os.environ.get("ONBOARDING_KG_SEED_CAP", "60")))
+    except ValueError:
+        return 60
+
+
+def _build_corpus_entity_prompt(facts: list[dict[str, Any]]) -> str:
+    """Prompt for Pass B's single batched entity-extraction call.
+
+    Reuses the *idea* of the retired ``write_facts_to_vault`` prompt but
+    constrains the type vocabulary to the canonical person/org/place (ctrl
+    422s anything else) and asks for a person→org tie so the graph resolves
+    those edges.
+    """
+    lines: list[str] = []
+    for f in facts:
+        if isinstance(f, dict):
+            t = str(f.get("fact", "")).strip()
+            if t:
+                lines.append(f"- {t}")
+    fact_block = "\n".join(lines) if lines else "(no facts)"
+    return f"""You are Alfred's clerk. Extract STRUCTURED ENTITIES from these facts about your principal so each gets its own vault record.
+
+FACTS ({len(lines)}):
+{fact_block}
+
+For each DISTINCT real-world person, organization, or physical place mentioned, emit one entity. Skip the principal themselves, generic roles ("my accountant" with no name), and anything that isn't a concrete named entity.
+
+Fields per entity:
+- type: EXACTLY one of `person`, `org`, `place`. Never `project`, `location`, or anything else.
+- name: the proper name (full name for people, Title Case).
+- description: 2-3 sentences about this entity and how it relates to the principal, grounded in the facts.
+- org: (person only) the organization this person belongs to, as a bare name (e.g. "Acme Co") — omit or empty if unknown.
+- role: (person only) their job title or role — omit if unknown.
+- email: (person only) their email if it appears in the facts — omit otherwise.
+
+Return ONLY valid JSON. No preamble, no markdown fences:
+{{
+  "entities": [
+    {{"type": "person", "name": "Full Name", "description": "...", "org": "Acme Co", "role": "Founder", "email": ""}},
+    {{"type": "org", "name": "Acme Co", "description": "..."}},
+    {{"type": "place", "name": "Berlin Office", "description": "..."}}
+  ]
+}}
+
+Be thorough but honest — extract every clearly-named entity, invent nothing."""
+
+
 @activity.defn
 async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
     """Seed an enriched, interlinked vault knowledge graph (B9).
@@ -858,7 +918,11 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
     union the matter backlink onto the entity's ``related`` (never clobber a
     curator body). Deterministic.
 
-    (Pass B — LLM corpus seeding — lands in the next commit.)
+    Pass B — one batched workers-profile LLM call over ``onboard["facts"]``
+    emits canonical person/org/place records for the broader corpus, create-
+    or-merged the same way. Gated by ``ONBOARDING_KG_SEED`` + an entity cap;
+    no-ops cleanly on LLM failure. The activity never raises — onboarding
+    must not be blocked by graph seeding.
 
     Idempotent + best-effort. The activity NAME is kept stable for Temporal
     replay-safety; only the body expanded (see module note above).
@@ -973,6 +1037,62 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "materialize_matter_entities: %s/%s failed: %s",
+                            etype, name, exc,
+                        )
+
+        # ---- Pass B: seed the broader fact corpus (LLM-gated) -----------
+        if facts and _kg_seed_enabled():
+            cap = _kg_seed_cap()
+            try:
+                prompt = _build_corpus_entity_prompt(facts)
+                raw = await _call_clerk(prompt, raw=True)
+                parsed = _parse_json_with_key(raw, "entities")
+                entities = parsed.get("entities") if isinstance(parsed, dict) else None
+            except Exception as exc:  # noqa: BLE001
+                # Degrade gracefully — Pass B is non-essential; never crash.
+                logger.warning(
+                    "materialize: Pass B corpus seed skipped (LLM unavailable): %s",
+                    exc,
+                )
+                entities = None
+
+            if isinstance(entities, list):
+                for ent in entities:
+                    if seeded >= cap:
+                        logger.info("materialize: Pass B hit entity cap %d", cap)
+                        break
+                    if not isinstance(ent, dict):
+                        continue
+                    etype = str(ent.get("type", "")).strip().lower()
+                    if etype not in _CANONICAL_ENTITY_TYPES:
+                        continue  # never write project/location/observation
+                    name = _normalize_entity_name(str(ent.get("name", "")))
+                    if not name:
+                        continue
+                    description = str(ent.get("description", "")).strip()
+                    org_link = ""
+                    if etype == "person":
+                        raw_org = str(ent.get("org", "")).strip()
+                        if raw_org:
+                            org_link = f"[[org/{_normalize_entity_name(raw_org)}]]"
+                    role = str(ent.get("role", "")).strip()
+                    email = str(ent.get("email", "")).strip()
+                    try:
+                        listing = await _ensure_listing(etype)
+                        outcome = await _create_or_merge_entity(
+                            client,
+                            record_type=etype, name=name,
+                            backlinks=[],
+                            description=description,
+                            org_link=org_link, role=role, email=email,
+                            existing_fm=listing,
+                        )
+                        if outcome == "created":
+                            seeded += 1
+                            activity.heartbeat(f"materialize(seed): {etype}/{name}")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "materialize: Pass B %s/%s failed: %s",
                             etype, name, exc,
                         )
 
