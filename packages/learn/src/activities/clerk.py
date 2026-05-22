@@ -532,6 +532,16 @@ Return JSON only:
 # enclosing Temporal activity timeout/heartbeat is the outer bound.
 _CLERK_COMPLETION_BUDGET_SECONDS = 900.0
 
+# F35 — priced-ceiling cap. Hermes' ``POST /v1/responses`` otherwise asks
+# the model for its full output window (65536 on the heavy/clerk models),
+# and OpenRouter prices the request against that ceiling — so a call 402s
+# ("requested up to 65536 tokens, can only afford 31301") even when the
+# actual reply is short. Forwarding a bounded ``max_output_tokens`` shrinks
+# the priced ceiling below the affordable budget. 31000 sits just under the
+# observed ~31301 affordable line; clerk replies are JSON envelopes that
+# never need anywhere near that. Correct regardless of the credit wall.
+_MAX_OUTPUT_TOKENS_CAP = 31000
+
 # Temporal envelope for any activity whose body blocks on ``_call_clerk``.
 # The activity ``start_to_close_timeout`` MUST sit above the HTTP completion
 # budget, otherwise Temporal kills the activity mid-call (the billable clerk
@@ -709,7 +719,8 @@ async def _call_clerk(
             resp = await client.post(
                 f"{base}/v1/responses",
                 headers=headers,
-                json={"input": prompt},
+                # F35: cap the priced output ceiling (see _MAX_OUTPUT_TOKENS_CAP).
+                json={"input": prompt, "max_output_tokens": _MAX_OUTPUT_TOKENS_CAP},
             )
     except httpx.TimeoutException as exc:
         raise TimeoutError(

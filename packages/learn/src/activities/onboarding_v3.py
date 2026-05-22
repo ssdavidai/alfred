@@ -54,9 +54,11 @@ async def _call_llm(
     deliberately carries no ``model`` field — only ``{"input": prompt}``.
     ``X-Hermes-Session-Key`` scopes the call to the ``onboarding`` agent.
 
-    ``max_tokens`` is retained in the signature for caller/Temporal
-    determinism stability; the Hermes profile owns generation limits, so it
-    is no longer forwarded.
+    ``max_tokens`` is forwarded as ``max_output_tokens`` (F35), clamped to
+    ``_MAX_OUTPUT_TOKENS_CAP``. Without it, Hermes asks the model for its
+    full output window (65536) and OpenRouter prices the call against that
+    ceiling — so a request 402s even when the reply is short. The clamp
+    keeps the priced ceiling under the affordable budget.
 
     Uses an explicit total timeout (wait_for) because httpx's read timeout
     applies *between bytes*, not total duration — a slow run can hang the
@@ -81,12 +83,17 @@ async def _call_llm(
     # non-streaming branch returns the final response JSON.
     timeout = httpx.Timeout(total_timeout, connect=30.0)
 
+    # F35 — clamp the priced output ceiling. Reuse the clerk cap so both
+    # learn-side LLM entry points share one affordable line.
+    from src.activities.clerk import _MAX_OUTPUT_TOKENS_CAP
+    capped_max = min(int(max_tokens), _MAX_OUTPUT_TOKENS_CAP)
+
     async def _do_call() -> str:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
                 f"{base}/v1/responses",
                 headers=headers,
-                json={"input": prompt},
+                json={"input": prompt, "max_output_tokens": capped_max},
             )
             resp.raise_for_status()
             return _response_output_text(resp.json())
