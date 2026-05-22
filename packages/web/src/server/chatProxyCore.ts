@@ -34,6 +34,45 @@ export function resolveChatCorsOrigin(
 }
 
 /**
+ * Path prefix the chat-proxy CORS middleware is mounted on, and the four
+ * concrete chat route paths registered under it.
+ *
+ * B10 — these MUST all be static path strings. A bare `*` wildcard (the old
+ * `app.options("/api/chat/*", …)`) is rejected by the deployed Express /
+ * path-to-regexp version with "Missing parameter name … /api/chat/*", which
+ * threw inside `registerChatProxy` BEFORE any route registered — so all four
+ * routes 404'd and the widget showed "Could not reach the chat service." CORS
+ * preflight is handled by the `cors` middleware mounted on the prefix below,
+ * so no wildcard route is needed. `assertStaticChatRoutePaths` is the pure
+ * guard the test exercises.
+ */
+export const CHAT_ROUTE_PREFIX = "/api/chat" as const;
+
+export const CHAT_ROUTE_PATHS = [
+  "/api/chat/status",
+  "/api/chat/turn",
+  "/api/chat/run",
+  "/api/chat/stream",
+] as const;
+
+/**
+ * Throw if any chat route path contains a routing-token character (`*`, `:`,
+ * `(`, `)`) the deployed path-to-regexp rejects. Pure + import-free so it can
+ * gate the boot-time registration without booting the Wasp env.
+ */
+export function assertStaticChatRoutePaths(
+  paths: readonly string[] = CHAT_ROUTE_PATHS,
+): void {
+  for (const p of paths) {
+    if (/[*:()]/.test(p)) {
+      throw new Error(
+        `chat route path is not a static string and would throw at boot: ${p}`,
+      );
+    }
+  }
+}
+
+/**
  * Resolve the Hermes upstream gateway token from env (the file-based source is
  * tried first by the caller). The init container writes the SAME token to both
  * the `/alfred-data/.gateway-token` file and `OPENCLAW_GATEWAY_TOKEN`;

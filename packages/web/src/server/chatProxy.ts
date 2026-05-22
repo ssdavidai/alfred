@@ -5,6 +5,8 @@ import type { Application, Request, Response, RequestHandler } from "express";
 import type { IncomingMessage } from "http";
 import { getSessionAndUserFromBearerToken } from "wasp/auth/session";
 import {
+  CHAT_ROUTE_PREFIX,
+  CHAT_ROUTE_PATHS,
   resolveChatCorsOrigin,
   resolveGatewayTokenFromEnv,
 } from "./chatProxyCore";
@@ -99,19 +101,26 @@ function withInjectedBearer(req: Request): IncomingMessage {
 }
 
 export function registerChatProxy(app: Application): void {
-  // F61 — apply CORS + a preflight handler to every chat route. These routes
-  // live outside Wasp's CORS-bearing router, so without this the browser blocks
-  // the cross-origin fetch from the SPA host to the `api.` subdomain.
+  // F61 — apply CORS to every chat route. These routes live outside Wasp's
+  // CORS-bearing router, so without this the browser blocks the cross-origin
+  // fetch from the SPA host to the `api.` subdomain.
+  //
+  // B10 — the `cors` middleware mounted here already answers OPTIONS preflight
+  // (it short-circuits OPTIONS with a 204 + the Access-Control-Allow-* headers).
+  // The previous explicit `app.options("/api/chat/*", …)` registration threw at
+  // boot in the deployed Express/path-to-regexp version ("Missing parameter name
+  // … /api/chat/*"): the bare `*` wildcard path is no longer a valid route
+  // string, and the throw aborted `registerChatProxy` before any of the four
+  // `/api/chat/*` routes registered — they all 404'd and the widget showed
+  // "Could not reach the chat service." Mounting `cors` as path-prefix
+  // middleware (no wildcard route string) is enough for preflight.
   const cors = chatCors();
-  app.use("/api/chat", cors);
-  app.options("/api/chat/*", cors, (_req: Request, res: Response) => {
-    res.sendStatus(204);
-  });
+  app.use(CHAT_ROUTE_PREFIX, cors);
 
   // ── Health / config probe ──────────────────────────────────────
   // Lets the chat widget show a clear "not configured" state instead of
   // failing opaquely.
-  app.get("/api/chat/status", async (req: Request, res: Response) => {
+  app.get(CHAT_ROUTE_PATHS[0], async (req: Request, res: Response) => {
     try {
       const userId = await getUserIdFromRequest(withInjectedBearer(req));
       if (!userId) {
@@ -155,7 +164,7 @@ export function registerChatProxy(app: Application): void {
   // `express.json()` per route so `req.body` is populated.
   const jsonBody = express.json({ limit: "256kb" });
 
-  app.post("/api/chat/turn", jsonBody, async (req: Request, res: Response) => {
+  app.post(CHAT_ROUTE_PATHS[1], jsonBody, async (req: Request, res: Response) => {
     try {
       const userId = await getUserIdFromRequest(withInjectedBearer(req));
       if (!userId) {
@@ -219,7 +228,7 @@ export function registerChatProxy(app: Application): void {
   //                       previousResponseId?: string }
   // → Hermes POST /v1/runs. Returns the created run object (incl. id) so
   //   the browser can then open the SSE stream below.
-  app.post("/api/chat/run", jsonBody, async (req: Request, res: Response) => {
+  app.post(CHAT_ROUTE_PATHS[2], jsonBody, async (req: Request, res: Response) => {
     try {
       const userId = await getUserIdFromRequest(withInjectedBearer(req));
       if (!userId) {
@@ -286,7 +295,7 @@ export function registerChatProxy(app: Application): void {
   //   body is re-streamed verbatim to the browser. An EventSource on the
   //   client can't set Authorization headers, so the Wasp session token
   //   is passed as `?token=`.
-  app.get("/api/chat/stream", async (req: Request, res: Response) => {
+  app.get(CHAT_ROUTE_PATHS[3], async (req: Request, res: Response) => {
     const userId = await getUserIdFromRequest(withInjectedBearer(req));
     if (!userId) {
       res.status(401).json({ error: "not_authenticated" });

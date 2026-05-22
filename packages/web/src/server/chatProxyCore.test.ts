@@ -17,6 +17,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  CHAT_ROUTE_PATHS,
+  assertStaticChatRoutePaths,
   resolveChatCorsOrigin,
   resolveGatewayTokenFromEnv,
 } from "./chatProxyCore";
@@ -46,6 +48,21 @@ test("resolveChatCorsOrigin: reflects the request origin when unconfigured", () 
 
 test("resolveChatCorsOrigin: passes a non-URL string through unchanged", () => {
   assert.equal(resolveChatCorsOrigin("not a url"), "not a url");
+});
+
+test("B10: every chat route path is a static string registerChatProxy can register", () => {
+  // The boot crash was a bare `*` wildcard path (`/api/chat/*`) the deployed
+  // path-to-regexp rejects, which threw before any of the four routes
+  // registered. `registerChatProxy` itself imports the Wasp env machinery and
+  // can't be loaded under bare tsx, so we gate the literal paths it registers.
+  assert.doesNotThrow(() => assertStaticChatRoutePaths());
+  for (const p of CHAT_ROUTE_PATHS) {
+    assert.equal(/[*:()]/.test(p), false, `${p} contains a routing-token char`);
+  }
+});
+
+test("B10: assertStaticChatRoutePaths throws on a bare `*` wildcard path", () => {
+  assert.throws(() => assertStaticChatRoutePaths(["/api/chat/*"]));
 });
 
 test("resolveGatewayTokenFromEnv: prefers the aligned OPENCLAW_GATEWAY_TOKEN", () => {
