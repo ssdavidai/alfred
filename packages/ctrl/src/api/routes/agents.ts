@@ -20,23 +20,30 @@ const HERMES_CONFIG_DIR = process.env.HERMES_CONFIG_DIR ?? `${HERMES_HOME}/profi
 
 /**
  * The agents the dashboard shows. alfred-black runs ONE `hermes` container
- * with two profiles — `main` (user-facing chat) and `workers` (background
- * agents). Hermes has no per-agent model knob; the model is a per-PROFILE
- * setting (`model.default`). So each dashboard "agent" maps to whichever
- * profile actually serves it:
+ * with THREE profiles (F67):
+ *   • `main`    (:18789) — the user-facing conversational chat surface.
+ *   • `workers` (:18790) — cheap, high-volume background agents.
+ *   • `heavy`   (:18791) — Opus-class heavy reasoning, used sparingly.
+ * Hermes has no per-agent model knob; the model is a per-PROFILE setting
+ * (`model.default`). So each dashboard "agent" maps to whichever profile
+ * actually serves it, and changing a model changes every agent on that profile:
  *   • `main`            → the `main` profile (the live chat surface).
  *   • the four workers  → the `workers` profile — learn-clerk, the vault
  *                          curator/janitor/distiller all run as `/v1/runs`
  *                          sessions against `hermes:18790`. They share the
- *                          `workers` profile model; changing one changes
- *                          all four (a true reflection of the runtime).
+ *                          `workers` profile model; changing one changes all four.
+ *   • onboarding/chore  → the `heavy` profile — onboarding facts/patterns
+ *                          reasoning and chore heavy-reasoning run against
+ *                          `hermes:18791` (Opus-class, slow/expensive).
  */
 const AGENTS = [
-  { id: "main", label: "Alfred", description: "Default agent for device interactions", profile: "main" },
-  { id: "learn-clerk", label: "Clerk", description: "Stateless LLM worker for learning workflows", profile: "workers" },
+  { id: "main", label: "Alfred", description: "Your conversational Alfred on every channel (Slack/Telegram/SMS), with memory", profile: "main" },
+  { id: "learn-clerk", label: "Clerk", description: "Event classification/extraction/reflection — cheap, high-volume", profile: "workers" },
   { id: "vault-curator", label: "Curator", description: "Processes inbox into structured vault records", profile: "workers" },
   { id: "vault-janitor", label: "Janitor", description: "Fixes structural vault issues", profile: "workers" },
   { id: "vault-distiller", label: "Distiller", description: "Extracts latent knowledge from records", profile: "workers" },
+  { id: "onboarding", label: "Onboarding", description: "Onboarding facts/patterns reasoning — Opus-class, runs once at setup", profile: "heavy" },
+  { id: "chore", label: "Chore reasoning", description: "Heavy-reasoning chore execution — Opus-class, used sparingly", profile: "heavy" },
 ];
 
 /** Read a Hermes profile's `model.default` from its config.yaml (read-only). */
