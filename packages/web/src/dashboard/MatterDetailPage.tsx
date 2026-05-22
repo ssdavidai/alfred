@@ -18,6 +18,7 @@ import {
 import { Frame } from "../client/components/ab/Frame";
 import { Markdown } from "../client/components/ab/Markdown";
 import { PageOverture } from "../client/components/ab/PageOverture";
+import { countSectionItems } from "./matterShapeCore";
 
 type TaskState = "pending" | "in_progress" | "done" | "archived";
 
@@ -72,10 +73,29 @@ interface MatterTask {
   as_of: string | null;
 }
 
+// F54 — the API (aggregator + vault fallback) returns the rich vault body as
+// `about`, plus `summary`, `counts`, `vault_by_category`. The previous type
+// declared none of these, so the page dropped the principal's description and
+// rendered only the (null) live narrative as a full-page empty-state.
+interface MatterCounts {
+  conversations: number;
+  decisions: number;
+  tasks: number;
+  drafts: number;
+}
+
 interface MatterDetail {
   id: string;
   path: string;
   name: string;
+  // F54 — vault-record substance, available without the nightly composer.
+  about?: string;
+  summary?: string;
+  counts?: MatterCounts;
+  vault_by_category?: {
+    tasks?: unknown[];
+    decisions?: unknown[];
+  };
   // RFC #884 — living narrative fields. Older ctrl-api builds will have
   // these as null/[]; the renderer handles either case.
   current_state: string | null;
@@ -212,6 +232,41 @@ function truncateLine(s: string, limit = 90): string {
   return flat.slice(0, limit - 1).trimEnd() + "…";
 }
 
+// F54 — the matter "shape": counts that make an un-routed matter look alive
+// instead of four zeros. People/questions/actions from the deterministic vault
+// body; tasks/decisions from binned linkage (non-zero once linkage works).
+function buildMatterShape(matter: MatterDetail): Array<{ label: string; n: number }> {
+  const about = matter.about ?? "";
+  const cats = matter.vault_by_category ?? {};
+  return [
+    { label: "People", n: countSectionItems(about, "Key people") },
+    { label: "Open questions", n: countSectionItems(about, "Open questions") },
+    { label: "Next actions", n: countSectionItems(about, "Suggested next actions") },
+    { label: "Tasks", n: matter.counts?.tasks ?? cats.tasks?.length ?? 0 },
+    { label: "Decisions", n: matter.counts?.decisions ?? cats.decisions?.length ?? 0 },
+  ];
+}
+
+function ShapeStrip({ shape }: { shape: Array<{ label: string; n: number }> }) {
+  if (shape.every((s) => s.n === 0)) return null; // avoid a row of zeros
+  return (
+    <div className="flex flex-wrap gap-x-8 gap-y-3 mb-10">
+      {shape
+        .filter((s) => s.n > 0)
+        .map((s) => (
+          <div key={s.label} className="flex items-baseline gap-2">
+            <span className="font-display tracking-tight" style={{ fontSize: 22, color: "var(--ink)" }}>
+              {s.n}
+            </span>
+            <span className="font-mono text-[10px] uppercase tracking-[0.22em]" style={{ color: "var(--marginalia)" }}>
+              {s.label}
+            </span>
+          </div>
+        ))}
+    </div>
+  );
+}
+
 export default function MatterDetailPage() {
   const { id } = useParams<{ id: string }>();
   const safeId = id ?? "";
@@ -325,13 +380,27 @@ export default function MatterDetailPage() {
           />
         </div>
 
-        {/* current_state paragraph + as_of byline */}
+        {/* F54 — render the vault substance (`about` + `summary`) ALWAYS, no
+            dependency on the nightly composer. `current_state` is an additive
+            secondary layer; null → a quiet byline, not a full-page empty-state. */}
         <section className="-mt-6 mb-10">
           <div className="mb-4">
             <StatusPill label={statusPill.label} color={statusPill.color} />
           </div>
+
+          {/* Lead summary — the one-line description. */}
+          {matter.summary && (
+            <p className="max-w-[64ch] font-body text-[19px] leading-[1.55] mb-8">
+              {matter.summary}
+            </p>
+          )}
+
+          {/* Shape — a minimal living view instead of four zero tiles. */}
+          <ShapeStrip shape={buildMatterShape(matter)} />
+
+          {/* Live current-state layer (composed nightly) — additive. */}
           {matter.current_state ? (
-            <>
+            <div className="mb-6">
               <div className="max-w-[64ch] font-body text-[18px] leading-[1.6]">
                 <Markdown
                   source={matter.current_state}
@@ -346,15 +415,22 @@ export default function MatterDetailPage() {
                   As of {fmtAsOf(matter.as_of)}
                 </div>
               )}
-            </>
+            </div>
           ) : (
-            <p
-              className="font-display italic text-[18px] max-w-[64ch]"
+            <div
+              className="font-mono text-[10px] uppercase tracking-[0.22em] mb-6"
               style={{ color: "var(--marginalia)" }}
             >
-              Alfred has not yet composed a current view for this matter. The
-              next nightly run will.
-            </p>
+              Live status not yet composed
+            </div>
+          )}
+
+          {/* The rich vault body — Context, Key people, Open questions,
+              Suggested next actions. Rendered for free from `about`. */}
+          {matter.about && (
+            <div className="max-w-[64ch] font-body text-[17px] leading-[1.65] mt-2">
+              <Markdown source={matter.about} useLiveResolver={false} />
+            </div>
           )}
         </section>
 

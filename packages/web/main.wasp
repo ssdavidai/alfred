@@ -1040,6 +1040,13 @@ action deleteInboundWebhook {
   entities: []
 }
 
+// F59 — OMI device pairing: creates-or-reuses the source:"omi" stream and
+// returns its composed device webhook_url. Never touches Composio.
+action pairOmiDevice {
+  fn: import { pairOmiDevice } from "@src/integrations/operations",
+  entities: []
+}
+
 // Reconciler — closes the gap between "Composio reports ACTIVE" and
 // "tenant has its stream/skill/schedule wired up". Runs every minute and
 // picks up any ComposioConnection where Composio is ACTIVE but our

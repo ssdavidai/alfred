@@ -33,13 +33,7 @@ import {
   getActivityFeed,
   getRecentStewardActions,
   getMatterDetail,
-  resolveNeedsAttentionDispatch,
-  resolveNeedsAttentionSkip,
-  resolveNeedsAttentionDone,
-  approveAction,
-  rejectAction,
   undoStewardAction,
-  recordDeskAction,
   recordDecision,
   getRecentDecisions,
   reverseDecision,
@@ -58,6 +52,11 @@ import { PageOverture } from "../client/components/ab/PageOverture";
 import { Markdown } from "../client/components/ab/Markdown";
 import { fadeUp, stagger } from "../client/lib/motion";
 import { enqueueDeskAction } from "./desk-action-queue";
+import {
+  shouldClearCardOnSuccess,
+  type DecisionSideEffects,
+} from "./deskReconcileCore";
+import { rowReversible } from "./deskLedgerCore";
 import DeskOnboardingGate from "./DeskOnboardingGate";
 
 // --------------------------------------------------------------------------
@@ -175,8 +174,11 @@ interface AuditRow {
   at: string;       // for sort
   atDisplay: string;
   act: string;
-  actionId?: string; // steward action id, when reversible
+  actionId?: string; // decision id or steward action id, when reversible
   reversible: boolean;
+  // F51 — which Undo wire to use. Decisions reverse via reverseDecision;
+  // steward actions via undoStewardAction. Activity rows are never reversible.
+  kind?: "decision" | "steward";
 }
 
 // --------------------------------------------------------------------------
@@ -438,17 +440,19 @@ function DeskContent() {
         "(no headline)";
       const verb = decisionVerb(intent, state);
       const decisionId = String(d?.id ?? "");
+      // F51 — wire the existing reverseDecision op to the ledger Undo. A
+      // decision is reversible when ctrl marked it so (cheap source-flip
+      // intents: done/defer/noise/take_mine — see decisions.ts isReversible)
+      // and it hasn't already been reversed. Was hardcoded false.
+      const reversible = rowReversible(d, decisionId);
       out.push({
         key: `dec:${decisionId || at}`,
         at,
         atDisplay: fmtArrived(at),
         act: `${verb} — ${headline}`,
         actionId: decisionId || undefined,
-        // Decisions are reversible until they have an outcome, but the
-        // Undo path here goes through reverseDecision, not
-        // undoStewardAction — different wire. Surface as informational
-        // for now; the dedicated reverse button lives on /decisions.
-        reversible: false,
+        reversible,
+        kind: "decision",
       });
     }
 
@@ -494,10 +498,7 @@ function DeskContent() {
       if (decision === "still_active" && !actionStr) continue;
       const at = String(s?.timestamp ?? s?.created ?? s?.created_at ?? "");
       const actionId = String(s?.id ?? s?.action_id ?? "");
-      const reversible =
-        Boolean(s?.is_reversible ?? s?.reversible ?? false) &&
-        !s?.reversed_at &&
-        Boolean(actionId);
+      const reversible = rowReversible(s, actionId);
       out.push({
         key: `sw:${actionId || at}`,
         at,
@@ -505,6 +506,7 @@ function DeskContent() {
         act: formatStewardAct(s),
         actionId: actionId || undefined,
         reversible,
+        kind: "steward",
       });
     }
     out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
@@ -536,164 +538,120 @@ function DeskContent() {
     setPending(null);
   }
 
-  // Every Desk-card click writes:
-  //
-  //   1. A `decision/<ts>.md` record (the new first-class artefact —
-  //      DecisionRouterWorkflow picks it up within ~60s and fans out
-  //      side effects: source-record status flip, signal re-arm, to_do
-  //      spawn, matter-timeline entry, outcome polling).
-  //   2. A legacy `event/desk-action-*.md` (kept for backwards compat
-  //      with the existing /decisions feed that reads the event/ dir).
-  //
-  // Both fire in parallel best-effort. A failure of either MUST NOT
-  // block the source-specific call.
-  async function auditDeskAction(
+  // F50 — ONE server call per click. POST /api/v1/decisions (C18) is now the
+  // single writer: it writes + indexVaultWrite()s decision/<ts>.md, mirrors a
+  // state.db audit row, and flips the source synchronously (or, for delegate,
+  // dispatches and only flips on success). The old 2–3 POSTs/click (the
+  // parallel recordDeskAction + a per-source mutation that raced the sync-flip)
+  // are gone. Returns true iff the card should clear (reconcile-on-success):
+  // false on HTTP/network failure or a delegate no-op, so the card stays.
+  async function submitDecision(
     d: Decision,
     action: "delegate" | "defer" | "delete" | "do" | "noise",
     note: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const intent =
-      action === "delete"
-        ? "done"
-        : action === "do"
-          ? "take_mine"
-          : action;
-    // Awaited so the caller knows the audit cycle is fully done before
-    // releasing the desk-action queue to the next click. Each write is
-    // best-effort — a ledger miss must not block the user — but the
-    // queue gate waits on both regardless of outcome.
-    await Promise.all([
-      recordDecision({
+      action === "delete" ? "done" : action === "do" ? "take_mine" : action;
+    let result: any;
+    try {
+      result = await recordDecision({
         source: d.source,
         sourceRecord:
           d.source === "needs_attention"
             ? `needs_attention/${d.recordId}.md`
             : d.recordId,
-        intent: intent as
-          | "delegate"
-          | "defer"
-          | "done"
-          | "take_mine"
-          | "noise",
+        intent: intent as "delegate" | "defer" | "done" | "take_mine" | "noise",
         note: note || undefined,
         matterRef: d.matterRef ? `matter/${d.matterRef}.md` : undefined,
         sourceHeadline: d.headline || undefined,
-      }).catch((e) => {
-        console.error("recordDecision failed", action, d.id, e);
-      }),
-      recordDeskAction({
-        source: d.source,
-        sourceId: d.recordId,
-        action,
-        note: note || undefined,
-      }).catch((e) => {
-        console.error("recordDeskAction failed", action, d.id, e);
-      }),
-    ]);
+      });
+    } catch (e) {
+      // Non-2xx / network — keep the card; the failure must be visible.
+      console.error("recordDecision failed; keeping card", action, d.id, e);
+      return false;
+    }
+    // Delegate is the one action whose 2xx can still be a no-op (advisory card
+    // → nothing_to_delegate, or a failed dispatch → dispatch_ok:false). The
+    // source stays pending server-side in those cases, so the card must stay.
+    const fx = (result?.frontmatter?.side_effects ?? null) as DecisionSideEffects | null;
+    const cleared = shouldClearCardOnSuccess(action, fx);
+    if (!cleared) {
+      console.warn("delegate did not dispatch; keeping card", d.id, fx?.dispatch_error);
+    }
+    return cleared;
   }
 
-  // Optimistic UI for all four buttons: clear the card from the queue
-  // immediately, fire the audit + source-specific server calls in the
-  // background. The two server calls run in parallel (they don't depend
-  // on each other). On mutation failure, revert by removing the id
-  // from `handled` so the card pops back into the queue. The audit call
-  // already swallows its own errors (best-effort) — a transient ledger
-  // miss must not block the user, and the source record's own status
-  // field is the durable truth of what happened to the underlying item.
-  function revertHandled(id: string): void {
-    setHandled((h) => h.filter((x) => x !== id));
-  }
-
-  // Every click goes through `enqueueDeskAction` so that 10 mash-clicks
-  // produce a single in-flight server cycle at a time. Optimistic UI
-  // (markHandled) still runs synchronously; only the audit + source
-  // mutation are serialised. See desk-action-queue.ts for rationale.
-  function onDelegate(d: Decision, instructions: string): void {
-    markHandled(d.id);
+  // The four primary buttons + Noise all reconcile-on-success: set the card
+  // busy, run the single decision POST through `enqueueDeskAction` (one
+  // in-flight cycle at a time), and clear the card only when the server
+  // confirms. A failure (or a delegate with nothing to delegate) clears the
+  // busy flag but leaves the card on the Desk.
+  function runDecision(
+    d: Decision,
+    action: "delegate" | "defer" | "delete" | "do" | "noise",
+    note: string,
+    onCleared?: () => void,
+  ): void {
+    setPending(d.id);
     enqueueDeskAction(async () => {
-      await auditDeskAction(d, "delegate", instructions);
-      if (d.source === "needs_attention") {
-        await resolveNeedsAttentionDispatch({
-          id: d.recordId,
-          note: instructions,
-        });
-      } else if (d.source === "approval") {
-        await approveAction({ path: d.recordId });
+      const cleared = await submitDecision(d, action, note);
+      if (cleared) {
+        markHandled(d.id); // clears the card + closes the panel + pending
+        onCleared?.();
+      } else {
+        setPending(null); // keep the card; re-enable its buttons
       }
     }).catch((e) => {
-      console.error("delegate failed; reverting", d.id, e);
-      revertHandled(d.id);
+      console.error("decision cycle errored; keeping card", d.id, e);
+      setPending(null);
     });
+  }
+
+  function onDelegate(d: Decision, instructions: string): void {
+    runDecision(d, "delegate", instructions);
   }
 
   function onDefer(d: Decision, when: string): void {
-    markHandled(d.id);
-    enqueueDeskAction(async () => {
-      await auditDeskAction(d, "defer", when);
-      if (d.source === "needs_attention") {
-        await resolveNeedsAttentionSkip({ id: d.recordId, note: when });
-      }
-      // Approvals + judgments have no native defer endpoint — the audit
-      // event captures intent; the underlying record stays pending.
-    }).catch((e) => {
-      console.error("defer failed; reverting", d.id, e);
-      revertHandled(d.id);
-    });
+    runDecision(d, "defer", when);
   }
 
   function onDelete(d: Decision, context: string): void {
     // "Done" — close the item. Optional context becomes part of the
     // observation extracted from the decision (richer learning signal).
-    markHandled(d.id);
-    enqueueDeskAction(async () => {
-      await auditDeskAction(d, "delete", context);
-      if (d.source === "needs_attention") {
-        await resolveNeedsAttentionDone({
-          id: d.recordId,
-          note: context || undefined,
-        });
-      } else if (d.source === "approval") {
-        await rejectAction({ path: d.recordId });
-      }
-    }).catch((e) => {
-      console.error("done failed; reverting", d.id, e);
-      revertHandled(d.id);
-    });
+    runDecision(d, "delete", context);
   }
 
   function onDo(d: Decision, context: string): void {
-    // "Do" writes a Decision (intent=take_mine) — the
-    // DecisionRouterWorkflow then spawns a to_do/<ts>.md record within
-    // ~60s, which surfaces in the Backstage section via getMyTodos.
-    // Context becomes the to_do's note + the observation's training
-    // signal. We refetch the todos list a few seconds later to close
-    // the gap.
-    markHandled(d.id);
-    enqueueDeskAction(() => auditDeskAction(d, "do", context));
-    setTimeout(() => {
-      refetchTodos().catch(() => {});
-    }, 5000);
+    // "Do" — the decision POST flips the source + the DecisionRouterWorkflow
+    // spawns a to_do/<ts>.md within ~60s (surfaces in Backstage via
+    // getMyTodos). Refetch shortly after to close the gap.
+    runDecision(d, "do", context, () => {
+      setTimeout(() => {
+        refetchTodos().catch(() => {});
+      }, 5000);
+    });
   }
 
   function onNoise(d: Decision): void {
-    // "Noise" — the principal says this category of signal should
-    // never have surfaced. Synchronous flip stamps status=noise;
-    // DecisionRouterWorkflow then materialises a signal_noise_pattern
-    // that signal_extract consults BEFORE the LLM call on future
-    // events. No note required — the gesture is the explanation.
-    markHandled(d.id);
-    enqueueDeskAction(() => auditDeskAction(d, "noise", ""));
-    // No source-specific mutation needed — the synchronous flip in
-    // ctrl-api's POST /api/v1/decisions already set the source
-    // record's status to "noise", which drops it from the queue.
+    // "Noise" — the synchronous flip in POST /api/v1/decisions stamps
+    // status=noise (drops it from the queue) and DecisionRouterWorkflow
+    // materialises a signal_noise_pattern. No note — the gesture explains it.
+    runDecision(d, "noise", "");
   }
 
-  async function onUndo(actionId: string) {
+  // F51 — Undo a ledger row. Decisions reverse via reverseDecision (the op was
+  // imported but wired to nothing); steward actions keep undoStewardAction.
+  async function onUndo(actionId: string, kind?: "decision" | "steward") {
     setUndoing(actionId);
     try {
-      await undoStewardAction({ actionId });
+      if (kind === "decision") {
+        await reverseDecision({ id: actionId });
+        await refetchDecisions().catch(() => {});
+      } else {
+        await undoStewardAction({ actionId });
+      }
     } catch (e) {
-      console.error("undo failed", e);
+      console.error("undo failed", kind, actionId, e);
     } finally {
       setUndoing(null);
     }
@@ -1066,7 +1024,7 @@ function DeskContent() {
                       </span>
                       {a.reversible && a.actionId ? (
                         <button
-                          onClick={() => a.actionId && onUndo(a.actionId)}
+                          onClick={() => a.actionId && onUndo(a.actionId, a.kind)}
                           disabled={undoing === a.actionId}
                           className="btn-link text-right"
                           style={{ marginRight: 0 }}

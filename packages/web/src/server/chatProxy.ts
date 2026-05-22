@@ -1,8 +1,13 @@
 import fs from "node:fs";
 import express from "express";
-import type { Application, Request, Response } from "express";
+import cors from "cors";
+import type { Application, Request, Response, RequestHandler } from "express";
 import type { IncomingMessage } from "http";
 import { getSessionAndUserFromBearerToken } from "wasp/auth/session";
+import {
+  resolveChatCorsOrigin,
+  resolveGatewayTokenFromEnv,
+} from "./chatProxyCore";
 
 /**
  * Chat proxy — single-VM edition, Hermes runtime.
@@ -51,11 +56,20 @@ function resolveGatewayToken(): string {
   } catch {
     /* file not mounted in this container — fall through to env */
   }
-  return (
-    process.env.HERMES_API_SERVER_KEY ??
-    process.env.OPENCLAW_GATEWAY_TOKEN ??
-    ""
-  );
+  // F61 — env fallback aligned with the file token (see chatProxyCore).
+  return resolveGatewayTokenFromEnv(process.env);
+}
+
+/** CORS middleware for the custom `/api/chat/*` routes (Wasp's router does
+ *  not cover setupFn-registered routes). `credentials:false` because the chat
+ *  widget authenticates with an Authorization bearer, not cookies. */
+function chatCors(): RequestHandler {
+  return cors({
+    origin: resolveChatCorsOrigin(process.env.WASP_WEB_CLIENT_URL),
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Authorization", "Content-Type", "Accept"],
+    credentials: false,
+  });
 }
 
 async function getUserIdFromRequest(
@@ -85,6 +99,15 @@ function withInjectedBearer(req: Request): IncomingMessage {
 }
 
 export function registerChatProxy(app: Application): void {
+  // F61 — apply CORS + a preflight handler to every chat route. These routes
+  // live outside Wasp's CORS-bearing router, so without this the browser blocks
+  // the cross-origin fetch from the SPA host to the `api.` subdomain.
+  const cors = chatCors();
+  app.use("/api/chat", cors);
+  app.options("/api/chat/*", cors, (_req: Request, res: Response) => {
+    res.sendStatus(204);
+  });
+
   // ── Health / config probe ──────────────────────────────────────
   // Lets the chat widget show a clear "not configured" state instead of
   // failing opaquely.

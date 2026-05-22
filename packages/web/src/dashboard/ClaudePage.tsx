@@ -34,10 +34,15 @@ interface McpApp {
   enabled: boolean;
 }
 
+// F75 — the backend returns `{ slug, toolkit, name, description, content }`
+// (the full SKILL.md body inlined), NOT a `url`. The page previously declared
+// `url` and CopyReveal'd `undefined`.
 interface ComposioSkill {
   slug: string;
+  toolkit?: string;
   name: string;
-  url: string;
+  description?: string;
+  content: string;
 }
 
 interface VaultLogin {
@@ -78,6 +83,99 @@ function CopyReveal({ value, sensitive = false }: { value: string; sensitive?: b
       >
         {copied ? "Copied" : "Copy"}
       </button>
+    </div>
+  );
+}
+
+// F75 — a skill is a markdown file to download, not a path string to copy.
+// Catalogue apps + custom instructions live as SaaS static assets at
+// `skill_url` (same-origin, browser-reachable): render a Download anchor +
+// an optional "Copy contents" that fetches the body. Lifted from the legacy
+// ClaudeSetupContent (SettingsPage), which did this correctly.
+function SkillDownload({
+  url,
+  filename,
+  description,
+}: {
+  url: string;
+  filename: string;
+  description?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  async function copyContents() {
+    try {
+      const text = await (await fetch(url)).text();
+      await navigator.clipboard?.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* fetch/clipboard blocked — the Download anchor still works */
+    }
+  }
+  return (
+    <div>
+      {description && (
+        <p className="font-body text-[14px] mb-2" style={{ color: "var(--marginalia)" }}>
+          {description}
+        </p>
+      )}
+      <div className="flex items-center gap-3">
+        <a href={url} download={filename} className="btn-ghost">
+          Download .md
+        </a>
+        <button onClick={copyContents} className="btn-ghost">
+          {copied ? "Copied" : "Copy contents"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// F75 — Composio skills carry their full SKILL.md as inlined `content`
+// (tenant-specific, no static asset). Offer a Blob download of that body.
+function BlobDownload({
+  content,
+  filename,
+  description,
+}: {
+  content: string;
+  filename: string;
+  description?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  function download() {
+    const blob = new Blob([content], { type: "text/markdown" });
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = href;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(href);
+  }
+  async function copyContents() {
+    try {
+      await navigator.clipboard?.writeText(content);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked */
+    }
+  }
+  return (
+    <div>
+      {description && (
+        <p className="font-body text-[14px] mb-2" style={{ color: "var(--marginalia)" }}>
+          {description}
+        </p>
+      )}
+      <div className="flex items-center gap-3">
+        <button onClick={download} className="btn-ghost">
+          Download .md
+        </button>
+        <button onClick={copyContents} className="btn-ghost">
+          {copied ? "Copied" : "Copy contents"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -230,7 +328,11 @@ export default function ClaudePage() {
                       >
                         Custom instructions
                       </div>
-                      <CopyReveal value={setup.custom_instructions.url} />
+                      <SkillDownload
+                        url={setup.custom_instructions.url}
+                        filename={setup.custom_instructions.filename}
+                        description="Paste into your claude.ai profile's Personalisation field."
+                      />
                     </li>
                     {setup.apps
                       .filter((a) => a.enabled && a.skill_url)
@@ -245,7 +347,11 @@ export default function ClaudePage() {
                           >
                             {a.name} skill
                           </div>
-                          <CopyReveal value={a.skill_url} />
+                          <SkillDownload
+                            url={a.skill_url}
+                            filename={`alfred-${a.id}.md`}
+                            description={a.description}
+                          />
                         </li>
                       ))}
                   </ul>
@@ -271,12 +377,16 @@ export default function ClaudePage() {
                       {setup.composio_skills.map((s) => (
                         <li
                           key={s.slug}
-                          className="grid grid-cols-[180px_1fr] gap-6 py-4 border-b border-rule items-center"
+                          className="grid grid-cols-[180px_1fr] gap-6 py-4 border-b border-rule items-start"
                         >
                           <span className="font-display italic text-[18px]">
                             {s.name || s.slug}
                           </span>
-                          <CopyReveal value={s.url} />
+                          <BlobDownload
+                            content={s.content}
+                            filename={`${s.slug}.md`}
+                            description={s.description}
+                          />
                         </li>
                       ))}
                     </ul>

@@ -47,6 +47,9 @@ import {
 import { Frame } from "../client/components/ab/Frame";
 import { useTheme } from "../client/lib/theme";
 import { useAuth } from "wasp/client/auth";
+import { config } from "wasp/client";
+import { auditKindLabel } from "./auditLedgerCore";
+import { apiBaseUrl } from "./apiKeysCore";
 
 const SECTIONS = [
   "settings",
@@ -414,10 +417,57 @@ function ApiKeysSection() {
     }
   }
 
+  // F76 — programmatic base = the Wasp server host (api. subdomain), NOT the
+  // apex SPA host and NOT the dead /user-api. e.g. https://api.alfred.black.
+  const apiBase = apiBaseUrl(config.apiUrl);
+  const [showQuickStart, setShowQuickStart] = useState(false);
+
   return (
     <div>
-      <H>API keys</H>
-      <Sub>For programmatic access to your Alfred SaaS account.</Sub>
+      <div className="flex items-center justify-between gap-4">
+        <H>API keys</H>
+        <a
+          href="https://docs.alfred.black"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="btn-ghost font-mono text-[10px] uppercase tracking-[0.22em] whitespace-nowrap"
+        >
+          Docs ↗
+        </a>
+      </div>
+      {/* F76 — drop "SaaS". */}
+      <Sub>For programmatic access to your Alfred.</Sub>
+
+      {/* F76 — expandable quick-start with a verified curl against the api.
+          subdomain (api/v1, NOT /user-api). */}
+      <div className="mb-6">
+        <button
+          onClick={() => setShowQuickStart((s) => !s)}
+          className="btn-link font-mono text-[11px] uppercase tracking-[0.22em]"
+        >
+          {showQuickStart ? "Quick start ▾" : "Quick start ▸"}
+        </button>
+        {showQuickStart && (
+          <pre
+            className="font-mono text-[12px] mt-3 p-4 overflow-x-auto whitespace-pre"
+            style={{ background: "rgba(0,0,0,0.04)", border: "1px solid var(--rule)" }}
+          >
+{`# Test your key (200 = key works, 401 = bad key)
+curl ${apiBase}/api/v1/health \\
+  -H "Authorization: Bearer alf_your_key_here"
+
+# Read your vault summary (record counts by type)
+curl ${apiBase}/api/v1/vault/context \\
+  -H "Authorization: Bearer alf_your_key_here"
+
+# Create a note
+curl -X POST ${apiBase}/api/v1/vault/records \\
+  -H "Authorization: Bearer alf_your_key_here" \\
+  -H "Content-Type: application/json" \\
+  -d '{"type":"note","name":"My Note","body":"Content here"}'`}
+          </pre>
+        )}
+      </div>
 
       {created && (
         <div
@@ -537,26 +587,49 @@ function ApiKeysSection() {
 // Audit
 // ---------------------------------------------------------------------------
 
+// F53/C12 — the C12 audit-ledger item shape (one row per user action).
+interface AuditItem {
+  id: string;
+  ts: string;
+  action_type: string;
+  actor: string | null;
+  headline: string | null;
+  note: string | null;
+  source: string | null;
+  reversible: boolean;
+  reversed_at: string | null;
+}
+
 function AuditSection() {
-  const { data } = useQuery(getAuditFeed, undefined, {
-    retry: false,
-    refetchInterval: 60_000,
-  });
-  // Backend returns {items: [{id, path, created, kind, summary}], total}.
+  // F53 — UI toggle for ?include_automated=1 (steward/auto noise hidden by
+  // default; the principal can now reach it from the page).
+  const [includeAutomated, setIncludeAutomated] = useState(false);
+  const { data } = useQuery(
+    getAuditFeed,
+    { includeAutomated },
+    { retry: false, refetchInterval: 60_000 },
+  );
+  // F53/C12 — single SQL ledger: {items:[{id,ts,action_type,headline,note,…}]}.
+  // One row per action — no more needs_attention_action + desk-action twin.
   const items = Array.isArray((data as any)?.items)
-    ? ((data as any).items as Array<{
-        id: string;
-        path: string;
-        created: string;
-        kind: string;
-        summary: string;
-      }>)
+    ? ((data as any).items as AuditItem[])
     : [];
 
   return (
     <div>
       <H>Audit</H>
       <Sub>Every act Alfred has taken on your behalf.</Sub>
+      <label
+        className="flex items-center gap-2 mb-4 font-mono text-[10px] uppercase tracking-[0.2em] cursor-pointer"
+        style={{ color: "var(--marginalia)" }}
+      >
+        <input
+          type="checkbox"
+          checked={includeAutomated}
+          onChange={(e) => setIncludeAutomated(e.target.checked)}
+        />
+        Show automated activity
+      </label>
       {items.length === 0 ? (
         <p
           className="font-body italic text-[15px]"
@@ -589,15 +662,20 @@ function AuditSection() {
                   className="py-3 pr-3 align-top whitespace-nowrap"
                   style={{ color: "var(--marginalia)" }}
                 >
-                  {formatAuditWhen(a.created)}
+                  {formatAuditWhen(a.ts)}
                 </td>
                 <td
                   className="py-3 pr-3 align-top whitespace-nowrap uppercase tracking-[0.18em] text-[10px]"
                   style={{ color: "var(--brass)" }}
                 >
-                  {a.kind}
+                  {auditKindLabel(a.action_type)}
                 </td>
-                <td className="py-3 pr-3 font-body text-[15px]">{a.summary}</td>
+                <td className="py-3 pr-3 font-body text-[15px]">
+                  {a.headline || "(no headline)"}
+                  {a.note ? (
+                    <span style={{ color: "var(--marginalia)" }}> — {a.note}</span>
+                  ) : null}
+                </td>
               </tr>
             ))}
           </tbody>

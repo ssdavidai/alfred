@@ -208,15 +208,17 @@ export default function ChannelsPage() {
             </button>
           </ChannelCard>
 
-          {/* Omi — a wearable webhook stream source, configured under Streams. */}
+          {/* Omi — a wearable webhook stream source. F60: repointed off the
+              legacy /dashboard/streams page to the canonical Connections
+              surface, where the OMI catalog card + pairing modal live. */}
           <ChannelCard
             name="Omi"
             address="Wearable audio stream"
             note="Ambient voice. Wear it; I will keep up."
             status="available"
           >
-            <Link to="/dashboard/streams" className="btn-ghost mt-4 inline-block">
-              Configure stream →
+            <Link to="/connections" className="btn-ghost mt-4 inline-block">
+              Pair device →
             </Link>
           </ChannelCard>
 

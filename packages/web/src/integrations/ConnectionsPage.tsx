@@ -23,6 +23,10 @@ import {
   deleteInboundWebhook,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
+import {
+  isLastAccountOfToolkit,
+  revokeConsequenceCopy,
+} from "./connectionsRevokeCore";
 
 // Synthetic toolkit slugs ctrl-api injects into the catalog response —
 // they aren't Composio toolkits and need bespoke modal UX.
@@ -82,6 +86,10 @@ interface Connected {
   auth_scheme?: string;
   created_at?: string;
   is_stream_source?: boolean;
+  // F27/F73 — inbound-webhook rows carry their absolute URL + token so the UI
+  // can re-display the endpoint after the write-once create-flow toast.
+  url?: string;
+  token?: string;
 }
 
 const PAGE_SIZE = 12;
@@ -117,6 +125,7 @@ export default function ConnectionsPage() {
   const [category, setCategory] = useState<string>("all");
   const [page, setPage] = useState(0);
   const [openApp, setOpenApp] = useState<Toolkit | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<Connected | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -273,9 +282,14 @@ export default function ConnectionsPage() {
     }
   }
 
-  async function disconnect(connection: Connected) {
+  // F72 — open the in-design revoke modal instead of the native confirm()
+  // Chrome popup. The actual revoke runs from the modal's affirmative.
+  function disconnect(connection: Connected) {
+    setRevokeTarget(connection);
+  }
+
+  async function performDisconnect(connection: Connected) {
     const label = connection.toolkit_name || connection.toolkit;
-    if (!confirm(`Disconnect ${label}?`)) return;
     setBusy(connection.id);
     try {
       // Custom webhooks have their own delete endpoint; everything else
@@ -288,6 +302,7 @@ export default function ConnectionsPage() {
         await disconnectIntegration({ connectionId: connection.id });
       }
       setToast(`Disconnected ${label}.`);
+      setRevokeTarget(null);
       await refetchConnected();
     } catch (e) {
       console.error("disconnect failed", e);
@@ -534,7 +549,70 @@ export default function ConnectionsPage() {
           onWebhook={(label) => createWebhook(openApp, label)}
         />
       )}
+
+      {revokeTarget && (
+        <RevokeModal
+          target={revokeTarget}
+          isLast={isLastAccountOfToolkit(revokeTarget, connected)}
+          busy={busy === revokeTarget.id}
+          onClose={() => setRevokeTarget(null)}
+          onConfirm={() => performDisconnect(revokeTarget)}
+        />
+      )}
     </Frame>
+  );
+}
+
+// F72 — in-design revoke confirmation modal (replaces window.confirm()). Reuses
+// the ConnectModal shell; the consequence copy is conditional on whether this
+// is the last account of the toolkit, and the affirmative is a distinct red.
+function RevokeModal({
+  target,
+  isLast,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  target: Connected;
+  isLast: boolean;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const label = target.toolkit_name || target.toolkit;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      style={{ background: "rgba(0,0,0,0.45)" }}
+      onClick={onClose}
+    >
+      <div
+        className="border border-rule p-8 max-w-[460px] w-full mx-4"
+        style={{ background: "var(--paper)" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="font-display text-2xl mb-2">Revoke {label}?</div>
+        <p
+          className="font-body text-[15px] mb-6"
+          style={{ color: "var(--marginalia)" }}
+        >
+          {revokeConsequenceCopy(label, isLast)}
+        </p>
+        <div className="flex items-center gap-4">
+          <button
+            onClick={onConfirm}
+            disabled={busy}
+            className="btn-brass"
+            style={{ background: "#9b2c2c", borderColor: "#9b2c2c", color: "#fff" }}
+          >
+            {busy ? "Revoking…" : "Revoke"}
+          </button>
+          <button onClick={onClose} disabled={busy} className="btn-link">
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -612,13 +690,19 @@ function ConnectModal({
           </p>
         ) : isDevicePair ? (
           <div>
+            {/* F59 — honest copy. Pairing produces a private audio endpoint URL
+                for the device; the live "create pairing URL" action (pairOmiDevice
+                → POST /api/v1/integrations/omi/pair) wires once the regenerated
+                Wasp client SDK ships the new op stub (it can't be imported against
+                the stale shared SDK in this worktree — see batch STOP-report). */}
             <p
               className="font-body text-[15px] mb-4"
               style={{ color: "var(--marginalia)" }}
             >
-              Pair {app.name} from your phone — open the {app.name} app and
-              point it at this tenant's gateway. Once paired, the device will
-              appear in the connected list below and start streaming.
+              {app.name} is a wearable audio stream. Pairing generates a private,
+              tenant-scoped endpoint URL — paste it into the {app.name} app's
+              developer settings as the audio stream destination. Once it streams,
+              the device appears in your connected list automatically.
             </p>
             <button onClick={onClose} className="btn-brass">
               Got it
@@ -838,6 +922,20 @@ function ConnectionRow({
   const writeList: string[] = Array.isArray(scope?.write) ? scope.write : [];
   const isPending = String(row.status || "").toUpperCase() !== "ACTIVE";
 
+  // F73 — inbound webhooks are write-once in the create toast; re-surface the
+  // absolute URL + a copy affordance on the row so it's retrievable later.
+  const [copied, setCopied] = useState(false);
+  async function copyWebhookUrl() {
+    if (!row.url) return;
+    try {
+      await navigator.clipboard.writeText(row.url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked — the URL is still visible to select manually */
+    }
+  }
+
   // Compact scope label: at most ~4 chips, then "+N more". Mix read + write
   // with a leading "read" / "write" verb so the audit reads well.
   const scopeChips: string[] = [];
@@ -869,6 +967,23 @@ function ConnectionRow({
             </span>
           )}
         </div>
+        {row.url && (
+          <div className="flex items-center gap-2 mt-1.5">
+            <code
+              className="font-mono text-[11px] break-all"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {row.url}
+            </code>
+            <button
+              onClick={copyWebhookUrl}
+              className="font-mono text-[9px] uppercase tracking-[0.22em] whitespace-nowrap"
+              style={{ color: "var(--brass)" }}
+            >
+              {copied ? "copied" : "copy"}
+            </button>
+          </div>
+        )}
       </td>
       <td
         className="py-3 font-mono text-[12px]"
