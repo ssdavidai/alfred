@@ -384,7 +384,9 @@ async function fetchAllModels(): Promise<ProviderGroup[]> {
 export function registerModelRoutes(): void {
   // GET /api/v1/admin/models — dynamic model catalog
   addRoute("GET", "/api/v1/admin/models", async ({ res, query }) => {
-    const forceRefresh = query?.refresh === "true";
+    // F66 — query is a URLSearchParams; `query?.refresh` is always undefined,
+    // so refresh was a permanent no-op. Read it with .get().
+    const forceRefresh = query.get("refresh") === "true";
 
     if (!forceRefresh && cache && Date.now() - cache.fetchedAt < CACHE_TTL_MS) {
       sendJson(res, 200, { groups: cache.groups, cached: true, fetchedAt: cache.fetchedAt });
