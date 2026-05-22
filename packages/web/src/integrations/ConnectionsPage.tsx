@@ -116,6 +116,18 @@ interface Connected {
   token?: string;
 }
 
+// Frozen shape returned by ctrl-api `GET /api/v1/integrations/:id/scope`.
+// `access`/`read`/`write` are derived from the connection's ACTUAL granted
+// OAuth scopes — `granted_scopes` is the raw URL list (tooltip only).
+interface IntegrationScope {
+  access: "read" | "read_write" | "none";
+  granted_scopes: string[];
+  read: string[];
+  write: string[];
+  toolkit?: string;
+  available_tools?: string[];
+}
+
 const PAGE_SIZE = 12;
 
 export default function ConnectionsPage() {
@@ -1154,12 +1166,13 @@ function ConnectionRow({
 }) {
   // ctrl-api caches scope lookups per toolkit for 10 min so we can
   // always-fetch without burning the Composio quota.
-  const { data: scope } = useQuery(getIntegrationScope, {
+  const { data: rawScope } = useQuery(getIntegrationScope, {
     connectionId: row.id,
   });
+  // ctrl now derives `access` from the connection's ACTUAL granted OAuth
+  // scopes (not a catalogue verb heuristic). Render that, not the URLs.
+  const scope = rawScope as IntegrationScope | undefined;
 
-  const readList: string[] = Array.isArray(scope?.read) ? scope.read : [];
-  const writeList: string[] = Array.isArray(scope?.write) ? scope.write : [];
   const isPending = String(row.status || "").toUpperCase() !== "ACTIVE";
 
   // F73 — inbound webhooks are write-once in the create toast; re-surface the
@@ -1176,21 +1189,21 @@ function ConnectionRow({
     }
   }
 
-  // Compact scope label: at most ~4 chips, then "+N more". Mix read + write
-  // with a leading "read" / "write" verb so the audit reads well.
-  const scopeChips: string[] = [];
-  if (scope?.note) {
-    scopeChips.push(scope.note);
-  } else {
-    if (readList.length) scopeChips.push(`read · ${summariseActions(readList)}`);
-    if (writeList.length) scopeChips.push(`write · ${summariseActions(writeList)}`);
-  }
-  const scopeText =
-    scopeChips.length === 0
-      ? scope
-        ? "—"
-        : "loading…"
-      : scopeChips.join(" · ");
+  // Headline scope = the connection's REAL read/write grant. Raw OAuth
+  // scope URLs are demoted to a hover tooltip so the cell stays at-a-glance.
+  const grantedScopes: string[] = Array.isArray(scope?.granted_scopes)
+    ? scope!.granted_scopes
+    : [];
+  const scopeText = !scope
+    ? "loading…"
+    : scope.access === "read_write"
+      ? "Read + write"
+      : scope.access === "read"
+        ? "Read only"
+        : "—";
+  const scopeTitle = grantedScopes.length
+    ? `Granted OAuth scopes:\n${grantedScopes.join("\n")}`
+    : undefined;
 
   return (
     <tr className="border-b border-rule">
@@ -1228,6 +1241,7 @@ function ConnectionRow({
       <td
         className="py-3 font-mono text-[12px]"
         style={{ color: "var(--ink)" }}
+        title={scopeTitle}
       >
         {scopeText}
       </td>
@@ -1263,22 +1277,6 @@ function ConnectionRow({
       </td>
     </tr>
   );
-}
-
-function summariseActions(actions: string[]): string {
-  // Render up to 4 chips, then "+N more". Strip toolkit prefix if the
-  // action labels still have shouty slug form.
-  const cleaned = actions
-    .slice(0, 6)
-    .map((a) =>
-      a
-        .replace(/^[A-Z0-9_]+_/, "")
-        .toLowerCase()
-        .replace(/_/g, " "),
-    );
-  const shown = cleaned.slice(0, 4);
-  const extra = actions.length - shown.length;
-  return extra > 0 ? `${shown.join(" · ")} · +${extra} more` : shown.join(" · ");
 }
 
 function formatAuthDate(iso?: string): string {
