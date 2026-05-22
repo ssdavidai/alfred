@@ -4,19 +4,17 @@
 //   GET  /api/v1/admin/vexa/auto-join  → { enabled, schedule_paused }
 //   POST /api/v1/admin/vexa/auto-join  → body { enabled: boolean }
 //
-// Behaviour: flipping `enabled` updates VEXA_ENABLED in the alfred-side
-// .env (so the next alfred-learn restart respects the setting) AND
-// pauses/unpauses the `al-meeting-capture` Temporal schedule (so the
-// effect is immediate — no docker compose restart required). The two
-// halves are independent: pausing the schedule alone would let the .env
-// drift out of sync and a restart would resurrect the workflow; updating
-// only the .env would leave a queued workflow firing until the next
-// restart.
+// Behaviour: flipping `enabled` updates VEXA_ENABLED in the alfred-side .env
+// (durable half — honoured on the next alfred-learn restart) AND pauses/
+// unpauses BOTH VEXA-gated Temporal schedules — `al-meeting-capture` (bot
+// dispatch) + `al-transcript-intake` (ingest) — for immediate effect.
 //
-// "Pause" rather than "delete" is deliberate. We want the schedule
-// metadata (cron, args, overlap policy) preserved across toggles, and
-// re-creating the schedule on every unpause would race with workflows
-// already mid-execution.
+// Resilience (F29): learn create-or-deletes these schedules at registration
+// based on VEXA_ENABLED, so when VEXA was off the schedule is *deleted*, not
+// paused, and a pause/unpause then fails NOT_FOUND. That must NOT 500: an
+// absent schedule is a benign no-op (on enable learn re-creates it; on disable
+// it's already gone). The schedule toggle is best-effort acceleration over the
+// authoritative .env flip; per-schedule failures surface as warnings, never 5xx.
 import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { addRoute } from "../server.js";
@@ -24,7 +22,11 @@ import { sendJson, ValidationError } from "../errors.js";
 import { COMPOSE_DIR } from "../helpers.js";
 
 const ENV_PATH = `${COMPOSE_DIR}/.env`;
-const SCHEDULE_ID = "al-meeting-capture";
+// Both VEXA-gated schedules toggle together. al-meeting-capture dispatches
+// the bot; al-transcript-intake ingests the transcripts it produces. Pausing
+// only the former (the old behaviour) left intake firing against an empty
+// stream. (register_schedules.py: register_meeting_capture / register_transcript_intake.)
+const SCHEDULE_IDS = ["al-meeting-capture", "al-transcript-intake"] as const;
 
 function readVexaEnabled(): boolean {
   try {
@@ -47,11 +49,18 @@ function readVexaEnabled(): boolean {
   return false;
 }
 
+/** Persist VEXA_ENABLED into the compose .env. Creates the file if it
+ *  doesn't exist (a fresh tenant may not have one yet) and tolerates a
+ *  transient read failure by starting from an empty file rather than
+ *  throwing. Returns true on success; on a hard write failure (e.g. the
+ *  bind-mount is read-only) it throws so the caller can surface a warning —
+ *  the caller must NOT let that bubble into a 500. */
 function writeVexaEnabled(enabled: boolean): void {
   let lines: string[];
   try {
     lines = fs.readFileSync(ENV_PATH, "utf-8").split("\n");
   } catch {
+    // .env missing or unreadable — start fresh; we'll create it below.
     lines = [];
   }
   const value = enabled ? "true" : "false";
@@ -113,12 +122,12 @@ function temporalCli(args: string[], timeoutMs = 15_000): Promise<string> {
   });
 }
 
-async function readSchedulePaused(): Promise<boolean | null> {
+async function readSchedulePaused(scheduleId: string): Promise<boolean | null> {
   try {
     const out = await temporalCli([
       "describe",
       "--schedule-id",
-      SCHEDULE_ID,
+      scheduleId,
       "--output",
       "json",
     ]);
@@ -144,7 +153,20 @@ async function readSchedulePaused(): Promise<boolean | null> {
   }
 }
 
-async function setSchedulePaused(paused: boolean): Promise<void> {
+/** True when a temporal CLI error means the schedule simply doesn't exist
+ *  (deleted by register_schedules while VEXA was off) — a benign no-op. */
+function isScheduleNotFound(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes("not found") ||
+    m.includes("notfound") ||
+    m.includes("no schedules") ||
+    m.includes("schedule not running") ||
+    m.includes("does not exist")
+  );
+}
+
+async function setSchedulePaused(scheduleId: string, paused: boolean): Promise<void> {
   // Temporal CLI 1.7 doesn't have `schedule pause` / `schedule unpause`
   // subcommands — pausing goes through `schedule toggle --pause` /
   // `--unpause`. The earlier attempt used the standalone subcommand
@@ -154,7 +176,7 @@ async function setSchedulePaused(paused: boolean): Promise<void> {
   await temporalCli([
     "toggle",
     "--schedule-id",
-    SCHEDULE_ID,
+    scheduleId,
     paused ? "--pause" : "--unpause",
     "--reason",
     paused
@@ -163,10 +185,35 @@ async function setSchedulePaused(paused: boolean): Promise<void> {
   ]);
 }
 
+/** Toggle every VEXA-gated schedule, tolerating absent handles. Returns a
+ *  warning map (id → message) only for failures OTHER than "doesn't exist";
+ *  a missing schedule is a silent no-op. Never throws. */
+async function toggleAllSchedules(paused: boolean): Promise<Record<string, string>> {
+  const warnings: Record<string, string> = {};
+  await Promise.all(
+    SCHEDULE_IDS.map(async (id) => {
+      try {
+        await setSchedulePaused(id, paused);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (!isScheduleNotFound(msg)) warnings[id] = msg;
+      }
+    }),
+  );
+  return warnings;
+}
+
 export function registerVexaRoutes(): void {
   addRoute("GET", "/api/v1/admin/vexa/auto-join", async ({ res }) => {
     const enabled = readVexaEnabled();
-    const schedulePaused = await readSchedulePaused();
+    // Report the primary schedule's paused state for back-compat with the
+    // existing response shape. If it's absent (null), fall back to the
+    // intake schedule so the field still reflects reality when only one
+    // exists.
+    let schedulePaused = await readSchedulePaused(SCHEDULE_IDS[0]);
+    if (schedulePaused === null) {
+      schedulePaused = await readSchedulePaused(SCHEDULE_IDS[1]);
+    }
     sendJson(res, 200, {
       enabled,
       schedule_paused: schedulePaused,
@@ -180,23 +227,38 @@ export function registerVexaRoutes(): void {
     }
     const enabled = b.enabled;
 
-    // 1. Persist to .env so a future alfred-learn restart honours it.
-    writeVexaEnabled(enabled);
-
-    // 2. Pause/unpause the schedule so the change takes effect now.
-    //    Best-effort — if the schedule is missing (tenant never had Vexa
-    //    enabled, or temporal is wedged) we still report the env update.
-    let scheduleErr: string | null = null;
+    // 1. Persist to .env (durable half). A write failure (e.g. read-only
+    //    bind-mount) is a warning, NOT a 500 — the toggle below still applies.
+    let envErr: string | null = null;
     try {
-      await setSchedulePaused(!enabled);
+      writeVexaEnabled(enabled);
     } catch (e) {
-      scheduleErr = e instanceof Error ? e.message : String(e);
+      envErr = e instanceof Error ? e.message : String(e);
     }
+
+    // 2. Pause/unpause BOTH schedules now. Best-effort; an absent schedule is
+    //    a benign no-op, never a 500 (see toggleAllSchedules).
+    const scheduleWarnings = await toggleAllSchedules(!enabled);
+
+    const warningParts: string[] = [];
+    if (envErr) warningParts.push(`env: ${envErr}`);
+    for (const [id, msg] of Object.entries(scheduleWarnings)) {
+      warningParts.push(`${id}: ${msg}`);
+    }
+    const hadScheduleWarning = Object.keys(scheduleWarnings).length > 0;
 
     sendJson(res, 200, {
       enabled,
-      schedule_paused: scheduleErr ? null : !enabled,
-      warning: scheduleErr,
+      // null when a schedule errored for a non-absence reason; else the
+      // requested terminal paused-state.
+      schedule_paused: hadScheduleWarning ? null : !enabled,
+      warning: warningParts.length > 0 ? warningParts.join("; ") : null,
     });
   });
 }
+
+// Re-exported for tests.
+export const _internal = {
+  SCHEDULE_IDS,
+  isScheduleNotFound,
+};
