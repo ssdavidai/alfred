@@ -372,6 +372,17 @@ services:
       - cold_data:/cold
       # ctrl-api restarts sibling containers (worker ops, chore runs).
       - /var/run/docker.sock:/var/run/docker.sock
+      # The host compose dir, bind-mounted RW. ctrl-api modules
+      # (vexa.ts/models.ts/credentials.ts/admin.ts/logs.ts) read and write
+      # ${COMPOSE_DIR}/.env and shell out to `docker compose -f
+      # ${COMPOSE_DIR}/docker-compose.yaml`. COMPOSE_DIR defaulted to the
+      # bare-VM path /srv/alfred-black, which does not exist in this
+      # containerized single-VM topology, so every .env read/write threw
+      # ENOENT (the vexa-toggle 500, the empty model catalog). RW so the
+      # vexa flag + credential writes land in the real file the rest of the
+      # stack reads. ${COMPOSE_DIR_HOST} defaults to /opt/alfred (the merged
+      # single-VM layout); override in .env for a different host path.
+      - ${COMPOSE_DIR_HOST:-/opt/alfred}:/srv/alfred-black
     env_file:
       - .env
     environment:
@@ -379,6 +390,11 @@ services:
       - AAS_PORT=3100
       - NODE_ENV=production
       - COMPOSE_PROJECT_NAME=alfred-black
+      # Point ctrl-api at the bind-mounted host compose dir above so
+      # ${COMPOSE_DIR}/.env and ${COMPOSE_DIR}/docker-compose.yaml resolve.
+      # (helpers.ts default is the bare-VM /srv/alfred-black; the mount makes
+      # that default path real inside the container.)
+      - COMPOSE_DIR=/srv/alfred-black
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
       # ctrl-api reads/writes Hermes profile config.yaml at ${dir}/<profile>/;
       # point it at the profiles parent so paths resolve to
