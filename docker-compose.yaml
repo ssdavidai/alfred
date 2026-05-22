@@ -400,6 +400,19 @@ services:
       # null and the OMI device / custom-webhook URL comes back empty (F41/F69).
       # Defaults to https://${DOMAIN}; override via TENANT_BASE_URL in .env.
       - TENANT_BASE_URL=${TENANT_BASE_URL:-https://${DOMAIN}}
+      # Env hygiene (F43): pin the runtime paths/hosts ctrl-api modules read,
+      # rather than leaning on code defaults that diverge from this topology.
+      #   VAULT_PATH       — vault/workspace/webhook fs root (the vault_data
+      #                      mount is /vault; was unset → relied on the code
+      #                      default, which differed across modules).
+      #   ALFRED_DATA_DIR  — streams/agentmail/chore scratch (alfred_data
+      #                      mount is /alfred-data; was unset).
+      #   SAAS_HOST        — generic webhook URL fallback; the code default
+      #                      was the wrong cross-tenant https://alfred.black.
+      #                      Pin to this tenant's own host.
+      - VAULT_PATH=/vault
+      - ALFRED_DATA_DIR=/alfred-data
+      - SAAS_HOST=${SAAS_HOST:-https://${DOMAIN}}
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
       # ctrl-api reads/writes Hermes profile config.yaml at ${dir}/<profile>/;
       # point it at the profiles parent so paths resolve to
