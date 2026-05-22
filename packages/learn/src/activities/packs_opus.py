@@ -308,6 +308,31 @@ def _validate_matter(matter: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+def _split_person_name(raw: str) -> tuple[str, str]:
+    """Split a key_person string into (bare_name, annotation).
+
+    Opus sometimes emits names with a trailing role annotation despite the
+    prompt asking for bare names — e.g. ``"Pat (advisor)"`` or
+    ``"Sam Lee — partner"``. The wikilink target must be the BARE name so
+    it resolves against the curator-authored ``person/<Name>.md`` records;
+    the annotation is kept as trailing display text on the body bullet.
+
+    Returns ``("Pat", "(advisor)")`` / ``("Sam Lee", "— partner")`` /
+    ``("Rami Khouri", "")``.
+    """
+    import re as _re
+    s = (raw or "").strip()
+    # Trailing parenthetical: "Name (role)".
+    m = _re.match(r"^(.*?)\s*(\([^)]*\))\s*$", s)
+    if m and m.group(1).strip():
+        return m.group(1).strip(), m.group(2).strip()
+    # Trailing em/en-dash or comma annotation: "Name — role" / "Name, role".
+    m = _re.match(r"^(.*?)\s*([—–,-]\s*.+)$", s)
+    if m and m.group(1).strip():
+        return m.group(1).strip(), m.group(2).strip()
+    return s, ""
+
+
 def _build_rich_matter_content(matter: dict[str, Any]) -> str:
     """Render a validated matter dict as a markdown record with rich body."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -321,6 +346,21 @@ def _build_rich_matter_content(matter: dict[str, Any]) -> str:
     related_patterns = [str(x).strip() for x in matter.get("related_patterns", []) if str(x).strip()]
     open_questions = [str(x).strip() for x in matter.get("open_questions", []) if str(x).strip()]
     next_actions = [str(x).strip() for x in matter.get("suggested_next_actions", []) if str(x).strip()]
+    # Opus may emit an org list (key_orgs/related_orgs) on some matters; the
+    # base matter schema doesn't require it, so treat it as optional.
+    key_orgs = [
+        str(x).strip()
+        for x in (matter.get("key_orgs") or matter.get("related_orgs") or [])
+        if str(x).strip()
+    ]
+
+    # F37 — wikilink targets for the file-walk graph. The bare name (role
+    # annotation stripped) is the link target so it resolves against the
+    # curator-authored person/org records; ctrl's graph LINK_FIELDS read
+    # ``related_persons`` / ``related_orgs`` (F10) to materialise the
+    # matter↔entity edges. Deterministic; no LLM.
+    person_links = [f"[[person/{_split_person_name(p)[0]}]]" for p in key_people]
+    org_links = [f"[[org/{_split_person_name(o)[0]}]]" for o in key_orgs]
 
     # Frontmatter (flat only — no nested maps, vault.ts can't handle them)
     fm_lines = [
@@ -334,6 +374,8 @@ def _build_rich_matter_content(matter: dict[str, Any]) -> str:
         f"created_by: onboarding_pipeline",
         f"generated: true",
         f"key_people: {_format_yaml_list(key_people)}",
+        f"related_persons: {_format_yaml_list(person_links)}",
+        f"related_orgs: {_format_yaml_list(org_links)}",
         f"related_patterns: {_format_yaml_list(related_patterns)}",
         f"tags: [onboarding, matter, auto-generated, {category}]",
         "---",
@@ -352,7 +394,21 @@ def _build_rich_matter_content(matter: dict[str, Any]) -> str:
 
     if key_people:
         body_parts += ["", "## Key people", ""]
-        body_parts += [f"- {p}" for p in key_people]
+        for p in key_people:
+            bare, annotation = _split_person_name(p)
+            bullet = f"- [[person/{bare}]]"
+            if annotation:
+                bullet += f" {annotation}"
+            body_parts.append(bullet)
+
+    if key_orgs:
+        body_parts += ["", "## Organizations", ""]
+        for o in key_orgs:
+            bare, annotation = _split_person_name(o)
+            bullet = f"- [[org/{bare}]]"
+            if annotation:
+                bullet += f" {annotation}"
+            body_parts.append(bullet)
 
     if related_patterns:
         body_parts += ["", "## Related patterns", ""]

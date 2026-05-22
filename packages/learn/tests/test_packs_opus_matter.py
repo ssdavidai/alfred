@@ -295,8 +295,9 @@ class TestBuildRichMatterContent:
 
     def test_body_lists_rendered(self):
         content = _build_rich_matter_content(self._good())
-        assert "- Pat" in content
-        assert "- Sam Lee" in content
+        # F37: key_people render as person wikilinks, not plain text.
+        assert "- [[person/Pat]]" in content
+        assert "- [[person/Sam Lee]]" in content
         assert "- Q1?" in content
         assert "- Do X" in content
 
@@ -319,6 +320,50 @@ class TestBuildRichMatterContent:
         assert "Alfred Black product vision" in lines[header_idx]
         # Description as blockquote
         assert any("> Core direction" in l for l in lines)
+
+    # ---- F37: wikilinks + related_persons/related_orgs frontmatter -------
+
+    def test_key_people_body_emitted_as_wikilinks(self):
+        content = _build_rich_matter_content(self._good())
+        # Body bullets must be [[person/Name]] wikilinks, not plain text,
+        # so the file-walk graph resolves matter↔person edges.
+        assert "- [[person/Pat]]" in content
+        assert "- [[person/Sam Lee]]" in content
+        # The old plain-text bullet must be gone.
+        assert "\n- Pat\n" not in content
+
+    def test_related_persons_frontmatter_present(self):
+        content = _build_rich_matter_content(self._good())
+        assert "related_persons:" in content
+        # Each entry is a person wikilink (LINK_FIELDS reads these, F10).
+        assert "[[person/Pat]]" in content.split("related_persons:")[1].split("\n")[0]
+        assert "[[person/Sam Lee]]" in content.split("related_persons:")[1].split("\n")[0]
+
+    def test_related_orgs_frontmatter_present(self):
+        content = _build_rich_matter_content(self._good())
+        # The field must exist so the graph's LINK_FIELDS read finds it,
+        # even when the matter pack has no org names (empty list).
+        assert "related_orgs:" in content
+
+    def test_role_annotation_stripped_from_wikilink_target(self):
+        m = self._good()
+        m["key_people"] = ["Pat (advisor)", "Sam Lee (partner)"]
+        content = _build_rich_matter_content(m)
+        # The wikilink target is the bare name; the role annotation is kept
+        # as trailing display text on the body bullet for readability.
+        assert "[[person/Pat]]" in content
+        assert "[[person/Sam Lee]]" in content
+        # The annotation survives in the rendered bullet.
+        assert "(advisor)" in content
+
+    def test_empty_key_people_omits_related_persons_entries(self):
+        m = self._good()
+        m["key_people"] = []
+        content = _build_rich_matter_content(m)
+        # No people → related_persons is an empty list (still present so
+        # the schema is stable), and no Key people body section.
+        assert "## Key people" not in content
+        assert "related_persons: []" in content
 
 
 # ---------------------------------------------------------------------------
