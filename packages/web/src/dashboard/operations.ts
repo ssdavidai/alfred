@@ -460,15 +460,23 @@ export const getActivityFeed: GetActivityFeed<void, any> = async (
   });
 };
 
-// Audit feed — reads vault/event/ records (durable trail of every act
-// Alfred has taken on the principal's behalf). Distinct from
-// getActivityFeed, which scrapes the alfred container's docker-compose
-// logs (debug-ops surface).
-export const getAuditFeed: GetAuditFeed<void, any> = async (_args, context) => {
+// Audit feed — F53/C12: reads the single state.db SQL ledger via
+// GET /api/v1/admin/audit (one row per user action, not the legacy
+// needs_attention_action + desk-action event-file twin). `includeAutomated`
+// maps to ?include_automated=1 so the UI can surface steward/auto noise.
+// Distinct from getActivityFeed, which scrapes the alfred container's logs.
+export const getAuditFeed: GetAuditFeed<
+  { includeAutomated?: boolean } | void,
+  any
+> = async (args, context) => {
   const instance = await getUserInstance(context);
+  const query: Record<string, string> = { limit: "50" };
+  if (args && typeof args === "object" && args.includeAutomated) {
+    query.include_automated = "1";
+  }
   return proxyToTenant(instance, {
     path: "/api/v1/admin/audit",
-    query: { limit: "50" },
+    query,
   });
 };
 

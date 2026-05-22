@@ -47,6 +47,7 @@ import {
 import { Frame } from "../client/components/ab/Frame";
 import { useTheme } from "../client/lib/theme";
 import { useAuth } from "wasp/client/auth";
+import { auditKindLabel } from "./auditLedgerCore";
 
 const SECTIONS = [
   "settings",
@@ -537,26 +538,49 @@ function ApiKeysSection() {
 // Audit
 // ---------------------------------------------------------------------------
 
+// F53/C12 — the C12 audit-ledger item shape (one row per user action).
+interface AuditItem {
+  id: string;
+  ts: string;
+  action_type: string;
+  actor: string | null;
+  headline: string | null;
+  note: string | null;
+  source: string | null;
+  reversible: boolean;
+  reversed_at: string | null;
+}
+
 function AuditSection() {
-  const { data } = useQuery(getAuditFeed, undefined, {
-    retry: false,
-    refetchInterval: 60_000,
-  });
-  // Backend returns {items: [{id, path, created, kind, summary}], total}.
+  // F53 — UI toggle for ?include_automated=1 (steward/auto noise hidden by
+  // default; the principal can now reach it from the page).
+  const [includeAutomated, setIncludeAutomated] = useState(false);
+  const { data } = useQuery(
+    getAuditFeed,
+    { includeAutomated },
+    { retry: false, refetchInterval: 60_000 },
+  );
+  // F53/C12 — single SQL ledger: {items:[{id,ts,action_type,headline,note,…}]}.
+  // One row per action — no more needs_attention_action + desk-action twin.
   const items = Array.isArray((data as any)?.items)
-    ? ((data as any).items as Array<{
-        id: string;
-        path: string;
-        created: string;
-        kind: string;
-        summary: string;
-      }>)
+    ? ((data as any).items as AuditItem[])
     : [];
 
   return (
     <div>
       <H>Audit</H>
       <Sub>Every act Alfred has taken on your behalf.</Sub>
+      <label
+        className="flex items-center gap-2 mb-4 font-mono text-[10px] uppercase tracking-[0.2em] cursor-pointer"
+        style={{ color: "var(--marginalia)" }}
+      >
+        <input
+          type="checkbox"
+          checked={includeAutomated}
+          onChange={(e) => setIncludeAutomated(e.target.checked)}
+        />
+        Show automated activity
+      </label>
       {items.length === 0 ? (
         <p
           className="font-body italic text-[15px]"
@@ -589,15 +613,20 @@ function AuditSection() {
                   className="py-3 pr-3 align-top whitespace-nowrap"
                   style={{ color: "var(--marginalia)" }}
                 >
-                  {formatAuditWhen(a.created)}
+                  {formatAuditWhen(a.ts)}
                 </td>
                 <td
                   className="py-3 pr-3 align-top whitespace-nowrap uppercase tracking-[0.18em] text-[10px]"
                   style={{ color: "var(--brass)" }}
                 >
-                  {a.kind}
+                  {auditKindLabel(a.action_type)}
                 </td>
-                <td className="py-3 pr-3 font-body text-[15px]">{a.summary}</td>
+                <td className="py-3 pr-3 font-body text-[15px]">
+                  {a.headline || "(no headline)"}
+                  {a.note ? (
+                    <span style={{ color: "var(--marginalia)" }}> — {a.note}</span>
+                  ) : null}
+                </td>
               </tr>
             ))}
           </tbody>
