@@ -23,6 +23,10 @@ import {
   deleteInboundWebhook,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
+import {
+  isLastAccountOfToolkit,
+  revokeConsequenceCopy,
+} from "./connectionsRevokeCore";
 
 // Synthetic toolkit slugs ctrl-api injects into the catalog response —
 // they aren't Composio toolkits and need bespoke modal UX.
@@ -117,6 +121,7 @@ export default function ConnectionsPage() {
   const [category, setCategory] = useState<string>("all");
   const [page, setPage] = useState(0);
   const [openApp, setOpenApp] = useState<Toolkit | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<Connected | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -273,9 +278,14 @@ export default function ConnectionsPage() {
     }
   }
 
-  async function disconnect(connection: Connected) {
+  // F72 — open the in-design revoke modal instead of the native confirm()
+  // Chrome popup. The actual revoke runs from the modal's affirmative.
+  function disconnect(connection: Connected) {
+    setRevokeTarget(connection);
+  }
+
+  async function performDisconnect(connection: Connected) {
     const label = connection.toolkit_name || connection.toolkit;
-    if (!confirm(`Disconnect ${label}?`)) return;
     setBusy(connection.id);
     try {
       // Custom webhooks have their own delete endpoint; everything else
@@ -288,6 +298,7 @@ export default function ConnectionsPage() {
         await disconnectIntegration({ connectionId: connection.id });
       }
       setToast(`Disconnected ${label}.`);
+      setRevokeTarget(null);
       await refetchConnected();
     } catch (e) {
       console.error("disconnect failed", e);
@@ -534,7 +545,70 @@ export default function ConnectionsPage() {
           onWebhook={(label) => createWebhook(openApp, label)}
         />
       )}
+
+      {revokeTarget && (
+        <RevokeModal
+          target={revokeTarget}
+          isLast={isLastAccountOfToolkit(revokeTarget, connected)}
+          busy={busy === revokeTarget.id}
+          onClose={() => setRevokeTarget(null)}
+          onConfirm={() => performDisconnect(revokeTarget)}
+        />
+      )}
     </Frame>
+  );
+}
+
+// F72 — in-design revoke confirmation modal (replaces window.confirm()). Reuses
+// the ConnectModal shell; the consequence copy is conditional on whether this
+// is the last account of the toolkit, and the affirmative is a distinct red.
+function RevokeModal({
+  target,
+  isLast,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  target: Connected;
+  isLast: boolean;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const label = target.toolkit_name || target.toolkit;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      style={{ background: "rgba(0,0,0,0.45)" }}
+      onClick={onClose}
+    >
+      <div
+        className="border border-rule p-8 max-w-[460px] w-full mx-4"
+        style={{ background: "var(--paper)" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="font-display text-2xl mb-2">Revoke {label}?</div>
+        <p
+          className="font-body text-[15px] mb-6"
+          style={{ color: "var(--marginalia)" }}
+        >
+          {revokeConsequenceCopy(label, isLast)}
+        </p>
+        <div className="flex items-center gap-4">
+          <button
+            onClick={onConfirm}
+            disabled={busy}
+            className="btn-brass"
+            style={{ background: "#9b2c2c", borderColor: "#9b2c2c", color: "#fff" }}
+          >
+            {busy ? "Revoking…" : "Revoke"}
+          </button>
+          <button onClick={onClose} disabled={busy} className="btn-link">
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
