@@ -33,6 +33,14 @@ import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { VAULT_PATH } from "./vault.js";
 import { attentionCache, invalidateVaultCachesForType } from "../vaultCache.js";
 import { appendAudit } from "./state.js";
+import { getStateDb } from "../../db/state.js";
+
+// A ULID is 26 chars of Crockford base32 (uppercase, no I/L/O/U). Signals were
+// demoted out of the vault's signal/ directory into the `state.db signal`
+// table, so a needs_attention record's `source_signal_path` now usually holds
+// a ULID, not a `signal/….md` path. dispatchSignalToAgent must resolve the
+// right store.
+const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 
 const NEEDS_ATTENTION_DIR = path.join(VAULT_PATH, "needs_attention");
 const EVENTS_DIR = path.join(VAULT_PATH, "event");
@@ -218,7 +226,43 @@ async function dispatchSignalToAgent(
       error: "no source_signal_path on needs_attention record",
     };
   }
-  // Patch source signal: status=unrouted so router picks it up.
+
+  // F3: a `source_signal_path` that is a bare ULID is a `state.db signal` row
+  // (signals were demoted out of the vault). Re-arm it there — flip
+  // status=unrouted and stamp decision_origin into payload_json — instead of
+  // doing fs.readFileSync(path.join(VAULT_PATH, ulid)) which always ENOENT'd
+  // → 400 (the headline Delegate-fails bug).
+  if (ULID_RE.test(sourceSignal)) {
+    const db = getStateDb();
+    const row = db
+      .prepare("SELECT id, payload_json FROM signal WHERE id = ?")
+      .get(sourceSignal) as { id: string; payload_json: string | null } | undefined;
+    if (!row) {
+      return {
+        outcome_signal_path: null,
+        error: `state.db signal ${sourceSignal} not found (advisory card has no real signal to delegate)`,
+      };
+    }
+    let payload: Record<string, unknown> = {};
+    if (row.payload_json) {
+      try {
+        const parsed = JSON.parse(row.payload_json);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          payload = parsed as Record<string, unknown>;
+        }
+      } catch {
+        /* keep payload empty on malformed json */
+      }
+    }
+    if (decisionOrigin) payload.decision_origin = decisionOrigin;
+    db.prepare(
+      "UPDATE signal SET status = 'unrouted', payload_json = ?, updated_at = datetime('now') WHERE id = ?",
+    ).run(JSON.stringify(payload), sourceSignal);
+    return { outcome_signal_path: sourceSignal, error: null };
+  }
+
+  // Legacy path: a vault-relative `signal/….md` file. Patch its frontmatter
+  // status=unrouted so the router picks it up.
   const sigPath = path.join(VAULT_PATH, sourceSignal);
   const sigResolved = path.resolve(sigPath);
   if (!sigResolved.startsWith(path.resolve(VAULT_PATH) + path.sep)) {
