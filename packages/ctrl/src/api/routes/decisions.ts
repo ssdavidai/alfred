@@ -42,6 +42,7 @@ import {
   emitResolutionEvent,
 } from "./attention.js";
 import { getStateDb } from "../../db/state.js";
+import { indexVaultWrite } from "../../db/vaultIndex.js";
 import { appendAudit } from "./state.js";
 
 const DECISIONS_DIR = path.join(VAULT_PATH, "decision");
@@ -560,6 +561,16 @@ export function registerDecisionRoutes(): void {
 
     fs.writeFileSync(fullPath, renderDecisionRecord(fields, bodyText), "utf-8");
 
+    // F1/C18 (KEYSTONE): index the record into `state.db vault_index` IN-REQUEST.
+    // `decision` is one of the 12 canonical vault types and every reader —
+    // GET /api/v1/decisions, the Desk ledger, and learn's
+    // list_decisions_by_state — queries `vault_index WHERE
+    // record_type='decision'`. Without this hook the row only landed on a
+    // boot-time reconciler walk, so every decision written after boot was
+    // invisible to every reader (root of the dead /decisions, dead ledger,
+    // dead defer-resurface, and frozen Asking instincts).
+    indexVaultWrite(`decision/${id}.md`);
+
     // Mirror the decision into state.db `audit` (PLAN.md Part I). The
     // `decision/*.md` vault record stays — `decision` is one of the 12
     // canonical types the principal reads — but the desk action it captures
@@ -777,6 +788,10 @@ export function registerDecisionRoutes(): void {
     }
     const fullPath = path.join(DECISIONS_DIR, `${rec.id}.md`);
     fs.writeFileSync(fullPath, renderDecisionRecord(next, rec.body), "utf-8");
+    // F1/C18: re-index on every state transition (router open→executing→
+    // completed) so the `vault_index` status column stays consistent with the
+    // file and the state-filtered readers don't go stale.
+    indexVaultWrite(`decision/${rec.id}.md`);
     sendJson(res, 200, {
       ok: true,
       id: rec.id,
@@ -888,6 +903,9 @@ export function registerDecisionRoutes(): void {
     next.reversed_at = new Date().toISOString();
     const fullPath = path.join(DECISIONS_DIR, `${rec.id}.md`);
     fs.writeFileSync(fullPath, renderDecisionRecord(next, rec.body), "utf-8");
+    // F1/C18: re-index the reversal so readers filtering state=reversed (and
+    // the learn router's reverseds count) see it immediately.
+    indexVaultWrite(`decision/${rec.id}.md`);
     sendJson(res, 200, {
       ok: true,
       id: rec.id,
