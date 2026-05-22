@@ -1237,6 +1237,10 @@ export function registerVaultRoutes(): void {
       "blocked_by", "based_on", "supports", "challenged_by", "references",
       "project", "approved_by", "confirmed_by", "invalidated_by",
       "governed_by", "cluster_sources",
+      // Entity-relationship fields (F10): onboarding matters carry
+      // key_people/related_persons/related_orgs and persons carry `org`.
+      // Without these, matter↔person and person↔org links produce no edges.
+      "key_people", "related_persons", "related_orgs", "org",
     ]);
 
     const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
