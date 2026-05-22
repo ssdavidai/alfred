@@ -156,6 +156,10 @@ export const getConnectedIntegrations: GetConnectedIntegrations<void, any> = asy
           auth_scheme: t.auth_scheme,
           created_at: t.created_at,
           is_stream_source: Boolean(t.is_stream_source),
+          // F27/F73 — webhook rows carry their absolute URL + token so the UI
+          // can re-display the endpoint after the write-once create toast.
+          url: t.url,
+          token: t.token,
           // Auto-config fields don't apply to non-Composio sources —
           // surface clean defaults so the UI doesn't render half-state.
           auto_config_state: "configured",

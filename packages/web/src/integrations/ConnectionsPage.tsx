@@ -86,6 +86,10 @@ interface Connected {
   auth_scheme?: string;
   created_at?: string;
   is_stream_source?: boolean;
+  // F27/F73 — inbound-webhook rows carry their absolute URL + token so the UI
+  // can re-display the endpoint after the write-once create-flow toast.
+  url?: string;
+  token?: string;
 }
 
 const PAGE_SIZE = 12;
@@ -912,6 +916,20 @@ function ConnectionRow({
   const writeList: string[] = Array.isArray(scope?.write) ? scope.write : [];
   const isPending = String(row.status || "").toUpperCase() !== "ACTIVE";
 
+  // F73 — inbound webhooks are write-once in the create toast; re-surface the
+  // absolute URL + a copy affordance on the row so it's retrievable later.
+  const [copied, setCopied] = useState(false);
+  async function copyWebhookUrl() {
+    if (!row.url) return;
+    try {
+      await navigator.clipboard.writeText(row.url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked — the URL is still visible to select manually */
+    }
+  }
+
   // Compact scope label: at most ~4 chips, then "+N more". Mix read + write
   // with a leading "read" / "write" verb so the audit reads well.
   const scopeChips: string[] = [];
@@ -943,6 +961,23 @@ function ConnectionRow({
             </span>
           )}
         </div>
+        {row.url && (
+          <div className="flex items-center gap-2 mt-1.5">
+            <code
+              className="font-mono text-[11px] break-all"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {row.url}
+            </code>
+            <button
+              onClick={copyWebhookUrl}
+              className="font-mono text-[9px] uppercase tracking-[0.22em] whitespace-nowrap"
+              style={{ color: "var(--brass)" }}
+            >
+              {copied ? "copied" : "copy"}
+            </button>
+          </div>
+        )}
       </td>
       <td
         className="py-3 font-mono text-[12px]"
