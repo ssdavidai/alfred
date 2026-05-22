@@ -12,6 +12,7 @@ import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { dockerExec } from "../helpers.js";
 import { createOrReuseOmiStream } from "./streams.js";
+import { composeInboundWebhookUrl } from "./webhooksInbound.js";
 
 // Synthetic catalog slugs are NOT real Composio toolkits — they render bespoke
 // modals (DEVICE_PAIR / INBOUND_WEBHOOK) and have their own routes. Posting one
@@ -1360,6 +1361,10 @@ export function registerIntegrationRoutes(): void {
             user_id: "",
             created_at: String(fm.created_at ?? ""),
             is_stream_source: eventCount > 0 || labelHasEvent,
+            // Expose the token + absolute URL so the UI can re-display the
+            // endpoint after the create-flow toast (it was write-once). (F27)
+            token,
+            url: composeInboundWebhookUrl(token),
           });
         }
       } catch { /* dir missing or unreadable — no webhook integrations */ }

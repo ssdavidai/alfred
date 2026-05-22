@@ -27,6 +27,18 @@ const VAULT_ROOT = process.env.VAULT_PATH ?? "/vault";
 const WEBHOOK_ENDPOINT_DIR = path.join(VAULT_ROOT, "webhook_endpoint");
 const STREAM_EVENT_DIR = path.join(VAULT_ROOT, "stream_event");
 
+// Compose the fully-qualified public ingest URL for a webhook token. The
+// tenant base URL is injected at provision time (TENANT_BASE_URL, e.g.
+// https://<sub>.alfred.black). Without it, the create/list flows previously
+// emitted a bare relative path the user couldn't actually POST to. Falls back
+// to https://${DOMAIN} when only DOMAIN is set, else the relative path. (F27)
+export function composeInboundWebhookUrl(token: string): string {
+  const rel = `/api/v1/webhooks/in/${token}`;
+  const base = process.env.TENANT_BASE_URL
+    || (process.env.DOMAIN ? `https://${process.env.DOMAIN}` : "");
+  return base ? `${base.replace(/\/$/, "")}${rel}` : rel;
+}
+
 interface WebhookFrontmatter {
   type: "webhook_endpoint";
   token: string;
@@ -161,7 +173,7 @@ export function registerInboundWebhookRoutes(): void {
       id: `webhook:${token}`,
       token,
       label,
-      url: `/api/v1/webhooks/in/${token}`,
+      url: composeInboundWebhookUrl(token),
       created_at: createdAt,
     });
   });
@@ -184,7 +196,7 @@ export function registerInboundWebhookRoutes(): void {
         id: `webhook:${fm.token}`,
         token: fm.token,
         label: fm.label,
-        url: `/api/v1/webhooks/in/${fm.token}`,
+        url: composeInboundWebhookUrl(fm.token),
         created_at: fm.created_at,
         event_count: fm.event_count,
         last_event_at: fm.last_event_at,
