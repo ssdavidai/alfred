@@ -70,10 +70,11 @@ const VALID_TAB_IDS = new Set(SETTINGS_TABS.map((t) => t.id));
 /*  Unified Settings Page                                               */
 /* ------------------------------------------------------------------ */
 
-// M6 #867 — /dashboard/settings redirects to /study#settings. The legacy
+// M6 #867 — /dashboard/settings redirects to the canonical /settings
+// (F83 rename /study → /settings; the renamed tab is #agent). The legacy
 // implementation is preserved as LegacySettingsPage.
 export default function SettingsPage() {
-  return <Navigate to="/study#settings" replace />;
+  return <Navigate to="/settings#agent" replace />;
 }
 
 function LegacySettingsPage() {

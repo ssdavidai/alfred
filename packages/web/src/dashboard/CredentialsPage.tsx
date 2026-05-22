@@ -258,7 +258,8 @@ export function CredentialsContent() {
   );
 }
 
-// M6 #867 — /dashboard/credentials → /study#credentials.
+// M6 #867 — /dashboard/credentials → /settings (F83 rename /study → /settings;
+// `credentials` is not a standalone section, so land on the default tab).
 export default function CredentialsPage() {
-  return <Navigate to="/study#credentials" replace />;
+  return <Navigate to="/settings#agent" replace />;
 }

@@ -52,7 +52,7 @@ import { auditKindLabel } from "./auditLedgerCore";
 import { apiBaseUrl } from "./apiKeysCore";
 
 const SECTIONS = [
-  "settings",
+  "agent",
   "account",
   "api-keys",
   "audit",
@@ -60,11 +60,18 @@ const SECTIONS = [
 ] as const;
 type Section = (typeof SECTIONS)[number];
 const SECTION_LABEL: Record<Section, string> = {
-  settings: "Settings",
+  agent: "Agent Configuration",
   account: "Account",
   "api-keys": "API keys",
   audit: "Audit",
   theme: "Theme",
+};
+
+// F83 — the model + meeting-config tab was keyed "settings"/labelled
+// "Settings"; it is now keyed "agent"/labelled "Agent Configuration" at
+// /settings#agent. Old deep-links (#settings) still resolve to it.
+const SECTION_ALIASES: Record<string, Section> = {
+  settings: "agent",
 };
 
 function H({ children }: { children: React.ReactNode }) {
@@ -87,9 +94,9 @@ export default function StudyPage() {
   const { hash } = useLocation();
   const initial = useMemo<Section>(() => {
     const want = hash.replace(/^#/, "").trim();
-    return (SECTIONS as readonly string[]).includes(want)
-      ? (want as Section)
-      : "settings";
+    if ((SECTIONS as readonly string[]).includes(want)) return want as Section;
+    if (SECTION_ALIASES[want]) return SECTION_ALIASES[want];
+    return "agent";
   }, [hash]);
   const [section, setSection] = useState<Section>(initial);
 
@@ -150,7 +157,7 @@ export default function StudyPage() {
         </aside>
 
         <article>
-          {section === "settings" && <SettingsSection />}
+          {section === "agent" && <SettingsSection />}
           {section === "account" && <AccountSection />}
           {section === "api-keys" && <ApiKeysSection />}
           {section === "audit" && <AuditSection />}
@@ -321,7 +328,7 @@ function SettingsSection() {
 
   return (
     <div>
-      <H>Settings</H>
+      <H>Agent Configuration</H>
       <Sub>The arrangement, in plain words.</Sub>
 
       {/* Model-config matrix (C17): one row per Hermes profile. Changing a

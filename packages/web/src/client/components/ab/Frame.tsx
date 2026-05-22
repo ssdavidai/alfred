@@ -32,7 +32,7 @@ const PRIMARY: NavItem[] = [
 // Everything else, behind a "More" menu.
 const MORE: NavItem[] = [
   { to: "/connections", label: "Apps", icon: "globe" },
-  { to: "/study", label: "Settings", icon: "settings" },
+  { to: "/settings", label: "Settings", icon: "settings" },
   { to: "/claude", label: "Claude Setup", icon: "skeleton_key" },
 ];
 

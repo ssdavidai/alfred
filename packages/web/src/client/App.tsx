@@ -66,8 +66,9 @@ export default function App() {
       p === "/tools" ||
       p === "/claude"
     ) return true;
-    // The Study (M6)
-    if (p === "/study") return true;
+    // Settings (formerly The Study, M6; renamed /study → /settings, F83).
+    // /study is kept as a recognised surface for the brief redirect render.
+    if (p === "/settings" || p === "/study") return true;
     return false;
   }, [location]);
 

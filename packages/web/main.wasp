@@ -264,11 +264,19 @@ page BriefingsPage {
   component: import BriefingsPage from "@src/briefings/BriefingsPage"
 }
 
-// /study — unified back office (M6 #867 + #868).
-route StudyRoute { path: "/study", to: StudyPage }
+// /settings — unified back office (M6 #867 + #868; renamed from /study, F83).
+// Canonical settings home. /study and /back-office redirect here.
+route SettingsRoute { path: "/settings", to: StudyPage }
 page StudyPage {
   authRequired: true,
   component: import StudyPage from "@src/dashboard/StudyPage"
+}
+
+// Legacy /study redirect (F83 — canonical home is now /settings).
+route StudyRoute { path: "/study", to: StudyRedirectPage }
+page StudyRedirectPage {
+  authRequired: true,
+  component: import StudyRedirectPage from "@src/dashboard/StudyRedirect"
 }
 
 // Legacy /back-office redirect (CommandCenterPage no longer canonical).
@@ -429,7 +437,9 @@ page WorkspacePage {
   component: import WorkspacePage from "@src/dashboard/WorkspacePage"
 }
 
-route SettingsRoute { path: "/dashboard/settings", to: SettingsPage }
+// Legacy /dashboard/settings — redirects to the canonical /settings (F83;
+// renamed from SettingsRoute to free that name for the canonical route).
+route LegacyDashSettingsRoute { path: "/dashboard/settings", to: SettingsPage }
 page SettingsPage {
   authRequired: true,
   component: import SettingsPage from "@src/dashboard/SettingsPage"

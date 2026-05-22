@@ -64,9 +64,9 @@ function methodColor(method: string) {
   }
 }
 
-// M6 #868 — /dashboard/api-docs → /study#api-keys.
+// M6 #868 — /dashboard/api-docs → /settings#api-keys (F83 rename /study → /settings).
 export default function ApiDocsPage() {
-  return <Navigate to="/study#api-keys" replace />;
+  return <Navigate to="/settings#api-keys" replace />;
 }
 
 function LegacyApiDocsPage() {

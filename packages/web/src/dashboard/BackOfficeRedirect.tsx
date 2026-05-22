@@ -1,6 +1,6 @@
-// /back-office → /study (M6).
+// /back-office → /settings (F83 — canonical back office renamed from /study).
 import { Navigate } from "react-router-dom";
 
 export default function BackOfficeRedirect() {
-  return <Navigate to="/study" replace />;
+  return <Navigate to="/settings" replace />;
 }
