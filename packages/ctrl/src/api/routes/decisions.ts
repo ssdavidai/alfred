@@ -738,14 +738,22 @@ export function registerDecisionRoutes(): void {
   //
   // Returns the currently-in-flight decisions for the "What Alfred is
   // doing now" Desk strip. In-flight = state in [open, scheduled,
-  // dispatching, executing]. Decisions in `open` for >10 min are
-  // surfaced too — they're effectively stuck (workflow should have
-  // picked them up within 60s). A decision in `dispatching` is the #55
-  // mark-before-dispatch intermediate state; one that never advances to
-  // `executing` is stranded (crash between the pre-dispatch mark and a
-  // successful dispatch) — keeping it in this strip makes that stuck
-  // state observable. Sorted by `created` desc so the most recent
-  // action appears first.
+  // dispatching, executing]. A decision in `dispatching` is the #55
+  // mark-before-dispatch intermediate state; `executing` is live work.
+  //
+  // B11: the strip must show *genuinely-active* work, not stranded
+  // corpses. Previously we surfaced stuck `open`/`dispatching` items
+  // indefinitely "to make the stuck state observable" — which is why an
+  // hours-old delegated item (e.g. an 8am "delegating celebration") never
+  // left the strip and junk lingered. Now we age out anything whose last
+  // activity is older than INFLIGHT_STRANDED_MINUTES (default 120): a
+  // decision still in dispatching/executing/open after that is stranded,
+  // not working, so it drops off the strip (the record itself is kept;
+  // the audit feed at /api/v1/decisions still shows it). "Last activity"
+  // is the newest of created / executing_at / scheduled_at / execute_at,
+  // so a recently-transitioned executing item with an old `created` still
+  // counts as live. Sorted by `created` desc so the most recent action
+  // appears first.
   // ─────────────────────────────────────────────────────────────
   addRoute("GET", "/api/v1/decisions/in-flight", async ({ res, req }) => {
     if (!fs.existsSync(DECISIONS_DIR)) {
@@ -757,6 +765,11 @@ export function registerDecisionRoutes(): void {
       1,
       Math.min(200, parseInt(url.searchParams.get("limit") ?? "50", 10) || 50),
     );
+    const strandedMinutes = Math.max(
+      1,
+      parseInt(process.env.INFLIGHT_STRANDED_MINUTES ?? "120", 10) || 120,
+    );
+    const strandedCutoffMs = Date.now() - strandedMinutes * 60_000;
     const files = fs.readdirSync(DECISIONS_DIR).filter((f) => f.endsWith(".md"));
     const records: any[] = [];
     for (const f of files) {
@@ -785,6 +798,18 @@ export function registerDecisionRoutes(): void {
         !VALID_INTENTS.includes(intent as DecisionIntent) ||
         !sourceRecord
       ) {
+        continue;
+      }
+      // B11: age out stranded items. Use the most recent state-change
+      // timestamp as the activity marker — the newest of created /
+      // executing_at / scheduled_at / execute_at. If even that is older
+      // than the stranded threshold, the work isn't live; drop it.
+      let lastActivityMs = -Infinity;
+      for (const key of ["created", "executing_at", "scheduled_at", "execute_at"]) {
+        const t = Date.parse(String(fm[key] ?? ""));
+        if (!Number.isNaN(t) && t > lastActivityMs) lastActivityMs = t;
+      }
+      if (lastActivityMs !== -Infinity && lastActivityMs < strandedCutoffMs) {
         continue;
       }
       records.push({
