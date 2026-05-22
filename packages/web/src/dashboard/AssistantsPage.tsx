@@ -50,7 +50,7 @@ import { useState, useEffect, useMemo } from "react";
 /*  Model catalog (dynamic — fetched from provider APIs)               */
 /* ------------------------------------------------------------------ */
 
-interface CatalogModel {
+export interface CatalogModel {
   id: string;
   name: string;
   provider: string;
@@ -60,7 +60,7 @@ interface CatalogModel {
   source: "direct" | "openrouter";
 }
 
-interface CatalogGroup {
+export interface CatalogGroup {
   provider: string;
   source: "direct" | "openrouter";
   models: CatalogModel[];
@@ -135,7 +135,7 @@ function statusIcon(state: string) {
 /*  ModelSelect — reusable grouped model picker                        */
 /* ------------------------------------------------------------------ */
 
-function ModelSelect({
+export function ModelSelect({
   value,
   onSelect,
   groups,

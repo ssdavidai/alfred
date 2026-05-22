@@ -32,7 +32,6 @@ import { Link, useLocation } from "react-router-dom";
 import {
   useQuery,
   getAgentConfig,
-  updateAgentConfig,
   updateAgentModel,
   getModelCatalog,
   getVexaAutoJoin,
@@ -45,6 +44,7 @@ import {
   getAuditFeed,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
+import { ModelSelect, type CatalogGroup } from "./AssistantsPage";
 import { useTheme } from "../client/lib/theme";
 import { useAuth } from "wasp/client/auth";
 import { config } from "wasp/client";
@@ -162,8 +162,65 @@ export default function StudyPage() {
 }
 
 // ---------------------------------------------------------------------------
-// Settings
+// Settings — model-config matrix (F78 / contract C17)
 // ---------------------------------------------------------------------------
+//
+// The matrix groups every wired agent by its Hermes *profile* (main /
+// workers / heavy). Changing a profile's model changes every agent riding
+// it, because Hermes binds the model per-profile, not per-agent.
+//
+// Data sources (both already-shipped, frozen shapes — see C17):
+//   • getModelCatalog  → GET /api/v1/admin/models  → { groups: [...] }
+//        (read `groups`, NOT `models` — the old SettingsSection read the
+//         wrong key, so the picker was always empty.)
+//   • getAgentConfig   → GET /api/v1/admin/agents   → { agents: [...], surveyor }
+//        where each agent (F68-enriched) carries `profile` + `default_model`
+//        (read per-agent `default_model`, NOT a single top-level `.model`).
+//   • updateAgentModel → PATCH /api/v1/admin/agents/:agentId/model {model,field?}
+//
+// Per-profile description + gateway port mirror the frozen ctrl PROFILES list
+// (packages/ctrl/src/api/routes/agents.ts). Ordered main → workers → heavy so
+// the `heavy` profile (Opus-class, F67) always renders.
+
+interface AgentEntry {
+  id: string;
+  label: string;
+  description: string;
+  profile: string;
+  default_model: string | null;
+}
+
+interface AgentConfigResp {
+  agents?: AgentEntry[];
+  surveyor?: { labeler_model?: string; embedder_model?: string; embedder_source?: string };
+}
+
+interface ModelCatalogResp {
+  groups?: CatalogGroup[];
+  cached?: boolean;
+  fetchedAt?: string;
+}
+
+const PROFILE_META: { id: string; label: string; description: string }[] = [
+  {
+    id: "main",
+    label: "Alfred",
+    description:
+      "Your conversational Alfred on every channel (Slack/Telegram/SMS), with memory.",
+  },
+  {
+    id: "workers",
+    label: "Workers",
+    description:
+      "Clerk (event classification/extraction/reflection), chore execution, surveyor labeling — cheap, high-volume.",
+  },
+  {
+    id: "heavy",
+    label: "Heavy",
+    description:
+      "Onboarding facts/patterns + chore heavy-reasoning — Opus-class, slow and expensive, used sparingly.",
+  },
+];
 
 function SettingsSection() {
   const { data: agentCfg, refetch: refetchAgent } = useQuery(getAgentConfig, undefined, {
@@ -216,28 +273,40 @@ function SettingsSection() {
     }
   }
 
-  const currentModel = String((agentCfg as any)?.model ?? "");
-  const models: string[] = Array.isArray((catalog as any)?.models)
-    ? ((catalog as any).models as any[]).map((m) => String(m?.id ?? m))
-    : [];
-  const vexaEnabled = Boolean((vexa as any)?.enabled);
+  // C17 — read `groups` (NOT `.models`), and per-agent `default_model` (NOT a
+  // single top-level `.model`). Build a profile → model → riders matrix.
+  const cfg = agentCfg as AgentConfigResp | undefined;
+  const cat = catalog as ModelCatalogResp | undefined;
+  const groups: CatalogGroup[] = Array.isArray(cat?.groups) ? cat!.groups! : [];
+  const agents: AgentEntry[] = Array.isArray(cfg?.agents) ? cfg!.agents! : [];
 
-  async function changeModel(model: string) {
-    if (!model || model === currentModel) return;
+  // Each profile's current model is the default_model of any agent riding it
+  // (they share the profile's model). Render in PROFILE_META order so `heavy`
+  // always appears even if its rider set changes.
+  const profileRows = PROFILE_META.map((p) => {
+    const riders = agents.filter((a) => a.profile === p.id);
+    const model = riders.find((a) => a.default_model)?.default_model ?? "";
+    return { ...p, riders, model };
+  }).filter((p) => p.riders.length > 0 || p.model);
+
+  const vexaEnabled = Boolean((vexa as any)?.enabled);
+  const [savingProfile, setSavingProfile] = useState<string | null>(null);
+
+  async function changeProfileModel(profileId: string, model: string) {
+    const row = profileRows.find((p) => p.id === profileId);
+    if (!row || !model || model === row.model) return;
+    // PATCH per rider — Hermes binds the model per profile, so every agent on
+    // this profile moves together. The endpoint returns {default_model}.
+    setSavingProfile(profileId);
     try {
-      // The agent config response carries `agents[].id` for every wired
-      // agent. Default agent for the model picker is `alfred` (the
-      // user-facing one); fall back to the first registered agent.
-      const agents = Array.isArray((agentCfg as any)?.agents)
-        ? ((agentCfg as any).agents as any[])
-        : [];
-      const target =
-        agents.find((a) => String(a?.id ?? "") === "alfred") ?? agents[0];
-      const agentId = String(target?.id ?? "alfred");
-      await updateAgentModel({ agentId, model });
+      for (const rider of row.riders) {
+        await updateAgentModel({ agentId: rider.id, model });
+      }
       await refetchAgent();
     } catch (e) {
       console.error("change model failed", e);
+    } finally {
+      setSavingProfile(null);
     }
   }
 
@@ -255,36 +324,63 @@ function SettingsSection() {
       <H>Settings</H>
       <Sub>The arrangement, in plain words.</Sub>
 
+      {/* Model-config matrix (C17): one row per Hermes profile. Changing a
+          profile's model moves every agent riding it. */}
       <ul className="border-t border-rule mb-12">
-        <li className="grid grid-cols-[1fr_1fr_140px] gap-4 py-4 border-b border-rule items-baseline">
-          <span className="font-display italic text-[18px]">Model</span>
-          <select
-            value={currentModel}
-            onChange={(e) => changeModel(e.target.value)}
-            className="bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+        {profileRows.map((p) => (
+          <li
+            key={p.id}
+            className="grid grid-cols-[200px_1fr] gap-6 py-5 border-b border-rule items-start"
           >
-            <option value={currentModel}>{currentModel || "—"}</option>
-            {models
-              .filter((m) => m !== currentModel)
-              .map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-          </select>
-          <span className="text-right">&nbsp;</span>
-        </li>
-        <li className="grid grid-cols-[1fr_1fr_140px] gap-4 py-4 border-b border-rule items-baseline">
+            <div>
+              <div className="font-display italic text-[18px]">{p.label}</div>
+              <p
+                className="font-body text-[13px] mt-1"
+                style={{ color: "var(--marginalia)" }}
+              >
+                {p.description}
+              </p>
+              {p.riders.length > 0 && (
+                <p
+                  className="font-mono text-[10px] uppercase tracking-[0.18em] mt-2"
+                  style={{ color: "var(--brass)" }}
+                >
+                  {p.riders.map((r) => r.label).join(" · ")}
+                </p>
+              )}
+            </div>
+            <div>
+              <ModelSelect
+                value={p.model}
+                onSelect={(model) => changeProfileModel(p.id, model)}
+                groups={groups}
+                isLoading={!catalog}
+                placeholder="Select a model…"
+              />
+              {savingProfile === p.id && (
+                <p
+                  className="font-body italic text-[12px] mt-1"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  Saving…
+                </p>
+              )}
+            </div>
+          </li>
+        ))}
+        <li className="grid grid-cols-[200px_1fr] gap-6 py-5 border-b border-rule items-baseline">
           <span className="font-display italic text-[18px]">Meeting bot</span>
-          <span
-            className="font-body italic"
-            style={{ color: "var(--marginalia)" }}
-          >
-            {vexaEnabled ? "Auto-joining" : "Off"}
-          </span>
-          <button onClick={toggleVexa} className="btn-link text-right">
-            {vexaEnabled ? "Stop" : "Start"}
-          </button>
+          <div className="flex items-baseline gap-4">
+            <span
+              className="font-body italic flex-1"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {vexaEnabled ? "Auto-joining" : "Off"}
+            </span>
+            <button onClick={toggleVexa} className="btn-link">
+              {vexaEnabled ? "Stop" : "Start"}
+            </button>
+          </div>
         </li>
       </ul>
 
