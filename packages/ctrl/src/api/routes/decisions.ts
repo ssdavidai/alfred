@@ -535,12 +535,31 @@ export function registerDecisionRoutes(): void {
       synchronousSideEffects.actions = synchronousActions;
     }
 
+    // C-B4: a defer carries a resurface contract in its 201 response so the
+    // web can confirm ("Deferred — Alfred will resurface this") instead of
+    // silently clearing the card. ctrl is zero-dep Node and must NOT parse the
+    // note with an LLM (that lives in learn/Hermes), so resurface_at is null
+    // here; learn's decision_router — which only lists state=open decisions —
+    // parses the note and stamps resurface_at async (null is contract-allowed).
+    if (intent === "defer") {
+      synchronousSideEffects.deferred = true;
+      synchronousSideEffects.resurface_at = null;
+    }
+
     // For cheap intents that fully completed synchronously, mark the
     // decision state=completed now. For delegate (which still needs
     // the workflow to actually dispatch) and pattern_proposal/delegate
     // (workflow writes the instinct), leave state=open.
+    //
+    // C-B4: `defer` MUST stay state=open even though its source flip ran
+    // synchronously. learn's decision_router only lists state=open decisions
+    // to parse the note → resurface_at → re-open the source NA at that time.
+    // Writing it `completed` (the old behavior) severed that chain — the card
+    // vanished and never came back.
     const initialState: DecisionState =
-      synchronousFlipOk && intent !== "delegate" ? "completed" : "open";
+      synchronousFlipOk && intent !== "delegate" && intent !== "defer"
+        ? "completed"
+        : "open";
 
     // OBS-6: optional `principal` field on the body — defaults to
     // "principal" (Sir clicked) but signal_router POSTs with "alfred"
