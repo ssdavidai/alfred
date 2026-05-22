@@ -109,6 +109,55 @@ function getComposioUserId(): string {
   return uid;
 }
 
+// Google-backed Composio toolkits whose OAuth grant lives in the principal's
+// Google account. Revoking the connection at Composio drops Composio's stored
+// credential but NOT the upstream Google grant — that needs an explicit call to
+// Google's revoke endpoint (F23).
+const GOOGLE_TOOLKIT_PREFIXES = ["gmail", "googlecalendar", "googledrive", "googlemeet", "googledocs", "googlesheets", "googletasks", "youtube", "googlephotos", "gmaps", "googlemaps"];
+
+function isGoogleToolkit(slug: string): boolean {
+  const lower = slug.toLowerCase();
+  return GOOGLE_TOOLKIT_PREFIXES.some((p) => lower === p || lower.startsWith(p));
+}
+
+/**
+ * Revoke a Google OAuth token at Google so the grant disappears from the
+ * principal's Google account. Best-effort + idempotent: an already-revoked
+ * token (Google replies 400 invalid_token) counts as success. Returns true if
+ * Google accepted the revoke (or it was already gone), false on a real error.
+ */
+async function revokeGoogleToken(token: string): Promise<boolean> {
+  try {
+    const resp = await fetch(
+      `https://oauth2.googleapis.com/revoke?token=${encodeURIComponent(token)}`,
+      { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+    );
+    // 200 = revoked; 400 invalid_token = already revoked/expired (still success).
+    if (resp.ok || resp.status === 400) return true;
+    console.error(`[integrations] Google token revoke failed: ${resp.status}`);
+    return false;
+  } catch (err: any) {
+    console.error(`[integrations] Google token revoke threw: ${err?.message ?? err}`);
+    return false;
+  }
+}
+
+/**
+ * Pull the most-revocable OAuth token off a connected_account record. Google's
+ * revoke accepts either the access or refresh token; prefer the refresh token
+ * (revoking it kills the whole grant). Composio mirrors credentials at
+ * state.val / data / params.
+ */
+function extractOAuthToken(conn: Record<string, unknown>): string | null {
+  const c = conn as any;
+  for (const src of [c?.state?.val, c?.data, c?.params]) {
+    if (!src) continue;
+    const t = src.refresh_token ?? src.access_token ?? src.token;
+    if (typeof t === "string" && t) return t;
+  }
+  return null;
+}
+
 /**
  * Check whether a Composio connected_account payload belongs to the given user_id.
  * Handles both `member_id` (legacy) and `user_id` field names.
@@ -1703,8 +1752,11 @@ export function registerIntegrationRoutes(): void {
       // 1. Fetch the connection to learn its toolkit before deleting.
       //    ALSO validate that the connection belongs to the current tenant —
       //    otherwise one tenant could delete another tenant's connection.
+      //    Capture the OAuth token so we can revoke it at Google after the
+      //    Composio delete (F23).
       let toolkit = "";
       let ownerUserId = "";
+      let oauthToken: string | null = null;
       try {
         const connResp = await fetch(
           `${COMPOSIO_API_V3}/connected_accounts/${encodeURIComponent(connId)}`,
@@ -1713,6 +1765,7 @@ export function registerIntegrationRoutes(): void {
         if (connResp.ok) {
           const conn = (await connResp.json()) as any;
           toolkit = (conn.toolkit?.slug ?? conn.appName ?? "").toLowerCase();
+          oauthToken = extractOAuthToken(conn);
           ownerUserId = (conn.member_id ?? conn.user_id ?? conn.userId ?? "") as string;
           // Defense-in-depth: require explicit ownership match. Treat a
           // missing/empty owner field as non-matching — otherwise a
@@ -1740,6 +1793,14 @@ export function registerIntegrationRoutes(): void {
       if (!resp.ok && resp.status !== 404) {
         sendJson(res, resp.status, { error: `Composio delete error: ${resp.status}` });
         return;
+      }
+
+      // 2b. Revoke the upstream Google OAuth grant (F23). Composio's delete
+      //     only drops its stored credential; without this the grant stays
+      //     live in the principal's Google "Third-party access". Best-effort.
+      let googleTokenRevoked: boolean | null = null;
+      if (toolkit && isGoogleToolkit(toolkit) && oauthToken) {
+        googleTokenRevoked = await revokeGoogleToken(oauthToken);
       }
 
       // 3. Clean up: remove any stream configs backed by this integration
@@ -1837,6 +1898,7 @@ export function registerIntegrationRoutes(): void {
         deleted_schedules: deletedSchedules,
         removed_tools: removedTools,
         skill_removed: skillRemoved,
+        google_token_revoked: googleTokenRevoked,
         gateway_restart_triggered: false,
       });
     } catch (err: any) {
