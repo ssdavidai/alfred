@@ -1043,10 +1043,15 @@ def _build_composition_prompt(
         "5. NO MARKDOWN HEADINGS (# or ##). Only **bold prose labels**.",
         "════════════════════════════════════════════════════════════",
         "",
-        "You are a butler handing Sir his day on one page. Thorough but",
-        "unhurried. Cover what moved, in order, in his voice. Static state",
-        "is never news. If a matter did not move, it belongs in §Quiet or",
-        "not at all.",
+        "You are a butler handing Sir his day on one page. Your job is to",
+        "LOAD HIS CONTEXT so he wakes up oriented: where his live matters",
+        "stand right now, what's on today, what's waiting on his call, what",
+        "crossed his money, what you handled for him. Movement is ONE input,",
+        "not the filter — a matter that did not move still belongs in the",
+        "brief if it is live, because Sir needs to hold its state in his",
+        "head. Even a quiet day gets a substantive orientation. A one-line",
+        "shrug is a failure: you have his matters, his decisions, his",
+        "signals below — use them.",
         "",
     ]
 
@@ -1150,12 +1155,33 @@ def _build_composition_prompt(
         "with a meta-line. Output only the brief, starting at §1.",
         "",
         "1. ONE-SENTENCE OPENING. REQUIRED.",
-        "   Greet Sir by name. Name the day's character from the counts",
-        '   above — "a quiet morning", "a full desk", "three things wanting',
-        '   your call before lunch". ONE sentence only. DO NOT extend with',
-        "   weather, temperature, °C, °F, sunshine, rain, fog, city, river,",
-        "   season, or any meteorological or geographical detail. You do",
-        "   not have that data. If you write weather, the brief is invalid.",
+        "   Greet Sir by name and name the day's WEIGHT and SHAPE — what is",
+        "   ahead of him — drawn from the counts and matters below. Name how",
+        "   many live matters he's carrying, whether anything wants his call",
+        '   today, what is on. Examples of tone: "a full desk — nine matters',
+        '   live and three wanting your call before lunch", "a steady morning',
+        '   — your matters are holding, nothing demands you yet". NEVER',
+        "   describe the day as empty or as 'nothing'; he is carrying live",
+        "   matters and you owe him their state. ONE sentence only. DO NOT",
+        "   extend with weather, temperature, °C, °F, sunshine, rain, fog,",
+        "   city, river, season, or any meteorological or geographical",
+        "   detail. You do not have that data. If you write weather, the",
+        "   brief is invalid.",
+        "",
+        f"1b. **Where things stand.** — REQUIRED whenever POST-MUTATION "
+        f"matter snapshots has ≥1 entry (currently {len(matter_snapshots)} "
+        "matters). This is the spine of the brief — never omit it.",
+        "    Walk Sir's LIVE matters and give him each one's standing in ONE",
+        "    short line: lead with the matter as [[<matter name>]], then a",
+        "    clause drawn from its `current_state` (paraphrase in your",
+        "    voice, do not dump the raw snapshot). This is orientation, not",
+        "    news — surface a matter EVEN IF it did not move this window,",
+        "    because Sir needs to know where it sits. Lead with the matters",
+        "    that moved or that surface_class marks most consequential, then",
+        "    the steady ones. Cap the detailed lines at the 8 most material",
+        "    matters; if more remain, roll the tail into one closing line:",
+        '    "and four others holding — [[Foo]], [[Bar]], … steady." Ground',
+        "    every clause in the snapshot's current_state — invent nothing.",
         "",
         "2. **Day's shape.** — REQUIRED if DAY SHAPE has "
         f"integration_available=True AND events_today has ≥1 entry "
@@ -1252,11 +1278,12 @@ def _build_composition_prompt(
         "    matter by [[name]]. If no such grounding exists, omit. Do",
         "    NOT invent calendar events here — §Day's shape covers today.",
         "",
-        f"13. **Quiet.** — REQUIRED if NAMES OF HOLDING MATTERS has ≥3 "
-        f"items (currently {len(holding_names)}).",
-        '    ONE sentence: "Eight matters holding their state — [[Foo]],',
-        '    [[Bar]], [[Baz]]. I\'ll surface them when something moves."',
-        "    Do not list more than 4 names. Wikilink each.",
+        "13. **Quiet.** — OPTIONAL, and only for matters NOT already named",
+        f"in §1b (currently {len(holding_names)} holding). §Where things",
+        "    stand already carries the live matters; use this ONLY to sweep",
+        "    up a truly inert tail you chose not to detail above, in ONE",
+        '    sentence: "The rest are holding — I\'ll surface them when',
+        '    something moves." Omit if §1b already covered everything.',
         "",
         "14. SIGN-OFF. REQUIRED.",
         '    One short line, no flourish. ("Standing by." / "Yours, ready.")',
@@ -1268,11 +1295,14 @@ def _build_composition_prompt(
         "  REQUIRED and its triggering array is non-empty, emitting the",
         "  brief without that section is a failure. Do not collapse",
         "  required sections into the opening or sign-off.",
-        f"- Length floor: if SIGNALS IN WINDOW + DECISIONS SIR MADE "
-        f"together exceed 5 items (currently "
-        f"{len(window_signals) + len(window_decisions)}), the brief body "
-        f"must be at least 600 characters. Anything shorter is leaving "
-        f"data on the floor.",
+        "- Length floor: UNCONDITIONAL. Whenever there is ANY live context "
+        f"to load (matters {len(matter_snapshots)}, signals "
+        f"{len(window_signals)}, decisions {len(window_decisions)}, pending "
+        f"{len(pending_decisions)}), the brief body MUST be a substantive "
+        "orientation of at least 700 characters and MUST include §1 + §1b "
+        "(Where things stand) plus every REQUIRED section whose array is "
+        "non-empty. A one-line 'quiet morning' brief is a FAILURE — you are "
+        "leaving Sir's standing context on the floor.",
         f"- Length cap: {BRIEF_BODY_CHAR_CAP} characters. Be ruthless on",
         "  prose flourish, never on coverage.",
         "- Wikilinks use the matter NAME. Write [[Robin's First Year]],",
@@ -1288,8 +1318,9 @@ def _build_composition_prompt(
         "  restored' → 'your Zoom recordings are back online'). Never",
         "  Wodehousian. A real butler, not a parody.",
         '- Never write that something "rests serene" or "lingers in',
-        '  abeyance" or "shows no motion." If a matter didn\'t move, it',
-        "  belongs in §13 (Quiet) or not at all.",
+        '  abeyance" or "shows no motion." A matter that didn\'t move still',
+        "  belongs in §1b (Where things stand) with its current state —",
+        "  give Sir its standing, not a euphemism for silence.",
         "- No JSON, no YAML, no markdown headings. Only **bold** labels",
         "  and prose / bullets.",
     ])
