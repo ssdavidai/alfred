@@ -1226,7 +1226,7 @@ export function registerVaultRoutes(): void {
 
   // --- GRAPH: nodes + edges + agent activity ---
 
-  addRoute("GET", "/api/v1/vault/graph", async ({ res }) => {
+  addRoute("GET", "/api/v1/vault/graph", async ({ res, query }) => {
     const AUDIT_LOG = path.join(
       process.env.ALFRED_DATA_DIR ?? "/alfred-data",
       "vault_audit.log",
@@ -1365,7 +1365,35 @@ export function registerVaultRoutes(): void {
       // Audit log may not exist yet
     }
 
-    sendJson(res, 200, { nodes, edges: dedupedEdges, activity });
+    // F11/C19: when ?focus=<record_path> is given, return the records that
+    // link TO the focused record as backlinks:[{path, name, rel}]. The matter
+    // detail / vault backlink panel reads `graph.backlinks`.
+    let backlinks: { path: string; name: string; rel: string }[] | undefined;
+    const focusRaw = query.get("focus");
+    if (focusRaw) {
+      const focus = focusRaw.replace(/\\/g, "/");
+      // Accept the path with or without the .md suffix.
+      const focusVariants = new Set([focus, focus.replace(/\.md$/, ""), `${focus}.md`]);
+      const nameById: Record<string, string> = {};
+      for (const n of nodes) nameById[n.id] = n.name;
+      backlinks = [];
+      for (const e of dedupedEdges) {
+        if (focusVariants.has(e.target)) {
+          backlinks.push({
+            path: e.source,
+            name: nameById[e.source] ?? path.basename(e.source, ".md"),
+            rel: e.relation,
+          });
+        }
+      }
+    }
+
+    sendJson(res, 200, {
+      nodes,
+      edges: dedupedEdges,
+      activity,
+      ...(backlinks !== undefined ? { backlinks } : {}),
+    });
   });
 
   // --- NEBULA: cluster + wikilink data for nebula visualization ---
