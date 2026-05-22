@@ -1253,7 +1253,9 @@ export function registerVaultRoutes(): void {
       // Entity-relationship fields (F10): onboarding matters carry
       // key_people/related_persons/related_orgs and persons carry `org`.
       // Without these, matter↔person and person↔org links produce no edges.
+      // related_places/place (B9): matter↔place edges from the KG seeder.
       "key_people", "related_persons", "related_orgs", "org",
+      "related_places", "place",
     ]);
 
     const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
