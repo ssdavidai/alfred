@@ -62,6 +62,33 @@ const OPENCLAW_WORKERS_SKILLS_DIR = `${HERMES_PROFILES_DIR}/workers/workspace/sk
 const RECONNECT_LEDGER_PATH = `${ALFRED_DATA_DIR}/.composio-reconnect-ledger.json`;
 const RECONNECT_GRACE_MS = 60 * 60 * 1000; // 1 hour
 
+// Atomically replace streams.json: write a temp file in the same dir, then
+// rename over the live path. A reader that lands mid-write either sees the old
+// complete file or the new complete file, never a half-written one that fails
+// JSON.parse and collapses every stream badge to false. (F26)
+function writeStreamsMetaAtomic(metaPath: string, streams: unknown): void {
+  const tmp = `${metaPath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(streams, null, 2));
+  fs.renameSync(tmp, metaPath);
+}
+
+// Does a `composio-<toolkit>-*` stream have DURABLE events? True when the stream
+// is enabled AND it has ever produced events — proven by a set last_event_at, a
+// non-empty backing JSONL, or a positive persisted counter. The JSONL is
+// append-only and never reset, so this is stable across auto-config re-runs
+// (unlike the reset-prone event_count). (F26)
+function streamHasDurableEvents(s: any): boolean {
+  if (!s || s.enabled === false) return false;
+  if (s.last_event_at) return true;
+  if ((s.event_count || 0) > 0) return true;
+  try {
+    const safe = String(s.id ?? "").replace(/[^a-zA-Z0-9_-]/g, "_");
+    if (!safe) return false;
+    const jsonl = path.join(STREAMS_DIR, `${safe}.jsonl`);
+    return fs.existsSync(jsonl) && fs.statSync(jsonl).size > 0;
+  } catch { return false; }
+}
+
 function getComposioApiKey(): string {
   const key = process.env.COMPOSIO_API_KEY || "";
   if (!key) throw new ValidationError("COMPOSIO_API_KEY not configured on this tenant");
@@ -1236,12 +1263,15 @@ export function registerIntegrationRoutes(): void {
       const owned = await fetchAllOwnedConnectedAccounts(apiKey, userId);
       const composioRows = owned.map((a: any) => {
         const slug = (a.toolkit?.slug ?? a.appName ?? "").toLowerCase();
+        // Derive the badge from durable facts (enabled stream + non-empty
+        // JSONL / last_event_at), NOT the reset-prone event_count counter that
+        // auto-config/enable/migrate zero on every re-config. (F26)
         const hasStream = streamsMeta.some(
           (s: any) =>
             typeof s?.id === "string" &&
             slug &&
             s.id.toLowerCase().startsWith(`composio-${slug}-`) &&
-            (s.event_count || 0) > 0,
+            streamHasDurableEvents(s),
         );
         return {
           id: a.id,
@@ -1881,7 +1911,7 @@ export function registerIntegrationRoutes(): void {
           let streams: any[] = JSON.parse(fs.readFileSync(streamsMetaPath, "utf-8"));
           const cleanedSet = new Set(cleanedStreams);
           streams = streams.filter((s: any) => !cleanedSet.has(s.id));
-          fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+          writeStreamsMetaAtomic(streamsMetaPath, streams);
         } catch { /* ok */ }
       }
 
@@ -2026,7 +2056,7 @@ export function registerIntegrationRoutes(): void {
           let streams: any[] = JSON.parse(fs.readFileSync(streamsMetaPath, "utf-8"));
           const cleanedSet = new Set(cleanedStreams);
           streams = streams.filter((s: any) => !cleanedSet.has(s.id));
-          fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+          writeStreamsMetaAtomic(streamsMetaPath, streams);
         } catch { /* ok */ }
       }
 
@@ -2499,7 +2529,9 @@ export function registerIntegrationRoutes(): void {
         streams = JSON.parse(fs.readFileSync(streamsMetaPath, "utf-8"));
       } catch { /* empty */ }
 
-      // Remove existing entry with same ID
+      // Preserve the prior entry's event_count/last_event_at on re-config —
+      // zeroing them blanked the stream badge intermittently (F26).
+      const prior = streams.find((s: any) => s.id === streamId);
       streams = streams.filter((s: any) => s.id !== streamId);
       streams.push({
         id: streamId,
@@ -2508,10 +2540,10 @@ export function registerIntegrationRoutes(): void {
         source: `composio:${toolkit}`,
         enabled: true,
         status: "idle",
-        last_event_at: null,
-        event_count: 0,
+        last_event_at: prior?.last_event_at ?? null,
+        event_count: typeof prior?.event_count === "number" ? prior.event_count : 0,
       });
-      fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+      writeStreamsMetaAtomic(streamsMetaPath, streams);
 
       sendJson(res, 201, {
         stream_id: streamId,
@@ -2630,10 +2662,13 @@ export function registerIntegrationRoutes(): void {
         try { fs.unlinkSync(oldConfigPath); } catch { /* ok */ }
       }
 
-      // Update streams.json metadata
+      // Update streams.json metadata. Carry the migrated-from stream's
+      // event_count/last_event_at onto the new entry so the badge survives the
+      // migration (F26).
       try {
         const streamsMetaPath = path.join(STREAMS_DIR, "streams.json");
         let streams: any[] = JSON.parse(fs.readFileSync(streamsMetaPath, "utf-8"));
+        const prior = streams.find((s: any) => s.id === oldStreamId || s.id === newStreamId);
         streams = streams.filter((s: any) => s.id !== oldStreamId && s.id !== newStreamId);
         streams.push({
           id: newStreamId,
@@ -2642,10 +2677,10 @@ export function registerIntegrationRoutes(): void {
           source: `composio:${toolkit}`,
           enabled: true,
           status: "idle",
-          last_event_at: null,
-          event_count: 0,
+          last_event_at: prior?.last_event_at ?? null,
+          event_count: typeof prior?.event_count === "number" ? prior.event_count : 0,
         });
-        fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+        writeStreamsMetaAtomic(streamsMetaPath, streams);
       } catch { /* ok */ }
 
       // (#53) No per-stream Temporal schedule to delete or recreate.
@@ -2723,7 +2758,7 @@ export function registerIntegrationRoutes(): void {
           const before = streams.length;
           streams = streams.filter((s: any) => s.id !== matchedStreamId);
           if (streams.length !== before) {
-            fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+            writeStreamsMetaAtomic(streamsMetaPath, streams);
           }
         }
       } catch { /* no metadata file — ok */ }
@@ -3120,17 +3155,21 @@ print(json.dumps(result, default=str))
           JSON.stringify(config, null, 2),
         );
 
-        // Register in streams.json
+        // Register in streams.json — preserve the prior entry's
+        // event_count/last_event_at so re-running auto-config doesn't blank the
+        // badge (F26).
         const streamsMetaPath = path.join(STREAMS_DIR, "streams.json");
         let streams: any[] = [];
         try { streams = JSON.parse(fs.readFileSync(streamsMetaPath, "utf-8")); } catch { /* empty */ }
+        const prior = streams.find((s: any) => s.id === streamId);
         streams = streams.filter((s: any) => s.id !== streamId);
         streams.push({
           id: streamId, name: rec.name, type: "composio",
           source: `composio:${toolkit}`, enabled: true, status: "idle",
-          last_event_at: null, event_count: 0,
+          last_event_at: prior?.last_event_at ?? null,
+          event_count: typeof prior?.event_count === "number" ? prior.event_count : 0,
         });
-        fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+        writeStreamsMetaAtomic(streamsMetaPath, streams);
 
         // (#53) No per-stream Temporal schedule is created. Before #53
         // auto-config created one al-stream-pull-* schedule per stream
@@ -3176,7 +3215,7 @@ print(json.dumps(result, default=str))
             }
           }
           if (disabledLegacy.length > 0) {
-            fs.writeFileSync(streamsMetaPath, JSON.stringify(streams, null, 2));
+            writeStreamsMetaAtomic(streamsMetaPath, streams);
             summary.legacy_streams_disabled = disabledLegacy;
           }
         } catch { /* migration is best-effort */ }

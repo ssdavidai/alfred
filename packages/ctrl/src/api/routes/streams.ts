@@ -157,7 +157,13 @@ function loadStreamsMeta(): StreamMeta[] {
 }
 
 function saveStreamsMeta(streams: StreamMeta[]): void {
-  fs.writeFileSync(getStreamMetaPath(), JSON.stringify(streams, null, 2));
+  // Atomic: write a temp file then rename over the live path so a concurrent
+  // reader never sees a half-written streams.json (which would fail JSON.parse
+  // and blank every stream badge for that request). (F26)
+  const metaPath = getStreamMetaPath();
+  const tmp = `${metaPath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(streams, null, 2));
+  fs.renameSync(tmp, metaPath);
 }
 
 /**
