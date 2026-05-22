@@ -126,9 +126,17 @@ wait_for_profiles
 # `gateway run --replace` runs in the FOREGROUND (so the supervisor owns the
 # process) and `--replace` clears any stale gateway.lock left by a previous
 # process — important when this script restarts a crashed gateway.
-start_proc "hermes-main"     "exec hermes -p main gateway run --replace"
-start_proc "hermes-workers"  "exec hermes -p workers gateway run --replace"
-start_proc "hermes-heavy"    "exec hermes -p heavy gateway run --replace"
+#
+# TERMINAL_CWD points context-file discovery at each profile dir
+# (build_context_files_prompt reads $TERMINAL_CWD, falling back to the
+# process cwd `/` otherwise). The init container deploys Alfred's AGENTS.md
+# to ${HERMES_HOME}/profiles/<p>/AGENTS.md (entrypoint step 2f); with
+# TERMINAL_CWD unset the main gateway looked for /AGENTS.md and the persona /
+# standing-rules instructions never reached the agent (F44). Set per-profile
+# so each gateway loads its own AGENTS.md from the dir init wrote it to.
+start_proc "hermes-main"     "TERMINAL_CWD=${PROFILES_DIR}/main exec hermes -p main gateway run --replace"
+start_proc "hermes-workers"  "TERMINAL_CWD=${PROFILES_DIR}/workers exec hermes -p workers gateway run --replace"
+start_proc "hermes-heavy"    "TERMINAL_CWD=${PROFILES_DIR}/heavy exec hermes -p heavy gateway run --replace"
 
 # =============================================================================
 # Supervise — restart any worker that exits while we are not shutting down.

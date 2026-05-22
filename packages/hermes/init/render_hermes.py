@@ -174,6 +174,9 @@ def main() -> int:
     mcp_stdio_dir = str(runtime_dir / "mcp-stdio")
     mcp_ctrl_script = str(runtime_dir / "mcp" / "ctrl-server.mjs")
     node_modules = str(runtime_dir / "mcp-stdio" / "node_modules")
+    # The profile dir in the runtime view — used for terminal.cwd so it never
+    # bakes a dead /opt/data path on a box whose HERMES_HOME diverges (F44).
+    runtime_profile_dir = str(runtime_dir)
 
     env = Environment(
         loader=FileSystemLoader(str(template_dir)),
@@ -190,6 +193,7 @@ def main() -> int:
         mcp_stdio_dir=mcp_stdio_dir,
         mcp_ctrl_script=mcp_ctrl_script,
         node_modules=node_modules,
+        runtime_profile_dir=runtime_profile_dir,
         alfred_prime=alfred_prime,
         cross_tenant_peers=cross_tenant_peers,
         # Bare OpenRouter model IDs (no `openrouter/` prefix — `provider:
