@@ -414,7 +414,6 @@ function WaitlistPanel() {
 
 const FOOTER_LINKS: Array<{ to: string; label: string }> = [
   { to: "/staff", label: "The Staff" },
-  { to: "/companion", label: "Mobile" },
   { to: "/voice", label: "Voice" },
   { to: "/sms", label: "SMS" },
   { to: "/voice-and-tone", label: "Voice & tone" },

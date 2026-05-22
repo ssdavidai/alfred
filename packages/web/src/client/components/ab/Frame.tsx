@@ -32,7 +32,6 @@ const PRIMARY: NavItem[] = [
 // Everything else, behind a "More" menu.
 const MORE: NavItem[] = [
   { to: "/connections", label: "Apps", icon: "globe" },
-  { to: "/companion", label: "Mobile", icon: "top_hat" },
   { to: "/staff", label: "Staff", icon: "bow_tie" },
   { to: "/study", label: "Settings", icon: "settings" },
   { to: "/claude", label: "Claude Setup", icon: "skeleton_key" },
@@ -42,7 +41,6 @@ const MORE: NavItem[] = [
 const LOGGED_OUT_PRIMARY: NavItem[] = [
   { to: "/", label: "Home", icon: "calling_card" },
   { to: "/staff", label: "Staff", icon: "bow_tie" },
-  { to: "/companion", label: "Mobile", icon: "top_hat" },
 ];
 
 // Demo link points at the static redesign at demo.alfred.black.
