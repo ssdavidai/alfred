@@ -93,10 +93,14 @@ describe("skills / SOUL / MEMORY path resolution", () => {
   });
 
   describe("workspace.ts", () => {
-    it("resolves SOUL.md / MEMORY.md (and the other canonical top-level files) to the vault root", () => {
+    // F14/C13 — SOUL.md / AGENTS.md now route to the Hermes main profile dir
+    // (the gateway loads them from there); the NON-gateway-loaded files
+    // (MEMORY.md, USER.md, TOOLS.md, KNOWN_CONTACTS.md) still resolve to the
+    // vault root, which is what RESOLVED_WORKSPACE_DIR exports.
+    it("resolves the non-gateway-loaded top-level files to the vault root", () => {
       assert.strictEqual(workspace.RESOLVED_WORKSPACE_DIR, EXPECTED_VAULT);
     });
-    it("does not resolve to /mnt/encrypted", () => {
+    it("does not resolve the vault root to /mnt/encrypted", () => {
       assert.ok(!workspace.RESOLVED_WORKSPACE_DIR.includes("/mnt/encrypted"));
     });
   });
