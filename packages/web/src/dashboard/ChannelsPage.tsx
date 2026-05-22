@@ -9,6 +9,7 @@ import {
   getPhoneConfig,
   getEmailChannelStatus,
   provisionEmail,
+  provisionPhone,
   addAuthorizedNumber,
   removeAuthorizedNumber,
   getVexaAutoJoin,
@@ -21,6 +22,15 @@ import { Frame } from "../client/components/ab/Frame";
 interface EmailChannelStatus {
   configured: boolean;
   inbox_address: string | null;
+}
+
+// F58/C15 — getPhoneConfig returns the ctrl-api phone config shape. The card
+// previously read `twilio_number`/`authorized_numbers`, which never match the
+// ctrl-api keys, so the card stayed "Not yet provisioned" even after wiring.
+interface PhoneConfig {
+  phoneNumber: string | null;
+  authorizedNumbers?: string[];
+  recentActivity?: unknown[];
 }
 
 export default function ChannelsPage() {
@@ -43,9 +53,10 @@ export default function ChannelsPage() {
     configured: false,
     inbox_address: null,
   };
-  const phoneNumber: string = (phoneData as any)?.twilio_number ?? (phoneData as any)?.number ?? "";
-  const authorized: string[] = Array.isArray((phoneData as any)?.authorized_numbers)
-    ? (phoneData as any).authorized_numbers
+  const phone = (phoneData as PhoneConfig | undefined) ?? { phoneNumber: null };
+  const phoneNumber: string = phone.phoneNumber ?? "";
+  const authorized: string[] = Array.isArray(phone.authorizedNumbers)
+    ? phone.authorizedNumbers
     : [];
   const vexaEnabled: boolean = Boolean((vexaData as any)?.enabled);
 
@@ -58,6 +69,48 @@ export default function ChannelsPage() {
   const [newNumber, setNewNumber] = useState("");
   const [phoneBusy, setPhoneBusy] = useState(false);
   const [vexaBusy, setVexaBusy] = useState(false);
+
+  // Phone setup-form state (F58/C15 — BYO existing number only).
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [openaiKey, setOpenaiKey] = useState("");
+  const [twilioSid, setTwilioSid] = useState("");
+  const [twilioToken, setTwilioToken] = useState("");
+  const [byoNumber, setByoNumber] = useState("");
+  const [setupBusy, setSetupBusy] = useState(false);
+  const [setupError, setSetupError] = useState<string | null>(null);
+
+  const setupReady =
+    openaiKey.trim() &&
+    twilioSid.trim() &&
+    twilioToken.trim() &&
+    byoNumber.trim();
+
+  async function doProvisionPhone() {
+    if (!setupReady) return;
+    setSetupBusy(true);
+    setSetupError(null);
+    try {
+      await provisionPhone({
+        openai_api_key: openaiKey.trim(),
+        twilio_account_sid: twilioSid.trim(),
+        twilio_auth_token: twilioToken.trim(),
+        phone_number: byoNumber.trim(),
+      });
+      setOpenaiKey("");
+      setTwilioSid("");
+      setTwilioToken("");
+      setByoNumber("");
+      setSetupOpen(false);
+      await refetchPhone();
+    } catch (e: any) {
+      // ctrl-api returns 4xx `{ error }` (e.g. buy_not_supported, bad creds).
+      setSetupError(
+        e?.message ?? e?.data?.error ?? "Setup failed — check the credentials.",
+      );
+    } finally {
+      setSetupBusy(false);
+    }
+  }
 
   async function doProvisionEmail() {
     const key = emailKey.trim();
@@ -207,13 +260,89 @@ export default function ChannelsPage() {
             )}
           </ChannelCard>
 
-          {/* Phone */}
+          {/* Phone — F58/C15: BYO-number provisioning + key fix. */}
           <ChannelCard
             name="Phone"
             address={phoneNumber || "Not yet provisioned"}
             note="Call me from any number you've authorised."
             status={phoneNumber ? "active" : "available"}
           >
+            {!phoneNumber && (
+              <div className="mt-5 space-y-3">
+                {!setupOpen ? (
+                  <button
+                    onClick={() => setSetupOpen(true)}
+                    className="btn-ghost"
+                  >
+                    Set up phone →
+                  </button>
+                ) : (
+                  <div className="space-y-3">
+                    <input
+                      type="password"
+                      value={openaiKey}
+                      onChange={(e) => setOpenaiKey(e.target.value)}
+                      placeholder="OpenAI API key (sk-…)"
+                      className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+                    />
+                    <input
+                      value={twilioSid}
+                      onChange={(e) => setTwilioSid(e.target.value)}
+                      placeholder="Twilio Account SID (AC…)"
+                      className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+                    />
+                    <input
+                      type="password"
+                      value={twilioToken}
+                      onChange={(e) => setTwilioToken(e.target.value)}
+                      placeholder="Twilio Auth Token"
+                      className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+                    />
+                    <input
+                      value={byoNumber}
+                      onChange={(e) => setByoNumber(e.target.value)}
+                      placeholder="Your Twilio number (+44 7700 900 188)"
+                      className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+                    />
+                    <p
+                      className="font-body italic text-[12px]"
+                      style={{ color: "var(--marginalia)" }}
+                    >
+                      Bring an existing Twilio number you own — purchasing new
+                      numbers isn't supported yet. Inbound calling also needs
+                      the voice-bridge, a separate step we're still wiring up.
+                    </p>
+                    <div className="flex gap-2 items-baseline">
+                      <button
+                        onClick={doProvisionPhone}
+                        disabled={setupBusy || !setupReady}
+                        className="btn-ghost"
+                      >
+                        {setupBusy ? "…" : "Provision"}
+                      </button>
+                      <button
+                        onClick={() => {
+                          setSetupOpen(false);
+                          setSetupError(null);
+                        }}
+                        disabled={setupBusy}
+                        className="btn-link"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    {setupError && (
+                      <p
+                        className="font-body italic text-[13px]"
+                        style={{ color: "var(--brass)" }}
+                      >
+                        {setupError}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
             {phoneNumber && (
               <div className="mt-5 space-y-3">
                 <div
