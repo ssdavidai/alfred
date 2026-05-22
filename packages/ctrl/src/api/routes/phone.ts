@@ -10,6 +10,8 @@
 import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError } from "../errors.js";
+import { dockerComposeCmd } from "../helpers.js";
+import { patchEnv } from "./credentials.js";
 
 // Defaults match the merged single-VM stack's ctrl-api mounts: vault at
 // /vault (vault_data volume) and alfred-data at /alfred-data (alfred_data
@@ -592,6 +594,69 @@ export function registerPhoneRoutes(): void {
       phoneNumber,
       authorizedNumbers: readAuthorizedNumbers(),
       recentActivity: events.slice(0, 30),
+    });
+  });
+
+  // POST /api/v1/phone/provision — Contract C15.
+  // Body: { openai_api_key, twilio_account_sid, twilio_auth_token,
+  //         phone_number? | buy:{country, area_code?} }
+  //   → 200 { phone_number, provisioned } / 4xx { error, code }
+  //
+  // Persists the creds (the now-allowlisted KNOWN_CREDENTIALS keys) into the
+  // compose .env (bind-mounted RW per F40) and (re)starts the voice-bridge
+  // service so it picks up the new OPENAI_API_KEY + token. The actual Twilio
+  // number purchase (F70/F71) is a separate Lane V task; here only BYO
+  // `phone_number` is supported — a `buy:` request returns 400 buy_not_supported.
+  addRoute("POST", "/api/v1/phone/provision", async ({ res, body }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const openaiKey = typeof b.openai_api_key === "string" ? b.openai_api_key.trim() : "";
+    const accountSid = typeof b.twilio_account_sid === "string" ? b.twilio_account_sid.trim() : "";
+    const authToken = typeof b.twilio_auth_token === "string" ? b.twilio_auth_token.trim() : "";
+    if (!openaiKey || !accountSid || !authToken) {
+      return sendJson(res, 400, {
+        error: "openai_api_key, twilio_account_sid and twilio_auth_token are required",
+        code: "missing_fields",
+      });
+    }
+
+    // Number resolution: BYO `phone_number` is supported; `buy:` is not yet
+    // wired (Lane V F70/F71) — fail clearly rather than block.
+    if (b.buy !== undefined && (b.phone_number === undefined || b.phone_number === null || b.phone_number === "")) {
+      return sendJson(res, 400, {
+        error: "Buying a number is not yet supported on this tenant — provide an existing phone_number (BYO). TODO: wire Twilio number purchase (Lane V F70/F71).",
+        code: "buy_not_supported",
+      });
+    }
+    const phoneNumber = typeof b.phone_number === "string" ? b.phone_number.trim() : "";
+    if (!phoneNumber) {
+      return sendJson(res, 400, {
+        error: "phone_number is required (BYO number)",
+        code: "missing_phone_number",
+      });
+    }
+
+    // Persist into the compose .env. TWILIO_PHONE_NUMBER is the name
+    // readInstanceMeta() already reads for outbound SMS/calls.
+    try {
+      patchEnv({
+        OPENAI_API_KEY: openaiKey,
+        TWILIO_ACCOUNT_SID: accountSid,
+        TWILIO_AUTH_TOKEN: authToken,
+        TWILIO_PHONE_NUMBER: phoneNumber,
+      });
+    } catch (err: any) {
+      return sendJson(res, 500, {
+        error: `failed to persist credentials: ${err?.message ?? String(err)}`,
+        code: "persist_failed",
+      });
+    }
+
+    // Respond immediately, then (re)start voice-bridge in the background so it
+    // reloads config from the new .env. --no-deps keeps ctrl-api untouched
+    // (same pattern as PATCH /admin/credentials).
+    sendJson(res, 200, { phone_number: phoneNumber, provisioned: true });
+    dockerComposeCmd(["up", "-d", "--no-deps", "--force-recreate", "voice-bridge"]).catch((err) => {
+      console.error("[phone/provision] voice-bridge restart failed:", err);
     });
   });
 

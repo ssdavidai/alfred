@@ -79,6 +79,35 @@ const KNOWN_CREDENTIALS: CredentialDef[] = [
     description: "Internal compose-network URL vault-init points at (typically http://vaultwarden:80). Editable for debugging only.",
     used_by: ["vault-init container"],
   },
+  // AgentPhone / voice-bridge credentials (C15 phone provision). The phone
+  // wizard persists these via POST /api/v1/phone/provision, but they are
+  // listed here so the credentials surface can mask + rotate them too. OpenAI
+  // is already covered by OPENAI_API_KEY above (the voice-bridge reads the
+  // same key for the Realtime API).
+  {
+    key: "TWILIO_ACCOUNT_SID",
+    label: "Twilio Account SID",
+    description: "Twilio account SID used by the SaaS to send SMS + initiate calls on this tenant's behalf. Provisioned via the phone wizard.",
+    used_by: ["SaaS Twilio internal endpoints", "voice-bridge"],
+  },
+  {
+    key: "TWILIO_AUTH_TOKEN",
+    label: "Twilio Auth Token",
+    description: "Twilio auth token paired with the account SID. Treat as a service credential; rotate if leaked.",
+    used_by: ["SaaS Twilio internal endpoints", "voice-bridge"],
+  },
+  {
+    key: "TWILIO_PHONE_NUMBER",
+    label: "Twilio phone number",
+    description: "The E.164 phone number Alfred answers/sends from. Read by phone.ts (readInstanceMeta) for outbound SMS/calls.",
+    used_by: ["ctrl-api phone routes", "voice-bridge"],
+  },
+  {
+    key: "VOICE_BRIDGE_INTERNAL_TOKEN",
+    label: "Voice-bridge internal token",
+    description: "Shared secret between ctrl-api/voice-bridge and the SaaS internal Twilio endpoints (Bearer auth). Generated at provision time.",
+    used_by: ["ctrl-api phone routes", "voice-bridge", "SaaS internal endpoints"],
+  },
 ];
 
 /** Protected keys that cannot be modified via this endpoint. */
@@ -114,7 +143,7 @@ function readEnv(): Record<string, string> {
  * comments, blank lines, ordering, and unrelated keys.
  * Set a value to null to remove that key.
  */
-function patchEnv(updates: Record<string, string | null>): void {
+export function patchEnv(updates: Record<string, string | null>): void {
   let lines: string[];
   try {
     lines = fs.readFileSync(ENV_PATH, "utf-8").split("\n");
