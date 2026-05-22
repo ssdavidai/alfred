@@ -9,10 +9,9 @@
 //   • Vault login       — vault_login (Vaultwarden bundle), gated on
 //                         tenants that were provisioned with BW
 //
-// "Developer / API keys" lives at /study#credentials per the spec — we
-// link to that section rather than duplicate it here.
+// F82 — "Developer / API keys" lives under Settings → Account → API Keys.
+// The duplicate link/block that used to sit here was removed.
 import { useState } from "react";
-import { Link } from "react-router-dom";
 import {
   useQuery,
   getClaudeSetup,
@@ -373,15 +372,6 @@ export default function ClaudePage() {
               </button>
             ))}
           </nav>
-          <div className="mt-8 pt-4 border-t border-rule">
-            <Link
-              to="/study#credentials"
-              className="font-mono text-[10px] uppercase tracking-[0.22em]"
-              style={{ color: "var(--brass)" }}
-            >
-              Developer / API keys →
-            </Link>
-          </div>
         </aside>
 
         <article>
