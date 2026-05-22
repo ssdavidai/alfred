@@ -47,7 +47,18 @@ const SEARCH_DEBOUNCE_MS = 400;
 // Component
 // ---------------------------------------------------------------------------
 
-export default function VaultGraph() {
+// C-B2 — optional matter-focus mode. When `focusPath` is set the graph asks
+// ctrl-api for that record's neighborhood (`?focus=`) and renders only the
+// focus node + its 1-hop neighbors at a compact height. With no props it
+// stays the whole-vault explorer the CommandCenter mounts (back-compat).
+interface VaultGraphProps {
+  focusPath?: string;
+  height?: number;
+}
+
+export default function VaultGraph({ focusPath, height }: VaultGraphProps = {}) {
+  const isFocusMode = Boolean(focusPath);
+  const graphHeight = height ?? (isFocusMode ? 420 : GRAPH_HEIGHT);
   const fgRef = useRef<ForceGraphMethods<GNode>>();
   const containerRef = useRef<HTMLDivElement>(null);
   // Beacon layers: each node can have up to 3 pulsing ring materials
@@ -77,10 +88,13 @@ export default function VaultGraph() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  // Graph data (30s poll)
-  const { data: graphData } = useQuery(getVaultGraph, undefined, {
-    refetchInterval: 30_000,
-  });
+  // Graph data (30s poll). In focus mode forward `?focus=` so ctrl-api
+  // returns the matter's neighborhood; otherwise whole-vault as before.
+  const { data: graphData } = useQuery(
+    getVaultGraph,
+    isFocusMode ? { focus: focusPath as string } : undefined,
+    { refetchInterval: 30_000 },
+  );
 
   // Server-side full-text search (debounced)
   const { data: serverResults } = useQuery(
@@ -188,17 +202,44 @@ export default function VaultGraph() {
     return counts;
   }, [graphData]);
 
+  // C-B2 — in focus mode, restrict to the focus node + its 1-hop neighbors.
+  // The `?focus=` endpoint may return the whole graph, so filter client-side
+  // (same neighbor pattern the search path uses). Normalize focusPath to the
+  // node id convention (display path, with `.md`).
+  const focusId = useMemo(() => {
+    if (!focusPath) return null;
+    return focusPath.endsWith(".md") ? focusPath : `${focusPath}.md`;
+  }, [focusPath]);
+
+  const focusVisibleIds = useMemo(() => {
+    if (!isFocusMode || !focusId || !graphData?.edges) return null;
+    const set = new Set<string>([focusId]);
+    for (const e of graphData.edges as GraphEdge[]) {
+      if (e.source === focusId) set.add(e.target);
+      if (e.target === focusId) set.add(e.source);
+    }
+    return set;
+  }, [isFocusMode, focusId, graphData]);
+
   const fg3dData = useMemo(() => {
     if (!graphData?.nodes) return { nodes: [], links: [] };
+    let nodes = graphData.nodes as GraphNode[];
+    let edges = graphData.edges as GraphEdge[];
+    if (focusVisibleIds) {
+      nodes = nodes.filter((n) => focusVisibleIds.has(n.id));
+      edges = edges.filter(
+        (e) => focusVisibleIds.has(e.source) && focusVisibleIds.has(e.target),
+      );
+    }
     return {
-      nodes: (graphData.nodes as GraphNode[]).map((n) => ({ ...n })),
-      links: (graphData.edges as GraphEdge[]).map((e) => ({
+      nodes: nodes.map((n) => ({ ...n })),
+      links: edges.map((e) => ({
         source: e.source,
         target: e.target,
         relation: e.relation,
       })),
     };
-  }, [graphData]);
+  }, [graphData, focusVisibleIds]);
 
   // Configure forces for tighter clustering + zoom to fit on initial load
   useEffect(() => {
@@ -358,8 +399,10 @@ export default function VaultGraph() {
 
   const onNodeClick = useCallback(
     (node: GNode) => {
+      // Route to the canonical vault reader. The previous target,
+      // /dashboard/vault/<path>, is a dead route post-redesign.
       const recordPath = (node.id as string).replace(/\.md$/, "");
-      navigate(`/dashboard/vault/${recordPath}`);
+      navigate(`/vault?slug=${encodeURIComponent(recordPath)}`);
     },
     [navigate],
   );
@@ -412,12 +455,21 @@ export default function VaultGraph() {
 
   // ---- Render ----
 
-  if (!graphData || fg3dData.nodes.length === 0) {
+  // C-B2 — in focus mode a matter with no resolved links yields just the
+  // focus node (or none). Show an honest "few links yet" line instead of the
+  // whole-vault "No vault records yet" copy or an empty 3D canvas.
+  const focusSparse =
+    isFocusMode && fg3dData.links.length === 0;
+
+  if (!graphData || fg3dData.nodes.length === 0 || focusSparse) {
+    const message = !graphData
+      ? "Loading graph data..."
+      : isFocusMode
+        ? "No linked records yet."
+        : "No vault records yet";
     return (
       <div className="flex items-center justify-center py-16">
-        <p className="font-mono text-xs text-muted-foreground/60">
-          {graphData ? "No vault records yet" : "Loading graph data..."}
-        </p>
+        <p className="font-mono text-xs text-muted-foreground/60">{message}</p>
       </div>
     );
   }
@@ -472,13 +524,13 @@ export default function VaultGraph() {
 
       <div className="relative">
         {/* Graph — full width */}
-        <div style={{ height: GRAPH_HEIGHT }} className="w-full overflow-hidden rounded-sm">
+        <div style={{ height: graphHeight }} className="w-full overflow-hidden rounded-sm">
           <ForceGraph3D
             ref={fgRef}
             graphData={fg3dData}
             backgroundColor="rgba(0,0,0,0)"
             width={containerWidth}
-            height={GRAPH_HEIGHT}
+            height={graphHeight}
             showNavInfo={false}
             nodeThreeObject={nodeThreeObject}
             nodeLabel={nodeLabel}
@@ -575,7 +627,7 @@ export default function VaultGraph() {
                 {searchResults.map((r) => (
                   <Link
                     key={r.id}
-                    to={`/dashboard/vault/${r.id.replace(/\.md$/, "")}`}
+                    to={`/vault?slug=${encodeURIComponent(r.id.replace(/\.md$/, ""))}`}
                     className="flex items-center gap-2 rounded px-1 py-0.5 hover:bg-white/5"
                   >
                     <span

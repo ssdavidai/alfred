@@ -7,7 +7,7 @@
 // — those are subsumed by current_state and the tasks list. The Edit button
 // is preserved (it writes a triage record with intent=matter_edit, existing
 // pattern).
-import { useMemo, useState } from "react";
+import { Suspense, lazy, useMemo, useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
 import {
   useQuery,
@@ -20,6 +20,11 @@ import { Frame } from "../client/components/ab/Frame";
 import { Markdown } from "../client/components/ab/Markdown";
 import { PageOverture } from "../client/components/ab/PageOverture";
 import { countSectionItems } from "./matterShapeCore";
+
+// C-B2 — the matter-scoped relationship graph. Lazy so the `three` /
+// react-force-graph-3d bundle only loads when a matter detail is opened, not
+// on every route. Rendered with focusPath = the matter's record path.
+const VaultGraph = lazy(() => import("./components/VaultGraph"));
 
 type TaskState = "pending" | "in_progress" | "done" | "archived";
 
@@ -550,6 +555,32 @@ export default function MatterDetailPage() {
             without a record (most, until upstream onboarding links them)
             degrade to plain text. */}
         <KeyEntitiesSection entities={matter.key_entities} />
+
+        {/* C-B2 — the matter's relationship graph: its 1-hop vault
+            neighborhood, replacing the old text-list layout the owner
+            rejected. Reuses VaultGraph in focus mode (the click route now
+            lands in the canonical vault reader). Self-quiets to a "no linked
+            records yet" line when the matter has no resolved links. */}
+        <section className="mb-12">
+          <h2
+            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-5"
+            style={{ color: "var(--brass)" }}
+          >
+            Relationships
+          </h2>
+          <Suspense
+            fallback={
+              <p
+                className="font-body italic text-[15px]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Drawing the web…
+              </p>
+            }
+          >
+            <VaultGraph focusPath={matter.path} height={420} />
+          </Suspense>
+        </section>
 
         {/* Brass hr — no originX. The earlier version had a transform that
             broke the SVG-ish rule layout; plain hr.gilt renders correctly. */}
