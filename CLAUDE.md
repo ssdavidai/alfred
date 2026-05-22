@@ -125,3 +125,94 @@ OpenClaw is replaced by **Hermes**. In ctrl-api code:
 One PR per logical change. After a push that triggers CI, wait for the deploy
 to finish and verify before pushing the next change. Don't batch unrelated
 fixes into rapid pushes.
+
+## Bug-fixing protocol (SOURCE OF TRUTH — this is how bugs get fixed here)
+
+Two modes: **investigate** (read-only fan-out → reports) then **fix**
+(gate-protected lane fan-out). The point is to run as many parallel agents as
+the work allows **without conflicts or contract violations** — by making a bad
+commit *impossible to land*, not by trusting agents to behave. Anchored by
+`docs/FAILURE-MODES.md` (the audit), `docs/FIX-PLAN.md` (the lane plan),
+`docs/FIX-CONTRACTS.md` (frozen cross-lane interfaces), and `scripts/hooks/`
+(the commit gate).
+
+### Mode A — Investigation fan-out (read-only)
+For mapping unknown breakage (e.g. a pass over the live product):
+- **One agent per issue**, scoped narrowly, run as parallel background agents.
+- **Strictly read-only**: no code edits, no live writes. Say so explicitly
+  ("no POST/PUT/DELETE, no `docker` writes"); require each agent to **disclose
+  any unavoidable probe side-effect** (a connect/init probe *can* mint stray
+  rows — it happened).
+- Each writes ONE report to a git-ignored **`debug/<MMDD>/<issue>-findings.md`**:
+  exact code path (`file:line`), live evidence, **root-cause vs environmental
+  caveat** (separate real bugs from credit/quota/stale-deploy noise), a "desired
+  happy path", and a prioritized list.
+- Track each as a task; surface each as it lands; then **synthesize** all
+  reports into one plan grouped by **cross-cutting root cause** (most symptoms
+  collapse into a few seams).
+- Live access is read-only SSH; **inline the SSH options on every call** (a
+  shell variable won't word-split under zsh).
+
+### Mode B — Fix fan-out (gate-protected, parallel-safe)
+1. **Rank bugs in `FAILURE-MODES.md` with the exact code path. Failing-test-first:**
+   write a red repro test, then fix to green — never fix against an assumption.
+2. **Phase 0 first, sequentially (orchestrator only):** build shared foundations
+   everything sits on (migration runner, the contracts, the gate). These are
+   forbidden-zone files; nothing parallel starts until they land.
+3. **Freeze the contracts** (`FIX-CONTRACTS.md`, C1…) *before any lane codes*.
+   A consumer lane builds against the frozen shape and never needs the
+   provider's code. **If a contract is wrong, the lane STOPs and reports — it
+   never improvises across the boundary.**
+4. **Package-scoped lanes**, non-overlapping glob territory (→ conflict-free
+   merges by construction): **I**·ctrl `packages/ctrl/**` · **II**·learn
+   `packages/learn/**` · **III**·web `packages/web/**` · **IV**·alfred-vault
+   `packages/alfred-vault/**` · **V**·edges/infra (`packages/{hermes,mcp-server,vault-init}/**`,
+   `scripts/**`, `caddy/**`, `docker-compose.yaml`, `.env.example`, `Makefile`,
+   `docs/**`). **At most one agent per lane at a time** — lanes parallel, tasks
+   within a lane serial.
+5. **The commit gate makes violations impossible to land** (`scripts/hooks/`,
+   `bash scripts/hooks/install.sh` sets `core.hooksPath`, inherited by every
+   worktree). On `git commit`, `check_lane.py` rejects the diff if it: (a) leaves
+   the lane's `allowed` globs, (b) touches the **forbidden zone** (`schema.sql`,
+   `db/migrations/**`, `migrate.ts`, `api/server.ts`, `**/CONTRACT.md`, the
+   `FIX-*`/`FAILURE-MODES` docs, `scripts/hooks/**`, `CLAUDE.md`), (c) exceeds
+   **~200 net LOC**, or (d) fails the lane **VERIFY** (build / `tsc` / pytest /
+   `compose config` — the regression gate). The lane is declared by a `.lane`
+   manifest at the worktree root (`{"lane":"II","verify":"…"}`). The **main
+   checkout (no `.lane`) is `phase0`** — orchestrator, allow-all. A linked
+   worktree with **no `.lane` is rejected** (fail-safe). **Never use
+   `ALFRED_SKIP_VERIFY`.**
+6. **Agent brief** = LANE / GOAL (one sentence) / ALLOWED + FORBIDDEN globs /
+   VERIFY / CONTRACT (the package `CONTRACT.md` + the relevant `FIX-CONTRACTS.md`
+   clause) / SCOPE ~200 LOC (if bigger, STOP and report) / WHEN DONE: 3-line PR
+   note, start nothing else. Standing preamble: *first action — write `.lane`;
+   read your contracts; touch only ALLOWED; code against the frozen contracts; a
+   blocked commit means re-scope, not override.*
+7. **Sequence vs parallelize.** Fan out lanes **in parallel** when their globs
+   are disjoint **and** the boundary contract is frozen. **Sequence** (provider
+   PR → consumer PR) when a consumer needs a provider's new shape, or when a
+   "disjoint" file turns out shared (move it to the forbidden zone, Phase-0-owned,
+   and lanes consume it). Merge order = **providers before consumers**. The gate
+   surfaces any cross-lane collision *immediately* as a blocked commit, never as
+   a tangled merge.
+8. **One PR per logical change → build → deploy to the verify VM → smoke → only
+   then the next PR.** Push to `main` lets CI build `:latest`; never clobber a
+   production `:latest` or push public `main` without explicit confirmation —
+   verify on a throwaway tag/VM first.
+
+### Hard-won rules (these bit me — do not relearn them)
+- **`isolation: worktree` does NOT guarantee isolation.** Agents have shared the
+  working tree and overwritten each other's `.lane`. Either confirm each agent
+  got a real separate worktree, **or** run coordinated cross-package work
+  yourself in the main checkout (phase0), one commit at a time. **Always
+  `git show --stat` each agent's commit** to confirm it touched only its own
+  files before trusting it.
+- **Agents must never run `npm install/ci/prune`** — it corrupts the shared
+  symlinked `node_modules`. VERIFY uses existing deps.
+- **Stage only your own files** (`git add <paths>`, never `git add -A`) — never
+  sweep up `node_modules`/lockfile churn or another lane's work.
+- **Clean up a stale `.lane`** before an orchestrator (phase0) commit — a
+  leftover lane marker blocks a legitimate cross-cutting commit.
+- Forbidden-zone files (contracts, migrations, `schema.sql`, `server.ts`,
+  `scripts/hooks/**`, `CLAUDE.md`) are **orchestrator-only**, edited centrally —
+  never inside a lane.
