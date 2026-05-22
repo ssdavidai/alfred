@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { addRoute } from "../server.js";
-import { sendJson, ValidationError, NotFoundError } from "../errors.js";
+import { sendJson, ValidationError, NotFoundError, ApiError } from "../errors.js";
 import { dockerExec } from "../helpers.js";
 import { createOrReuseOmiStream } from "./streams.js";
 import { composeInboundWebhookUrl } from "./webhooksInbound.js";
@@ -1100,23 +1100,42 @@ function collectStreamEventSourceTypes(): Set<string> {
 }
 
 /**
- * Fetch the credential field name(s) a toolkit's API_KEY / BEARER_TOKEN
+ * A single credential-initiation field spec as Composio exposes it under
+ * `auth_config_details[].fields.connected_account_initiation.required[]`.
+ * `name` is the only field guaranteed present; the rest are surfaced faithfully
+ * (passed through unchanged) so the client can render a labelled, typed input.
+ */
+export interface RequiredCredentialField {
+  name: string;
+  displayName?: string;
+  description?: string;
+  type?: string;
+  required?: boolean;
+  default?: unknown;
+  is_secret?: boolean;
+  legacy_template_name?: string;
+}
+
+/**
+ * Fetch the credential field spec(s) a toolkit's API_KEY / BEARER_TOKEN
  * connection actually requires, from the toolkit detail's
- * `auth_config_details[].fields.connected_account_initiation.required[].name`.
+ * `auth_config_details[].fields.connected_account_initiation.required[]`.
  *
  * The canonical field is `generic_api_key` for almost every API-key toolkit
  * (SERP, Tavily, Exa, Perplexity), but it is NOT constant — Firecrawl needs
  * `generic_api_key` AND a second field (`full`/base_url). Hardcoding
  * `api_key`/`token` 400s with ConnectedAccount_MissingRequiredFields.
  *
- * Returns the matching auth_config_detail's required field names, or an empty
- * array when the detail can't be read (caller falls back to a sane default).
+ * Returns the matching auth_config_detail's required field specs (the raw
+ * Composio objects, unmodified except for guaranteeing a string `name`), or an
+ * empty array when the detail can't be read (callers fall back to a sane
+ * default). Use `fieldNames()` to reduce this to just the names.
  */
 async function fetchRequiredCredentialFields(
   toolkitSlug: string,
   authScheme: string,
   apiKey: string,
-): Promise<string[]> {
+): Promise<RequiredCredentialField[]> {
   try {
     const resp = await fetch(
       `${COMPOSIO_API_V3}/toolkits/${encodeURIComponent(toolkitSlug)}`,
@@ -1141,14 +1160,22 @@ async function fetchRequiredCredentialFields(
     const required: any[] =
       detail?.fields?.connected_account_initiation?.required ?? [];
     return required
-      .map((f) => (typeof f?.name === "string" ? f.name : ""))
-      .filter(Boolean);
+      // Keep only well-formed entries (a string name is the contract), but
+      // surface every other property Composio sent so the UI can render a
+      // proper labelled / typed / described input.
+      .filter((f) => f && typeof f.name === "string" && f.name)
+      .map((f) => ({ ...f }) as RequiredCredentialField);
   } catch (err: any) {
     console.error(
       `[integrations] toolkit detail fetch for ${toolkitSlug} threw: ${err?.message ?? err}`,
     );
     return [];
   }
+}
+
+/** Reduce a required-field spec list to just the credential field names. */
+function fieldNames(fields: RequiredCredentialField[]): string[] {
+  return fields.map((f) => f.name).filter(Boolean);
 }
 
 /**
@@ -1615,6 +1642,38 @@ export function registerIntegrationRoutes(): void {
   });
 
   // =========================================================================
+  // GET /api/v1/integrations/:toolkit/required-fields — credential field specs
+  //
+  // Tells the client which credential field(s) an API-key / bearer-token
+  // toolkit needs so it can render the right inputs. Most toolkits need one
+  // (`generic_api_key`), but multi-field toolkits like Firecrawl need
+  // `generic_api_key` + `full` and the UI cannot guess that (F74).
+  //
+  // Query: ?auth_scheme=API_KEY|BEARER_TOKEN  (defaults to API_KEY)
+  // Response: { toolkit, auth_scheme, fields: RequiredCredentialField[] }
+  // where each field is the raw Composio
+  // connected_account_initiation.required[] entry, surfaced faithfully
+  // ({ name, displayName?, description?, type?, required?, is_secret?, ... }).
+  // `fields` is [] when the toolkit detail is unreadable — the client should
+  // then fall back to a single credential input + POST { credential }.
+  // =========================================================================
+  addRoute("GET", "/api/v1/integrations/:toolkit/required-fields", async ({ res, params, query }) => {
+    const toolkitSlug = params.toolkit;
+    assertNotSyntheticSlug(toolkitSlug);
+    const authScheme = (query.get("auth_scheme") || "API_KEY").toUpperCase();
+    if (authScheme !== "API_KEY" && authScheme !== "BEARER_TOKEN") {
+      throw new ValidationError(`Unsupported auth_scheme "${authScheme}" — must be API_KEY or BEARER_TOKEN`);
+    }
+    const apiKey = getComposioApiKey();
+    try {
+      const fields = await fetchRequiredCredentialFields(toolkitSlug, authScheme, apiKey);
+      sendJson(res, 200, { toolkit: toolkitSlug, auth_scheme: authScheme, fields });
+    } catch (err: any) {
+      sendJson(res, 500, { error: `Failed to fetch required fields: ${err.message}` });
+    }
+  });
+
+  // =========================================================================
   // POST /api/v1/integrations/connect-api-key — API-key / bearer-token flow
   //
   // Non-OAuth connect flow for toolkits whose auth_scheme is API_KEY or
@@ -1626,8 +1685,16 @@ export function registerIntegrationRoutes(): void {
   //   {
   //     toolkit_slug: string,
   //     auth_scheme?: "API_KEY" | "BEARER_TOKEN"   // defaults to API_KEY
-  //     credential: string                          // the user's key / token
+  //     credential?: string                         // single-field flow (legacy)
+  //     fields?: { [fieldName: string]: string }    // multi-field flow (F74)
   //   }
+  //
+  // Single-field (legacy) flow: supply `credential` and we map it onto every
+  // required field — exactly the historical behaviour. Multi-field flow:
+  // supply `fields` (alias `credentials`) keyed by the names returned from
+  // GET /api/v1/integrations/:toolkit/required-fields, and each named field
+  // gets its own value (Firecrawl needs generic_api_key AND full). Exactly one
+  // of `credential` / `fields` is required.
   //
   // Response mirrors /api/v1/integrations/connect so the SaaS side can reuse
   // the same upsertConnection path. `connect_url` is always empty — there
@@ -1639,8 +1706,25 @@ export function registerIntegrationRoutes(): void {
       throw new ValidationError("toolkit_slug (string) is required");
     }
     assertNotSyntheticSlug(b.toolkit_slug as string);
-    if (typeof b.credential !== "string" || !b.credential.trim()) {
-      throw new ValidationError("credential (string) is required");
+
+    // Per-field map (F74). Accept `fields` or its alias `credentials`. Coerce
+    // every value to a trimmed string and drop empties so a half-filled form
+    // can't smuggle blanks past the required-field check below.
+    const rawFieldMap = (b.fields ?? b.credentials);
+    const fieldMap: Record<string, string> = {};
+    if (rawFieldMap !== undefined) {
+      if (typeof rawFieldMap !== "object" || rawFieldMap === null || Array.isArray(rawFieldMap)) {
+        throw new ValidationError("fields (object map of fieldName → value) must be an object");
+      }
+      for (const [k, v] of Object.entries(rawFieldMap as Record<string, unknown>)) {
+        if (typeof v === "string" && v.trim()) fieldMap[k] = v.trim();
+      }
+    }
+    const hasFieldMap = Object.keys(fieldMap).length > 0;
+
+    const hasCredential = typeof b.credential === "string" && (b.credential as string).trim().length > 0;
+    if (!hasCredential && !hasFieldMap) {
+      throw new ValidationError("credential (string) or fields (object map) is required");
     }
 
     const authScheme = (typeof b.auth_scheme === "string" ? b.auth_scheme : "API_KEY").toUpperCase();
@@ -1651,7 +1735,7 @@ export function registerIntegrationRoutes(): void {
     const apiKey = getComposioApiKey();
     const userId = getComposioUserId();
     const toolkitSlug = b.toolkit_slug as string;
-    const credential = (b.credential as string).trim();
+    const credential = hasCredential ? (b.credential as string).trim() : "";
 
     try {
       // Step 1: Find an existing auth_config for this toolkit that uses the
@@ -1721,23 +1805,52 @@ export function registerIntegrationRoutes(): void {
         }
       }
 
-      // Step 2: Create a connected_account with the user's credential in
+      // Step 2: Create a connected_account with the user's credential(s) in
       // connection.state.val. The credential field name(s) are NOT a constant
       // — they come from the toolkit's connected_account_initiation.required
       // (SERP/Tavily/Exa want `generic_api_key`; Firecrawl wants
-      // `generic_api_key` + `full`). Read them from the toolkit detail and map
-      // the user's single pasted credential onto every required field. Fall
+      // `generic_api_key` + `full`). Read them from the toolkit detail. Fall
       // back to the legacy `generic_api_key`/`token` guess only when the detail
       // is unreadable.
-      const requiredFields = await fetchRequiredCredentialFields(
+      const requiredSpecs = await fetchRequiredCredentialFields(
         toolkitSlug,
         authScheme,
         apiKey,
       );
+      const requiredFields = fieldNames(requiredSpecs);
       const fallbackField = authScheme === "BEARER_TOKEN" ? "token" : "generic_api_key";
       const fields = requiredFields.length > 0 ? requiredFields : [fallbackField];
       const val: Record<string, string> = {};
-      for (const field of fields) val[field] = credential;
+      if (hasFieldMap) {
+        // Multi-field (F74): take each required field's value from the
+        // per-field map. If the form omitted a required field but a single
+        // `credential` was ALSO sent, fall back to that for the gap (lets a
+        // caller fill the secret via `credential` and extras via `fields`).
+        const missing: string[] = [];
+        for (const field of fields) {
+          if (Object.prototype.hasOwnProperty.call(fieldMap, field)) {
+            val[field] = fieldMap[field];
+          } else if (hasCredential) {
+            val[field] = credential;
+          } else {
+            missing.push(field);
+          }
+        }
+        // Carry through any extra keys the caller supplied that aren't in the
+        // detected required set (the detail can be unreadable / lag Composio).
+        for (const [k, v] of Object.entries(fieldMap)) {
+          if (!Object.prototype.hasOwnProperty.call(val, k)) val[k] = v;
+        }
+        if (missing.length > 0) {
+          throw new ValidationError(
+            `Missing required credential field(s): ${missing.join(", ")}`,
+          );
+        }
+      } else {
+        // Single-field (legacy): map the one pasted credential onto every
+        // required field — unchanged behaviour.
+        for (const field of fields) val[field] = credential;
+      }
       const connectResp = await fetch(`${COMPOSIO_API_V3}/connected_accounts`, {
         method: "POST",
         headers: {
@@ -1773,6 +1886,10 @@ export function registerIntegrationRoutes(): void {
         auth_scheme: authScheme,
       });
     } catch (err: any) {
+      // A ValidationError raised in here (e.g. a missing required field in the
+      // per-field map) is a 400, not a 500 — let the framework handler render
+      // it with the right status instead of masking it as an internal error.
+      if (err instanceof ApiError) throw err;
       sendJson(res, 500, { error: `Failed to initiate connection: ${err.message}` });
     }
   });
