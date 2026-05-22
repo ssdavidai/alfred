@@ -167,10 +167,22 @@ def main() -> int:
     cross_tenant_peers = os.environ.get("CROSS_TENANT_PEERS", "").strip()
 
     # Paths baked into config.yaml must be valid in the Hermes RUNTIME
-    # container. Use HERMES_RUNTIME_PROFILE_DIR when set; else the write dir.
-    runtime_dir = Path(
-        os.environ.get("HERMES_RUNTIME_PROFILE_DIR", str(profile_dir))
-    )
+    # container, whose HERMES_HOME can differ from the init container's write
+    # path (e.g. the runtime mounts the volume at /hermes-state while the init
+    # image's Dockerfile default is /opt/data). Resolution order: an explicit
+    # per-profile override; else derive from the runtime HERMES_HOME; else the
+    # write dir. Without this the terminal.cwd / mcp paths bake a dead
+    # /opt/data path on a box whose runtime HERMES_HOME diverges (F44).
+    runtime_profile_override = os.environ.get(
+        "HERMES_RUNTIME_PROFILE_DIR", ""
+    ).strip()
+    runtime_home = os.environ.get("HERMES_RUNTIME_HOME", "").strip()
+    if runtime_profile_override:
+        runtime_dir = Path(runtime_profile_override)
+    elif runtime_home:
+        runtime_dir = Path(runtime_home) / "profiles" / profile
+    else:
+        runtime_dir = Path(profile_dir)
     mcp_stdio_dir = str(runtime_dir / "mcp-stdio")
     mcp_ctrl_script = str(runtime_dir / "mcp" / "ctrl-server.mjs")
     node_modules = str(runtime_dir / "mcp-stdio" / "node_modules")
