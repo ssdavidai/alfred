@@ -229,8 +229,16 @@ class TestBuildRichInstinctContent:
         content = _build_rich_instinct_content(self._good())
         assert "type: instinct" in content
         assert "status: active" in content
-        assert "discretion_threshold: 0.9" in content
         assert "generated: true" in content
+
+    def test_discretion_threshold_not_seeded(self):
+        # C-B6: day-zero instincts must NOT carry a seeded
+        # discretion_threshold (even when the LLM emits one) — they start
+        # at Asking and earn autonomy from accumulated observations. The
+        # runtime gate derives the bar from observation_count: 0 → 0.95.
+        content = _build_rich_instinct_content(self._good())
+        assert "discretion_threshold" not in content
+        assert "observation_count: 0" in content
 
     def test_input_patterns_serialized_as_json_scalar(self):
         content = _build_rich_instinct_content(self._good())

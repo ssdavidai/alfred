@@ -60,6 +60,36 @@ class TestShouldRouteAutonomously:
         instinct = {"observation_count": 60}
         assert should_route_autonomously(0.76, instinct) is True
 
+    # --- C-B6: observation-earned bar is a FLOOR; explicit threshold raise-only ---
+
+    def test_seeded_threshold_does_not_authorize_autonomy_at_zero_obs(self):
+        # A fresh instinct seeded with a low threshold (0.80) but ZERO
+        # real observations must NOT auto-route — the obs floor (0.95)
+        # wins, so it stays at Asking and asks Sir for guidance.
+        instinct = {"discretion_threshold": 0.80, "observation_count": 0}
+        assert should_route_autonomously(0.90, instinct) is False
+        # Only a score clearing the earned 0.95 floor would route.
+        assert should_route_autonomously(0.96, instinct) is True
+
+    def test_explicit_threshold_can_only_raise_the_bar(self):
+        # 60 obs earns a 0.75 bar; an explicit 0.90 (more cautious
+        # operator override) must raise it, not be ignored.
+        instinct = {"discretion_threshold": 0.90, "observation_count": 60}
+        assert should_route_autonomously(0.80, instinct) is False
+        assert should_route_autonomously(0.91, instinct) is True
+
+    def test_earned_instinct_still_routes(self):
+        # >=20 decision-sourced observations earns the 0.80 Acting bar;
+        # with no premature seed it routes autonomously.
+        instinct = {"observation_count": 25}
+        assert should_route_autonomously(0.81, instinct) is True
+
+    def test_live_observation_count_preferred_over_snapshot(self):
+        # Live (ctrl-api-enriched) count is the decision-sourced source
+        # of truth and overrides a stale stored snapshot.
+        instinct = {"live_observation_count": 0, "observation_count": 99}
+        assert should_route_autonomously(0.90, instinct) is False
+
 
 class TestFormatDiscretionLevel:
     def test_very_cautious(self):
