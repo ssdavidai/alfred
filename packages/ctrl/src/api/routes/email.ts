@@ -18,10 +18,51 @@ const AGENTMAIL_API = "https://api.agentmail.to/v0";
 const FALLBACK_FILE =
   path.join(process.env.ALFRED_DATA_DIR ?? "/alfred-data", ".agentmail-credentials.json");
 
+// Inbound mail: AgentMail → SaaS receiver (/webhooks/agentmail, see
+// agentmailReceiver.ts) → this tenant's /api/v1/channels/email/inbound.
+// SAAS_HOST mirrors the streams.ts convention for SaaS-routed webhooks.
+const SAAS_HOST = (process.env.SAAS_HOST ?? "https://alfred.black").replace(/\/$/, "");
+const AGENTMAIL_WEBHOOK_URL = `${SAAS_HOST}/webhooks/agentmail`;
+
 interface AgentMailCreds {
   inbox_id: string;
   inbox_address: string;
   api_key: string;
+}
+
+// Persist the inbox-scoped credential to the JSON fallback getCreds() reads.
+// This is the same credential-store path the env-driven config falls back to,
+// so a provision makes the inbox usable without an .env edit + restart, and a
+// re-provision overwrites cleanly (idempotent / self-refreshing).
+function writeCreds(creds: AgentMailCreds): void {
+  fs.mkdirSync(path.dirname(FALLBACK_FILE), { recursive: true });
+  fs.writeFileSync(FALLBACK_FILE, JSON.stringify(creds, null, 2), "utf-8");
+}
+
+// Make sure inbound mail for this inbox reaches the SaaS receiver. Returns
+// true if a webhook to AGENTMAIL_WEBHOOK_URL exists (already present or newly
+// created), false otherwise. Never throws — provisioning succeeds regardless,
+// since the shared-pod webhook configured at SaaS bootstrap is the primary
+// delivery path; this is a per-inbox belt-and-braces.
+async function ensureInboundWebhook(creds: AgentMailCreds): Promise<boolean> {
+  try {
+    const existing = await amWithKey(creds.api_key, "GET", "/webhooks");
+    if (existing.status >= 200 && existing.status < 300) {
+      const hooks = Array.isArray(existing.body?.webhooks)
+        ? existing.body.webhooks
+        : [];
+      const match = hooks.some((h: any) => h?.url === AGENTMAIL_WEBHOOK_URL);
+      if (match) return true;
+    }
+    const created = await amWithKey(creds.api_key, "POST", "/webhooks", {
+      url: AGENTMAIL_WEBHOOK_URL,
+      event_types: ["message.received"],
+      inbox_ids: [creds.inbox_id],
+    });
+    return created.status >= 200 && created.status < 300;
+  } catch {
+    return false;
+  }
 }
 
 function getCreds(): AgentMailCreds {
@@ -51,8 +92,8 @@ function getCreds(): AgentMailCreds {
   );
 }
 
-async function am(
-  creds: AgentMailCreds,
+async function amWithKey(
+  apiKey: string,
   method: string,
   path: string,
   body?: unknown,
@@ -60,7 +101,7 @@ async function am(
   const init: RequestInit = {
     method,
     headers: {
-      Authorization: `Bearer ${creds.api_key}`,
+      Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
   };
@@ -75,6 +116,15 @@ async function am(
     parsed = null;
   }
   return { status: res.status, body: parsed };
+}
+
+function am(
+  creds: AgentMailCreds,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<{ status: number; body: any }> {
+  return amWithKey(creds.api_key, method, path, body);
 }
 
 function assertOk(
@@ -96,18 +146,58 @@ function stringArray(v: unknown): string[] | undefined {
 }
 
 export function registerEmailRoutes(): void {
-  // Quick health check — confirms tenant has AgentMail wired up.
+  // Health check. Contract C14: { configured, inbox_address: string|null }.
+  // The web card branches on `configured`; inbox_address is always present
+  // (null when unconfigured) so the consumer never reads undefined.
   addRoute("GET", "/api/v1/email/status", async ({ res }) => {
     try {
       const creds = getCreds();
-      sendJson(res, 200, {
-        configured: true,
-        inbox_id: creds.inbox_id,
-        inbox_address: creds.inbox_address,
-      });
+      sendJson(res, 200, { configured: true, inbox_id: creds.inbox_id, inbox_address: creds.inbox_address || null });
     } catch {
-      sendJson(res, 200, { configured: false });
+      sendJson(res, 200, { configured: false, inbox_address: null });
     }
+  });
+
+  // Provision/re-provision the AgentMail inbox from a bare API key. Contract
+  // C14: POST {api_key} → 200 {configured, inbox_address, inbox_id,
+  // webhook_registered} / 4xx {error, code}. Validate the key by listing
+  // inboxes, persist the credential to the fallback getCreds() reads (so
+  // send/reply work with no .env edit), ensure the inbound webhook. Idempotent
+  // — a second call overwrites the creds and re-uses the webhook.
+  addRoute("POST", "/api/v1/email/provision", async ({ res, body }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const apiKey = typeof b.api_key === "string" ? b.api_key.trim() : "";
+    if (!apiKey) return sendJson(res, 400, { error: "`api_key` is required", code: "missing_api_key" });
+
+    let listed: { status: number; body: any };
+    try {
+      listed = await amWithKey(apiKey, "GET", "/inboxes");
+    } catch (err: any) {
+      return sendJson(res, 502, { error: `AgentMail unreachable: ${err?.message ?? String(err)}`, code: "agentmail_unreachable" });
+    }
+    if (listed.status === 401 || listed.status === 403) {
+      return sendJson(res, 400, { error: "AgentMail rejected the API key (unauthorized).", code: "invalid_api_key" });
+    }
+    if (listed.status < 200 || listed.status >= 300) {
+      return sendJson(res, 400, { error: `AgentMail inbox lookup failed (status=${listed.status})`, code: "inbox_lookup_failed" });
+    }
+
+    const inbox = (Array.isArray(listed.body?.inboxes) ? listed.body.inboxes : [])[0];
+    if (!inbox?.inbox_id || !inbox?.email) {
+      return sendJson(res, 400, { error: "This AgentMail key has no inbox. Mint an inbox-scoped key and try again.", code: "no_inbox" });
+    }
+
+    const creds: AgentMailCreds = { api_key: apiKey, inbox_id: inbox.inbox_id, inbox_address: inbox.email };
+    try {
+      writeCreds(creds);
+    } catch (err: any) {
+      return sendJson(res, 500, { error: `failed to persist credentials: ${err?.message ?? String(err)}`, code: "persist_failed" });
+    }
+
+    // Best-effort — provisioning still succeeds if the key can't manage
+    // webhooks (the shared-pod webhook from SaaS bootstrap also delivers).
+    const webhook_registered = await ensureInboundWebhook(creds);
+    sendJson(res, 200, { configured: true, inbox_address: creds.inbox_address, inbox_id: creds.inbox_id, webhook_registered });
   });
 
   // Send a new message (new thread).
