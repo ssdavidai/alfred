@@ -1253,8 +1253,34 @@ export function registerIntegrationRoutes(): void {
           user_id: a.member_id ?? a.user_id ?? "",
           created_at: a.createdAt ?? a.created_at ?? "",
           is_stream_source: hasStream,
+          is_primary: true,
+          duplicate_of: null as string | null,
         };
       });
+
+      // 1b. Dedup by toolkit (F25). When a toolkit has more than one ACTIVE
+      //     account (e.g. Sir re-authed Gmail without disconnecting the first),
+      //     the newest is the primary; older ACTIVE duplicates are stamped
+      //     is_primary:false + duplicate_of:<primary id> so the UI can
+      //     group/collapse them. Rows are NOT dropped — each still holds a live
+      //     grant the principal may want to revoke.
+      const newestByToolkit = new Map<string, { id: string; created_at: string }>();
+      for (const r of composioRows) {
+        if (r.status !== "ACTIVE") continue;
+        const tk = r.toolkit.toLowerCase();
+        const cur = newestByToolkit.get(tk);
+        if (!cur || r.created_at > cur.created_at) {
+          newestByToolkit.set(tk, { id: r.id, created_at: r.created_at });
+        }
+      }
+      for (const r of composioRows) {
+        if (r.status !== "ACTIVE") continue;
+        const primary = newestByToolkit.get(r.toolkit.toLowerCase());
+        if (primary && primary.id !== r.id) {
+          r.is_primary = false;
+          r.duplicate_of = primary.id;
+        }
+      }
 
       // 2. Omi wearable row — derived from stream-event source types.
       //    The OpenClaw-era `devices list --json` CLI that used to enumerate
