@@ -190,13 +190,19 @@ function normalizeMatterId(raw: string): string | null {
 }
 
 /** Pull a stable id reference out of various frontmatter shapes
- *  (`[[matter/foo]]`, `matter/foo`, `matter/foo.md`, `foo`). */
+ *  (`[[matter/foo]]`, `matter/foo`, `matter/foo.md`, `foo`).
+ *
+ *  Also resolves the legacy `project/` namespace (F8): the onboarding
+ *  pipeline created matters under `matter/<slug>` but tasks link a parallel
+ *  set of `project/<Human Name>` records via `project: '[[project/Foo]]'`.
+ *  Both prefixes map to the same flat id space (the file stem) so a
+ *  `project/<name>` ref binds to the project skeleton built in pass 1. */
 function extractMatterRef(value: unknown): string | null {
   if (!value) return null;
   let s = String(value).trim();
   const wl = /^\[\[([^\]|]+)(?:\|[^\]]+)?\]\]$/.exec(s);
   if (wl) s = wl[1];
-  s = s.replace(/^matter\//, "").replace(/\.md$/, "");
+  s = s.replace(/^(?:matter|project)\//, "").replace(/\.md$/, "");
   if (!s || s.includes("/")) return null;
   return s;
 }
@@ -411,19 +417,39 @@ function buildMatterIndex(): MatterIndexResult {
   // Pass 1 — Build the per-matter detail skeleton + parse explicit
   // `tasks:` arrays from each matter's frontmatter (forward reference
   // from matter → task; the reverse direction is handled in pass 2).
+  //
+  // Two namespaces feed the skeleton (F8): the canonical `matter/<slug>`
+  // records the onboarding pipeline writes, AND the legacy `project/<Human
+  // Name>` records that tasks/decisions actually back-reference. Without the
+  // latter, every `project/`-linked child was structurally invisible to
+  // /matters (counts/timeline/tasks stuck at 0). `matter/` is processed first
+  // so a same-stem collision resolves in favour of the canonical record.
   // -------------------------------------------------------------------------
   const tasksDeclaredByMatter = new Map<string, Set<string>>();
-  for (const relPath of files) {
-    const display = relPath.replace(/\\/g, "/");
-    if (!display.startsWith("matter/")) continue;
+  // display paths promoted into a matter skeleton — pass 2 must not also
+  // treat them as child records of some other matter.
+  const skeletonPaths = new Set<string>();
+  const skeletonOrder = files
+    .map((relPath) => relPath.replace(/\\/g, "/"))
+    .filter((display) => display.startsWith("matter/") || display.startsWith("project/"))
+    // matter/ before project/ so the canonical namespace wins on stem collision.
+    .sort((a, b) => {
+      const ap = a.startsWith("matter/") ? 0 : 1;
+      const bp = b.startsWith("matter/") ? 0 : 1;
+      return ap - bp;
+    });
+  for (const display of skeletonOrder) {
+    const relPath = display;
     const rec = readRecord(relPath);
     if (!rec) continue;
     if (rec.fm.type && String(rec.fm.type) !== "matter" && String(rec.fm.type) !== "project") {
-      // Defence: matter/ files should be type=matter (or the legacy
-      // `project` synonym). Skip strays.
+      // Defence: matter/ and project/ files should be type=matter (or the
+      // legacy `project` synonym). Skip strays.
       continue;
     }
     const id = rec.stem;
+    // matter/ wins a same-stem collision (it sorts first).
+    if (byId.has(id)) continue;
     const name = String(rec.fm.name ?? rec.fm.title ?? id);
     const summary = String(rec.fm.summary ?? rec.fm.description ?? "");
     const next = String(rec.fm.next_action ?? rec.fm.next ?? "");
@@ -467,6 +493,7 @@ function buildMatterIndex(): MatterIndexResult {
       tasks: [],
       state: "waiting",
     });
+    skeletonPaths.add(display);
     // Forward-declared tasks: `tasks: [[[task/foo]], task/bar, baz]`
     const declared = rec.fm.tasks;
     if (declared) {
@@ -499,7 +526,10 @@ function buildMatterIndex(): MatterIndexResult {
 
   for (const relPath of files) {
     const display = relPath.replace(/\\/g, "/");
-    if (display.startsWith("matter/")) continue;
+    // Skip records already promoted into a matter skeleton in pass 1 —
+    // both the canonical matter/ namespace and any project/ records (F8).
+    // A skeleton record must not also be binned as a child of another matter.
+    if (display.startsWith("matter/") || skeletonPaths.has(display)) continue;
     const rec = readRecord(relPath);
     if (!rec) continue;
     const recType = String(rec.fm.type ?? "");
