@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate, Navigate } from "react-router-dom";
 import { useAuth } from "wasp/client/auth";
 import {
   useQuery,
@@ -43,7 +43,15 @@ const TRANSPORT_LABELS: Record<string, string> = {
   system: "System",
 };
 
+// F46 — /dashboard/streams → /connections. This was the pre-1.0 generic
+// "Integrations" console; the canonical connections surface is /connections.
+// The legacy console is preserved verbatim as LegacyStreamsPage so the
+// cutover can be reverted with one line.
 export default function StreamsPage() {
+  return <Navigate to="/connections" replace />;
+}
+
+function LegacyStreamsPage() {
   const { data: user } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();

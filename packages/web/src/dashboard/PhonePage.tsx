@@ -5,6 +5,7 @@ import {
   addAuthorizedNumber,
   removeAuthorizedNumber,
 } from "wasp/client/operations";
+import { Navigate } from "react-router-dom";
 import { Card, CardContent, CardTitle } from "../client/components/ui/card";
 import { Button } from "../client/components/ui/button";
 import { Input } from "../client/components/ui/input";
@@ -63,7 +64,14 @@ function formatRelative(iso: string): string {
   return `${Math.round(seconds / 86_400)}d ago`;
 }
 
+// F46 — /dashboard/phone → /channels. Phone/SMS is surfaced from the
+// Channels phone card. The legacy phone console is preserved verbatim as
+// LegacyPhonePage so the cutover can be reverted with one line.
 export default function PhonePage() {
+  return <Navigate to="/channels" replace />;
+}
+
+function LegacyPhonePage() {
   const { data, isLoading, error, refetch } = useQuery(getPhoneConfig);
   const cfg = data as PhoneConfig | undefined;
 

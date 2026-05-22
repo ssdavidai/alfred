@@ -240,7 +240,10 @@ function handleStart(req: Request, res: Response) {
     new Set([...config.defaultScopes, ...requestedScopes]),
   );
 
-  const redirectAfter = queryString(req.query.redirectAfter) || "/dashboard/streams";
+  // F46 — legacy /dashboard/streams now redirects to /connections (and a
+  // <Navigate> would drop the OAuth query params), so land directly on the
+  // canonical Connections surface.
+  const redirectAfter = queryString(req.query.redirectAfter) || "/connections";
 
   // Generate state token
   const state = crypto.randomBytes(24).toString("hex");
@@ -260,7 +263,7 @@ async function handleCallback(req: Request, res: Response) {
 
   if (error) {
     console.error(`[oauth2] Provider returned error: ${error}`);
-    return res.redirect(`/dashboard/streams?error=${encodeURIComponent(String(error))}`);
+    return res.redirect(`/connections?error=${encodeURIComponent(String(error))}`);
   }
 
   if (!state || !code) {

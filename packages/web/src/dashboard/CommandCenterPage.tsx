@@ -17,7 +17,7 @@ import {
   XCircle,
   Bot,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import DashboardLayout from "./DashboardLayout";
 import { Switch } from "../client/components/ui/switch";
@@ -60,7 +60,15 @@ function saveDashboardCache(data: any): void {
 // CommandCenterPage — the bento grid stats dashboard
 // ---------------------------------------------------------------------------
 
+// F46 — /dashboard/command-center → /desk. The canonical home (/desk) is
+// the decision queue + audit ledger; the steward-feed sub-route already
+// redirects to /decisions. The legacy bento stats dashboard is preserved
+// verbatim as LegacyCommandCenterPage so the cutover can be reverted.
 export default function CommandCenterPage() {
+  return <Navigate to="/desk" replace />;
+}
+
+function LegacyCommandCenterPage() {
   const [graphVisible, setGraphVisible] = useState(true);
   const [activePanel, setActivePanel] = useState<string | null>(null);
   const [persistedCache, setPersistedCache] = useState<{

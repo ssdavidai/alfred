@@ -12,13 +12,21 @@
 // the only two inputs the native CLI takes. Command approval is no longer
 // surfaced here at all: it is now Hermes-native (`approvals.mode`).
 import { useQuery, getDevices, approveDevice } from "wasp/client/operations";
+import { Navigate } from "react-router-dom";
 import DashboardLayout from "./DashboardLayout";
 import { Card, CardContent } from "../client/components/ui/card";
 import { Button } from "../client/components/ui/button";
 import { MessageSquare, Check } from "lucide-react";
 import { useState } from "react";
 
+// F46 — /dashboard/devices → /channels. Device/DM pairing now lives under
+// the Channels surface. The legacy pairing page is preserved verbatim as
+// LegacyDevicesPage so the cutover can be reverted with one line.
 export default function DevicesPage() {
+  return <Navigate to="/channels" replace />;
+}
+
+function LegacyDevicesPage() {
   const { data, isLoading, error, refetch } = useQuery(getDevices);
   const [platform, setPlatform] = useState("");
   const [code, setCode] = useState("");
