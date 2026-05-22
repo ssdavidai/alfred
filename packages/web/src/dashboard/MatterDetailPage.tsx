@@ -7,12 +7,13 @@
 // — those are subsumed by current_state and the tasks list. The Edit button
 // is preserved (it writes a triage record with intent=matter_edit, existing
 // pattern).
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link, useParams, useNavigate } from "react-router-dom";
 import {
   useQuery,
   getMatterDetail,
   getVaultRecord,
+  getVaultGraph,
   createVaultRecord,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
@@ -103,6 +104,25 @@ interface MatterDetail {
   signal_count_24h: number;
   timeline: TimelineEntry[];
   tasks: MatterTask[];
+}
+
+// F55 — the C19 graph backlink contract: getVaultGraph({ focus }) returns
+// `backlinks: [{path, name, rel}]` — the records that link TO the focused
+// record. `path` is a real vault record path (e.g. "person/jane-doe.md") and
+// `rel` is the linking frontmatter field / relation (e.g. "related_persons",
+// "body_link").
+interface Backlink {
+  path: string;
+  name: string;
+  rel: string;
+}
+
+// Tidy the raw relation field into a short human label for the group heading.
+function relLabel(rel: string): string {
+  const r = String(rel ?? "").trim();
+  if (!r) return "Linked";
+  if (r === "body_link") return "Mentioned in";
+  return r.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function fmtAsOf(value: string | null): string {
@@ -276,6 +296,37 @@ export default function MatterDetailPage() {
     { enabled: Boolean(safeId) },
   );
   const matter = (data?.matter ?? null) as MatterDetail | null;
+
+  // F55 — backlinks via the C19 graph contract. Focus on the matter's record
+  // path so ctrl-api returns the records that link TO this matter as
+  // `backlinks:[{path,name,rel}]`. Enabled only once we know the path. (The
+  // previous code asked getMatterDetail's fallback for `?focus=&` and read a
+  // `b.type`/`b.path` shape the route never produced — backlinks were always
+  // empty.)
+  const focusPath = matter?.path ?? "";
+  const { data: graphData } = useQuery(
+    getVaultGraph,
+    { focus: focusPath },
+    { enabled: Boolean(focusPath) },
+  );
+  const backlinks: Backlink[] = Array.isArray((graphData as any)?.backlinks)
+    ? ((graphData as any).backlinks as Backlink[])
+    : [];
+  const groupedBacklinks = useMemo(() => {
+    const groups = new Map<string, Backlink[]>();
+    const seen = new Set<string>();
+    for (const b of backlinks) {
+      if (!b?.path) continue;
+      // De-dupe a record that links via more than one field within a rel.
+      const key = `${b.rel}::${b.path}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const list = groups.get(b.rel);
+      if (list) list.push(b);
+      else groups.set(b.rel, [b]);
+    }
+    return [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  }, [backlinks]);
 
   const [asking, setAsking] = useState(false);
   const [draft, setDraft] = useState("");
@@ -666,6 +717,44 @@ export default function MatterDetailPage() {
             </ul>
           )}
         </section>
+
+        {/* F55 — Backlinks: records that link TO this matter, grouped by the
+            linking relation. Only rendered when there's at least one — an
+            empty graph stays quiet rather than showing a "no record yet"
+            placeholder. Each entry links into the vault reader. */}
+        {groupedBacklinks.length > 0 && (
+          <section className="mb-14">
+            <h2
+              className="font-mono text-[10px] uppercase tracking-[0.22em] mb-6"
+              style={{ color: "var(--brass)" }}
+            >
+              Linked records
+            </h2>
+            {groupedBacklinks.map(([rel, items]) => (
+              <div key={rel} className="mb-6">
+                <div
+                  className="font-mono text-[9px] uppercase tracking-[0.22em] mb-2"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  {relLabel(rel)}
+                </div>
+                <ul>
+                  {items.map((b) => (
+                    <li key={`${rel}-${b.path}`} className="py-2 border-b border-rule">
+                      <Link
+                        to={`/vault?slug=${encodeURIComponent(b.path.replace(/\.md$/, ""))}`}
+                        className="font-body text-[16px]"
+                        style={{ color: "var(--ink)" }}
+                      >
+                        {b.name || b.path}
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </section>
+        )}
 
         {/* Edit button — preserved from the previous layout. Writes a
             triage record with intent=matter_edit; the curator pipeline picks

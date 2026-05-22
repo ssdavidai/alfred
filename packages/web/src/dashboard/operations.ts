@@ -343,12 +343,21 @@ export const getVaultRecord: GetVaultRecord<{ path: string }, any> = async (
 // ============================================================
 // Vault Graph (3D knowledge graph)
 // ============================================================
-export const getVaultGraph: GetVaultGraph<void, any> = async (
-  _args,
+// F55 — accept an optional `focus` (a vault record path). When present we
+// forward it as the `?focus=` query param so ctrl-api returns the C19 backlink
+// contract ({nodes, edges, activity, backlinks:[{path,name,rel}]}) for that
+// record. The arg is optional, so existing call sites that pass nothing (e.g.
+// VaultPage, which derives backlinks from edges client-side) keep working.
+export const getVaultGraph: GetVaultGraph<{ focus?: string } | void, any> = async (
+  args,
   context,
 ) => {
   const instance = await getUserInstance(context);
-  return proxyToTenant(instance, { path: "/api/v1/vault/graph" });
+  const focus = (args as { focus?: string } | undefined)?.focus;
+  return proxyToTenant(instance, {
+    path: "/api/v1/vault/graph",
+    ...(focus ? { query: { focus } } : {}),
+  });
 };
 
 // ============================================================
