@@ -1074,6 +1074,33 @@ async function fetchRequiredCredentialFields(
   }
 }
 
+/**
+ * Read a connection's granted OAuth scope from the connected_account record.
+ * Composio mirrors it at state.val.scope / data.scope / params.scope. Returns a
+ * de-duped list of scope URLs (whitespace-separated in the grant).
+ */
+function readGrantedScopes(conn: Record<string, unknown>): string[] {
+  const c = conn as any;
+  const raw =
+    c?.state?.val?.scope ?? c?.data?.scope ?? c?.params?.scope ?? "";
+  if (typeof raw !== "string" || !raw.trim()) return [];
+  return [...new Set(raw.split(/\s+/).filter(Boolean))];
+}
+
+/**
+ * Classify a set of granted scopes as read-only vs read+write. A grant is
+ * read+write if ANY scope is not a `.readonly` (or `*.read`) scope — i.e. the
+ * connection can mutate. Empty/unknown grants classify as `unknown`.
+ */
+function classifyGrantedAccess(scopes: string[]): "read" | "read_write" | "unknown" {
+  if (scopes.length === 0) return "unknown";
+  const allReadOnly = scopes.every((s) => {
+    const lower = s.toLowerCase();
+    return lower.endsWith(".readonly") || lower.endsWith("/readonly") || lower.endsWith(".read");
+  });
+  return allReadOnly ? "read" : "read_write";
+}
+
 // ---------------------------------------------------------------------------
 // Scope endpoint — per-toolkit action cache
 // ---------------------------------------------------------------------------
@@ -1342,12 +1369,22 @@ export function registerIntegrationRoutes(): void {
       const toolkit = String(
         (conn as any).toolkit?.slug ?? (conn as any).appName ?? "",
       ).toLowerCase();
-      if (!toolkit) {
-        sendJson(res, 200, { read: [], write: [] });
-        return;
-      }
-      const scope = await fetchScopeForToolkit(toolkit, apiKey);
-      sendJson(res, 200, scope);
+
+      // The authoritative answer is the connection's REAL granted OAuth scope,
+      // not a verb heuristic over the toolkit catalogue (which is identical for
+      // every connection of a toolkit and cannot tell read-only from
+      // read+write). Read state.val.scope and classify it.
+      const grantedScopes = readGrantedScopes(conn);
+      const access = classifyGrantedAccess(grantedScopes);
+      sendJson(res, 200, {
+        access,                       // "read" | "read_write" | "unknown"
+        granted_scopes: grantedScopes,
+        toolkit,
+        // Backward-compatible chip arrays derived from the real grant: read is
+        // always present once granted; write only when the grant is read+write.
+        read: grantedScopes,
+        write: access === "read_write" ? grantedScopes : [],
+      });
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to fetch scope: ${err.message}` });
     }
