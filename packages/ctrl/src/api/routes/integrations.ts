@@ -1457,11 +1457,15 @@ export function registerIntegrationRoutes(): void {
             "x-api-key": apiKey,
             "Content-Type": "application/json",
           },
+          // Composio v3 reads the custom-auth directive from `auth_config`,
+          // NOT `options`. Under `options` it is silently ignored and Composio
+          // defaults to managed auth, 400ing for toolkits with no managed
+          // credentials (SERP, Exa, …) — code 306 DefaultAuthConfigNotFound.
           body: JSON.stringify({
             toolkit: { slug: toolkitSlug },
-            options: {
+            auth_config: {
               type: "use_custom_auth",
-              auth_scheme: authScheme,
+              authScheme,
               credentials: {},
             },
           }),
