@@ -259,6 +259,7 @@ const STANDARD_LIBRARY_CHORE_TEMPLATES: ReadonlySet<string> = new Set([
   "briefing_evening",
   "subscription_watcher",
   "weekly_matter_digest",
+  "weekly_money_day",
 ]);
 
 /**
@@ -304,7 +305,40 @@ const STANDARD_LIBRARY_DEFAULTS: Record<
     description:
       "Weekly synthesis across all active matters. One paragraph per matter that had movement, plus what's still open and what next week should be ready for.",
   },
+  weekly_money_day: {
+    name: "Money Day",
+    schedule: "0 6 * * 2",
+    workflow_class_name: "WeeklyMoneyDayBriefWorkflow",
+    description:
+      "Every Tuesday morning, your butler pulls the books together. Net worth and the week-over-week change, your three biggest outflows, anything that looks off, and a per-account balance table by currency.",
+  },
 };
+
+/** Standard-library `description` matching a chore record by its `template`
+ *  field first, then by `workflow_class_name` (B7). Returns "" when nothing
+ *  in the standard library matches — read-side only, no record writes. */
+function templateDescriptionFor(fm: Record<string, unknown>): string {
+  const template = String(fm.template ?? "").trim();
+  if (template && STANDARD_LIBRARY_DEFAULTS[template]) {
+    return STANDARD_LIBRARY_DEFAULTS[template].description;
+  }
+  const wfClass = String(fm.workflow_class_name ?? "").trim();
+  if (wfClass) {
+    for (const def of Object.values(STANDARD_LIBRARY_DEFAULTS)) {
+      if (def.workflow_class_name === wfClass) return def.description;
+    }
+  }
+  return "";
+}
+
+/** A chore record's user-facing description, falling back to the matching
+ *  standard-library template's description when the record's field is
+ *  empty/absent (B7). Never overrides a record's own non-empty description. */
+function resolveChoreDescription(fm: Record<string, unknown>): string {
+  const own = String(fm.user_facing_description ?? "").trim();
+  if (own) return own;
+  return templateDescriptionFor(fm);
+}
 
 const STANDARD_LIBRARY_BUILTIN_PATH = (template: string): string =>
   `packages/learn/src/workflows/chores/${template}.py`;
@@ -344,6 +378,9 @@ interface ChoreSummary {
   schedule_id: string;
   last_run: string | null;
   next_run_at: string | null;
+  /** B7 — the record's user_facing_description, or the matching
+   *  standard-library template's description when the record's is empty. */
+  user_facing_description: string;
 }
 
 function readChoreFile(slug: string): { frontmatter: Record<string, unknown>; body: string } | null {
@@ -499,6 +536,7 @@ export function registerChoreRoutes(): void {
         schedule_id: (fm.schedule_id as string) ?? `chore-${slug}`,
         last_run: (fm.last_run as string) || null,
         next_run_at: nextRunAt,
+        user_facing_description: resolveChoreDescription(fm),
       });
     }
     sendJson(res, 200, { chores, count: chores.length });
@@ -1014,7 +1052,14 @@ export function registerChoreRoutes(): void {
     }
     const body = {
       slug,
-      frontmatter: { ...parsed.frontmatter, next_run_at: nextRunAt },
+      frontmatter: {
+        ...parsed.frontmatter,
+        next_run_at: nextRunAt,
+        // B7 — backfill an empty/absent description from the matching
+        // standard-library template so template chores (e.g. money-day)
+        // don't render "No description yet." Read-side only.
+        user_facing_description: resolveChoreDescription(parsed.frontmatter),
+      },
       body: parsed.body,
       chore,
     };
