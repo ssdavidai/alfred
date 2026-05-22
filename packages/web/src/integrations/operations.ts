@@ -895,3 +895,21 @@ export const deleteInboundWebhook: DeleteInboundWebhook<
     path: `/api/v1/webhooks/inbound/${encodeURIComponent(args.id)}`,
   });
 };
+
+// F59 — OMI pairing. OMI is a push/stream source, NOT a Composio OAuth/API-key
+// integration: "pairing" means handing the device a private tenant-scoped audio
+// endpoint to POST raw PCM to. The tenant route creates-or-reuses the single
+// source:"omi" stream and returns its composed device webhook_url — it never
+// touches Composio (which would fuzzy-resolve the synthetic alfred-omi slug to
+// a junk `cal` connection). Typed loosely (no generated Wasp type yet).
+export const pairOmiDevice = async (
+  _args: void,
+  context: any,
+): Promise<any> => {
+  requireUser(context);
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/integrations/omi/pair",
+  });
+};

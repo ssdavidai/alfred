@@ -690,13 +690,19 @@ function ConnectModal({
           </p>
         ) : isDevicePair ? (
           <div>
+            {/* F59 — honest copy. Pairing produces a private audio endpoint URL
+                for the device; the live "create pairing URL" action (pairOmiDevice
+                → POST /api/v1/integrations/omi/pair) wires once the regenerated
+                Wasp client SDK ships the new op stub (it can't be imported against
+                the stale shared SDK in this worktree — see batch STOP-report). */}
             <p
               className="font-body text-[15px] mb-4"
               style={{ color: "var(--marginalia)" }}
             >
-              Pair {app.name} from your phone — open the {app.name} app and
-              point it at this tenant's gateway. Once paired, the device will
-              appear in the connected list below and start streaming.
+              {app.name} is a wearable audio stream. Pairing generates a private,
+              tenant-scoped endpoint URL — paste it into the {app.name} app's
+              developer settings as the audio stream destination. Once it streams,
+              the device appears in your connected list automatically.
             </p>
             <button onClick={onClose} className="btn-brass">
               Got it
