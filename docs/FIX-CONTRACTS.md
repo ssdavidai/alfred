@@ -110,3 +110,61 @@ Provider → consumer notation: *(Lane X provides → Lane Y consumes)*.
 - **Risk:** rerouting a writer that the UI silently depends on can blank a surface.
   Mitigation: each reroute is failing-test-first (prove the old path 422s / the new
   path persists + the consumer still reads it) before it lands.
+
+---
+
+## New contracts — 0522 fix campaign (C12–C19)
+
+Frozen from `debug/0522/SYNTHESIS.md` §3. Consumers build against these shapes; a
+provider lane never exposes a different shape without re-freezing here first.
+
+### C12 · Audit ledger read endpoint *(I → III)*
+`GET /api/v1/admin/audit?limit=&include_automated=0&cursor=<ts>` reads **`state.db audit`**
+(the SQL ledger, via the existing `/api/v1/state/audit` hot+cold plumbing) — NOT
+`event/*.md`. Returns `{items:[{id,ts,action_type,actor,headline,note,source,reversible,reversed_at}], total, next_cursor}`.
+**One row per user action** (not the needs_attention_action + desk-action twin); `action_type`
+normalised to one casing (F5) before grouping; `include_automated=1` surfaces steward/auto noise.
+
+### C13 · ctrl→Hermes workspace write target *(I+V → III editor)*
+Workspace writes (`SOUL.md`, `AGENTS.md`) land where the `main` gateway loads them: ctrl-api
+gets read/write to the Hermes profile dir (mount `hermes_data` into ctrl-api, or a Hermes write
+API). `SOUL.md`→`HERMES_HOME/profiles/main/SOUL.md`; `AGENTS.md`→the main gateway's `TERMINAL_CWD`
+dir. **Standing rules = a sentinel `## Standing Rules` block inside `AGENTS.md`** (already
+allow-listed; no new workspace file).
+
+### C14 · Email provision *(I → III)*
+`POST /api/v1/email/provision {api_key}` → `200 {configured, inbox_address, inbox_id, webhook_registered}`
+/ `4xx {error,code}`. `GET /api/v1/email/status` → `{configured, inbox_address|null}`. Web
+`getEmailChannelStatus` proxies status; the card branches on `configured`.
+
+### C15 · Phone provision *(I + web-SaaS → III wizard)*
+`POST /api/v1/phone/provision {openai_api_key, twilio_account_sid, twilio_auth_token, phone_number?|buy:{country,area_code?}}`
+→ `200 {phone_number, provisioned}` / `4xx {error,code}`. ctrl persists creds (extended
+`KNOWN_CREDENTIALS`) + (re)starts voice-bridge. SaaS exposes `/api/internal/{voice-bridge/tenant/:id,twilio/send-sms,twilio/initiate-call}`
++ `/api/twiml/say` + inbound voice/SMS webhooks (Bearer `VOICE_BRIDGE_INTERNAL_TOKEN`).
+`GET /api/v1/phone/config` → `{phoneNumber, authorizedNumbers, recentActivity}` (web reads
+those exact keys).
+
+### C16 · Approval-secret reveal-once + rotate *(I → III)*
+`GET /api/v1/claude-setup` → `{…, approval_secret: null, approval_secret_set: bool, last_rotated_at}`
+(never echo the value). `POST /api/v1/claude-setup/approval-secret/rotate` → `200 {approval_secret}`
+returned **exactly once**. Same reveal-once for `vault_login.master_password`; stored hashed at rest.
+
+### C17 · Model-config matrix API *(I → III)*
+`GET /api/v1/admin/models[?refresh=true]` → `{groups:[{provider,source,models:[{id,name,…}]}], cached, fetchedAt}`
+(catalog reads a *reachable* cred source — F65; `refresh` actually busts cache — F66; web reads
+`groups`, not `models`). `GET /api/v1/admin/profiles` → `{profiles:[{id,gateway_port,default_model,resolved_model,description,agents:[…]}], surveyor:{…}}`
+incl. **`heavy`** (F67). `PATCH /api/v1/admin/agents/:agentId/model {model,field?}` → `{default_model}`.
+
+### C18 · Decision record = single source of truth *(I → II + III)*
+`POST /api/v1/decisions {source, source_record, intent, note}` (one call/click): (1) write
+`decision/<ts>.md` **and `indexVaultWrite()`** it (F1) so readers see it same-request; (2) mirror
+to `state.db audit`; (3) synchronous source-flip only for done/defer/noise/take_mine — **delegate**
+flips NA→dispatched only *after* dispatch succeeds, returning the result. `GET /api/v1/decisions`
+(the `vault_index` reader) + learn `list_decisions_by_state("open")` then return rows. Client
+clears the card **only on 2xx** (F50).
+
+### C19 · Vault graph focus/backlinks *(I → III)*
+`GET /api/v1/vault/graph?focus=<record_path>` → `{nodes, edges, activity, backlinks:[{path,name,rel}]}`.
+`LINK_FIELDS` extended with `key_people, related_persons, related_orgs, org` (F10) so person/matter
+edges resolve; `MatterDetailPage` consumes `backlinks` (F55).
