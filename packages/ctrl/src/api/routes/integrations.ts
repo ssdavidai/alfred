@@ -1497,7 +1497,11 @@ export function registerIntegrationRoutes(): void {
         const usable = items.find((ac: any) => {
           if (ac.is_disabled) return false;
           const scheme = String(ac.auth_scheme ?? ac.authScheme ?? "").toUpperCase();
-          return scheme === authScheme || scheme === ""; // tolerate older configs without a scheme tag
+          // Require an EXACT scheme match. A managed-OAuth config's scheme is
+          // often absent from the list payload; tolerating `scheme === ""` here
+          // reused that OAuth config for an API_KEY connection, then failed on
+          // the connected_account create with a scheme mismatch.
+          return scheme === authScheme;
         });
         if (usable) authConfigId = usable.id;
       }
