@@ -308,6 +308,31 @@ def _validate_matter(matter: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+def _split_person_name(raw: str) -> tuple[str, str]:
+    """Split a key_person string into (bare_name, annotation).
+
+    Opus sometimes emits names with a trailing role annotation despite the
+    prompt asking for bare names — e.g. ``"Pat (advisor)"`` or
+    ``"Sam Lee — partner"``. The wikilink target must be the BARE name so
+    it resolves against the curator-authored ``person/<Name>.md`` records;
+    the annotation is kept as trailing display text on the body bullet.
+
+    Returns ``("Pat", "(advisor)")`` / ``("Sam Lee", "— partner")`` /
+    ``("Rami Khouri", "")``.
+    """
+    import re as _re
+    s = (raw or "").strip()
+    # Trailing parenthetical: "Name (role)".
+    m = _re.match(r"^(.*?)\s*(\([^)]*\))\s*$", s)
+    if m and m.group(1).strip():
+        return m.group(1).strip(), m.group(2).strip()
+    # Trailing em/en-dash or comma annotation: "Name — role" / "Name, role".
+    m = _re.match(r"^(.*?)\s*([—–,-]\s*.+)$", s)
+    if m and m.group(1).strip():
+        return m.group(1).strip(), m.group(2).strip()
+    return s, ""
+
+
 def _build_rich_matter_content(matter: dict[str, Any]) -> str:
     """Render a validated matter dict as a markdown record with rich body."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -321,6 +346,21 @@ def _build_rich_matter_content(matter: dict[str, Any]) -> str:
     related_patterns = [str(x).strip() for x in matter.get("related_patterns", []) if str(x).strip()]
     open_questions = [str(x).strip() for x in matter.get("open_questions", []) if str(x).strip()]
     next_actions = [str(x).strip() for x in matter.get("suggested_next_actions", []) if str(x).strip()]
+    # Opus may emit an org list (key_orgs/related_orgs) on some matters; the
+    # base matter schema doesn't require it, so treat it as optional.
+    key_orgs = [
+        str(x).strip()
+        for x in (matter.get("key_orgs") or matter.get("related_orgs") or [])
+        if str(x).strip()
+    ]
+
+    # F37 — wikilink targets for the file-walk graph. The bare name (role
+    # annotation stripped) is the link target so it resolves against the
+    # curator-authored person/org records; ctrl's graph LINK_FIELDS read
+    # ``related_persons`` / ``related_orgs`` (F10) to materialise the
+    # matter↔entity edges. Deterministic; no LLM.
+    person_links = [f"[[person/{_split_person_name(p)[0]}]]" for p in key_people]
+    org_links = [f"[[org/{_split_person_name(o)[0]}]]" for o in key_orgs]
 
     # Frontmatter (flat only — no nested maps, vault.ts can't handle them)
     fm_lines = [
@@ -334,6 +374,8 @@ def _build_rich_matter_content(matter: dict[str, Any]) -> str:
         f"created_by: onboarding_pipeline",
         f"generated: true",
         f"key_people: {_format_yaml_list(key_people)}",
+        f"related_persons: {_format_yaml_list(person_links)}",
+        f"related_orgs: {_format_yaml_list(org_links)}",
         f"related_patterns: {_format_yaml_list(related_patterns)}",
         f"tags: [onboarding, matter, auto-generated, {category}]",
         "---",
@@ -352,7 +394,21 @@ def _build_rich_matter_content(matter: dict[str, Any]) -> str:
 
     if key_people:
         body_parts += ["", "## Key people", ""]
-        body_parts += [f"- {p}" for p in key_people]
+        for p in key_people:
+            bare, annotation = _split_person_name(p)
+            bullet = f"- [[person/{bare}]]"
+            if annotation:
+                bullet += f" {annotation}"
+            body_parts.append(bullet)
+
+    if key_orgs:
+        body_parts += ["", "## Organizations", ""]
+        for o in key_orgs:
+            bare, annotation = _split_person_name(o)
+            bullet = f"- [[org/{bare}]]"
+            if annotation:
+                bullet += f" {annotation}"
+            body_parts.append(bullet)
 
     if related_patterns:
         body_parts += ["", "## Related patterns", ""]
@@ -514,6 +570,106 @@ async def generate_matter_pack_opus(onboard_path: str) -> dict[str, Any]:
             "source": "opus",
             "rejected_reasons": rejected_reasons[:5] if rejected_reasons else [],
         }
+    finally:
+        await client.close()
+
+
+# ---------------------------------------------------------------------------
+# F36 — deterministic post-pack entity materialisation
+# ---------------------------------------------------------------------------
+# Matters used to be graph islands: people named in a matter were body text
+# with no person/org record. F37 made the matter emit ``[[person/Name]]``
+# wikilinks; this stage materialises the targets — a minimal stub for any
+# wikilink with no record (a real graph node the curator enriches in
+# Wave-5) + a backlink from the entity to the matter. Deterministic; no LLM.
+
+
+def _parse_entity_wikilink(value: str) -> tuple[str, str] | None:
+    """Parse ``[[person/Name]]`` / ``[[org/Name]]`` → ``(type, name)``;
+    None for non-wikilinks or non-person/org targets."""
+    import re
+    s = (value or "").strip()
+    m = re.match(r"^\[\[(person|org)/(.+?)\]\]$", s)
+    if not m:
+        return None
+    name = m.group(2).strip()
+    return (m.group(1), name) if name else None
+
+
+def _entity_stub_content(record_type: str, name: str, matter_path: str) -> str:
+    """Minimal valid person/org stub — a real graph node the curator
+    enriches later (Wave-5)."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    related = _format_yaml_list([f"[[{matter_path[:-3]}]]"])
+    return (
+        f"---\ntype: {record_type}\nname: {_escape_yaml_scalar(name)}\n"
+        f"status: active\ncreated: {now}\ncreated_by: onboarding_pipeline\n"
+        f"generated: true\nrelated: {related}\n"
+        f"tags: [onboarding, auto-discovered]\n---\n\n# {name}\n\n"
+        f"> Stub created during onboarding from `{matter_path}`. "
+        f"Alfred will enrich this with context as it learns more.\n"
+    )
+
+
+@activity.defn
+async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
+    """Create person/org stubs + backlinks for matter-named entities (F36).
+
+    For each matter's ``related_persons``/``related_orgs`` wikilink: write a
+    minimal stub if no record exists, else backlink the matter onto the
+    entity's ``related``. Idempotent + best-effort. Rich bodies are Wave-5.
+    """
+    config = load_config()
+    client = VaultClient(config)
+    created = 0
+    linked = 0
+    try:
+        try:
+            matters = await client.list_records("matter", limit=500)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("materialize_matter_entities: matter list failed: %s", exc)
+            return {"created": 0, "linked": 0, "matters": 0}
+
+        for rec in matters or []:
+            matter_path = str(rec.get("path") or "").strip()
+            fm = rec.get("frontmatter") or rec
+            if not matter_path.startswith("matter/"):
+                continue
+            links: list[str] = []
+            for field in ("related_persons", "related_orgs"):
+                vals = fm.get(field)
+                if isinstance(vals, list):
+                    links += [str(v) for v in vals]
+            backlink = f"[[{matter_path[:-3]}]]"
+            for link in links:
+                parsed = _parse_entity_wikilink(link)
+                if not parsed:
+                    continue
+                etype, name = parsed  # name is the slug/title
+                try:
+                    if not await client.record_exists(etype, name):
+                        await client.write_record(
+                            etype, name,
+                            _entity_stub_content(etype, name, matter_path),
+                        )
+                        created += 1
+                        activity.heartbeat(f"materialize: {etype}/{name}")
+                    else:  # existing entity → just add the backlink
+                        await client.patch_frontmatter_structured(
+                            f"{etype}/{name}.md",
+                            json_updates={"related": [backlink]},
+                        )
+                    linked += 1
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "materialize_matter_entities: %s/%s failed: %s",
+                        etype, name, exc,
+                    )
+        logger.info(
+            "materialize_matter_entities: created %d stub(s), linked %d across %d matters",
+            created, linked, len(matters or []),
+        )
+        return {"created": created, "linked": linked, "matters": len(matters or [])}
     finally:
         await client.close()
 

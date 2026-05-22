@@ -56,6 +56,7 @@ with workflow.unsafe.imports_passed_through():
         generate_errand_pack_opus,
         generate_instinct_pack_opus,
         generate_matter_pack_opus,
+        materialize_matter_entities,
     )
     from src.activities.assign_chores import assign_initial_chores
     from src.activities.chore_generation import restart_learn_worker
@@ -464,6 +465,23 @@ class OnboardingPipelineWorkflow:
                 start_to_close_timeout=timedelta(minutes=5),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
+            # F36 — deterministic post-pack stage: materialise person/org
+            # stub records + backlinks for the matter-named entities the
+            # matter pack just wikilinked (F37), so matter↔entity graph
+            # edges resolve. Rich entity bodies are left to the LLM curator
+            # (Wave-5). Best-effort; never blocks onboarding.
+            try:
+                await workflow.execute_activity(
+                    materialize_matter_entities,
+                    args=[onboard_path],
+                    start_to_close_timeout=timedelta(minutes=5),
+                    heartbeat_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as exc:  # noqa: BLE001
+                workflow.logger.warning(
+                    "onboarding_pipeline: materialize_matter_entities failed: %s", exc
+                )
 
         # -----------------------------------------------------------------
         # Stage 7.5: Assign initial chores from profile
