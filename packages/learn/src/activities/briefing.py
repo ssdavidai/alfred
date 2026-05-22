@@ -60,6 +60,7 @@ from src.activities.state_mutator import (
     propose_fn,
 )
 from src.config import load_config
+from src.utils.signal_state import read_signal_record
 from src.utils.vault_client import VaultClient
 
 logger = logging.getLogger("alfred-learn")
@@ -73,6 +74,13 @@ logger = logging.getLogger("alfred-learn")
 # the cap used by nightly_narrative so matter records render uniformly
 # regardless of which writer produced the current_state.
 NARRATIVE_CHAR_CAP = 600
+
+# P0-3 bounds for the per-matter observed-event content fed into the propose
+# prompt. We cap items per matter and chars per field so a noisy window can't
+# blow up the prompt — enough substance for the clerk to judge "did this move?"
+# without flooding it.
+PROPOSE_MAX_EVENTS_PER_MATTER = 12
+PROPOSE_EVENT_FIELD_CHARS = 400
 
 # Default confidence for clerk-drafted briefing narratives when the
 # clerk does not self-report one. Higher than nightly_narrative's 0.85
@@ -666,6 +674,56 @@ def _build_propose_prompt(
     return "\n".join(lines)
 
 
+def _clip(value: Any, limit: int = PROPOSE_EVENT_FIELD_CHARS) -> str:
+    """Trim a frontmatter scalar to ``limit`` chars for the propose prompt."""
+    s = str(value or "").strip()
+    return s[:limit].rstrip() + "…" if len(s) > limit else s
+
+
+async def _load_observed_event_content(
+    observed: ObservedWindow,
+    *,
+    config: Any,
+    vault: VaultClient,
+) -> list[dict[str, Any]]:
+    """Build content-bearing event dicts for the propose prompt (P0-3).
+
+    Old behaviour fed the clerk only ``{"kind","path"}`` — it judged "did
+    this matter move?" blind → mostly NO_CHANGE → thin briefs. Here we read
+    each observed signal (state.db, by id) and decision (vault, by path) and
+    surface its headline + summary/body + the signal's own reasoning, bounded
+    by item count and per-field length. Read failures degrade to a path-only
+    entry so the clerk still sees the event happened.
+    """
+    events: list[dict[str, Any]] = []
+    for sid in observed.signal_paths[:PROPOSE_MAX_EVENTS_PER_MATTER]:
+        entry: dict[str, Any] = {"kind": "signal", "path": sid}
+        try:
+            rec = await read_signal_record(sid, config=config)
+            fm = (rec or {}).get("frontmatter") or {}
+            entry["headline"] = _clip(fm.get("display_headline") or fm.get("headline"))
+            entry["summary"] = _clip(
+                fm.get("display_body") or fm.get("body") or fm.get("summary")
+            )
+            entry["reasoning"] = _clip(fm.get("reasoning"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("briefing.propose: signal content read failed "
+                           "id=%s err=%s", sid, exc)
+        events.append({k: v for k, v in entry.items() if v != ""})
+    for path in observed.decision_paths[:PROPOSE_MAX_EVENTS_PER_MATTER]:
+        entry = {"kind": "decision", "path": path}
+        try:
+            rec = await vault.read_record(path)
+            fm = (rec or {}).get("frontmatter") or {}
+            entry["intent"] = _clip(fm.get("intent"), 80)
+            entry["note"] = _clip(fm.get("note") or fm.get("summary"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("briefing.propose: decision content read failed "
+                           "path=%s err=%s", path, exc)
+        events.append({k: v for k, v in entry.items() if v != ""})
+    return events
+
+
 @propose_fn("briefing.propose_matter_update")
 async def propose_briefing_matter_update(
     *,
@@ -721,14 +779,18 @@ async def propose_briefing_matter_update(
         )
         return None
 
-    # Build a compact view of observed events so the clerk has enough
-    # context to decide whether the framing changed, without flooding
-    # the prompt with the entire vault.
-    observed_events = [
-        {"kind": "signal", "path": p} for p in observed.signal_paths
-    ] + [
-        {"kind": "decision", "path": p} for p in observed.decision_paths
-    ]
+    # Build a content-bearing view of observed events so the clerk can
+    # actually judge whether the framing changed — headline + summary/body
+    # + the signal's own reasoning, not just paths (P0-3). Bounded per the
+    # PROPOSE_* caps so a noisy window can't flood the prompt.
+    config = load_config()
+    vault = VaultClient(config)
+    try:
+        observed_events = await _load_observed_event_content(
+            observed, config=config, vault=vault
+        )
+    finally:
+        await vault.close()
 
     prompt = _build_propose_prompt(
         slug=slug or target_path,
