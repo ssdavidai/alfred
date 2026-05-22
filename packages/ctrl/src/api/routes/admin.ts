@@ -68,7 +68,6 @@ function classifyAuditKind(filename: string): string {
     "needs_attention_action",
     "desk-action",
     "auto-task-created",
-    "daily-digest",
   ];
   for (const k of KINDS) {
     if (filename.startsWith(`${k}-`) || filename === `${k}.md`) return k;
@@ -180,24 +179,6 @@ function formatAuditSummary(
     case "auto-task-created": {
       const title = String(fm.title || "").trim();
       return title ? `Auto-created task: ${title}` : "Auto-created a task";
-    }
-
-    case "daily-digest": {
-      // Filename pattern: daily-digest-2026-05-11.md
-      const m = filename.match(/^daily-digest-(\d{4})-(\d{2})-(\d{2})\.md$/);
-      if (m) {
-        try {
-          const d = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`);
-          return `Daily digest for ${new Intl.DateTimeFormat("en-GB", {
-            day: "numeric",
-            month: "long",
-            year: "numeric",
-          }).format(d)}`;
-        } catch {
-          // fall through
-        }
-      }
-      return "Daily digest";
     }
 
     case "steward-action": {
