@@ -85,6 +85,17 @@ interface MatterCounts {
   drafts: number;
 }
 
+// C-B2 — CRM links. The detail aggregator (Lane I) resolves the matter's
+// key people / organizations to vault record paths so the page can link
+// them. `path` is null when no confident record match exists — render as
+// plain text in that case (most paths are null until onboarding links
+// people upstream).
+interface KeyEntity {
+  name: string;
+  path: string | null;
+  type: "person" | "org";
+}
+
 interface MatterDetail {
   id: string;
   path: string;
@@ -93,6 +104,8 @@ interface MatterDetail {
   about?: string;
   summary?: string;
   counts?: MatterCounts;
+  // C-B2 — resolved key people & orgs (optional; older ctrl-api omits it).
+  key_entities?: KeyEntity[];
   vault_by_category?: {
     tasks?: unknown[];
     decisions?: unknown[];
@@ -287,6 +300,56 @@ function ShapeStrip({ shape }: { shape: Array<{ label: string; n: number }> }) {
   );
 }
 
+// C-B2 — CRM-style block: each key person/org is a link to its vault record
+// when a path resolved, plain text otherwise. Hidden when there are none.
+function KeyEntitiesSection({ entities }: { entities?: KeyEntity[] }) {
+  const list = Array.isArray(entities) ? entities.filter((e) => e?.name) : [];
+  if (list.length === 0) return null;
+  return (
+    <section className="mb-12">
+      <h2
+        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-5"
+        style={{ color: "var(--brass)" }}
+      >
+        Key people &amp; organizations
+      </h2>
+      <ul className="flex flex-wrap gap-x-6 gap-y-3">
+        {list.map((e, i) => {
+          const typeLabel = e.type === "org" ? "org" : "person";
+          const inner = (
+            <>
+              <span className="font-body text-[16px]">{e.name}</span>
+              <span
+                className="font-mono text-[9px] uppercase tracking-[0.22em] ml-2"
+                style={{ color: "var(--marginalia)" }}
+              >
+                {typeLabel}
+              </span>
+            </>
+          );
+          return (
+            <li key={`${e.type}-${e.path ?? e.name}-${i}`} className="inline-flex items-baseline">
+              {e.path ? (
+                <Link
+                  to={`/vault?slug=${encodeURIComponent(e.path.replace(/\.md$/, ""))}`}
+                  className="inline-flex items-baseline"
+                  style={{ color: "var(--ink)" }}
+                >
+                  {inner}
+                </Link>
+              ) : (
+                <span className="inline-flex items-baseline" style={{ color: "var(--ink)" }}>
+                  {inner}
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 export default function MatterDetailPage() {
   const { id } = useParams<{ id: string }>();
   const safeId = id ?? "";
@@ -433,12 +496,11 @@ export default function MatterDetailPage() {
 
         {/* F54 — render the vault substance (`about` + `summary`) ALWAYS, no
             dependency on the nightly composer. `current_state` is an additive
-            secondary layer; null → a quiet byline, not a full-page empty-state. */}
+            secondary layer; null → a quiet byline, not a full-page empty-state.
+            C-B2 — the matter's task-state lives in ONE place: the overture
+            `meta` pill above. The standalone StatusPill here was a redundant
+            second copy and has been removed. */}
         <section className="-mt-6 mb-10">
-          <div className="mb-4">
-            <StatusPill label={statusPill.label} color={statusPill.color} />
-          </div>
-
           {/* Lead summary — the one-line description. */}
           {matter.summary && (
             <p className="max-w-[64ch] font-body text-[19px] leading-[1.55] mb-8">
@@ -449,8 +511,13 @@ export default function MatterDetailPage() {
           {/* Shape — a minimal living view instead of four zero tiles. */}
           <ShapeStrip shape={buildMatterShape(matter)} />
 
-          {/* Live current-state layer (composed nightly) — additive. */}
-          {matter.current_state ? (
+          {/* Live current-state layer (composed nightly) — additive. Render
+              only when composed. C-B2 — the "Live status not yet composed"
+              byline was the third overlapping status expression (alongside the
+              overture pill); it has been dropped. The overture pill is the
+              single source of truth for the matter's state, and the substance
+              below (`about` / `summary`) carries the rest. */}
+          {matter.current_state && (
             <div className="mb-6">
               <div className="max-w-[64ch] font-body text-[18px] leading-[1.6]">
                 <Markdown
@@ -467,13 +534,6 @@ export default function MatterDetailPage() {
                 </div>
               )}
             </div>
-          ) : (
-            <div
-              className="font-mono text-[10px] uppercase tracking-[0.22em] mb-6"
-              style={{ color: "var(--marginalia)" }}
-            >
-              Live status not yet composed
-            </div>
           )}
 
           {/* The rich vault body — Context, Key people, Open questions,
@@ -484,6 +544,12 @@ export default function MatterDetailPage() {
             </div>
           )}
         </section>
+
+        {/* C-B2 — Key people & organizations as CRM-style links. Each entity
+            with a resolved vault `path` is clickable into the reader; entities
+            without a record (most, until upstream onboarding links them)
+            degrade to plain text. */}
+        <KeyEntitiesSection entities={matter.key_entities} />
 
         {/* Brass hr — no originX. The earlier version had a transform that
             broke the SVG-ish rule layout; plain hr.gilt renders correctly. */}
