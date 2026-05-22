@@ -9,8 +9,9 @@
 // the waitlist sign-in is /login.
 
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, Navigate } from "react-router-dom";
 import { motion } from "framer-motion";
+import { useAuth } from "wasp/client/auth";
 import { submitAccessRequest } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { Icon } from "../client/components/ab/Icon";
@@ -18,6 +19,15 @@ import { Seal } from "../client/components/ab/Seal";
 import { fadeUp, ruleDraw, titleRise } from "../client/lib/motion";
 
 export default function LandingPage() {
+  // F52 — an authenticated visitor hitting "/" should land on their Desk, not
+  // the marketing door. The post-login bounce (PostSignupPage) only fires once
+  // on the auth callback; returning to "/" (bookmark, logo, new tab) otherwise
+  // shows the homepage. Gate on useAuth and redirect while we still have a user.
+  const { data: user, isLoading } = useAuth();
+  if (!isLoading && user) {
+    return <Navigate to="/desk" replace />;
+  }
+
   return (
     <Frame>
       <div style={{ scrollSnapType: "y mandatory" }}>
