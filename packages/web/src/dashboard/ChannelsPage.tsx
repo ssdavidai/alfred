@@ -6,8 +6,9 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
   useQuery,
-  getDashboardData,
   getPhoneConfig,
+  getEmailChannelStatus,
+  provisionEmail,
   addAuthorizedNumber,
   removeAuthorizedNumber,
   getVexaAutoJoin,
@@ -15,8 +16,19 @@ import {
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 
+// F57/C14 — the email card reads the live ctrl-api status, not a phantom
+// Instance row. `inbox_address` is only present once `configured`.
+interface EmailChannelStatus {
+  configured: boolean;
+  inbox_address: string | null;
+}
+
 export default function ChannelsPage() {
-  const { data: dashData } = useQuery(getDashboardData);
+  const { data: emailData, refetch: refetchEmail } = useQuery(
+    getEmailChannelStatus,
+    undefined,
+    { retry: false },
+  );
   const { data: phoneData, refetch: refetchPhone } = useQuery(
     getPhoneConfig,
     undefined,
@@ -27,18 +39,44 @@ export default function ChannelsPage() {
     undefined,
     { retry: false },
   );
-  const inboxAddress: string =
-    (dashData as any)?.instance?.agentmailInboxAddress ?? "";
+  const email = (emailData as EmailChannelStatus | undefined) ?? {
+    configured: false,
+    inbox_address: null,
+  };
   const phoneNumber: string = (phoneData as any)?.twilio_number ?? (phoneData as any)?.number ?? "";
   const authorized: string[] = Array.isArray((phoneData as any)?.authorized_numbers)
     ? (phoneData as any).authorized_numbers
     : [];
   const vexaEnabled: boolean = Boolean((vexaData as any)?.enabled);
 
+  // Email-form state (F57).
+  const [emailKey, setEmailKey] = useState("");
+  const [emailBusy, setEmailBusy] = useState(false);
+  const [emailError, setEmailError] = useState<string | null>(null);
+
   // Phone-form state.
   const [newNumber, setNewNumber] = useState("");
   const [phoneBusy, setPhoneBusy] = useState(false);
   const [vexaBusy, setVexaBusy] = useState(false);
+
+  async function doProvisionEmail() {
+    const key = emailKey.trim();
+    if (!key) return;
+    setEmailBusy(true);
+    setEmailError(null);
+    try {
+      await provisionEmail({ api_key: key });
+      setEmailKey("");
+      await refetchEmail();
+    } catch (e: any) {
+      // ctrl-api returns a 4xx `{ error }` for an invalid key.
+      setEmailError(
+        e?.message ?? e?.data?.error ?? "Provisioning failed — check the key.",
+      );
+    } finally {
+      setEmailBusy(false);
+    }
+  }
 
   async function addNumber() {
     const n = newNumber.trim();
@@ -116,16 +154,57 @@ export default function ChannelsPage() {
             </div>
           </ChannelCard>
 
-          {/* Email */}
+          {/* Email — F57/C14: live status from getEmailChannelStatus. */}
           <ChannelCard
             name="Email"
-            address={inboxAddress || "Provisioning…"}
+            address={
+              email.configured
+                ? email.inbox_address || "Connected"
+                : "Credential not set"
+            }
             note="Forward anything; I read attachments and PDFs."
-            status={inboxAddress ? "active" : "available"}
+            status={email.configured ? "active" : "available"}
           >
-            <Link to="/dashboard/inbox" className="btn-ghost mt-4 inline-block">
-              Open the inbox →
-            </Link>
+            {email.configured ? (
+              // The inbox lives in the vault's `inbox/` folder; the old
+              // /dashboard/inbox link was a dead redirect.
+              <Link to="/vault" className="btn-ghost mt-4 inline-block">
+                Open the vault →
+              </Link>
+            ) : (
+              <div className="mt-5 space-y-3">
+                <div
+                  className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  AgentMail API key
+                </div>
+                <div className="flex gap-2 items-baseline">
+                  <input
+                    type="password"
+                    value={emailKey}
+                    onChange={(e) => setEmailKey(e.target.value)}
+                    placeholder="am_live_…"
+                    className="flex-1 bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+                  />
+                  <button
+                    onClick={doProvisionEmail}
+                    disabled={emailBusy || !emailKey.trim()}
+                    className="btn-ghost"
+                  >
+                    {emailBusy ? "…" : "Provision"}
+                  </button>
+                </div>
+                {emailError && (
+                  <p
+                    className="font-body italic text-[13px]"
+                    style={{ color: "var(--brass)" }}
+                  >
+                    {emailError}
+                  </p>
+                )}
+              </div>
+            )}
           </ChannelCard>
 
           {/* Phone */}
