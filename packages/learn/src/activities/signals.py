@@ -41,7 +41,6 @@ lands will fail; that's expected for the dispatch sequence.
 """
 from __future__ import annotations
 
-import difflib
 import hashlib
 import json
 import logging
@@ -193,10 +192,16 @@ def _is_garbage_event(event_dict: dict[str, Any]) -> tuple[bool, str]:
 # than 5 points of similarity is genuinely ambiguous.
 TARGET_AMBIGUITY_BAND: float = 0.05
 
-# Floor for the top match to be considered a real target. Below this we
-# don't claim a target_path either (string similarity at <0.3 is barely
-# better than chance for slug+name matching).
-TARGET_MATCH_FLOOR: float = 0.30
+# Floor for the top match to be considered a real target. The score is
+# now a *token-set overlap* (see ``_rank_candidates``), not a difflib char
+# ratio, so the floor reads as "what fraction of the hint's meaningful
+# tokens were found on the record". 0.50 = "at least half the hint's
+# content words name this record" — precision-favouring. A wrong binding
+# is strictly worse than none (P0-1): below the floor we return None and
+# let auto-create-task make a correctly-named fresh task rather than bind
+# to a near-random record (the old 0.30 difflib floor produced
+# Rayon→family-planning).
+TARGET_MATCH_FLOOR: float = 0.50
 
 # How many candidates we keep on the signal record for audit. Top-N
 # ranked; the rest are discarded after ranking.
@@ -877,67 +882,111 @@ def _after_first_blank_line(body: str) -> str:
 # Helpers — target resolution
 # ---------------------------------------------------------------------------
 
-def _candidate_haystack(record: dict[str, Any]) -> str:
-    """Build the ranking string for a single matter/task candidate.
+# Stopwords that carry no discriminating signal between matter/task
+# candidates — dropped from both the hint and the candidate token sets so
+# overlap reflects *content* words, not glue. Kept deliberately small:
+# anything ambiguous (e.g. "report", "payment") is content here.
+_TARGET_STOPWORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "and", "or", "of", "to", "for", "with", "about",
+    "on", "in", "at", "by", "from", "into", "re", "fwd", "update",
+    "updates", "follow", "followup", "up", "this", "that", "is", "are",
+    "was", "were", "be", "your", "you", "my", "our", "his", "her", "it",
+    "new", "please", "regarding", "concerning", "via",
+})
 
-    We rank against the union of (slug, name, title) so a target_hint
-    of "shopify orders" can match either a task whose name is "Investigate
-    Shopify duplicate orders" or whose slug is "shopify-orders-2026-04".
-    Tags are NOT included — they're too generic to discriminate between
-    candidates and inflate similarity scores spuriously.
+# Minimum token length to keep — single chars and most 2-char fragments
+# are noise (kebab-slug artefacts, initials). 3+ keeps "vc", oh wait — we
+# keep 2+ so short-but-meaningful tokens ("hr", "vc", "id") survive.
+_TARGET_MIN_TOKEN_LEN: int = 2
+
+_TARGET_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokenize_target(text: str) -> set[str]:
+    """Lowercase → alphanumeric tokens → drop stopwords / too-short.
+
+    Deterministic, dependency-free. Used for both the LLM ``target_hint``
+    and each candidate record's token set so the two are comparable.
     """
-    parts: list[str] = []
+    if not text:
+        return set()
+    out: set[str] = set()
+    for tok in _TARGET_TOKEN_RE.findall(text.lower()):
+        if len(tok) < _TARGET_MIN_TOKEN_LEN:
+            continue
+        if tok in _TARGET_STOPWORDS:
+            continue
+        out.add(tok)
+    return out
+
+
+def _candidate_tokens(record: dict[str, Any]) -> set[str]:
+    """Token set for a matter/task candidate, from its *identity* fields.
+
+    Tokens come from ``name``/``title`` + ``aliases`` + ``key_people`` (the
+    entities the record is *about*) + the slug — NOT the slug alone. P0-1:
+    the old matcher ran a difflib char ratio against the slug, scoring
+    "Rayon … payment failed" 0.3168 against "family planning young family
+    support" (shared n-grams, zero shared meaning). Identity tokens make
+    the score reflect meaning. Tags excluded — too generic.
+    """
     fm = record.get("frontmatter") or {}
     if not isinstance(fm, dict):
         fm = {}
 
-    name = str(fm.get("name") or fm.get("title") or "").strip()
-    if name:
-        parts.append(name)
+    tokens: set[str] = set()
+    tokens |= _tokenize_target(str(fm.get("name") or fm.get("title") or ""))
+
+    for key in ("aliases", "key_people"):
+        val = fm.get(key)
+        if isinstance(val, str):
+            tokens |= _tokenize_target(val)
+        elif isinstance(val, (list, tuple)):
+            for item in val:
+                tokens |= _tokenize_target(str(item))
 
     path = str(record.get("path") or "").strip()
     if path:
-        # Strip leading dir + trailing extension so the slug is what
-        # contributes to the ranker.
         slug = path.rsplit("/", 1)[-1]
         if slug.endswith(".md"):
             slug = slug[:-3]
-        # Slugs are kebab-case — turn dashes into spaces so the
-        # SequenceMatcher sees them as word tokens.
-        parts.append(slug.replace("-", " "))
+        tokens |= _tokenize_target(slug.replace("-", " "))
 
-    return " ".join(parts).lower()
+    return tokens
 
 
 def _rank_candidates(
     target_hint: str,
     records: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Score and sort candidates by similarity to ``target_hint``.
+    """Score + sort candidates by token-set **containment** with the hint::
 
-    Uses ``difflib.SequenceMatcher`` ratio — 0.0..1.0. We use the
-    "real_quick_ratio + ratio" two-stage trick implicitly via
-    SequenceMatcher's default behaviour: it computes the ratio in one
-    pass which is fast enough for the ≤500 candidates a single tenant
-    usually has.
+        score = |hint_tokens ∩ candidate_tokens| / |hint_tokens|
 
-    Returns a list of ``{"path": ..., "score": float}`` sorted
-    descending by score. Records with empty haystacks (no name, no
-    slug) are dropped — they can't contribute to a meaningful match.
+    i.e. "what fraction of the hint's content words name this record".
+    Containment (not symmetric Jaccard) lets a short hint fully match a
+    longer record name without penalty for the record's extra words.
+    0.0..1.0, read directly against ``TARGET_MATCH_FLOOR``. Deterministic,
+    dependency-free — a sqlite-vec semantic pass is a follow-up but there
+    is no wired, dependency-free embedding path callable here today.
+    Returns ``[{"path", "score"}, ...]`` descending; empty-token records drop.
     """
-    hint = target_hint.strip().lower()
-    if not hint:
+    hint_tokens = _tokenize_target(target_hint)
+    if not hint_tokens:
         return []
 
     scored: list[dict[str, Any]] = []
     for rec in records:
-        haystack = _candidate_haystack(rec)
-        if not haystack:
-            continue
-        score = difflib.SequenceMatcher(None, hint, haystack).ratio()
         path = str(rec.get("path") or "").strip()
         if not path:
             continue
+        cand_tokens = _candidate_tokens(rec)
+        if not cand_tokens:
+            continue
+        overlap = len(hint_tokens & cand_tokens)
+        if overlap == 0:
+            continue
+        score = overlap / len(hint_tokens)
         scored.append({"path": path, "score": round(score, 4)})
 
     scored.sort(key=lambda c: c["score"], reverse=True)
