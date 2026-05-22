@@ -21,6 +21,7 @@ import {
   getIntegrationScope,
   createInboundWebhook,
   deleteInboundWebhook,
+  pairOmiDevice,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import {
@@ -128,6 +129,10 @@ export default function ConnectionsPage() {
   const [revokeTarget, setRevokeTarget] = useState<Connected | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  // F59 — composed OMI device URL after a successful pair. null = not paired
+  // yet; "" = paired but the tenant has no TENANT_BASE_URL (missing-URL state);
+  // a non-empty string is the URL to display + copy.
+  const [omiUrl, setOmiUrl] = useState<string | null>(null);
 
   const filtered = useMemo(() => {
     return toolkits.filter((t) => {
@@ -307,6 +312,42 @@ export default function ConnectionsPage() {
     } catch (e) {
       console.error("disconnect failed", e);
       setToast(`Could not disconnect ${label}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // F59 — real OMI pairing. OMI is a push/stream source, not a Composio
+  // OAuth/API-key integration: "pairing" means handing the device a private
+  // tenant-scoped audio endpoint to POST raw PCM to. pairOmiDevice proxies the
+  // ctrl-api create-or-reuse-omi-stream route and returns the server-composed
+  // { webhook_url } — we surface it verbatim with a copy button and never route
+  // through initiateConnect (which would fuzzy-resolve the synthetic alfred-omi
+  // slug to a junk `cal` connection). webhook_url is null when the tenant lacks
+  // TENANT_BASE_URL — we show a "contact support" state, never a broken URL.
+  async function pairOmi(toolkit: Toolkit) {
+    setBusy(toolkit.slug);
+    setOmiUrl(null);
+    try {
+      const result: any = await pairOmiDevice();
+      const url: string | null = result?.webhook_url ?? null;
+      if (url) {
+        setOmiUrl(url);
+        try {
+          await navigator.clipboard.writeText(url);
+          setToast(`${toolkit.name} pairing URL copied to clipboard.`);
+        } catch {
+          setToast(`${toolkit.name} pairing URL ready.`);
+        }
+      } else {
+        // TENANT_BASE_URL missing on the tenant — surface an honest state.
+        setOmiUrl("");
+        setToast(`Couldn't compose the ${toolkit.name} URL — contact support.`);
+      }
+      await refetchConnected();
+    } catch (e) {
+      console.error("omi pair failed", e);
+      setToast(`Could not pair ${toolkit.name}`);
     } finally {
       setBusy(null);
     }
@@ -543,10 +584,15 @@ export default function ConnectionsPage() {
         <ConnectModal
           app={openApp}
           busy={busy === openApp.slug}
-          onClose={() => setOpenApp(null)}
+          omiUrl={omiUrl}
+          onClose={() => {
+            setOpenApp(null);
+            setOmiUrl(null);
+          }}
           onOAuth={() => startOAuth(openApp)}
           onApiKey={(k) => saveApiKey(openApp, k)}
           onWebhook={(label) => createWebhook(openApp, label)}
+          onPairOmi={() => pairOmi(openApp)}
         />
       )}
 
@@ -619,17 +665,21 @@ function RevokeModal({
 function ConnectModal({
   app,
   busy,
+  omiUrl,
   onClose,
   onOAuth,
   onApiKey,
   onWebhook,
+  onPairOmi,
 }: {
   app: Toolkit;
   busy: boolean;
+  omiUrl: string | null;
   onClose: () => void;
   onOAuth: () => void;
   onApiKey: (key: string) => void;
   onWebhook: (label: string) => void;
+  onPairOmi: () => void;
 }) {
   const [key, setKey] = useState("");
   const [webhookLabel, setWebhookLabel] = useState("");
@@ -690,23 +740,63 @@ function ConnectModal({
           </p>
         ) : isDevicePair ? (
           <div>
-            {/* F59 — honest copy. Pairing produces a private audio endpoint URL
-                for the device; the live "create pairing URL" action (pairOmiDevice
-                → POST /api/v1/integrations/omi/pair) wires once the regenerated
-                Wasp client SDK ships the new op stub (it can't be imported against
-                the stale shared SDK in this worktree — see batch STOP-report). */}
-            <p
-              className="font-body text-[15px] mb-4"
-              style={{ color: "var(--marginalia)" }}
-            >
-              {app.name} is a wearable audio stream. Pairing generates a private,
-              tenant-scoped endpoint URL — paste it into the {app.name} app's
-              developer settings as the audio stream destination. Once it streams,
-              the device appears in your connected list automatically.
-            </p>
-            <button onClick={onClose} className="btn-brass">
-              Got it
-            </button>
+            {/* F59 — real pairing flow. "Create pairing URL" calls pairOmiDevice
+                (→ POST /api/v1/integrations/omi/pair), which create-or-reuses the
+                single source:"omi" stream and returns its server-composed
+                webhook_url. We display that URL verbatim with a copy button; we
+                never reconstruct it and never route through Composio. */}
+            {omiUrl === null ? (
+              <>
+                <p
+                  className="font-body text-[15px] mb-4"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  {app.name} is a wearable audio stream. I'll generate a private,
+                  tenant-scoped endpoint URL for the device. Paste it into the{" "}
+                  {app.name} app's developer settings as the audio stream
+                  destination — once it streams, the device appears in your
+                  connected list automatically.
+                </p>
+                <button onClick={onPairOmi} disabled={busy} className="btn-brass">
+                  {busy ? "…" : "Create pairing URL"}
+                </button>
+              </>
+            ) : omiUrl === "" ? (
+              <p
+                className="font-body text-[15px] mb-4"
+                style={{ color: "var(--marginalia)" }}
+              >
+                This tenant isn't configured with a base URL yet, so I can't
+                compose the {app.name} audio endpoint. Please contact support to
+                finish provisioning, then pair again.
+              </p>
+            ) : (
+              <div>
+                <p
+                  className="font-body text-[15px] mb-3"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  Paste this into the {app.name} app's developer settings as the
+                  audio stream endpoint:
+                </p>
+                <div
+                  className="border border-rule p-3 mb-4 font-mono text-[12px] break-all"
+                  style={{ borderColor: "var(--brass)", color: "var(--ink)" }}
+                >
+                  {omiUrl}
+                </div>
+                <button
+                  onClick={() => {
+                    void navigator.clipboard
+                      .writeText(omiUrl)
+                      .catch(() => {});
+                  }}
+                  className="btn-brass"
+                >
+                  Copy URL
+                </button>
+              </div>
+            )}
           </div>
         ) : isInboundWebhook ? (
           <div>
