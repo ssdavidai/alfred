@@ -84,6 +84,13 @@ interface Decision {
   // contextual callout. Stored as the bare matter id (e.g. "smythson-invoice")
   // — the wikilink / vault-path prefix is stripped.
   matterRef?: string | null;
+  // C-B5 provenance — retained off the NA record (target_path/target_kind,
+  // source_signal_path, matched_instinct) so the card renders a one-line
+  // "From <signal> · Matter <m> / Task <t> · instinct <name>". Bare stems;
+  // sourceSignal is a short label (never assumed to be a vault file).
+  taskRef?: string | null;
+  sourceSignal?: string | null;
+  matchedInstinct?: string | null;
   // Freshness band stamped by DecayWatcherWorkflow — used to group the
   // queue under "Fresh / Aging / Stale" so origin-old cards drift below
   // the fold instead of clogging the active surface.
@@ -104,6 +111,25 @@ function extractMatterId(raw: unknown): string | null {
     .replace(/\.md$/, "")
     .trim();
   return stripped || null;
+}
+
+/** Extract a task stem — mirrors extractMatterId, strips `task/`. */
+function extractTaskId(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const wiki = s.match(/^\[\[\s*([^|\]]+?)\s*(?:\|[^\]]*)?\]\]$/);
+  const stripped = (wiki ? wiki[1] : s).replace(/^task\//, "").replace(/\.md$/, "").trim();
+  return stripped || null;
+}
+
+/** Short label for a source_signal_path (ULID or legacy `signal/….md`) —
+ *  just the last segment; never assumed to be a vault file. */
+function signalLabel(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  return (s.replace(/\.md$/, "").split("/").pop() ?? s) || null;
 }
 
 function fmtArrived(value: unknown): string {
@@ -325,11 +351,21 @@ function DeskContent() {
       const rawQuote =
         typeof r?.raw_quote === "string" ? r.raw_quote.trim() : "";
       const why = voicedBody || reasoning || rawQuote || String(r?.body ?? "");
-      // When target_kind === "matter", target_path *is* the matter ref.
+      // C-B5: target_path is the matter ref when target_kind==="matter" and
+      // the task ref when ==="task" — retain both, plus signal + instinct.
+      const targetKind = String(r?.target_kind ?? "");
       const matterRef =
-        String(r?.target_kind ?? "") === "matter"
+        targetKind === "matter"
           ? extractMatterId(r?.target_path)
           : extractMatterId(fm.matter ?? fm.parent_matter);
+      const taskRef =
+        targetKind === "task"
+          ? extractTaskId(r?.target_path)
+          : extractTaskId(fm.task ?? fm.parent_task);
+      const sourceSignal = signalLabel(r?.source_signal_path ?? fm.source_signal_path);
+      const matchedInstinctRaw =
+        typeof r?.matched_instinct === "string" ? r.matched_instinct.trim() : "";
+      const matchedInstinct = matchedInstinctRaw || null;
       const decayBandRaw = String(r?.decay_band ?? fm.decay_band ?? "").toLowerCase();
       const decayBand =
         decayBandRaw === "fresh" || decayBandRaw === "aging" || decayBandRaw === "stale"
@@ -353,6 +389,9 @@ function DeskContent() {
         ),
         conf: typeof r?.confidence === "number" ? r.confidence : undefined,
         matterRef,
+        taskRef,
+        sourceSignal,
+        matchedInstinct,
         decayBand,
       });
     }
@@ -565,6 +604,7 @@ function DeskContent() {
         intent: intent as "delegate" | "defer" | "done" | "take_mine" | "noise",
         note: note || undefined,
         matterRef: d.matterRef ? `matter/${d.matterRef}.md` : undefined,
+        taskRef: d.taskRef ? `task/${d.taskRef}.md` : undefined,
         sourceHeadline: d.headline || undefined,
       });
     } catch (e) {
@@ -1244,6 +1284,12 @@ function DecisionCard({
 }) {
   const arrived = fmtArrived(d.arrived);
   const labelKicker = featured ? "For your decision" : null;
+  // Only render the provenance span (and its leading separator) when at
+  // least one field is present, so advisory cards don't show a dangling "·".
+  const hasProvenance = Boolean(
+    d.sourceSignal || d.matterRef || d.taskRef || d.matchedInstinct,
+  );
+  const provenance = hasProvenance ? <DecisionProvenance d={d} /> : null;
 
   const Buttons = (
     <div
@@ -1352,6 +1398,12 @@ function DecisionCard({
               <span>arrived {arrived}</span>
             </>
           )}
+          {provenance && (
+            <>
+              <span style={{ opacity: 0.5 }}>·</span>
+              {provenance}
+            </>
+          )}
         </div>
       </article>
     );
@@ -1432,6 +1484,12 @@ function DecisionCard({
             <span>arrived {arrived}</span>
           </>
         )}
+        {provenance && (
+          <>
+            <span style={{ opacity: 0.5 }}>·</span>
+            {provenance}
+          </>
+        )}
       </div>
     </article>
   );
@@ -1486,5 +1544,45 @@ function MatterContextCallout({ matterId }: { matterId: string }) {
         </p>
       )}
     </div>
+  );
+}
+
+/** C-B5 — a compact one-line provenance for a desk card: "From <signal> ·
+ *  Matter <m> · Task <t> · instinct <name>". Renders only the parts that
+ *  are present; matter links to /matters/<id>, task to the vault record.
+ *  Returns null when no provenance exists (advisory cards degrade quietly
+ *  rather than rendering empty "Matter —"). */
+function DecisionProvenance({ d }: { d: Decision }) {
+  const parts: ReactNode[] = [];
+  if (d.sourceSignal) parts.push(<>From {d.sourceSignal}</>);
+  if (d.matterRef)
+    parts.push(
+      <>
+        Matter{" "}
+        <Link to={`/matters/${encodeURIComponent(d.matterRef)}`} style={{ color: "var(--brass)" }}>
+          {d.matterRef}
+        </Link>
+      </>,
+    );
+  if (d.taskRef)
+    parts.push(
+      <>
+        Task{" "}
+        <Link to={`/vault?slug=${encodeURIComponent(`task/${d.taskRef}`)}`} style={{ color: "var(--brass)" }}>
+          {d.taskRef}
+        </Link>
+      </>,
+    );
+  if (d.matchedInstinct) parts.push(<>instinct {d.matchedInstinct}</>);
+  if (parts.length === 0) return null;
+  return (
+    <span style={{ display: "inline-flex", flexWrap: "wrap", gap: "0 8px" }}>
+      {parts.map((p, i) => (
+        <span key={i} style={{ display: "inline-flex", gap: "0 8px" }}>
+          {i > 0 && <span style={{ opacity: 0.5 }}>·</span>}
+          {p}
+        </span>
+      ))}
+    </span>
   );
 }

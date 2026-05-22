@@ -48,6 +48,30 @@ interface Row {
   state?: DecisionState;
   intent?: string;
   executeAt?: string;
+  // C-B5 provenance — copied off the decision record (matter_ref / task_ref /
+  // source_record) so each row can show what matter/task it belongs to and
+  // the signal it derived from. Bare stems; null when the record carries none.
+  matterRef?: string | null;
+  taskRef?: string | null;
+  sourceSignal?: string | null;
+}
+
+/** C-B5 — strip a `<prefix>/…/<stem>.md` (or wikilink) down to its stem. */
+function provenanceStem(raw: unknown, prefix: string): string | null {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  const wiki = s.match(/^\[\[\s*([^|\]]+?)\s*(?:\|[^\]]*)?\]\]$/);
+  const stem = (wiki ? wiki[1] : s).replace(new RegExp(`^${prefix}/`), "").replace(/\.md$/, "").trim();
+  return stem || null;
+}
+
+/** Short label for a source signal/record path (ULID or `signal/….md`). */
+function provenanceLabel(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+  return (s.replace(/\.md$/, "").split("/").pop() ?? s) || null;
 }
 
 function classifyOutcome(item: any): Outcome {
@@ -207,6 +231,9 @@ export default function DecisionsPage() {
         state,
         intent,
         executeAt: executeAt || undefined,
+        matterRef: provenanceStem(d?.matter_ref, "matter"),
+        taskRef: provenanceStem(d?.task_ref, "task"),
+        sourceSignal: provenanceLabel(d?.source_signal_path ?? d?.source_record),
       });
     }
     out.sort((a, b) => (a.when < b.when ? 1 : a.when > b.when ? -1 : 0));
@@ -483,6 +510,40 @@ function DecisionsLedger({
                         style={{ color: "var(--marginalia)", marginTop: 2 }}
                       >
                         Fires {fmtWhen(r.executeAt)}
+                      </span>
+                    )}
+                    {(r.sourceSignal || r.matterRef || r.taskRef) && (
+                      <span
+                        className="block font-mono text-[11px]"
+                        style={{ color: "var(--marginalia)", marginTop: 2 }}
+                      >
+                        {r.sourceSignal && <span>From {r.sourceSignal}</span>}
+                        {r.matterRef && (
+                          <>
+                            {r.sourceSignal && <span style={{ opacity: 0.5 }}> · </span>}
+                            Matter{" "}
+                            <Link
+                              to={`/matters/${encodeURIComponent(r.matterRef)}`}
+                              style={{ color: "var(--brass)" }}
+                            >
+                              {r.matterRef}
+                            </Link>
+                          </>
+                        )}
+                        {r.taskRef && (
+                          <>
+                            {(r.sourceSignal || r.matterRef) && (
+                              <span style={{ opacity: 0.5 }}> · </span>
+                            )}
+                            Task{" "}
+                            <Link
+                              to={`/vault?slug=${encodeURIComponent(`task/${r.taskRef}`)}`}
+                              style={{ color: "var(--brass)" }}
+                            >
+                              {r.taskRef}
+                            </Link>
+                          </>
+                        )}
                       </span>
                     )}
                   </td>
