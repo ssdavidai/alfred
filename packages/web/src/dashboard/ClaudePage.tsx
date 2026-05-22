@@ -48,12 +48,21 @@ interface ComposioSkill {
 interface VaultLogin {
   url: string;
   email: string;
-  master_password: string;
+  // F63/C16 — the master password is never echoed on a normal load; the page
+  // surfaces only that it is set.
+  master_password: string | null;
+  master_password_set?: boolean;
 }
 
 interface ClaudeSetupResp {
   tenant_url: string | null;
-  approval_secret: string | null;
+  // F63/C16 — the approval secret is NEVER echoed on a page load. The value is
+  // always null here; branch on `approval_secret_set` instead, and surface the
+  // value exactly once from the rotate endpoint (see the Approval secret
+  // section). `last_rotated_at` is an ISO timestamp or null.
+  approval_secret: null;
+  approval_secret_set: boolean;
+  last_rotated_at: string | null;
   apps: McpApp[];
   custom_instructions: { url: string; filename: string } | null;
   composio_skills: ComposioSkill[] | null;
@@ -180,11 +189,61 @@ function BlobDownload({
   );
 }
 
+// F63/C16 — Approval secret section. The secret is a long-lived bearer value
+// the *mcp-server* checks at its `/approve` endpoint (the device- and
+// command-approval gate, also surfaced on the Vaultwarden /admin/invite page)
+// — it is NOT an "X-Approval header on write actions" (the prior copy was
+// wrong). The value is never echoed on load: surface only that it is set + when
+// it was last rotated. A fresh value is shown exactly once after a rotation,
+// then we fall back to the set/rotated state.
+function ApprovalSecretSection({
+  isSet,
+  lastRotatedAt,
+}: {
+  isSet: boolean;
+  lastRotatedAt: string | null;
+}) {
+  const rotatedLabel = lastRotatedAt
+    ? new Date(lastRotatedAt).toLocaleString(undefined, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      })
+    : null;
+
+  return (
+    <div>
+      <h2 className="font-display text-4xl mb-2">Approval secret</h2>
+      <p
+        className="font-body italic mb-8"
+        style={{ color: "var(--marginalia)" }}
+      >
+        The shared secret Alfred checks before it executes a sensitive action —
+        device pairing, command approval, and the Vaultwarden invite gate. Keep
+        it private; it is the key to approving actions on your behalf.
+      </p>
+
+      <p className="font-body text-[16px] mb-2">
+        {isSet ? "An approval secret is set." : "No approval secret yet."}
+      </p>
+      {rotatedLabel && (
+        <p
+          className="font-mono text-[11px] uppercase tracking-[0.18em] mb-6"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Last rotated {rotatedLabel}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function ClaudePage() {
   const { data, isLoading } = useQuery(getClaudeSetup);
   const setup = (data as ClaudeSetupResp | undefined) ?? {
     tenant_url: null,
     approval_secret: null,
+    approval_secret_set: false,
+    last_rotated_at: null,
     apps: [],
     custom_instructions: null,
     composio_skills: [],
@@ -194,7 +253,9 @@ export default function ClaudePage() {
   // Filter active sections.
   const availableSections: Section[] = SECTIONS.filter((s) => {
     if (s === "MCP servers") return setup.apps.length > 0;
-    if (s === "Approval secret") return Boolean(setup.approval_secret);
+    // F63/C16 — surface the section whenever a secret is configured (the value
+    // is never present on load), so the principal can see its status / rotate.
+    if (s === "Approval secret") return setup.approval_secret_set;
     if (s === "Skill") return Boolean(setup.custom_instructions);
     if (s === "Composio skills")
       return Array.isArray(setup.composio_skills) && setup.composio_skills.length > 0;
@@ -295,18 +356,11 @@ export default function ClaudePage() {
                 </div>
               )}
 
-              {section === "Approval secret" && setup.approval_secret && (
-                <div>
-                  <h2 className="font-display text-4xl mb-2">Approval secret</h2>
-                  <p
-                    className="font-body italic mb-8"
-                    style={{ color: "var(--marginalia)" }}
-                  >
-                    Claude must include this in the X-Approval header on
-                    write actions.
-                  </p>
-                  <CopyReveal value={setup.approval_secret} sensitive />
-                </div>
+              {section === "Approval secret" && (
+                <ApprovalSecretSection
+                  isSet={setup.approval_secret_set}
+                  lastRotatedAt={setup.last_rotated_at}
+                />
               )}
 
               {section === "Skill" && setup.custom_instructions && (
@@ -429,10 +483,24 @@ export default function ClaudePage() {
                       >
                         Master password
                       </div>
-                      <CopyReveal
-                        value={setup.vault_login.master_password}
-                        sensitive
-                      />
+                      {/* F63/C16 — the master password is never echoed on load.
+                          Show only that it is set; recovery happens through
+                          Vaultwarden's own flow. */}
+                      {setup.vault_login.master_password ? (
+                        <CopyReveal
+                          value={setup.vault_login.master_password}
+                          sensitive
+                        />
+                      ) : (
+                        <p
+                          className="font-body text-[14px]"
+                          style={{ color: "var(--marginalia)" }}
+                        >
+                          {setup.vault_login.master_password_set
+                            ? "Set — recover it from your Vaultwarden account settings if you lose it."
+                            : "Not provisioned."}
+                        </p>
+                      )}
                     </li>
                   </ul>
                   <a
