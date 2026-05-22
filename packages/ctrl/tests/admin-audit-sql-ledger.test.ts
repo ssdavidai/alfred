@@ -48,6 +48,7 @@ describe("GET /api/v1/admin/audit — SQL ledger reader (F4/C12)", () => {
       changes: { intent: "done", note: "this is already done" },
       payload: { is_reversible: true },
     });
+    // Hyphenated input — appendAudit normalises it to steward_action (F5).
     appendAudit({
       ts: "2026-05-22T06:00:00.000Z", action_type: "steward-action",
       actor: "alfred", summary: "Reviewed a task",
@@ -67,8 +68,8 @@ describe("GET /api/v1/admin/audit — SQL ledger reader (F4/C12)", () => {
 
   it("hides automated steward noise by default; include_automated=1 reveals it", async () => {
     const hidden = await getAudit("?limit=50");
-    assert.ok(!hidden.items.find((i: any) => i.action_type === "steward-action"));
+    assert.ok(!hidden.items.find((i: any) => i.action_type === "steward_action"));
     const shown = await getAudit("?limit=50&include_automated=1");
-    assert.ok(shown.items.find((i: any) => i.action_type === "steward-action"));
+    assert.ok(shown.items.find((i: any) => i.action_type === "steward_action"));
   });
 });
