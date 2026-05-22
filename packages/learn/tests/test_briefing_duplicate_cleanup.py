@@ -21,11 +21,19 @@ def _client_with_schedules(ids: list[str]):
     handle.delete = AsyncMock()
     client.get_schedule_handle = MagicMock(return_value=handle)
 
-    async def _aiter():
-        for sid in ids:
-            yield MagicMock(id=sid)
+    def _aiter():
+        async def _gen():
+            for sid in ids:
+                yield MagicMock(id=sid)
 
-    client.list_schedules = MagicMock(side_effect=lambda: _aiter())
+        return _gen()
+
+    # Mirror the real temporalio SDK: Client.list_schedules is an
+    # ``async def`` that returns a ScheduleAsyncIterator, so calling it
+    # yields a coroutine that must be awaited before ``async for``. An
+    # AsyncMock returns a coroutine resolving to its return_value, which
+    # is exactly that shape — so the un-awaited call would raise here.
+    client.list_schedules = AsyncMock(side_effect=lambda: _aiter())
     return client, handle
 
 

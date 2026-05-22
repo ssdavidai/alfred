@@ -1136,7 +1136,7 @@ async def _delete_legacy_steward_schedules(client: Client) -> int:
     deleted = 0
     try:
         legacy_ids: list[str] = []
-        async for entry in client.list_schedules():
+        async for entry in await client.list_schedules():
             sid = getattr(entry, "id", None) or ""
             if sid.startswith(STEWARD_SCHEDULE_PREFIX) and sid != STEWARD_SWEEP_SCHEDULE_ID:
                 legacy_ids.append(sid)
@@ -1267,7 +1267,7 @@ async def _delete_legacy_stream_pull_schedules(client: Client) -> int:
     deleted = 0
     try:
         legacy_ids: list[str] = []
-        async for entry in client.list_schedules():
+        async for entry in await client.list_schedules():
             sid = getattr(entry, "id", None) or ""
             if sid.startswith(STREAM_PULL_SCHEDULE_PREFIX):
                 legacy_ids.append(sid)
@@ -1368,7 +1368,7 @@ async def reconcile_chore_schedules(
     deleted = 0
     try:
         orphan_ids: list[str] = []
-        async for entry in client.list_schedules():
+        async for entry in await client.list_schedules():
             sid = getattr(entry, "id", None) or ""
             if not sid.startswith(CHORE_SCHEDULE_PREFIX):
                 continue
@@ -1443,7 +1443,7 @@ async def delete_duplicate_briefing_chore(client: Client) -> int:
     targets = {f"{CHORE_SCHEDULE_PREFIX}{s}" for s in _BRIEFING_CHORE_SLUGS}
     try:
         present: list[str] = []
-        async for entry in client.list_schedules():
+        async for entry in await client.list_schedules():
             sid = getattr(entry, "id", None) or ""
             if sid in targets:
                 present.append(sid)
