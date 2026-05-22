@@ -18,6 +18,7 @@
  */
 import type {
   GetIntegrationCatalog,
+  GetToolkitRequiredFields,
   GetConnectedIntegrations,
   GetGmailConnectionStatus,
   GetIntegrationCapabilities,
@@ -71,6 +72,27 @@ export const getIntegrationCatalog: GetIntegrationCatalog<
   if (args?.category) query.category = args.category;
   return proxyToTenant(instance, {
     path: "/api/v1/integrations/catalog",
+    query,
+  });
+};
+
+/**
+ * F74 — a toolkit's required API-key credential fields, so the connect UI can
+ * render one input per field for multi-field toolkits (e.g. Firecrawl needs
+ * `generic_api_key` + `full`). Proxies the ctrl-api GET; on an unreadable
+ * toolkit the route returns `{ fields: [] }` and the UI falls back to a single
+ * credential input.
+ */
+export const getToolkitRequiredFields: GetToolkitRequiredFields<
+  { toolkit: string; auth_scheme?: string },
+  any
+> = async (args, context) => {
+  if (!args?.toolkit) throw new Error("toolkit is required");
+  const instance = await getUserInstance(context);
+  const query: Record<string, string> = {};
+  if (args.auth_scheme) query.auth_scheme = args.auth_scheme;
+  return proxyToTenant(instance, {
+    path: `/api/v1/integrations/${encodeURIComponent(args.toolkit.toLowerCase())}/required-fields`,
     query,
   });
 };
@@ -380,12 +402,21 @@ export const initiateConnect: InitiateConnect<
  * it for an ACTIVE connection in one round trip.
  */
 export const initiateApiKeyConnect: InitiateApiKeyConnect<
-  { toolkit_slug: string; credential: string; auth_scheme?: string },
+  {
+    toolkit_slug: string;
+    credential?: string;
+    fields?: Record<string, string>;
+    auth_scheme?: string;
+  },
   any
 > = async (args, context) => {
   if (!args?.toolkit_slug) throw new Error("toolkit_slug is required");
-  if (!args?.credential || !args.credential.trim()) {
-    throw new Error("credential is required");
+  // F74 — accept EITHER a single credential (legacy, mapped onto every
+  // required field server-side) OR a per-field map for multi-field toolkits.
+  const hasFields = !!args.fields && Object.keys(args.fields).length > 0;
+  const hasCredential = !!args.credential && args.credential.trim().length > 0;
+  if (!hasFields && !hasCredential) {
+    throw new Error("credential or fields is required");
   }
   const user = requireUser(context);
   const instance = await getUserInstance(context);
@@ -396,7 +427,8 @@ export const initiateApiKeyConnect: InitiateApiKeyConnect<
     path: "/api/v1/integrations/connect-api-key",
     body: {
       toolkit_slug: toolkit,
-      credential: args.credential.trim(),
+      ...(hasCredential ? { credential: args.credential!.trim() } : {}),
+      ...(hasFields ? { fields: args.fields } : {}),
       auth_scheme: args.auth_scheme,
     },
   });

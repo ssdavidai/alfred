@@ -963,6 +963,12 @@ query getIntegrationCatalog {
   entities: []
 }
 
+// F74 — a toolkit's required API-key credential fields (multi-field toolkits).
+query getToolkitRequiredFields {
+  fn: import { getToolkitRequiredFields } from "@src/integrations/operations",
+  entities: []
+}
+
 query getConnectedIntegrations {
   fn: import { getConnectedIntegrations } from "@src/integrations/operations",
   entities: [ComposioConnection]
