@@ -1803,7 +1803,29 @@ export function registerIntegrationRoutes(): void {
         googleTokenRevoked = await revokeGoogleToken(oauthToken);
       }
 
-      // 3. Clean up: remove any stream configs backed by this integration
+      // 2c. Is this the last ACTIVE account of the toolkit? Determines whether
+      //     we sweep the shared skill dir (step 6/7) AND whether we sweep
+      //     legacy/unbound stream configs of the toolkit (step 3, F24). On a
+      //     lookup failure, err toward PRESERVING surface.
+      let lastOfToolkit = false;
+      if (toolkit) {
+        try {
+          const owned = await fetchAllOwnedConnectedAccounts(apiKey, userId);
+          lastOfToolkit = owned.every(
+            (a: any) =>
+              a.id === connId ||
+              a.status !== "ACTIVE" ||
+              ((a.toolkit?.slug ?? a.appName ?? "") as string).toLowerCase() !== toolkit,
+          );
+        } catch { lastOfToolkit = false; }
+      }
+
+      // 3. Clean up stream configs backed by this integration. Always remove
+      //    configs bound to the deleted connection id; when this was the LAST
+      //    account of the toolkit, ALSO sweep legacy/unbound configs matched by
+      //    composio_toolkit or source (e.g. a "migrated-to-composio" Gmail
+      //    config with no composio_connection_id) so they don't linger as
+      //    phantom streams. (F24)
       const cleanedStreams: string[] = [];
       try {
         fs.mkdirSync(STREAM_CONFIGS_DIR, { recursive: true });
@@ -1812,7 +1834,13 @@ export function registerIntegrationRoutes(): void {
           const configPath = path.join(STREAM_CONFIGS_DIR, file);
           try {
             const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-            if (config.composio_connection_id === connId) {
+            const boundToConn = config.composio_connection_id === connId;
+            const matchesToolkit =
+              lastOfToolkit && toolkit &&
+              (String(config.composio_toolkit ?? "").toLowerCase() === toolkit ||
+                String(config.source ?? "").toLowerCase() === toolkit ||
+                String(config.source ?? "").toLowerCase() === `composio:${toolkit}`);
+            if (boundToConn || matchesToolkit) {
               cleanedStreams.push(config.id || file.replace(".json", ""));
               fs.unlinkSync(configPath);
             }
@@ -1857,24 +1885,10 @@ export function registerIntegrationRoutes(): void {
       const removedTools: string[] = [];
       let skillRemoved = false;
 
+      // Reuses `lastOfToolkit` computed in step 2c (the same "no other ACTIVE
+      // account of this toolkit survives" condition that gated the legacy
+      // stream sweep). On a lookup failure it stays false → preserve surface.
       if (toolkit) {
-        let lastOfToolkit = false;
-        try {
-          const owned = await fetchAllOwnedConnectedAccounts(apiKey, userId);
-          const sameToolkitActive = owned.filter(
-            (a: any) =>
-              a.id !== connId &&
-              a.status === "ACTIVE" &&
-              ((a.toolkit?.slug ?? a.appName ?? "") as string).toLowerCase() === toolkit,
-          );
-          lastOfToolkit = sameToolkitActive.length === 0;
-        } catch {
-          // If we cannot determine the remaining count, err on the side of
-          // PRESERVING surface — better to leave a stale skill dir in place
-          // than to strip a surface that survivors still need.
-          lastOfToolkit = false;
-        }
-
         if (lastOfToolkit) {
           // Last connection for this toolkit — remove its shared skill dir.
           // There is no Hermes tool-enable list to clean up: Composio is the
