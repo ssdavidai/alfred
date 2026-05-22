@@ -6,10 +6,11 @@ Two passes expand the F36 ``materialize_matter_entities`` stage:
   record (description from the fact-substring + matter context, ``aliases``,
   ``org`` link, ``role``, ``person.base`` body embeds), idempotently — a
   pre-existing curator body is NEVER clobbered, only ``related`` is unioned.
-- **Pass B** makes one batched workers-profile LLM call over
-  ``onboard["facts"]`` that emits CANONICAL ``person``/``org``/``place``
-  records (never ``project``/``location``/``observation``) with descriptions
-  + person→org ties, for entities not already recorded.
+- **Pass B** makes one batched plain-completion ``_call_llm`` call (NOT the
+  agentic ``_call_clerk``) over ``onboard["facts"]`` that emits CANONICAL
+  ``person``/``org``/``place`` records (never ``project``/``location``/
+  ``observation``) with descriptions + person→org ties, for entities not
+  already recorded.
 
 Casing/dedup: ``"RJ Johnson"`` and ``"rj johnson"`` resolve to the same
 ``person/RJ Johnson.md``.
@@ -118,8 +119,9 @@ def _install(monkeypatch, fake: _FakeVaultClient, llm=None,
     else:
         monkeypatch.setenv("ONBOARDING_KG_SEED", kg_seed)
     # Pass B LLM: either a stub returning a JSON string, or one that raises.
+    # Pass B now uses the plain-completion _call_llm, NOT the agentic _call_clerk.
     if llm is not None:
-        monkeypatch.setattr("src.activities.packs_opus._call_clerk", llm)
+        monkeypatch.setattr("src.activities.packs_opus._call_llm", llm)
 
 
 # ---------------------------------------------------------------------------
@@ -350,8 +352,9 @@ async def test_passB_llm_failure_does_not_crash(monkeypatch):
     ])
     facts = [{"fact": "Rami Khouri is involved."}]
 
+    # _call_llm raises (e.g. Hermes heavy profile out of credits).
     async def _boom(prompt, *a, **k):
-        raise RuntimeError("workers gateway 402")
+        raise RuntimeError("hermes heavy profile 402")
 
     _install(monkeypatch, fake, llm=_boom, facts=facts, kg_seed="true")
     result = await materialize_matter_entities("/tmp/onboard.json")

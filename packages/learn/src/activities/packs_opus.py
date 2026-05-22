@@ -592,12 +592,14 @@ async def generate_matter_pack_opus(onboard_path: str) -> dict[str, Any]:
 #     body embeds so the two are interchangeable. Idempotent: an existing
 #     (curator-authored) body is NEVER clobbered — only ``related`` is unioned.
 #
-#   * Pass B (LLM-gated) — one BATCHED workers-profile call over
-#     ``onboard["facts"]`` that emits CANONICAL ``person``/``org``/``place``
-#     records (never ``project``/``location``/``observation`` — those 422 at
-#     ctrl) with descriptions + person→org ties, for fact-corpus entities not
-#     already recorded. Gated behind ``ONBOARDING_KG_SEED`` (default on) + an
-#     entity cap; degrades cleanly to a no-op if the LLM/credits are out.
+#   * Pass B (LLM-gated) — one BATCHED plain-completion ``_call_llm`` call over
+#     ``onboard["facts"]`` (NOT the agentic ``_call_clerk``, which would try to
+#     write the records itself instead of returning JSON) that emits CANONICAL
+#     ``person``/``org``/``place`` records (never ``project``/``location``/
+#     ``observation`` — those 422 at ctrl) with descriptions + person→org ties,
+#     for fact-corpus entities not already recorded. Gated behind
+#     ``ONBOARDING_KG_SEED`` (default on) + an entity cap; degrades cleanly to a
+#     no-op if the LLM/credits are out.
 #
 # Interlinking is deterministic in both passes: matter→person ``[[person/
 # Name]]`` (pack already emits), person→matter backlink (UNION into
@@ -859,11 +861,16 @@ def _kg_seed_enabled() -> bool:
 
 
 def _kg_seed_cap() -> int:
-    """Max entities Pass B will materialise (bounds cost/scale on a huge corpus)."""
+    """Max entities Pass B will materialise (bounds scale on a huge corpus).
+
+    Default 250 (env-overridable): Pass B is ONE LLM extraction call (already
+    paid) plus cheap per-entity create-or-merge vault writes — not per-entity
+    expensive — so the full extracted corpus should seed, not just a slice.
+    """
     try:
-        return max(0, int(os.environ.get("ONBOARDING_KG_SEED_CAP", "60")))
+        return max(0, int(os.environ.get("ONBOARDING_KG_SEED_CAP", "250")))
     except ValueError:
-        return 60
+        return 250
 
 
 def _build_corpus_entity_prompt(facts: list[dict[str, Any]]) -> str:
@@ -918,11 +925,11 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
     union the matter backlink onto the entity's ``related`` (never clobber a
     curator body). Deterministic.
 
-    Pass B — one batched workers-profile LLM call over ``onboard["facts"]``
-    emits canonical person/org/place records for the broader corpus, create-
-    or-merged the same way. Gated by ``ONBOARDING_KG_SEED`` + an entity cap;
-    no-ops cleanly on LLM failure. The activity never raises — onboarding
-    must not be blocked by graph seeding.
+    Pass B — one batched plain-completion ``_call_llm`` call (NOT the agentic
+    ``_call_clerk``) over ``onboard["facts"]`` emits canonical person/org/place
+    records for the broader corpus, create-or-merged the same way. Gated by
+    ``ONBOARDING_KG_SEED`` + an entity cap; no-ops cleanly on LLM failure. The
+    activity never raises — onboarding must not be blocked by graph seeding.
 
     Idempotent + best-effort. The activity NAME is kept stable for Temporal
     replay-safety; only the body expanded (see module note above).
@@ -1045,7 +1052,14 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
             cap = _kg_seed_cap()
             try:
                 prompt = _build_corpus_entity_prompt(facts)
-                raw = await _call_clerk(prompt, raw=True)
+                # Plain completion (NOT _call_clerk): the agentic clerk runs an
+                # MCP-tooled agent that would try to CREATE these records itself
+                # and trip same_tool_failure_halt, returning a meta-explanation
+                # instead of JSON. _call_llm returns the entities JSON we ask for.
+                raw = await _call_llm(
+                    prompt, max_tokens=8192,
+                    heartbeat_message="materialize: Pass B corpus entity extraction",
+                )
                 parsed = _parse_json_with_key(raw, "entities")
                 entities = parsed.get("entities") if isinstance(parsed, dict) else None
             except Exception as exc:  # noqa: BLE001
