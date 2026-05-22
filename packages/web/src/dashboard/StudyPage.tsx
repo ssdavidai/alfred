@@ -50,6 +50,7 @@ import { useAuth } from "wasp/client/auth";
 import { config } from "wasp/client";
 import { auditKindLabel } from "./auditLedgerCore";
 import { apiBaseUrl } from "./apiKeysCore";
+import { ClaudeSetupSections } from "./ClaudePage";
 
 const SECTIONS = [
   "agent",
@@ -468,6 +469,12 @@ function SettingsSection() {
           </div>
         </div>
       )}
+
+      {/* F84 — Claude Setup (MCP servers, approval secret, skills, vault
+          login) folded in from the retired /claude page. */}
+      <div className="mt-16 pt-12 border-t border-rule">
+        <ClaudeSetupSections />
+      </div>
     </div>
   );
 }

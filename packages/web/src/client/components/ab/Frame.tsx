@@ -30,10 +30,11 @@ const PRIMARY: NavItem[] = [
 ];
 
 // Everything else, behind a "More" menu.
+// F84 — "Claude Setup" (/claude) folded into Settings → Agent Configuration;
+// its nav entry was removed (the /claude route now redirects to /settings#agent).
 const MORE: NavItem[] = [
   { to: "/connections", label: "Apps", icon: "globe" },
   { to: "/settings", label: "Settings", icon: "settings" },
-  { to: "/claude", label: "Claude Setup", icon: "skeleton_key" },
 ];
 
 // Logged-out marketing nav: the only entry points an anonymous visitor sees.

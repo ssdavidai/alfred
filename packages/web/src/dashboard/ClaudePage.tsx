@@ -1,37 +1,33 @@
-// ClaudePage — Claude Setup, restyled (#866).
+// ClaudeSetupSections — the Claude Setup body (#866; relocated F84).
 //
-// Reads getClaudeSetup. Renders five sections in a sidebar layout:
+// F84 — the standalone /claude page was folded into Settings → Agent
+// Configuration. This module no longer has a default page export; it exports
+// <ClaudeSetupSections /> which StudyPage renders below the model matrix at
+// /settings#agent. The section JSX, getClaudeSetup query, rotate handler, and
+// copy/reveal state are unchanged — only the wrapper (Frame + sidebar nav) was
+// dropped; the sections now stack vertically.
+//
+// Reads getClaudeSetup. Renders these sections (when their data is present):
 //
 //   • MCP servers       — apps[].mcp_url, copy-revealable
-//   • Approval secret   — approval_secret, copy-revealable
+//   • Approval secret   — approval_secret, reveal-once rotate (F77/C16)
 //   • Skill             — apps[].skill_url + custom_instructions.url
 //   • Composio skills   — composio_skills (one per connected toolkit)
 //   • Vault login       — vault_login (Vaultwarden bundle), gated on
 //                         tenants that were provisioned with BW
 //
-// F82 — "Developer / API keys" lives under Settings → Account → API Keys.
-// The duplicate link/block that used to sit here was removed.
+// F82 — "Developer / API keys" lives under Settings → API keys; not here.
 import { useState } from "react";
 import {
   useQuery,
   getClaudeSetup,
   rotateApprovalSecret,
 } from "wasp/client/operations";
-import { Frame } from "../client/components/ab/Frame";
 
 // F77/C16 — the rotate action returns the fresh secret exactly once.
 interface RotateApprovalSecretResp {
   approval_secret: string;
 }
-
-const SECTIONS = [
-  "MCP servers",
-  "Approval secret",
-  "Skill",
-  "Composio skills",
-  "Vault login",
-] as const;
-type Section = (typeof SECTIONS)[number];
 
 interface McpApp {
   id: string;
@@ -317,7 +313,10 @@ function ApprovalSecretSection({
   );
 }
 
-export default function ClaudePage() {
+// F84 — the Claude Setup body, rendered inline within Settings → Agent
+// Configuration (StudyPage). No Frame, no sidebar nav: each section renders
+// only when its data is present, and the sections stack vertically.
+export function ClaudeSetupSections() {
   const { data, isLoading, refetch } = useQuery(getClaudeSetup);
   const setup = (data as ClaudeSetupResp | undefined) ?? {
     tenant_url: null,
@@ -330,267 +329,233 @@ export default function ClaudePage() {
     vault_login: null,
   };
 
-  // Filter active sections.
-  const availableSections: Section[] = SECTIONS.filter((s) => {
-    if (s === "MCP servers") return setup.apps.length > 0;
-    // F63/C16 — surface the section whenever a secret is configured (the value
-    // is never present on load), so the principal can see its status / rotate.
-    if (s === "Approval secret") return setup.approval_secret_set;
-    if (s === "Skill") return Boolean(setup.custom_instructions);
-    if (s === "Composio skills")
-      return Array.isArray(setup.composio_skills) && setup.composio_skills.length > 0;
-    if (s === "Vault login") return Boolean(setup.vault_login);
-    return false;
-  });
-
-  const [section, setSection] = useState<Section>(
-    availableSections[0] ?? "MCP servers",
-  );
+  const hasMcp = setup.apps.length > 0;
+  // F63/C16 — surface the section whenever a secret is configured (the value
+  // is never present on load), so the principal can see its status / rotate.
+  const hasApproval = setup.approval_secret_set;
+  const hasSkill = Boolean(setup.custom_instructions);
+  const hasComposio =
+    Array.isArray(setup.composio_skills) && setup.composio_skills.length > 0;
+  const hasVaultLogin = Boolean(setup.vault_login);
+  const hasAny =
+    hasMcp || hasApproval || hasSkill || hasComposio || hasVaultLogin;
 
   return (
-    <Frame>
-      <section className="mx-auto max-w-[1240px] px-8 py-12 grid md:grid-cols-[260px_1fr] gap-12 items-start">
-        <aside className="md:sticky md:top-12">
-          <div
-            className="font-mono text-[10px] uppercase tracking-[0.28em] mb-3"
-            style={{ color: "var(--brass)" }}
-          >
-            Claude Setup
-          </div>
-          <div className="font-display text-3xl italic mb-8">Hand off to Claude</div>
-          <nav className="border-t border-rule">
-            {availableSections.map((s) => (
-              <button
-                key={s}
-                onClick={() => setSection(s)}
-                className="w-full text-left py-3 border-b border-rule font-display italic text-[18px]"
-                style={{
-                  color: s === section ? "var(--ink)" : "var(--marginalia)",
-                }}
+    <div>
+      <h2 className="font-display text-4xl tracking-tight mb-2">Hand off to Claude</h2>
+      <p className="font-body italic mb-8" style={{ color: "var(--marginalia)" }}>
+        MCP servers, the approval secret, and the skills Claude reads.
+      </p>
+
+      {isLoading ? (
+        <p
+          className="font-body italic text-[16px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Reading the setup file…
+        </p>
+      ) : !hasAny ? (
+        <p
+          className="font-body italic text-[16px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Claude setup isn't ready yet — your tenant is still composing.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-16">
+          {hasMcp && (
+            <div>
+              <h3 className="font-display text-3xl mb-2">MCP servers</h3>
+              <p
+                className="font-body italic mb-8"
+                style={{ color: "var(--marginalia)" }}
               >
-                {s}
-              </button>
-            ))}
-          </nav>
-        </aside>
-
-        <article>
-          {isLoading ? (
-            <p
-              className="font-body italic text-[16px]"
-              style={{ color: "var(--marginalia)" }}
-            >
-              Reading the setup file…
-            </p>
-          ) : availableSections.length === 0 ? (
-            <p
-              className="font-body italic text-[16px]"
-              style={{ color: "var(--marginalia)" }}
-            >
-              Claude setup isn't ready yet — your tenant is still composing.
-            </p>
-          ) : (
-            <>
-              {section === "MCP servers" && (
-                <div>
-                  <h2 className="font-display text-4xl mb-2">MCP servers</h2>
-                  <p
-                    className="font-body italic mb-8"
-                    style={{ color: "var(--marginalia)" }}
-                  >
-                    Connect Claude to your household. Add each URL as an MCP
-                    server in Claude.ai's settings.
-                  </p>
-                  <ul className="border-t border-rule">
-                    {setup.apps
-                      .filter((a) => a.enabled && a.mcp_url)
-                      .map((a) => (
-                        <li
-                          key={a.id}
-                          className="grid grid-cols-[180px_1fr] gap-6 py-4 border-b border-rule items-center"
-                        >
-                          <div>
-                            <div className="font-display italic text-[20px]">
-                              {a.name}
-                            </div>
-                            <div
-                              className="font-mono text-[10px] uppercase tracking-[0.22em]"
-                              style={{ color: "var(--marginalia)" }}
-                            >
-                              {a.id}
-                            </div>
-                          </div>
-                          <CopyReveal value={a.mcp_url!} />
-                        </li>
-                      ))}
-                  </ul>
-                </div>
-              )}
-
-              {section === "Approval secret" && (
-                <ApprovalSecretSection
-                  isSet={setup.approval_secret_set}
-                  lastRotatedAt={setup.last_rotated_at}
-                  onRotated={() => {
-                    void refetch();
-                  }}
-                />
-              )}
-
-              {section === "Skill" && setup.custom_instructions && (
-                <div>
-                  <h2 className="font-display text-4xl mb-2">Skill</h2>
-                  <p
-                    className="font-body italic mb-8"
-                    style={{ color: "var(--marginalia)" }}
-                  >
-                    The instructions Claude reads at the start of every
-                    turn — paste into your claude.ai profile's
-                    Personalisation field.
-                  </p>
-                  <ul className="border-t border-rule">
-                    <li className="py-4 border-b border-rule">
-                      <div
-                        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
-                        style={{ color: "var(--marginalia)" }}
-                      >
-                        Custom instructions
-                      </div>
-                      <SkillDownload
-                        url={setup.custom_instructions.url}
-                        filename={setup.custom_instructions.filename}
-                        description="Paste into your claude.ai profile's Personalisation field."
-                      />
-                    </li>
-                    {setup.apps
-                      .filter((a) => a.enabled && a.skill_url)
-                      .map((a) => (
-                        <li
-                          key={a.id}
-                          className="py-4 border-b border-rule"
-                        >
-                          <div
-                            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
-                            style={{ color: "var(--marginalia)" }}
-                          >
-                            {a.name} skill
-                          </div>
-                          <SkillDownload
-                            url={a.skill_url}
-                            filename={`alfred-${a.id}.md`}
-                            description={a.description}
-                          />
-                        </li>
-                      ))}
-                  </ul>
-                </div>
-              )}
-
-              {section === "Composio skills" &&
-                Array.isArray(setup.composio_skills) &&
-                setup.composio_skills.length > 0 && (
-                  <div>
-                    <h2 className="font-display text-4xl mb-2">
-                      Composio skills
-                    </h2>
-                    <p
-                      className="font-body italic mb-8"
-                      style={{ color: "var(--marginalia)" }}
+                Connect Claude to your household. Add each URL as an MCP
+                server in Claude.ai's settings.
+              </p>
+              <ul className="border-t border-rule">
+                {setup.apps
+                  .filter((a) => a.enabled && a.mcp_url)
+                  .map((a) => (
+                    <li
+                      key={a.id}
+                      className="grid grid-cols-[180px_1fr] gap-6 py-4 border-b border-rule items-center"
                     >
-                      One per connected toolkit. Each contains the
-                      tenant-specific connection id — regenerated when you
-                      reconnect.
-                    </p>
-                    <ul className="border-t border-rule">
-                      {setup.composio_skills.map((s) => (
-                        <li
-                          key={s.slug}
-                          className="grid grid-cols-[180px_1fr] gap-6 py-4 border-b border-rule items-start"
-                        >
-                          <span className="font-display italic text-[18px]">
-                            {s.name || s.slug}
-                          </span>
-                          <BlobDownload
-                            content={s.content}
-                            filename={`${s.slug}.md`}
-                            description={s.description}
-                          />
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-
-              {section === "Vault login" && setup.vault_login && (
-                <div>
-                  <h2 className="font-display text-4xl mb-2">Vault login</h2>
-                  <p
-                    className="font-body italic mb-8"
-                    style={{ color: "var(--marginalia)" }}
-                  >
-                    Your private Vaultwarden web UI, with the master
-                    password Alfred provisioned.
-                  </p>
-                  <ul className="border-t border-rule">
-                    <li className="py-4 border-b border-rule">
-                      <div
-                        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
-                        style={{ color: "var(--marginalia)" }}
-                      >
-                        URL
-                      </div>
-                      <CopyReveal value={setup.vault_login.url} />
-                    </li>
-                    <li className="py-4 border-b border-rule">
-                      <div
-                        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
-                        style={{ color: "var(--marginalia)" }}
-                      >
-                        Email
-                      </div>
-                      <CopyReveal value={setup.vault_login.email} />
-                    </li>
-                    <li className="py-4 border-b border-rule">
-                      <div
-                        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
-                        style={{ color: "var(--marginalia)" }}
-                      >
-                        Master password
-                      </div>
-                      {/* F63/C16 — the master password is never echoed on load.
-                          Show only that it is set; recovery happens through
-                          Vaultwarden's own flow. */}
-                      {setup.vault_login.master_password ? (
-                        <CopyReveal
-                          value={setup.vault_login.master_password}
-                          sensitive
-                        />
-                      ) : (
-                        <p
-                          className="font-body text-[14px]"
+                      <div>
+                        <div className="font-display italic text-[20px]">
+                          {a.name}
+                        </div>
+                        <div
+                          className="font-mono text-[10px] uppercase tracking-[0.22em]"
                           style={{ color: "var(--marginalia)" }}
                         >
-                          {setup.vault_login.master_password_set
-                            ? "Set — recover it from your Vaultwarden account settings if you lose it."
-                            : "Not provisioned."}
-                        </p>
-                      )}
+                          {a.id}
+                        </div>
+                      </div>
+                      <CopyReveal value={a.mcp_url!} />
                     </li>
-                  </ul>
-                  <a
-                    href={setup.vault_login.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="btn-brass mt-6 inline-block"
-                  >
-                    Open the vault →
-                  </a>
-                </div>
-              )}
-            </>
+                  ))}
+              </ul>
+            </div>
           )}
-        </article>
-      </section>
-    </Frame>
+
+          {hasApproval && (
+            <ApprovalSecretSection
+              isSet={setup.approval_secret_set}
+              lastRotatedAt={setup.last_rotated_at}
+              onRotated={() => {
+                void refetch();
+              }}
+            />
+          )}
+
+          {hasSkill && setup.custom_instructions && (
+            <div>
+              <h3 className="font-display text-3xl mb-2">Skill</h3>
+              <p
+                className="font-body italic mb-8"
+                style={{ color: "var(--marginalia)" }}
+              >
+                The instructions Claude reads at the start of every
+                turn — paste into your claude.ai profile's
+                Personalisation field.
+              </p>
+              <ul className="border-t border-rule">
+                <li className="py-4 border-b border-rule">
+                  <div
+                    className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+                    style={{ color: "var(--marginalia)" }}
+                  >
+                    Custom instructions
+                  </div>
+                  <SkillDownload
+                    url={setup.custom_instructions.url}
+                    filename={setup.custom_instructions.filename}
+                    description="Paste into your claude.ai profile's Personalisation field."
+                  />
+                </li>
+                {setup.apps
+                  .filter((a) => a.enabled && a.skill_url)
+                  .map((a) => (
+                    <li key={a.id} className="py-4 border-b border-rule">
+                      <div
+                        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+                        style={{ color: "var(--marginalia)" }}
+                      >
+                        {a.name} skill
+                      </div>
+                      <SkillDownload
+                        url={a.skill_url}
+                        filename={`alfred-${a.id}.md`}
+                        description={a.description}
+                      />
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          )}
+
+          {hasComposio &&
+            Array.isArray(setup.composio_skills) &&
+            setup.composio_skills.length > 0 && (
+              <div>
+                <h3 className="font-display text-3xl mb-2">Composio skills</h3>
+                <p
+                  className="font-body italic mb-8"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  One per connected toolkit. Each contains the
+                  tenant-specific connection id — regenerated when you
+                  reconnect.
+                </p>
+                <ul className="border-t border-rule">
+                  {setup.composio_skills.map((s) => (
+                    <li
+                      key={s.slug}
+                      className="grid grid-cols-[180px_1fr] gap-6 py-4 border-b border-rule items-start"
+                    >
+                      <span className="font-display italic text-[18px]">
+                        {s.name || s.slug}
+                      </span>
+                      <BlobDownload
+                        content={s.content}
+                        filename={`${s.slug}.md`}
+                        description={s.description}
+                      />
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+          {hasVaultLogin && setup.vault_login && (
+            <div>
+              <h3 className="font-display text-3xl mb-2">Vault login</h3>
+              <p
+                className="font-body italic mb-8"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Your private Vaultwarden web UI, with the master
+                password Alfred provisioned.
+              </p>
+              <ul className="border-t border-rule">
+                <li className="py-4 border-b border-rule">
+                  <div
+                    className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+                    style={{ color: "var(--marginalia)" }}
+                  >
+                    URL
+                  </div>
+                  <CopyReveal value={setup.vault_login.url} />
+                </li>
+                <li className="py-4 border-b border-rule">
+                  <div
+                    className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+                    style={{ color: "var(--marginalia)" }}
+                  >
+                    Email
+                  </div>
+                  <CopyReveal value={setup.vault_login.email} />
+                </li>
+                <li className="py-4 border-b border-rule">
+                  <div
+                    className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+                    style={{ color: "var(--marginalia)" }}
+                  >
+                    Master password
+                  </div>
+                  {/* F63/C16 — the master password is never echoed on load.
+                      Show only that it is set; recovery happens through
+                      Vaultwarden's own flow. */}
+                  {setup.vault_login.master_password ? (
+                    <CopyReveal
+                      value={setup.vault_login.master_password}
+                      sensitive
+                    />
+                  ) : (
+                    <p
+                      className="font-body text-[14px]"
+                      style={{ color: "var(--marginalia)" }}
+                    >
+                      {setup.vault_login.master_password_set
+                        ? "Set — recover it from your Vaultwarden account settings if you lose it."
+                        : "Not provisioned."}
+                    </p>
+                  )}
+                </li>
+              </ul>
+              <a
+                href={setup.vault_login.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-brass mt-6 inline-block"
+              >
+                Open the vault →
+              </a>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

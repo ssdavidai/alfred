@@ -286,11 +286,12 @@ page BackOfficePage {
   component: import BackOfficePage from "@src/dashboard/BackOfficeRedirect"
 }
 
-// /claude — Claude Setup, restyled (M5 #866).
+// /claude → /settings#agent (F84). Claude Setup is folded into Settings →
+// Agent Configuration (ClaudeSetupSections); this route is now a thin redirect.
 route ClaudeRoute { path: "/claude", to: ClaudePage }
 page ClaudePage {
   authRequired: true,
-  component: import ClaudePage from "@src/dashboard/ClaudePage"
+  component: import ClaudePage from "@src/dashboard/ClaudeRedirect"
 }
 
 // /channels — live channels (M5 #864).
