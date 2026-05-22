@@ -66,6 +66,17 @@ function effectiveThreshold(instinct: any, matchCount: number): number {
   return discretionThreshold(matchCount);
 }
 
+// Observation-earned ceiling (#B6). A seeded `discretion_threshold` may
+// only *lower* displayed trust, never promote an instinct above what its
+// accumulated decision-observations have earned. Mirrors the obs-count
+// buckets of `discretionThreshold` (5 / 20 breakpoints) collapsed to the
+// three stages: <5 → Asking, 5–19 → Confirming, ≥20 → Acting.
+function earnedCeiling(matchCount: number): Stage {
+  if (matchCount < 5) return "Asking";
+  if (matchCount < 20) return "Confirming";
+  return "Acting";
+}
+
 function butlerLine(threshold: number): string {
   if (threshold >= 0.95) return "I'd ask before acting on this.";
   if (threshold >= 0.90) return "I'd rather confirm before acting.";
@@ -87,9 +98,17 @@ function classifyStage(instinct: any, matchCount: number): Stage {
   //   0.85 ≤ thr < 0.95 →  Confirming
   //   threshold <  0.85 →  Acting
   const t = effectiveThreshold(instinct, matchCount);
-  if (t >= 0.95) return "Asking";
-  if (t >= 0.85) return "Confirming";
-  return "Acting";
+  let thresholdStage: Stage;
+  if (t >= 0.95) thresholdStage = "Asking";
+  else if (t >= 0.85) thresholdStage = "Confirming";
+  else thresholdStage = "Acting";
+  // Clamp to the observation-earned ceiling (#B6): a seeded threshold can
+  // only lower the displayed trust, never show Acting/Confirming an
+  // instinct hasn't earned. Render the LOWER of the two by STAGES index.
+  const ceiling = earnedCeiling(matchCount);
+  return STAGES.indexOf(thresholdStage) <= STAGES.indexOf(ceiling)
+    ? thresholdStage
+    : ceiling;
 }
 
 function titleCaseSlug(slug: string): string {
