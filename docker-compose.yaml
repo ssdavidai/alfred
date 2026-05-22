@@ -395,6 +395,11 @@ services:
       # (helpers.ts default is the bare-VM /srv/alfred-black; the mount makes
       # that default path real inside the container.)
       - COMPOSE_DIR=/srv/alfred-black
+      # The tenant's public base URL. composeWebhookUrl() (streams.ts) builds
+      # absolute OMI/custom-webhook endpoint URLs from it; unset → it returns
+      # null and the OMI device / custom-webhook URL comes back empty (F41/F69).
+      # Defaults to https://${DOMAIN}; override via TENANT_BASE_URL in .env.
+      - TENANT_BASE_URL=${TENANT_BASE_URL:-https://${DOMAIN}}
       - OPENCLAW_GATEWAY_TOKEN_FILE=/alfred-data/.gateway-token
       # ctrl-api reads/writes Hermes profile config.yaml at ${dir}/<profile>/;
       # point it at the profiles parent so paths resolve to
