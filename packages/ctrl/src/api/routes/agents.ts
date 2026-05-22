@@ -46,6 +46,17 @@ const AGENTS = [
   { id: "chore", label: "Chore reasoning", description: "Heavy-reasoning chore execution — Opus-class, used sparingly", profile: "heavy" },
 ];
 
+/**
+ * The three Hermes profiles, in display order. Gateway ports and descriptions
+ * are the runtime facts the model-config matrix renders (C17). The agents that
+ * ride each profile are derived from the AGENTS catalog by `profile`.
+ */
+const PROFILES: { id: string; gateway_port: number; description: string }[] = [
+  { id: "main", gateway_port: 18789, description: "Your conversational Alfred on every channel (Slack/Telegram/SMS), with memory." },
+  { id: "workers", gateway_port: 18790, description: "Clerk (event classification/extraction/reflection), chore execution, surveyor labeling — cheap, high-volume." },
+  { id: "heavy", gateway_port: 18791, description: "Onboarding facts/patterns + chore heavy-reasoning — Opus-class, slow and expensive, used sparingly." },
+];
+
 /** Read a Hermes profile's `model.default` from its config.yaml (read-only). */
 function readProfileModel(profile: string): string | null {
   try {
@@ -168,18 +179,51 @@ function getSurveyorConfig(config: Record<string, any>): Record<string, any> {
 }
 
 export function registerAgentRoutes(): void {
-  // GET /api/v1/admin/agents — lightweight agent list (no docker exec)
+  // GET /api/v1/admin/agents — agent list (no docker exec). F68: enrich each
+  // entry with `profile` + `default_model` (read read-only from the profile
+  // config.yaml) so the model-config matrix can render without N+1 round-trips.
   addRoute("GET", "/api/v1/admin/agents", async ({ res }) => {
     const config = await readConfig();
+    // Cache per-profile model reads so we don't re-parse a config.yaml per agent.
+    const modelByProfile = new Map<string, string | null>();
+    const profileModel = (profile: string): string | null => {
+      if (!modelByProfile.has(profile)) modelByProfile.set(profile, readProfileModel(profile));
+      return modelByProfile.get(profile) ?? null;
+    };
 
     sendJson(res, 200, {
       agents: AGENTS.map((a) => ({
         id: a.id,
         label: a.label,
         description: a.description,
+        profile: a.profile,
+        default_model: profileModel(a.profile),
       })),
       surveyor: getSurveyorConfig(config),
     });
+  });
+
+  // GET /api/v1/admin/profiles — the model-config matrix source (C17). One
+  // round-trip: the three Hermes profiles, each with its model + the agents
+  // riding it, plus the surveyor (labeler/embedder).
+  addRoute("GET", "/api/v1/admin/profiles", async ({ res }) => {
+    const config = await readConfig();
+    const profiles = PROFILES.map((p) => {
+      const model = readProfileModel(p.id);
+      return {
+        id: p.id,
+        gateway_port: p.gateway_port,
+        default_model: model,
+        resolved_model: model,
+        description: p.description,
+        agents: AGENTS.filter((a) => a.profile === p.id).map((a) => ({
+          id: a.id,
+          label: a.label,
+          description: a.description,
+        })),
+      };
+    });
+    sendJson(res, 200, { profiles, surveyor: getSurveyorConfig(config) });
   });
 
   // GET /api/v1/admin/agents/:agentId — single agent's full model status
