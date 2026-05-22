@@ -26,7 +26,14 @@ class _FakeVaultClient:
         self.patched: list = []
 
     async def list_records(self, record_type: str, **kw: Any):
-        return self._matters if record_type == "matter" else []
+        if record_type == "matter":
+            return self._matters
+        # Surface the existing entities as a typed listing, the way the real
+        # ctrl-api does — B9's seeder caches this listing for existence checks.
+        return [
+            {"path": f"{t}/{n}.md", "name": n, "frontmatter": {"name": n}}
+            for (t, n) in self.existing if t == record_type
+        ]
 
     async def record_exists(self, record_type: str, slug: str) -> bool:
         return (record_type, slug) in self.existing

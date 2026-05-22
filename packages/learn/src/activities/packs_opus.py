@@ -575,13 +575,91 @@ async def generate_matter_pack_opus(onboard_path: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# F36 — deterministic post-pack entity materialisation
+# B9 — onboarding seeds an enriched, interlinked knowledge graph
 # ---------------------------------------------------------------------------
 # Matters used to be graph islands: people named in a matter were body text
 # with no person/org record. F37 made the matter emit ``[[person/Name]]``
-# wikilinks; this stage materialises the targets — a minimal stub for any
-# wikilink with no record (a real graph node the curator enriches in
-# Wave-5) + a backlink from the entity to the matter. Deterministic; no LLM.
+# wikilinks; F36 materialised bare stubs ("Alfred will enrich this later").
+# B9 expands that single stage into two passes (the activity NAME is kept —
+# ``materialize_matter_entities`` — for Temporal replay-safety + worker
+# registration; only the body grows):
+#
+#   * Pass A (deterministic-first) — upgrade each matter-named entity from a
+#     bare stub into a real CURATOR-SCHEMA record: a 2-3 sentence description
+#     derived from the fact-substring + matter context, ``aliases``/``email``/
+#     ``role``/``org`` frontmatter, and the curator's ``![[person.base#…]]``
+#     body embeds so the two are interchangeable. Idempotent: an existing
+#     (curator-authored) body is NEVER clobbered — only ``related`` is unioned.
+#
+#   * Pass B (LLM-gated) — one BATCHED workers-profile call over
+#     ``onboard["facts"]`` that emits CANONICAL ``person``/``org``/``place``
+#     records (never ``project``/``location``/``observation`` — those 422 at
+#     ctrl) with descriptions + person→org ties, for fact-corpus entities not
+#     already recorded. Gated behind ``ONBOARDING_KG_SEED`` (default on) + an
+#     entity cap; degrades cleanly to a no-op if the LLM/credits are out.
+#
+# Interlinking is deterministic in both passes: matter→person ``[[person/
+# Name]]`` (pack already emits), person→matter backlink (UNION into
+# ``related``), person→``[[org/Name]]``.
+
+
+# Base-view embeds matching the curator schema (vault-curator/SKILL.md). A
+# person/org record the curator would author carries these so the dashboard
+# base views render and the curator treats a seeded record as one of its own
+# on a later pass. ``place`` has no dedicated base — use the generic one the
+# curator uses for location bodies.
+_PERSON_BASE_EMBEDS = (
+    "## Decisions\n![[person.base#Decisions]]\n"
+    "## Tasks\n![[person.base#Tasks]]\n"
+    "## Projects\n![[person.base#Projects]]\n"
+    "## Sessions\n![[person.base#Sessions]]\n"
+    "## Learnings\n![[person.base#Learnings]]\n"
+    "## Accounts\n![[person.base#Accounts]]\n"
+    "## Assets\n![[person.base#Assets]]\n"
+    "## Notes\n![[person.base#Notes]]\n"
+)
+_ORG_BASE_EMBEDS = (
+    "## People\n![[org.base#People]]\n"
+    "## Projects\n![[org.base#Projects]]\n"
+    "## Tasks\n![[org.base#Tasks]]\n"
+    "## Accounts\n![[org.base#Accounts]]\n"
+    "## Assets\n![[org.base#Assets]]\n"
+    "## Notes\n![[org.base#Notes]]\n"
+)
+_PLACE_BASE_EMBEDS = "![[related.base#All]]\n"
+
+
+def _base_embeds(record_type: str) -> str:
+    if record_type == "person":
+        return _PERSON_BASE_EMBEDS
+    if record_type == "org":
+        return _ORG_BASE_EMBEDS
+    return _PLACE_BASE_EMBEDS
+
+
+def _normalize_entity_name(name: str) -> str:
+    """Normalise a free-text entity name to the curator's Title-Case form.
+
+    The curator owns ``person/Title Case Name.md`` and ctrl resolves graph
+    edges by exact ``stemToPath`` match, so the seeder must align casing
+    before the existence check to avoid a duplicate
+    (``person/rj-johnson.md`` vs ``person/RJ Johnson.md``). Tokens that are
+    already mixed/all-caps (``RJ``, ``McKay``) are preserved; lowercase
+    tokens get title-cased.
+    """
+    cleaned = " ".join((name or "").split())
+    if not cleaned:
+        return ""
+    out: list[str] = []
+    for tok in cleaned.split(" "):
+        # Preserve a token that already carries an internal/leading capital
+        # (acronyms like "RJ", camel like "McKay"); only title-case an all-
+        # lowercase token.
+        if tok and tok == tok.lower():
+            out.append(tok[:1].upper() + tok[1:])
+        else:
+            out.append(tok)
+    return " ".join(out)
 
 
 def _parse_entity_wikilink(value: str) -> tuple[str, str] | None:
@@ -596,80 +674,319 @@ def _parse_entity_wikilink(value: str) -> tuple[str, str] | None:
     return (m.group(1), name) if name else None
 
 
-def _entity_stub_content(record_type: str, name: str, matter_path: str) -> str:
-    """Minimal valid person/org stub — a real graph node the curator
-    enriches later (Wave-5)."""
+def _facts_mentioning(facts: list[dict[str, Any]], name: str, limit: int = 6) -> list[str]:
+    """Return fact strings that mention ``name`` (case-insensitive substring).
+
+    Deterministic context-gathering for Pass A's description — the same idea
+    as the retired ``write_facts_to_vault`` (onboarding.py), but it feeds an
+    enriched curator-schema record instead of demoted per-fact observations.
+    """
+    needle = (name or "").strip().casefold()
+    if not needle:
+        return []
+    hits: list[str] = []
+    for f in facts:
+        if not isinstance(f, dict):
+            continue
+        text = str(f.get("fact", "")).strip()
+        if text and needle in text.casefold():
+            hits.append(text)
+            if len(hits) >= limit:
+                break
+    return hits
+
+
+def _enriched_entity_content(
+    record_type: str,
+    name: str,
+    *,
+    description: str,
+    related: list[str],
+    org_link: str = "",
+    role: str = "",
+    email: str = "",
+    aliases: list[str] | None = None,
+    source_note: str = "",
+) -> str:
+    """Render a curator-schema person/org/place record with a real body.
+
+    Matches vault-curator/SKILL.md so the seeded record is interchangeable
+    with a curator-authored one: flat frontmatter (``aliases``, ``org``,
+    ``role``, ``email``, ``related``), a ``# Name`` heading + description
+    blockquote, then the base-view embeds. No demoted ``observation`` types.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    related = _format_yaml_list([f"[[{matter_path[:-3]}]]"])
-    return (
-        f"---\ntype: {record_type}\nname: {_escape_yaml_scalar(name)}\n"
-        f"status: active\ncreated: {now}\ncreated_by: onboarding_pipeline\n"
-        f"generated: true\nrelated: {related}\n"
-        f"tags: [onboarding, auto-discovered]\n---\n\n# {name}\n\n"
-        f"> Stub created during onboarding from `{matter_path}`. "
-        f"Alfred will enrich this with context as it learns more.\n"
+    desc = (description or "").strip() or f"{name} — discovered during onboarding."
+    fm_lines = [
+        "---",
+        f"type: {record_type}",
+        f"name: {_escape_yaml_scalar(name)}",
+        "status: active",
+        f"aliases: {_format_yaml_list(aliases or [])}",
+        f"description: {_escape_yaml_scalar(desc)}",
+    ]
+    if record_type == "person":
+        # org/role/email are person-schema fields (curator SKILL.md 130-146).
+        if org_link:
+            fm_lines.append(f"org: {_escape_yaml_scalar(org_link)}")
+        if role:
+            fm_lines.append(f"role: {_escape_yaml_scalar(role)}")
+        if email:
+            fm_lines.append(f"email: {_escape_yaml_scalar(email)}")
+    fm_lines += [
+        f"related: {_format_yaml_list(related)}",
+        f"created: {now}",
+        "created_by: onboarding_pipeline",
+        "generated: true",
+        "tags: [onboarding, auto-discovered]",
+        "---",
+    ]
+    body = [f"# {name}", "", f"> {desc}", ""]
+    if source_note:
+        body += [source_note, ""]
+    body.append(_base_embeds(record_type))
+    return "\n".join(fm_lines) + "\n\n" + "\n".join(body)
+
+
+def _union_related(existing: Any, additions: list[str]) -> list[str]:
+    """Union an existing ``related`` value with new links, order-stable, deduped.
+
+    ctrl-api's ``json_set`` REPLACES a frontmatter value (``fm[k] = v``,
+    vault.ts) — it does NOT union lists. So the union must happen on this
+    side: read the record's current ``related`` and merge before writing the
+    full list back. (Risk #3 in debug/0522c/onboarding-kg-scope.md: the F36
+    stage relied on a union ctrl never provided, silently clobbering existing
+    backlinks.) Casefold dedup so ``[[matter/x]]`` isn't added twice.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    src: list[Any] = []
+    if isinstance(existing, list):
+        src = existing
+    elif isinstance(existing, str) and existing.strip():
+        src = [existing]
+    for v in [*src, *additions]:
+        s = str(v).strip()
+        if not s:
+            continue
+        key = s.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
+async def _create_or_merge_entity(
+    client: VaultClient,
+    *,
+    record_type: str,
+    name: str,
+    backlinks: list[str],
+    description: str,
+    org_link: str = "",
+    role: str = "",
+    email: str = "",
+    aliases: list[str] | None = None,
+    source_note: str = "",
+    existing_fm: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    """Idempotent create-or-merge for one entity.
+
+    - If a record already exists (exact path/slug, casefold-aware) → NEVER
+      overwrite the body; only patch the missing links (``related`` UNIONED
+      with the existing value client-side — see ``_union_related`` — plus
+      ``org`` if the record doesn't already carry one). Returns ``"merged"``.
+    - Else create an enriched curator-schema record. Returns ``"created"``.
+
+    ``existing_fm`` is the cached ``{casefold_name: frontmatter}`` map for
+    this type (avoids an O(N) ``record_exists`` listing per entity AND gives
+    the current ``related`` for a real union).
+    """
+    norm = _normalize_entity_name(name)
+    if not norm:
+        return "skipped"
+    cf = norm.casefold()
+    cached = existing_fm if existing_fm is not None else None
+    if cached is not None:
+        exists = cf in cached
+        current_fm = cached.get(cf) or {}
+    else:
+        exists = await client.record_exists(record_type, norm)
+        current_fm = {}
+    if exists:
+        updates: dict[str, Any] = {}
+        if backlinks:
+            # UNION with the record's current related — never replace.
+            merged = _union_related(current_fm.get("related"), backlinks)
+            if merged:
+                updates["related"] = merged
+        # Only fill an org tie the record is missing — don't overwrite a
+        # curator-authored org.
+        if record_type == "person" and org_link and not str(
+            current_fm.get("org") or "").strip():
+            updates["org"] = org_link
+        if updates:
+            await client.patch_frontmatter_structured(
+                f"{record_type}/{norm}.md", json_updates=updates,
+            )
+            if cached is not None and "related" in updates:
+                current_fm["related"] = updates["related"]
+        return "merged"
+    await client.write_record(
+        record_type, norm,
+        _enriched_entity_content(
+            record_type, norm,
+            description=description, related=backlinks,
+            org_link=org_link, role=role, email=email,
+            aliases=aliases, source_note=source_note,
+        ),
     )
+    if cached is not None:
+        cached[cf] = {"name": norm, "related": list(backlinks),
+                      "org": org_link}
+    return "created"
 
 
 @activity.defn
 async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
-    """Create person/org stubs + backlinks for matter-named entities (F36).
+    """Seed an enriched, interlinked vault knowledge graph (B9).
 
-    For each matter's ``related_persons``/``related_orgs`` wikilink: write a
-    minimal stub if no record exists, else backlink the matter onto the
-    entity's ``related``. Idempotent + best-effort. Rich bodies are Wave-5.
+    Pass A — for each matter's ``related_persons``/``related_orgs`` wikilink:
+    create an enriched curator-schema record if none exists (description from
+    the fact-substring + matter context, person→org tie, base embeds), else
+    union the matter backlink onto the entity's ``related`` (never clobber a
+    curator body). Deterministic.
+
+    (Pass B — LLM corpus seeding — lands in the next commit.)
+
+    Idempotent + best-effort. The activity NAME is kept stable for Temporal
+    replay-safety; only the body expanded (see module note above).
     """
     config = load_config()
     client = VaultClient(config)
+    onboard = _read_onboard_json(onboard_path)
+    facts = onboard.get("facts") or []
+    if not isinstance(facts, list):
+        facts = []
+
     created = 0
     linked = 0
+    seeded = 0
+
+    # Cache the typed listing ONCE per type (avoid O(N²) record_exists over
+    # hundreds of entities — each existence check would otherwise re-list).
+    # Maps casefold(normalized name) → that record's frontmatter, so a merge
+    # can UNION the existing ``related`` instead of clobbering it.
+    existing_fm_cache: dict[str, dict[str, dict[str, Any]]] = {}
+
+    async def _ensure_listing(record_type: str) -> dict[str, dict[str, Any]]:
+        if record_type not in existing_fm_cache:
+            try:
+                recs = await client.list_records(record_type, limit=1000)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "materialize: listing %s failed: %s", record_type, exc)
+                recs = []
+            by_name: dict[str, dict[str, Any]] = {}
+            for r in recs or []:
+                fm = dict(r.get("frontmatter") or {})
+                nm = str(fm.get("name") or r.get("name") or "").strip()
+                if not nm:
+                    path = str(r.get("path") or "")
+                    if "/" in path:
+                        nm = path.split("/", 1)[1].rsplit(".md", 1)[0]
+                if nm:
+                    by_name[_normalize_entity_name(nm).casefold()] = fm
+            existing_fm_cache[record_type] = by_name
+        return existing_fm_cache[record_type]
+
     try:
+        # ---- Pass A: enrich matter-named entities -----------------------
         try:
             matters = await client.list_records("matter", limit=500)
         except Exception as exc:  # noqa: BLE001
             logger.warning("materialize_matter_entities: matter list failed: %s", exc)
-            return {"created": 0, "linked": 0, "matters": 0}
+            matters = []
 
         for rec in matters or []:
             matter_path = str(rec.get("path") or "").strip()
             fm = rec.get("frontmatter") or rec
             if not matter_path.startswith("matter/"):
                 continue
-            links: list[str] = []
+            matter_context = str(
+                fm.get("context") or fm.get("description") or "").strip()
+            matter_name = str(fm.get("name") or "").strip()
+            backlink = f"[[{matter_path[:-3]}]]"
+
+            # Collect this matter's org wikilinks so a person can be tied to
+            # the matter's org (person→org edge). One org/matter is the common
+            # case; pick the first as the tie.
+            org_vals = fm.get("related_orgs")
+            matter_org_link = ""
+            if isinstance(org_vals, list):
+                for ov in org_vals:
+                    p = _parse_entity_wikilink(str(ov))
+                    if p and p[0] == "org":
+                        matter_org_link = f"[[org/{_normalize_entity_name(p[1])}]]"
+                        break
+
             for field in ("related_persons", "related_orgs"):
                 vals = fm.get(field)
-                if isinstance(vals, list):
-                    links += [str(v) for v in vals]
-            backlink = f"[[{matter_path[:-3]}]]"
-            for link in links:
-                parsed = _parse_entity_wikilink(link)
-                if not parsed:
+                if not isinstance(vals, list):
                     continue
-                etype, name = parsed  # name is the slug/title
-                try:
-                    if not await client.record_exists(etype, name):
-                        await client.write_record(
-                            etype, name,
-                            _entity_stub_content(etype, name, matter_path),
+                for link in vals:
+                    parsed = _parse_entity_wikilink(str(link))
+                    if not parsed:
+                        continue
+                    etype, raw_name = parsed
+                    name = _normalize_entity_name(raw_name)
+                    if not name:
+                        continue
+                    # Deterministic description: fact substrings + matter context.
+                    hits = _facts_mentioning(facts, name)
+                    if hits:
+                        desc = " ".join(hits[:3])
+                    elif matter_context:
+                        desc = (
+                            f"Involved in the matter “{matter_name or matter_path[7:-3]}”. "
+                            f"{matter_context[:280]}"
+                        ).strip()
+                    else:
+                        desc = f"Named in the matter “{matter_name or matter_path[7:-3]}”."
+                    org_link = matter_org_link if etype == "person" else ""
+                    try:
+                        listing = await _ensure_listing(etype)
+                        outcome = await _create_or_merge_entity(
+                            client,
+                            record_type=etype, name=name,
+                            backlinks=[backlink],
+                            description=desc,
+                            org_link=org_link,
+                            source_note=f"_Seeded during onboarding from `{matter_path}`._",
+                            existing_fm=listing,
                         )
-                        created += 1
-                        activity.heartbeat(f"materialize: {etype}/{name}")
-                    else:  # existing entity → just add the backlink
-                        await client.patch_frontmatter_structured(
-                            f"{etype}/{name}.md",
-                            json_updates={"related": [backlink]},
+                        if outcome == "created":
+                            created += 1
+                            activity.heartbeat(f"materialize: {etype}/{name}")
+                        linked += 1
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "materialize_matter_entities: %s/%s failed: %s",
+                            etype, name, exc,
                         )
-                    linked += 1
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "materialize_matter_entities: %s/%s failed: %s",
-                        etype, name, exc,
-                    )
+
         logger.info(
-            "materialize_matter_entities: created %d stub(s), linked %d across %d matters",
-            created, linked, len(matters or []),
+            "materialize_matter_entities: created %d (matter), linked %d, "
+            "seeded %d (corpus) across %d matters",
+            created, linked, seeded, len(matters or []),
         )
-        return {"created": created, "linked": linked, "matters": len(matters or [])}
+        return {
+            "created": created,
+            "linked": linked,
+            "seeded": seeded,
+            "matters": len(matters or []),
+        }
     finally:
         await client.close()
 
