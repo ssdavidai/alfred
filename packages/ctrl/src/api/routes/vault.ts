@@ -934,6 +934,19 @@ export function registerVaultRoutes(): void {
             message: e.message ?? String(err),
           }),
         );
+        // Discriminate "missing record" from a genuine edit failure. The
+        // alfred CLI exits non-zero when `vault edit` targets a file that
+        // doesn't exist; raw-rethrowing that turned an absent record into a
+        // misleading 500 (noisy `PATCH …/chore/<x>.md → 500` logs from
+        // callers that legitimately update absent records, e.g. the briefing
+        // chore-run recorder). If the file still isn't on disk after the
+        // failed run, the right answer is 404 — same NotFoundError the
+        // json_set branch throws below. A real edit failure (schema error,
+        // lock contention, …) leaves the file present, so re-throw unchanged
+        // and let the genuine 500 surface.
+        if (!fs.existsSync(path.resolve(VAULT_PATH, recordPath))) {
+          throw new NotFoundError(`Cannot PATCH missing record: ${recordPath}`);
+        }
         throw err;
       }
     }
