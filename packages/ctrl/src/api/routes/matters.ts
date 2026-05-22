@@ -68,6 +68,11 @@ interface VaultLink {
   date: string;
 }
 
+/** A key person/org referenced by a matter, resolved to a vault path when a
+ *  matching record exists (C-B2); `path` is null when none resolves (the web
+ *  renders plain text rather than a link). */
+interface KeyEntity { name: string; path: string | null; type: "person" | "org" }
+
 interface RecentDecision {
   date: string;
   label: string;
@@ -154,6 +159,8 @@ interface MatterDetail extends Omit<MatterIndexRow, "state"> {
     tasks: VaultLink[];
     drafts: VaultLink[];
   };
+  // C-B2 — CRM-style key people/orgs resolved to vault paths.
+  key_entities: KeyEntity[];
   // RFC #884 — Living Narratives layer.
   current_state: string | null;
   as_of: string | null;
@@ -217,6 +224,109 @@ function extractTaskRef(value: unknown): string | null {
   s = s.replace(/^task\//, "").replace(/\.md$/, "");
   if (!s || s.includes("/")) return null;
   return s;
+}
+
+/** Lowercase + collapse non-alphanumerics to single hyphens — the
+ *  conservative match key for a person/org name vs a record stem/name field
+ *  ("RJ Johnson" → "rj-johnson"). */
+function slugifyEntity(raw: string): string {
+  return String(raw)
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/** person/ + org/ records indexed by slugified stem AND slugified name/title,
+ *  so a bare matter name resolves regardless of which form the file uses.
+ *  Value = vault display path (e.g. `person/rami-khouri.md`). */
+interface EntityIndex { person: Map<string, string>; org: Map<string, string> }
+
+function buildEntityIndex(files: string[]): EntityIndex {
+  const idx: EntityIndex = { person: new Map(), org: new Map() };
+  for (const relPath of files) {
+    const display = relPath.replace(/\\/g, "/");
+    const kind = display.startsWith("person/")
+      ? "person"
+      : display.startsWith("org/")
+        ? "org"
+        : null;
+    if (!kind) continue;
+    const rec = readRecord(relPath);
+    if (!rec) continue;
+    const recType = String(rec.fm.type ?? "");
+    if (recType && recType !== kind) continue; // defence: stray file in dir
+    const map = idx[kind];
+    const nameField = rec.fm.name ?? rec.fm.title;
+    for (const key of [rec.stem, typeof nameField === "string" ? nameField : ""]) {
+      const slug = slugifyEntity(key);
+      if (slug && !map.has(slug)) map.set(slug, display);
+    }
+  }
+  return idx;
+}
+
+/** Resolve one ref to `{ name, path, type }`: handles wikilink/path forms
+ *  (`[[person/Foo]]`, `person/Foo`, `org/Foo.md`) and bare names. `path` is the
+ *  matching record path or null; `hint` biases bare-name lookup. */
+function resolveKeyEntity(
+  value: unknown,
+  hint: "person" | "org",
+  idx: EntityIndex,
+): KeyEntity | null {
+  if (value == null) return null;
+  let s = String(value).trim();
+  if (!s || s === "null") return null;
+  const wl = /^\[\[([^\]|]+)(?:\|([^\]]+))?\]\]$/.exec(s);
+  let displayName: string | null = null;
+  if (wl) {
+    displayName = wl[2]?.trim() || null; // [[target|alias]]
+    s = wl[1].trim();
+  }
+  // Typed-path form (person/Foo[.md], org/Foo[.md]) pins the type.
+  const typed = /^(person|org)\/(.+)$/.exec(s);
+  if (typed) {
+    const type = typed[1] as "person" | "org";
+    const bare = typed[2].replace(/\.md$/, "").trim();
+    return {
+      name: displayName ?? bare,
+      path: idx[type].get(slugifyEntity(bare)) ?? null,
+      type,
+    };
+  }
+  // Bare name — match the hinted type first, then the other.
+  const slug = slugifyEntity(s);
+  const other = hint === "person" ? "org" : "person";
+  const matchType = idx[hint].has(slug) ? hint : idx[other].has(slug) ? other : null;
+  return {
+    name: displayName ?? s,
+    path: matchType ? idx[matchType].get(slug)! : null,
+    type: matchType ?? hint,
+  };
+}
+
+/** Build `key_entities` from matter frontmatter, deduplicated by resolved path
+ *  (or `type:slug` when unresolved). */
+function buildKeyEntities(fm: Record<string, unknown>, idx: EntityIndex): KeyEntity[] {
+  const out: KeyEntity[] = [];
+  const seen = new Set<string>();
+  const sources: Array<[unknown, "person" | "org"]> = [
+    [fm.key_people, "person"], [fm.related_persons, "person"],
+    [fm.related_orgs, "org"], [fm.org, "org"],
+  ];
+  for (const [raw, hint] of sources) {
+    if (!raw) continue;
+    for (const item of Array.isArray(raw) ? raw : [raw]) {
+      const entity = resolveKeyEntity(item, hint, idx);
+      if (!entity) continue;
+      const key = entity.path ?? `${entity.type}:${slugifyEntity(entity.name)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(entity);
+    }
+  }
+  return out;
 }
 
 /** First sentence cap at `cap` chars. Falls back to first `cap` chars. */
@@ -407,6 +517,9 @@ interface MatterIndexResult {
 /** Walk all records once and group by matter id. */
 function buildMatterIndex(): MatterIndexResult {
   const files = walkMd(VAULT_PATH, VAULT_PATH, IGNORE_DIRS);
+  // C-B2 — pre-index person/ and org/ records so each matter's key people /
+  // orgs can resolve to a clickable vault path during pass 1.
+  const entityIndex = buildEntityIndex(files);
   const byId = new Map<string, MatterDetail>();
   const childrenByMatter = new Map<
     string,
@@ -476,6 +589,7 @@ function buildMatterIndex(): MatterIndexResult {
         tasks: [],
         drafts: [],
       },
+      key_entities: buildKeyEntities(rec.fm, entityIndex),
       current_state: currentState,
       as_of: asOf,
       signal_count_24h: signalCount24h,
