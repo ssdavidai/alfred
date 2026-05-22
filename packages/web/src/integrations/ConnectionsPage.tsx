@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   useQuery,
   getIntegrationCatalog,
+  getToolkitRequiredFields,
   getConnectedIntegrations,
   initiateConnect,
   initiateApiKeyConnect,
@@ -60,6 +61,28 @@ type AuthFlow =
   | "device_pair"
   | "inbound_webhook"
   | "unsupported";
+
+// F74 — one required credential field as returned by getToolkitRequiredFields.
+// `fields` is `[]` when the toolkit detail is unreadable (the UI then falls
+// back to the single-input behaviour).
+interface RequiredField {
+  name: string;
+  displayName?: string;
+  description?: string;
+  type?: string;
+  required?: boolean;
+  is_secret?: boolean;
+  default?: string;
+}
+
+interface RequiredFieldsResult {
+  fields?: RequiredField[];
+}
+
+// Treat a field as secret (password input) when the toolkit flags it OR its
+// name looks credential-ish.
+const isSecretField = (f: RequiredField): boolean =>
+  !!f.is_secret || /key|token|secret|password|api/i.test(f.name);
 
 function resolveAuthFlow(toolkit: Toolkit | null | undefined): AuthFlow {
   const schemes = new Set(
@@ -266,6 +289,41 @@ export default function ConnectionsPage() {
         toolkit_slug: toolkit.slug,
         credential: key,
         auth_scheme,
+      });
+      const connectionId = result?.connection_id ?? result?.connectionId;
+      if (connectionId) {
+        try {
+          await autoConfigIntegration({ connectionId });
+          await finalizeComposioConnections();
+        } catch (e) {
+          console.warn("auto-config best-effort failed", e);
+        }
+      }
+      setOpenApp(null);
+      setToast(`${toolkit.name} connected.`);
+      await refetchConnected();
+    } catch (e) {
+      console.error("api key connect failed", e);
+      setToast(`Could not connect ${toolkit.name}`);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // F74 — multi-field API-key connect. Drives the submit off the toolkit's
+  // required-field list: builds a per-field { name: value } map and calls
+  // initiateApiKeyConnect with `fields` instead of a single `credential`.
+  async function saveApiKeyFields(
+    toolkit: Toolkit,
+    fields: Record<string, string>,
+    authScheme: string,
+  ) {
+    setBusy(toolkit.slug);
+    try {
+      const result: any = await initiateApiKeyConnect({
+        toolkit_slug: toolkit.slug,
+        fields,
+        auth_scheme: authScheme,
       });
       const connectionId = result?.connection_id ?? result?.connectionId;
       if (connectionId) {
@@ -591,6 +649,9 @@ export default function ConnectionsPage() {
           }}
           onOAuth={() => startOAuth(openApp)}
           onApiKey={(k) => saveApiKey(openApp, k)}
+          onApiKeyFields={(fields, authScheme) =>
+            saveApiKeyFields(openApp, fields, authScheme)
+          }
           onWebhook={(label) => createWebhook(openApp, label)}
           onPairOmi={() => pairOmi(openApp)}
         />
@@ -669,6 +730,7 @@ function ConnectModal({
   onClose,
   onOAuth,
   onApiKey,
+  onApiKeyFields,
   onWebhook,
   onPairOmi,
 }: {
@@ -678,10 +740,10 @@ function ConnectModal({
   onClose: () => void;
   onOAuth: () => void;
   onApiKey: (key: string) => void;
+  onApiKeyFields: (fields: Record<string, string>, authScheme: string) => void;
   onWebhook: (label: string) => void;
   onPairOmi: () => void;
 }) {
-  const [key, setKey] = useState("");
   const [webhookLabel, setWebhookLabel] = useState("");
   const flow = resolveAuthFlow(app);
   const isApiKey = flow === "api_key" || flow === "bearer_token";
@@ -689,6 +751,7 @@ function ConnectModal({
   const isInboundWebhook = flow === "inbound_webhook";
   const isUnsupported = flow === "unsupported";
   const credentialLabel = flow === "bearer_token" ? "Bearer token" : "API key";
+  const authScheme = flow === "bearer_token" ? "BEARER_TOKEN" : "API_KEY";
 
   return (
     <div
@@ -845,30 +908,14 @@ function ConnectModal({
             </p>
           </div>
         ) : isApiKey ? (
-          <div>
-            <label
-              className="font-mono text-[10px] uppercase tracking-[0.22em] block mb-2"
-              style={{ color: "var(--marginalia)" }}
-            >
-              {app.name} {credentialLabel.toLowerCase()}
-            </label>
-            <input
-              autoFocus
-              type="password"
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
-              placeholder="••••••••••••"
-              className="w-full bg-transparent outline-none border-b font-mono text-[14px] pb-2 mb-5"
-              style={{ borderColor: "var(--brass)" }}
-            />
-            <button
-              onClick={() => onApiKey(key)}
-              disabled={busy || !key.trim()}
-              className="btn-brass"
-            >
-              {busy ? "…" : `Save ${credentialLabel.toLowerCase()}`}
-            </button>
-          </div>
+          <ApiKeyFields
+            app={app}
+            busy={busy}
+            authScheme={authScheme}
+            credentialLabel={credentialLabel}
+            onApiKey={onApiKey}
+            onApiKeyFields={onApiKeyFields}
+          />
         ) : (
           <div>
             <p
@@ -893,6 +940,109 @@ function ConnectModal({
           Cancel
         </button>
       </div>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// ApiKeyFields — F74 dynamic multi-field credential collector.
+// ----------------------------------------------------------------------------
+//
+// Fetches the toolkit's required credential fields (getToolkitRequiredFields)
+// when the api-key section opens for that toolkit. If the toolkit reports >= 1
+// field, renders one input per field (label, secret-masking, helper text,
+// required-marking) and submits a per-field { name: value } map. If the query
+// is loading, errored, or returns `[]`, falls back to the single credential
+// input (so SerpAPI-style single-field toolkits are unaffected).
+function ApiKeyFields({
+  app,
+  busy,
+  authScheme,
+  credentialLabel,
+  onApiKey,
+  onApiKeyFields,
+}: {
+  app: Toolkit;
+  busy: boolean;
+  authScheme: string;
+  credentialLabel: string;
+  onApiKey: (key: string) => void;
+  onApiKeyFields: (fields: Record<string, string>, authScheme: string) => void;
+}) {
+  const { data, error } = useQuery(getToolkitRequiredFields, {
+    toolkit: app.slug,
+    auth_scheme: authScheme,
+  });
+  const real: RequiredField[] = Array.isArray(
+    (data as RequiredFieldsResult | undefined)?.fields,
+  )
+    ? (data as RequiredFieldsResult).fields!
+    : [];
+  // When the query is in flight, errored, or returns `[]`, fall back to a
+  // single synthetic credential field — submit then routes through the
+  // single-`credential` call so single-field toolkits (SerpAPI) are unchanged.
+  const isFallback = !!error || real.length === 0;
+  const fields: RequiredField[] = isFallback
+    ? [{ name: "__credential", displayName: `${app.name} ${credentialLabel.toLowerCase()}`, is_secret: true }]
+    : real;
+
+  const [values, setValues] = useState<Record<string, string>>({});
+  const setVal = (name: string, v: string) =>
+    setValues((prev) => ({ ...prev, [name]: v }));
+
+  const missingRequired = fields.some(
+    (f) => f.required !== false && !(values[f.name] ?? "").trim(),
+  );
+
+  function submit() {
+    if (isFallback) {
+      onApiKey((values.__credential ?? "").trim());
+      return;
+    }
+    const payload: Record<string, string> = {};
+    for (const f of fields) {
+      const v = (values[f.name] ?? f.default ?? "").trim();
+      if (v) payload[f.name] = v;
+    }
+    onApiKeyFields(payload, authScheme);
+  }
+
+  return (
+    <div>
+      {fields.map((f, i) => {
+        const secret = isSecretField(f);
+        return (
+          <div key={f.name} className="mb-5">
+            <label
+              className="font-mono text-[10px] uppercase tracking-[0.22em] block mb-2"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {f.displayName || f.name}
+              {!isFallback && f.required !== false ? " *" : ""}
+            </label>
+            <input
+              autoFocus={i === 0}
+              type={secret ? "password" : "text"}
+              value={values[f.name] ?? f.default ?? ""}
+              onChange={(e) => setVal(f.name, e.target.value)}
+              placeholder={secret ? "••••••••••••" : ""}
+              className="w-full bg-transparent outline-none border-b font-mono text-[14px] pb-2"
+              style={{ borderColor: "var(--brass)" }}
+            />
+            {f.description && (
+              <p
+                className="font-body text-[12px] mt-1.5"
+                style={{ color: "var(--marginalia)" }}
+              >
+                {f.description}
+              </p>
+            )}
+          </div>
+        );
+      })}
+      <button onClick={submit} disabled={busy || missingRequired} className="btn-brass">
+        {busy ? "…" : `Save ${credentialLabel.toLowerCase()}`}
+      </button>
     </div>
   );
 }
