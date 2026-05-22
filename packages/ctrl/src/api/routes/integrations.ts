@@ -1105,25 +1105,27 @@ function classifyGrantedAccess(scopes: string[]): "read" | "read_write" | "unkno
 // Scope endpoint — per-toolkit action cache
 // ---------------------------------------------------------------------------
 interface ScopeCacheEntry {
-  data: { read: string[]; write: string[] };
+  data: string[];
   fetchedAt: number;
 }
 const SCOPE_CACHE = new Map<string, ScopeCacheEntry>();
 const SCOPE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-async function fetchScopeForToolkit(
+async function fetchToolkitTools(
   toolkit: string,
   apiKey: string,
-): Promise<{ read: string[]; write: string[] }> {
+): Promise<string[]> {
   const cached = SCOPE_CACHE.get(toolkit);
   if (cached && Date.now() - cached.fetchedAt < SCOPE_CACHE_TTL_MS) {
     return cached.data;
   }
-  const read: string[] = [];
-  const write: string[] = [];
+  const tools: string[] = [];
   try {
+    // Composio retired /api/v3/actions?apps= (it 404s); the live endpoint is
+    // /api/v3/tools?toolkit_slug=. Do NOT swallow a non-200 — log it so a
+    // future endpoint move is visible instead of producing a silent empty list.
     const resp = await fetch(
-      `${COMPOSIO_API_V3}/actions?apps=${encodeURIComponent(toolkit)}&limit=500`,
+      `${COMPOSIO_API_V3}/tools?toolkit_slug=${encodeURIComponent(toolkit)}&limit=500`,
       { headers: { "x-api-key": apiKey } },
     );
     if (resp.ok) {
@@ -1135,17 +1137,21 @@ async function fetchScopeForToolkit(
         if (!slug) continue;
         if (item.deprecated) continue;
         const displayName = (item.displayName ?? item.display_name ?? "").trim() || slug;
-        const kind = classifyAction(slug);
-        if (kind === "stream") read.push(displayName);
-        else write.push(displayName);
+        tools.push(displayName);
       }
+    } else {
+      console.error(
+        `[integrations] toolkit tools fetch for ${toolkit} failed: ${resp.status}`,
+      );
     }
-  } catch { /* swallow — return whatever we have */ }
-  read.sort((a, b) => a.localeCompare(b));
-  write.sort((a, b) => a.localeCompare(b));
-  const data = { read, write };
-  SCOPE_CACHE.set(toolkit, { data, fetchedAt: Date.now() });
-  return data;
+  } catch (err: any) {
+    console.error(
+      `[integrations] toolkit tools fetch for ${toolkit} threw: ${err?.message ?? err}`,
+    );
+  }
+  tools.sort((a, b) => a.localeCompare(b));
+  SCOPE_CACHE.set(toolkit, { data: tools, fetchedAt: Date.now() });
+  return tools;
 }
 
 // ---------------------------------------------------------------------------
@@ -1376,10 +1382,15 @@ export function registerIntegrationRoutes(): void {
       // read+write). Read state.val.scope and classify it.
       const grantedScopes = readGrantedScopes(conn);
       const access = classifyGrantedAccess(grantedScopes);
+      // The catalogue of actions this toolkit exposes ("tools I can act
+      // through") — informational, distinct from the granted scope. Pulled
+      // from the live /api/v3/tools endpoint (F22).
+      const availableTools = toolkit ? await fetchToolkitTools(toolkit, apiKey) : [];
       sendJson(res, 200, {
         access,                       // "read" | "read_write" | "unknown"
         granted_scopes: grantedScopes,
         toolkit,
+        available_tools: availableTools,
         // Backward-compatible chip arrays derived from the real grant: read is
         // always present once granted; write only when the grant is read+write.
         read: grantedScopes,
