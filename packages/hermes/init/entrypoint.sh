@@ -203,6 +203,50 @@ if [[ -f "$AGENTS_SRC" ]]; then
     done
 fi
 
+# --- 2g. SOUL.md — the agent's persona/identity ------------------------------
+# Hermes seeds a stock Nous identity ("You are Hermes Agent…") into each
+# profile's SOUL.md at first run and never overwrites an existing SOUL. So the
+# live agent ran the stock persona, not Alfred. Deploy a personalized SOUL:
+#   - SOURCE: the onboarding-chosen persona at /vault/SOUL.md (written by the
+#     SoulPresetPage onboarding step) when present + non-empty; else the
+#     bundled baseline Alfred SOUL at /setup/SOUL.md.
+#   - OVERWRITE GUARD: replace only a MISSING SOUL, the stock Nous SOUL, or
+#     one we previously deployed (matched by content-hash). A hand-edited
+#     SOUL that is neither stock nor ours is preserved untouched.
+SOUL_BUNDLED="/setup/SOUL.md"
+SOUL_ONBOARDING="/vault/SOUL.md"
+if [[ -s "$SOUL_ONBOARDING" ]]; then
+    SOUL_SRC="$SOUL_ONBOARDING"
+    echo "[init] Using onboarding-chosen SOUL.md from $SOUL_ONBOARDING"
+elif [[ -f "$SOUL_BUNDLED" ]]; then
+    SOUL_SRC="$SOUL_BUNDLED"
+    echo "[init] Using bundled baseline SOUL.md"
+else
+    SOUL_SRC=""
+    echo "[init] No SOUL.md source available — leaving profile SOUL untouched"
+fi
+if [[ -n "$SOUL_SRC" ]]; then
+    SOUL_HASH=$(md5sum "$SOUL_SRC" | cut -d' ' -f1)
+    for profile in "${PROFILES[@]}"; do
+        PROFILE_DIR="$HERMES_DATA_DIR/profiles/$profile"
+        DST="$PROFILE_DIR/SOUL.md"
+        HASH_FILE="$PROFILE_DIR/.soul-md.content-hash"
+        if [[ -f "$HASH_FILE" ]] && [[ "$(cat "$HASH_FILE")" == "$SOUL_HASH" ]]; then
+            echo "[init] SOUL.md unchanged in $profile, skipping"
+        elif [[ -f "$DST" ]] \
+            && [[ ! -f "$HASH_FILE" ]] \
+            && ! grep -q "You are Hermes Agent" "$DST" 2>/dev/null; then
+            # An existing SOUL that is neither the stock Nous identity nor one
+            # we deployed (no hash record) — a hand-edit. Do not clobber it.
+            echo "[init] SOUL.md in $profile is custom (not stock, not ours) — preserved"
+        else
+            cp "$SOUL_SRC" "$DST"
+            echo "$SOUL_HASH" > "$HASH_FILE"
+            echo "[init] SOUL.md deployed to $profile (replacing stock/seed identity)"
+        fi
+    done
+fi
+
 # =============================================================================
 # 3. Generate the alfred vault-daemon config.yaml.
 # =============================================================================

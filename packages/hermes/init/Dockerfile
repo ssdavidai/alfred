@@ -94,6 +94,11 @@ COPY packages/mcp-server/package.json             ./mcp-stdio/package.json
 # Hermes profile dir as AGENTS.md.
 COPY packages/mcp-server/instructions/alfred-custom-instructions.md ./AGENTS.md
 
+# SOUL.md — Alfred's persona/identity. Deployed into each profile as the
+# baseline SOUL, replacing Hermes' stock Nous identity. The onboarding-chosen
+# persona at /vault/SOUL.md takes precedence when present (see entrypoint).
+COPY packages/hermes/init/SOUL.md ./SOUL.md
+
 RUN chmod +x entrypoint.sh
 
 ENTRYPOINT ["./entrypoint.sh"]
