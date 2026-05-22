@@ -12,8 +12,57 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { addRoute } from "../server.js";
 import { sendJson } from "../errors.js";
+import { COMPOSE_DIR, dockerComposeCmd } from "../helpers.js";
+
+const ENV_PATH = `${COMPOSE_DIR}/.env`;
+const ROTATED_AT_KEY = "MCP_APPROVAL_SECRET_ROTATED_AT";
+
+/** Read a single key's value from the tenant .env (best-effort). */
+function readEnvKey(key: string): string | null {
+  let content = "";
+  try {
+    content = fs.readFileSync(ENV_PATH, "utf-8");
+  } catch {
+    return null;
+  }
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx < 0) continue;
+    if (trimmed.slice(0, eqIdx).trim() === key) return trimmed.slice(eqIdx + 1).trim();
+  }
+  return null;
+}
+
+/** Surgically update keys in the tenant .env, preserving comments/order/other
+ *  keys. Mirrors credentials.ts patchEnv (kept local — small, no shared dep). */
+function patchEnv(updates: Record<string, string>): void {
+  let lines: string[] = [];
+  try {
+    lines = fs.readFileSync(ENV_PATH, "utf-8").split("\n");
+  } catch {
+    lines = [];
+  }
+  const remaining = new Map(Object.entries(updates));
+  const result = lines.map((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) return line;
+    const eqIdx = trimmed.indexOf("=");
+    if (eqIdx < 0) return line;
+    const key = trimmed.slice(0, eqIdx).trim();
+    if (!remaining.has(key)) return line;
+    const v = remaining.get(key)!;
+    remaining.delete(key);
+    return `${key}=${v}`;
+  });
+  for (const [key, value] of remaining) result.push(`${key}=${value}`);
+  const content = result.join("\n");
+  fs.writeFileSync(ENV_PATH, content.endsWith("\n") ? content : content + "\n", "utf-8");
+}
 
 interface McpApp {
   id: string;
@@ -101,7 +150,13 @@ export function registerClaudeSetupRoutes(): void {
     // mcp.${DOMAIN}. (F62)
     const domain = process.env.DOMAIN || process.env.TENANT_DOMAIN || "";
     const tenantUrl = domain ? `https://mcp.${domain}` : null;
-    const approvalSecret = process.env.MCP_APPROVAL_SECRET || null;
+    // F63/C16 — NEVER echo the approval secret on a normal page load. It is a
+    // long-lived bearer secret; returning it on every GET (the old behaviour)
+    // leaks it to anything that can read the authenticated owner response.
+    // Surface only whether one is set + when it was last rotated; the value is
+    // returned exactly once by the rotate endpoint below.
+    const approvalSecretSet = !!(process.env.MCP_APPROVAL_SECRET || readEnvKey("MCP_APPROVAL_SECRET"));
+    const lastRotatedAt = readEnvKey(ROTATED_AT_KEY);
 
     // SaaS app serves these as static assets — see
     // packages/saas/app/public/mcp-skills/. The names mirror the MCP catalogue
@@ -188,21 +243,49 @@ export function registerClaudeSetupRoutes(): void {
     // is served at vault.${DOMAIN} (no per-tenant subdomain prefix). (F62)
     const bwUser = process.env.BW_USER || process.env.OWNER_EMAIL || null;
     const bwPassword = process.env.VAULTWARDEN_BW_PASSWORD || process.env.BW_PASSWORD || null;
+    // F63/C16 — same reveal-once treatment for the Vaultwarden master password:
+    // never echo it; surface only that it is set. (Rotation for it is out of
+    // scope here — it lives in Vaultwarden's own flow.)
     const vaultLogin = bwPassword && domain
       ? {
           url: `https://vault.${domain}`,
           email: bwUser,
-          master_password: bwPassword,
+          master_password: null,
+          master_password_set: true,
         }
       : null;
 
     sendJson(res, 200, {
       tenant_url: tenantUrl,
-      approval_secret: approvalSecret,
+      approval_secret: null,
+      approval_secret_set: approvalSecretSet,
+      last_rotated_at: lastRotatedAt,
       apps,
       custom_instructions: customInstructions,
       composio_skills: composioSkills,
       vault_login: vaultLogin,
     });
+  });
+
+  // POST /api/v1/claude-setup/approval-secret/rotate — owner-initiated rotation.
+  // Mints a fresh 256-bit hex secret (matching bootstrap.sh's openssl rand -hex
+  // 32), writes it + a rotated-at timestamp to the tenant .env, restarts the
+  // mcp-server so /approve validates against the new value, and returns the new
+  // secret EXACTLY ONCE (C16). The dashboard shows it in a copy-it-now panel.
+  addRoute("POST", "/api/v1/claude-setup/approval-secret/rotate", async ({ res }) => {
+    const secret = crypto.randomBytes(32).toString("hex"); // 64 hex chars
+    const rotatedAt = new Date().toISOString();
+    patchEnv({ MCP_APPROVAL_SECRET: secret, [ROTATED_AT_KEY]: rotatedAt });
+    // Keep this process's view current so a subsequent GET reports set=true.
+    process.env.MCP_APPROVAL_SECRET = secret;
+    // Restart mcp-server so it re-reads MCP_APPROVAL_SECRET (env_file: .env).
+    // Best-effort — the secret is already persisted; the next deploy/restart
+    // also picks it up.
+    try {
+      await dockerComposeCmd(["up", "-d", "--no-deps", "--force-recreate", "mcp-server"]);
+    } catch {
+      // Restart is best-effort; the .env write is the source of truth.
+    }
+    sendJson(res, 200, { approval_secret: secret, last_rotated_at: rotatedAt });
   });
 }
