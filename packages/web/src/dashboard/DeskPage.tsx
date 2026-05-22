@@ -56,6 +56,7 @@ import {
   shouldClearCardOnSuccess,
   type DecisionSideEffects,
 } from "./deskReconcileCore";
+import { rowReversible } from "./deskLedgerCore";
 import DeskOnboardingGate from "./DeskOnboardingGate";
 
 // --------------------------------------------------------------------------
@@ -173,8 +174,11 @@ interface AuditRow {
   at: string;       // for sort
   atDisplay: string;
   act: string;
-  actionId?: string; // steward action id, when reversible
+  actionId?: string; // decision id or steward action id, when reversible
   reversible: boolean;
+  // F51 — which Undo wire to use. Decisions reverse via reverseDecision;
+  // steward actions via undoStewardAction. Activity rows are never reversible.
+  kind?: "decision" | "steward";
 }
 
 // --------------------------------------------------------------------------
@@ -436,17 +440,19 @@ function DeskContent() {
         "(no headline)";
       const verb = decisionVerb(intent, state);
       const decisionId = String(d?.id ?? "");
+      // F51 — wire the existing reverseDecision op to the ledger Undo. A
+      // decision is reversible when ctrl marked it so (cheap source-flip
+      // intents: done/defer/noise/take_mine — see decisions.ts isReversible)
+      // and it hasn't already been reversed. Was hardcoded false.
+      const reversible = rowReversible(d, decisionId);
       out.push({
         key: `dec:${decisionId || at}`,
         at,
         atDisplay: fmtArrived(at),
         act: `${verb} — ${headline}`,
         actionId: decisionId || undefined,
-        // Decisions are reversible until they have an outcome, but the
-        // Undo path here goes through reverseDecision, not
-        // undoStewardAction — different wire. Surface as informational
-        // for now; the dedicated reverse button lives on /decisions.
-        reversible: false,
+        reversible,
+        kind: "decision",
       });
     }
 
@@ -492,10 +498,7 @@ function DeskContent() {
       if (decision === "still_active" && !actionStr) continue;
       const at = String(s?.timestamp ?? s?.created ?? s?.created_at ?? "");
       const actionId = String(s?.id ?? s?.action_id ?? "");
-      const reversible =
-        Boolean(s?.is_reversible ?? s?.reversible ?? false) &&
-        !s?.reversed_at &&
-        Boolean(actionId);
+      const reversible = rowReversible(s, actionId);
       out.push({
         key: `sw:${actionId || at}`,
         at,
@@ -503,6 +506,7 @@ function DeskContent() {
         act: formatStewardAct(s),
         actionId: actionId || undefined,
         reversible,
+        kind: "steward",
       });
     }
     out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
@@ -635,12 +639,19 @@ function DeskContent() {
     runDecision(d, "noise", "");
   }
 
-  async function onUndo(actionId: string) {
+  // F51 — Undo a ledger row. Decisions reverse via reverseDecision (the op was
+  // imported but wired to nothing); steward actions keep undoStewardAction.
+  async function onUndo(actionId: string, kind?: "decision" | "steward") {
     setUndoing(actionId);
     try {
-      await undoStewardAction({ actionId });
+      if (kind === "decision") {
+        await reverseDecision({ id: actionId });
+        await refetchDecisions().catch(() => {});
+      } else {
+        await undoStewardAction({ actionId });
+      }
     } catch (e) {
-      console.error("undo failed", e);
+      console.error("undo failed", kind, actionId, e);
     } finally {
       setUndoing(null);
     }
@@ -1013,7 +1024,7 @@ function DeskContent() {
                       </span>
                       {a.reversible && a.actionId ? (
                         <button
-                          onClick={() => a.actionId && onUndo(a.actionId)}
+                          onClick={() => a.actionId && onUndo(a.actionId, a.kind)}
                           disabled={undoing === a.actionId}
                           className="btn-link text-right"
                           style={{ marginRight: 0 }}
