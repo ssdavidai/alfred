@@ -20,6 +20,7 @@ import {
   finalizeComposioConnections,
   getOpenclawReadiness,
   getIntegrationScope,
+  getInstalledApps,
   createInboundWebhook,
   deleteInboundWebhook,
   pairOmiDevice,
@@ -130,6 +131,23 @@ interface IntegrationScope {
 
 const PAGE_SIZE = 12;
 
+// B12 — one of the user's other surfaces (Plane / Vault / Sure), as returned by
+// getInstalledApps (web op → ctrl-api GET /api/v1/apps). The ctrl side returning
+// real URLs lands in Lane I; we build against the frozen shape. `status` is a
+// short health marker — we treat anything other than an explicit healthy value
+// as muted so an unhealthy/unknown app never offers a dead link.
+interface AppLink {
+  id: string;
+  name: string;
+  url: string | null;
+  icon: string;
+  status: string;
+}
+
+const HEALTHY_STATUSES = new Set(["up", "healthy", "ok", "running"]);
+const isAppHealthy = (a: AppLink): boolean =>
+  HEALTHY_STATUSES.has(String(a.status ?? "").toLowerCase());
+
 export default function ConnectionsPage() {
   const { data: catalogData, isLoading: catalogLoading } = useQuery(
     getIntegrationCatalog,
@@ -139,6 +157,10 @@ export default function ConnectionsPage() {
     getConnectedIntegrations,
   );
   const { data: readiness } = useQuery(getOpenclawReadiness);
+  // B12 — the user's other surfaces (Plane / Vault / Sure) for the launcher row.
+  const { data: appsData } = useQuery(getInstalledApps);
+  const launcherApps: AppLink[] = ((appsData as { apps?: AppLink[] } | undefined)
+    ?.apps ?? []) as AppLink[];
 
   const toolkits: Toolkit[] = (catalogData?.toolkits ?? []) as Toolkit[];
   const categories: string[] = (catalogData?.categories ?? []) as string[];
@@ -477,6 +499,8 @@ export default function ConnectionsPage() {
           through. I'll only ever do what you've explicitly asked.
         </p>
 
+        <LauncherRow apps={launcherApps} />
+
         {readiness && readiness.openclawReady === false && (
           <div
             className="border border-rule p-4 mb-6 font-body text-[14px]"
@@ -679,6 +703,99 @@ export default function ConnectionsPage() {
         />
       )}
     </Frame>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// LauncherRow — B12 app-launcher near the top of /connections.
+// ----------------------------------------------------------------------------
+//
+// A horizontal row of cards linking to the user's other surfaces — Plane,
+// Vault, Sure (sourced from getInstalledApps; each opens its url in a new tab,
+// muted/disabled when the url is null or the app isn't healthy) — plus a
+// "Chat with Alfred" tile that always shows and navigates same-tab to the
+// internal /chat route (the thin Hermes client). Matches the page's card
+// styling (border-rule, card-hover, font-display/font-mono type scale).
+function LauncherRow({ apps }: { apps: AppLink[] }) {
+  return (
+    <div className="mb-10">
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.28em] mb-3"
+        style={{ color: "var(--brass)" }}
+      >
+        Your surfaces
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {apps.map((app) => {
+          const healthy = isAppHealthy(app);
+          const enabled = healthy && !!app.url;
+          const inner = (
+            <>
+              <div
+                className="w-8 h-8 shrink-0 border border-rule font-display italic flex items-center justify-center"
+                style={{ color: "var(--brass)" }}
+              >
+                {app.icon || app.name.slice(0, 1)}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="font-display text-[18px] truncate">
+                  {app.name}
+                </div>
+                <div
+                  className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  {enabled ? "Open →" : "Unavailable"}
+                </div>
+              </div>
+            </>
+          );
+          return enabled ? (
+            <a
+              key={app.id}
+              href={app.url!}
+              target="_blank"
+              rel="noopener"
+              className="border border-rule p-5 card-hover flex items-center gap-4"
+            >
+              {inner}
+            </a>
+          ) : (
+            <div
+              key={app.id}
+              className="border border-rule p-5 flex items-center gap-4 opacity-50 cursor-not-allowed"
+              title={app.url ? `${app.name} is not healthy` : `${app.name} is not available yet`}
+            >
+              {inner}
+            </div>
+          );
+        })}
+        {/* "Chat with Alfred" — always shown, internal same-tab nav to /chat. */}
+        <a
+          href="/chat"
+          className="border border-rule p-5 card-hover flex items-center gap-4"
+          style={{ borderColor: "var(--brass)" }}
+        >
+          <div
+            className="w-8 h-8 shrink-0 border border-rule font-display italic flex items-center justify-center"
+            style={{ color: "var(--brass)", borderColor: "var(--brass)" }}
+          >
+            A
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="font-display text-[18px] truncate">
+              Chat with Alfred
+            </div>
+            <div
+              className="font-mono text-[10px] uppercase tracking-[0.22em]"
+              style={{ color: "var(--brass)" }}
+            >
+              Open →
+            </div>
+          </div>
+        </a>
+      </div>
+    </div>
   );
 }
 
