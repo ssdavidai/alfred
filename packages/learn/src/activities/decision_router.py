@@ -122,6 +122,7 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
     source_record = str(decision.get("source_record") or "")
     note = str(decision.get("note") or "")
     matter_ref = str(decision.get("matter_ref") or "")
+    task_ref = str(decision.get("task_ref") or "")
     source_headline = str(decision.get("source_headline") or "")
     state = str(decision.get("state") or "open")
     existing_side_effects = decision.get("side_effects") or {}
@@ -200,6 +201,36 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
                     side_effects["needs_attention_audit"] = (
                         resp.json().get("audit_record_path")
                     )
+                # F32 — closing the card must close the work it was about.
+                # Before, the done branch only flipped the NA status, so a
+                # linked task stayed open forever (#6). When the desk card
+                # carries a ``task_ref`` (the underlying task/* the card was
+                # raised against), PATCH it to ``status=done``. Best-effort:
+                # a failed task close logs but never rolls back the NA flip
+                # or the decision completion — the card is already handled.
+                if task_ref.startswith("task/") and task_ref.endswith(".md"):
+                    try:
+                        tp = await client.patch(
+                            f"/api/v1/vault/records/{task_ref}",
+                            json={
+                                "set": {
+                                    "status": "done",
+                                    "outcome": (
+                                        f"closed via Desk 'done' on "
+                                        f"decision/{decision_id}.md"
+                                    ),
+                                },
+                            },
+                        )
+                        if tp.status_code < 400:
+                            actions_taken.append("task.closed")
+                            side_effects["closed_task"] = task_ref
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "decision_router: task close failed for %s on "
+                            "done decision=%s: %s — NA flip stands",
+                            task_ref, decision_id, exc,
+                        )
             elif intent == "defer":
                 # #5: resolve the resurface intent FIRST, independent of (and
                 # before) the skip flip. The hourly DeferResurfaceWorkflow only
