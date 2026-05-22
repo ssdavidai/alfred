@@ -11,6 +11,23 @@ import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
 import { dockerExec } from "../helpers.js";
+import { createOrReuseOmiStream } from "./streams.js";
+
+// Synthetic catalog slugs are NOT real Composio toolkits — they render bespoke
+// modals (DEVICE_PAIR / INBOUND_WEBHOOK) and have their own routes. Posting one
+// to Composio's connect flow fuzzy-resolves it to a junk toolkit (alfred-omi →
+// `cal`), minting stray INITIATED connections. Reject them up front.
+const SYNTHETIC_TOOLKIT_SLUGS = new Set(["alfred-omi", "alfred-webhook"]);
+
+function assertNotSyntheticSlug(slug: string): void {
+  if (SYNTHETIC_TOOLKIT_SLUGS.has(slug.toLowerCase())) {
+    throw new ValidationError(
+      `"${slug}" is not a Composio toolkit — it is a synthetic Alfred source. ` +
+        `Use its dedicated flow (OMI → POST /api/v1/integrations/omi/pair; ` +
+        `webhook → POST /api/v1/webhooks/inbound) instead of the Composio connect route.`,
+    );
+  }
+}
 
 // Vault root — for synthetic integration sources (Omi, custom webhooks).
 const VAULT_ROOT = process.env.VAULT_PATH ?? "/vault";
@@ -1344,6 +1361,7 @@ export function registerIntegrationRoutes(): void {
     if (!b || typeof b.toolkit_slug !== "string") {
       throw new ValidationError("toolkit_slug (string) is required");
     }
+    assertNotSyntheticSlug(b.toolkit_slug as string);
     const apiKey = getComposioApiKey();
     const userId = getComposioUserId();
     const redirectUrl = typeof b.redirect_url === "string" ? b.redirect_url : "";
@@ -1462,6 +1480,7 @@ export function registerIntegrationRoutes(): void {
     if (!b || typeof b.toolkit_slug !== "string") {
       throw new ValidationError("toolkit_slug (string) is required");
     }
+    assertNotSyntheticSlug(b.toolkit_slug as string);
     if (typeof b.credential !== "string" || !b.credential.trim()) {
       throw new ValidationError("credential (string) is required");
     }
@@ -1598,6 +1617,30 @@ export function registerIntegrationRoutes(): void {
     } catch (err: any) {
       sendJson(res, 500, { error: `Failed to initiate connection: ${err.message}` });
     }
+  });
+
+  // =========================================================================
+  // POST /api/v1/integrations/omi/pair — pair an OMI wearable
+  //
+  // OMI is a push/stream source, NOT an OAuth/API-key Composio integration.
+  // "Pairing" means handing the device a private tenant-scoped audio endpoint
+  // to POST raw PCM to — exactly what the streams subsystem produces. This
+  // route creates-or-reuses the single source:"omi" stream and returns its
+  // composed device webhook_url; it NEVER touches Composio (which would
+  // fuzzy-resolve the synthetic alfred-omi slug to a junk `cal` connection).
+  // =========================================================================
+  addRoute("POST", "/api/v1/integrations/omi/pair", async ({ res }) => {
+    const { stream, webhook_url, reused } = createOrReuseOmiStream();
+    sendJson(res, 200, {
+      stream_id: stream.id,
+      webhook_url,
+      reused,
+      // null webhook_url means TENANT_BASE_URL is unset on this tenant — the
+      // UI should show a "missing base URL" state rather than a broken URL.
+      note: webhook_url
+        ? "Paste this into the OMI app developer settings as the audio stream endpoint."
+        : "Tenant is missing TENANT_BASE_URL — the device URL cannot be composed.",
+    });
   });
 
   // =========================================================================

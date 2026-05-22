@@ -160,6 +160,48 @@ function saveStreamsMeta(streams: StreamMeta[]): void {
   fs.writeFileSync(getStreamMetaPath(), JSON.stringify(streams, null, 2));
 }
 
+/**
+ * Create-or-reuse the tenant's Omi audio stream and return its composed device
+ * webhook URL. Shared by the streams POST route and the integrations OMI-pair
+ * route so "pair OMI" is a single source:"omi" stream, never a Composio
+ * connect (which fuzzy-resolves the synthetic `alfred-omi` slug to junk).
+ *
+ * Idempotent: if a `source:"omi"` stream already exists it is reused (its
+ * existing webhookToken is kept). `webhook_url` is null when TENANT_BASE_URL
+ * is absent — the caller surfaces a "missing base URL" state, never a broken
+ * URL.
+ */
+export function createOrReuseOmiStream(): {
+  stream: StreamMeta;
+  webhook_url: string | null;
+  reused: boolean;
+} {
+  const streams = loadStreamsMeta();
+  const existing = streams.find((s) => s.source === "omi");
+  if (existing) {
+    return {
+      stream: existing,
+      webhook_url: composeWebhookUrl("omi", existing.webhookToken),
+      reused: true,
+    };
+  }
+  const webhookToken = crypto.randomBytes(24).toString("hex");
+  const stream: StreamMeta = {
+    id: "omi-ambient",
+    name: "Omi Ambient",
+    type: "webhook",
+    source: "omi",
+    enabled: true,
+    status: "idle",
+    last_event_at: null,
+    event_count: 0,
+    webhookToken,
+  };
+  streams.push(stream);
+  saveStreamsMeta(streams);
+  return { stream, webhook_url: composeWebhookUrl("omi", webhookToken), reused: false };
+}
+
 function getStreamConfigPath(streamId: string): string {
   const safe = streamId.replace(/[^a-zA-Z0-9_-]/g, "_");
   return path.join(STREAM_CONFIGS_DIR, `${safe}.json`);
