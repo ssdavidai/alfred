@@ -94,9 +94,13 @@ function readComposioSkills(): ComposioSkill[] {
 
 export function registerClaudeSetupRoutes(): void {
   addRoute("GET", "/api/v1/claude-setup", async ({ res }) => {
-    const subdomain = process.env.TENANT_SUBDOMAIN || "";
-    const domain = process.env.TENANT_DOMAIN || "alfred.black";
-    const tenantUrl = subdomain ? `https://${subdomain}.${domain}` : null;
+    // The user-facing MCP server is reachable at mcp.${DOMAIN} (Caddy routes
+    // mcp.{$DOMAIN} → mcp-server; the apex DOMAIN/<app>/mcp is NOT routed
+    // there). The old TENANT_SUBDOMAIN/TENANT_DOMAIN scheme is unset on the
+    // merged single-VM stack → null URLs → empty /claude list. Rebuild around
+    // mcp.${DOMAIN}. (F62)
+    const domain = process.env.DOMAIN || process.env.TENANT_DOMAIN || "";
+    const tenantUrl = domain ? `https://mcp.${domain}` : null;
     const approvalSecret = process.env.MCP_APPROVAL_SECRET || null;
 
     // SaaS app serves these as static assets — see
@@ -142,7 +146,8 @@ export function registerClaudeSetupRoutes(): void {
           "Secrets manager — list, search, get, create, update, delete vault items. Also rotates secrets into the running services via vault_refresh.",
         mcp_url: tenantUrl ? `${tenantUrl}/vaultwarden/mcp` : null,
         skill_url: `${skillBase}/alfred-vaultwarden.md`,
-        enabled: !!process.env.BW_USER,
+        // Merged stack provisions VAULTWARDEN_BW_PASSWORD (not BW_USER). (F62)
+        enabled: !!(process.env.VAULTWARDEN_BW_PASSWORD || process.env.BW_USER),
       },
       {
         id: "execute",
@@ -178,13 +183,14 @@ export function registerClaudeSetupRoutes(): void {
     // type into Vaultwarden's login form. The dashboard hides it
     // behind a Reveal toggle, same pattern as the approval secret.
     //
-    // Gated on BW_USER being set so tenants that haven't been
-    // provisioned with Vaultwarden don't show an empty card.
-    const bwUser = process.env.BW_USER || null;
-    const bwPassword = process.env.BW_PASSWORD || null;
-    const vaultLogin = bwUser && bwPassword && subdomain
+    // Gated on the Vaultwarden password being provisioned. On the merged
+    // single-VM stack the password is VAULTWARDEN_BW_PASSWORD and the web UI
+    // is served at vault.${DOMAIN} (no per-tenant subdomain prefix). (F62)
+    const bwUser = process.env.BW_USER || process.env.OWNER_EMAIL || null;
+    const bwPassword = process.env.VAULTWARDEN_BW_PASSWORD || process.env.BW_PASSWORD || null;
+    const vaultLogin = bwPassword && domain
       ? {
-          url: `https://${subdomain}-vault.${domain}`,
+          url: `https://vault.${domain}`,
           email: bwUser,
           master_password: bwPassword,
         }
