@@ -13,8 +13,17 @@
 // link to that section rather than duplicate it here.
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery, getClaudeSetup } from "wasp/client/operations";
+import {
+  useQuery,
+  getClaudeSetup,
+  rotateApprovalSecret,
+} from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
+
+// F77/C16 — the rotate action returns the fresh secret exactly once.
+interface RotateApprovalSecretResp {
+  approval_secret: string;
+}
 
 const SECTIONS = [
   "MCP servers",
@@ -199,16 +208,46 @@ function BlobDownload({
 function ApprovalSecretSection({
   isSet,
   lastRotatedAt,
+  onRotated,
 }: {
   isSet: boolean;
   lastRotatedAt: string | null;
+  onRotated: () => void;
 }) {
+  // The freshly-rotated value, surfaced exactly once. Never sourced from the
+  // page load — only from a deliberate rotate.
+  const [revealed, setRevealed] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
   const rotatedLabel = lastRotatedAt
     ? new Date(lastRotatedAt).toLocaleString(undefined, {
         dateStyle: "medium",
         timeStyle: "short",
       })
     : null;
+
+  async function rotate() {
+    setBusy(true);
+    setError(null);
+    try {
+      const resp = (await rotateApprovalSecret({})) as RotateApprovalSecretResp;
+      setRevealed(resp.approval_secret);
+    } catch (e: any) {
+      setError(e?.message ?? e?.data?.error ?? "Rotation failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Collapse the reveal-once panel back to the set/rotated state; refetch
+  // getClaudeSetup so `last_rotated_at` is current.
+  function dismiss() {
+    setRevealed(null);
+    setCopied(false);
+    onRotated();
+  }
 
   return (
     <div>
@@ -222,23 +261,65 @@ function ApprovalSecretSection({
         it private; it is the key to approving actions on your behalf.
       </p>
 
-      <p className="font-body text-[16px] mb-2">
-        {isSet ? "An approval secret is set." : "No approval secret yet."}
-      </p>
-      {rotatedLabel && (
-        <p
-          className="font-mono text-[11px] uppercase tracking-[0.18em] mb-6"
-          style={{ color: "var(--marginalia)" }}
-        >
-          Last rotated {rotatedLabel}
-        </p>
+      {revealed ? (
+        // F77/C16 — reveal-once panel. The value is shown a single time after
+        // the rotation; it is never persisted in the page or fetched again.
+        <div className="border border-rule p-4">
+          <p className="font-body text-[15px] mb-3">
+            Your new approval secret — copy it now.{" "}
+            <strong>It won't be shown again.</strong>
+          </p>
+          <div className="flex items-center gap-2">
+            <code className="flex-1 font-mono text-[12px] border border-rule p-2 break-all">
+              {revealed}
+            </code>
+            <button
+              onClick={() => {
+                navigator.clipboard?.writeText(revealed);
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              }}
+              className="btn-ghost"
+            >
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          <button onClick={dismiss} className="btn-ghost mt-4">
+            Done — I've copied it
+          </button>
+        </div>
+      ) : (
+        <>
+          <p className="font-body text-[16px] mb-2">
+            {isSet ? "An approval secret is set." : "No approval secret yet."}
+          </p>
+          {rotatedLabel && (
+            <p
+              className="font-mono text-[11px] uppercase tracking-[0.18em] mb-6"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Last rotated {rotatedLabel}
+            </p>
+          )}
+          <button onClick={rotate} disabled={busy} className="btn-brass">
+            {busy ? "Generating…" : "Generate new approval secret"}
+          </button>
+          {error && (
+            <p
+              className="font-body italic text-[13px] mt-3"
+              style={{ color: "var(--brass)" }}
+            >
+              {error}
+            </p>
+          )}
+        </>
       )}
     </div>
   );
 }
 
 export default function ClaudePage() {
-  const { data, isLoading } = useQuery(getClaudeSetup);
+  const { data, isLoading, refetch } = useQuery(getClaudeSetup);
   const setup = (data as ClaudeSetupResp | undefined) ?? {
     tenant_url: null,
     approval_secret: null,
@@ -360,6 +441,9 @@ export default function ClaudePage() {
                 <ApprovalSecretSection
                   isSet={setup.approval_secret_set}
                   lastRotatedAt={setup.last_rotated_at}
+                  onRotated={() => {
+                    void refetch();
+                  }}
                 />
               )}
 
