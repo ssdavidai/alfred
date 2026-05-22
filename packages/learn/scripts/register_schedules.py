@@ -35,6 +35,12 @@ from src.config import load_config
 CHORE_SCHEDULE_PREFIX = "chore-"
 _USER_CHORES_DIR = "/alfred-data/user-chores"
 
+# F33c — the Opus-generated brief-duplicate chore. The brief is a built-in
+# now (BriefingWorkflow, F33a), so this generated chore is swept at boot.
+# Slug variants cover hyphen (schedule id) + underscore (module name).
+_BRIEFING_CHORE_SLUGS = ("morning-briefing", "morning_briefing")
+_BRIEFING_CHORE_PY = "morning_briefing.py"
+
 PLANE_SYNC_SCHEDULE_ID = "al-plane-sync"
 PLANE_SYNC_WORKFLOW = "PlaneSyncWorkflow"
 PLANE_SYNC_NOTE = (
@@ -1394,6 +1400,74 @@ async def reconcile_chore_schedules(
     return deleted
 
 
+async def _remove_briefing_chore_files_and_record() -> None:
+    """Delete the brief-duplicate chore's ``.py`` + vault record (F33c).
+
+    Best-effort: a missing file / unreachable ctrl-api logs and continues.
+    """
+    try:
+        py = os.path.join(_USER_CHORES_DIR, _BRIEFING_CHORE_PY)
+        if os.path.exists(py):
+            os.remove(py)
+            logger.info("delete_duplicate_briefing_chore: removed %s", py)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("delete_duplicate_briefing_chore: .py remove failed: %s", exc)
+
+    config = load_config()
+    api_key = os.environ.get("AAS_API_KEY", "")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    try:
+        async with httpx.AsyncClient(
+            base_url=config.alfred_ctrl_url, timeout=15.0, headers=headers
+        ) as client:
+            for slug in _BRIEFING_CHORE_SLUGS:
+                try:
+                    await client.delete(f"/api/v1/vault/records/chore/{slug}.md")
+                except Exception:  # noqa: BLE001
+                    pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("delete_duplicate_briefing_chore: record delete failed: %s", exc)
+
+
+async def delete_duplicate_briefing_chore(client: Client) -> int:
+    """Sweep the duplicate generated ``morning_briefing`` chore (F33c).
+
+    The brief is a built-in (F33a), so the Opus-generated morning_briefing
+    chore — a ``.py``, a ``chore-morning-briefing`` schedule, and a
+    ``chore/morning-briefing.md`` record — is a duplicate that races the
+    built-in. F34's orphan reconciler won't touch it (it HAS backing), so
+    this targeted cleanup deletes the schedule + ``.py`` + vault record.
+    Idempotent: a clean tenant deletes nothing. Returns schedules deleted.
+    """
+    deleted = 0
+    targets = {f"{CHORE_SCHEDULE_PREFIX}{s}" for s in _BRIEFING_CHORE_SLUGS}
+    try:
+        present: list[str] = []
+        async for entry in client.list_schedules():
+            sid = getattr(entry, "id", None) or ""
+            if sid in targets:
+                present.append(sid)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "delete_duplicate_briefing_chore: list_schedules failed: %s", exc,
+        )
+        present = []
+
+    for sid in present:
+        try:
+            await client.get_schedule_handle(sid).delete()
+            logger.info("delete_duplicate_briefing_chore: deleted schedule %s", sid)
+            deleted += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "delete_duplicate_briefing_chore: schedule %s delete failed: %s",
+                sid, exc,
+            )
+
+    await _remove_briefing_chore_files_and_record()
+    return deleted
+
+
 async def register_stream_sweep_schedule(client: Client) -> None:
     """Register the single ``al-stream-sweep`` schedule (#53).
 
@@ -1579,6 +1653,10 @@ async def register_all() -> None:
     # soak, fleet rollout once the per-source-type confidence shifts
     # have been observed to track real reversal patterns.
     await register_reversal_calibration(client, config.task_queue)
+    try:  # F33c — sweep the brief-duplicate chore (brief is a built-in now).
+        await delete_duplicate_briefing_chore(client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("delete_duplicate_briefing_chore: sweep failed: %s", exc)
     try:  # F34 — sweep orphaned chore-* schedules; never blocks boot.
         await reconcile_chore_schedules(client)
     except Exception as exc:  # noqa: BLE001
