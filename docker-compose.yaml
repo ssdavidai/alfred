@@ -456,6 +456,13 @@ services:
       - ANTHROPIC_API_KEY=
       - VAULT_PATH=/vault
       - TASK_QUEUE=alfred-learn
+      # OMI ambient transcription. OmiAudioProcessorWorkflow transcribes
+      # captured wearable audio via Groq Whisper (omi_audio.py reads
+      # GROQ_API_KEY). env_file: .env injects it too, but the raw provider
+      # keys above are explicitly blanked here, so pin GROQ through cleanly
+      # — without it every audio group is discarded as "empty transcription"
+      # and OMI capture is silently dead. Distinct from VEXA_TRANSCRIPTION_*.
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
       - ALFRED_LEARN_ENABLED=${ALFRED_LEARN_ENABLED:-true}
       - ALFRED_CTRL_URL=http://ctrl-api:3100
       # Signal pipeline (#78): stream events → signals → decision cards.
