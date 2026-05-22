@@ -1229,8 +1229,7 @@ Derive 5-12 instincts from the patterns and facts. Lean heavily on the patterns 
   - destination_type: one of `stream`, `triage`, `matter`, `errand`, `log`, `digest`, `notification`, `draft`, `review`
   - destination: short label of where to route (e.g. "tier2 stream-log", "priority triage")
   - process: short label of what to do (e.g. "archive", "urgent-triage", "daily-digest")
-- **discretion_threshold**: float 0.7-0.95. Higher = more confident, fires automatically. Lower = will ask the user first.
-- **confidence_score**: float 0.0-1.0. How confident YOU are this rule is right for this user.
+- **confidence_score**: float 0.0-1.0. How confident YOU are this rule is right for this user. (Do NOT emit a discretion_threshold — new instincts always start at Asking and earn autonomy as real observations accumulate; autonomy is never granted at creation.)
 - **execution** (OPTIONAL): include ONLY when the instinct's action goes BEYOND simple routing. If the instinct should CREATE A TASK (e.g. "create an urgent errand with specific details", "draft a reply", "summarize and notify"), set `execution.enabled: true`. For pure routing instincts ("file newsletters to digest", "route to project folder"), omit or set `enabled: false`.
 
 ## Output format
@@ -1264,7 +1263,6 @@ Return ONLY valid JSON. No preamble, no fences:
         "tier": 2,
         "requires_approval": true
       }},
-      "discretion_threshold": 0.85,
       "confidence_score": 0.9
     }}
   ]
@@ -1363,14 +1361,16 @@ def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
     input_patterns = instinct.get("input_patterns") or {}
     routing_rule = instinct.get("routing_rule") or {}
     confidence = float(instinct.get("confidence_score", 0.85))
-    # discretion_threshold is optional in the writer contract — when the
-    # caller includes it, we surface it on the record. When absent, the
-    # runtime falls back to the obs-count formula in
-    # src/matching/discretion.py (0.95 for <5 obs) so the principal is
-    # asked until the pattern earns trust through repetition. See
-    # should_route_autonomously: it only consults the field when set.
-    threshold_raw = instinct.get("discretion_threshold")
-    threshold: float | None = float(threshold_raw) if threshold_raw is not None else None
+    # discretion_threshold is intentionally NOT seeded on day-zero
+    # instincts. New instincts start at Asking (0 observations) and earn
+    # their way up through repetition; the runtime gate derives the bar
+    # from the live observation count in src/matching/discretion.py
+    # (0.95 for <5 obs → Asking). Seeding the LLM's subjective confidence
+    # here would authorize autonomy at 0 observations — exactly the
+    # premature-trust bug C-B6 forbids. The gate (_instinct_threshold /
+    # should_route_autonomously) now treats any explicit threshold as
+    # raise-only, but we still avoid persisting one at creation so the
+    # record itself reflects the unearned-Asking posture.
 
     # Encode the structured nested fields as JSON-scalar strings so the
     # flat parser on the read side can round-trip them via json.loads.
@@ -1392,8 +1392,8 @@ def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
         f"input_patterns: {_escape_yaml_scalar(input_patterns_json)}",
         f"routing_rule: {_escape_yaml_scalar(routing_rule_json)}",
     ]
-    if threshold is not None:
-        fm_lines.append(f"discretion_threshold: {threshold}")
+    # NB: discretion_threshold deliberately omitted — see above. New
+    # instincts start at Asking and earn autonomy via observation count.
 
     # Persist execution block if the LLM included one
     execution = instinct.get("execution")
@@ -1442,10 +1442,10 @@ def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
         if process:
             body_parts.append(f"- **Process:** {process}")
 
-    summary_bits = []
-    if threshold is not None:
-        summary_bits.append(f"**Discretion threshold:** {threshold:.2f}")
-    summary_bits.append(f"**Confidence:** {confidence:.2f}")
+    # No discretion-threshold line — day-zero instincts start at Asking
+    # and earn autonomy from accumulated observations (see frontmatter
+    # note above), so there is no seeded threshold to report.
+    summary_bits = [f"**Confidence:** {confidence:.2f}"]
     body_parts += [
         "",
         "  |  ".join(summary_bits),

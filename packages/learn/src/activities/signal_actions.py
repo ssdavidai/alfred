@@ -278,19 +278,21 @@ def _score_signal_against_instinct(
 
 
 def _instinct_threshold(instinct: dict[str, Any]) -> float:
-    """Pull the per-instinct discretion threshold from frontmatter.
+    """Compute the effective per-instinct discretion bar from frontmatter.
 
     Progressive autonomy contract (mirrors
     ``src.matching.discretion.should_route_autonomously``):
 
-      1. Explicit ``discretion_threshold`` override on the instinct
-         wins. Reserved for operator-tuned exceptions.
-      2. Otherwise use the obs-count formula from
+      1. Compute the obs-count bar from
          ``src.matching.discretion.get_discretion_threshold`` on the
          live observation count (decision-sourced observations linked
-         to this instinct).
-      3. Bare fallback when neither is available:
-         ``DEFAULT_DISCRETION_THRESHOLD`` (0.95 — Asking).
+         to this instinct). This is the **floor** — the autonomy an
+         instinct has actually earned.
+      2. An explicit ``discretion_threshold`` override is **raise-only**:
+         it may only make the bar stricter (``max`` of the two), never
+         authorize autonomy below what observations earned. A seeded
+         threshold therefore cannot promote a 0-obs instinct out of the
+         Asking bar (0.95) — it still requires Sir's guidance.
 
     The live count comes from ctrl-api on the
     ``frontmatter.live_observation_count`` field. ctrl-api computes it
@@ -306,17 +308,8 @@ def _instinct_threshold(instinct: dict[str, Any]) -> float:
     if not isinstance(fm, dict):
         fm = instinct
 
-    raw = fm.get("discretion_threshold")
-    if raw is not None:
-        try:
-            f = float(raw)
-        except (TypeError, ValueError):
-            f = None
-        if f is not None and f == f and f >= 0.0:
-            return min(f, 1.0)
-
-    # No explicit override — defer to the obs-count formula. Prefer
-    # the ctrl-api-enriched live count over the stored snapshot.
+    # Floor: the bar the live observation count has earned. Prefer the
+    # ctrl-api-enriched live count over the stored snapshot.
     obs_count_raw = (
         fm.get("live_observation_count")
         if fm.get("live_observation_count") is not None
@@ -330,7 +323,20 @@ def _instinct_threshold(instinct: dict[str, Any]) -> float:
         obs_count = 0
 
     from src.matching.discretion import get_discretion_threshold
-    return get_discretion_threshold(obs_count)
+    earned = get_discretion_threshold(obs_count)
+
+    # Raise-only override: an explicit threshold can only make the bar
+    # stricter, never lower it below the earned floor.
+    raw = fm.get("discretion_threshold")
+    if raw is not None:
+        try:
+            f = float(raw)
+        except (TypeError, ValueError):
+            f = None
+        if f is not None and f == f and f >= 0.0:
+            return max(earned, min(f, 1.0))
+
+    return earned
 
 
 def _safe_filename_slug(s: str) -> str:

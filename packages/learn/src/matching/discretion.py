@@ -34,15 +34,40 @@ def should_route_autonomously(
     score: float,
     instinct: dict[str, Any],
 ) -> bool:
-    """Determine if the score exceeds the instinct's discretion threshold.
+    """Determine if the score clears the instinct's discretion bar.
 
-    Uses the instinct's own threshold if set, otherwise calculates from
-    observation count.
+    The observation-earned bar is a **floor**: an explicit
+    ``discretion_threshold`` may only *raise* the bar (lower trust /
+    keep the instinct more cautious), never authorize autonomy beyond
+    what the live observation count has earned. So the effective bar is
+    the STRICTER (higher) of the obs-count formula and any explicit
+    override. An instinct with <5 observations therefore sits at the
+    Asking bar (0.95) regardless of a seeded threshold, and never
+    auto-routes until it earns more observations.
+
+    Prefers the ctrl-api-enriched ``live_observation_count`` (the same
+    decision-sourced count the badge uses) over the stored snapshot.
     """
-    threshold = instinct.get("discretion_threshold")
-    if threshold is None:
-        obs_count = instinct.get("observation_count", 0)
-        threshold = get_discretion_threshold(obs_count)
+    obs_raw = instinct.get("live_observation_count")
+    if obs_raw is None:
+        obs_raw = instinct.get("observation_count", 0)
+    try:
+        obs_count = int(obs_raw)
+    except (TypeError, ValueError):
+        obs_count = 0
+    earned = get_discretion_threshold(max(obs_count, 0))
+
+    explicit = instinct.get("discretion_threshold")
+    threshold = earned
+    if explicit is not None:
+        try:
+            f = float(explicit)
+        except (TypeError, ValueError):
+            f = None
+        if f is not None and f == f:
+            # Raise-only: an explicit override may only make the bar
+            # stricter, never looser than what observations earned.
+            threshold = max(earned, f)
     return score >= threshold
 
 

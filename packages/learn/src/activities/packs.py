@@ -478,7 +478,10 @@ async def generate_instinct_pack(onboard_path: str) -> dict[str, Any]:
     - Inner circle -> priority, immediate triage
     - Financial + failed/declined -> urgent task
 
-    High-confidence patterns get discretion_threshold 0.85, lower get 0.95.
+    Day-zero instincts are NOT seeded with a discretion_threshold or a
+    fake observation_count: they start at Asking (0 observations) and
+    earn autonomy as real decision-sourced observations accumulate. See
+    src/matching/discretion.py and packs_opus.py for the rationale.
     Creates 3-10 records.
     """
     profile = _load_profile(onboard_path)
@@ -517,9 +520,8 @@ async def generate_instinct_pack(onboard_path: str) -> dict[str, Any]:
                         "process": "archive",
                         "default_assignee": "",
                     },
-                    "discretion_threshold": 0.85,
                     "confidence_score": 0.9,
-                    "observation_count": len(noise_senders),
+                    "observation_count": 0,
                     "tags": ["onboarding", "noise", "auto-generated"],
                     "routing_logic": "Route noise-tier senders directly to stream log without triage.",
                 }
@@ -555,9 +557,8 @@ async def generate_instinct_pack(onboard_path: str) -> dict[str, Any]:
                         "process": "digest",
                         "default_assignee": "",
                     },
-                    "discretion_threshold": 0.85,
                     "confidence_score": 0.85,
-                    "observation_count": len(newsletter_senders),
+                    "observation_count": 0,
                     "tags": ["onboarding", "newsletter", "auto-generated"],
                     "routing_logic": "Route newsletter senders to stream log for daily digest.",
                 }
@@ -593,9 +594,8 @@ async def generate_instinct_pack(onboard_path: str) -> dict[str, Any]:
                         "process": "urgent-triage",
                         "default_assignee": "",
                     },
-                    "discretion_threshold": 0.85,
                     "confidence_score": 0.95,
-                    "observation_count": len(inner_senders),
+                    "observation_count": 0,
                     "tags": ["onboarding", "inner-circle", "auto-generated"],
                     "routing_logic": "Route inner-circle contacts to immediate triage queue.",
                 }
@@ -632,9 +632,8 @@ async def generate_instinct_pack(onboard_path: str) -> dict[str, Any]:
                         "process": "urgent-review",
                         "default_assignee": "",
                     },
-                    "discretion_threshold": 0.95,
                     "confidence_score": 0.8,
-                    "observation_count": len(payment_issues),
+                    "observation_count": 0,
                     "tags": ["onboarding", "financial", "urgent", "auto-generated"],
                     "routing_logic": "Route payment failure notifications to urgent task queue.",
                 }
@@ -685,9 +684,8 @@ async def generate_instinct_pack(onboard_path: str) -> dict[str, Any]:
                         "process": "standard",
                         "default_assignee": "",
                     },
-                    "discretion_threshold": 0.95,
                     "confidence_score": 0.7,
-                    "observation_count": len(dom_senders),
+                    "observation_count": 0,
                     "tags": ["onboarding", tier_name, "auto-generated"],
                     "routing_logic": f"Route {domain} emails to {tier_name} triage.",
                 }
