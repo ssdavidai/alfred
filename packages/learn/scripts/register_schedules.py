@@ -7,6 +7,7 @@ Run on container first boot:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
@@ -1304,17 +1305,16 @@ def _slugify_chore(name: str) -> str:
     return s.strip("-")
 
 
-async def _vault_chore_slugs() -> set[str]:
-    """Slugs of live vault ``chore/*`` records (canonical backing).
+async def _fetch_vault_chore_records() -> tuple[list[dict], bool]:
+    """Return ``(records, ok)`` for the live vault ``chore/*`` list (F34b).
 
-    Best-effort: a failure returns ``set()`` so the reconciler degrades to
-    the ``.py``-only check rather than deleting a chore whose record just
-    couldn't be read this boot.
+    ``ok`` is ``True`` only on a clean 200 read; any failure yields
+    ``([], False)`` so callers treat the backing source as *unknown* (not
+    *empty*) and decline to delete this boot.
     """
     config = load_config()
     api_key = os.environ.get("AAS_API_KEY", "")
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    slugs: set[str] = set()
     try:
         async with httpx.AsyncClient(
             base_url=config.alfred_ctrl_url, timeout=15.0, headers=headers
@@ -1322,21 +1322,44 @@ async def _vault_chore_slugs() -> set[str]:
             resp = await client.get("/api/v1/vault/list/chore")
             resp.raise_for_status()
             body = resp.json()
-        records = body.get("records") if isinstance(body, dict) else body
-        for rec in records or []:
-            path = str((rec or {}).get("path") or "").strip()
-            if path.startswith("chore/") and path.endswith(".md"):
-                slugs.add(path[len("chore/"):-len(".md")])
+        # ctrl-api contract is {"results": [...], "count": N}. Legacy code
+        # read "records" (which never exists) → silently-empty backing set.
+        if isinstance(body, dict):
+            records = body.get("results")
+            if records is None:
+                records = body.get("records")
+        else:
+            records = body
+        return list(records or []), True
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "reconcile_chore_schedules: vault chore list failed: %s "
-            "— falling back to .py-only backing check", exc,
+            "— treating backing as UNKNOWN (deleting nothing this boot)", exc,
         )
-    return slugs
+        return [], False
 
 
-async def _collect_live_chore_slugs() -> set[str]:
-    """Slugs with a backing artifact: a user-chores ``.py`` OR a vault record."""
+async def _vault_chore_slugs() -> tuple[set[str], bool]:
+    """Slugs of live vault ``chore/*`` records + whether the read succeeded.
+
+    On failure ``ok`` is ``False``; a transient read must never be mistaken
+    for "no chores exist", so the caller MUST NOT delete anything then.
+    """
+    records, ok = await _fetch_vault_chore_records()
+    slugs: set[str] = set()
+    for rec in records:
+        path = str((rec or {}).get("path") or "").strip()
+        if path.startswith("chore/") and path.endswith(".md"):
+            slugs.add(path[len("chore/"):-len(".md")])
+    return slugs, ok
+
+
+async def _collect_live_chore_slugs() -> tuple[set[str], bool]:
+    """Backing slugs (union of ``.py`` stems + vault records) + ``backing_ok``.
+
+    The ``.py`` arm is an additional-safety signal only; deletion is gated on
+    ``backing_ok`` (the authoritative vault read), never on the ``.py`` set.
+    """
     slugs: set[str] = set()
     try:
         for fn in os.listdir(_USER_CHORES_DIR):
@@ -1346,24 +1369,44 @@ async def _collect_live_chore_slugs() -> set[str]:
         pass
     except Exception as exc:  # noqa: BLE001
         logger.warning("reconcile_chore_schedules: user-chores scan failed: %s", exc)
-    slugs |= await _vault_chore_slugs()
-    return slugs
+    vault_slugs, backing_ok = await _vault_chore_slugs()
+    slugs |= vault_slugs
+    return slugs, backing_ok
 
 
 async def reconcile_chore_schedules(
-    client: Client, *, live_slugs: set[str] | None = None,
+    client: Client,
+    *,
+    live_slugs: set[str] | None = None,
+    backing_ok: bool | None = None,
 ) -> int:
-    """Delete orphaned ``chore-*`` Temporal schedules (F34).
+    """Delete orphaned ``chore-*`` Temporal schedules (F34 / F34b).
 
-    An orphan is a ``chore-<slug>`` schedule whose slug has NO backing
-    artifact — neither a user-chores ``.py`` nor a vault ``chore/<slug>.md``
-    record (left behind by a reset/re-onboard; schedules live in Temporal's
-    own store, so they survive and churn 504 NotFound on an unregistered
-    workflow class). Conservative: any backing keeps the schedule; only the
-    ``chore-`` prefix is swept. Best-effort + idempotent. Returns the count.
+    An orphan is a ``chore-<slug>`` schedule with NO backing ``.py`` or
+    vault ``chore/<slug>.md`` record. Only the ``chore-`` prefix is swept;
+    any backing keeps the schedule. Best-effort + idempotent.
+
+    F34b safety: deletion requires a SUCCESSFUL authoritative vault read. If
+    the vault list could not be read this boot, the backing set is *unknown*
+    and we delete NOTHING — never fall through to a ``.py``-only set whose
+    title-derived slugs don't match real schedules (the bug that nuked all 19
+    live schedules). An explicit ``live_slugs`` is authoritative unless
+    ``backing_ok=False`` is passed.
     """
     if live_slugs is None:
-        live_slugs = await _collect_live_chore_slugs()
+        live_slugs, collected_ok = await _collect_live_chore_slugs()
+        if backing_ok is None:
+            backing_ok = collected_ok
+    elif backing_ok is None:
+        backing_ok = True
+
+    if not backing_ok:
+        logger.warning(
+            "reconcile_chore_schedules: vault backing read FAILED — "
+            "skipping deletion this boot (would otherwise over-delete "
+            "legit chore schedules)",
+        )
+        return 0
 
     deleted = 0
     try:
@@ -1466,6 +1509,129 @@ async def delete_duplicate_briefing_chore(client: Client) -> int:
 
     await _remove_briefing_chore_files_and_record()
     return deleted
+
+
+def _chore_workflow_from_frontmatter(fm: dict[str, Any]) -> str | None:
+    """Workflow type for a chore: ``workflow_class_name`` (generated) else
+    ``template`` mapped via assign_chores' registry. ``None`` if neither."""
+    wf_class = fm.get("workflow_class_name")
+    if isinstance(wf_class, str) and wf_class.strip():
+        return wf_class.strip()
+    template = fm.get("template")
+    if isinstance(template, str) and template.strip():
+        try:
+            from src.activities.assign_chores import _TEMPLATE_TO_WORKFLOW
+            return _TEMPLATE_TO_WORKFLOW.get(template.strip())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "recreate_missing_chore_schedules: template map import "
+                "failed: %s", exc,
+            )
+    return None
+
+
+def _decode_chore_params(raw: Any) -> dict[str, Any]:
+    """Decode a chore record's ``params`` frontmatter (a JSON string scalar)
+    into a dict; absent/empty/malformed → ``{}`` (F34b)."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            decoded = json.loads(raw)
+            return decoded if isinstance(decoded, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+    return {}
+
+
+async def recreate_missing_chore_schedules(client: Client) -> int:
+    """Re-create ``chore-<slug>`` schedules for live records lacking one (F34b).
+
+    The F34 reconciler only deletes; an over-deletion (or Temporal reset)
+    can leave a live ``chore/<slug>.md`` record with no schedule, so it never
+    fires. For each ACTIVE record we (re)create ``chore-<slug>`` if absent —
+    cron from ``schedule``, workflow from ``workflow_class_name``/``template``,
+    input ``{"chore_slug": slug, **params}``. Idempotent, best-effort, never
+    blocks boot. SKIPs F33c briefing slugs + non-active records. Returns count.
+    """
+    records, ok = await _fetch_vault_chore_records()
+    if not ok:
+        logger.warning(
+            "recreate_missing_chore_schedules: vault chore list unreadable "
+            "— skipping restoration this boot",
+        )
+        return 0
+
+    cfg = load_config()
+    created = 0
+    for rec in records:
+        rec = rec or {}
+        path = str(rec.get("path") or "").strip()
+        if not (path.startswith("chore/") and path.endswith(".md")):
+            continue
+        slug = path[len("chore/"):-len(".md")]
+        if not slug or slug in _BRIEFING_CHORE_SLUGS:
+            continue
+
+        fm = rec.get("frontmatter")
+        fm = fm if isinstance(fm, dict) else {}
+
+        status = str(fm.get("status") or "").strip().lower()
+        if status in ("paused", "completed"):
+            continue
+
+        cron = fm.get("schedule")
+        if not (isinstance(cron, str) and cron.strip()):
+            logger.warning("recreate_missing: %s has no cron — skipping", slug)
+            continue
+
+        workflow_name = _chore_workflow_from_frontmatter(fm)
+        if not workflow_name:
+            logger.warning("recreate_missing: %s has no workflow — skipping", slug)
+            continue
+        # BriefingWorkflow is a built-in (F33a) taking a positional slot, not
+        # the chore-input dict — never recreate it as a chore schedule.
+        if workflow_name == "BriefingWorkflow":
+            continue
+
+        params = _decode_chore_params(fm.get("params"))
+        wf_input = {"chore_slug": slug, **params}
+        schedule_id = f"{CHORE_SCHEDULE_PREFIX}{slug}"
+
+        action = ScheduleActionStartWorkflow(
+            workflow_name,
+            wf_input,
+            id=f"{schedule_id}-run",
+            task_queue=cfg.task_queue,
+        )
+        spec = ScheduleSpec(cron_expressions=[cron.strip()])
+        try:
+            await client.create_schedule(
+                schedule_id, Schedule(action=action, spec=spec),
+            )
+            created += 1
+            logger.info(
+                "recreate_missing_chore_schedules: created %s → %s",
+                schedule_id, workflow_name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            err = str(exc).lower()
+            if "already" in err or "exists" in err or "running" in err:
+                logger.info(
+                    "recreate_missing_chore_schedules: %s already exists "
+                    "(skipping)", schedule_id,
+                )
+            else:
+                logger.warning(
+                    "recreate_missing_chore_schedules: create %s failed: %s",
+                    schedule_id, exc,
+                )
+    if created:
+        logger.info(
+            "recreate_missing_chore_schedules: created %d missing schedule(s)",
+            created,
+        )
+    return created
 
 
 async def register_stream_sweep_schedule(client: Client) -> None:
@@ -1657,10 +1823,14 @@ async def register_all() -> None:
         await delete_duplicate_briefing_chore(client)
     except Exception as exc:  # noqa: BLE001
         logger.warning("delete_duplicate_briefing_chore: sweep failed: %s", exc)
-    try:  # F34 — sweep orphaned chore-* schedules; never blocks boot.
+    try:  # F34 — sweep TRUE orphaned chore-* schedules; never blocks boot.
         await reconcile_chore_schedules(client)
     except Exception as exc:  # noqa: BLE001
         logger.warning("reconcile_chore_schedules: sweep failed: %s", exc)
+    try:  # F34b — restore chore schedules whose vault record lacks one.
+        await recreate_missing_chore_schedules(client)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("recreate_missing_chore_schedules: restore failed: %s", exc)
 
 
 def main() -> None:
