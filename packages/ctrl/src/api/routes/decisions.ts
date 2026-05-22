@@ -40,6 +40,7 @@ import {
   readNeedsAttention,
   writeFrontmatterPatch,
   emitResolutionEvent,
+  dispatchSignalToAgent,
 } from "./attention.js";
 import { getStateDb } from "../../db/state.js";
 import { indexVaultWrite } from "../../db/vaultIndex.js";
@@ -336,19 +337,36 @@ export function registerDecisionRoutes(): void {
             synchronousSideEffects.needs_attention_audit = auditPath;
             synchronousFlipOk = true;
           } else if (intent === "delegate") {
-            // Flip to dispatched optimistically so the card drops
-            // off the queue; workflow still runs the actual
-            // dispatchSignalToAgent in the next tick. If dispatch
-            // fails the workflow can revert.
-            writeFrontmatterPatch(rec, {
-              status: "dispatched",
-              resolved_at: new Date().toISOString(),
-              resolution_note: note || null,
-            });
-            const auditPath = emitResolutionEvent(rec, "dispatched", note);
-            synchronousActions.push("needs_attention.dispatched_optimistic");
-            synchronousSideEffects.needs_attention_audit = auditPath;
-            // state stays "open" — workflow handles real dispatch.
+            // F2/C18: do NOT flip NA→dispatched optimistically. Attempt the
+            // real dispatch first (re-arm the source signal so the router
+            // picks it up), and flip to `dispatched` ONLY when it succeeds.
+            // An advisory card (no real state.db signal) returns a clean
+            // "nothing to delegate" — the NA stays pending so the card stays
+            // on the Desk and the failure isn't masked as success.
+            const dispatchResult = await dispatchSignalToAgent(
+              rec,
+              `decision/${id}.md`,
+            );
+            if (dispatchResult.error) {
+              synchronousActions.push("needs_attention.nothing_to_delegate");
+              synchronousSideEffects.dispatch_ok = false;
+              synchronousSideEffects.nothing_to_delegate = true;
+              synchronousSideEffects.dispatch_error = dispatchResult.error;
+              // NA left pending; state stays "open".
+            } else {
+              writeFrontmatterPatch(rec, {
+                status: "dispatched",
+                resolved_at: new Date().toISOString(),
+                resolution_note: note || null,
+              });
+              const auditPath = emitResolutionEvent(rec, "dispatched", note);
+              synchronousActions.push("needs_attention.dispatched");
+              synchronousSideEffects.needs_attention_audit = auditPath;
+              synchronousSideEffects.dispatch_ok = true;
+              synchronousSideEffects.re_routed_signal =
+                dispatchResult.outcome_signal_path;
+              // state stays "open" — workflow polls the outcome.
+            }
           } else if (intent === "noise") {
             // Mark-as-noise: the principal is saying "this category
             // of signal should never have surfaced." Flip to a

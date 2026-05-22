@@ -205,7 +205,7 @@ export function emitResolutionEvent(
   return `event/${auditId}.md`;
 }
 
-async function dispatchSignalToAgent(
+export async function dispatchSignalToAgent(
   rec: NeedsAttentionRecord,
   decisionOrigin?: string,
 ): Promise<{ outcome_signal_path: string | null; error: string | null }> {
