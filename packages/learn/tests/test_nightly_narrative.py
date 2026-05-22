@@ -228,6 +228,33 @@ async def test_load_matter_signals_24h_returns_only_fresh_targeted(monkeypatch):
     assert fake.list_calls and fake.list_calls[0].get("matter") == "matter/carter.md"
 
 
+@pytest.mark.asyncio
+async def test_load_matter_signals_24h_no_vault_signal_fallback(monkeypatch):
+    """F38 — the composer reads ONE signal store (state.db). When the
+    state.db query fails it returns [] rather than silently falling back
+    to a vault ``signal/`` walk (the store the matters route used to
+    disagree on — paired with Lane I F9). The activity must never read
+    vault/signal/."""
+
+    class _Boom:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return None
+
+        async def list_signals(self, **kwargs: Any):
+            raise RuntimeError("state.db unreachable")
+
+    monkeypatch.setattr(
+        "src.utils.signal_state.StateClient", lambda *_a, **_kw: _Boom()
+    )
+    # If the activity tried a vault fallback it would need a VaultClient;
+    # leave it unpatched so any such call would error loudly. It must not.
+    result = await load_matter_signals_24h("matter/carter.md")
+    assert result == []
+
+
 # ---------------------------------------------------------------------------
 # load_task_transitions_24h
 # ---------------------------------------------------------------------------

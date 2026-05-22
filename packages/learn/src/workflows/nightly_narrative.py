@@ -17,8 +17,10 @@ Per matter the flow is:
 
   1. ``read_matter_summary`` — fetch the matter's current frontmatter
      (name, prior current_state).
-  2. ``load_matter_signals_24h`` — signal/*.md filtered by target match
-     within the lookback window.
+  2. ``load_matter_signals_24h`` — state.db ``signal`` rows (storage
+     cutover #27) filtered by matter target match within the lookback
+     window. The ctrl-api matters route reads the same store (F9), so the
+     composer and the matters timeline agree on one signal store.
   3. ``load_task_transitions_24h`` — task/*.md whose
      last_steward_outcome.evaluated_at is fresh.
   4. ``load_source_events`` — back-pointer expand signals -> events.
