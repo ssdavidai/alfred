@@ -1194,10 +1194,11 @@ function readGrantedScopes(conn: Record<string, unknown>): string[] {
 /**
  * Classify a set of granted scopes as read-only vs read+write. A grant is
  * read+write if ANY scope is not a `.readonly` (or `*.read`) scope — i.e. the
- * connection can mutate. Empty/unknown grants classify as `unknown`.
+ * connection can mutate. Empty/unknown grants classify as `none` — we surface
+ * the honest "we don't know" rather than guessing a default.
  */
-function classifyGrantedAccess(scopes: string[]): "read" | "read_write" | "unknown" {
-  if (scopes.length === 0) return "unknown";
+function classifyGrantedAccess(scopes: string[]): "read" | "read_write" | "none" {
+  if (scopes.length === 0) return "none";
   const allReadOnly = scopes.every((s) => {
     const lower = s.toLowerCase();
     return lower.endsWith(".readonly") || lower.endsWith("/readonly") || lower.endsWith(".read");
@@ -1524,7 +1525,7 @@ export function registerIntegrationRoutes(): void {
       // from the live /api/v3/tools endpoint (F22).
       const availableTools = toolkit ? await fetchToolkitTools(toolkit, apiKey) : [];
       sendJson(res, 200, {
-        access,                       // "read" | "read_write" | "unknown"
+        access,                       // "read" | "read_write" | "none"
         granted_scopes: grantedScopes,
         toolkit,
         available_tools: availableTools,

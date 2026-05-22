@@ -74,4 +74,22 @@ describe("F21 — scope reflects the real granted OAuth scope", () => {
     assert.strictEqual(status, 200);
     assert.strictEqual(data.access, "read", `expected read, got ${data.access}`);
   });
+
+  it("classifies an empty/missing grant as none, not a falsy guess", async () => {
+    // Composio sometimes returns a connection with no recorded scope string
+    // (non-OAuth schemes, or a grant whose scope mirror is absent). The honest
+    // answer is "none" (unknown), and granted_scopes must be an empty array —
+    // never a fabricated read/write.
+    accounts["ca_empty"] = {
+      member_id: "alfred-test-user",
+      toolkit: { slug: "googlecalendar" },
+      authScheme: "OAUTH2",
+      state: { val: {} },
+    };
+    const { status, data } = await req("GET", "/api/v1/integrations/ca_empty/scope");
+    assert.strictEqual(status, 200, JSON.stringify(data));
+    assert.strictEqual(data.access, "none", `expected none, got ${data.access}`);
+    assert.ok(Array.isArray(data.granted_scopes) && data.granted_scopes.length === 0,
+      "granted_scopes should be empty for an ungranted/unknown connection");
+  });
 });
