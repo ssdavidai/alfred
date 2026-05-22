@@ -100,12 +100,6 @@ page LandingPage {
   component: import LandingPage from "@src/landing-page/LandingPage"
 }
 
-// Public marketing — the small staff of specialists (#848). No authRequired.
-route StaffRoute { path: "/staff", to: StaffPage }
-page StaffPage {
-  component: import StaffPage from "@src/landing-page/StaffPage"
-}
-
 // Public marketing — companion / voice / sms / voice-and-tone (#849). No authRequired.
 route CompanionRoute { path: "/companion", to: CompanionPage }
 page CompanionPage {

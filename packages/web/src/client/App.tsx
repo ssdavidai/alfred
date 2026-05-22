@@ -27,7 +27,6 @@ export default function App() {
     if (p === "/") return true;
     // Marketing
     if (
-      p === "/staff" ||
       p === "/companion" ||
       p === "/voice" ||
       p === "/sms" ||
