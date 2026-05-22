@@ -46,15 +46,22 @@ export function invalidateModelCatalogCache(): void {
   cache = null;
 }
 
-function readEnvKeys(): Set<string> {
-  let content = "";
+// F65 — read provider creds from a REACHABLE source: the COMPOSE_DIR/.env file
+// (when mounted, via F40) UNION the container's own process.env (where F40/F43
+// inject the same keys). On the box the .env file was unmounted, so the catalog
+// was permanently {groups:[]}; reading process.env as well lets the catalog
+// populate from whichever source actually carries the keys.
+function readEnvFileLines(): string[] {
   try {
-    content = fs.readFileSync(ENV_PATH, "utf-8");
+    return fs.readFileSync(ENV_PATH, "utf-8").split("\n");
   } catch {
-    return new Set();
+    return [];
   }
+}
+
+export function readEnvKeys(): Set<string> {
   const keys = new Set<string>();
-  for (const line of content.split("\n")) {
+  for (const line of readEnvFileLines()) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     const eqIdx = trimmed.indexOf("=");
@@ -63,25 +70,27 @@ function readEnvKeys(): Set<string> {
     const value = trimmed.slice(eqIdx + 1).trim();
     if (value) keys.add(key);
   }
+  // process.env fallback/union — a key set in the container env counts too.
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string" && value.trim()) keys.add(key);
+  }
   return keys;
 }
 
-function getEnvValue(key: string): string | null {
-  let content = "";
-  try {
-    content = fs.readFileSync(ENV_PATH, "utf-8");
-  } catch {
-    return null;
-  }
-  for (const line of content.split("\n")) {
+export function getEnvValue(key: string): string | null {
+  for (const line of readEnvFileLines()) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
     const eqIdx = trimmed.indexOf("=");
     if (eqIdx < 0) continue;
     if (trimmed.slice(0, eqIdx).trim() === key) {
-      return trimmed.slice(eqIdx + 1).trim();
+      const v = trimmed.slice(eqIdx + 1).trim();
+      if (v) return v;
     }
   }
+  // Fall back to the container env.
+  const envVal = process.env[key];
+  if (typeof envVal === "string" && envVal.trim()) return envVal.trim();
   return null;
 }
 
