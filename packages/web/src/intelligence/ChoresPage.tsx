@@ -378,7 +378,7 @@ export default function ChoresPage() {
                   </div>
                   {isOpen && (
                     <div className="pb-6 pr-12">
-                      {c.description && (
+                      {c.description ? (
                         <p
                           className="font-body text-[16px] leading-[1.6] border-l pl-4 mb-4"
                           style={{
@@ -387,6 +387,16 @@ export default function ChoresPage() {
                           }}
                         >
                           {c.description}
+                        </p>
+                      ) : (
+                        <p
+                          className="font-body italic text-[15px] leading-[1.6] border-l pl-4 mb-4"
+                          style={{
+                            borderColor: "var(--marginalia)",
+                            color: "var(--marginalia)",
+                          }}
+                        >
+                          No description yet.
                         </p>
                       )}
                       <div className="flex gap-1 items-baseline">

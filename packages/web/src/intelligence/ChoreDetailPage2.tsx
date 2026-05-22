@@ -801,16 +801,29 @@ export default function ChoreDetailPage2() {
         </section>
 
         {/* What this chore does */}
-        {displayBody && (
-          <section className="mb-10">
+        <section className="mb-10">
+          <h2
+            className="font-mono text-[10px] uppercase tracking-[0.22em] mb-4 pb-2 border-b border-rule"
+            style={{ color: "var(--brass)" }}
+          >
+            What this does
+          </h2>
+          {displayBody ? (
             <div
               className="font-body text-[16px] leading-[1.65] border-l pl-5"
               style={{ borderColor: "var(--brass)" }}
             >
               <Markdown source={displayBody} useLiveResolver={false} />
             </div>
-          </section>
-        )}
+          ) : (
+            <p
+              className="font-body italic text-[16px] leading-[1.65] border-l pl-5"
+              style={{ borderColor: "var(--marginalia)", color: "var(--marginalia)" }}
+            >
+              No description yet.
+            </p>
+          )}
+        </section>
 
         {/* Schedule editor (Phase I — #897) */}
         <ScheduleEditorSection
