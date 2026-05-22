@@ -5,6 +5,7 @@ import { dockerComposeCmd, dockerExec, execAsync, sudoExec, parseJsonLines, vali
 import { getVaultContextData, getInboxFiles, VAULT_PATH } from "./vault.js";
 import { parseActivityFeed } from "../activity.js";
 import { ttlCache } from "../cache.js";
+import { queryAuditCrossTier } from "../../db/coldRead.js";
 
 // Activity feed is the most expensive read on the Desk page — it spawns
 // `docker compose logs --tail=N alfred` which forks a process per call.
@@ -67,7 +68,6 @@ function classifyAuditKind(filename: string): string {
     "needs_attention_action",
     "desk-action",
     "auto-task-created",
-    "daily-digest",
   ];
   for (const k of KINDS) {
     if (filename.startsWith(`${k}-`) || filename === `${k}.md`) return k;
@@ -181,24 +181,6 @@ function formatAuditSummary(
       return title ? `Auto-created task: ${title}` : "Auto-created a task";
     }
 
-    case "daily-digest": {
-      // Filename pattern: daily-digest-2026-05-11.md
-      const m = filename.match(/^daily-digest-(\d{4})-(\d{2})-(\d{2})\.md$/);
-      if (m) {
-        try {
-          const d = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`);
-          return `Daily digest for ${new Intl.DateTimeFormat("en-GB", {
-            day: "numeric",
-            month: "long",
-            year: "numeric",
-          }).format(d)}`;
-        } catch {
-          // fall through
-        }
-      }
-      return "Daily digest";
-    }
-
     case "steward-action": {
       const decision = String(fm.decision || "").trim();
       // Filename has the task slug embedded after the sha — drop the
@@ -259,6 +241,41 @@ function toSentenceVerb(action: string): string {
     done: "Marked done",
   };
   return map[action] || sentenceCase(action);
+}
+
+// F4/C12 — `state.db audit` SQL-ledger read helpers. Compare action_type on a
+// hyphen/underscore-stripped lowercase form so mixed casing across writers
+// (`signal-action` vs `desk_action`) doesn't fragment the filter (F5 also
+// normalises at the write boundary). Automated/internal rows hidden by default:
+// steward noise (94% of volume), signal-router actions, and the
+// needs_attention_action/desk_action twins already represented first-class by
+// the `decision` row (C12: one row per user action).
+const canonAuditType = (t: string) => String(t ?? "").toLowerCase().replace(/[_-]/g, "");
+const AUTOMATED_AUDIT_TYPES = new Set(
+  ["steward-action", "steward-source-pruned", "steward-action-reversed",
+   "signal-action", "auto-task-created", "needs_attention_action", "desk_action"]
+    .map(canonAuditType),
+);
+const isAutomatedAuditType = (t: string) => AUTOMATED_AUDIT_TYPES.has(canonAuditType(t));
+
+function toC12AuditItem(row: Record<string, any>): Record<string, unknown> {
+  const parse = (v: unknown): any => {
+    if (v == null) return null;
+    if (typeof v !== "string") return v;
+    try { return JSON.parse(v); } catch { return v; }
+  };
+  const changes = parse(row.changes_json) ?? {};
+  const payload = parse(row.payload_json) ?? {};
+  const note = changes?.note ?? payload?.note ?? null;
+  const reversible = parse(row.undo_json) != null || payload?.is_reversible === true;
+  const reversedAt = changes?.reversed_at ?? payload?.reversed_at ?? null;
+  return {
+    id: row.id, ts: row.ts, action_type: row.action_type,
+    actor: row.actor ?? null, headline: row.summary ?? null,
+    note: note != null ? String(note) : null, source: row.source ?? null,
+    reversible: Boolean(reversible),
+    reversed_at: reversedAt != null ? String(reversedAt) : null,
+  };
 }
 
 export function registerAdminRoutes(): void {
@@ -652,82 +669,38 @@ export function registerAdminRoutes(): void {
     sendJson(res, 200, payload);
   });
 
-  // GET /api/v1/admin/audit — durable audit trail of "every act Alfred
-  // has taken on your behalf" as the user-facing /study#audit reads it.
-  //
-  // Source: vault/event/*.md records (steward-action, signal-action,
-  // needs_attention_action, auto-task-created, decision-router etc).
-  // 14k+ on a long-running tenant — list by mtime desc and slice to the
-  // requested window before reading any frontmatter.
-  //
-  // NOT the same as /api/v1/admin/activity, which scrapes the alfred
-  // container's docker-compose logs (a debug-ops feed). LogsPage stays
-  // on /activity; StudyPage's Audit section moves to /audit.
+  // GET /api/v1/admin/audit?limit&include_automated=0&cursor=<ts> — the durable
+  // audit ledger (/study#audit). F4/C12: reads the `state.db audit` SQL ledger
+  // via the cross-tier (hot+cold) queryAuditCrossTier plumbing, NOT the legacy
+  // vault/event/*.md walk (a subset that never surfaced first-class `decision`
+  // rows and double-counted each click). One row per user action.
   addRoute("GET", "/api/v1/admin/audit", async ({ res, query }) => {
-    const limit = Math.min(
-      Math.max(parseInt(query.get("limit") ?? "50", 10) || 50, 1),
-      200,
-    );
-    // ?include_automated=1 lets the principal see the steward bot's
-    // health-check pings. Default is to hide them — 94% of david's
-    // event records are automated reviews ("yes that task is still
-    // alive") that crowd out the actually-interesting moments.
+    const limit = Math.min(Math.max(parseInt(query.get("limit") ?? "50", 10) || 50, 1), 200);
     const includeAutomated = ["1", "true", "yes"].includes(
       (query.get("include_automated") ?? "").toLowerCase(),
     );
-    const eventDir = `${VAULT_PATH}/event`;
-    let entries: { name: string; mtime: number }[] = [];
+    // cursor = ts of the previous page's last item (exclusive upper bound).
+    // Over-fetch when hiding automated rows so a full page survives the filter.
+    const cursor = query.get("cursor");
+    let result;
     try {
-      const names = fs.readdirSync(eventDir);
-      for (const name of names) {
-        if (!name.endsWith(".md")) continue;
-        if (!includeAutomated && isAutomatedAuditKind(name)) continue;
-        try {
-          const st = fs.statSync(`${eventDir}/${name}`);
-          entries.push({ name, mtime: st.mtimeMs });
-        } catch {
-          // skip unreadable
-        }
-      }
+      result = queryAuditCrossTier({
+        until: cursor || null, limit: includeAutomated ? limit : limit * 4, offset: 0,
+      } as any);
     } catch {
-      sendJson(res, 200, { items: [] });
+      sendJson(res, 200, { items: [], total: 0, next_cursor: null });
       return;
     }
-    entries.sort((a, b) => b.mtime - a.mtime);
-    const top = entries.slice(0, limit);
-
-    const items = top.map((e) => {
-      const path = `event/${e.name}`;
-      let fm: Record<string, any> = {};
-      try {
-        const raw = fs.readFileSync(`${eventDir}/${e.name}`, "utf-8");
-        const m = /^---\n([\s\S]*?)\n---/.exec(raw);
-        if (m) fm = parseSimpleYaml(m[1]);
-      } catch {
-        // skip frontmatter parse errors — surface what we can
-      }
-      // Best-effort kind classification from filename prefix +
-      // frontmatter type field.
-      // Prefer the filename-derived classifier — frontmatter `type` is
-      // sometimes generic ("event") even when the filename clearly names
-      // the kind (e.g. daily-digest-2026-05-09.md → type:event).
-      const kind =
-        classifyAuditKind(e.name) ||
-        String(fm.type || "").trim() ||
-        "event";
-      const created =
-        String(fm.created || fm.timestamp || "").trim() ||
-        new Date(e.mtime).toISOString();
-      const summary = formatAuditSummary(kind, fm, e.name);
-      return {
-        id: e.name.replace(/\.md$/, ""),
-        path,
-        created,
-        kind,
-        summary,
-      };
+    const visible = (result.entries as Array<Record<string, any>>).filter(
+      (row) => includeAutomated || !isAutomatedAuditType(String(row.action_type ?? "")),
+    );
+    const page = visible.slice(0, limit);
+    const last = page.length ? page[page.length - 1] : null;
+    sendJson(res, 200, {
+      items: page.map(toC12AuditItem),
+      total: result.total,
+      next_cursor: visible.length > limit && last ? String(last.ts) : null,
     });
-    sendJson(res, 200, { items, total: entries.length });
   });
 
   // --- Config ---

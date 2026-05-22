@@ -767,6 +767,18 @@ export interface AuditInput {
  * (the POST /api/v1/state/audit route): a failed insert RETHROWS so the request
  * surfaces a 5xx instead of a false 201 {ok,id}.
  */
+/**
+ * F5 — canonical audit `action_type` convention is **underscore** (matching the
+ * schema's documented `signal_action | steward_action | desk_action` and the C2
+ * signal-status convention). Writers are inconsistent: ctrl emits underscore,
+ * but learn (via POST /api/v1/state/audit → here) emits hyphenated
+ * `signal-action`/`steward-action`/`steward-source-pruned`. Normalise at this
+ * single write boundary so a grouped SQL reader isn't fragmented by casing.
+ */
+export function normalizeActionType(actionType: string): string {
+  return String(actionType ?? "").trim().toLowerCase().replace(/-/g, "_");
+}
+
 export function appendAudit(
   input: AuditInput,
   opts?: { strict?: boolean },
@@ -793,7 +805,7 @@ export function appendAudit(
       .run(
         id,
         input.ts ?? new Date().toISOString(),
-        input.action_type,
+        normalizeActionType(input.action_type),
         input.actor,
         input.source ?? null,
         input.target_path ?? null,

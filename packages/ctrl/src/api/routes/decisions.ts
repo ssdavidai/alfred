@@ -40,8 +40,10 @@ import {
   readNeedsAttention,
   writeFrontmatterPatch,
   emitResolutionEvent,
+  dispatchSignalToAgent,
 } from "./attention.js";
 import { getStateDb } from "../../db/state.js";
+import { indexVaultWrite } from "../../db/vaultIndex.js";
 import { appendAudit } from "./state.js";
 
 const DECISIONS_DIR = path.join(VAULT_PATH, "decision");
@@ -335,19 +337,36 @@ export function registerDecisionRoutes(): void {
             synchronousSideEffects.needs_attention_audit = auditPath;
             synchronousFlipOk = true;
           } else if (intent === "delegate") {
-            // Flip to dispatched optimistically so the card drops
-            // off the queue; workflow still runs the actual
-            // dispatchSignalToAgent in the next tick. If dispatch
-            // fails the workflow can revert.
-            writeFrontmatterPatch(rec, {
-              status: "dispatched",
-              resolved_at: new Date().toISOString(),
-              resolution_note: note || null,
-            });
-            const auditPath = emitResolutionEvent(rec, "dispatched", note);
-            synchronousActions.push("needs_attention.dispatched_optimistic");
-            synchronousSideEffects.needs_attention_audit = auditPath;
-            // state stays "open" — workflow handles real dispatch.
+            // F2/C18: do NOT flip NA→dispatched optimistically. Attempt the
+            // real dispatch first (re-arm the source signal so the router
+            // picks it up), and flip to `dispatched` ONLY when it succeeds.
+            // An advisory card (no real state.db signal) returns a clean
+            // "nothing to delegate" — the NA stays pending so the card stays
+            // on the Desk and the failure isn't masked as success.
+            const dispatchResult = await dispatchSignalToAgent(
+              rec,
+              `decision/${id}.md`,
+            );
+            if (dispatchResult.error) {
+              synchronousActions.push("needs_attention.nothing_to_delegate");
+              synchronousSideEffects.dispatch_ok = false;
+              synchronousSideEffects.nothing_to_delegate = true;
+              synchronousSideEffects.dispatch_error = dispatchResult.error;
+              // NA left pending; state stays "open".
+            } else {
+              writeFrontmatterPatch(rec, {
+                status: "dispatched",
+                resolved_at: new Date().toISOString(),
+                resolution_note: note || null,
+              });
+              const auditPath = emitResolutionEvent(rec, "dispatched", note);
+              synchronousActions.push("needs_attention.dispatched");
+              synchronousSideEffects.needs_attention_audit = auditPath;
+              synchronousSideEffects.dispatch_ok = true;
+              synchronousSideEffects.re_routed_signal =
+                dispatchResult.outcome_signal_path;
+              // state stays "open" — workflow polls the outcome.
+            }
           } else if (intent === "noise") {
             // Mark-as-noise: the principal is saying "this category
             // of signal should never have surfaced." Flip to a
@@ -559,6 +578,16 @@ export function registerDecisionRoutes(): void {
       .join("\n");
 
     fs.writeFileSync(fullPath, renderDecisionRecord(fields, bodyText), "utf-8");
+
+    // F1/C18 (KEYSTONE): index the record into `state.db vault_index` IN-REQUEST.
+    // `decision` is one of the 12 canonical vault types and every reader —
+    // GET /api/v1/decisions, the Desk ledger, and learn's
+    // list_decisions_by_state — queries `vault_index WHERE
+    // record_type='decision'`. Without this hook the row only landed on a
+    // boot-time reconciler walk, so every decision written after boot was
+    // invisible to every reader (root of the dead /decisions, dead ledger,
+    // dead defer-resurface, and frozen Asking instincts).
+    indexVaultWrite(`decision/${id}.md`);
 
     // Mirror the decision into state.db `audit` (PLAN.md Part I). The
     // `decision/*.md` vault record stays — `decision` is one of the 12
@@ -777,6 +806,10 @@ export function registerDecisionRoutes(): void {
     }
     const fullPath = path.join(DECISIONS_DIR, `${rec.id}.md`);
     fs.writeFileSync(fullPath, renderDecisionRecord(next, rec.body), "utf-8");
+    // F1/C18: re-index on every state transition (router open→executing→
+    // completed) so the `vault_index` status column stays consistent with the
+    // file and the state-filtered readers don't go stale.
+    indexVaultWrite(`decision/${rec.id}.md`);
     sendJson(res, 200, {
       ok: true,
       id: rec.id,
@@ -888,6 +921,9 @@ export function registerDecisionRoutes(): void {
     next.reversed_at = new Date().toISOString();
     const fullPath = path.join(DECISIONS_DIR, `${rec.id}.md`);
     fs.writeFileSync(fullPath, renderDecisionRecord(next, rec.body), "utf-8");
+    // F1/C18: re-index the reversal so readers filtering state=reversed (and
+    // the learn router's reverseds count) see it immediately.
+    indexVaultWrite(`decision/${rec.id}.md`);
     sendJson(res, 200, {
       ok: true,
       id: rec.id,
