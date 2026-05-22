@@ -1,21 +1,16 @@
-// F8 — matter↔project linkage across the matter/ vs project/ namespace split.
+// B1 — top-level Matters must contain ONLY canonical matter/<slug> records.
 //
-// debug/0522/matters-findings.md §4/§7-P1: the onboarding pipeline created
-// matters under /vault/matter/<slug>.md, but every task links a *parallel* set
-// of records under /vault/project/<Human Name>.md (legacy `project:` field with
-// human-readable names). The aggregator only walked matter/ and only resolved
-// refs that began `matter/` — so:
-//   (a) project/ dir records were invisible to /matters entirely
-//       (matters.ts:417 `if (!display.startsWith("matter/")) continue;`), and
-//   (b) a `project: '[[project/Foo]]'` ref resolved to null because
-//       extractMatterRef stripped only the `matter/` prefix, leaving a slash.
-// Net effect: 0 of 21 live tasks linked to a matter; all counts permanently 0.
-//
-// Fix: also build matter skeletons from project/ records and resolve
-// `project/<stem>` refs to that stem. This test seeds both namespaces and a
-// task that points at the project record by its human name, and asserts the
-// project surfaces as a matter with the task binned to it — while the existing
-// MatterDetail fields (about/summary/vault_by_category) still come through.
+// A prior fix (F8) promoted BOTH matter/<slug> AND project/<Human Name> vault
+// records into the top-level /matters list. On the live box that surfaced a
+// pile of auto-generated project/ junk as "matters" ("App Discourse Call",
+// "Suno Marketing Campaign", …). project/ records are NOT first-class matters,
+// so B1 reverts that surfacing:
+//   - the top-level /matters index lists ONLY matter/<slug> records, and
+//   - a task that links only a [[project/<name>]] record does NOT roll up to a
+//     matter (extractMatterRef no longer resolves the project/ prefix).
+// This test seeds both namespaces plus a project-linked task and asserts the
+// project record stays out of the index — while the existing MatterDetail
+// fields (about/summary/vault_by_category) still come through for matter/.
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -43,7 +38,7 @@ function write(rel: string, lines: string[]): void {
 }
 
 function seed(): void {
-  // A regular matter/<slug> record (the onboarding namespace).
+  // A regular matter/<slug> record (the canonical namespace).
   write("matter/acme-deal.md", [
     "---",
     "type: matter",
@@ -55,8 +50,8 @@ function seed(): void {
     "## Context",
     "Acme is a strategic account.",
   ]);
-  // A legacy project/<Human Name> record (the parallel namespace the tasks
-  // actually point at). Note the human-readable filename / stem.
+  // A legacy auto-generated project/<Human Name> record. This must NOT show up
+  // as a top-level matter.
   write("project/Pulumi Infrastructure Support.md", [
     "---",
     "type: project",
@@ -68,8 +63,8 @@ function seed(): void {
     "## Context",
     "Ongoing infra engagement.",
   ]);
-  // A task that links to the project record by its human name (the live
-  // pattern: `project: '[[project/Pulumi Infrastructure Support]]'`).
+  // A task that links ONLY to the project record by its human name. With B1 it
+  // does not roll up to any matter (project/ refs no longer resolve).
   write("task/wire-up-pulumi.md", [
     "---",
     "type: task",
@@ -96,29 +91,36 @@ async function call(method: string, pathname: string): Promise<{ status: number;
   return { status, payload };
 }
 
-describe("matters route — project/ namespace linkage (F8)", () => {
+describe("matters route — only matter/ records are top-level matters (B1)", () => {
   before(() => {
     seed();
   });
 
-  it("surfaces project/ records as matters in the index", async () => {
+  it("lists matter/ records in the index", async () => {
     const { status, payload } = await call("GET", "/api/v1/matters");
     assert.equal(status, 200, `expected 200, got ${status}: ${JSON.stringify(payload)}`);
     const ids = (payload.matters as any[]).map((m) => m.id);
-    assert.ok(ids.includes("Pulumi Infrastructure Support"),
-      `project record must surface as a matter; got ${JSON.stringify(ids)}`);
+    assert.ok(ids.includes("acme-deal"),
+      `canonical matter must surface; got ${JSON.stringify(ids)}`);
   });
 
-  it("bins a task that references the project by [[project/<name>]]", async () => {
-    const { status, payload } = await call("GET", "/api/v1/matters/Pulumi Infrastructure Support");
+  it("does NOT surface project/ records as matters in the index", async () => {
+    const { status, payload } = await call("GET", "/api/v1/matters");
     assert.equal(status, 200, `expected 200, got ${status}: ${JSON.stringify(payload)}`);
-    const m = payload.matter;
-    assert.equal(m.counts.tasks, 1, `task must be counted; got ${JSON.stringify(m.counts)}`);
-    const taskLinks = m.vault_by_category.tasks as any[];
-    assert.ok(taskLinks.some((t) => t.path === "task/wire-up-pulumi.md"),
-      `task must appear in vault_by_category.tasks; got ${JSON.stringify(taskLinks)}`);
-    assert.ok((m.tasks as any[]).some((t) => t.id === "wire-up-pulumi"),
-      `task must appear in tasks[]; got ${JSON.stringify(m.tasks)}`);
+    const ids = (payload.matters as any[]).map((m) => m.id);
+    assert.ok(!ids.includes("Pulumi Infrastructure Support"),
+      `project record must NOT appear as a matter; got ${JSON.stringify(ids)}`);
+  });
+
+  it("does not roll a project/-only-linked task up to any matter", async () => {
+    const { payload } = await call("GET", "/api/v1/matters");
+    // The only top-level matter is acme-deal; the pulumi task links only a
+    // project/ record, so it must not be counted against any matter.
+    for (const m of payload.matters as any[]) {
+      assert.equal(m.id, "acme-deal", `unexpected matter ${m.id}`);
+      assert.equal(m.counts.tasks, 0,
+        `project-linked task must not roll up; got ${JSON.stringify(m.counts)}`);
+    }
   });
 
   it("does not regress about/summary/vault_by_category on the detail", async () => {
