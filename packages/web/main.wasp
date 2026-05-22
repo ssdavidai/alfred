@@ -662,6 +662,27 @@ action removeAuthorizedNumber {
   entities: []
 }
 
+// Channel provisioning (F57 email · F58 phone · F77 approval secret)
+query getEmailChannelStatus {
+  fn: import { getEmailChannelStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+action provisionEmail {
+  fn: import { provisionEmail } from "@src/dashboard/operations",
+  entities: []
+}
+
+action provisionPhone {
+  fn: import { provisionPhone } from "@src/dashboard/operations",
+  entities: []
+}
+
+action rotateApprovalSecret {
+  fn: import { rotateApprovalSecret } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
   entities: []

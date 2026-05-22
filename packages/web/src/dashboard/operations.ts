@@ -74,6 +74,58 @@ export const removeAuthorizedNumber = async (
 };
 
 // ============================================================
+// Channel provisioning (F57 email · F58 phone · F77 approval secret)
+// Thin proxies to the ctrl-api C14/C15/C16 endpoints. entities: [].
+// ============================================================
+
+/** F57/C14 — email channel status: { configured, inbox_address|null }. */
+export const getEmailChannelStatus = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/email/status" });
+};
+
+/** F57/C14 — provision the AgentMail inbox from an API key. */
+export const provisionEmail = async (
+  args: { api_key: string },
+  context: any,
+) => {
+  if (!args?.api_key) throw new HttpError(400, "api_key required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/email/provision",
+    body: { api_key: args.api_key },
+  });
+};
+
+/** F58/C15 — provision phone (BYO number; the buy: path is 4xx for now). */
+export const provisionPhone = async (
+  args: {
+    openai_api_key: string;
+    twilio_account_sid: string;
+    twilio_auth_token: string;
+    phone_number?: string;
+  },
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/phone/provision",
+    body: args,
+  });
+};
+
+/** F77/C16 — rotate the approval secret; returns { approval_secret } once. */
+export const rotateApprovalSecret = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/claude-setup/approval-secret/rotate",
+  });
+};
+
+// ============================================================
 // Dashboard Home
 // ============================================================
 
