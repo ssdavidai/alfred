@@ -1074,6 +1074,41 @@ Return your response as valid JSON matching this exact schema:
 Return ONLY the JSON object. No markdown, no preamble, no explanation."""
 
 
+# F33b — the whole-life daily brief is a mandatory built-in
+# (BriefingWorkflow morning/evening, F33a), so Opus must not also generate
+# it as a chore. Otherwise onboarding mints a duplicate ``morning_briefing``
+# chore that re-implements the brief and races the built-in. This filter is
+# deliberately narrow: it drops only opportunities that ARE the whole-life
+# brief, never a scoped per-matter digest (e.g. weekly-acme-digest).
+_BRIEF_OPPORTUNITY_MARKERS = (
+    "brief",       # "daily brief", "morning brief", "briefing"
+    "morning digest",
+    "evening digest",
+    "daily digest",
+    "start of day",
+    "end of day",
+)
+
+
+def _is_brief_opportunity(opp: dict[str, Any]) -> bool:
+    """True if an opportunity re-implements the built-in daily brief.
+
+    Matches the whole-life brief by id/name/tag markers but NOT a digest
+    scoped to a single matter (those carry a specific subject like an org
+    name and are legitimate chores).
+    """
+    if not isinstance(opp, dict):
+        return False
+    name = str(opp.get("name") or "").lower()
+    oid = str(opp.get("id") or "").lower()
+    tags = {str(t).lower() for t in (opp.get("tags") or []) if isinstance(t, str)}
+    # A "briefing" tag is the built-in brief's signature.
+    if "briefing" in tags:
+        return True
+    hay = f"{oid} {name}"
+    return any(marker in hay for marker in _BRIEF_OPPORTUNITY_MARKERS)
+
+
 @activity.defn
 async def write_brief_and_opportunities_opus(onboard_path: str) -> dict[str, Any]:
     """Generate the First Brief AND a structured chore opportunity list in one call.
@@ -1189,7 +1224,17 @@ async def write_brief_and_opportunities_opus(onboard_path: str) -> dict[str, Any
                     attempts, exc,
                 )
                 continue
-            validated.append(opp.to_dict())
+            opp_dict = opp.to_dict()
+            # F33b — never generate a brief chore; the brief is a built-in.
+            if _is_brief_opportunity(opp_dict):
+                rejected_count += 1
+                logger.info(
+                    "onboarding_v3: dropping brief opportunity %r — the daily "
+                    "brief is a built-in (BriefingWorkflow), not a chore",
+                    opp_dict.get("id") or opp_dict.get("name"),
+                )
+                continue
+            validated.append(opp_dict)
 
         if not validated:
             last_error = (
