@@ -57,6 +57,7 @@ import {
   type DecisionSideEffects,
 } from "./deskReconcileCore";
 import { rowReversible } from "./deskLedgerCore";
+import { useToast } from "../client/hooks/use-toast";
 import DeskOnboardingGate from "./DeskOnboardingGate";
 
 // --------------------------------------------------------------------------
@@ -254,6 +255,7 @@ function DeskContent() {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState<string | null>(null);
   const [undoing, setUndoing] = useState<string | null>(null);
+  const { toast } = useToast();
   // Ledger pagination — Sir's request: don't unspool the entire activity
   // history at once. Reveal in 20-row pages with a "Show more" cue.
   const [ledgerVisible, setLedgerVisible] = useState(20);
@@ -573,10 +575,23 @@ function DeskContent() {
     // Delegate is the one action whose 2xx can still be a no-op (advisory card
     // → nothing_to_delegate, or a failed dispatch → dispatch_ok:false). The
     // source stays pending server-side in those cases, so the card must stay.
-    const fx = (result?.frontmatter?.side_effects ?? null) as DecisionSideEffects | null;
+    const fx = (result?.frontmatter?.side_effects ??
+      result?.side_effects ??
+      null) as DecisionSideEffects | null;
     const cleared = shouldClearCardOnSuccess(action, fx);
     if (!cleared) {
       console.warn("delegate did not dispatch; keeping card", d.id, fx?.dispatch_error);
+    }
+    if (action === "defer" && cleared) {
+      // C-B4: the card clears optimistically, so the only signal the principal
+      // gets that the defer was captured (and will return) is this toast. If
+      // ctrl/learn stamped a concrete resurface_at, name the time; otherwise
+      // degrade to the generic "I'll resurface this" promise.
+      const when = fmtArrived(fx?.resurface_at ?? undefined);
+      toast({
+        title: "Deferred — Alfred will resurface this",
+        description: when ? `Back on your desk on ${when}.` : undefined,
+      });
     }
     return cleared;
   }

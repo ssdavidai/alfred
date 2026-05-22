@@ -9,6 +9,11 @@ export interface DecisionSideEffects {
   nothing_to_delegate?: boolean;
   dispatch_ok?: boolean;
   dispatch_error?: string;
+  // C-B4 defer→resurface: on a successful `intent:"defer"`, ctrl stamps
+  // `deferred:true` and (if it can parse the note synchronously, else learn
+  // fills it async) a `resurface_at` ISO timestamp — null is allowed.
+  deferred?: boolean;
+  resurface_at?: string | null;
   [k: string]: unknown;
 }
 
