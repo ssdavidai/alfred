@@ -39,6 +39,7 @@
 import { addRoute } from "../server.js";
 import { sendJson, NotFoundError } from "../errors.js";
 import { VAULT_PATH, walkMd, readRecord } from "./vault.js";
+import { getStateDb } from "../../db/state.js";
 
 const IGNORE_DIRS = new Set([".git", ".obsidian", "node_modules", ".trash"]);
 
@@ -817,6 +818,66 @@ function buildMatterIndex(): MatterIndexResult {
       return aw < bw ? 1 : -1;
     });
     matter.state = deriveMatterState(matter.tasks);
+  }
+
+  // -------------------------------------------------------------------------
+  // F9 — Signal timeline from state.db (the store of record). Signals were
+  // demoted out of vault/signal/ into the state.db `signal` table; the
+  // NightlyNarrativeWorkflow composer reads them from state.db, so the matters
+  // route must too. We pull rows whose `matter_ref` resolves to a known matter
+  // and feed them into the same signalsByPath/signalsByMatter the timeline
+  // composer below consumes. The ULID is the opaque ref (the timeline `path`).
+  // -------------------------------------------------------------------------
+  try {
+    const rows = getStateDb()
+      .prepare(
+        `SELECT id, ts, headline, body, matter_ref, payload_json
+           FROM signal
+          WHERE matter_ref IS NOT NULL AND matter_ref != ''`,
+      )
+      .all() as Array<{
+        id: string;
+        ts: string | null;
+        headline: string | null;
+        body: string | null;
+        matter_ref: string | null;
+        payload_json: string | null;
+      }>;
+    for (const row of rows) {
+      const id = extractMatterRef(row.matter_ref);
+      if (!id || !byId.has(id)) continue;
+      let payload: Record<string, unknown> = {};
+      if (row.payload_json) {
+        try {
+          const p = JSON.parse(row.payload_json);
+          if (p && typeof p === "object" && !Array.isArray(p)) payload = p as Record<string, unknown>;
+        } catch {
+          // Non-JSON payload — ignore; the column fields are authoritative.
+        }
+      }
+      const fm: Record<string, unknown> = {
+        ...payload,
+        type: "signal",
+        // The timeline composer reads `created`/`applied_at` for `when`.
+        created: String(payload.created ?? payload.applied_at ?? row.ts ?? ""),
+      };
+      const sigRef = `signal/${row.id}`;
+      // `stem` is the headline fallback used when no action_proposal/reasoning.
+      signalsByPath.set(sigRef, {
+        fm,
+        body: row.body ?? "",
+        stem: (row.headline ?? row.id).trim() || row.id,
+      });
+      let bucket = signalsByMatter.get(id);
+      if (!bucket) {
+        bucket = [];
+        signalsByMatter.set(id, bucket);
+      }
+      bucket.push(sigRef);
+    }
+  } catch {
+    // state.db may be unavailable in some contexts (e.g. CLI without a DB).
+    // The vault-walk signals (legacy) still compose; this is additive.
   }
 
   // -------------------------------------------------------------------------
