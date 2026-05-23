@@ -106,6 +106,21 @@ MIN_CONTENT_LENGTH: int = 20
 HARD_BLOCKED_SOURCE_TYPES: set[str] = {"slack", "github"}
 
 
+# Substrings (case-insensitive) in a Composio tool result's
+# ``composio_execution_message`` / summary that mark a poll/fetch with
+# zero new content. Opening the open-world gate (Commit 1) means these
+# list/fetch poll artifacts now flow — without this they'd be classified
+# as a real transport and burn an LLM call per empty refresh. Generic,
+# not per-app: any composio fetch that "returned no results" is noise.
+_EMPTY_POLL_RESULT_MARKERS: tuple[str, ...] = (
+    "returned no results",
+    "no results",
+    "no messages found",
+    "no items found",
+    "0 results",
+)
+
+
 # Slash-command openclaw-chat sessions carry zero signal — they're
 # command artifacts, not conversations. ``/new``, ``/status``,
 # ``/models``, ``/help``, etc. dropped before LLM. Match against
@@ -172,6 +187,12 @@ def _is_garbage_event(event_dict: dict[str, Any]) -> tuple[bool, str]:
     src_type = _infer_source_type(event_dict)
     if src_type in HARD_BLOCKED_SOURCE_TYPES:
         return True, f"hard-blocked source_type: {src_type}"
+
+    # Empty composio poll/fetch result — zero new content. Stamped by
+    # _ingest_row_to_record. Garbage (consume: drop + mark processed), so it
+    # never reaches the LLM and never hits the unknown-source retry valve.
+    if fm.get("empty_poll_result") is True:
+        return True, "empty composio poll/fetch result (no new content)"
 
     name = str(fm.get("name") or "").strip()
     # Composio API errors stored as events (any source). The ingester
@@ -674,11 +695,56 @@ def _ingest_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     if composio_app:
         frontmatter["source_app"] = composio_app
 
+    # Empty poll/fetch detection (Commit 2): a composio list/fetch that
+    # returned no new content is noise — stamp it so _is_garbage_event
+    # consumes it (drop + mark processed) instead of LLM-classifying (or
+    # retry-looping) every empty refresh. Generic across all ~1000 apps;
+    # gated on the composio envelope so a native event is never touched.
+    is_composio_envelope = (
+        bool(composio_app)
+        or str(payload.get("stream_type") or "").strip().lower() == "composio"
+        or str(row.get("channel") or "").strip().lower() == "composio"
+    )
+    if is_composio_envelope and _composio_result_is_empty_poll(payload):
+        frontmatter["empty_poll_result"] = True
+
     return {
         "frontmatter": frontmatter,
         "content": body,
         "_ingest_id": row.get("id"),
     }
+
+
+def _composio_result_is_empty_poll(payload: dict[str, Any]) -> bool:
+    """True when a Composio fetch/list result carries no new content.
+
+    Conservative — only fires on a clearly-empty/zero result:
+      * ``composio_execution_message`` / ``summary`` matches an empty-result
+        marker ("RETURNED NO RESULTS", "no results", ...);
+      * ``resultSizeEstimate == 0`` (Gmail fetch shape);
+      * an explicit items list (messages/items/results/...) is present and
+        empty.
+    A fetch WITH items returns False and passes the gate normally.
+    """
+    raw = payload.get("raw")
+    raw = raw if isinstance(raw, dict) else {}
+    msg = str(
+        raw.get("composio_execution_message")
+        or payload.get("composio_execution_message")
+        or payload.get("summary")
+        or ""
+    ).lower()
+    if any(marker in msg for marker in _EMPTY_POLL_RESULT_MARKERS):
+        return True
+    size = raw.get("resultSizeEstimate")
+    if isinstance(size, (int, float)) and not isinstance(size, bool) and size == 0:
+        return True
+    for key in ("messages", "items", "results", "emails", "events", "records"):
+        if key in raw:
+            val = raw.get(key)
+            if isinstance(val, list) and len(val) == 0:
+                return True
+    return False
 
 
 async def _fetch_ingest_event_as_record(event_id: str) -> dict[str, Any] | None:

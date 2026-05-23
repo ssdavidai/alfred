@@ -21,6 +21,7 @@ from src.activities.signals import (  # noqa: E402
     _infer_source_type,
     _event_body,
     _gmail_sender_domain,
+    _is_unknown_source_only_drop,
     _pre_filter,
 )
 
@@ -100,6 +101,9 @@ def test_adapter_composio_no_results_event_is_unknown() -> None:
     assert _infer_source_type(rec) == "unknown"
     accepted, _ = _pre_filter(rec)
     assert not accepted
+    # ...and it is consumed (garbage drop + mark processed), NOT retry-looped:
+    # the empty-poll noise filter catches the composio "no results" envelope.
+    assert _is_unknown_source_only_drop(rec) is False
 
 
 def test_adapter_tolerates_garbage_payload() -> None:
