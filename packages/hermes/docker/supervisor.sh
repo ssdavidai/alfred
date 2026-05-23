@@ -125,6 +125,33 @@ wait_for_profiles
 # subcommand's exit code must not crash the supervisor at boot.
 hermes profile use main 2>/dev/null || true
 
+# Propagate the openai-codex OAuth credentials across all 3 profiles.
+# `hermes auth login` only writes to the sticky-default profile's auth.json
+# (now `main`), but the same OAuth token is per-user and works for every
+# profile (the ChatGPT subscription is one identity). Without this, the
+# heavy profile (onboarding Opus calls) and workers profile (clerk/curator)
+# would 401 with "No Codex credentials stored" until manually `hermes -p
+# heavy auth login` was run a second + third time.
+#
+# Rule: if main/auth.json exists, mirror it to workers + heavy whenever
+# either is missing OR is smaller (heuristic: empty or env-pointer-only).
+# Idempotent — re-running this on every boot is a no-op once the per-profile
+# files are sized at-least the main one.
+HERMES_ROOT="${HERMES_HOME:-/hermes-state}"
+MAIN_AUTH="$HERMES_ROOT/profiles/main/auth.json"
+if [[ -f "$MAIN_AUTH" && -s "$MAIN_AUTH" ]]; then
+    MAIN_SIZE=$(stat -c%s "$MAIN_AUTH" 2>/dev/null || echo 0)
+    for p in workers heavy; do
+        P_AUTH="$HERMES_ROOT/profiles/$p/auth.json"
+        P_SIZE=0
+        [[ -f "$P_AUTH" ]] && P_SIZE=$(stat -c%s "$P_AUTH" 2>/dev/null || echo 0)
+        if [[ "$P_SIZE" -lt "$MAIN_SIZE" ]]; then
+            cp "$MAIN_AUTH" "$P_AUTH"
+            log "propagated main/auth.json -> $p/auth.json (${MAIN_SIZE} bytes)"
+        fi
+    done
+fi
+
 # Launch the three Hermes gateways. Each `gateway run` owns its profile's
 # OpenAI-compatible API server, bound to the canonical port (18789 main /
 # 18790 workers / 18791 heavy) on 0.0.0.0 — callers reach the /v1 API
