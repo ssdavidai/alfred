@@ -73,6 +73,9 @@ from src.workflows.chores._dynamic_loader import (
 # Activities — chore assignment (onboarding Stage 7.5)
 from src.activities.assign_chores import assign_initial_chores
 
+# Activities — day-one Desk seed (C-OB3, end of onboarding chores stage)
+from src.activities.desk_seed import seed_day_one_desk_cards
+
 # Activities — chore matching (Step 3, Opus-driven template matcher)
 from src.activities.chore_matching import match_opportunities_to_templates
 
@@ -868,6 +871,8 @@ ALL_ACTIVITIES = [
     validate_classification,
     # Chore template helpers + actions + assignment + matching + generation
     assign_initial_chores,
+    # C-OB3 — day-one Desk seed at end of chores stage
+    seed_day_one_desk_cards,
     match_opportunities_to_templates,
     generate_chore_template_code,
     validate_generated_template,

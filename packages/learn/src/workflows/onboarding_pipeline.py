@@ -60,6 +60,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from src.activities.assign_chores import assign_initial_chores
     from src.activities.chore_generation import restart_learn_worker
+    from src.activities.desk_seed import seed_day_one_desk_cards
     from src.activities.first_brief_email import send_first_brief_email
 
 ONBOARD_PATH = "/alfred-data/onboard.json"
@@ -518,6 +519,28 @@ class OnboardingPipelineWorkflow:
                 isinstance(chore_result, dict)
                 and chore_result.get("generated", 0) > 0
             )
+
+            # C-OB3 — day-one Desk seed. The Desk currently lands empty
+            # on day one; this activity reads the 2-3 most time-critical
+            # matters (those whose body carries a real date phrase) and
+            # writes a ``needs_attention`` card for each. Idempotent
+            # (records ``onboard["day_one_desk_seeded"]``) so a resume or
+            # retry doesn't double-seed. Best-effort: a failure here
+            # doesn't fail the whole pipeline — Sir still gets the brief
+            # and chores; the Desk just lands empty as before.
+            try:
+                await workflow.execute_activity(
+                    seed_day_one_desk_cards,
+                    args=[onboard_path],
+                    start_to_close_timeout=timedelta(minutes=2),
+                    heartbeat_timeout=timedelta(seconds=60),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as exc:  # noqa: BLE001 — advisory
+                workflow.logger.warning(
+                    "onboarding_pipeline: seed_day_one_desk_cards "
+                    "failed: %s", exc,
+                )
         else:
             templates_generated = False
 
