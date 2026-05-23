@@ -41,6 +41,9 @@ async def _call_llm(
     max_tokens: int = 8192,
     total_timeout: float = 600.0,
     heartbeat_message: str = "waiting on Opus",
+    *,
+    response_format: dict | None = None,
+    instructions: str | None = None,
 ) -> str:
     """Run the heavy-reasoning agent via Hermes. Returns raw text response.
 
@@ -59,6 +62,30 @@ async def _call_llm(
     full output window (65536) and OpenRouter prices the call against that
     ceiling — so a request 402s even when the reply is short. The clamp
     keeps the priced ceiling under the affordable budget.
+
+    ``response_format`` (kw-only) is the OpenAI Responses API's
+    ``text.format`` selector. Pass ``{"type": "json_object"}`` for
+    "any well-formed JSON object" or
+    ``{"type": "json_schema", "name": "...", "strict": True, "schema": {...}}``
+    for a strict schema. When provided, ``_call_llm`` wraps it as
+    ``{"text": {"format": <response_format>}}`` in the Hermes payload —
+    callers don't have to know the Responses-API nesting. This is
+    model-agnostic: it works on gpt-5.5, claude-opus-4-6, and any future
+    model bound to the heavy profile, instead of trusting prose
+    instructions like "return JSON" that gpt-5.5 has been ignoring.
+
+    ``instructions`` (kw-only) is the Responses-API persona override for
+    this single call. Heavy Hermes loads ~33k tokens of Alfred persona
+    (AGENTS.md + SOUL.md + MCP tool defs + skills) on every call — too
+    much frame for a pure structured-extraction task, and a temptation
+    for the model to "respond as Alfred" or try to use a tool instead of
+    returning JSON. Passing ``instructions="You are a structured data
+    extractor..."`` overrides the persona for the call (other calls keep
+    Alfred).
+
+    Both parameters are opt-in — when omitted, the request body shape is
+    unchanged for backwards-compatible callers (the F35 contract still
+    holds).
 
     Uses an explicit total timeout (wait_for) because httpx's read timeout
     applies *between bytes*, not total duration — a slow run can hang the
@@ -88,12 +115,28 @@ async def _call_llm(
     from src.activities.clerk import _MAX_OUTPUT_TOKENS_CAP
     capped_max = min(int(max_tokens), _MAX_OUTPUT_TOKENS_CAP)
 
+    # Build the request body. Legacy callers (no response_format,
+    # no instructions) get the exact F35 shape unchanged. Opt-in callers
+    # get the Responses-API extensions wired into the right slots.
+    payload: dict[str, Any] = {
+        "input": prompt,
+        "max_output_tokens": capped_max,
+    }
+    if response_format is not None:
+        # OpenAI Responses API contract: structured-output lives at
+        # request.text.format, NOT a top-level response_format (that
+        # would be the legacy chat-completions field, which Hermes
+        # /v1/responses does not honor).
+        payload["text"] = {"format": response_format}
+    if instructions is not None:
+        payload["instructions"] = instructions
+
     async def _do_call() -> str:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
                 f"{base}/v1/responses",
                 headers=headers,
-                json={"input": prompt, "max_output_tokens": capped_max},
+                json=payload,
             )
             resp.raise_for_status()
             return _response_output_text(resp.json())
@@ -494,6 +537,97 @@ def _parse_json_with_key(raw: str, key: str, expect: type = list) -> dict:
 def _parse_json_with_facts(raw: str) -> dict:
     """Parse a JSON object containing both "facts" and "key_identity_facts"."""
     return _parse_json_with_key(raw, "facts")
+
+
+# Canonical-key aliases for the model-agnostic parser. gpt-5.5 sometimes
+# emits ``factsList`` / ``identityFacts`` even when the prompt asks for
+# ``facts`` / ``key_identity_facts``; an LLM-key shape mismatch must not
+# silently degrade to "0 facts". Aliases are deliberately conservative —
+# only obvious case-variants of the documented prompt keys, never a stray
+# arbitrary list-valued key. Extend cautiously.
+_DEFAULT_KEY_ALIASES: dict[str, list[str]] = {
+    "facts": ["factsList", "extracted_facts"],
+    "key_identity_facts": [
+        "identityFacts", "identity_facts", "keyIdentityFacts",
+    ],
+}
+
+
+def _log_raw_response_sample(raw: str, expected_keys: tuple[str, ...]) -> None:
+    """Emit a WARN with head/tail/length of an unparseable LLM response.
+
+    Live failure (Lane II / harden): heavy Hermes returned a 62-char
+    "I cannot return JSON for this request" string and the parser logged
+    ``len=62`` with no clue what was actually returned. With no raw
+    sample in the logs, the only diagnostic path was re-running the
+    activity with a debugger attached. This helper closes that gap: on
+    every parse failure we leave enough breadcrumbs to read the model's
+    actual output from a tail of the worker logs.
+    """
+    length = len(raw or "")
+    head = (raw or "")[:300]
+    tail = (raw or "")[-300:] if length > 300 else ""
+    logger.warning(
+        "onboarding_v3: parse failed for keys=%s len=%d head=%r tail=%r",
+        list(expected_keys), length, head, tail,
+    )
+
+
+def _parse_json_with_keys(
+    raw: str,
+    canonical_key: str,
+    *,
+    aliases: dict[str, list[str]] | None = None,
+    expect: type = list,
+) -> dict:
+    """Model-agnostic JSON envelope parser with key-alias normalisation.
+
+    Wraps ``_parse_json_with_key`` (the hardened single-key parser) with
+    two production-driven extensions:
+
+    1. **Key aliasing.** Some models emit ``factsList`` where the prompt
+       asks for ``facts``, or ``identityFacts`` for ``key_identity_facts``.
+       ``aliases`` (or the module-level ``_DEFAULT_KEY_ALIASES`` if
+       omitted) maps each canonical key to a list of acceptable alias
+       names. If the canonical key is missing AND any alias key is
+       present with the expected shape, the returned dict carries the
+       canonical key. Callers stay model-agnostic.
+
+    2. **Raw-response logging on failure.** When neither the canonical
+       key nor any alias parses, log a head/tail/length sample at WARN
+       so the next regression is diagnosable from logs instead of a
+       silent "0 facts" symptom.
+
+    Returns ``{}`` if no parse path produced the canonical key with the
+    expected type. Returns the parsed object otherwise — with the
+    canonical key set even if the model used an alias.
+    """
+    alias_map = aliases if aliases is not None else _DEFAULT_KEY_ALIASES
+    alias_list = alias_map.get(canonical_key, [])
+
+    # Happy path: the canonical key parses directly.
+    if raw and f'"{canonical_key}"' in raw:
+        parsed = _parse_json_with_key(raw, canonical_key, expect=expect)
+        if parsed:
+            return parsed
+
+    # Try each alias in order; rewrite the matched key to canonical.
+    for alias in alias_list:
+        if not raw or f'"{alias}"' not in raw:
+            continue
+        parsed = _parse_json_with_key(raw, alias, expect=expect)
+        if parsed and alias in parsed:
+            value = parsed.pop(alias)
+            parsed[canonical_key] = value
+            logger.info(
+                "onboarding_v3: parsed alias key %r → canonical %r",
+                alias, canonical_key,
+            )
+            return parsed
+
+    # No parse path worked — log the raw sample so a human can diagnose.
+    _log_raw_response_sample(raw, (canonical_key, *alias_list))
+    return {}
 
 
 # ---------------------------------------------------------------------------
