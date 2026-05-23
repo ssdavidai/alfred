@@ -177,11 +177,63 @@ fi
 # upstream SHA); we copy it into the persisted profile dir so Hermes
 # discovers it under $HERMES_HOME/profiles/main/plugins/. Idempotent —
 # `[[ ! -e ... ]]` guard makes re-runs a no-op once installed.
+#
+# INSTALL CONTRACT (verified against hermes-lcm v0.11.1 + Hermes v2026.5.16):
+# This plugin is a filesystem-manifest plugin (`plugin.yaml` + `__init__.py`
+# with `register(ctx)`) — NOT a pip package. Hermes discovers it via
+# `_scan_directory($HERMES_HOME/plugins/<name>/plugin.yaml)`. When the gateway
+# runs under `hermes -p main`, the CLI rewrites HERMES_HOME to
+# $HERMES_HOME/profiles/main, so the path below IS the discovery path.
+# A `pip install` step would fail (no setup metadata) and is not required.
 if [[ -d /opt/hermes-lcm && ! -e "$HERMES_HOME/profiles/main/plugins/hermes-lcm" ]]; then
     mkdir -p "$HERMES_HOME/profiles/main/plugins"
     cp -r /opt/hermes-lcm "$HERMES_HOME/profiles/main/plugins/hermes-lcm"
     log "installed hermes-lcm plugin -> \$HERMES_HOME/profiles/main/plugins/hermes-lcm"
 fi
+
+# --- LCM load-verification (background) --------------------------------------
+# hermes-lcm loads silently on success — no startup log line. A broken
+# install (wrong dir, partial copy, plugin contract mismatch with the
+# running Hermes version) produces ZERO signal in `docker logs hermes`;
+# the only symptom is that LCM tools never appear in the agent toolset.
+# After main is up, probe the live runtime and log one clear OK / WARNING
+# line. Backgrounded so it does not delay the supervise loop.
+verify_lcm() {
+    local cfg="$HERMES_HOME/profiles/main/config.yaml"
+    grep -q "hermes-lcm" "$cfg" 2>/dev/null || return 0
+
+    # Wait for /health (bound at 240s — slightly > HEALTHCHECK start-period).
+    local waited=0
+    while (( waited < 240 )); do
+        curl -fsS --max-time 2 "http://127.0.0.1:18789/health" >/dev/null 2>&1 && break
+        sleep 5; waited=$((waited + 5))
+    done
+
+    # HTTP probe: lcm_* tools appear only when the LCM engine registered.
+    local tools_json
+    tools_json="$(curl -fsS --max-time 5 "http://127.0.0.1:18789/v1/tools" 2>/dev/null || true)"
+    if [[ -n "$tools_json" ]] && echo "$tools_json" | grep -q '"lcm_'; then
+        log "hermes-lcm OK: context engine 'lcm' active on main (lcm_* tools registered)"
+        return 0
+    fi
+    # CLI fallback: `plugins list` is non-interactive (plugins w/o subcommand prompts).
+    local plugins_out
+    plugins_out="$(hermes -p main plugins list 2>/dev/null || true)"
+    if [[ -n "$plugins_out" ]] && echo "$plugins_out" | grep -q "hermes-lcm"; then
+        log "hermes-lcm OK: plugin loaded on main (per 'hermes -p main plugins list')"
+        return 0
+    fi
+
+    log "WARNING: hermes-lcm in main/config.yaml but not loaded after gateway boot."
+    log "WARNING:   plugin yaml  : $([[ -f "$HERMES_HOME/profiles/main/plugins/hermes-lcm/plugin.yaml" ]] && echo present || echo MISSING)"
+    log "WARNING:   plugin init  : $([[ -f "$HERMES_HOME/profiles/main/plugins/hermes-lcm/__init__.py" ]] && echo present || echo MISSING)"
+    log "WARNING:   likely cause : Hermes plugin contract mismatch or HERMES_HOME divergence."
+    log "WARNING:   diagnose with: HERMES_PLUGINS_DEBUG=1 hermes -p main plugins list"
+}
+# Disown so the supervise loop's `wait -n` does not treat verify_lcm's exit
+# as a worker death and walk PIDS[] for a spurious match.
+verify_lcm &
+disown
 
 if [[ -s "$HERMES_HOME/profiles/main/SOUL.md" ]]; then
     MAIN_SOUL_SIZE=$(stat -c%s "$HERMES_HOME/profiles/main/SOUL.md" 2>/dev/null || echo 0)
