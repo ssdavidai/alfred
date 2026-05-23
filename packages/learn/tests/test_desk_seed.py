@@ -209,14 +209,13 @@ class TestSeedDayOneDeskCards:
                 assert required in content, content[:400]
             assert "onboarding_seed" in content and "day_one" in content
 
-    def test_returns_zero_when_no_time_anchored_matters(
+    def test_returns_zero_when_zero_matters_input(
         self, tmp_path, monkeypatch,
     ):
-        matters = [
-            _rec("NeoTerra A", "neoterra-a", _NEOTERRA_BODY),
-            _rec("NeoTerra B", "neoterra-b", _NEOTERRA_BODY),
-        ]
-        result, writes = _run_with_vault(matters, tmp_path, monkeypatch)
+        """0 matters in → 0 cards out. The Day-1 fallback (Gap 2) must
+        not invent cards from nothing — it only fires when matters exist
+        but none happen to be time-anchored."""
+        result, writes = _run_with_vault([], tmp_path, monkeypatch)
         assert result.get("seeded", -1) == 0
         assert writes == []
 

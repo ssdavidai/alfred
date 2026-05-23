@@ -121,18 +121,63 @@ def _rank_matters_by_time_anchor(matters: list[dict]) -> list[dict]:
     return out
 
 
+def _rank_matters_by_activity(matters: list[dict], top_n: int = 3) -> list[dict]:
+    """Gap 2 fallback ranker — top ``top_n`` matters by ``activity_score``
+    (float; higher wins), then ``len(key_people)`` (density proxy), then
+    original list order. Returned dicts carry ``_fallback=True`` so the
+    card builder knows there's no date phrase to quote."""
+    if not matters:
+        return []
+
+    def _score(m: dict) -> tuple[float, int]:
+        fm = m.get("frontmatter") or {}
+        try:
+            score = float(fm.get("activity_score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        kp = fm.get("key_people")
+        return (score, len(kp) if isinstance(kp, list) else 0)
+
+    indexed = list(enumerate(matters))
+    indexed.sort(key=lambda t: (-_score(t[1])[0], -_score(t[1])[1], t[0]))
+    out: list[dict] = []
+    for _idx, m in indexed[:max(0, top_n)]:
+        c = dict(m)
+        c["_anchor_text"] = ""
+        c["_anchor_rank"] = -1
+        c["_fallback"] = True
+        out.append(c)
+    return out
+
+
 def _build_card_content(
     matter: dict, actions: list[str], created_iso: str,
     name: str, anchor_text: str,
 ) -> str:
-    """Render the C-OB3 ``needs_attention`` markdown for one seeded card."""
+    """Render the C-OB3 ``needs_attention`` markdown for one seeded card.
+
+    ``matter["_fallback"]=True`` (Gap 2) → no date phrase to quote;
+    headline is the matter name and the body invites edit/dismiss/defer
+    so the Day-1 Desk isn't empty on a thematic-only matter set."""
     matter_ref = matter.get("path") or f"matter/{_slug_of(matter)}.md"
-    headline = f"{name} — {anchor_text}".strip(" —")
-    if actions:
-        lines = ["Suggested next actions:"] + [f"- {a}" for a in actions]
+    if matter.get("_fallback"):
+        headline = name
+        lines = [
+            f"Alfred surfaced this matter from your inbox to start your "
+            f"Desk. The matter is **{name}**. Edit, dismiss, or defer.",
+        ]
+        if actions:
+            lines += ["", "Suggested next actions:", *(f"- {a}" for a in actions)]
         display_body = "\n".join(lines)
     else:
-        display_body = f"From matter {matter_ref}. Time anchor: {anchor_text}."
+        headline = f"{name} — {anchor_text}".strip(" —")
+        if actions:
+            display_body = "\n".join(
+                ["Suggested next actions:"] + [f"- {a}" for a in actions])
+        else:
+            display_body = (
+                f"From matter {matter_ref}. Time anchor: {anchor_text}."
+            )
     fm = (
         "---\n"
         "type: needs_attention\n"
@@ -205,13 +250,27 @@ async def seed_day_one_desk_cards(onboard_path: str) -> dict[str, Any]:
 
         ranked = _rank_matters_by_time_anchor(matters)
         if not ranked:
+            # Gap 2 fallback: seed top 3 by activity_score / key_people so
+            # Day-1 Desk isn't empty when matters are thematic (no anchors).
+            ranked = _rank_matters_by_activity(matters, top_n=3)
+            if not ranked:
+                logger.info(
+                    "seed_day_one_desk_cards: 0 time-anchored matters in %d "
+                    "(fallback inactive: 0 matters available)", len(matters),
+                )
+                onboard["day_one_desk_seeded"] = True
+                _write_onboard(onboard_path, onboard)
+                return {"seeded": 0}
             logger.info(
-                "seed_day_one_desk_cards: 0 time-anchored matters in %d",
-                len(matters),
+                "seed_day_one_desk_cards: 0 time-anchored matters in %d "
+                "(fallback active: %d cards seeded from top matters by "
+                "activity)", len(matters), len(ranked),
             )
-            onboard["day_one_desk_seeded"] = True
-            _write_onboard(onboard_path, onboard)
-            return {"seeded": 0}
+        else:
+            logger.info(
+                "seed_day_one_desk_cards: %d time-anchored matters in %d",
+                len(ranked), len(matters),
+            )
 
         created_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
         for matter in ranked[:3]:
