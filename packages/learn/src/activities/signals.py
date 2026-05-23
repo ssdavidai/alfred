@@ -378,6 +378,20 @@ def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _composio_app_from_stream_id(stream_id: str) -> str:
+    """Parse the app token out of a ``composio-<app>-<trigger>`` stream id.
+
+    The app is the first token after the ``composio-`` prefix (the trigger
+    slug repeats it, e.g. ``composio-gmail-gmail-fetch-emails``). Returns
+    ``""`` when ``stream_id`` is not a composio id.
+    """
+    sid = (stream_id or "").strip().lower()
+    if not sid.startswith("composio-"):
+        return ""
+    rest = sid[len("composio-"):]
+    return rest.split("-", 1)[0].strip()
+
+
 def _infer_source_type(event_dict: dict[str, Any]) -> str:
     """Derive a normalized source type from a stream-event vault record.
 
@@ -386,6 +400,9 @@ def _infer_source_type(event_dict: dict[str, Any]) -> str:
          stamped by ``stream_vault._build_vault_content`` and the
          T6.6.1 migrator. When present and in the allowlist, used
          directly without further inspection.
+      0b. Composio transport — one envelope (~1000 apps), app in
+         stream_id. Recognized app → specialized key; unrecognized app →
+         raw token (open-world, e.g. ``"notion"``), never ``unknown``.
       1. ``frontmatter.stream_type`` — the canonical pre-6.6 field.
       2. ``frontmatter.source`` — older records pre-#705 used this
          instead of stream_type.
@@ -396,12 +413,30 @@ def _infer_source_type(event_dict: dict[str, Any]) -> str:
          template so even a hand-written stream event can be
          classified.
 
-    Returns one of the values in PRE_FILTER_ALLOWLIST OR the literal
-    string ``"unknown"`` (which the pre-filter will then reject).
+    Returns a specialized-refinement key (the 9 in PRE_FILTER_ALLOWLIST),
+    an open-world composio app token, OR ``"unknown"`` (no transport at
+    all — never "a composio app we don't enumerate").
     """
     fm = event_dict.get("frontmatter") or {}
     if not isinstance(fm, dict):
         fm = {}
+
+    # 0b. Composio transport — one envelope, app encoded in stream_id.
+    stream_id_raw = str(fm.get("stream_id") or "").strip().lower()
+    stream_type_raw = str(fm.get("stream_type") or "").strip().lower()
+    channel_raw = str(fm.get("channel") or "").strip().lower()
+    is_composio = (
+        stream_type_raw == "composio"
+        or channel_raw == "composio"
+        or stream_id_raw.startswith("composio-")
+    )
+    if is_composio:
+        app = _composio_app_from_stream_id(stream_id_raw)
+        if app:
+            # Known app → specialized key; unknown app → raw token (never "unknown").
+            normalized = _normalize_source_type(app)
+            return normalized if normalized != "unknown" else app
+        # composio envelope but no app token — fall through to native heuristics.
 
     # 0. source_type — explicit Phase 6.6 field, highest priority.
     explicit_source_type = str(fm.get("source_type") or "").strip().lower()
@@ -476,7 +511,7 @@ def _normalize_source_type(raw: str) -> str:
         return "openclaw-chat"
     if raw in ("vexa-transcript", "vexa-meeting"):
         return "vexa"
-    if raw in ("calendar", "google-calendar", "google_calendar"):
+    if raw in ("calendar", "google-calendar", "google_calendar", "googlecalendar"):
         return "gcal"
     if raw in ("plane-issue", "plane_issue", "plane-comment"):
         return "plane"
@@ -592,11 +627,22 @@ def _ingest_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(meta, dict):
         meta = {}
 
-    # source_type: the composio parser stamps metadata.event_type ("email" →
-    # gmail via _normalize_source_type); fall back to the stream's transport
-    # type / the ingest row's kind/channel.
+    # source_type: a composio event's real app lives in stream_id
+    # (``composio-<app>-...``), NOT in metadata.event_type (the generic
+    # "item"/"cancelled" label). Derive from the stream_id app (normalized-
+    # if-known else raw token) AHEAD of event_type; event_type stays a
+    # fallback for non-composio rows.
+    stream_id = str(payload.get("stream_id") or "")
+    composio_app = _composio_app_from_stream_id(stream_id)
+    composio_source_type = ""
+    if composio_app:
+        normalized = _normalize_source_type(composio_app)
+        composio_source_type = (
+            normalized if normalized != "unknown" else composio_app
+        )
     source_type = str(
-        meta.get("event_type")
+        composio_source_type
+        or meta.get("event_type")
         or payload.get("stream_type")
         or row.get("kind")
         or row.get("channel")
@@ -612,17 +658,24 @@ def _ingest_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
     created = str(payload.get("received_at") or row.get("ts") or "")
     tags = [source_type] if source_type else []
 
+    frontmatter: dict[str, Any] = {
+        "source_type": source_type,
+        "stream_type": payload.get("stream_type") or source_type,
+        "stream_id": stream_id,
+        "from": sender,
+        "sender": sender,
+        "subject": subject,
+        "name": subject or (str(payload.get("summary") or "")[:80]),
+        "created": created,
+        "tags": tags,
+    }
+    # Open-world provenance: stamp the raw composio app so downstream audit /
+    # priors can see which of the ~1000 apps produced this event.
+    if composio_app:
+        frontmatter["source_app"] = composio_app
+
     return {
-        "frontmatter": {
-            "source_type": source_type,
-            "stream_type": payload.get("stream_type") or source_type,
-            "from": sender,
-            "sender": sender,
-            "subject": subject,
-            "name": subject or (str(payload.get("summary") or "")[:80]),
-            "created": created,
-            "tags": tags,
-        },
+        "frontmatter": frontmatter,
         "content": body,
         "_ingest_id": row.get("id"),
     }
@@ -701,12 +754,14 @@ def _pre_filter(event_dict: dict[str, Any]) -> tuple[bool, str]:
     INFO so we can audit drop rates without DEBUG noise.
 
     Rejection criteria:
-      * source_type NOT in PRE_FILTER_ALLOWLIST (incl. "unknown")
+      * source_type == "unknown" (no transport classified — open-world
+        gate; any recognized transport, incl. unenumerated composio apps,
+        is accepted and rides the generic path)
       * body length < MIN_CONTENT_LENGTH characters
       * gmail event whose sender domain is in NEWSLETTER_BLOCKLIST
 
     The order matters — source-type check first because a malformed
-    or misclassified record is the cheapest to reject.
+    or untyped record is the cheapest to reject.
     """
     is_garbage, garbage_reason = _is_garbage_event(event_dict)
     if is_garbage:
@@ -716,9 +771,12 @@ def _pre_filter(event_dict: dict[str, Any]) -> tuple[bool, str]:
     if is_old:
         return False, age_reason
 
+    # Open-world gate: accept any *classified transport*. PRE_FILTER_ALLOWLIST
+    # is now a set of specialized-refinement keys (gmail/gcal/slack branches
+    # below), not an acceptance whitelist. Only ``unknown`` (no transport) rejects.
     src_type = _infer_source_type(event_dict)
-    if src_type not in PRE_FILTER_ALLOWLIST:
-        return False, f"source_type not in allowlist: {src_type!r}"
+    if src_type == "unknown":
+        return False, "source_type unknown (no transport classified)"
 
     body = _event_body(event_dict)
     if len(body.strip()) < MIN_CONTENT_LENGTH:
@@ -774,6 +832,10 @@ def _is_unknown_source_only_drop(event_dict: dict[str, Any]) -> bool:
     still marked processed). Returns True only when the event is NOT
     structural garbage, NOT too old, and its inferred source_type is
     ``unknown``. Everything else is a terminal drop.
+
+    Post-open-world: ``unknown`` means *no transport signal at all*. A
+    composio event always classifies to an app, so it can never reach this
+    valve — it passes the gate or is dropped-and-marked as genuine noise.
     """
     is_garbage, _ = _is_garbage_event(event_dict)
     if is_garbage:
@@ -2997,11 +3059,13 @@ async def list_unprocessed_stream_events(
                         if created_dt is None or created_dt < since_dt:
                             continue
 
-                    # Allowlist pre-filter — the extractor will drop
-                    # non-allowlisted source types anyway, so listing
-                    # them just burns N pointless workflow reads.
+                    # Transport pre-filter — the extractor drops only
+                    # genuinely-untyped (``unknown``) events, so listing
+                    # those just burns N pointless workflow reads. Any
+                    # classified transport (incl. open-world composio apps)
+                    # is listed and rides the generic extraction path.
                     src_type = _infer_source_type({"frontmatter": fm})
-                    if src_type not in PRE_FILTER_ALLOWLIST:
+                    if src_type == "unknown":
                         continue
 
                     # Body-content check: composio gmail ingestion has
