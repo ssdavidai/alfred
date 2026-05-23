@@ -262,4 +262,98 @@ describe("POST /api/v1/vault/records — onboarding quality gate", () => {
     });
     assert.strictEqual(status, 201, "non-onboarding writes must bypass the gate");
   });
+
+  // ---------------------------------------------------------------------
+  // Unicode-aware capitalisation (C-OB1 Hungarian/accented-name fix).
+  //
+  // The original gate used `/^[A-Z]/` which only matches ASCII uppercase,
+  // so Hungarian names like "Üveges Gábor" or "Tóth Zsuzsa" were rejected
+  // as "<2 capitalised tokens" — every accented name silently disappeared
+  // from a tenant's vault during onboarding. The fix swaps to `\p{Lu}/u`,
+  // a Unicode property escape that recognises uppercase across scripts.
+  //
+  // Regression cases (h–k) MUST accept; guards (l–o) MUST still reject.
+  // ---------------------------------------------------------------------
+
+  for (const name of [
+    "Üveges Gábor",
+    "Tóth Zsuzsa",
+    "Ágnes Sirhuber",
+    "Sándor Szöllősi",
+    "Éva Bíró",
+  ]) {
+    it(`(unicode) accepts plausibly-human person name "${name}"`, async () => {
+      resetUserMd();
+      const content = "---\ntype: person\ncreated_by: onboarding_pipeline\n---\n";
+      const { status } = await req("POST", "/api/v1/vault/records", {
+        type: "person",
+        name,
+        content,
+      });
+      assert.strictEqual(
+        status,
+        201,
+        `unicode-uppercase person "${name}" must pass the gate`,
+      );
+    });
+  }
+
+  it("(unicode-regression) still accepts ASCII 'RJ Johnson'", async () => {
+    resetUserMd();
+    const content = "---\ntype: person\ncreated_by: onboarding_pipeline\n---\n";
+    const { status } = await req("POST", "/api/v1/vault/records", {
+      type: "person",
+      name: "RJ Johnson",
+      content,
+    });
+    assert.strictEqual(status, 201, "ASCII baseline must keep passing");
+  });
+
+  it("(unicode-guard) still rejects 'Github Notifications' (Notifications? suffix rule)", async () => {
+    resetUserMd();
+    const content = "---\ntype: person\ncreated_by: onboarding_pipeline\n---\n";
+    const { status, data } = await req("POST", "/api/v1/vault/records", {
+      type: "person",
+      name: "Github Notifications",
+      content,
+    });
+    assert.strictEqual(status, 422);
+    assert.strictEqual(data.error.code, "QUALITY_REJECTED");
+  });
+
+  it("(unicode-guard) still rejects 'alice@example.com' (@ rule)", async () => {
+    resetUserMd();
+    const content = "---\ntype: person\ncreated_by: onboarding_pipeline\n---\n";
+    const { status, data } = await req("POST", "/api/v1/vault/records", {
+      type: "person",
+      name: "alice@example.com",
+      content,
+    });
+    assert.strictEqual(status, 422);
+    assert.strictEqual(data.error.code, "QUALITY_REJECTED");
+  });
+
+  it("(unicode-guard) still rejects 'alice.com' (TLD rule)", async () => {
+    resetUserMd();
+    const content = "---\ntype: person\ncreated_by: onboarding_pipeline\n---\n";
+    const { status, data } = await req("POST", "/api/v1/vault/records", {
+      type: "person",
+      name: "alice.com",
+      content,
+    });
+    assert.strictEqual(status, 422);
+    assert.strictEqual(data.error.code, "QUALITY_REJECTED");
+  });
+
+  it("(unicode-guard) still rejects 'Madonna' (single capitalised token rule)", async () => {
+    resetUserMd();
+    const content = "---\ntype: person\ncreated_by: onboarding_pipeline\n---\n";
+    const { status, data } = await req("POST", "/api/v1/vault/records", {
+      type: "person",
+      name: "Madonna",
+      content,
+    });
+    assert.strictEqual(status, 422);
+    assert.strictEqual(data.error.code, "QUALITY_REJECTED");
+  });
 });
