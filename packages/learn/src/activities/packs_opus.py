@@ -784,6 +784,106 @@ def _union_related(existing: Any, additions: list[str]) -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# C-OB1 person filter — non-human / truncated names must NOT reach the vault.
+# ---------------------------------------------------------------------------
+# Live evidence (fixture onboarding_golden/, 2026-05-23):
+# * ``person/Github Notifications.md`` — Pass B's LLM emitted a system
+#   sender as a person.
+# * ``person/David Szabo-St.md`` — Pass A copied a key_people string the
+#   matter generator truncated mid-surname.
+# * ``person/david@szabostuban.com.md`` — would have been written if the
+#   facts list ever named an email as an entity.
+# The two helpers below gate _create_or_merge_entity's person path.
+
+import re as _re_person_filter
+
+_PERSON_TLD_RE = _re_person_filter.compile(
+    r"\.(com|io|net|org|ai|co|so)\b", _re_person_filter.IGNORECASE,
+)
+_PERSON_NOTIFICATIONS_RE = _re_person_filter.compile(
+    r"\bnotifications?$", _re_person_filter.IGNORECASE,
+)
+
+
+def _is_plausible_human_name(name: str) -> bool:
+    """C-OB1: every person record name must look like a real human.
+
+    Rejects:
+    * a Notifications? suffix (``Github Notifications``);
+    * an email address (anything containing ``@``);
+    * a TLD substring (``.com``/``.io``/``.net``/``.org``/``.ai``/``.co``/``.so``);
+    * a name with fewer than 2 capitalised tokens (the truncation signal —
+      ``Github`` alone, lowercase ``david``).
+
+    A name is split on whitespace AND on hyphen so a hyphenated surname
+    (``Szabo-Stuban``) yields multiple cap tokens.
+    """
+    s = (name or "").strip()
+    if not s:
+        return False
+    if "@" in s:
+        return False
+    if _PERSON_NOTIFICATIONS_RE.search(s):
+        return False
+    if _PERSON_TLD_RE.search(s):
+        return False
+    parts: list[str] = []
+    for tok in s.split():
+        parts.extend(t for t in tok.split("-") if t)
+    cap_tokens = [t for t in parts if t[:1].isupper()]
+    if len(cap_tokens) < 2:
+        return False
+    return True
+
+
+def _person_tokens(name: str) -> set[str]:
+    """Tokenise a person name for overlap scoring — split on whitespace AND
+    hyphen, lowercase, strip punctuation. Mirrors the test suite's
+    ``_tokens`` so the threshold maths agree.
+    """
+    return {
+        t.lower()
+        for t in _re_person_filter.findall(
+            r"[A-Za-zÀ-ÿ0-9]+", name or "",
+        )
+    }
+
+
+def _dedupe_truncated_persons(
+    existing_names: list[str], candidate: str,
+) -> str | None:
+    """If ``candidate`` is a token-prefix/subset of any existing name (or
+    vice versa) with token-overlap ≥ 0.65, return the LONGER canonical
+    name so the caller merges onto it instead of writing a duplicate.
+
+    Returns ``None`` when no truncation match exists. Live case:
+    ``David Szabo-St`` vs ``David Szabo-Stuban`` → ``{david, szabo, st}``
+    vs ``{david, szabo, stuban}`` → overlap 2/3 = 0.667 ≥ 0.65, longer
+    name wins.
+    """
+    cand_tokens = _person_tokens(candidate)
+    if not cand_tokens:
+        return None
+    for existing in existing_names:
+        ex_tokens = _person_tokens(existing)
+        if not ex_tokens:
+            continue
+        inter = cand_tokens & ex_tokens
+        if not inter:
+            continue
+        # min-cardinality overlap (the truncation-aware shape — a strict
+        # subset gets 1.0, a one-token overlap on 3-tok names gets 0.33).
+        overlap = len(inter) / min(len(cand_tokens), len(ex_tokens))
+        if overlap < 0.65:
+            continue
+        # The longer name is the canonical surface form.
+        if len(existing) >= len(candidate):
+            return existing
+        return candidate
+    return None
+
+
 async def _create_or_merge_entity(
     client: VaultClient,
     *,
@@ -809,10 +909,39 @@ async def _create_or_merge_entity(
     ``existing_fm`` is the cached ``{casefold_name: frontmatter}`` map for
     this type (avoids an O(N) ``record_exists`` listing per entity AND gives
     the current ``related`` for a real union).
+
+    C-OB1 person filter: a candidate person whose name doesn't pass
+    ``_is_plausible_human_name`` is dropped (``"skipped"``). A candidate
+    that's a tokenwise prefix/truncation of an existing person collapses
+    onto the canonical (longer) name via ``_dedupe_truncated_persons``.
     """
     norm = _normalize_entity_name(name)
     if not norm:
         return "skipped"
+
+    # C-OB1: gate the person path. Orgs/places go through commits 3+'s
+    # own filters; here we only intercept persons.
+    if record_type == "person":
+        if not _is_plausible_human_name(norm):
+            logger.info(
+                "materialize: dropping implausible person name %r "
+                "(C-OB1: Notifications/@/TLD/single-cap)",
+                norm,
+            )
+            return "skipped"
+        if existing_fm:
+            canonical = _dedupe_truncated_persons(
+                [str(v.get("name") or "") for v in existing_fm.values()],
+                norm,
+            )
+            if canonical and canonical != norm:
+                logger.info(
+                    "materialize: collapsing truncated person %r → %r",
+                    norm, canonical,
+                )
+                norm = _normalize_entity_name(canonical)
+                if not norm:
+                    return "skipped"
     cf = norm.casefold()
     cached = existing_fm if existing_fm is not None else None
     if cached is not None:
