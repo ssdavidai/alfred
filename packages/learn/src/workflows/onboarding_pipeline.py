@@ -28,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
     from src.activities.onboarding import (
         init_onboard_json,
         persist_onboarding_mode,
+        record_stage_degrade,
         update_onboard_stage,
         update_onboard_progress,
     )
@@ -64,6 +65,17 @@ with workflow.unsafe.imports_passed_through():
     from src.activities.first_brief_email import send_first_brief_email
 
 ONBOARD_PATH = "/alfred-data/onboard.json"
+
+
+# ``_record_stage_degrade`` is re-exported from activities.onboarding so
+# unit tests can import it from this workflow module (it pairs naturally
+# with ``_safe_stage_wrapper`` below). The workflow body itself calls the
+# ACTIVITY ``record_stage_degrade`` through workflow.execute_activity —
+# the sync helper is test-only.
+with workflow.unsafe.imports_passed_through():
+    from src.activities.onboarding import (
+        _record_stage_degrade,  # noqa: F401 — re-exported for tests
+    )
 
 STAGE_ORDER = [
     "metadata",              # Stage 1: fetch email metadata + snippets
@@ -190,6 +202,80 @@ class OnboardingResult:
     brief_email_reason: str = ""
 
 
+async def _safe_stage_wrapper(
+    stage_name: str,
+    activity_callable: Any,
+    args: list[Any],
+    onboard_path: str,
+    *,
+    start_to_close_timeout: timedelta,
+    heartbeat_timeout: timedelta | None = None,
+    schedule_to_start_timeout: timedelta | None = None,
+    retry_policy: RetryPolicy | None = None,
+) -> dict[str, Any]:
+    """Run an activity stage; downgrade unhandled exceptions to a degrade.
+
+    Phase 4 / Lane II Commit 2 — every onboarding stage MUST reach
+    ``stage=done`` even when an activity exhausts its retry budget. This
+    wrapper takes the same parameters as ``workflow.execute_activity`` and:
+
+      * dispatches the activity through Temporal's normal retry machinery,
+      * on success returns the activity result (or ``{}`` for ``None``),
+      * on failure (post-retries) logs a workflow-level warning, calls the
+        ``record_stage_degrade`` activity to stamp
+        ``onboard.json["degraded_stages"]``, and returns a sentinel
+        ``{"degraded": True, "stage": ..., "reason": ..., "error": ...}``.
+
+    Downstream stages tolerate the gap: ``personalize_opus`` /
+    ``write_brief_*`` / ``generate_*_pack_opus`` already key off
+    ``onboard.get("facts") or []`` and bail out cleanly when upstream
+    produced nothing. Today, by contrast, a stage failure → workflow
+    failure → ``stage`` never gets stamped ``done`` → UI hangs.
+
+    Credit-aware activities (extract_facts_opus / discover_patterns_opus /
+    ...) already handle 402 INTERNALLY via Commit 1, so the wrapper here
+    catches the rarer residual class: hard failures, transients that
+    outlast the retry budget, schedule-to-start timeouts, etc.
+    """
+    kwargs: dict[str, Any] = {"start_to_close_timeout": start_to_close_timeout}
+    if heartbeat_timeout is not None:
+        kwargs["heartbeat_timeout"] = heartbeat_timeout
+    if schedule_to_start_timeout is not None:
+        kwargs["schedule_to_start_timeout"] = schedule_to_start_timeout
+    if retry_policy is not None:
+        kwargs["retry_policy"] = retry_policy
+    try:
+        result = await workflow.execute_activity(
+            activity_callable, args=args, **kwargs,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade-and-continue
+        reason = f"{type(exc).__name__}: {exc}"
+        workflow.logger.warning(
+            "onboarding_pipeline: stage=%s activity exhausted retries — "
+            "marking degraded and continuing: %s", stage_name, reason,
+        )
+        try:
+            await workflow.execute_activity(
+                record_stage_degrade,
+                args=[onboard_path, stage_name, reason],
+                start_to_close_timeout=timedelta(seconds=10),
+            )
+        except Exception as record_exc:  # noqa: BLE001 — bookkeeping last
+            workflow.logger.warning(
+                "onboarding_pipeline: record_stage_degrade(%s) also failed: %s",
+                stage_name, record_exc,
+            )
+        return {
+            "degraded": True, "stage": stage_name,
+            "reason": "stage_failure", "error": reason[:300],
+        }
+    if result is None:
+        return {}
+    if isinstance(result, dict):
+        return result
+    return {"result": result}
+
+
 @workflow.defn(name="OnboardingPipelineWorkflow")
 class OnboardingPipelineWorkflow:
     @workflow.run
@@ -279,14 +365,19 @@ class OnboardingPipelineWorkflow:
             # token). Google path: the legacy direct-Gmail fetch. Both write
             # the SAME onboard.json `emails` shape so every downstream stage
             # (profiler, Opus) is mode-agnostic.
+            #
+            # Phase 4: wrapped — a complete metadata failure (e.g. Composio
+            # auth wedge) is downgraded to a degrade so the pipeline still
+            # reaches `done`. Downstream stages will see an empty
+            # ``emails`` list and bail out cleanly.
             email_metadata_activity = (
                 composio_fetch_email_metadata
                 if use_composio_gmail
                 else fetch_email_metadata
             )
-            await workflow.execute_activity(
-                email_metadata_activity,
-                args=[input.user_id],
+            await _safe_stage_wrapper(
+                "metadata", email_metadata_activity,
+                [input.user_id], onboard_path,
                 start_to_close_timeout=timedelta(minutes=30),
                 # Bumped from 60s → 300s for #74: a single Composio
                 # GMAIL_FETCH_EMAILS page can take 10-30s, and a
@@ -308,9 +399,9 @@ class OnboardingPipelineWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
 
-            await workflow.execute_activity(
-                run_behavioral_profiler,
-                args=[onboard_path],
+            await _safe_stage_wrapper(
+                "profiler", run_behavioral_profiler,
+                [onboard_path], onboard_path,
                 start_to_close_timeout=timedelta(minutes=10),
                 heartbeat_timeout=timedelta(seconds=120),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -319,16 +410,20 @@ class OnboardingPipelineWorkflow:
         # -----------------------------------------------------------------
         # Stage 3: Extract facts (1 Opus call) — enhanced with profiler data
         # -----------------------------------------------------------------
+        # Phase 4: wrapped in _safe_stage_wrapper. A 402 is degraded INSIDE
+        # the activity (Commit 1) and never raises out of execute_activity.
+        # The wrapper catches the rarer residual class — hard failures /
+        # transients that outlast the retry budget — and marks the stage
+        # degraded so the workflow advances. Downstream stages tolerate
+        # missing facts (they check ``onboard.get("facts") or []``).
         if resume_idx <= _stage_index("facts"):
             await workflow.execute_activity(
                 update_onboard_stage,
                 args=[onboard_path, "facts"],
                 start_to_close_timeout=timedelta(seconds=10),
             )
-
-            await workflow.execute_activity(
-                extract_facts_opus,
-                args=[onboard_path],
+            await _safe_stage_wrapper(
+                "facts", extract_facts_opus, [onboard_path], onboard_path,
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=60),
                 schedule_to_start_timeout=timedelta(minutes=15),
@@ -344,10 +439,8 @@ class OnboardingPipelineWorkflow:
                 args=[onboard_path, "patterns"],
                 start_to_close_timeout=timedelta(seconds=10),
             )
-
-            await workflow.execute_activity(
-                discover_patterns_opus,
-                args=[onboard_path],
+            await _safe_stage_wrapper(
+                "patterns", discover_patterns_opus, [onboard_path], onboard_path,
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=4),
@@ -362,10 +455,8 @@ class OnboardingPipelineWorkflow:
                 args=[onboard_path, "personalize"],
                 start_to_close_timeout=timedelta(seconds=10),
             )
-
-            await workflow.execute_activity(
-                personalize_opus,
-                args=[onboard_path],
+            await _safe_stage_wrapper(
+                "personalize", personalize_opus, [onboard_path], onboard_path,
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=4),
@@ -408,9 +499,13 @@ class OnboardingPipelineWorkflow:
             # list in one Opus call (see PR S2-1). The old write_brief_opus
             # is kept as the activity's internal fallback for when the
             # structured-output parse fails across all retries.
-            await workflow.execute_activity(
-                write_brief_and_opportunities_opus,
-                args=[onboard_path],
+            #
+            # Phase 4: wrapped — 402 is handled inside the activity (Commit
+            # 1); the wrapper catches the residual failure class so the
+            # workflow still reaches `done` even when both Opus paths fail.
+            await _safe_stage_wrapper(
+                "brief", write_brief_and_opportunities_opus,
+                [onboard_path], onboard_path,
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=4),
@@ -430,39 +525,34 @@ class OnboardingPipelineWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
             )
 
-            # Run pack generators sequentially.
-            # Matter pack uses Opus-authored version (Plan B.1) which
-            # falls back to generate_matter_pack on any failure.
-            # Timeout bumped to 15 minutes to accommodate the Opus call
-            # (typical ~60-120 seconds, retry budget eats the rest).
-            await workflow.execute_activity(
-                generate_matter_pack_opus,
-                args=[onboard_path],
+            # Run pack generators sequentially. Each is wrapped so a
+            # complete failure (after the activity's own rule-based
+            # fallback also failed) is downgraded to a stage degrade
+            # instead of failing the whole workflow.
+            await _safe_stage_wrapper(
+                "packs.matter", generate_matter_pack_opus,
+                [onboard_path], onboard_path,
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-            # Instinct pack uses Opus-authored version (Plan B.3) which
-            # falls back to generate_instinct_pack on any failure.
-            await workflow.execute_activity(
-                generate_instinct_pack_opus,
-                args=[onboard_path],
+            await _safe_stage_wrapper(
+                "packs.instinct", generate_instinct_pack_opus,
+                [onboard_path], onboard_path,
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-            # Errand pack uses Opus-authored version (Plan B.2) which
-            # falls back to generate_errand_pack on any failure.
-            await workflow.execute_activity(
-                generate_errand_pack_opus,
-                args=[onboard_path],
+            await _safe_stage_wrapper(
+                "packs.errand", generate_errand_pack_opus,
+                [onboard_path], onboard_path,
                 start_to_close_timeout=timedelta(minutes=15),
                 heartbeat_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-            await workflow.execute_activity(
-                generate_stream_pack,
-                args=[onboard_path],
+            await _safe_stage_wrapper(
+                "packs.stream", generate_stream_pack,
+                [onboard_path], onboard_path,
                 start_to_close_timeout=timedelta(minutes=5),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
@@ -501,9 +591,12 @@ class OnboardingPipelineWorkflow:
             # Timeout extended to 20 minutes because each generation attempt
             # can make up to 3 Opus calls (_call_llm total timeout 600s per
             # call) and we can generate up to 3 templates in one run.
-            chore_result = await workflow.execute_activity(
-                assign_initial_chores,
-                args=[onboard_path, input.user_id],
+            #
+            # Phase 4: wrapped so a complete chores-stage failure is
+            # downgraded to a degrade instead of failing the workflow.
+            chore_result = await _safe_stage_wrapper(
+                "chores", assign_initial_chores,
+                [onboard_path, input.user_id], onboard_path,
                 start_to_close_timeout=timedelta(minutes=20),
                 heartbeat_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -518,6 +611,7 @@ class OnboardingPipelineWorkflow:
             templates_generated = (
                 isinstance(chore_result, dict)
                 and chore_result.get("generated", 0) > 0
+                and not chore_result.get("degraded")
             )
 
             # C-OB3 — day-one Desk seed. The Desk currently lands empty

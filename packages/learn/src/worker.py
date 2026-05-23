@@ -249,6 +249,7 @@ from src.activities.judge import (
 from src.activities.onboarding import (
     init_onboard_json,
     persist_onboarding_mode,
+    record_stage_degrade,
     update_onboard_stage,
     update_onboard_progress,
     backfill_gmail_history,
@@ -824,6 +825,7 @@ ALL_ACTIVITIES = [
     # Onboarding v2
     init_onboard_json,
     persist_onboarding_mode,
+    record_stage_degrade,
     update_onboard_stage,
     update_onboard_progress,
     backfill_gmail_history,

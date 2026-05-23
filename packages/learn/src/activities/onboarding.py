@@ -235,6 +235,53 @@ async def update_onboard_stage(onboard_path: str, stage: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Activity: record_stage_degrade
+# ---------------------------------------------------------------------------
+# Workflow-side companion to onboarding_v3._append_degraded_stage. The
+# OnboardingPipeline workflow's _safe_stage_wrapper catches an activity
+# exception that survived its retry budget and calls this activity to
+# record the degrade — the workflow then advances to the next stage
+# instead of failing. ``onboard.json["degraded_stages"]`` is the audit
+# trail the UI can surface as "finished with reduced fidelity".
+
+def _record_stage_degrade(
+    onboard_path: str, stage_name: str, reason: str = "",
+) -> None:
+    """Synchronous bookkeeping helper — used by unit tests and the
+    ``record_stage_degrade`` activity wrapper. Idempotently appends
+    ``stage_name`` to ``onboard["degraded_stages"]`` and records the
+    truncated ``reason`` in ``onboard["degraded_reasons"]``."""
+    data = _read_onboard(onboard_path)
+    stages = data.get("degraded_stages")
+    if not isinstance(stages, list):
+        stages = []
+    if stage_name in stages:
+        return
+    stages.append(stage_name)
+    data["degraded_stages"] = stages
+    if reason:
+        reasons = data.get("degraded_reasons")
+        if not isinstance(reasons, dict):
+            reasons = {}
+        reasons[stage_name] = reason[:300]
+        data["degraded_reasons"] = reasons
+    _write_onboard(onboard_path, data)
+
+
+@activity.defn
+async def record_stage_degrade(
+    onboard_path: str, stage_name: str, reason: str = "",
+) -> None:
+    """Idempotently append ``stage_name`` to ``onboard["degraded_stages"]``.
+
+    The activity face of ``_record_stage_degrade`` — the workflow body
+    calls THIS through ``workflow.execute_activity`` (the sync helper is
+    test-only).
+    """
+    _record_stage_degrade(onboard_path, stage_name, reason)
+
+
+# ---------------------------------------------------------------------------
 # Activity: update_onboard_progress
 # ---------------------------------------------------------------------------
 
