@@ -801,6 +801,72 @@ def _rules_dict_has_minimum(rules_by_section: dict[str, list[str]]) -> bool:
     return sum(len(v or []) for v in rules_by_section.values()) >= 3
 
 
+# C-OB2: the principal-facing ``vault/SOUL.md`` is a three-section
+# snapshot of the PRINCIPAL'S soul — distinct from the existing
+# ``soul_md`` (Alfred's runtime persona) which ctrl-api routes to the
+# Hermes profile dir's SOUL.md.
+_SOUL_SECTION_ORDER: list[tuple[str, str]] = [
+    ("values", "Values"),
+    ("tone_preferences", "Tone preferences"),
+    ("what_i_care_about", "What I care about"),
+]
+
+
+def _coerce_soul_dict(raw: Any) -> dict[str, str]:
+    """Normalize the Opus ``soul`` field into a ``{section_key: str}``.
+
+    Missing or non-string values become empty strings; whitespace is
+    collapsed at the edges so an empty paragraph never produces a
+    section heading with no body.
+    """
+    out: dict[str, str] = {key: "" for key, _ in _SOUL_SECTION_ORDER}
+    if not isinstance(raw, dict):
+        return out
+    for key, _ in _SOUL_SECTION_ORDER:
+        value = raw.get(key)
+        if isinstance(value, str):
+            out[key] = value.strip()
+    return out
+
+
+def _format_principal_soul_md(
+    soul_by_section: dict[str, str],
+    created_iso: str,
+) -> str:
+    """Render the C-OB2 ``vault/SOUL.md`` markdown.
+
+    All three sections (Values / Tone preferences / What I care about)
+    are emitted unconditionally — the C-OB2 contract requires them all
+    to be present and populated, so an empty section is a quality bug
+    the caller must guard against before calling this.
+    """
+    frontmatter = (
+        "---\n"
+        "type: note\n"
+        "subtype: principal_soul\n"
+        "status: active\n"
+        f"created: {created_iso}\n"
+        "created_by: onboarding_pipeline\n"
+        "---\n"
+    )
+    body_lines: list[str] = ["", "# Soul", ""]
+    for key, heading in _SOUL_SECTION_ORDER:
+        text = soul_by_section.get(key, "")
+        body_lines.append(f"## {heading}")
+        body_lines.append(text)
+        body_lines.append("")
+    return frontmatter + "\n".join(body_lines).rstrip() + "\n"
+
+
+def _soul_dict_is_complete(soul_by_section: dict[str, str]) -> bool:
+    """C-OB2: all three sections must carry a real paragraph (>= 20
+    chars after whitespace strip) — otherwise the principal's SOUL.md
+    is a hollow form and we'd rather skip the write than ship one.
+    """
+    return all(len(soul_by_section.get(key, "")) >= 20
+               for key, _ in _SOUL_SECTION_ORDER)
+
+
 @activity.defn
 async def personalize_opus(onboard_path: str) -> dict[str, Any]:
     """Generate personalization files from facts + patterns."""
@@ -845,6 +911,12 @@ Write these five files. Return them in this exact JSON format:
     "household": ["[2-5 short rules about the home: who owns what (family vs admin), infant/child constraints, quiet hours, partner's domain]"],
     "communication": ["[2-4 short rules about tone, density, escalation: concise vs verbose, what reaches the principal vs what gets filtered]"],
     "decision": ["[1-3 short rules about decision-making default — defer vs act, time-critical handling, autonomy boundaries]"]
+  }},
+
+  "soul": {{
+    "values": "[Short paragraph (2-4 sentences) describing what this person VALUES at their core — family, work, sovereignty, craft, conviction. What drives them at the deepest level, beyond achievements.]",
+    "tone_preferences": "[Short paragraph (2-4 sentences) describing how this person wants to be addressed — concise vs reflective, formal vs casual, dry wit vs warmth, the linguistic register that suits them. Anchored in observed communication style.]",
+    "what_i_care_about": "[Short paragraph (2-4 sentences) about the concrete things in this person's life that matter NOW — relationships, ventures, transitions, principles. What deserves Alfred's attention versus what should be filtered out.]"
   }}
 }}
 
@@ -852,6 +924,12 @@ The ``rules`` field is the STRUCTURED form of rules_md — same content, broken
 into categories by who/what each rule governs. Empty list for a category that
 has no relevant rule (DO NOT invent generic platitudes to fill it). Total
 across all four categories MUST be >= 3 real rules grounded in the facts.
+
+The ``soul`` field is the PRINCIPAL'S soul (their values, tone, concerns),
+distinct from ``soul_md`` (Alfred's runtime persona — how Alfred behaves). It
+is a third-person snapshot of who this person IS, written so the principal
+themself can read it and recognise themselves. Each section a short paragraph,
+grounded in concrete facts.
 
 Make each file genuinely useful — not generic templates. Reference specific names, projects, and patterns from the data."""
 
@@ -975,6 +1053,62 @@ Make each file genuinely useful — not generic templates. Reference specific na
         logger.info(
             "onboarding_v3: skipping vault/RULES.md — Opus produced fewer "
             "than 3 rules total across sections",
+        )
+
+    # ---------------------------------------------------------------------
+    # C-OB2: principal-facing ``vault/SOUL.md``.
+    #
+    # The workspace SOUL.md write above is Alfred's RUNTIME soul — how
+    # Alfred should behave with this person — pinned in the Hermes
+    # profile dir where the agent loads it. This is a SECOND,
+    # principal-readable note: the PRINCIPAL's soul (Values / Tone
+    # preferences / What I care about), so the principal can read in
+    # /vault what Alfred thinks of them. Distinguished by
+    # ``subtype: principal_soul`` frontmatter. Failure is logged but
+    # non-blocking — runtime SOUL.md is the load-bearing path.
+    # ---------------------------------------------------------------------
+    soul_by_section = _coerce_soul_dict(files.get("soul"))
+    if _soul_dict_is_complete(soul_by_section):
+        created_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        principal_soul_md = _format_principal_soul_md(
+            soul_by_section, created_iso
+        )
+        try:
+            async with httpx.AsyncClient(
+                base_url=config.alfred_ctrl_url,
+                timeout=30.0,
+                headers=headers,
+            ) as client:
+                resp = await client.post(
+                    "/api/v1/vault/records",
+                    json={
+                        "type": "note",
+                        "name": "SOUL.md",
+                        "content": principal_soul_md,
+                    },
+                )
+            if 200 <= resp.status_code < 300:
+                written.append("vault/SOUL.md")
+                logger.info(
+                    "onboarding_v3: wrote vault/SOUL.md (%d chars)",
+                    len(principal_soul_md),
+                )
+            else:
+                failed.append("vault/SOUL.md")
+                logger.warning(
+                    "onboarding_v3: vault/SOUL.md write failed "
+                    "status=%d body=%s",
+                    resp.status_code, getattr(resp, "text", "")[:300],
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort, non-blocking
+            failed.append("vault/SOUL.md")
+            logger.warning(
+                "onboarding_v3: vault/SOUL.md write failed: %s", exc
+            )
+    else:
+        logger.info(
+            "onboarding_v3: skipping vault/SOUL.md — Opus produced an "
+            "incomplete soul (one or more sections empty/short)",
         )
 
     onboard["user_md"] = files.get("user_md", "")
