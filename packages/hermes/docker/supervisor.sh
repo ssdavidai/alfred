@@ -198,16 +198,18 @@ fi
 # process) and `--replace` clears any stale gateway.lock left by a previous
 # process — important when this script restarts a crashed gateway.
 #
-# TERMINAL_CWD points context-file discovery at each profile dir
-# (build_context_files_prompt reads $TERMINAL_CWD, falling back to the
-# process cwd `/` otherwise). The init container deploys Alfred's AGENTS.md
-# to ${HERMES_HOME}/profiles/<p>/AGENTS.md (entrypoint step 2f); with
-# TERMINAL_CWD unset the main gateway looked for /AGENTS.md and the persona /
-# standing-rules instructions never reached the agent (F44). Set per-profile
-# so each gateway loads its own AGENTS.md from the dir init wrote it to.
-start_proc "hermes-main"     "TERMINAL_CWD=${PROFILES_DIR}/main exec hermes -p main gateway run --replace"
-start_proc "hermes-workers"  "TERMINAL_CWD=${PROFILES_DIR}/workers exec hermes -p workers gateway run --replace"
-start_proc "hermes-heavy"    "TERMINAL_CWD=${PROFILES_DIR}/heavy exec hermes -p heavy gateway run --replace"
+# Two-axis context-file wiring (both required per the Hermes docs):
+#   1. TERMINAL_CWD — gateway terminal-tool / cwd-aware prompt assembly.
+#   2. Process CWD at launch — Hermes auto-discovers AGENTS.md /
+#      CLAUDE.md / .hermes.md / .cursorrules from the PROCESS CWD at
+#      gateway boot (user-guide/features/context-files). supervisor.sh
+#      inherits tini's `/`, so the per-profile AGENTS.md was never loaded.
+# `cd "${PROFILES_DIR}/<p>" && exec hermes …` aligns the gateway's cwd
+# with its profile dir. `exec` hands the PID directly to hermes so the
+# supervisor's `kill -0 $pid` bookkeeping still tracks the real process.
+start_proc "hermes-main"     "cd \"${PROFILES_DIR}/main\"    && TERMINAL_CWD=${PROFILES_DIR}/main    exec hermes -p main gateway run --replace"
+start_proc "hermes-workers"  "cd \"${PROFILES_DIR}/workers\" && TERMINAL_CWD=${PROFILES_DIR}/workers exec hermes -p workers gateway run --replace"
+start_proc "hermes-heavy"    "cd \"${PROFILES_DIR}/heavy\"   && TERMINAL_CWD=${PROFILES_DIR}/heavy   exec hermes -p heavy gateway run --replace"
 
 # =============================================================================
 # Supervise — restart any worker that exits while we are not shutting down.
