@@ -21,6 +21,7 @@ import {
   getMattersIndex,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
+import { rulesViewState } from "./rulesEmptyStateCore";
 
 // ---------------------------------------------------------------------------
 // Section frame
@@ -53,7 +54,7 @@ function Section({
 // ---------------------------------------------------------------------------
 
 function RulesSection() {
-  const { data, isLoading, isError, refetch } = useQuery(
+  const { data, isLoading, isError, error, refetch } = useQuery(
     getWorkspaceFile,
     { filename: "RULES.md" },
     { refetchInterval: false, retry: false },
@@ -66,6 +67,12 @@ function RulesSection() {
   const [draft, setDraft] = useState("");
   const [newRule, setNewRule] = useState("");
   const [saving, setSaving] = useState(false);
+
+  // C-OB2 — on a fresh tenant RULES.md doesn't exist yet (the onboarding
+  // pipeline writes it after the first brief). A 404 from getWorkspaceFile
+  // is the EXPECTED absence, not a fetch failure — render the "still
+  // composing" copy instead of the generic "couldn't load — Retry" message.
+  const view = rulesViewState({ data, isLoading, isError, error, seeded });
 
   useEffect(() => {
     if (seeded) return;
@@ -112,9 +119,22 @@ function RulesSection() {
     await persist(next);
   };
 
+  const title = view === "composing" ? "Standing rules — composing" : "Standing rules";
+
   return (
-    <Section title="Standing rules">
-      {isError && !seeded ? (
+    <Section title={title}>
+      {view === "composing" ? (
+        // C-OB2 — RULES.md absent (404). The onboarding pipeline composes it
+        // after the first brief lands. Don't render the "couldn't load —
+        // Retry" message: the absence is expected, not a fetch failure.
+        <p
+          className="font-body italic text-[15px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Alfred is still composing your standing rules from the facts you
+          confirmed. They'll appear here once your first brief is ready.
+        </p>
+      ) : view === "error" ? (
         // Fetch failed (retry:false, so it won't self-recover) — show an
         // explicit retry instead of hanging on "A moment." or rendering an
         // empty list that reads as "no rules" (FAILURE-MODES web bug #5).
@@ -137,7 +157,7 @@ function RulesSection() {
             Retry
           </button>
         </p>
-      ) : isLoading && !seeded ? (
+      ) : view === "loading" ? (
         <p
           className="font-body italic text-[15px]"
           style={{ color: "var(--marginalia)" }}
