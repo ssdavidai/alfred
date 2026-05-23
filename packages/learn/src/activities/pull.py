@@ -11,9 +11,19 @@ import httpx
 from temporalio import activity
 
 from src.config import load_config
+from src.integrations.composio_client import execute_action
 from src.parsers import get_parser
 
 logger = logging.getLogger("alfred-learn")
+
+# #180: Temporal caps an activity result (and argument) at 4MB over gRPC. A
+# fresh-inbox GMAIL_FETCH_EMAILS backfill comes back ~4.88MB, so returning the
+# raw batch from composio_pull fails respond_activity_task_completed and the
+# whole pull errors out with 0 events ingested. When a pull response is at or
+# above this threshold AND the caller gave composio_pull a stream context, the
+# activity ingests the events itself and returns a small summary instead of the
+# batch. 3MB leaves headroom under the 4MB ceiling for envelope + cursor.
+_MAX_PULL_RESULT_BYTES = 3_000_000
 
 
 # Known-deprecated Composio actions get rewritten to their current replacement
@@ -239,6 +249,21 @@ async def ingest_events(
 
     If ``OWNER_EMAIL`` is unset the guard is skipped entirely so an
     onboarding-in-progress tenant still ingests.
+    """
+    return await _ingest_raw_items(stream_id, stream_type, parser_name, raw_items)
+
+
+async def _ingest_raw_items(
+    stream_id: str,
+    stream_type: str,
+    parser_name: str,
+    raw_items: list[dict[str, Any]],
+) -> dict[str, int]:
+    """Core parse-guard-ingest loop shared by ``ingest_events`` (the activity)
+    and ``composio_pull`` (which ingests internally when its response is too
+    large to return as a Temporal activity result — see #180). Plain async
+    function so it can be called from inside another activity without a nested
+    ``execute_activity``.
     """
     parser = get_parser(parser_name)
     config = load_config()
@@ -1085,6 +1110,9 @@ async def composio_pull(
     action_slug: str,
     arguments: dict[str, Any] | None = None,
     connected_account_id: str | None = None,
+    stream_id: str | None = None,
+    stream_type: str | None = None,
+    parser_name: str | None = None,
 ) -> dict[str, Any]:
     """Execute a Composio action as a stream pull source.
 
@@ -1095,6 +1123,15 @@ async def composio_pull(
     ``connected_account_id`` pins a specific connection — required for
     Gmail to defeat Composio's flaky auto-routing across multiple
     historical connections (#74).
+
+    ``stream_id`` / ``stream_type`` / ``parser_name`` give the activity a
+    stream context so it can self-ingest an oversized response (#180). When
+    they are provided AND the raw response is at/above ``_MAX_PULL_RESULT_BYTES``
+    (the fresh-inbox backfill case), the activity ingests the events here and
+    returns a small summary instead of the ~5MB batch — which Temporal would
+    otherwise reject as too large for an activity result. Small responses (the
+    common incremental pull) are returned verbatim and the workflow ingests
+    them via ``ingest_events`` exactly as before.
 
     The underlying ``execute_action`` is a SYNCHRONOUS SDK call — it
     blocks the event loop for the duration of the Composio HTTP
@@ -1107,8 +1144,7 @@ async def composio_pull(
     ``asyncio.to_thread`` so the event loop stays free to heartbeat.
     """
     import asyncio
-
-    from src.integrations.composio_client import execute_action
+    import json
 
     args = arguments or {}
     # Inject sensible defaults for known actions that require parameters
@@ -1124,7 +1160,62 @@ async def composio_pull(
         logger.warning("Composio pull %s returned error: %s", action_slug, result.get("error"))
 
     activity.heartbeat(f"Composio pull {action_slug} completed")
+
+    # #180: bound the activity-result size. If this would exceed Temporal's
+    # gRPC limit, ingest the batch here and hand the workflow a summary.
+    if stream_id and isinstance(result, dict):
+        try:
+            raw_size = len(json.dumps(result).encode("utf-8"))
+        except (TypeError, ValueError):
+            raw_size = 0
+        if raw_size >= _MAX_PULL_RESULT_BYTES:
+            counts = await _ingest_raw_items(
+                stream_id,
+                stream_type or "composio",
+                parser_name or "composio",
+                [result],
+            )
+            logger.info(
+                "composio_pull %s: response %d bytes >= %d — self-ingested %s "
+                "in-activity to stay under Temporal's 4MB result limit (#180)",
+                action_slug, raw_size, _MAX_PULL_RESULT_BYTES, counts,
+            )
+            # Return a bounded envelope: keep the status/error/cursor surface
+            # the workflow inspects (_classify_composio_response, _is_sync_reset,
+            # _extract_sync_cursor) but drop the bulky payload lists.
+            return _summarize_pull_result(result, counts)
+
     return result
+
+
+# Payload keys that hold the bulky per-item batch — stripped from an
+# oversized response so the summary the workflow gets stays tiny while the
+# cursor/continuation tokens beside them survive.
+_BULK_PAYLOAD_KEYS = ("messages", "events", "results", "items", "data_list")
+
+
+def _summarize_pull_result(
+    result: dict[str, Any], counts: dict[str, int]
+) -> dict[str, Any]:
+    """Strip the bulky item lists out of a Composio response, preserving the
+    status/error/cursor scaffolding the StreamPuller workflow reads. Marks the
+    envelope ``_ingested`` so the workflow skips a redundant ingest."""
+    def _strip(node: Any) -> Any:
+        if isinstance(node, dict):
+            return {
+                k: ("<ingested>" if k in _BULK_PAYLOAD_KEYS else _strip(v))
+                for k, v in node.items()
+            }
+        return node
+
+    summary = _strip(result)
+    if not isinstance(summary, dict):
+        summary = {}
+    summary["_ingested"] = {
+        "ingested": counts.get("ingested", 0),
+        "rejected": counts.get("rejected", 0),
+    }
+    return summary
 
 
 # Default arguments for known Composio actions that require parameters.

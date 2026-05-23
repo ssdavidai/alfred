@@ -313,10 +313,14 @@ async def _run_composio_pull(
     else:
         merged_args = sync_args
 
-    # 2. Execute the Composio action.
+    # 2. Execute the Composio action. Pass stream context so the activity can
+    #    self-ingest an oversized (fresh-inbox backfill) response instead of
+    #    returning a >4MB batch that Temporal would reject (#180).
+    parser_name = config.get("parser", "composio")
+    stream_type = config.get("type", "composio")
     raw_response: dict[str, Any] = await workflow.execute_activity(
         composio_pull,
-        args=[action_slug, merged_args],
+        args=[action_slug, merged_args, None, stream_id, stream_type, parser_name],
         start_to_close_timeout=timedelta(seconds=120),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
@@ -335,7 +339,7 @@ async def _run_composio_pull(
             merged_args = sync_args
         raw_response = await workflow.execute_activity(
             composio_pull,
-            args=[action_slug, merged_args],
+            args=[action_slug, merged_args, None, stream_id, stream_type, parser_name],
             start_to_close_timeout=timedelta(seconds=120),
             retry_policy=RetryPolicy(maximum_attempts=3),
         )
@@ -347,9 +351,14 @@ async def _run_composio_pull(
     # 5. Ingest through the composio parser only if the response carries
     #    real data. An error envelope with no `data` would just produce
     #    an empty ingest anyway.
-    if pull_status == "ok":
-        parser_name = config.get("parser", "composio")
-        stream_type = config.get("type", "composio")
+    #    #180: if composio_pull already self-ingested an oversized batch it
+    #    returns an `_ingested` summary instead of the data — adopt those
+    #    counts and skip the (now redundant, and itself >4MB) ingest call.
+    pre_ingested = raw_response.get("_ingested") if isinstance(raw_response, dict) else None
+    if isinstance(pre_ingested, dict):
+        result.events_ingested = pre_ingested.get("ingested", 0)
+        result.events_rejected = pre_ingested.get("rejected", 0)
+    elif pull_status == "ok":
         counts: dict[str, int] = await workflow.execute_activity(
             ingest_events,
             args=[stream_id, stream_type, parser_name, [raw_response]],

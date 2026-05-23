@@ -159,7 +159,12 @@ def _make_stubs(
 
     @activity.defn(name="composio_pull")
     async def stub_composio_pull(
-        action_slug: str, arguments: dict[str, Any] | None = None,
+        action_slug: str,
+        arguments: dict[str, Any] | None = None,
+        connected_account_id: str | None = None,
+        stream_id: str | None = None,
+        stream_type: str | None = None,
+        parser_name: str | None = None,
     ) -> dict[str, Any]:
         state["pulled"].append(action_slug)
         return {"data": {"items": [{"id": "evt-1"}]}}
@@ -324,7 +329,12 @@ class TestStreamSweepWorkflow:
 
         @activity.defn(name="composio_pull")
         async def stub_composio_pull(
-            action_slug: str, arguments: dict[str, Any] | None = None,
+            action_slug: str,
+            arguments: dict[str, Any] | None = None,
+            connected_account_id: str | None = None,
+            stream_id: str | None = None,
+            stream_type: str | None = None,
+            parser_name: str | None = None,
         ) -> dict[str, Any]:
             state["pulled"].append(action_slug)
             return {"data": {"items": []}}

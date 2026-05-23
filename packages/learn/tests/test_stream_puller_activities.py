@@ -408,3 +408,73 @@ async def test_list_due_streams_empty_when_nothing_due(
     ])
     due = await list_due_streams(100)
     assert due == []
+
+
+# ---------------------------------------------------------------------------
+# BUG #180 — composio_pull must not return a >4MB batch as its Temporal
+# activity result. On a fresh-inbox backfill GMAIL_FETCH_EMAILS comes back
+# ~4.88MB, the activity-result exceeds Temporal's 4MB gRPC limit, the pull
+# FAILS and 0 events ingest. Fix: when given a stream context and the
+# response is large, the activity ingests the events itself and returns a
+# small summary (mirroring composio_fetch_email_metadata's write-then-count
+# pattern) — never the full batch.
+# ---------------------------------------------------------------------------
+
+from temporalio.testing import ActivityEnvironment  # noqa: E402
+
+from src.activities.pull import (  # noqa: E402
+    _MAX_PULL_RESULT_BYTES,
+    composio_pull,
+)
+
+
+def _gmail_response(n: int) -> dict[str, Any]:
+    """A Composio Gmail response with n chunky messages."""
+    msgs = [{"messageId": f"m{i}", "messageText": "x" * 1200,
+             "subject": f"S{i}", "sender": "x@e.test",
+             "messageTimestamp": "2026-05-01T00:00:00Z"} for i in range(n)]
+    return {"successful": True, "error": None,
+            "data": {"response_data": {"messages": msgs}}}
+
+
+async def _run_pull(action: str, args: dict) -> dict:
+    return await ActivityEnvironment().run(
+        composio_pull, action, args,
+        None, "gmail-stream", "gmail", "composio",  # conn, stream_id, type, parser
+    )
+
+
+@pytest.mark.asyncio
+async def test_composio_pull_large_response_self_ingests_and_summarizes(
+    monkeypatch: pytest.MonkeyPatch, fake_client: _FakeIngestClient
+) -> None:
+    monkeypatch.delenv("OWNER_EMAIL", raising=False)
+    big = _gmail_response(5000)
+    assert len(json.dumps(big).encode()) > _MAX_PULL_RESULT_BYTES  # over the limit
+    monkeypatch.setattr("src.activities.pull.execute_action",
+                        lambda *a, **k: big, raising=False)
+
+    result = await _run_pull("GMAIL_FETCH_EMAILS", {"max_results": 5000})
+
+    # Returns a small summary, NOT the 5000-message batch.
+    assert result["_ingested"]["ingested"] == 5000
+    assert len(json.dumps(result).encode()) < _MAX_PULL_RESULT_BYTES
+    assert result.get("successful") is True  # cursor/status metadata survives
+    # Events were actually POSTed to ctrl-api (retrievable by consumers).
+    assert len(fake_client.calls) == 5000
+    assert fake_client.calls[0]["url"] == "/api/v1/streams/ingest"
+
+
+@pytest.mark.asyncio
+async def test_composio_pull_small_response_returned_verbatim(
+    monkeypatch: pytest.MonkeyPatch, fake_client: _FakeIngestClient
+) -> None:
+    # Incremental pulls are tiny: returned verbatim, NOT self-ingested (the
+    # workflow ingests via ingest_events). No double-ingest.
+    small = _gmail_response(1)
+    monkeypatch.setattr("src.activities.pull.execute_action",
+                        lambda *a, **k: small, raising=False)
+    result = await _run_pull("GMAIL_FETCH_EMAILS", {"max_results": 30})
+    assert "_ingested" not in result
+    assert result == small
+    assert fake_client.calls == []
