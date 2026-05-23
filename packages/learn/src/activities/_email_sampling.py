@@ -106,3 +106,48 @@ def sample_emails_per_day(
         len(sampled), len(emails), len(buckets), cap,
     )
     return sampled
+
+
+# ---------------------------------------------------------------------------
+# Chunked extraction (Lane II / harden, 2026-05-23)
+# ---------------------------------------------------------------------------
+# Even after per-day sampling cut a real inbox to ~1614 emails, the single
+# heavy-Hermes ``extract_facts_opus`` prompt overflowed gpt-5.5's context
+# window — Hermes raised "Context length exceeded: max compression attempts
+# (3) reached". Per-email payload (date | from | to | subject | snippet) is
+# ~400 chars; 1614 × ~400 = ~640k chars ≈ 160k tokens, plus ~33k tokens of
+# heavy-Hermes persona/tool overhead, lands well above any 128k window.
+#
+# Fix: split the corpus into chunks comfortably under the window. The
+# extractor calls the LLM once per chunk and merges the per-chunk facts.
+# A separate (TINY) synthesis pass picks the final 8-12 identity facts
+# from the merged candidate pool — never extracted from raw emails in a
+# single oversized call. This is robust to ANY future window: flip the
+# heavy model to a 1M-token one, chunks just get bigger; flip to a 32k
+# one, chunks shrink. The pipeline shape stays correct.
+_CHUNK_THRESHOLD: int = 500  # emails ≤ threshold → single call, > → chunked
+_CHUNK_SIZE: int = 400       # per-chunk size above threshold
+
+
+def chunk_emails_for_extraction(
+    emails: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Split emails into LLM-friendly chunks for per-chunk fact extraction.
+
+    Returns ``[[all emails]]`` when ``len(emails) <= _CHUNK_THRESHOLD`` —
+    a single call, the pre-fix behaviour for small corpora. Otherwise
+    returns deterministic contiguous chunks of ``_CHUNK_SIZE`` (the last
+    chunk may be smaller). Order is preserved: the sampler hands us a
+    newest-first sequence and that ordering is retained within each
+    chunk, so chunk[0] holds the newest evidence and chunk[-1] the oldest.
+
+    Empty input returns ``[]`` so callers can short-circuit.
+    """
+    if not emails:
+        return []
+    if len(emails) <= _CHUNK_THRESHOLD:
+        return [list(emails)]
+    return [
+        list(emails[i:i + _CHUNK_SIZE])
+        for i in range(0, len(emails), _CHUNK_SIZE)
+    ]

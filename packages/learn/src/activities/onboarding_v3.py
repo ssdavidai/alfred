@@ -820,45 +820,27 @@ async def fetch_email_metadata(user_id: str) -> dict[str, Any]:
 # Step 2: Extract facts
 # ---------------------------------------------------------------------------
 
-@activity.defn
-async def extract_facts_opus(onboard_path: str) -> dict[str, Any]:
-    """Send all email metadata to Opus, extract every fact about the user."""
-    onboard = _read_onboard(onboard_path)
-    emails = onboard.get("emails", [])
-    if not emails:
-        return {"facts": [], "count": 0}
+def _build_facts_prompt(emails: list[dict], profiler_context: str) -> str:
+    """Render the facts-extraction prompt for ONE chunk of emails.
 
-    # Cap at 3000 emails to stay within Opus context limits
-    if len(emails) > 3000:
-        logger.info("onboarding_v3: capping emails from %d to 3000", len(emails))
-        emails = emails[:3000]
-
-    # Build email corpus text — compact format
+    Extracted so the chunked path and the single-call path render the
+    identical prompt shape — only the corpus changes. The
+    ``key_identity_facts`` instruction stays in every chunk's prompt
+    because each chunk should still surface candidate identity facts;
+    the final synthesis pass picks the canonical 8-12 from the merged
+    candidate pool.
+    """
     lines = []
     for e in emails:
-        line = f"{e.get('date', '')} | {e.get('from', '')} → {e.get('to', '')} | {e.get('subject', '')} | {e.get('snippet', '')}"
+        line = (
+            f"{e.get('date', '')} | {e.get('from', '')} → "
+            f"{e.get('to', '')} | {e.get('subject', '')} | "
+            f"{e.get('snippet', '')}"
+        )
         lines.append(line)
-
     email_text = "\n".join(lines)
 
-    # Inject behavioral profiler data if available (#283)
-    profiler_context = ""
-    profile = onboard.get("profile", {})
-    if profile:
-        summary = profile.get("summary", {})
-        profiler_context = f"""
-
-BEHAVIORAL ANALYSIS (pre-computed from email metadata — use as ground truth):
-- Inner circle contacts: {', '.join(summary.get('inner_circle', [])[:10])}
-- Communication style: {summary.get('communication_style', 'unknown')}
-- Work hours estimate: {summary.get('work_hours', 'unknown')}
-- Top subscriptions/services: {', '.join(summary.get('top_subscriptions', [])[:10])}
-- Key behavioral patterns: {'; '.join(summary.get('key_patterns', [])[:5])}
-"""
-
-    activity.heartbeat("Sending to Opus for fact extraction")
-
-    prompt = f"""You are Alfred, a personal AI butler. You've been given access to your new master's email history — {len(emails)} emails from the last 100 days. Your task: extract EVERY fact about this person's WHOLE LIFE — not just their work.
+    return f"""You are Alfred, a personal AI butler. You've been given access to your new master's email history — {len(emails)} emails from the last 100 days. Your task: extract EVERY fact about this person's WHOLE LIFE — not just their work.
 {profiler_context}
 EMAIL HISTORY ({len(emails)} emails):
 {email_text}
@@ -897,54 +879,227 @@ The key_identity_facts are the 8-12 most important facts about who this person I
 
 Be EXHAUSTIVE on the facts. This is about the WHOLE person — their family dinners matter as much as their business deals. Extract every person, place, service, habit, preference, and pattern you can find. Hundreds of facts expected from {len(emails)} emails."""
 
-    # The prompt asks for "hundreds of facts, be EXHAUSTIVE" — at 16384 the
-    # response truncated mid-array (observed: a 57.7k-char cutoff → unparseable
-    # → 0 facts → empty verify screen). Give it real headroom so the full
-    # facts + key_identity_facts object lands; the parser salvages anyway if a
-    # very large inbox still overruns.
-    try:
-        # Lane II / harden: heavy + gpt-5.5 returned 62 chars of non-JSON
-        # via prompt alone. text.format + persona override fixes it
-        # model-agnostically (gpt-5.5, claude-opus-4-6, future).
-        raw = await _call_llm(
-            prompt,
-            max_tokens=32000,
-            response_format={"type": "json_object"},
-            instructions=_STRUCTURED_EXTRACTOR_INSTRUCTIONS,
-        )
-    except Exception as exc:  # noqa: BLE001 — degrade-or-reraise classifier
-        # Phase 4: a 402 / credit-exhaustion failure here is a stage degrade,
-        # not a Temporal retry. The pipeline keeps moving with empty facts;
-        # downstream stages tolerate the gap by checking ``onboard["facts"]``.
-        sentinel = _handle_llm_degraded(
-            "facts", onboard_path, exc,
-            activity_name="extract_facts_opus",
-            partial_result={"facts": 0, "key_identity_facts": 0},
-        )
-        if sentinel is not None:
-            return sentinel
-        raise
 
-    # Alias-aware parse (factsList → facts, identityFacts →
-    # key_identity_facts). Re-key the identity-facts side if it arrived
-    # under an alias.
-    parsed = _parse_json_with_keys(raw, "facts")
-    facts = parsed.get("facts", [])
-    if "key_identity_facts" not in parsed:
-        kif = _parse_json_with_keys(raw, "key_identity_facts")
-        key_identity_facts = kif.get("key_identity_facts", [])
+def _fact_text_key(fact: Any) -> str:
+    """Normalise a fact's text for case-insensitive, whitespace-collapsed dedup."""
+    if isinstance(fact, dict):
+        text = str(fact.get("fact", ""))
     else:
-        key_identity_facts = parsed.get("key_identity_facts", [])
+        text = str(fact)
+    return " ".join(text.lower().split())
 
-    # Empty-parse degrade: LLM ran but produced nothing parseable.
+
+def _dedup_identity_candidates(candidates: list[dict]) -> list[dict]:
+    """Last-wins dedup of identity-fact candidates by ``field``.
+
+    Synthesis-fallback path only. When the synthesis call drops or
+    empty-parses, we still want a SOMEthing-shaped identity list — so
+    collapse the candidate pool by ``field`` (one entry per identity
+    field), preserving the first occurrence's display label and value.
+    Order matches first-occurrence (chunks are newest-first, so the
+    most recent evidence wins).
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for c in candidates:
+        if not isinstance(c, dict):
+            continue
+        field = str(c.get("field", "")).strip().lower()
+        if not field or field in seen:
+            continue
+        seen.add(field)
+        out.append(c)
+    return out
+
+
+def _build_identity_synthesis_prompt(candidates: list[dict]) -> str:
+    """Render the identity-facts synthesis prompt.
+
+    Input: the candidate pool of identity facts pulled from each chunk
+    (potentially with duplicates / contradictions). Output: the top
+    8-12 identity facts. This is a TINY prompt — only the candidates,
+    not the raw emails — so it never overflows the model's window.
+    """
+    pool_text = json.dumps(candidates, indent=2)
+    return f"""You are picking the 8-12 most important identity facts for a personal butler. Below is a candidate pool aggregated from multiple email-batch extractions — there may be duplicates, near-duplicates, or contradictions. Pick the canonical 8-12 facts that DEFINE who this person IS (the ones where getting them wrong would be embarrassing for a butler): name, age, location, partner, children, pets, company/role, main project, and anything else that defines their identity.
+
+CANDIDATE POOL:
+{pool_text}
+
+Return JSON:
+{{
+  "key_identity_facts": [
+    {{"field": "name", "value": "Jane Doe", "display": "Full name"}}
+  ]
+}}
+
+Return between 8 and 12 facts. Prefer the candidate phrasing that best matches a butler's voice. Resolve duplicates by keeping the clearest entry. If a field is contradicted across candidates, pick the entry that looks most recent / most specific."""
+
+
+@activity.defn
+async def extract_facts_opus(onboard_path: str) -> dict[str, Any]:
+    """Send email metadata to Opus, extract every fact about the user.
+
+    For corpora above ``_CHUNK_THRESHOLD`` (default 500), the call is
+    split into per-chunk LLM extractions to stay safely under any
+    reasonable model context window. Per-chunk facts are merged with
+    string-equality dedup. A final TINY synthesis pass picks the
+    canonical 8-12 identity facts from the merged candidate pool —
+    that pass's input is just the candidates, not raw emails, so it
+    never overflows. See ``_email_sampling.chunk_emails_for_extraction``
+    for the rationale (Hermes "Context length exceeded" overflow,
+    2026-05-23).
+
+    Single-chunk corpora keep the pre-fix behaviour bit-identical: one
+    call, identity facts taken from that response directly.
+    """
+    from src.activities._email_sampling import chunk_emails_for_extraction
+
+    onboard = _read_onboard(onboard_path)
+    emails = onboard.get("emails", [])
+    if not emails:
+        return {"facts": [], "count": 0}
+
+    # Cap at 3000 emails to stay within Opus context limits even after
+    # chunking — keeps the WORST case bounded (e.g. a future model with
+    # a 1M-token window but a slow Hermes throughput would still chew
+    # through 7+ chunks if we let it).
+    if len(emails) > 3000:
+        logger.info("onboarding_v3: capping emails from %d to 3000", len(emails))
+        emails = emails[:3000]
+
+    # Inject behavioral profiler data if available (#283).
+    profiler_context = ""
+    profile = onboard.get("profile", {})
+    if profile:
+        summary = profile.get("summary", {})
+        profiler_context = f"""
+
+BEHAVIORAL ANALYSIS (pre-computed from email metadata — use as ground truth):
+- Inner circle contacts: {', '.join(summary.get('inner_circle', [])[:10])}
+- Communication style: {summary.get('communication_style', 'unknown')}
+- Work hours estimate: {summary.get('work_hours', 'unknown')}
+- Top subscriptions/services: {', '.join(summary.get('top_subscriptions', [])[:10])}
+- Key behavioral patterns: {'; '.join(summary.get('key_patterns', [])[:5])}
+"""
+
+    chunks = chunk_emails_for_extraction(emails)
+    n_chunks = len(chunks)
+    is_chunked = n_chunks > 1
+
+    # Per-chunk extraction. A 402 / credit-exhaustion error short-
+    # circuits the WHOLE stage (we have no credits — every following
+    # chunk will fail too); other errors per chunk are logged and the
+    # loop continues so the surviving chunks still contribute facts.
+    facts: list[dict] = []
+    identity_candidates: list[dict] = []
+    seen_fact_keys: set[str] = set()
+    chunks_with_failure = 0
+
+    for i, chunk in enumerate(chunks):
+        activity.heartbeat(
+            f"Extracting facts: chunk {i + 1}/{n_chunks} ({len(chunk)} emails)"
+        )
+        prompt = _build_facts_prompt(chunk, profiler_context)
+        try:
+            raw = await _call_llm(
+                prompt,
+                max_tokens=32000,
+                response_format={"type": "json_object"},
+                instructions=_STRUCTURED_EXTRACTOR_INSTRUCTIONS,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Phase 4 / Lane II: a 402 here would burn the entire run.
+            # Credit-class failure → degrade + short-circuit (no point
+            # hammering the remaining chunks). Non-credit failure in
+            # single-chunk mode → re-raise (preserves pre-chunking
+            # behaviour — Temporal owns transient retries). Non-credit
+            # failure in multi-chunk mode → log + continue so the
+            # surviving chunks still contribute (resilience above
+            # individual-chunk recovery).
+            sentinel = _handle_llm_degraded(
+                "facts", onboard_path, exc,
+                activity_name="extract_facts_opus",
+                partial_result={"facts": 0, "key_identity_facts": 0},
+            )
+            if sentinel is not None:
+                return sentinel
+            if not is_chunked:
+                raise
+            logger.warning(
+                "onboarding_v3: extract chunk %d/%d failed (continuing): %s",
+                i + 1, n_chunks, exc,
+            )
+            chunks_with_failure += 1
+            continue
+
+        parsed = _parse_json_with_keys(raw, "facts")
+        chunk_facts = parsed.get("facts", []) or []
+        if "key_identity_facts" not in parsed:
+            kif = _parse_json_with_keys(raw, "key_identity_facts")
+            chunk_identity = kif.get("key_identity_facts", []) or []
+        else:
+            chunk_identity = parsed.get("key_identity_facts", []) or []
+
+        if not chunk_facts and not chunk_identity:
+            chunks_with_failure += 1
+            logger.warning(
+                "onboarding_v3: chunk %d/%d produced 0 facts (raw len=%d)",
+                i + 1, n_chunks, len(raw or ""),
+            )
+
+        # String-equality dedup, case-insensitive + whitespace-collapsed.
+        for f in chunk_facts:
+            key = _fact_text_key(f)
+            if not key or key in seen_fact_keys:
+                continue
+            seen_fact_keys.add(key)
+            facts.append(f)
+        identity_candidates.extend(chunk_identity)
+
+    # Identity-facts synthesis pass (multi-chunk only). Input is the
+    # candidate pool — tiny — so it never overflows. Single-chunk runs
+    # SKIP this pass (behaviour bit-identical to the pre-fix path).
+    if is_chunked and identity_candidates:
+        activity.heartbeat("Extracting facts: synthesising identity facts")
+        try:
+            synth_raw = await _call_llm(
+                _build_identity_synthesis_prompt(identity_candidates),
+                max_tokens=4000,
+                response_format={"type": "json_object"},
+                instructions=_STRUCTURED_EXTRACTOR_INSTRUCTIONS,
+            )
+            synth_parsed = _parse_json_with_keys(synth_raw, "key_identity_facts")
+            key_identity_facts = synth_parsed.get("key_identity_facts", []) or []
+            if not key_identity_facts:
+                # Synthesis empty-parsed; fall back to the candidate
+                # pool (deduped) rather than dropping identity entirely.
+                key_identity_facts = _dedup_identity_candidates(
+                    identity_candidates
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "onboarding_v3: identity synthesis pass failed (%s); "
+                "falling back to deduped candidate pool", exc,
+            )
+            key_identity_facts = _dedup_identity_candidates(identity_candidates)
+    else:
+        key_identity_facts = identity_candidates
+
+    # All-chunks-failed degrade.
     if not facts and not key_identity_facts:
         _mark_stage_degraded_empty_parse(
             onboard_path, "facts",
             activity_name="extract_facts_opus",
-            raw_sample=raw, onboard=onboard,
+            raw_sample="", onboard=onboard,
         )
 
-    logger.info("onboarding_v3: extracted %d facts, %d key identity facts", len(facts), len(key_identity_facts))
+    logger.info(
+        "onboarding_v3: extracted %d facts, %d key identity facts from %d "
+        "chunk(s) (%d emails total, %d chunk failure(s))",
+        len(facts), len(key_identity_facts), n_chunks, len(emails),
+        chunks_with_failure,
+    )
 
     onboard["facts"] = facts
     onboard["key_identity_facts"] = key_identity_facts
