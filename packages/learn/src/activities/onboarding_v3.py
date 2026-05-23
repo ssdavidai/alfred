@@ -36,6 +36,26 @@ logger = logging.getLogger("alfred-learn")
 ONBOARD_PATH = "/alfred-data/onboard.json"
 
 
+# Persona override for Opus structured-extraction calls. Heavy Hermes
+# injects ~33k tokens of Alfred persona + 6 MCP tool defs on every call;
+# pure structured-extraction tasks need NONE of that. Passed as
+# ``instructions=`` to ``_call_llm`` — replaces the persona for that one
+# call. Model-agnostic.
+_STRUCTURED_EXTRACTOR_INSTRUCTIONS = (
+    "You are a structured data extractor. Return ONLY the requested JSON "
+    "object. Do not use tools. Do not respond as a persona. Do not add "
+    "prose, preface, or commentary."
+)
+
+# Persona override for the prose-only First Brief call. Suppresses tool-
+# use / meta-prose while keeping Alfred's voice in the letter itself.
+_BUTLER_BRIEF_INSTRUCTIONS = (
+    "You are Alfred, a personal butler, writing a letter. Return ONLY "
+    "the letter text — no JSON, no markdown formatting, no preface, no "
+    "tool use. Plain butler prose."
+)
+
+
 async def _call_llm(
     prompt: str,
     max_tokens: int = 8192,
@@ -321,6 +341,47 @@ def _handle_llm_degraded(
     if partial_result:
         sentinel.update(partial_result)
     return sentinel
+
+
+def _mark_stage_degraded_empty_parse(
+    onboard_path: str,
+    stage_name: str,
+    *,
+    activity_name: str = "",
+    raw_sample: str = "",
+    onboard: dict[str, Any] | None = None,
+) -> None:
+    """Mark ``stage_name`` degraded because the LLM ran but parse was empty.
+
+    Production gap (Lane II / harden): heavy Hermes returned 200 OK with
+    a 62-char non-JSON body. The parser returned ``{}``; the activity
+    returned 0 facts and reported success. ``degraded_stages`` was NOT
+    set because no exception was raised — ``/verify`` showed nothing.
+
+    When caller passes its in-memory ``onboard`` dict, the helper mutates
+    it AND persists, so a later in-stage ``_write_onboard`` from a stale
+    snapshot can't clobber the degrade marker.
+    """
+    try:
+        if onboard is None:
+            onboard = _read_onboard(onboard_path)
+        stages = onboard.get("degraded_stages")
+        if not isinstance(stages, list):
+            stages = []
+        if stage_name not in stages:
+            stages.append(stage_name)
+            onboard["degraded_stages"] = stages
+            _write_onboard(onboard_path, onboard)
+    except Exception as exc:  # noqa: BLE001 — audit must not fail loud
+        logger.warning(
+            "onboarding_v3: failed to record degraded_stages[%s]: %s",
+            stage_name, exc,
+        )
+    logger.warning(
+        "stage=%s activity=%s degraded — empty parse (LLM ran, response "
+        "had no expected keys); raw[:200]=%r",
+        stage_name, activity_name or stage_name, (raw_sample or "")[:200],
+    )
 
 
 def _string_aware_json_object_span(text: str, start: int) -> int | None:
@@ -835,7 +896,15 @@ Be EXHAUSTIVE on the facts. This is about the WHOLE person — their family dinn
     # facts + key_identity_facts object lands; the parser salvages anyway if a
     # very large inbox still overruns.
     try:
-        raw = await _call_llm(prompt, max_tokens=32000)
+        # Lane II / harden: heavy + gpt-5.5 returned 62 chars of non-JSON
+        # via prompt alone. text.format + persona override fixes it
+        # model-agnostically (gpt-5.5, claude-opus-4-6, future).
+        raw = await _call_llm(
+            prompt,
+            max_tokens=32000,
+            response_format={"type": "json_object"},
+            instructions=_STRUCTURED_EXTRACTOR_INSTRUCTIONS,
+        )
     except Exception as exc:  # noqa: BLE001 — degrade-or-reraise classifier
         # Phase 4: a 402 / credit-exhaustion failure here is a stage degrade,
         # not a Temporal retry. The pipeline keeps moving with empty facts;
@@ -849,10 +918,24 @@ Be EXHAUSTIVE on the facts. This is about the WHOLE person — their family dinn
             return sentinel
         raise
 
-    # Parse JSON — use brace-depth tracking (not greedy regex)
-    parsed = _parse_json_with_facts(raw)
+    # Alias-aware parse (factsList → facts, identityFacts →
+    # key_identity_facts). Re-key the identity-facts side if it arrived
+    # under an alias.
+    parsed = _parse_json_with_keys(raw, "facts")
     facts = parsed.get("facts", [])
-    key_identity_facts = parsed.get("key_identity_facts", [])
+    if "key_identity_facts" not in parsed:
+        kif = _parse_json_with_keys(raw, "key_identity_facts")
+        key_identity_facts = kif.get("key_identity_facts", [])
+    else:
+        key_identity_facts = parsed.get("key_identity_facts", [])
+
+    # Empty-parse degrade: LLM ran but produced nothing parseable.
+    if not facts and not key_identity_facts:
+        _mark_stage_degraded_empty_parse(
+            onboard_path, "facts",
+            activity_name="extract_facts_opus",
+            raw_sample=raw, onboard=onboard,
+        )
 
     logger.info("onboarding_v3: extracted %d facts, %d key identity facts", len(facts), len(key_identity_facts))
 
@@ -956,7 +1039,12 @@ Return JSON:
 Be insightful. Look for non-obvious connections. A great butler notices what the master doesn't."""
 
     try:
-        raw = await _call_llm(prompt, max_tokens=8192)
+        raw = await _call_llm(
+            prompt,
+            max_tokens=8192,
+            response_format={"type": "json_object"},
+            instructions=_STRUCTURED_EXTRACTOR_INSTRUCTIONS,
+        )
     except Exception as exc:  # noqa: BLE001 — degrade-or-reraise classifier
         sentinel = _handle_llm_degraded(
             "patterns", onboard_path, exc,
@@ -967,9 +1055,16 @@ Be insightful. Look for non-obvious connections. A great butler notices what the
             return sentinel
         raise
 
-    # Reuse the same robust parser (looks for "patterns" key)
-    parsed = _parse_json_with_key(raw, "patterns")
+    # Reuse the robust parser (looks for "patterns" key)
+    parsed = _parse_json_with_keys(raw, "patterns")
     patterns = parsed.get("patterns", [])
+
+    if not patterns:
+        _mark_stage_degraded_empty_parse(
+            onboard_path, "patterns",
+            activity_name="discover_patterns_opus",
+            raw_sample=raw, onboard=onboard,
+        )
 
     logger.info("onboarding_v3: discovered %d patterns", len(patterns))
 
@@ -1212,7 +1307,12 @@ grounded in concrete facts.
 Make each file genuinely useful — not generic templates. Reference specific names, projects, and patterns from the data."""
 
     try:
-        raw = await _call_llm(prompt, max_tokens=16384)
+        raw = await _call_llm(
+            prompt,
+            max_tokens=16384,
+            response_format={"type": "json_object"},
+            instructions=_STRUCTURED_EXTRACTOR_INSTRUCTIONS,
+        )
     except Exception as exc:  # noqa: BLE001 — degrade-or-reraise classifier
         sentinel = _handle_llm_degraded(
             "personalize", onboard_path, exc,
@@ -1223,14 +1323,21 @@ Make each file genuinely useful — not generic templates. Reference specific na
             return sentinel
         raise
 
-    # Use the hardened, string-aware parser the facts/patterns/packs stages
+    # Use the hardened, alias-aware parser the facts/patterns/packs stages
     # already rely on instead of the naive brace-counting regex that desynced
     # on literal braces in values and gave up on max_tokens truncation —
     # the facts→0 truncation class that dropped all five files (#BUG-6).
     # ``user_md`` is the anchor key; its value is a string, so expect=str.
-    files = _parse_json_with_key(raw, "user_md", expect=str)
+    files = _parse_json_with_keys(raw, "user_md", expect=str)
     if not files:
         logger.error("onboarding_v3: failed to parse personalization")
+        _mark_stage_degraded_empty_parse(
+            onboard_path, "personalize",
+            activity_name="personalize_opus",
+            raw_sample=raw, onboard=onboard,
+        )
+        # Return without raising — degrade marker is the audit trail.
+        return {"files_written": [], "files_failed": [], "degraded": True}
 
     # Write files to vault
     config = load_config()
@@ -1492,7 +1599,12 @@ Start with "Sir," or "Ma'am," (infer from the data). End with "At your disposal.
 Return ONLY the brief text. No JSON wrapping."""
 
     try:
-        brief = await _call_llm(prompt, max_tokens=4096)
+        # Prose-only: no response_format, but persona override kills
+        # the 33k Alfred frame for this single call.
+        brief = await _call_llm(
+            prompt, max_tokens=4096,
+            instructions=_BUTLER_BRIEF_INSTRUCTIONS,
+        )
     except Exception as exc:  # noqa: BLE001 — degrade-or-reraise classifier
         sentinel = _handle_llm_degraded(
             "brief", onboard_path, exc,
@@ -1770,7 +1882,12 @@ async def write_brief_and_opportunities_opus(onboard_path: str) -> dict[str, Any
         )
 
         try:
-            raw = await _call_llm(prompt, max_tokens=8192)
+            # {brief, opportunities} envelope — JSON format + persona override.
+            raw = await _call_llm(
+                prompt, max_tokens=8192,
+                response_format={"type": "json_object"},
+                instructions=_STRUCTURED_EXTRACTOR_INSTRUCTIONS,
+            )
         except Exception as exc:
             # Phase 4: a 402 / credit-exhaustion failure is a stage degrade,
             # NOT another retry attempt. Re-rolling against an empty wallet
@@ -1794,12 +1911,9 @@ async def write_brief_and_opportunities_opus(onboard_path: str) -> dict[str, Any
             last_error = f"LLM call raised {type(exc).__name__}: {exc}"
             continue
 
-        # Robust parse: _parse_json_with_key handles code fences, truncation,
-        # brace-depth scanning. Note the helper requires the keyed value to be
-        # a LIST (it was designed for "facts"/"patterns" extraction), so we
-        # key on "opportunities" which maps to a list. The returned dict will
-        # also contain "brief" as a string which we pull out separately.
-        parsed = _parse_json_with_key(raw, "opportunities")
+        # Alias-aware parse keyed on "opportunities" (the list); "brief"
+        # is pulled out separately as a string.
+        parsed = _parse_json_with_keys(raw, "opportunities")
         if not parsed:
             logger.error(
                 "onboarding_v3: brief+opportunities parse failed (attempt %d), raw[:200]=%r",
