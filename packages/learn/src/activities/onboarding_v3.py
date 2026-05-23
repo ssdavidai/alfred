@@ -159,6 +159,127 @@ def _write_onboard(path: str, data: dict) -> None:
         raise
 
 
+# ---------------------------------------------------------------------------
+# Credit-aware degrade (Phase 4 / Lane II)
+# ---------------------------------------------------------------------------
+# When a heavy-Hermes LLM call fails with HTTP 402 (credit exhaustion) or
+# returns a billing-error payload, retrying just burns latency for the same
+# wall. Each onboarding LLM-calling activity wraps its core ``_call_llm`` and
+# routes a 402 through ``_handle_llm_degraded``, which:
+#
+#   1. classifies the exception (402 / billing marker → degrade; anything
+#      else → re-raise so Temporal can ride out a transient hiccup),
+#   2. appends the stage name to ``onboard.json["degraded_stages"]``
+#      (idempotent — duplicates collapsed),
+#   3. logs a loud WARNING with the stage + activity + reason, and
+#   4. returns a partial-result sentinel dict the caller hands back so the
+#      workflow advances to the next stage instead of failing.
+#
+# ``degraded_stages`` is the audit trail the UI can surface as "finished
+# with reduced fidelity" — a never-delivered-output stage is recorded,
+# not swallowed.
+#
+# Detection set (mirrors clerk.py's _BILLING_ERROR_MARKERS):
+_BILLING_ERROR_MARKERS = (
+    "insufficient credits",
+    "billing error",
+    "out of credits",
+    "api key has run out",
+    "payment required",
+)
+
+
+def _is_credit_exhaustion(exc: BaseException) -> bool:
+    """True if ``exc`` represents a 402 / credit-exhaustion class error.
+
+    Recognises three shapes:
+      * ``httpx.HTTPStatusError`` whose ``response.status_code == 402``
+        (the shape ``onboarding_v3._call_llm``'s ``raise_for_status``
+        surfaces on a heavy-Hermes 402).
+      * Any exception whose stringified form contains a billing marker
+        (the shape ``clerk._call_clerk``'s ``ApplicationError`` /
+        ``RuntimeError`` carries on the workers profile, and the shape an
+        HTTP 200 with a billing-text body produces).
+      * An ``ApplicationError`` (temporalio) whose ``type`` attribute is
+        ``ClerkBillingError``.
+    """
+    # httpx.HTTPStatusError (or any object exposing response.status_code).
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status == 402:
+        return True
+    # Temporalio ApplicationError with our billing type.
+    if getattr(exc, "type", None) == "ClerkBillingError":
+        return True
+    # Stringified message search — last line of defence.
+    text = str(exc).lower()
+    return any(marker in text for marker in _BILLING_ERROR_MARKERS)
+
+
+def _append_degraded_stage(onboard_path: str, stage_name: str) -> None:
+    """Idempotently append ``stage_name`` to ``onboard["degraded_stages"]``.
+
+    Reads the current onboard.json, appends ``stage_name`` if not already
+    present, and atomically rewrites via ``_write_onboard``. Best-effort:
+    a read/write failure is logged and swallowed — degrading the degrade
+    audit must NEVER fail the activity.
+    """
+    try:
+        data = _read_onboard(onboard_path)
+        stages = data.get("degraded_stages")
+        if not isinstance(stages, list):
+            stages = []
+        if stage_name not in stages:
+            stages.append(stage_name)
+            data["degraded_stages"] = stages
+            _write_onboard(onboard_path, data)
+    except Exception as exc:  # noqa: BLE001 — bookkeeping must not fail loud
+        logger.warning(
+            "onboarding_v3: failed to record degraded_stages[%s]: %s",
+            stage_name, exc,
+        )
+
+
+def _handle_llm_degraded(
+    stage_name: str,
+    onboard_path: str,
+    exc: BaseException,
+    *,
+    activity_name: str = "",
+    partial_result: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Classify an LLM-call exception and degrade-or-reraise.
+
+    Returns a partial-result sentinel dict when ``exc`` is a 402 / credit-
+    exhaustion class failure — the caller returns this to its own caller
+    (Temporal) so the activity SUCCEEDS and the workflow advances. Returns
+    ``None`` when ``exc`` is not credit-related — the caller MUST re-raise
+    so Temporal can retry the activity through its normal backoff.
+
+    Side effects on the degrade path:
+      * ``onboard["degraded_stages"]`` gains ``stage_name`` (idempotent).
+      * A WARNING is logged carrying stage + activity + exception class.
+
+    ``partial_result`` is merged into the sentinel so the caller can carry
+    stage-specific shape (e.g. ``{"facts": 0, "key_identity_facts": 0}``).
+    """
+    if not _is_credit_exhaustion(exc):
+        return None
+
+    _append_degraded_stage(onboard_path, stage_name)
+    logger.warning(
+        "stage=%s activity=%s degraded — 402 (credits exhausted): %s",
+        stage_name,
+        activity_name or stage_name,
+        exc,
+    )
+    sentinel: dict[str, Any] = {"degraded": True, "stage": stage_name,
+                                "reason": "credits_exhausted"}
+    if partial_result:
+        sentinel.update(partial_result)
+    return sentinel
+
+
 def _string_aware_json_object_span(text: str, start: int) -> int | None:
     """Find the closing ``}`` of the JSON object that opens at ``text[start]``.
 
@@ -579,7 +700,20 @@ Be EXHAUSTIVE on the facts. This is about the WHOLE person — their family dinn
     # → 0 facts → empty verify screen). Give it real headroom so the full
     # facts + key_identity_facts object lands; the parser salvages anyway if a
     # very large inbox still overruns.
-    raw = await _call_llm(prompt, max_tokens=32000)
+    try:
+        raw = await _call_llm(prompt, max_tokens=32000)
+    except Exception as exc:  # noqa: BLE001 — degrade-or-reraise classifier
+        # Phase 4: a 402 / credit-exhaustion failure here is a stage degrade,
+        # not a Temporal retry. The pipeline keeps moving with empty facts;
+        # downstream stages tolerate the gap by checking ``onboard["facts"]``.
+        sentinel = _handle_llm_degraded(
+            "facts", onboard_path, exc,
+            activity_name="extract_facts_opus",
+            partial_result={"facts": 0, "key_identity_facts": 0},
+        )
+        if sentinel is not None:
+            return sentinel
+        raise
 
     # Parse JSON — use brace-depth tracking (not greedy regex)
     parsed = _parse_json_with_facts(raw)
@@ -687,7 +821,17 @@ Return JSON:
 
 Be insightful. Look for non-obvious connections. A great butler notices what the master doesn't."""
 
-    raw = await _call_llm(prompt, max_tokens=8192)
+    try:
+        raw = await _call_llm(prompt, max_tokens=8192)
+    except Exception as exc:  # noqa: BLE001 — degrade-or-reraise classifier
+        sentinel = _handle_llm_degraded(
+            "patterns", onboard_path, exc,
+            activity_name="discover_patterns_opus",
+            partial_result={"patterns": 0},
+        )
+        if sentinel is not None:
+            return sentinel
+        raise
 
     # Reuse the same robust parser (looks for "patterns" key)
     parsed = _parse_json_with_key(raw, "patterns")
@@ -933,7 +1077,17 @@ grounded in concrete facts.
 
 Make each file genuinely useful — not generic templates. Reference specific names, projects, and patterns from the data."""
 
-    raw = await _call_llm(prompt, max_tokens=16384)
+    try:
+        raw = await _call_llm(prompt, max_tokens=16384)
+    except Exception as exc:  # noqa: BLE001 — degrade-or-reraise classifier
+        sentinel = _handle_llm_degraded(
+            "personalize", onboard_path, exc,
+            activity_name="personalize_opus",
+            partial_result={"files_written": [], "files_failed": []},
+        )
+        if sentinel is not None:
+            return sentinel
+        raise
 
     # Use the hardened, string-aware parser the facts/patterns/packs stages
     # already rely on instead of the naive brace-counting regex that desynced
@@ -1203,7 +1357,17 @@ Start with "Sir," or "Ma'am," (infer from the data). End with "At your disposal.
 
 Return ONLY the brief text. No JSON wrapping."""
 
-    brief = await _call_llm(prompt, max_tokens=4096)
+    try:
+        brief = await _call_llm(prompt, max_tokens=4096)
+    except Exception as exc:  # noqa: BLE001 — degrade-or-reraise classifier
+        sentinel = _handle_llm_degraded(
+            "brief", onboard_path, exc,
+            activity_name="write_brief_opus",
+            partial_result={"brief_length": 0},
+        )
+        if sentinel is not None:
+            return sentinel
+        raise
 
     # Clean up any markdown fences
     brief = brief.strip()
@@ -1474,6 +1638,24 @@ async def write_brief_and_opportunities_opus(onboard_path: str) -> dict[str, Any
         try:
             raw = await _call_llm(prompt, max_tokens=8192)
         except Exception as exc:
+            # Phase 4: a 402 / credit-exhaustion failure is a stage degrade,
+            # NOT another retry attempt. Re-rolling against an empty wallet
+            # just burns latency. Break out of the loop into the sentinel
+            # path so the pipeline advances with an empty brief, recorded
+            # in ``degraded_stages``.
+            if _is_credit_exhaustion(exc):
+                sentinel = _handle_llm_degraded(
+                    "brief", onboard_path, exc,
+                    activity_name="write_brief_and_opportunities_opus",
+                    partial_result={
+                        "brief_length": 0,
+                        "opportunities_count": 0,
+                        "attempts": attempts,
+                        "fallback": False,
+                    },
+                )
+                if sentinel is not None:
+                    return sentinel
             logger.error("onboarding_v3: _call_llm failed on attempt %d: %s", attempts, exc)
             last_error = f"LLM call raised {type(exc).__name__}: {exc}"
             continue

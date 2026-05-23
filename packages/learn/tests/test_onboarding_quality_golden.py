@@ -383,12 +383,64 @@ def test_always_reaches_stage_done_even_with_402() -> None:
     """
 
 
-@pytest.mark.skip(reason="Phase 4: needs LLM-mocking harness")
-def test_degraded_stages_field_present_on_402() -> None:
-    """On a 402 path the onboard.json must carry a `degraded_stages: [...]`
+def test_degraded_stages_field_present_on_402(tmp_path, monkeypatch) -> None:
+    """On a 402 path the onboard.json must carry a ``degraded_stages: [...]``
     field listing which stages fell back to the rule-based generator, so the
     UI can surface 'finished with reduced fidelity' to the principal.
+
+    Phase 4 / Lane II — Commit 1. The credit-aware degrade is wired into each
+    LLM-calling onboarding activity; simulating a 402 via ``_call_llm`` must
+    produce a ``degraded_stages`` entry without raising.
     """
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from typing import Any
+    import httpx as _httpx
+    from temporalio import activity as _activity
+    from temporalio.testing import ActivityEnvironment as _ActivityEnvironment
+
+    onboard_path = tmp_path / "onboard.json"
+    onboard_path.write_text(json.dumps({
+        "user_id": "u-1",
+        "stage": "metadata",
+        "progress": {"current_day": 0, "total_days": 0,
+                     "facts_count": 0, "patterns_count": 0},
+        "facts": [],
+        "patterns": [],
+        "emails": [{"date": "2026-05-20", "from": "x@y.com",
+                    "to": "u@v.com", "subject": "s", "snippet": "hi"}],
+        "user_md": "", "soul_md": "",
+        "automations": [],
+        "brief": "",
+    }))
+
+    req = _httpx.Request("POST", "http://hermes/v1/responses")
+    resp = _httpx.Response(status_code=402, request=req,
+                           json={"error": {"message": "insufficient credits"}})
+    exc = _httpx.HTTPStatusError("402", request=req, response=resp)
+
+    monkeypatch.setenv("AAS_API_KEY", "test-token")
+
+    from src.activities.onboarding_v3 import extract_facts_opus
+
+    env = _ActivityEnvironment()
+
+    @_activity.defn(name="_q_wrap")
+    async def _wrap() -> Any:
+        return await extract_facts_opus(str(onboard_path))
+
+    with patch("src.activities.onboarding_v3._call_llm",
+               new=AsyncMock(side_effect=exc)):
+        result = asyncio.run(env.run(_wrap))
+
+    assert isinstance(result, dict) and result.get("degraded") is True, (
+        "extract_facts_opus must return a degrade sentinel on 402, not raise"
+    )
+    data = json.loads(onboard_path.read_text())
+    assert "facts" in data.get("degraded_stages", []), (
+        f"onboard.json must carry degraded_stages with 'facts' — got "
+        f"{data.get('degraded_stages')!r}"
+    )
 
 
 # Quick sanity: the fixture is wired correctly. If THIS test fails, the

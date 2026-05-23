@@ -1308,10 +1308,22 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
                 entities = parsed.get("entities") if isinstance(parsed, dict) else None
             except Exception as exc:  # noqa: BLE001
                 # Degrade gracefully — Pass B is non-essential; never crash.
+                # Phase 4: also record the stage in onboard["degraded_stages"]
+                # for observability when this is a 402 / credit wall — the UI
+                # can then surface "finished with reduced fidelity" instead of
+                # the failure being silent in the worker log.
                 logger.warning(
                     "materialize: Pass B corpus seed skipped (LLM unavailable): %s",
                     exc,
                 )
+                try:
+                    from src.activities.onboarding_v3 import _handle_llm_degraded
+                    _handle_llm_degraded(
+                        "materialize", onboard_path, exc,
+                        activity_name="materialize_matter_entities",
+                    )
+                except Exception:  # noqa: BLE001 — observability bookkeeping only
+                    pass
                 entities = None
 
             if isinstance(entities, list):

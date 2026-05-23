@@ -1095,6 +1095,22 @@ async def generate_chore_template_code(
                 heartbeat_message=f"opus generating chore template (attempt {attempt})",
             )
         except Exception as exc:
+            # Phase 4: a 402 / credit wall here can never be cured by another
+            # re-roll — raise immediately so the caller's structured-failure
+            # path runs once. The chores stage still completes (assign_chores'
+            # _generate_chore_from_opportunity catches ChoreGenerationError),
+            # this just avoids burning the retry budget against an empty wallet.
+            from src.activities.onboarding_v3 import _is_credit_exhaustion
+            if _is_credit_exhaustion(exc):
+                logger.warning(
+                    "chore_generation: 402 / credit exhaustion on attempt %d — "
+                    "skipping remaining attempts: %s",
+                    attempt, exc,
+                )
+                raise ChoreGenerationError(
+                    f"generate_chore_template_code aborted on attempt {attempt}: "
+                    f"credit exhaustion ({type(exc).__name__}: {exc})"
+                ) from exc
             logger.error(
                 "chore_generation: _call_llm raised on attempt %d: %s",
                 attempt, exc,
