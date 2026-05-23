@@ -1419,21 +1419,37 @@ HERMES_USER_CAP = 1375
 HERMES_SEED_FALLBACK_DIR = "/alfred-data"
 
 
-def _truncate_at_sentence(text: str, cap: int) -> str:
-    """Trim ``text`` to ``<= cap`` chars, ending on a sentence boundary if
-    one exists in the prefix; else word boundary; else hard cap."""
+def _truncate_at_sentence_boundary(
+    text: str, cap: int, *, floor_fraction: float = 0.85,
+) -> str:
+    """Trim ``text`` to ``<= cap`` chars, ending on the LAST sentence
+    boundary that falls inside ``[floor_fraction*cap, cap]``.
+
+    Sentence boundary = a ``.``/``!``/``?`` followed by whitespace or
+    end-of-string. Search runs BACKWARDS from index ``cap`` so the
+    latest qualifying boundary wins (regression: the previous helper
+    iterated terminators by kind in order and returned on the first
+    kind that ``rfind`` matched — for a bullet-form USER.md whose only
+    ``.\\n`` was on line 1, it collapsed 1407 chars to 53).
+
+    If no boundary lands in the window, hard-truncate at ``cap-1`` and
+    append ``…`` so the seed is exactly ``cap`` chars and we never lose
+    more than ``1 - floor_fraction`` of the budget.
+    """
     if len(text) <= cap:
-        return text.rstrip()
-    head = text[:cap]
-    for marker in (". ", ".\n", "! ", "? ", "!\n", "?\n"):
-        idx = head.rfind(marker)
-        if idx >= 0:
-            return head[: idx + 1].rstrip()
-    idx = head.rfind(".")
-    if idx >= 0:
-        return head[: idx + 1].rstrip()
-    idx = head.rfind(" ")
-    return head[:idx].rstrip() if idx >= 0 else head.rstrip()
+        return text
+    floor = int(cap * floor_fraction)
+    # Walk backwards from ``cap`` for the last ``.``/``!``/``?`` followed
+    # by whitespace. (EOS is impossible in this window — len(text) > cap.)
+    for i in range(cap - 1, floor - 1, -1):
+        if text[i] in ".!?" and text[i + 1].isspace():
+            return text[: i + 1]
+    return text[: cap - 1] + "…"
+
+
+# Back-compat shim — older call sites in this module / tests may still
+# reference the old name. Both names resolve to the same fixed helper.
+_truncate_at_sentence = _truncate_at_sentence_boundary
 
 
 def _seed_hermes_memory(memory_md: str, user_md: str) -> list[str]:
@@ -1446,21 +1462,33 @@ def _seed_hermes_memory(memory_md: str, user_md: str) -> list[str]:
     if not memory_md and not user_md:
         return seeded
 
-    # Cap each blob at its Hermes limit; log so a regression is
-    # diagnosable from logs instead of a silent over-cap symptom.
+    # Cap each blob at its Hermes limit; log the truncation path
+    # (``sentence-boundary`` vs ``hard-truncate-with-ellipsis``) so a
+    # regression is diagnosable from logs instead of a silent over-cap
+    # symptom.
     if memory_md and len(memory_md) > HERMES_MEMORY_CAP:
         orig = len(memory_md)
-        memory_md = _truncate_at_sentence(memory_md, HERMES_MEMORY_CAP)
+        memory_md = _truncate_at_sentence_boundary(
+            memory_md, HERMES_MEMORY_CAP,
+        )
+        path = ("hard-truncate-with-ellipsis"
+                if memory_md.endswith("…") else "sentence-boundary")
         logger.info(
             "onboarding_v3: hermes_memory_md truncated %d → %d chars "
-            "(cap %d)", orig, len(memory_md), HERMES_MEMORY_CAP,
+            "(cap %d, via %s)",
+            orig, len(memory_md), HERMES_MEMORY_CAP, path,
         )
     if user_md and len(user_md) > HERMES_USER_CAP:
         orig = len(user_md)
-        user_md = _truncate_at_sentence(user_md, HERMES_USER_CAP)
+        user_md = _truncate_at_sentence_boundary(
+            user_md, HERMES_USER_CAP,
+        )
+        path = ("hard-truncate-with-ellipsis"
+                if user_md.endswith("…") else "sentence-boundary")
         logger.info(
             "onboarding_v3: hermes_user_md truncated %d → %d chars "
-            "(cap %d)", orig, len(user_md), HERMES_USER_CAP,
+            "(cap %d, via %s)",
+            orig, len(user_md), HERMES_USER_CAP, path,
         )
 
     # Prefer the direct /hermes-state path; fall back to /alfred-data.

@@ -13,10 +13,14 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from temporalio import activity
 from temporalio.testing import ActivityEnvironment
 
-from src.activities.onboarding_v3 import personalize_opus
+from src.activities.onboarding_v3 import (
+    _truncate_at_sentence_boundary,
+    personalize_opus,
+)
 
 
 def _run_activity(coro_factory):
@@ -200,3 +204,74 @@ class TestPersonalizeHermesMemorySeed:
                                 "TOOLS.md", "USER.md"]
         assert not any("hermes" in f.lower()
                        for f in result["files_written"])
+
+
+class TestTruncateAtSentenceBoundary:
+    """Helper must keep the LAST sentence boundary in ``[0.85*cap, cap]``.
+
+    Regression: the old helper iterated terminators by kind and returned
+    on the FIRST kind ``rfind`` matched. For a bullet-form USER.md where
+    only line 1 ended with ``.\\n``, it collapsed 1407 chars to 53.
+    """
+
+    def test_truncate_under_cap_returns_as_is(self):
+        text = "x" * 1000
+        assert _truncate_at_sentence_boundary(text, 1375) == text
+
+    def test_truncate_just_over_cap_keeps_late_sentence_boundary(self):
+        """Live bug: one early boundary (~53) + several late (>1169).
+        Helper must keep a LATE one, NOT collapse to 53."""
+        text = ("Tone: concise, high-signal, no theatrical enthusiasm. "
+                + "a" * 740 + ". "    # ~800
+                + "b" * 390 + ". "    # ~1200
+                + "c" * 130 + ". "    # ~1340 (in-window)
+                + "d" * 70)
+        assert text[52] == "." and len(text) > 1375
+        out = _truncate_at_sentence_boundary(text, 1375)
+        assert len(out) > 100, f"regressed to early boundary: {len(out)}"
+        assert int(1375 * 0.85) <= len(out) <= 1375
+        assert out.endswith(".")
+
+    def test_truncate_no_late_boundary_falls_back_to_hard_cap(self):
+        """No boundary in [1169,1375] → hard-cap at 1374 + ``…``."""
+        early = "Tone: concise, high-signal, no theatrical enthusiasm."
+        body = "\n".join("- " + ("x" * 20) for _ in range(60))
+        text = (early + "\n" + body + ("x" * 1407))[:1407]
+        out = _truncate_at_sentence_boundary(text, 1375)
+        assert len(out) == 1375 and out.endswith("…")
+
+    def test_truncate_memory_md_cap_2200(self):
+        """Same logic at the 2200-char MEMORY.md cap. Floor = 1870."""
+        text = ("a" * 79 + ". " + "b" * 1400 + ". "
+                + "c" * 640 + ". " + "d" * 200)  # late ~2150
+        out = _truncate_at_sentence_boundary(text, 2200)
+        assert int(2200 * 0.85) <= len(out) <= 2200
+        assert out.endswith(".")
+
+    @pytest.mark.parametrize("cap,floor", [(100, 85), (1375, 1168), (2200, 1870)])
+    def test_truncate_floor_85_percent(self, cap, floor):
+        """Boundary below floor → ellipsis. Above floor → accepted."""
+        below = "x" * (floor - 2) + ". " + "y" * cap * 2
+        out_below = _truncate_at_sentence_boundary(below, cap)
+        assert len(out_below) == cap and out_below.endswith("…")
+        above = "x" * (floor + 4) + ". " + "y" * cap * 2
+        out_above = _truncate_at_sentence_boundary(above, cap)
+        assert floor <= len(out_above) <= cap and out_above.endswith(".")
+
+    def test_truncate_logs_path_hint(self, tmp_path, monkeypatch, caplog):
+        """Log distinguishes ``sentence-boundary`` from
+        ``hard-truncate-with-ellipsis`` so a regression is diagnosable."""
+        monkeypatch.setenv("AAS_API_KEY", "t")
+        early = "Tone: concise, high-signal, no theatrical enthusiasm."
+        body = "\n".join("- " + ("x" * 20) for _ in range(60))
+        long_user = (early + "\n" + body + ("x" * 1407))[:1407]
+        with caplog.at_level("INFO", logger="alfred-learn"):
+            _, written, _ = _run_with_mocks(
+                _write_onboard(tmp_path),
+                _opus_response("Sir: founder.", long_user),
+            )
+        seed = written["/hermes-state/memories/USER.md"]
+        assert len(seed) == 1375 and seed.endswith("…")
+        log_text = " ".join(r.message for r in caplog.records)
+        assert "hermes_user_md truncated" in log_text
+        assert "hard-truncate-with-ellipsis" in log_text
