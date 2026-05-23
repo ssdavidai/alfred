@@ -976,6 +976,13 @@ async def composio_fetch_email_metadata(user_id: str) -> dict[str, Any]:
         if len(emails) >= 5000:
             break
 
+    # Per-day sample BEFORE handing the corpus to downstream Opus
+    # stages. The pre-sample 5000-cap above stays as defense-in-depth
+    # against a pathological single day; see ``_email_sampling`` for
+    # the rationale (Hermes context-window overflow, 2026-05-23).
+    from src.activities._email_sampling import sample_emails_per_day
+    emails = sample_emails_per_day(emails)
+
     by_domain: dict[str, int] = {}
     for e in emails:
         by_domain[e["domain"]] = by_domain.get(e["domain"], 0) + 1

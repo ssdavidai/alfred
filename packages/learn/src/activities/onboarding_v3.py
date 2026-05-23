@@ -773,6 +773,13 @@ async def fetch_email_metadata(user_id: str) -> dict[str, Any]:
             except Exception:
                 continue
 
+    # Per-day sample BEFORE handing the corpus to downstream Opus
+    # stages. The fetch loop's 5000-cap above stays as defense-in-depth
+    # against a pathological single day; see ``_email_sampling`` for
+    # the rationale (Hermes context-window overflow, 2026-05-23).
+    from src.activities._email_sampling import sample_emails_per_day
+    emails = sample_emails_per_day(emails)
+
     # Group by domain for summary
     by_domain: dict[str, int] = defaultdict(int)
     for e in emails:

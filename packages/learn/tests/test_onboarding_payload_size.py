@@ -194,7 +194,13 @@ def test_composio_fetch_email_metadata_returns_summary_not_corpus(
     # The return value is a tiny summary — orders of magnitude under the
     # 4 MB gRPC limit that broke onboarding (#76).
     assert _payload_size(result) < SUMMARY_CEILING
-    assert result["count"] == 5000
+    # Per-day sampling (2026-05-23): the corpus is bucketed by day and
+    # capped at ~20/day before it leaves the fetcher, so an all-same-day
+    # synthetic corpus collapses to ``_PER_DAY_EMAIL_CAP``. The contract
+    # this test was written to pin (tiny return / corpus on disk) is
+    # unchanged — only the magic number moves.
+    from src.activities._email_sampling import _PER_DAY_EMAIL_CAP
+    assert result["count"] == _PER_DAY_EMAIL_CAP
     assert result["domains"] > 0
     # Crucially: the corpus itself is NOT in the return value.
     assert "emails" not in result
@@ -202,6 +208,5 @@ def test_composio_fetch_email_metadata_returns_summary_not_corpus(
     # The corpus landed on the onboard.json DISK side-channel — the shape
     # the behavioral profiler and the Opus stages read.
     on_disk = json.loads(Path(onboard_path).read_text())
-    assert len(on_disk["emails"]) == 5000
-    assert on_disk["emails"][0]["from"].startswith("sender0@")
-    assert on_disk["progress"]["total_days"] == 5000
+    assert len(on_disk["emails"]) == _PER_DAY_EMAIL_CAP
+    assert on_disk["progress"]["total_days"] == _PER_DAY_EMAIL_CAP

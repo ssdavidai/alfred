@@ -388,8 +388,13 @@ async def test_fetch_email_metadata_writes_profiler_shape(
     # onboard.json `emails` carries the exact keys the profiler reads.
     for email in emails:
         assert set(email) == {"from", "to", "subject", "date", "snippet", "domain"}
-    assert emails[0]["domain"] == "one.com"
-    assert emails[0]["snippet"] == "body one"
+    # Per-day sampling (2026-05-23) sorts newest-first, so the m2 email
+    # (2026-04-02) lands ahead of m1 (2026-04-01). Both are preserved
+    # because each day's bucket is well under the cap.
+    domains = {e["domain"] for e in emails}
+    assert domains == {"one.com", "two.com"}
+    snippets = {e["snippet"] for e in emails}
+    assert snippets == {"body one", "body two"}
     # progress + top_domains updated, existing keys preserved.
     assert written["user_id"] == "u1"
     assert written["progress"]["total_days"] == 2
