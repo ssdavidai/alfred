@@ -73,8 +73,14 @@ function countBodyChars(body: string): number {
   return body.length;
 }
 
+// Unicode-aware uppercase detection: `\p{Lu}` matches any uppercase letter
+// across scripts (Latin, Greek, Cyrillic, accented Hungarian/Polish/Czech/
+// German/Spanish/…) — not just ASCII A–Z. Without the `/u` flag and the
+// property escape, names like "Üveges Gábor" or "Ágnes Sirhuber" would fail
+// the >=2-capitalised-tokens rule and be wrongly classified as non-human,
+// silently dropping every accented-name person from a tenant's vault.
 function capitalisedTokenCount(name: string): number {
-  return name.split(/[\s\-]+/).filter(Boolean).filter((t) => /^[A-Z]/.test(t)).length;
+  return name.split(/[\s\-]+/).filter(Boolean).filter((t) => /^\p{Lu}/u.test(t)).length;
 }
 
 // USER.md cache: ctrl-api is single-tenant per process so cardinality is 1,
