@@ -855,6 +855,48 @@ async def _create_or_merge_entity(
     return "created"
 
 
+def _org_name_from_link(org_link: str) -> str:
+    """Extract the bare org name from an ``[[org/Name]]`` wikilink (or a bare
+    name). Returns the normalised name, or "" if there's nothing to extract."""
+    s = (org_link or "").strip()
+    if not s:
+        return ""
+    parsed = _parse_entity_wikilink(s)
+    if parsed and parsed[0] == "org":
+        return _normalize_entity_name(parsed[1])
+    return _normalize_entity_name(s)
+
+
+async def _ensure_org_for_person(
+    client: VaultClient,
+    org_link: str,
+    *,
+    person_name: str,
+    backlinks: list[str],
+    listing: dict[str, dict[str, Any]],
+) -> bool:
+    """B9: symmetrically materialise the org named by a person→org tie.
+
+    The live gap was 20 person but 0 org records: an LLM/matter that names a
+    person with an ``org`` tie produces a dangling ``[[org/Name]]`` wikilink
+    but no org record unless the org also happened to be listed as a
+    standalone entity. This create-or-merges that org so the edge resolves.
+    Returns True iff a NEW org record was created.
+    """
+    org_name = _org_name_from_link(org_link)
+    if not org_name:
+        return False
+    outcome = await _create_or_merge_entity(
+        client,
+        record_type="org", name=org_name,
+        backlinks=backlinks,
+        description=f"Organization associated with {person_name}.",
+        source_note="_Seeded during onboarding from a person→org tie._",
+        existing_fm=listing,
+    )
+    return outcome == "created"
+
+
 def _kg_seed_enabled() -> bool:
     """Pass B (LLM corpus seeding) gate. Default on, env-overridable."""
     return os.environ.get("ONBOARDING_KG_SEED", "true").strip().lower() != "false"
@@ -1039,8 +1081,18 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
                         )
                         if outcome == "created":
                             created += 1
-                            activity.heartbeat(f"materialize: {etype}/{name}")
                         linked += 1
+                        # B9: a person→org tie must also materialise the org,
+                        # not just leave a dangling [[org/Name]] link.
+                        if etype == "person" and org_link:
+                            org_listing = await _ensure_listing("org")
+                            if await _ensure_org_for_person(
+                                client, org_link,
+                                person_name=name, backlinks=[backlink],
+                                listing=org_listing,
+                            ):
+                                created += 1
+                        activity.heartbeat(f"materialize: {etype}/{name}")
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "materialize_matter_entities: %s/%s failed: %s",
@@ -1103,7 +1155,17 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
                         )
                         if outcome == "created":
                             seeded += 1
-                            activity.heartbeat(f"materialize(seed): {etype}/{name}")
+                        # B9: materialise the org the person is tied to, even
+                        # when the LLM didn't emit it as a standalone entity.
+                        if etype == "person" and org_link:
+                            org_listing = await _ensure_listing("org")
+                            if await _ensure_org_for_person(
+                                client, org_link,
+                                person_name=name, backlinks=[],
+                                listing=org_listing,
+                            ):
+                                seeded += 1
+                        activity.heartbeat(f"materialize(seed): {etype}/{name}")
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
                             "materialize: Pass B %s/%s failed: %s",

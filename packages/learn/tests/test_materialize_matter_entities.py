@@ -11,11 +11,18 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from temporalio.testing import ActivityEnvironment
 
 from src.activities.packs_opus import (
     _parse_entity_wikilink,
     materialize_matter_entities,
 )
+
+
+async def _run_materialize(path: str = "/tmp/onboard.json"):
+    """Run the activity inside an ActivityEnvironment so activity.heartbeat
+    has a context (the real worker provides one)."""
+    return await ActivityEnvironment().run(materialize_matter_entities, path)
 
 
 class _FakeVaultClient:
@@ -101,3 +108,62 @@ async def test_existing_entity_skipped_and_backlinked_via_patch(monkeypatch):
     # ...but it still gets the backlink via a frontmatter patch.
     patches = [p for p in fake.patched if "person/Zsolt Rapali" in p[0]]
     assert patches and "[[matter/deal]]" in (patches[0][1].get("related") or [])
+
+
+# ---------------------------------------------------------------------------
+# B9 org-seeding gap (live): onboarding materialised 20 person but 0 org
+# records. The cause: when a person carries an `org` tie (Pass A's
+# matter org link, or Pass B's `org` field) but the org is never listed as a
+# standalone entity, no org/<Name>.md record was ever created — only a
+# dangling [[org/Name]] wikilink on the person. Fix: materialise the org
+# symmetrically wherever a person→org tie names it.
+# ---------------------------------------------------------------------------
+
+
+def _install_passB(monkeypatch, fake, facts, entities):
+    """Wire Pass B: facts present + a mocked _call_llm returning entities."""
+    _install(monkeypatch, fake)
+    monkeypatch.setattr(
+        "src.activities.packs_opus._read_onboard_json",
+        lambda _p: {"facts": facts},
+    )
+
+    async def fake_llm(prompt, max_tokens=8192, heartbeat_message=""):
+        import json
+        return json.dumps({"entities": entities})
+
+    monkeypatch.setattr("src.activities.packs_opus._call_llm", fake_llm)
+    monkeypatch.setenv("ONBOARDING_KG_SEED", "true")
+
+
+@pytest.mark.asyncio
+async def test_passB_person_org_tie_materialises_the_org(monkeypatch):
+    """A person with org='NeoTerra' but NO standalone org entity must still
+    yield an org/NeoTerra record — not just a dangling wikilink."""
+    fake = _FakeVaultClient([])
+    _install_passB(
+        monkeypatch, fake,
+        facts=[{"fact": "Works with NeoTerra on the grid project."}],
+        entities=[{"type": "person", "name": "Dana Reyes",
+                   "description": "Lead engineer.", "org": "NeoTerra"}],
+    )
+    await _run_materialize()
+    written = [(t, n) for (t, n, _) in fake.written]
+    assert ("person", "Dana Reyes") in written
+    assert ("org", "NeoTerra") in written, (
+        f"org tie must materialise an org record; got {written}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_passA_person_org_tie_materialises_the_org(monkeypatch):
+    """Pass A: a matter naming a person AND an org ties the person to that
+    org. The org must become a record, not only the person."""
+    fake = _FakeVaultClient(
+        [_matter("acq", ["[[person/Sam Vale]]"], orgs=["[[org/Banco Real]]"])]
+    )
+    _install(monkeypatch, fake)
+    await _run_materialize()
+    written = [(t, n) for (t, n, _) in fake.written]
+    assert ("person", "Sam Vale") in written
+    assert ("org", "Banco Real") in written
