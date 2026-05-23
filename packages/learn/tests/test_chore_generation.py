@@ -1120,3 +1120,157 @@ class TestGeneratorReRollOnStaticValidation:
         result = asyncio.run(run_it())
         assert result["attempts"] == 1
         assert call_count["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# BUG #181 — chores stage hung because Opus emitted a cron whose day-of-week
+# contradicted its own user_facing_description ("weekdays" + `0 4 * * *`).
+# The validator rejected it, the activity re-rolled the LLM up to the cap, and
+# the brief-stage workflow hit StartToClose. Fix: auto-correct the obvious
+# day-of-week mismatch BEFORE validating (so the common case never re-rolls),
+# and keep the LLM-correction retries bounded so the activity can't time out —
+# an irreparable chore is skipped (ChoreGenerationError → caller drops it),
+# never looped.
+# ---------------------------------------------------------------------------
+
+from src.activities.chore_generation import (  # noqa: E402
+    _GENERATION_MAX_ATTEMPTS,
+    _autocorrect_cron_dow_for_description,
+)
+
+
+class TestAutocorrectCronDow:
+    def test_weekdays_wildcard_dow_coerced_to_1_5(self):
+        """The exact live bug: description says weekdays, cron DOW is `*`."""
+        corrected = _autocorrect_cron_dow_for_description(
+            "0 4 * * *",
+            "Every weekday at 04:00 UTC, this chore assembles a digest.",
+        )
+        assert corrected is not None
+        # minute/hour/dom/month preserved; only DOW coerced to weekdays.
+        assert corrected == "0 4 * * 1-5"
+
+    def test_weekend_wildcard_dow_coerced_to_0_6(self):
+        corrected = _autocorrect_cron_dow_for_description(
+            "0 10 * * *",
+            "On weekends at 10:00 UTC, this chore reviews personal projects.",
+        )
+        assert corrected is not None
+        assert corrected.split()[-1] == "0,6"
+
+    def test_daily_description_not_corrected(self):
+        """'every day' wants a wildcard DOW — nothing to coerce."""
+        assert _autocorrect_cron_dow_for_description(
+            "0 7 * * *",
+            "Each morning at 07:00 UTC, this chore drafts your day plan.",
+        ) is None
+
+    def test_explicit_nonwildcard_dow_left_alone(self):
+        """We only fill in a wildcard; an explicit DOW is the LLM's choice
+        and gets left for the validator to accept/reject (not silently
+        overwritten)."""
+        assert _autocorrect_cron_dow_for_description(
+            "0 9 * * 1",
+            "Every weekday at 09:00 UTC, this chore drafts a digest.",
+        ) is None
+
+
+def _run_generation(envelope: str) -> tuple:
+    """Drive generate_chore_template_code with _call_llm mocked to always
+    return `envelope`. Returns (result_dict_or_None, exc_or_None, n_calls)."""
+    call_count = {"n": 0}
+
+    async def fake_call_llm(prompt, max_tokens=8192, heartbeat_message=""):
+        call_count["n"] += 1
+        return envelope
+
+    async def run_it():
+        env = ActivityEnvironment()
+        with patch(
+            "src.activities.chore_generation._call_llm", side_effect=fake_call_llm
+        ), patch(
+            "src.activities.chore_generation._read_template_examples", return_value={}
+        ):
+            return await env.run(
+                generate_chore_template_code,
+                {"id": "opp", "name": "X", "description": "x", "tags": ["t"]},
+                {"rhythm": {"work_start_estimate": 9, "work_end_estimate": 17}},
+            )
+
+    try:
+        return asyncio.run(run_it()), None, call_count["n"]
+    except ChoreGenerationError as exc:
+        return None, exc, call_count["n"]
+
+
+class TestChoreGenerationCronAutocorrect:
+    def test_weekday_dow_mismatch_autocorrected_no_reroll(self):
+        """The live #181 envelope: description 'weekdays' + cron `0 4 * * *`.
+        The generator must auto-correct the DOW and return on attempt 1 with
+        the corrected schedule — NOT re-roll the LLM into a timeout."""
+        import json
+        result, exc, n = _run_generation(json.dumps({
+            "module_name": "weekday_digest",
+            "workflow_class_name": "WeekdayDigestWorkflow",
+            "user_facing_description": (
+                "Every weekday at 04:00 UTC, this chore assembles a single "
+                "morning digest summarising your day-ahead calendar and any "
+                "overnight emails worth your attention before the day starts."
+            ),
+            "schedule": "0 4 * * *",
+            "python_source": _good_python_source(),
+        }))
+        assert exc is None
+        assert result["attempts"] == 1 and n == 1, "autocorrect must avoid a re-roll"
+        assert result["schedule"] == "0 4 * * 1-5", (
+            f"DOW should be coerced to weekdays, got {result['schedule']!r}"
+        )
+
+    def test_irreparable_mismatch_is_bounded_then_skipped(self):
+        """A time mismatch the DOW autocorrect can't fix: description says
+        09:00 UTC, cron fires at 23:00 UTC. The activity must NOT loop — it
+        re-rolls at most `_GENERATION_MAX_ATTEMPTS` times then raises so the
+        assign_chores caller drops (skips) the opportunity."""
+        import json
+        result, exc, n = _run_generation(json.dumps({
+            "module_name": "wrong_time_chore",
+            "workflow_class_name": "WrongTimeChoreWorkflow",
+            "user_facing_description": (
+                "Every day at 09:00 UTC, this chore drafts your day plan and "
+                "highlights anything that needs your attention this morning."
+            ),
+            "schedule": "0 23 * * *",  # wrong hour, daily DOW already wildcard
+            "python_source": _good_python_source(),
+        }))
+        assert exc is not None, "irreparable mismatch must raise so caller skips it"
+        # Bounded: never more than the cap — proves it cannot loop forever.
+        assert n == _GENERATION_MAX_ATTEMPTS, (
+            f"re-rolls must be capped at {_GENERATION_MAX_ATTEMPTS}, got {n}"
+        )
+
+    def test_chores_stage_completes_with_one_invalid_chore(self):
+        """End-to-end at the assign_chores layer: when one generated chore is
+        irreparably invalid, _generate_chore_from_opportunity returns a
+        structured failure (does NOT raise) so the chores stage still
+        completes and the valid chores survive."""
+        from src.activities.assign_chores import _generate_chore_from_opportunity
+
+        async def fake_gen(opportunity, profile):
+            raise ChoreGenerationError("exhausted: schedule does not match")
+
+        async def run_it():
+            env = ActivityEnvironment()
+            with patch(
+                "src.activities.chore_generation.generate_chore_template_code",
+                side_effect=fake_gen,
+            ):
+                return await env.run(
+                    _generate_chore_from_opportunity,
+                    {"id": "opp-bad", "name": "Bad", "description": "x"},
+                    {"rhythm": {}},
+                )
+
+        result = asyncio.run(run_it())
+        assert result["ok"] is False
+        assert result["phase"] == "generate"
+        assert result["opportunity_id"] == "opp-bad"

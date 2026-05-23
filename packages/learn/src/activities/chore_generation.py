@@ -862,6 +862,67 @@ def _validate_cron_matches_description(
     return True, ""
 
 
+def _autocorrect_cron_dow_for_description(
+    cron: str,
+    description: str,
+) -> str | None:
+    """Coerce a wildcard cron day-of-week to match an unambiguous description.
+
+    BUG #181: Opus reliably emits a sensible minute/hour but leaves the
+    day-of-week as `*` even when its own `user_facing_description` clearly
+    promises "weekdays" / "weekends" / a named day. The semantic validator
+    (`_validate_cron_matches_description`) then rejects the envelope, the
+    generator re-rolls the LLM, and the chores stage hits StartToClose. Most
+    of these are trivially fixable: the firing time is right, only the DOW
+    field is too broad.
+
+    This deterministically fixes that one class — and ONLY that class:
+      * fires only when the cron's DOW field is the wildcard `*` (we never
+        overwrite an explicit DOW the LLM chose — that stays the validator's
+        call), and
+      * only when the description unambiguously implies a DOW restriction
+        (weekdays → `1-5`, weekends → `0,6`, a named day → that day).
+
+    Returns the corrected 5-field cron string, or None when there is nothing
+    safe to correct (daily/vague descriptions, non-wildcard DOW, unparseable
+    cron, or a named-day set we can't render). The minute/hour/day-of-month/
+    month fields are preserved verbatim; only the DOW field is rewritten.
+    """
+    if not isinstance(cron, str) or not isinstance(description, str):
+        return None
+    parts = cron.strip().split()
+    if len(parts) != 5:
+        return None
+    minute_f, hour_f, dom_f, mon_f, dow_f = parts
+    # Only fill in a wildcard DOW; never override an explicit choice.
+    if dow_f.strip() != "*":
+        return None
+
+    is_daily = _description_implies_daily(description)
+    is_weekdays = _description_implies_weekdays(description)
+    is_weekend = _description_implies_weekend(description)
+    named_days = _description_named_days(description)
+
+    new_dow: str | None = None
+    # Mirror the precedence in _validate_cron_matches_description: a daily
+    # phrase wants the wildcard we already have, so leave it alone.
+    if is_weekdays and not named_days:
+        new_dow = "1-5"
+    elif is_weekend and not named_days:
+        new_dow = "0,6"
+    elif named_days and not is_daily:
+        # Render the named days as a sorted comma list, normalising the
+        # 0/7 Sunday duplication down to a single 0.
+        normalized = {0 if d == 7 else d for d in named_days}
+        if not normalized:
+            return None
+        new_dow = ",".join(str(d) for d in sorted(normalized))
+
+    if new_dow is None:
+        return None
+    return f"{minute_f} {hour_f} {dom_f} {mon_f} {new_dow}"
+
+
 def _resolve_tenant_timezone() -> str:
     """Return the tenant's IANA timezone for description-cron comparison.
 
@@ -1055,6 +1116,27 @@ async def generate_chore_template_code(
             )
             last_error = "response was not valid JSON matching {module_name, workflow_class_name, python_source}"
             continue
+
+        # BUG #181: before validating, deterministically fix the most common
+        # cron-vs-description mismatch — a wildcard day-of-week when the
+        # description clearly says weekdays/weekends/a named day. This avoids
+        # an LLM re-roll (and the StartToClose timeout it caused) for the
+        # trivially-correctable case. Anything the autocorrect can't fix
+        # (e.g. a wrong firing HOUR) still falls through to the validator and
+        # the bounded retry loop below, so an irreparable chore is skipped
+        # rather than looped.
+        _sched = parsed.get("schedule")
+        if isinstance(_sched, str) and _sched.strip():
+            _ufd = parsed.get("user_facing_description")
+            if isinstance(_ufd, str) and _ufd.strip():
+                _fixed = _autocorrect_cron_dow_for_description(_sched, _ufd)
+                if _fixed is not None and _fixed != _sched.strip():
+                    logger.info(
+                        "chore_generation: autocorrected cron DOW %r -> %r "
+                        "to match description",
+                        _sched, _fixed,
+                    )
+                    parsed["schedule"] = _fixed
 
         ok, validation_err = _validate_envelope(parsed)
         if not ok:
