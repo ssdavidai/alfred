@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
+import { invalidateUserMdCache as _qualityInvalidateUserMd } from "../middleware/onboarding_quality_gate.js";
 
 // This route is a read/write surface for the principal's top-level workspace
 // markdown — SOUL.md, MEMORY.md plus the identity/operating files (USER,
@@ -152,6 +153,13 @@ export function registerWorkspaceRoutes(): void {
     fs.mkdirSync(destDir, { recursive: true });
     const filePath = path.join(destDir, params.filename);
     fs.writeFileSync(filePath, b.content, "utf-8");
+    // C-OB1 — USER.md is the allow-list source for the onboarding quality
+    // gate's org rule (a domain-name org passes only if USER.md mentions it).
+    // Bust the gate's USER.md cache here so a USER.md edit takes effect on
+    // the very next vault POST instead of waiting for the 60s TTL.
+    if (params.filename === "USER.md") {
+      _qualityInvalidateUserMd(VAULT_DIR);
+    }
     sendJson(res, 200, { filename: params.filename, message: "File saved" });
   });
 }

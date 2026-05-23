@@ -21,6 +21,13 @@ import { indexVaultWrite, removeFromVaultIndex, IGNORE_DIRS } from "../../db/vau
 // keep working — and so the reconciler and the walk endpoints can never drift.
 export { IGNORE_DIRS };
 import { assertCanonicalVaultPath } from "../../db/promotionContract.js";
+import {
+  shouldTrigger as _qualityShouldTrigger,
+  evaluateQuality as _qualityEvaluate,
+  recordRejection as _qualityRecordRejection,
+  recordAcceptance as _qualityRecordAcceptance,
+  invalidateUserMdCache as _qualityInvalidateUserMd,
+} from "../middleware/onboarding_quality_gate.js";
 
 // alfred-black mounts the vault as a named Docker volume (PLAN.md Part E),
 // bind-mounted into ctrl-api at /vault by default. VAULT_PATH overrides it.
@@ -733,7 +740,7 @@ export function registerVaultRoutes(): void {
   // --- WRITE OPERATIONS: keep docker-exec for safety (scope, logging) ---
 
   // Create vault record
-  addRoute("POST", "/api/v1/vault/records", async ({ res, body }) => {
+  addRoute("POST", "/api/v1/vault/records", async ({ req, res, body }) => {
     const b = body as Record<string, unknown> | undefined;
     if (!b || typeof b.type !== "string" || typeof b.name !== "string") {
       throw new ValidationError("type and name are required");
@@ -750,6 +757,67 @@ export function registerVaultRoutes(): void {
         ? nm
         : `${b.type as string}/${nm}.md`;
       assertCanonicalVaultPath(probePath);
+    }
+
+    // Onboarding promotion-quality gate (Contract C-OB1). Fires ONLY when
+    // the write is from onboarding (frontmatter.created_by ∈ allow-list, or
+    // X-Onboarding-Write: true header). Rejects low-quality records with
+    // 422 QUALITY_REJECTED + a suggestion field pointing at the correct
+    // destination. Every non-onboarding vault write passes straight through.
+    {
+      const contentStr = typeof b.content === "string" ? b.content : "";
+      const fieldsObj =
+        b.fields && typeof b.fields === "object" && !Array.isArray(b.fields)
+          ? (b.fields as Record<string, unknown>)
+          : {};
+      let parsedFm: Record<string, unknown> = {};
+      let parsedBody: string = "";
+      if (contentStr) {
+        const p = parseFrontmatter(contentStr);
+        parsedFm = p.frontmatter;
+        parsedBody = p.body;
+      }
+      // `fields` shadows individual frontmatter keys from `content` if both
+      // are present (the CLI write path uses `fields`).
+      const fm: Record<string, unknown> = { ...parsedFm, ...fieldsObj };
+      const createdBy =
+        typeof fm.created_by === "string" ? (fm.created_by as string) : null;
+      const onboardingHeader = req.headers["x-onboarding-write"] as
+        | string
+        | string[]
+        | undefined;
+      if (
+        _qualityShouldTrigger({
+          createdBy,
+          onboardingWriteHeader: onboardingHeader ?? null,
+        })
+      ) {
+        const verdict = _qualityEvaluate({
+          kind: b.type as string,
+          name: b.name as string,
+          frontmatter: fm,
+          body: parsedBody || contentStr || "",
+          vaultRoot: VAULT_PATH,
+        });
+        if (!verdict.ok) {
+          _qualityRecordRejection({
+            record_kind: b.type as string,
+            name: b.name as string,
+            reason: verdict.reason ?? "rejected",
+            suggestion: verdict.suggestion ?? "",
+          });
+          sendJson(res, 422, {
+            error: {
+              code: "QUALITY_REJECTED",
+              message: verdict.reason ?? "rejected by onboarding quality gate",
+              reason: verdict.reason ?? "",
+            },
+            suggestion: verdict.suggestion ?? "",
+          });
+          return;
+        }
+        _qualityRecordAcceptance();
+      }
     }
 
     // If raw content is provided, write the file directly
