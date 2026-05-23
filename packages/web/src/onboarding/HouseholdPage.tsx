@@ -1,10 +1,10 @@
 // /household — the editor seam after the first brief (#854).
 //
-// Adapted from /tmp/alfred-black-redesign/src/routes/household.tsx but wired
-// to live tenant data instead of the redesign's localStorage `getPrincipal()`
-// store:
-//
-//   • Standing rules ← getWorkspaceFile("RULES.md") + updateWorkspaceFile
+//   • Standing rules ← getVaultRecord({path:"RULES.md"}) + createVaultRecord.
+//     RULES.md is the *principal-facing* vault note (`type: note,
+//     subtype: standing_rules`), NOT the agent-facing AGENTS.md sentinel
+//     block at /api/v1/admin/workspace/RULES.md — the old workspace-files
+//     path 404'd and left /household stuck on "still composing".
 //   • Chores ← getChores / pauseChore / resumeChore / deleteChore
 //   • Matters ← getMattersIndex (M4 #859)
 
@@ -12,8 +12,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import {
   useQuery,
-  getWorkspaceFile,
-  updateWorkspaceFile,
+  getVaultRecord,
+  createVaultRecord,
   getChores,
   pauseChore,
   resumeChore,
@@ -29,6 +29,7 @@ import {
   SECTION_HEADING,
   type RulesSections,
 } from "./rulesEditorCore";
+import { composeRulesFile } from "./rulesFileCore";
 
 // ---------------------------------------------------------------------------
 // Section frame
@@ -52,14 +53,13 @@ function Section({
 }
 
 // ---------------------------------------------------------------------------
-// Standing rules — backed by RULES.md (C-OB2 schema).
-//
-// Lane II's onboarding pipeline composes RULES.md as 4 sections (sovereignty
-// / household / communication / decision). The editor parses that body via
-// `rulesEditorCore.parseRulesMarkdown`, renders one editable group per
-// section, and on "Save changes" re-serializes via `serializeRules` and
-// writes through `updateWorkspaceFile` — preserving the rest of the vault
-// record (frontmatter is handled by the ctrl-api workspace endpoint).
+// Standing rules — backed by vault/RULES.md (C-OB2 schema). The onboarding
+// pipeline writes a top-level vault note (`type: note, subtype:
+// standing_rules`) whose body is 4 sections (sovereignty / household /
+// communication / decision). The editor parses the body, renders one
+// editable group per section, and on Save re-serialises + upserts via
+// `createVaultRecord` — frontmatter from the existing record is preserved
+// verbatim, only the body is replaced.
 // ---------------------------------------------------------------------------
 
 const SECTION_PLACEHOLDER: Record<keyof RulesSections, string> = {
@@ -75,12 +75,18 @@ function emptySections(): RulesSections {
 
 function RulesSection() {
   const { data, isLoading, isError, error, refetch } = useQuery(
-    getWorkspaceFile,
-    { filename: "RULES.md" },
+    getVaultRecord,
+    { path: "RULES.md" },
     { refetchInterval: false, retry: false },
   );
 
-  const initial = ((data as any)?.content ?? "") as string;
+  // GET /api/v1/vault/records/:path returns `{path, frontmatter, body}`.
+  // `body` is the markdown sans frontmatter — what `parseRulesMarkdown`
+  // expects. Fall back to `.content` only as defence in depth.
+  const initial = ((data as any)?.body ?? (data as any)?.content ?? "") as string;
+  const initialFrontmatter = ((data as any)?.frontmatter ?? null) as
+    | Record<string, unknown>
+    | null;
   const [sections, setSections] = useState<RulesSections>(emptySections);
   const [drafts, setDrafts] = useState<Record<keyof RulesSections, string>>({
     sovereignty: "",
@@ -136,19 +142,23 @@ function RulesSection() {
   const saveAll = async () => {
     setSaving(true);
     try {
-      // The ctrl-api workspace endpoint preserves the rest of the vault
-      // record (subtype, created, created_by, updated_at) — we only replace
-      // the body. `serializeRules` always emits the canonical `# Standing
-      // Rules` header + the populated sections in canonical order.
-      await updateWorkspaceFile({
-        filename: "RULES.md",
-        content: serializeRules(sections),
+      // Preserve the existing frontmatter; re-serialise the body. ctrl-api
+      // accepts a `name` ending in `.md` as a vault-relative write path,
+      // so "RULES.md" lands at vault/RULES.md.
+      const fullContent = composeRulesFile(
+        initialFrontmatter,
+        serializeRules(sections),
+      );
+      await createVaultRecord({
+        type: "note",
+        name: "RULES.md",
+        content: fullContent,
       });
       await refetch();
       setDirty(false);
       setSavedAt(Date.now());
     } catch (err) {
-      console.error("updateWorkspaceFile(RULES.md) failed:", err);
+      console.error("createVaultRecord(RULES.md) failed:", err);
     } finally {
       setSaving(false);
     }
