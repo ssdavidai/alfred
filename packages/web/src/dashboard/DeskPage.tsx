@@ -59,6 +59,7 @@ import {
 import { rowReversible } from "./deskLedgerCore";
 import { useToast } from "../client/hooks/use-toast";
 import DeskOnboardingGate from "./DeskOnboardingGate";
+import HermesAuthBanner from "./HermesAuthBanner";
 import {
   extractDayOneMarkers,
   isDayOneIntroduction,
@@ -729,6 +730,7 @@ function DeskContent() {
 
   return (
     <Frame>
+      <HermesAuthBanner />
       <section className="mx-auto max-w-[1180px] px-8 py-16">
         <PageOverture
           eyebrow="The Desk"

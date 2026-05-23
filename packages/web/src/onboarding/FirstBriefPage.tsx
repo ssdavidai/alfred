@@ -15,6 +15,7 @@ import { useQuery, getFirstBrief } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { RitualNav } from "../client/components/ab/RitualNav";
 import { Markdown } from "../client/components/ab/Markdown";
+import HermesAuthBanner from "../dashboard/HermesAuthBanner";
 
 function todayLong(): string {
   return new Date().toLocaleDateString("en-GB", {
@@ -39,6 +40,7 @@ export default function FirstBriefPage() {
 
   return (
     <Frame>
+      <HermesAuthBanner />
       <section className="mx-auto max-w-[860px] px-8 py-14">
         <div className="flex items-baseline justify-between gap-8 mb-8">
           <div
