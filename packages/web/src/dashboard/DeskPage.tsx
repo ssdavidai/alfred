@@ -59,6 +59,10 @@ import {
 import { rowReversible } from "./deskLedgerCore";
 import { useToast } from "../client/hooks/use-toast";
 import DeskOnboardingGate from "./DeskOnboardingGate";
+import {
+  extractDayOneMarkers,
+  isDayOneIntroduction,
+} from "./dayOneBadgeCore";
 
 // --------------------------------------------------------------------------
 // Decision row — unified shape across the three source queries.
@@ -95,6 +99,12 @@ interface Decision {
   // queue under "Fresh / Aging / Stale" so origin-old cards drift below
   // the fold instead of clogging the active surface.
   decayBand?: "fresh" | "aging" | "stale" | null;
+  // C-OB3 — the onboarding pipeline seeds a small set of NA records the
+  // first time a principal lands on /desk (frontmatter.source =
+  // "onboarding_seed" + tags includes "day_one"). When both markers are
+  // present we render a subtle "Day-1 introduction" pill so the
+  // principal understands the card is a starter, not a fresh signal.
+  dayOne?: boolean;
 }
 
 /** Extract a matter id from a frontmatter value. Accepts wikilinks
@@ -371,6 +381,10 @@ function DeskContent() {
         decayBandRaw === "fresh" || decayBandRaw === "aging" || decayBandRaw === "stale"
           ? (decayBandRaw as "fresh" | "aging" | "stale")
           : null;
+      // C-OB3 — onboarding-seeded day-one cards earn a subtle pill on
+      // the headline. Pull the markers off either the top-level fields
+      // or the frontmatter map (both shapes exist in ctrl-api).
+      const dayOne = isDayOneIntroduction(extractDayOneMarkers(r));
       out.push({
         id: `na:${id}`,
         source: "needs_attention",
@@ -393,6 +407,7 @@ function DeskContent() {
         sourceSignal,
         matchedInstinct,
         decayBand,
+        dayOne,
       });
     }
     const apps = Array.isArray(approvals?.results)
@@ -1267,6 +1282,31 @@ function actionSubmitText(a: Action): string {
   }
 }
 
+/** C-OB3 — small muted pill rendered next to the headline on cards the
+ *  onboarding pipeline seeded as introductions. The tooltip explains
+ *  the card is a starter raised from the principal's onboarding
+ *  analysis; nothing else changes about the card's behaviour. */
+function DayOneBadge() {
+  return (
+    <span
+      className="font-mono uppercase tracking-[0.22em]"
+      style={{
+        fontSize: 10,
+        padding: "3px 8px",
+        marginLeft: 12,
+        border: "1px solid var(--rule)",
+        color: "var(--marginalia)",
+        whiteSpace: "nowrap",
+        verticalAlign: "middle",
+        display: "inline-block",
+      }}
+      title="Alfred raised this from your onboarding analysis. It's a starter — feel free to dismiss."
+    >
+      Day-1 introduction
+    </span>
+  );
+}
+
 function DecisionCard({
   d, featured = false, busy, open, draft, setDraft,
   onOpen, onCancel, onSubmit, onNoise,
@@ -1375,6 +1415,7 @@ function DecisionCard({
           style={{ fontSize: "clamp(40px, 5vw, 64px)" }}
         >
           {d.headline}
+          {d.dayOne && <DayOneBadge />}
         </h2>
         {d.why && (
           <p
@@ -1416,6 +1457,7 @@ function DecisionCard({
         style={{ fontSize: 22 }}
       >
         {d.headline}
+        {d.dayOne && <DayOneBadge />}
       </h2>
       {d.why && (
         <p
