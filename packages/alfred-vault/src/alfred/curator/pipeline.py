@@ -23,6 +23,7 @@ from alfred.vault.ops import VaultError, vault_create, vault_edit, vault_read
 from .backends import VAULT_CLI_REFERENCE
 from .backends.openclaw import OpenClawBackend, _clear_agent_sessions, sync_workspace_claude_md
 from .config import CuratorConfig
+from .note_filter import _suppress_per_service_summary
 from .utils import get_logger
 
 log = get_logger(__name__)
@@ -304,6 +305,24 @@ async def _stage1_analyze(
             note_path = _find_created_note(stdout, session_path)
             if not note_path:
                 log.warning("pipeline.s1_no_note_created", file=inbox_filename)
+            else:
+                # Suppress per-service-sender summary notes ("GitHub Activity
+                # Summary", "Canva Service Emails", ...). These are
+                # bookkeeping aggregates, not principal content (CLAUDE.md
+                # promotion contract). Delete the freshly-written file and
+                # clear `note_path` so interlink/enrich skip it.
+                suppressed = _suppress_per_service_summary(
+                    vault_path=config.vault.vault_path,
+                    note_path=note_path,
+                )
+                if not suppressed:
+                    log.info(
+                        "pipeline.s1_note_suppressed",
+                        file=inbox_filename,
+                        note_path=note_path,
+                        reason="per_service_sender_summary",
+                    )
+                note_path = suppressed
 
         # Try to read the entity manifest from the temp file first.
         # The manifest_path uses /alfred-data/ (openclaw-workers mount point),
