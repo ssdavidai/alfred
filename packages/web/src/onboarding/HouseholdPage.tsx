@@ -22,6 +22,13 @@ import {
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import { rulesViewState } from "./rulesEmptyStateCore";
+import {
+  parseRulesMarkdown,
+  serializeRules,
+  SECTION_ORDER,
+  SECTION_HEADING,
+  type RulesSections,
+} from "./rulesEditorCore";
 
 // ---------------------------------------------------------------------------
 // Section frame
@@ -45,13 +52,26 @@ function Section({
 }
 
 // ---------------------------------------------------------------------------
-// Standing rules — backed by RULES.md
+// Standing rules — backed by RULES.md (C-OB2 schema).
 //
-// We treat each non-empty line of RULES.md as one "rule" entry. Edits, line
-// adds, and removals are serialised back to the file with a single
-// updateWorkspaceFile call. This matches how the legacy AGENTS/SOUL editors
-// already operate (whole-file replace; no patch).
+// Lane II's onboarding pipeline composes RULES.md as 4 sections (sovereignty
+// / household / communication / decision). The editor parses that body via
+// `rulesEditorCore.parseRulesMarkdown`, renders one editable group per
+// section, and on "Save changes" re-serializes via `serializeRules` and
+// writes through `updateWorkspaceFile` — preserving the rest of the vault
+// record (frontmatter is handled by the ctrl-api workspace endpoint).
 // ---------------------------------------------------------------------------
+
+const SECTION_PLACEHOLDER: Record<keyof RulesSections, string> = {
+  sovereignty: "Add a personal sovereignty rule.",
+  household: "Add a household rule.",
+  communication: "Add a communication rule.",
+  decision: "Add a decision rule.",
+};
+
+function emptySections(): RulesSections {
+  return { sovereignty: [], household: [], communication: [], decision: [] };
+}
 
 function RulesSection() {
   const { data, isLoading, isError, error, refetch } = useQuery(
@@ -61,12 +81,17 @@ function RulesSection() {
   );
 
   const initial = ((data as any)?.content ?? "") as string;
-  const [rules, setRules] = useState<string[]>([]);
+  const [sections, setSections] = useState<RulesSections>(emptySections);
+  const [drafts, setDrafts] = useState<Record<keyof RulesSections, string>>({
+    sovereignty: "",
+    household: "",
+    communication: "",
+    decision: "",
+  });
   const [seeded, setSeeded] = useState(false);
-  const [editingIdx, setEditingIdx] = useState<number | null>(null);
-  const [draft, setDraft] = useState("");
-  const [newRule, setNewRule] = useState("");
+  const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
 
   // C-OB2 — on a fresh tenant RULES.md doesn't exist yet (the onboarding
   // pipeline writes it after the first brief). A 404 from getWorkspaceFile
@@ -77,46 +102,56 @@ function RulesSection() {
   useEffect(() => {
     if (seeded) return;
     if (data === undefined) return; // still loading
-    const parsed = parseRules(initial);
-    setRules(parsed);
+    setSections(parseRulesMarkdown(initial));
     setSeeded(true);
   }, [data, initial, seeded]);
 
-  const persist = async (next: string[]) => {
+  const updateSection = (key: keyof RulesSections, next: string[]) => {
+    setSections((prev) => ({ ...prev, [key]: next }));
+    setDirty(true);
+    setSavedAt(null);
+  };
+
+  const editRule = (key: keyof RulesSections, idx: number, text: string) => {
+    updateSection(
+      key,
+      sections[key].map((r, i) => (i === idx ? text : r)),
+    );
+  };
+
+  const removeRule = (key: keyof RulesSections, idx: number) => {
+    updateSection(
+      key,
+      sections[key].filter((_, i) => i !== idx),
+    );
+  };
+
+  const addRule = (key: keyof RulesSections) => {
+    const text = drafts[key].trim();
+    if (!text) return;
+    updateSection(key, [...sections[key], text]);
+    setDrafts((prev) => ({ ...prev, [key]: "" }));
+  };
+
+  const saveAll = async () => {
     setSaving(true);
     try {
+      // The ctrl-api workspace endpoint preserves the rest of the vault
+      // record (subtype, created, created_by, updated_at) — we only replace
+      // the body. `serializeRules` always emits the canonical `# Standing
+      // Rules` header + the populated sections in canonical order.
       await updateWorkspaceFile({
         filename: "RULES.md",
-        content: serializeRules(next),
+        content: serializeRules(sections),
       });
       await refetch();
+      setDirty(false);
+      setSavedAt(Date.now());
     } catch (err) {
       console.error("updateWorkspaceFile(RULES.md) failed:", err);
     } finally {
       setSaving(false);
     }
-  };
-
-  const addRule = async () => {
-    const trimmed = newRule.trim();
-    if (!trimmed) return;
-    const next = [...rules, trimmed];
-    setRules(next);
-    setNewRule("");
-    await persist(next);
-  };
-
-  const editRule = async (i: number, text: string) => {
-    const next = rules.map((r, idx) => (idx === i ? text : r));
-    setRules(next);
-    setEditingIdx(null);
-    await persist(next);
-  };
-
-  const removeRule = async (i: number) => {
-    const next = rules.filter((_, idx) => idx !== i);
-    setRules(next);
-    await persist(next);
   };
 
   const title = view === "composing" ? "Standing rules — composing" : "Standing rules";
@@ -165,111 +200,100 @@ function RulesSection() {
           A moment.
         </p>
       ) : (
-        <>
-          {rules.length === 0 ? (
-            <p
-              className="font-body italic text-[15px] mb-6"
-              style={{ color: "var(--marginalia)" }}
-            >
-              No standing rules yet. Add one below — Alfred will keep it.
-            </p>
-          ) : (
-            <ul className="border-t border-rule mb-6">
-              {rules.map((r, i) => (
-                <li key={i} className="border-b border-rule py-4">
-                  {editingIdx === i ? (
-                    <input
-                      autoFocus
-                      defaultValue={r}
-                      onChange={(e) => setDraft(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") editRule(i, draft || r);
-                        if (e.key === "Escape") setEditingIdx(null);
-                      }}
-                      onBlur={() => editRule(i, draft || r)}
-                      className="w-full bg-transparent outline-none border-b font-display italic text-[20px] pb-1"
-                      style={{ borderColor: "var(--brass)" }}
-                    />
-                  ) : (
-                    <div className="grid grid-cols-[1fr_auto] gap-4 items-baseline">
-                      <div className="font-body text-[18px] leading-snug">
-                        {r}
-                      </div>
-                      <div className="font-mono text-[11px] uppercase tracking-[0.22em] flex gap-2 whitespace-nowrap">
+        <div className="space-y-10">
+          {SECTION_ORDER.map((key) => {
+            const items = sections[key];
+            const heading = SECTION_HEADING[key];
+            return (
+              <div key={key}>
+                <h3
+                  className="font-mono text-[11px] uppercase tracking-[0.22em] mb-3"
+                  style={{ color: "var(--brass)" }}
+                >
+                  {heading}
+                </h3>
+                {items.length === 0 ? (
+                  <p
+                    className="font-body italic text-[14px] mb-3"
+                    style={{ color: "var(--marginalia)" }}
+                  >
+                    No rules in this section yet. Add one below.
+                  </p>
+                ) : (
+                  <ul className="border-t border-rule mb-3">
+                    {items.map((rule, idx) => (
+                      <li
+                        key={idx}
+                        className="border-b border-rule py-3 grid grid-cols-[1fr_auto] gap-3 items-baseline"
+                      >
+                        <input
+                          value={rule}
+                          onChange={(e) => editRule(key, idx, e.target.value)}
+                          className="w-full bg-transparent outline-none font-body text-[16px] leading-snug"
+                          style={{ color: "var(--ink)" }}
+                        />
                         <button
-                          onClick={() => {
-                            setEditingIdx(i);
-                            setDraft(r);
-                          }}
-                          className="btn-ghost"
-                        >
-                          Edit
-                        </button>
-                        <button
-                          onClick={() => removeRule(i)}
-                          className="btn-ghost"
+                          onClick={() => removeRule(key, idx)}
+                          className="btn-ghost font-mono text-[11px] uppercase tracking-[0.22em]"
+                          disabled={saving}
                         >
                           Remove
                         </button>
-                      </div>
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="grid grid-cols-[1fr_auto] gap-3 items-baseline">
+                  <input
+                    value={drafts[key]}
+                    onChange={(e) =>
+                      setDrafts((prev) => ({ ...prev, [key]: e.target.value }))
+                    }
+                    placeholder={SECTION_PLACEHOLDER[key]}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") addRule(key);
+                    }}
+                    className="w-full bg-transparent outline-none border-b font-display italic text-[18px] pb-1"
+                    style={{ borderColor: "var(--rule)" }}
+                  />
+                  <button
+                    onClick={() => addRule(key)}
+                    disabled={saving || !drafts[key].trim()}
+                    className="btn-ghost font-mono text-[11px] uppercase tracking-[0.22em]"
+                    style={{ color: "var(--brass)", borderColor: "var(--brass)" }}
+                  >
+                    Add rule →
+                  </button>
+                </div>
+              </div>
+            );
+          })}
 
-          <div className="grid grid-cols-[1fr_auto] gap-3 items-baseline">
-            <input
-              value={newRule}
-              onChange={(e) => setNewRule(e.target.value)}
-              placeholder="Add a standing rule for Alfred to keep."
-              onKeyDown={(e) => {
-                if (e.key === "Enter") addRule();
-              }}
-              className="w-full bg-transparent outline-none border-b font-display italic text-[20px] pb-1"
-              style={{ borderColor: "var(--rule)" }}
-            />
-            <button
-              onClick={addRule}
-              disabled={saving || !newRule.trim()}
-              className="btn-ghost"
-              style={{ color: "var(--brass)", borderColor: "var(--brass)" }}
+          <div className="border-t border-rule pt-4 flex items-baseline justify-between">
+            <span
+              className="font-body italic text-[13px]"
+              style={{ color: "var(--marginalia)" }}
             >
-              Add →
+              {saving
+                ? "Saving…"
+                : dirty
+                  ? "Unsaved changes."
+                  : savedAt
+                    ? "Saved."
+                    : ""}
+            </span>
+            <button
+              onClick={saveAll}
+              disabled={saving || !dirty}
+              className="btn-brass"
+            >
+              Save changes
             </button>
           </div>
-        </>
+        </div>
       )}
     </Section>
   );
-}
-
-// Convert RULES.md content (markdown bullet list, with or without intro) to
-// a flat array of rule strings. We accept lines that start with `- `, `* `,
-// or are non-empty plain text — anything starting with `#` is treated as a
-// section heading and ignored.
-function parseRules(md: string): string[] {
-  const out: string[] = [];
-  for (const raw of md.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line) continue;
-    if (line.startsWith("#")) continue;
-    if (/^[-*]\s+/.test(line)) {
-      out.push(line.replace(/^[-*]\s+/, ""));
-    } else {
-      out.push(line);
-    }
-  }
-  return out;
-}
-
-function serializeRules(rules: string[]): string {
-  if (rules.length === 0) return "# RULES.md\n";
-  const lines = ["# RULES.md", ""];
-  for (const r of rules) lines.push(`- ${r}`);
-  lines.push("");
-  return lines.join("\n");
 }
 
 // ---------------------------------------------------------------------------
