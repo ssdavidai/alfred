@@ -353,6 +353,25 @@ mcp_servers:
     timeout: 120
     connect_timeout: 60
 
+{%- if is_main %}
+# =============================================================================
+# Plugins (main profile only)
+# =============================================================================
+# hermes-lcm: lossless cross-session context engine. Replaces the default
+# summarising context strategy with the LCM engine so the user-facing
+# Alfred reloads prior session context without lossy compression. Plugin
+# source is baked into the image at /opt/hermes-lcm (pinned SHA in
+# Dockerfile) and supervisor.sh copies it into
+# $HERMES_HOME/profiles/main/plugins/hermes-lcm at boot. Workers/heavy do
+# not enable this — they are stateless / capped-concurrency.
+plugins:
+  enabled:
+    - hermes-lcm
+
+context:
+  engine: lcm
+{%- endif %}
+
 # =============================================================================
 # Display
 # =============================================================================

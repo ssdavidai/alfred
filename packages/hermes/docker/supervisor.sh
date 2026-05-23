@@ -171,6 +171,18 @@ fi
 #       Nous identity marker (`You are Hermes Agent`).
 # A hand-edited $HERMES_HOME/SOUL.md that is neither stock nor smaller
 # than the main-profile copy is preserved untouched.
+# Install the hermes-lcm plugin into the main profile (main only — workers
+# + heavy are stateless / capped-concurrency and LCM has no value there).
+# The plugin source is baked at /opt/hermes-lcm by the Dockerfile (pinned
+# upstream SHA); we copy it into the persisted profile dir so Hermes
+# discovers it under $HERMES_HOME/profiles/main/plugins/. Idempotent —
+# `[[ ! -e ... ]]` guard makes re-runs a no-op once installed.
+if [[ -d /opt/hermes-lcm && ! -e "$HERMES_HOME/profiles/main/plugins/hermes-lcm" ]]; then
+    mkdir -p "$HERMES_HOME/profiles/main/plugins"
+    cp -r /opt/hermes-lcm "$HERMES_HOME/profiles/main/plugins/hermes-lcm"
+    log "installed hermes-lcm plugin -> \$HERMES_HOME/profiles/main/plugins/hermes-lcm"
+fi
+
 if [[ -s "$HERMES_HOME/profiles/main/SOUL.md" ]]; then
     MAIN_SOUL_SIZE=$(stat -c%s "$HERMES_HOME/profiles/main/SOUL.md" 2>/dev/null || echo 0)
     HOME_SOUL_SIZE=0

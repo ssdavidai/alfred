@@ -98,6 +98,21 @@ RUN pip install --no-cache-dir \
     && hermes --version || true
 
 # =============================================================================
+# Bake the hermes-lcm plugin (lossless cross-session context engine).
+# =============================================================================
+# The `stephenschoettler/hermes-lcm` plugin enables Hermes' LCM context engine
+# for the user-facing main profile (lossless reload of prior session context,
+# vs the default summariser). Pinned to upstream tag v0.11.1 — never `main` /
+# no pin, so the build is reproducible and a supply-chain hijack of the
+# upstream branch cannot land silently. The plugin lives at /opt/hermes-lcm
+# in the image; supervisor.sh copies it into
+# $HERMES_HOME/profiles/main/plugins/hermes-lcm at first boot (main only).
+ARG HERMES_LCM_REF=2d108b759e33b72427350dffcb77281f7f61baf9
+RUN git clone https://github.com/stephenschoettler/hermes-lcm /opt/hermes-lcm \
+    && git -C /opt/hermes-lcm checkout "${HERMES_LCM_REF}" \
+    && rm -rf /opt/hermes-lcm/.git
+
+# =============================================================================
 # Bake the MCP bundle.
 # =============================================================================
 # The 5-app stdio bundle + its node_modules, plus the ctrl-server.mjs HTTP
