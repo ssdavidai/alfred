@@ -921,6 +921,59 @@ _ORG_TLD_RE = _re_person_filter.compile(
 )
 
 
+# Gap 3 — deterministic facts → org extraction. Live 2026-05-23: Pass B
+# (LLM) timed out at 180s, ``org: 0`` despite 1635 facts naming NeoTerra/
+# Stylers/Wise/Mercury/Gránit Bank/Ugly Code LLC/Szabó-Stubán Kft. Regex
+# pass extracts these without an LLM call so must-have orgs materialise
+# even when Pass B degrades.
+_ORG_SUFFIX_WORDS = (
+    "Kft", "Bt", "Zrt", "Nyrt",  # Hungarian corporate forms
+    "Ltd", "LLC", "Inc", "Corp", "Co", "GmbH", "AG", "SA", "PLC",
+    "Group", "Bank", "Property", "Properties", "Holdings", "Holding",
+    "Solutions", "Capital", "Ventures", "Studios", "Labs", "Partners",
+    "Trust", "Foundation", "Business",
+)
+# 0-3 leading Title-Case tokens (Unicode-safe — [A-ZÀ-Ý] covers 'Á','Ü')
+# + required company-shape suffix.
+_ORG_NAME_RE = _re_person_filter.compile(
+    r"(?:(?<![A-Za-z0-9])(?:[A-ZÀ-Ý][\w'’\-]{1,}\s+){0,3}"
+    rf"(?:{'|'.join(_ORG_SUFFIX_WORDS)})\.?)", _re_person_filter.UNICODE,
+)
+
+
+def _extract_org_candidates_from_facts(
+    facts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Walk ``facts`` → org candidates. Deduped (case-insensitive),
+    gated through ``_org_name_is_plausible``. Items are
+    ``{"name", "description", "source": "facts"}``."""
+    if not facts:
+        return []
+    facts_corpus = "\n".join(
+        str(f.get("fact", "")).strip()
+        for f in facts if isinstance(f, dict)
+    )
+    seen: dict[str, dict[str, Any]] = {}
+    for f in facts:
+        if not isinstance(f, dict):
+            continue
+        text = str(f.get("fact", "")).strip()
+        if not text:
+            continue
+        for raw in _ORG_NAME_RE.findall(text):
+            name = " ".join((raw or "").split()).rstrip(".,;:")
+            # Bare suffix without leading proper-name tokens isn't an org.
+            if not name or name in _ORG_SUFFIX_WORDS:
+                continue
+            if not _org_name_is_plausible(name, facts_corpus):
+                continue
+            key = name.casefold()
+            if key not in seen:
+                seen[key] = {"name": name, "description": text,
+                             "source": "facts"}
+    return list(seen.values())
+
+
 def _org_name_is_plausible(name: str, facts_corpus: str) -> bool:
     """C-OB1 org gate.
 
@@ -1313,6 +1366,42 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
                             etype, name, exc,
                         )
 
+        # Pass A.5 (Gap 3): deterministic facts → orgs. Writes must-have
+        # org records BEFORE Pass B so a 180s timeout doesn't leave
+        # the vault with org: 0.
+        facts_orgs: list[dict[str, Any]] = []
+        if facts:
+            try:
+                facts_orgs = _extract_org_candidates_from_facts(facts)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("materialize: Pass A.5 extract failed: %s", exc)
+        if facts_orgs:
+            logger.info(
+                "materialize: Pass A.5 extracted %d org(s) from facts",
+                len(facts_orgs),
+            )
+            org_listing = await _ensure_listing("org")
+            for cand in facts_orgs:
+                name = cand.get("name") or ""
+                try:
+                    outcome = await _create_or_merge_entity(
+                        client, record_type="org", name=name,
+                        backlinks=[],
+                        description=cand.get("description") or "",
+                        source_note=(
+                            "_Seeded during onboarding from a fact "
+                            "naming this organization._"
+                        ),
+                        existing_fm=org_listing,
+                        facts_corpus=facts_corpus,
+                    )
+                    if outcome == "created":
+                        seeded += 1
+                    activity.heartbeat(f"materialize(facts): org/{name}")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "materialize: Pass A.5 org/%s failed: %s", name, exc)
+
         # ---- Pass B: seed the broader fact corpus (LLM-gated) -----------
         if facts and _kg_seed_enabled():
             cap = _kg_seed_cap()
@@ -1322,8 +1411,12 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
                 # MCP-tooled agent that would try to CREATE these records itself
                 # and trip same_tool_failure_halt, returning a meta-explanation
                 # instead of JSON. _call_llm returns the entities JSON we ask for.
+                # Shorter total_timeout (90s, down from the default 600s) so
+                # the activity degrades-and-continues faster when the LLM call
+                # times out — the must-have orgs are already written by Pass
+                # A.5, so Pass B is enhancement, not blocking.
                 raw = await _call_llm(
-                    prompt, max_tokens=8192,
+                    prompt, max_tokens=8192, total_timeout=90.0,
                     heartbeat_message="materialize: Pass B corpus entity extraction",
                 )
                 parsed = _parse_json_with_key(raw, "entities")

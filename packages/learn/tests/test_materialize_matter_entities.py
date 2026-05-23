@@ -128,7 +128,7 @@ def _install_passB(monkeypatch, fake, facts, entities):
         lambda _p: {"facts": facts},
     )
 
-    async def fake_llm(prompt, max_tokens=8192, heartbeat_message=""):
+    async def fake_llm(prompt, max_tokens=8192, heartbeat_message="", **_kw):
         import json
         return json.dumps({"entities": entities})
 
