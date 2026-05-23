@@ -152,6 +152,42 @@ if [[ -f "$MAIN_AUTH" && -s "$MAIN_AUTH" ]]; then
     done
 fi
 
+# Consolidate the Alfred-personalised SOUL.md to the file Hermes actually
+# reads at gateway boot. Per the Hermes docs
+# (https://hermes-agent.nousresearch.com/docs/user-guide/features/personality)
+# the persona is loaded from `$HERMES_HOME/SOUL.md` — a single global file,
+# NOT per-profile copies. The init container's step 2g lays the personalised
+# SOUL into `$HERMES_HOME/profiles/main/SOUL.md`, but Hermes never reads it
+# from there. Without this consolidation the live agent boots with the
+# stock Nous identity ("You are Hermes Agent…") regardless of how rich the
+# main profile's SOUL.md is.
+#
+# Reasoning: `main` is the user-facing Alfred profile — its SOUL is the
+# right one to serve as the global persona.
+#
+# Guard: non-destructive. We overwrite ONLY if
+#   (a) the source is real and non-trivial (>200 bytes), AND
+#   (b) the destination is missing, OR smaller, OR contains the stock
+#       Nous identity marker (`You are Hermes Agent`).
+# A hand-edited $HERMES_HOME/SOUL.md that is neither stock nor smaller
+# than the main-profile copy is preserved untouched.
+if [[ -s "$HERMES_HOME/profiles/main/SOUL.md" ]]; then
+    MAIN_SOUL_SIZE=$(stat -c%s "$HERMES_HOME/profiles/main/SOUL.md" 2>/dev/null || echo 0)
+    HOME_SOUL_SIZE=0
+    [[ -f "$HERMES_HOME/SOUL.md" ]] && HOME_SOUL_SIZE=$(stat -c%s "$HERMES_HOME/SOUL.md" 2>/dev/null || echo 0)
+    HOME_SOUL_IS_STOCK=0
+    if [[ -f "$HERMES_HOME/SOUL.md" ]] && grep -q "You are Hermes Agent" "$HERMES_HOME/SOUL.md" 2>/dev/null; then
+        HOME_SOUL_IS_STOCK=1
+    fi
+    if (( MAIN_SOUL_SIZE > 200 )) && \
+       { [[ ! -f "$HERMES_HOME/SOUL.md" ]] \
+         || (( HOME_SOUL_SIZE < MAIN_SOUL_SIZE )) \
+         || (( HOME_SOUL_IS_STOCK == 1 )); }; then
+        cp "$HERMES_HOME/profiles/main/SOUL.md" "$HERMES_HOME/SOUL.md"
+        log "consolidated SOUL.md from profiles/main -> \$HERMES_HOME/SOUL.md (${MAIN_SOUL_SIZE} bytes)"
+    fi
+fi
+
 # Launch the three Hermes gateways. Each `gateway run` owns its profile's
 # OpenAI-compatible API server, bound to the canonical port (18789 main /
 # 18790 workers / 18791 heavy) on 0.0.0.0 — callers reach the /v1 API
