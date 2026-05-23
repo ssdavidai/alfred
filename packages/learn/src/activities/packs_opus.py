@@ -884,6 +884,41 @@ def _dedupe_truncated_persons(
     return None
 
 
+# ---------------------------------------------------------------------------
+# C-OB1 org filter — bare-domain org names must be grounded in the facts.
+# ---------------------------------------------------------------------------
+# Live evidence: the only org the 2026-05-23 onboarding materialised was
+# ``org/github.com.md``. The matter pack emits ``[[org/github.com]]`` from
+# the curator-discovered sender domain, and the materialise stage walked
+# the wikilink without checking whether the name was a real company.
+# This helper draws the line at "is this string in onboard.facts?".
+
+_ORG_TLD_RE = _re_person_filter.compile(
+    r"\.(com|io|net|org|ai|co|so|hu|uk|de|us|app|dev)\b",
+    _re_person_filter.IGNORECASE,
+)
+
+
+def _org_name_is_plausible(name: str, facts_corpus: str) -> bool:
+    """C-OB1 org gate.
+
+    * A name with a TLD substring (``github.com``, ``stripe.io``) is
+      allowed ONLY if the same string appears verbatim (case-insensitive)
+      in ``facts_corpus`` — proves the principal's facts use this string
+      as the org's surface form.
+    * A non-TLD proper name (``NeoTerra Property Group``, ``Acme Co``)
+      is allowed unconditionally — proper-name pass-through.
+    * An empty/whitespace name is rejected.
+    """
+    s = (name or "").strip()
+    if not s:
+        return False
+    if _ORG_TLD_RE.search(s):
+        # Domain-shaped: require literal grounding in the facts corpus.
+        return s.casefold() in (facts_corpus or "").casefold()
+    return True
+
+
 async def _create_or_merge_entity(
     client: VaultClient,
     *,
@@ -897,6 +932,7 @@ async def _create_or_merge_entity(
     aliases: list[str] | None = None,
     source_note: str = "",
     existing_fm: dict[str, dict[str, Any]] | None = None,
+    facts_corpus: str = "",
 ) -> str:
     """Idempotent create-or-merge for one entity.
 
@@ -914,6 +950,10 @@ async def _create_or_merge_entity(
     ``_is_plausible_human_name`` is dropped (``"skipped"``). A candidate
     that's a tokenwise prefix/truncation of an existing person collapses
     onto the canonical (longer) name via ``_dedupe_truncated_persons``.
+
+    C-OB1 org filter: a domain-shaped org name must appear verbatim in
+    ``facts_corpus`` or it is dropped (the live ``org/github.com`` junk).
+    A proper-name org passes unconditionally.
     """
     norm = _normalize_entity_name(name)
     if not norm:
@@ -942,6 +982,13 @@ async def _create_or_merge_entity(
                 norm = _normalize_entity_name(canonical)
                 if not norm:
                     return "skipped"
+    # C-OB1 org gate: reject a TLD-shaped name that isn't in the facts.
+    if record_type == "org" and not _org_name_is_plausible(norm, facts_corpus):
+        logger.info(
+            "materialize: dropping domain-shaped org %r "
+            "(C-OB1: not in facts_corpus)", norm,
+        )
+        return "skipped"
     cf = norm.casefold()
     cached = existing_fm if existing_fm is not None else None
     if cached is not None:
@@ -1003,6 +1050,7 @@ async def _ensure_org_for_person(
     person_name: str,
     backlinks: list[str],
     listing: dict[str, dict[str, Any]],
+    facts_corpus: str = "",
 ) -> bool:
     """B9: symmetrically materialise the org named by a person→org tie.
 
@@ -1011,6 +1059,10 @@ async def _ensure_org_for_person(
     but no org record unless the org also happened to be listed as a
     standalone entity. This create-or-merges that org so the edge resolves.
     Returns True iff a NEW org record was created.
+
+    ``facts_corpus`` is passed through to the C-OB1 org filter so a
+    person→org tie carrying a bare domain (``[[org/github.com]]``) is
+    dropped just like a standalone domain org would be.
     """
     org_name = _org_name_from_link(org_link)
     if not org_name:
@@ -1022,6 +1074,7 @@ async def _ensure_org_for_person(
         description=f"Organization associated with {person_name}.",
         source_note="_Seeded during onboarding from a person→org tie._",
         existing_fm=listing,
+        facts_corpus=facts_corpus,
     )
     return outcome == "created"
 
@@ -1111,6 +1164,14 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
     facts = onboard.get("facts") or []
     if not isinstance(facts, list):
         facts = []
+
+    # C-OB1 org filter needs the facts string corpus: an org name only
+    # earns a record if it's named in the principal's facts (proves it's
+    # a real company, not a bare sender domain). Built once per run.
+    facts_corpus = "\n".join(
+        str(f.get("fact", "")).strip()
+        for f in facts if isinstance(f, dict)
+    )
 
     created = 0
     linked = 0
@@ -1207,6 +1268,7 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
                             org_link=org_link,
                             source_note=f"_Seeded during onboarding from `{matter_path}`._",
                             existing_fm=listing,
+                            facts_corpus=facts_corpus,
                         )
                         if outcome == "created":
                             created += 1
@@ -1219,6 +1281,7 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
                                 client, org_link,
                                 person_name=name, backlinks=[backlink],
                                 listing=org_listing,
+                                facts_corpus=facts_corpus,
                             ):
                                 created += 1
                         activity.heartbeat(f"materialize: {etype}/{name}")
@@ -1281,6 +1344,7 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
                             description=description,
                             org_link=org_link, role=role, email=email,
                             existing_fm=listing,
+                            facts_corpus=facts_corpus,
                         )
                         if outcome == "created":
                             seeded += 1
@@ -1292,6 +1356,7 @@ async def materialize_matter_entities(onboard_path: str) -> dict[str, Any]:
                                 client, org_link,
                                 person_name=name, backlinks=[],
                                 listing=org_listing,
+                                facts_corpus=facts_corpus,
                             ):
                                 seeded += 1
                         activity.heartbeat(f"materialize(seed): {etype}/{name}")

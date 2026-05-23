@@ -243,16 +243,17 @@ def test_create_or_merge_entity_collapses_truncated_person() -> None:
     )
 
 
-def test_create_or_merge_entity_does_not_filter_orgs() -> None:
-    """The person filter must NOT touch org writes (orgs have their own
-    filter in commit 3)."""
+def test_create_or_merge_entity_person_filter_does_not_block_proper_org() -> None:
+    """The person filter must NOT touch proper-name org writes — a real
+    company name passes the type-specific gate. (The TLD-shaped org case
+    is the subject of commit 3's tests.)"""
     fake = _FakeVaultClient()
 
     async def _go() -> str:
         return await _create_or_merge_entity(
             fake,  # type: ignore[arg-type]
             record_type="org",
-            name="github.com",  # would fail the person TLD test, but irrelevant for org here
+            name="NeoTerra Property Group",
             backlinks=[],
             description="An org.",
             existing_fm={},
@@ -261,8 +262,6 @@ def test_create_or_merge_entity_does_not_filter_orgs() -> None:
     outcome = _run(_go)
 
     assert outcome == "created"
-    # The org write proceeded; _normalize_entity_name title-cases the leading
-    # token but the gate did NOT reject — that's the whole point.
     assert any(t == "org" for (t, _) in fake.written), (
         f"org write was filtered out; got {fake.written}"
     )
