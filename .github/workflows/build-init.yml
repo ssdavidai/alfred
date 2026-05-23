@@ -11,6 +11,8 @@ on:
     branches: [main]
     paths:
       - "packages/hermes/init/**"
+      - "packages/hermes/hermes-config.yaml.njk"
+      - "packages/hermes/hermes-profile.env.njk"
       - "packages/hermes/mcp/**"
       - "packages/hermes/workspace-template/**"
       - "packages/mcp-server/**"
