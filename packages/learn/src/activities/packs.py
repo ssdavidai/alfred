@@ -336,136 +336,60 @@ async def generate_stream_pack(onboard_path: str) -> dict[str, Any]:
 
 @activity.defn
 async def generate_matter_pack(onboard_path: str) -> dict[str, Any]:
-    """Create matter/project vault records for detected work domains.
+    """Degraded-mode no-op fallback for the matter pack.
 
-    Groups by client domains, personal domains, and service domains.
-    Names are inferred from domain + most common subject keywords.
-    Deduplicates against existing vault records before creating.
-    Creates 3-8 records.
+    Pre-2026-05-23 this generator wrote ``matter/<domain>-project.md``
+    stubs ("Github Project", "Stripe Project", …) keyed off
+    ``profile.sender_tiers`` — a bare domain count is machine bookkeeping
+    and does NOT satisfy the promotion contract ("the principal reads
+    this", per ``CLAUDE.md`` §Storage Architecture). Live runs showed
+    eight such stubs leaking into the vault next to the gold Opus
+    matters; ``docs/GENERATORS.md`` §6 labels the path KILL.
+
+    The Opus generator (``packs_opus.generate_matter_pack_opus``) is
+    GOLD and remains the only path that produces vault matter records.
+    This fallback is kept callable so the existing Opus-side fallback
+    chain still has something to invoke on a 402/parse/no-context path,
+    but it writes NOTHING to the vault — instead it logs a degraded
+    marker and returns ``{"created": 0, "degraded": True}`` so the
+    caller's response carries the gap visibly.
+
+    A future commit can route the degraded marker into
+    ``alfred-state.db.observation`` for forensic introspection; today
+    the contract is "no vault write here, ever".
+
+    The dedup primitives the live writers use (``search_records`` /
+    ``record_exists`` + ``skipped_existing`` accounting) live in
+    ``generate_errand_pack`` below and in ``packs_opus.py``; this no-op
+    fallback obviously has no records to dedup.
     """
-    profile = _load_profile(onboard_path)
-    activity.heartbeat("loaded profile for matter generation")
-
-    sender_tiers = _normalize_sender_tiers(profile)
-
-    config = load_config()
-    client = VaultClient(config)
+    activity.heartbeat("matter pack fallback entered (no-op, degraded mode)")
+    # Best-effort profile peek so the log carries the candidate count we
+    # would have written, for ops/observability. We do NOT touch the
+    # vault.
     try:
-        # Gather domain clusters from sender_tiers
-        domain_groups: dict[str, dict[str, Any]] = {}  # domain → info
-
-        for tier_name, senders in sender_tiers.items():
-            if not isinstance(senders, list):
-                continue
-            for sender in senders:
-                if not isinstance(sender, dict):
-                    continue
-                domain = sender.get("domain", "").lower()
-                if not domain:
-                    continue
-                if domain not in domain_groups:
-                    domain_groups[domain] = {
-                        "tier": tier_name,
-                        "count": 0,
-                        "subjects": [],
-                        "senders": [],
-                    }
-                domain_groups[domain]["count"] += sender.get("count", 1)
-                domain_groups[domain]["senders"].append(
-                    sender.get("address", sender.get("name", ""))
-                )
-                for kw in sender.get("subject_keywords", []):
-                    domain_groups[domain]["subjects"].append(kw)
-
-        # Also gather from relationships (top correspondents)
-        for rel in profile.get("relationships", []):
-            if not isinstance(rel, dict):
-                continue
-            domain = rel.get("domain", "").lower()
-            if not domain:
-                continue
-            if domain not in domain_groups:
-                domain_groups[domain] = {
-                    "tier": "relationship",
-                    "count": rel.get("email_count", 1),
-                    "subjects": rel.get("common_topics", []),
-                    "senders": [rel.get("name", rel.get("email", ""))],
-                }
-
-        activity.heartbeat("detected %d domain groups" % len(domain_groups))
-
-        # Filter: skip known service/noise domains
-        _SKIP_DOMAINS = {
-            "gmail.com", "yahoo.com", "hotmail.com", "outlook.com",
-            "googlemail.com", "icloud.com", "me.com", "live.com",
-            "noreply.github.com",
+        profile = _load_profile(onboard_path)
+        sender_tiers = _normalize_sender_tiers(profile)
+        candidate_domains = {
+            (s.get("domain") or "").lower()
+            for senders in sender_tiers.values() if isinstance(senders, list)
+            for s in senders if isinstance(s, dict) and s.get("domain")
         }
-        candidates = {
-            d: info for d, info in domain_groups.items()
-            if d not in _SKIP_DOMAINS
-            and not d.startswith("noreply")
-            and info["count"] >= 2
-        }
+        candidate_domains.discard("")
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        candidate_domains = set()
 
-        # Sort by email count descending, take top 8
-        sorted_domains = sorted(
-            candidates.items(), key=lambda x: x[1]["count"], reverse=True
-        )[:8]
-
-        created = 0
-        skipped_existing = 0
-
-        for domain, info in sorted_domains:
-            # Derive a human-readable name
-            subjects = info.get("subjects", [])
-            if subjects:
-                # Most common keyword as descriptor
-                from collections import Counter
-                kw_counts = Counter(subjects)
-                top_kw = kw_counts.most_common(1)[0][0]
-                matter_name = f"{domain.split('.')[0].title()} — {top_kw.title()}"
-            else:
-                matter_name = f"{domain.split('.')[0].title()} Project"
-
-            slug = _slugify(matter_name)
-
-            # Dedup: search vault for existing record
-            existing = await client.search_records(slug, record_type="matter")
-            if existing:
-                skipped_existing += 1
-                continue
-
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            tier = info.get("tier", "unknown")
-            senders_list = ", ".join(info.get("senders", [])[:5])
-
-            content = f"""---
-type: matter
-name: {matter_name}
-status: active
-domain: {domain}
-tier: {tier}
-created: {now}
----
-
-# {matter_name}
-
-**Domain:** {domain}
-**Detected tier:** {tier}
-**Key contacts:** {senders_list}
-
-Auto-generated from onboarding email analysis.
-"""
-            await client.write_record("matter", slug, content)
-            created += 1
-
-            if created >= 8:
-                break
-
-        activity.heartbeat("matter pack complete: %d created, %d skipped" % (created, skipped_existing))
-        return {"created": created, "skipped_existing": skipped_existing}
-    finally:
-        await client.close()
+    activity.heartbeat(
+        "matter pack fallback: %d candidate domains skipped (degraded)"
+        % len(candidate_domains)
+    )
+    return {
+        "created": 0,
+        "skipped_existing": 0,
+        "degraded": True,
+        "degraded_reason": "matter_pack_fallback_disabled",
+        "candidate_domains": sorted(candidate_domains),
+    }
 
 
 @activity.defn
