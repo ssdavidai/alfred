@@ -200,6 +200,7 @@ def main() -> int:
     config_tmpl = env.get_template("hermes-config.yaml.njk")
     config_out = config_tmpl.render(
         profile=profile,
+        is_main=(profile == "main"),
         vault_path=vault_path,
         ctrl_api_url=ctrl_api_url,
         mcp_stdio_dir=mcp_stdio_dir,
@@ -233,6 +234,7 @@ def main() -> int:
     env_tmpl = env.get_template("hermes-profile.env.njk")
     env_out = env_tmpl.render(
         profile=profile,
+        is_main=(profile == "main"),
         api_server_port=_API_SERVER_PORT[profile],
         api_server_key=gateway_token,
         # Bind 0.0.0.0 — the Hermes API server is now reached directly over
