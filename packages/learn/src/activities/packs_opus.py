@@ -806,6 +806,23 @@ _PERSON_NOTIFICATIONS_RE = _re_person_filter.compile(
 )
 
 
+def _is_capitalized_token(token: str) -> bool:
+    """Token has a Unicode-uppercase first character.
+
+    Uses ``str.isupper`` (Unicode-aware by design — ``"Ü".isupper()`` is
+    ``True``, ``"ü".isupper()`` is ``False``) rather than an ASCII
+    ``re.match(r"[A-Z]", …)`` test. The ASCII regex silently dropped
+    real Hungarian names like ``Üveges Gábor`` / ``Ágnes Sirhuber`` /
+    ``Éva Bíró`` from the materialise pipeline — live failure on the
+    2026-05-23 onboarding, the sister bug to Lane I's ctrl-api gate fix
+    (``b51697d``). Do NOT replace this helper with an ASCII ``[A-Z]``
+    test or ``token.isascii() and …`` shortcut; the regression tests in
+    ``test_person_filter_materialize`` will catch it, but the intent
+    lives here.
+    """
+    return bool(token) and token[0].isupper()
+
+
 def _is_plausible_human_name(name: str) -> bool:
     """C-OB1: every person record name must look like a real human.
 
@@ -817,7 +834,10 @@ def _is_plausible_human_name(name: str) -> bool:
       ``Github`` alone, lowercase ``david``).
 
     A name is split on whitespace AND on hyphen so a hyphenated surname
-    (``Szabo-Stuban``) yields multiple cap tokens.
+    (``Szabo-Stuban``) yields multiple cap tokens. Capitalisation is
+    tested with the Unicode-aware ``_is_capitalized_token`` helper so
+    Hungarian names like ``Üveges Gábor`` / ``Éva Bíró`` pass the gate
+    (the sister bug to Lane I's ctrl-api ASCII-only fix, ``b51697d``).
     """
     s = (name or "").strip()
     if not s:
@@ -831,7 +851,9 @@ def _is_plausible_human_name(name: str) -> bool:
     parts: list[str] = []
     for tok in s.split():
         parts.extend(t for t in tok.split("-") if t)
-    cap_tokens = [t for t in parts if t[:1].isupper()]
+    # Unicode-aware capitalisation check — see ``_is_capitalized_token``
+    # for the Hungarian-name rationale.
+    cap_tokens = [t for t in parts if _is_capitalized_token(t)]
     if len(cap_tokens) < 2:
         return False
     return True

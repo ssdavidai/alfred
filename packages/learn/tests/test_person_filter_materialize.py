@@ -27,6 +27,7 @@ from src.activities import packs_opus
 from src.activities.packs_opus import (
     _create_or_merge_entity,
     _dedupe_truncated_persons,
+    _is_capitalized_token,
     _is_plausible_human_name,
 )
 
@@ -79,6 +80,56 @@ def test_accepts_two_capitalized_tokens() -> None:
 def test_accepts_unicode_diacritic_name() -> None:
     """Eszter Szabó-Stubán → real human."""
     assert _is_plausible_human_name("Eszter Szabó-Stubán") is True
+
+
+def test_accepts_hungarian_leading_uppercase_names() -> None:
+    """Names with a LEADING non-ASCII uppercase letter must pass.
+
+    Live failure (2026-05-23 onboarding): 23 people materialised but
+    Hungarian-named contacts (Üveges Gábor, Tóth Zsuzsa, etc.) were
+    silently filtered out. Lane I's ctrl-api gate used an ASCII-only
+    ``[A-Z]`` capitalisation check (fixed in ``b51697d``); this lane's
+    parallel filter must do the same Unicode-aware check.
+
+    These cases would FAIL under ``re.match(r'[A-Z]', token)`` because
+    ``Ü``, ``Á``, ``É`` are not in the ASCII ``A-Z`` range — they are
+    the canonical regression guard against re-introducing the ASCII bug.
+    """
+    assert _is_plausible_human_name("Üveges Gábor") is True
+    assert _is_plausible_human_name("Tóth Zsuzsa") is True
+    assert _is_plausible_human_name("Ágnes Sirhuber") is True
+    assert _is_plausible_human_name("Sándor Szöllősi") is True
+    assert _is_plausible_human_name("Éva Bíró") is True
+
+
+def test_rejects_lowercase_unicode_tokens() -> None:
+    """Lowercase Unicode tokens (``üveges gábor``) must still be rejected —
+    the filter requires ≥2 *capitalised* tokens, and ``ü.isupper()`` is
+    ``False`` so the all-lowercase form fails the gate exactly like
+    ``madonna jones``.
+    """
+    assert _is_plausible_human_name("üveges gábor") is False
+    assert _is_plausible_human_name("madonna jones") is False
+
+
+# ---------------------------------------------------------------------------
+# _is_capitalized_token — explicit Unicode-aware helper (the regression guard)
+# ---------------------------------------------------------------------------
+
+
+def test_is_capitalized_token_unicode_uppercase() -> None:
+    """The helper backing ``_is_plausible_human_name`` must use
+    Python's Unicode-aware ``str.isupper``, not an ASCII ``[A-Z]`` regex.
+    """
+    # Unicode-uppercase leading char — must be True.
+    for tok in ("Üveges", "Ágnes", "Éva", "Ötvös", "Ürmös", "Árpád"):
+        assert _is_capitalized_token(tok) is True, tok
+    # ASCII baseline — must still be True.
+    for tok in ("RJ", "Johnson", "McKay"):
+        assert _is_capitalized_token(tok) is True, tok
+    # Lowercase (ASCII and Unicode) — must be False.
+    for tok in ("üveges", "david", "ágnes", ""):
+        assert _is_capitalized_token(tok) is False, tok
 
 
 # ---------------------------------------------------------------------------
