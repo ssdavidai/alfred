@@ -117,6 +117,14 @@ wait_for_profiles() {
 log "alfred-black-hermes starting — HERMES_HOME=${HERMES_HOME}"
 wait_for_profiles
 
+# Make `main` the sticky default profile so an interactive
+# `docker exec -it alfred-black-hermes-1 hermes chat` (or just `hermes`)
+# opens the Alfred TUI with persona + MCP tools + vault access, rather
+# than the bare stock Hermes default profile under /root/.hermes/.
+# Idempotent + best-effort: a future Hermes CLI that changes this
+# subcommand's exit code must not crash the supervisor at boot.
+hermes profile use main 2>/dev/null || true
+
 # Launch the three Hermes gateways. Each `gateway run` owns its profile's
 # OpenAI-compatible API server, bound to the canonical port (18789 main /
 # 18790 workers / 18791 heavy) on 0.0.0.0 — callers reach the /v1 API

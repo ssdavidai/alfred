@@ -125,6 +125,23 @@ COPY packages/hermes/workspace-template/docs/TOOLS.md /opt/hermes-assets/TOOLS.m
 COPY packages/mcp-server/instructions/alfred-custom-instructions.md /opt/hermes-assets/AGENTS.md
 
 # =============================================================================
+# Convenience CLI wrappers.
+# =============================================================================
+# `alfred chat` opens the main (user-facing) profile; `workers-cli` and
+# `heavy-cli` cover the background/heavy profiles. Equivalent to
+# `hermes -p <profile> "$@"`. These complement the sticky default set by
+# supervisor.sh (`hermes profile use main`) so BOTH styles work:
+#   - bare `hermes chat`        — sticky default
+#   - explicit `alfred chat`    — wrapper
+# The workers/heavy wrappers are suffixed `-cli` to avoid any clash with
+# present-or-future binaries named plainly `workers` / `heavy`. `alfred` is
+# safe — no existing `alfred` binary in the runtime image.
+RUN printf '#!/bin/sh\nexec hermes -p main "$@"\n' > /usr/local/bin/alfred && \
+    printf '#!/bin/sh\nexec hermes -p workers "$@"\n' > /usr/local/bin/workers-cli && \
+    printf '#!/bin/sh\nexec hermes -p heavy "$@"\n' > /usr/local/bin/heavy-cli && \
+    chmod +x /usr/local/bin/alfred /usr/local/bin/workers-cli /usr/local/bin/heavy-cli
+
+# =============================================================================
 # Supervisor entrypoint.
 # =============================================================================
 COPY packages/hermes/docker/supervisor.sh /opt/hermes-supervisor/supervisor.sh
