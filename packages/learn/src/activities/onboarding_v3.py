@@ -1402,6 +1402,109 @@ def _soul_dict_is_complete(soul_by_section: dict[str, str]) -> bool:
                for key, _ in _SOUL_SECTION_ORDER)
 
 
+# ---------------------------------------------------------------------------
+# Hermes persistent-memory seeding (MEMORY.md + USER.md).
+#
+# Hermes loads ``$HERMES_HOME/memories/MEMORY.md`` (~2200 chars) and
+# ``USER.md`` (~1375 chars) into every system prompt. We distil two of
+# them at onboarding time so Alfred has the baseline from turn one rather
+# than waiting on Hermes' slow self-population. Direct write to
+# ``/hermes-state/memories/`` (hermes_data volume, alfred-learn rw) when
+# reachable; otherwise stage under ``/alfred-data/`` for the supervisor
+# init container to copy on next boot.
+# ---------------------------------------------------------------------------
+HERMES_MEMORY_DIR = "/hermes-state/memories"
+HERMES_MEMORY_CAP = 2200
+HERMES_USER_CAP = 1375
+HERMES_SEED_FALLBACK_DIR = "/alfred-data"
+
+
+def _truncate_at_sentence(text: str, cap: int) -> str:
+    """Trim ``text`` to ``<= cap`` chars, ending on a sentence boundary if
+    one exists in the prefix; else word boundary; else hard cap."""
+    if len(text) <= cap:
+        return text.rstrip()
+    head = text[:cap]
+    for marker in (". ", ".\n", "! ", "? ", "!\n", "?\n"):
+        idx = head.rfind(marker)
+        if idx >= 0:
+            return head[: idx + 1].rstrip()
+    idx = head.rfind(".")
+    if idx >= 0:
+        return head[: idx + 1].rstrip()
+    idx = head.rfind(" ")
+    return head[:idx].rstrip() if idx >= 0 else head.rstrip()
+
+
+def _seed_hermes_memory(memory_md: str, user_md: str) -> list[str]:
+    """Write Hermes' persistent-memory seeds. Best-effort, never load-
+    bearing. Returns the audit list (``hermes/...`` for the direct path,
+    ``alfred-data/...`` for the fallback)."""
+    from pathlib import Path
+
+    seeded: list[str] = []
+    if not memory_md and not user_md:
+        return seeded
+
+    # Cap each blob at its Hermes limit; log so a regression is
+    # diagnosable from logs instead of a silent over-cap symptom.
+    if memory_md and len(memory_md) > HERMES_MEMORY_CAP:
+        orig = len(memory_md)
+        memory_md = _truncate_at_sentence(memory_md, HERMES_MEMORY_CAP)
+        logger.info(
+            "onboarding_v3: hermes_memory_md truncated %d → %d chars "
+            "(cap %d)", orig, len(memory_md), HERMES_MEMORY_CAP,
+        )
+    if user_md and len(user_md) > HERMES_USER_CAP:
+        orig = len(user_md)
+        user_md = _truncate_at_sentence(user_md, HERMES_USER_CAP)
+        logger.info(
+            "onboarding_v3: hermes_user_md truncated %d → %d chars "
+            "(cap %d)", orig, len(user_md), HERMES_USER_CAP,
+        )
+
+    # Prefer the direct /hermes-state path; fall back to /alfred-data.
+    hermes_dir = Path(HERMES_MEMORY_DIR)
+    if hermes_dir.exists() or hermes_dir.parent.exists():
+        try:
+            hermes_dir.mkdir(parents=True, exist_ok=True)
+            if memory_md:
+                (hermes_dir / "MEMORY.md").write_text(memory_md)
+                seeded.append("hermes/MEMORY.md")
+                logger.info("onboarding_v3: seeded hermes/MEMORY.md (%d chars)",
+                            len(memory_md))
+            if user_md:
+                (hermes_dir / "USER.md").write_text(user_md)
+                seeded.append("hermes/USER.md")
+                logger.info("onboarding_v3: seeded hermes/USER.md (%d chars)",
+                            len(user_md))
+            return seeded
+        except OSError as exc:
+            logger.warning(
+                "onboarding_v3: direct hermes-state write failed (%s) — "
+                "falling back to /alfred-data", exc,
+            )
+            seeded = []
+
+    fallback = Path(HERMES_SEED_FALLBACK_DIR)
+    try:
+        fallback.mkdir(parents=True, exist_ok=True)
+        if memory_md:
+            (fallback / "hermes_seed_memory.md").write_text(memory_md)
+            seeded.append("alfred-data/hermes_seed_memory.md")
+        if user_md:
+            (fallback / "hermes_seed_user.md").write_text(user_md)
+            seeded.append("alfred-data/hermes_seed_user.md")
+        if seeded:
+            logger.info(
+                "onboarding_v3: seeded hermes memory in /alfred-data — "
+                "supervisor will pick up next boot (%s)", ", ".join(seeded),
+            )
+    except OSError as exc:
+        logger.warning("onboarding_v3: hermes seed fallback write failed: %s", exc)
+    return seeded
+
+
 @activity.defn
 async def personalize_opus(onboard_path: str) -> dict[str, Any]:
     """Generate personalization files from facts + patterns."""
@@ -1452,7 +1555,11 @@ Write these five files. Return them in this exact JSON format:
     "values": "[Short paragraph (2-4 sentences) describing what this person VALUES at their core — family, work, sovereignty, craft, conviction. What drives them at the deepest level, beyond achievements.]",
     "tone_preferences": "[Short paragraph (2-4 sentences) describing how this person wants to be addressed — concise vs reflective, formal vs casual, dry wit vs warmth, the linguistic register that suits them. Anchored in observed communication style.]",
     "what_i_care_about": "[Short paragraph (2-4 sentences) about the concrete things in this person's life that matter NOW — relationships, ventures, transitions, principles. What deserves Alfred's attention versus what should be filtered out.]"
-  }}
+  }},
+
+  "hermes_memory_md": "[Dense operational-facts seed for Hermes' persistent memory (loaded into every system prompt). NO frontmatter, NO `# heading` at the top — just dense bullets/prose. First line MUST identify the principal, e.g. 'David Szabo-Stuban (Sir): Hungarian founder...'. Cover: who Sir is (1-2 lines); active companies + roles; active matters by name; daily rhythm + time-zone constraints; banking/payment infrastructure; critical relationships. Bullet form preferred. HARD CAP: 2200 characters — be concise.]",
+
+  "hermes_user_md": "[Dense user-profile / communication-preferences seed for Hermes (loaded into every system prompt). NO frontmatter, NO `# heading`. First line MUST be e.g. 'Tone: concise, no theatrical enthusiasm. Languages: English primary, Hungarian preserved for legal/admin.'. Cover: tone; languages; when to escalate vs batch; format preferences (markdown, tables when comparing); what Sir cares about right now (deadlines/continuity/relationships > newsletters/promo/noise). HARD CAP: 1375 characters — be concise.]"
 }}
 
 The ``rules`` field is the STRUCTURED form of rules_md — same content, broken
@@ -1465,6 +1572,12 @@ distinct from ``soul_md`` (Alfred's runtime persona — how Alfred behaves). It
 is a third-person snapshot of who this person IS, written so the principal
 themself can read it and recognise themselves. Each section a short paragraph,
 grounded in concrete facts.
+
+The ``hermes_memory_md`` and ``hermes_user_md`` fields are Hermes-format
+memory seeds — written to ``$HERMES_HOME/memories/`` and loaded into every
+Hermes system prompt. They are NOT the same as ``memory_md`` (the wikilink-
+index vault file) or ``user_md`` (the rich vault profile). Keep them dense,
+operational, and under their caps.
 
 Make each file genuinely useful — not generic templates. Reference specific names, projects, and patterns from the data."""
 
@@ -1671,6 +1784,22 @@ Make each file genuinely useful — not generic templates. Reference specific na
     onboard["user_md"] = files.get("user_md", "")
     onboard["soul_md"] = files.get("soul_md", "")
     _write_onboard(onboard_path, onboard)
+
+    # ---------------------------------------------------------------------
+    # Hermes persistent-memory seed (MEMORY.md + USER.md). Best-effort —
+    # never load-bearing. Skipped silently if Opus omitted the keys.
+    # ---------------------------------------------------------------------
+    hermes_memory_md = files.get("hermes_memory_md", "") or ""
+    hermes_user_md = files.get("hermes_user_md", "") or ""
+    if hermes_memory_md or hermes_user_md:
+        try:
+            written.extend(
+                _seed_hermes_memory(hermes_memory_md, hermes_user_md)
+            )
+        except Exception as exc:  # noqa: BLE001 — must never fail the stage
+            logger.warning(
+                "onboarding_v3: hermes memory seed skipped: %s", exc,
+            )
 
     # Stage narration — Alfred composing your profile + shaping its own soul.
     try:
