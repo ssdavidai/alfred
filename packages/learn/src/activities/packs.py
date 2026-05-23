@@ -233,10 +233,24 @@ def _build_instinct_content(instinct: dict[str, Any]) -> str:
     resolver = routing_rule.get("destination_resolver")
     resolver_yaml = "null" if resolver is None else f'"{resolver}"'
 
+    # C-OB4: surface tier + discretion_threshold + status when the caller
+    # applied the day-zero caps (_apply_unearned_caps in packs_opus). The
+    # legacy default ('status: active') is kept for non-onboarding paths
+    # that never set status.
+    status = str(instinct.get("status", "active")).strip().lower() or "active"
+    tier = str(instinct.get("tier", "")).strip()
+    discretion_threshold = instinct.get("discretion_threshold")
+    extra_fm: list[str] = []
+    if tier:
+        extra_fm.append(f"tier: {tier}")
+    if isinstance(discretion_threshold, (int, float)):
+        extra_fm.append(f"discretion_threshold: {float(discretion_threshold)}")
+    extra_fm_block = ("\n" + "\n".join(extra_fm)) if extra_fm else ""
+
     return f"""---
 type: instinct
 name: {name}
-status: active
+status: {status}
 description: "{description}"
 input_patterns:
   sender_domains: {input_patterns.get("sender_domains", [])}
@@ -262,7 +276,7 @@ matching_weights:
   tags: {weights.get("tags", 0.10)}
 created: {now}
 updated: {now}
-tags: {tags}
+tags: {tags}{extra_fm_block}
 ---
 
 ## Routing Logic
@@ -449,6 +463,9 @@ async def generate_instinct_pack(onboard_path: str) -> dict[str, Any]:
                     "tags": ["onboarding", "noise", "auto-generated"],
                     "routing_logic": "Route noise-tier senders directly to stream log without triage.",
                 }
+                # C-OB4 cap before write (Asking/unconfirmed/<=0.4/>=0.7).
+                from src.activities.packs_opus import _apply_unearned_caps
+                _apply_unearned_caps(instinct)
                 content = _build_instinct_content(instinct)
                 await client.write_record("instinct", "route-noise-to-log", content)
                 created += 1
@@ -486,6 +503,8 @@ async def generate_instinct_pack(onboard_path: str) -> dict[str, Any]:
                     "tags": ["onboarding", "newsletter", "auto-generated"],
                     "routing_logic": "Route newsletter senders to stream log for daily digest.",
                 }
+                from src.activities.packs_opus import _apply_unearned_caps
+                _apply_unearned_caps(instinct)
                 content = _build_instinct_content(instinct)
                 await client.write_record("instinct", "route-newsletters-to-log", content)
                 created += 1
@@ -523,6 +542,8 @@ async def generate_instinct_pack(onboard_path: str) -> dict[str, Any]:
                     "tags": ["onboarding", "inner-circle", "auto-generated"],
                     "routing_logic": "Route inner-circle contacts to immediate triage queue.",
                 }
+                from src.activities.packs_opus import _apply_unearned_caps
+                _apply_unearned_caps(instinct)
                 content = _build_instinct_content(instinct)
                 await client.write_record("instinct", "route-inner-circle-priority", content)
                 created += 1
@@ -561,64 +582,23 @@ async def generate_instinct_pack(onboard_path: str) -> dict[str, Any]:
                     "tags": ["onboarding", "financial", "urgent", "auto-generated"],
                     "routing_logic": "Route payment failure notifications to urgent task queue.",
                 }
+                from src.activities.packs_opus import _apply_unearned_caps
+                _apply_unearned_caps(instinct)
                 content = _build_instinct_content(instinct)
                 await client.write_record("instinct", "route-payment-failures-urgent", content)
                 created += 1
 
         activity.heartbeat("financial instincts done")
 
-        # --- Per-domain instincts for remaining high-volume senders ---
-        # Create individual instincts for domains with many emails that
-        # don't fall into the above categories.
-        _covered_tiers = {"noise", "newsletter", "newsletters", "inner_circle", "inner-circle"}
-        for tier_name, senders in sender_tiers.items():
-            if tier_name in _covered_tiers:
-                continue
-            if not isinstance(senders, list):
-                continue
-            # Group by domain
-            domain_senders: dict[str, list[dict[str, Any]]] = {}
-            for s in senders:
-                if not isinstance(s, dict):
-                    continue
-                d = s.get("domain", "").lower()
-                if d:
-                    domain_senders.setdefault(d, []).append(s)
-
-            for domain, dom_senders in domain_senders.items():
-                if created >= 10:
-                    break
-                if len(dom_senders) < 3:
-                    continue
-
-                slug = _slugify(f"route-{tier_name}-{domain.split('.')[0]}")
-                instinct = {
-                    "name": slug,
-                    "description": f"Route {tier_name}-tier emails from {domain}",
-                    "input_patterns": {
-                        "sender_domains": [domain],
-                        "subject_keywords": [],
-                        "attachment_types": [],
-                        "input_types": ["email"],
-                    },
-                    "routing_rule": {
-                        "destination_type": "project",
-                        "destination": f"{tier_name} triage",
-                        "destination_resolver": None,
-                        "process": "standard",
-                        "default_assignee": "",
-                    },
-                    "confidence_score": 0.7,
-                    "observation_count": 0,
-                    "tags": ["onboarding", tier_name, "auto-generated"],
-                    "routing_logic": f"Route {domain} emails to {tier_name} triage.",
-                }
-                content = _build_instinct_content(instinct)
-                await client.write_record("instinct", slug, content)
-                created += 1
-
-            if created >= 10:
-                break
+        # C-OB4: the legacy per-domain branch (`route-<tier>-<domain>`
+        # stubs from sender-tier discovery) is SKIPPED at observation
+        # count = 0. A per-domain instinct has zero grounding to lean
+        # on at seeding — it must come from observed decisions, not from
+        # a profiler heuristic. The 4 canned instincts above are the
+        # only rule-based instincts that may seed.
+        activity.heartbeat(
+            "per-domain instinct branch skipped (C-OB4: obs=0 grounding)"
+        )
 
         activity.heartbeat("instinct pack complete: %d created" % created)
         return {"created": created}

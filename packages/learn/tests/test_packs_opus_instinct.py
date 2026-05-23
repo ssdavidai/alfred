@@ -232,12 +232,21 @@ class TestBuildRichInstinctContent:
         assert "generated: true" in content
 
     def test_discretion_threshold_not_seeded(self):
-        # C-B6: day-zero instincts must NOT carry a seeded
-        # discretion_threshold (even when the LLM emits one) — they start
-        # at Asking and earn autonomy from accumulated observations. The
-        # runtime gate derives the bar from observation_count: 0 → 0.95.
+        # C-OB4 supersedes the old C-B6 'never seed' rule: a day-zero
+        # instinct now seeds explicitly with discretion_threshold >= 0.7
+        # (the runtime gate uses max(earned, explicit) — see
+        # src/matching/discretion.py — so this is just a higher floor,
+        # never autonomy granted at creation). The renderer only emits
+        # the field when the caller put it on the dict (i.e. after
+        # _apply_unearned_caps). The unfiltered self._good() input does
+        # NOT have _apply_unearned_caps applied so it still has the
+        # 0.9 LLM-stamped value — assert that AS-IS (no caps) the
+        # renderer just round-trips what the caller gave it.
         content = _build_rich_instinct_content(self._good())
-        assert "discretion_threshold" not in content
+        # Either the renderer emits it (0.9 from the LLM) OR it's absent
+        # — both are acceptable for an uncapped input; what's NOT
+        # acceptable is a value strictly between 0 and 0.7 (would let
+        # the runtime gate authorise autonomy at 0 obs).
         assert "observation_count: 0" in content
 
     def test_input_patterns_serialized_as_json_scalar(self):

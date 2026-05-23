@@ -2045,6 +2045,38 @@ def _validate_instinct(instinct: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+# ---------------------------------------------------------------------------
+# C-OB4 instinct seeding caps — applied by BOTH packs_opus and packs.
+# ---------------------------------------------------------------------------
+# At observation_count==0 every newly-seeded instinct must carry the
+# 'unearned' posture: Asking tier, status unconfirmed, discretion_
+# threshold >= 0.7 (raise-only floor), confidence_score <= 0.4. Live
+# 2026-05-23 had 9 Opus instincts at confidence 0.86-0.91 with no tier
+# — exactly the premature-trust hole GENERATORS.md §7 calls out.
+
+_UNEARNED_CONFIDENCE_CAP = 0.4
+_UNEARNED_DISCRETION_FLOOR = 0.95  # matches discretion.py's <5-obs Asking bar
+
+
+def _apply_unearned_caps(instinct: dict[str, Any]) -> None:
+    """Mutate ``instinct`` in place to enforce the C-OB4 seeding caps.
+
+    Idempotent. Safe to call on a record that already meets the caps.
+    """
+    instinct["tier"] = "Asking"
+    instinct["status"] = "unconfirmed"
+    try:
+        cur_conf = float(instinct.get("confidence_score", 0.0))
+    except (TypeError, ValueError):
+        cur_conf = 0.0
+    instinct["confidence_score"] = min(cur_conf, _UNEARNED_CONFIDENCE_CAP)
+    try:
+        cur_thresh = float(instinct.get("discretion_threshold", 0.0))
+    except (TypeError, ValueError):
+        cur_thresh = 0.0
+    instinct["discretion_threshold"] = max(cur_thresh, _UNEARNED_DISCRETION_FLOOR)
+
+
 def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
     """Render a validated instinct dict as a markdown record with rich body.
 
@@ -2055,10 +2087,17 @@ def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
 
     Body has Description, Rationale, and Examples sections so users
     reviewing instincts in the dashboard see real justification.
+
+    Callers seeding at observation_count=0 should run
+    ``_apply_unearned_caps(instinct)`` first; this renderer reads the
+    capped tier/status/discretion_threshold/confidence values out of
+    ``instinct`` and emits them in frontmatter so the C-OB4 posture is
+    visible to the principal in the vault record.
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     name = str(instinct["name"]).strip()
     status = str(instinct.get("status", "active")).strip().lower()
+    tier = str(instinct.get("tier", "")).strip()
     description = str(instinct["description"]).strip()
     rationale = str(instinct["rationale"]).strip()
     examples = [str(e).strip() for e in instinct.get("examples", []) if str(e).strip()]
@@ -2068,16 +2107,7 @@ def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
     input_patterns = instinct.get("input_patterns") or {}
     routing_rule = instinct.get("routing_rule") or {}
     confidence = float(instinct.get("confidence_score", 0.85))
-    # discretion_threshold is intentionally NOT seeded on day-zero
-    # instincts. New instincts start at Asking (0 observations) and earn
-    # their way up through repetition; the runtime gate derives the bar
-    # from the live observation count in src/matching/discretion.py
-    # (0.95 for <5 obs → Asking). Seeding the LLM's subjective confidence
-    # here would authorize autonomy at 0 observations — exactly the
-    # premature-trust bug C-B6 forbids. The gate (_instinct_threshold /
-    # should_route_autonomously) now treats any explicit threshold as
-    # raise-only, but we still avoid persisting one at creation so the
-    # record itself reflects the unearned-Asking posture.
+    discretion_threshold = instinct.get("discretion_threshold")
 
     # Encode the structured nested fields as JSON-scalar strings so the
     # flat parser on the read side can round-trip them via json.loads.
@@ -2099,8 +2129,12 @@ def _build_rich_instinct_content(instinct: dict[str, Any]) -> str:
         f"input_patterns: {_escape_yaml_scalar(input_patterns_json)}",
         f"routing_rule: {_escape_yaml_scalar(routing_rule_json)}",
     ]
-    # NB: discretion_threshold deliberately omitted — see above. New
-    # instincts start at Asking and earn autonomy via observation count.
+    # C-OB4: surface the capped tier + discretion floor when they're set
+    # (e.g. via _apply_unearned_caps for the day-zero seeding path).
+    if tier:
+        fm_lines.append(f"tier: {tier}")
+    if isinstance(discretion_threshold, (int, float)):
+        fm_lines.append(f"discretion_threshold: {float(discretion_threshold)}")
 
     # Persist execution block if the LLM included one
     execution = instinct.get("execution")
@@ -2259,6 +2293,12 @@ async def generate_instinct_pack_opus(onboard_path: str) -> dict[str, Any]:
                     "instinct_pack_opus: existence check failed for %s: %s (proceeding)",
                     slug, exc,
                 )
+
+            # C-OB4: day-zero instincts seed with Asking tier, status
+            # unconfirmed, capped confidence, and a discretion floor —
+            # autonomy is earned via observations, never granted by the
+            # LLM's prior. _apply_unearned_caps mutates the dict in place.
+            _apply_unearned_caps(instinct)
 
             content = _build_rich_instinct_content(instinct)
             try:
