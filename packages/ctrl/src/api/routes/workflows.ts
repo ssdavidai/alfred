@@ -3,6 +3,7 @@ import path from "node:path";
 import { addRoute } from "../server.js";
 import { sendJson, ApiError, ValidationError } from "../errors.js";
 import { dockerExec, parseJsonLines } from "../helpers.js";
+import { getQualityReport as _qualityGetReport } from "../middleware/onboarding_quality_gate.js";
 
 // alfred-black single-VM stacks mount the alfred-data named volume at
 // /alfred-data inside ctrl-api (see docker-compose.yaml). Legacy multi-tenant
@@ -191,6 +192,22 @@ export function registerWorkflowRoutes(): void {
         count: 0,
       });
     }
+  });
+
+  // C-OB1 — Quality report for the onboarding promotion gate. Returns
+  // {accepted, rejected_by_kind, rejections, since} over the last 24h,
+  // sourced from the in-memory ring buffer the gate populates on every
+  // 422 QUALITY_REJECTED. The `window_ms` query parameter narrows the
+  // window (defaults to 24h, capped at 7 days so the bounded ring never
+  // serves stale forever-data).
+  addRoute("GET", "/api/v1/onboarding/quality-report", async ({ res, query }) => {
+    const DEFAULT_WINDOW = 24 * 60 * 60 * 1000;
+    const MAX_WINDOW = 7 * 24 * 60 * 60 * 1000;
+    const raw = parseInt(query.get("window_ms") ?? "", 10);
+    const windowMs = Number.isFinite(raw) && raw > 0
+      ? Math.min(raw, MAX_WINDOW)
+      : DEFAULT_WINDOW;
+    sendJson(res, 200, _qualityGetReport(windowMs));
   });
 
   // Get onboarding progress (reads /mnt/encrypted/alfred/onboard.json)
