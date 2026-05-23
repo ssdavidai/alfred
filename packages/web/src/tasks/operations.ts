@@ -168,13 +168,22 @@ export const createVaultRecord: CreateVaultRecord<
   const body = args.description ? `\n# ${args.name}\n\n${args.description}\n` : `\n# ${args.name}\n`;
   const content = args.content || (fmLines.join("\n") + "\n" + body);
 
+  // ctrl-api accepts a `name` ending in `.md` as a vault-relative path
+  // written verbatim. When a caller already passes a full path (singletons
+  // "RULES.md"/"SOUL.md", or "note/foo.md" from VaultPage), don't
+  // double-prefix — that would yield "note/RULES.md.md" or
+  // "note/note/foo.md.md". Otherwise prepend `<type>/` and append `.md`.
+  const wireName = args.name.endsWith(".md")
+    ? args.name
+    : `${args.type}/${args.name}.md`;
+
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, {
     method: "POST",
     path: "/api/v1/vault/records",
     body: {
       type: args.type,
-      name: `${args.type}/${args.name}.md`,
+      name: wireName,
       content,
     },
   });
