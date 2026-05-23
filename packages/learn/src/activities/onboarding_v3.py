@@ -717,6 +717,90 @@ Be insightful. Look for non-obvious connections. A great butler notices what the
 # Step 4: Write USER.md + SOUL.md + MEMORY.md + TOOLS.md
 # ---------------------------------------------------------------------------
 
+
+# C-OB2: the C-OB2 contract specifies four rule sections for the
+# principal-facing ``vault/RULES.md``. Sections present in the markdown
+# only when the corresponding key in the Opus ``rules`` dict has >= 1
+# rule — empty sections are omitted (the contract is omit-empty).
+_RULES_SECTION_ORDER: list[tuple[str, str]] = [
+    ("personal_sovereignty", "Personal sovereignty rules"),
+    ("household", "Household rules"),
+    ("communication", "Communication rules"),
+    ("decision", "Decision rules"),
+]
+
+
+def _coerce_rules_dict(raw: Any) -> dict[str, list[str]]:
+    """Coerce the Opus ``rules`` field into a normalized dict.
+
+    Opus may return strings instead of lists for a section (a single
+    rule), or non-string scalars inside the list. Normalize to
+    ``{section_key: [str, ...]}`` with empty lists for missing or
+    invalid sections. Unknown section keys are dropped — only the four
+    C-OB2 categories are honored.
+    """
+    out: dict[str, list[str]] = {key: [] for key, _ in _RULES_SECTION_ORDER}
+    if not isinstance(raw, dict):
+        return out
+    known = {key for key, _ in _RULES_SECTION_ORDER}
+    for key, value in raw.items():
+        if key not in known:
+            continue
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            continue
+        rules: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if not text:
+                continue
+            # One rule per line — collapse any internal newlines so a
+            # single rule string never produces a multi-line bullet.
+            text = " ".join(text.split())
+            rules.append(text)
+        out[key] = rules
+    return out
+
+
+def _format_principal_rules_md(
+    rules_by_section: dict[str, list[str]],
+    created_iso: str,
+) -> str:
+    """Render the C-OB2 ``vault/RULES.md`` markdown.
+
+    Frontmatter is fixed by the C-OB2 contract; sections are emitted in
+    a stable order and omitted when empty. Each rule becomes a single
+    ``- <text>`` bullet on its own line.
+    """
+    frontmatter = (
+        "---\n"
+        "type: note\n"
+        "subtype: standing_rules\n"
+        "status: active\n"
+        f"created: {created_iso}\n"
+        "created_by: onboarding_pipeline\n"
+        "---\n"
+    )
+    body_lines: list[str] = ["", "# Standing Rules", ""]
+    for key, heading in _RULES_SECTION_ORDER:
+        rules = rules_by_section.get(key) or []
+        if not rules:
+            continue
+        body_lines.append(f"## {heading}")
+        for rule in rules:
+            body_lines.append(f"- {rule}")
+        body_lines.append("")
+    return frontmatter + "\n".join(body_lines).rstrip() + "\n"
+
+
+def _rules_dict_has_minimum(rules_by_section: dict[str, list[str]]) -> bool:
+    """C-OB2: minimum 3 rules total across present sections."""
+    return sum(len(v or []) for v in rules_by_section.values()) >= 3
+
+
 @activity.defn
 async def personalize_opus(onboard_path: str) -> dict[str, Any]:
     """Generate personalization files from facts + patterns."""
@@ -754,8 +838,20 @@ Write these five files. Return them in this exact JSON format:
 
   "tools_md": "# Suggested Tools\\n\\n[3-5 specific automations or workflows that would help THIS person based on their patterns. Each with: name, what it does, what triggers it, estimated time saved. Be practical and specific.]",
 
-  "rules_md": "# Standing Rules\\n\\n[8-15 standing house rules Alfred should follow for THIS person, inferred from their life: boundaries, preferences, do's and don'ts, who/what to prioritise or protect, quiet hours, financial caution, tone. Format as a markdown bullet list — exactly ONE clear rule per line starting with '- ', each a single imperative sentence the principal can keep, edit, or delete. Draft sensible defaults, not generic platitudes.]"
+  "rules_md": "# Standing Rules\\n\\n[8-15 standing house rules Alfred should follow for THIS person, inferred from their life: boundaries, preferences, do's and don'ts, who/what to prioritise or protect, quiet hours, financial caution, tone. Format as a markdown bullet list — exactly ONE clear rule per line starting with '- ', each a single imperative sentence the principal can keep, edit, or delete. Draft sensible defaults, not generic platitudes.]",
+
+  "rules": {{
+    "personal_sovereignty": ["[1-3 short imperative rules about WHO calls the shots — identity, role, founder authority, the lines no one else crosses for this person]"],
+    "household": ["[2-5 short rules about the home: who owns what (family vs admin), infant/child constraints, quiet hours, partner's domain]"],
+    "communication": ["[2-4 short rules about tone, density, escalation: concise vs verbose, what reaches the principal vs what gets filtered]"],
+    "decision": ["[1-3 short rules about decision-making default — defer vs act, time-critical handling, autonomy boundaries]"]
+  }}
 }}
+
+The ``rules`` field is the STRUCTURED form of rules_md — same content, broken
+into categories by who/what each rule governs. Empty list for a category that
+has no relevant rule (DO NOT invent generic platitudes to fill it). Total
+across all four categories MUST be >= 3 real rules grounded in the facts.
 
 Make each file genuinely useful — not generic templates. Reference specific names, projects, and patterns from the data."""
 
@@ -817,6 +913,68 @@ Make each file genuinely useful — not generic templates. Reference specific na
         raise RuntimeError(
             "personalize_opus: load-bearing vault write(s) failed: "
             + "; ".join(load_bearing_failures)
+        )
+
+    # ---------------------------------------------------------------------
+    # C-OB2: principal-facing ``vault/RULES.md``.
+    #
+    # The workspace ``RULES.md`` write above is the *runtime* surface
+    # ctrl-api routes into the Hermes main profile dir's AGENTS.md
+    # sentinel block — the agent reads it at decision time. This is a
+    # SECOND, principal-readable note pinned at the vault root with
+    # frontmatter ``subtype: standing_rules`` and rules carved into
+    # personal-sovereignty / household / communication / decision
+    # sections. The two artifacts share content but serve different
+    # readers: the agent vs the principal in /vault. Empty sections are
+    # omitted; minimum 3 rules across present sections is the C-OB2
+    # floor. Failure is logged but non-blocking — the runtime RULES
+    # write is the load-bearing path.
+    # ---------------------------------------------------------------------
+    rules_by_section = _coerce_rules_dict(files.get("rules"))
+    if _rules_dict_has_minimum(rules_by_section):
+        created_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        principal_rules_md = _format_principal_rules_md(
+            rules_by_section, created_iso
+        )
+        try:
+            async with httpx.AsyncClient(
+                base_url=config.alfred_ctrl_url,
+                timeout=30.0,
+                headers=headers,
+            ) as client:
+                resp = await client.post(
+                    "/api/v1/vault/records",
+                    json={
+                        "type": "note",
+                        "name": "RULES.md",
+                        "content": principal_rules_md,
+                    },
+                )
+            if 200 <= resp.status_code < 300:
+                written.append("vault/RULES.md")
+                logger.info(
+                    "onboarding_v3: wrote vault/RULES.md (%d chars, "
+                    "%d rules across %d sections)",
+                    len(principal_rules_md),
+                    sum(len(v) for v in rules_by_section.values()),
+                    sum(1 for v in rules_by_section.values() if v),
+                )
+            else:
+                failed.append("vault/RULES.md")
+                logger.warning(
+                    "onboarding_v3: vault/RULES.md write failed "
+                    "status=%d body=%s",
+                    resp.status_code, getattr(resp, "text", "")[:300],
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort, non-blocking
+            failed.append("vault/RULES.md")
+            logger.warning(
+                "onboarding_v3: vault/RULES.md write failed: %s", exc
+            )
+    else:
+        logger.info(
+            "onboarding_v3: skipping vault/RULES.md — Opus produced fewer "
+            "than 3 rules total across sections",
         )
 
     onboard["user_md"] = files.get("user_md", "")
