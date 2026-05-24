@@ -940,12 +940,113 @@ _ORG_NAME_RE = _re_person_filter.compile(
     rf"(?:{'|'.join(_ORG_SUFFIX_WORDS)})\.?)", _re_person_filter.UNICODE,
 )
 
+# Live 2026-05-23: ~30 of 85 materialised orgs were junk because the regex
+# happily grabbed verb-leading constructions ("Uses GitHub Co"), single-cap
+# tokens before a weak corporate-form suffix ("AI Co", "Hungary Kft", "Make
+# Co", "BOTANIQ Co"), article-prefixed compounds ("The Founders Co"), and
+# two-suffix concatenations from adjacent fact fragments ("Wyoming LLC Ugly
+# Co"). The filters below run after the regex match and BEFORE the
+# existing ``_org_name_is_plausible`` TLD gate.
+
+# Verb / preposition tokens that, when leading the match, mean we captured a
+# sentence stem ("Uses GitHub Co") rather than an org name.
+_ORG_VERB_PREFIX = frozenset({
+    "Uses", "Receives", "Received", "Receive", "Follows", "Following",
+    "Sent", "Using", "From", "To", "Via", "By", "With", "Through",
+})
+
+# Leading articles that prefix a single-cap compound ("The Founders Co").
+_ORG_ARTICLE_PREFIX = frozenset({"The", "A", "An"})
+
+# Weak corporate-form suffixes — short abbreviations that, on their own,
+# only weakly disambiguate a real org from a 2-word stem. We require ≥2
+# capitalised tokens BEFORE these (or a single leading token that's itself
+# a multi-word compound — i.e. contains a hyphen or a non-ASCII letter, as
+# in "Szabó-Stubán Kft"). Strong suffixes (Group / Bank / Partners / Labs
+# / Business / Solutions / Properties / Holdings / Capital / Ventures /
+# Studios / Trust / Foundation) only need ≥1 leading cap token.
+_ORG_SUFFIX_WEAK = frozenset({
+    "Kft", "Bt", "Zrt", "Nyrt",
+    "Ltd", "LLC", "Inc", "Corp", "Co", "GmbH", "AG", "SA", "PLC",
+})
+
+
+def _has_multiword_compound_shape(token: str) -> bool:
+    """A single leading token that nonetheless reads like a multi-word
+    compound: contains a hyphen ("Szabó-Stubán") or a non-ASCII letter
+    (Hungarian, German, etc. — usually marks a real proper name)."""
+    if not token:
+        return False
+    if "-" in token:
+        return True
+    return any(ord(c) > 127 for c in token)
+
+
+def _looks_like_real_org(name: str) -> bool:
+    """Second-stage filter for a regex-matched org candidate.
+
+    Returns False for the live junk patterns described above. The existing
+    ``_org_name_is_plausible`` filter still runs after this for the TLD
+    grounding check; both filters are independent.
+    """
+    s = (name or "").strip()
+    if not s:
+        return False
+    tokens = s.split()
+    if not tokens:
+        return False
+
+    # (1) Verb / preposition prefix — sentence stem, not an org name.
+    if tokens[0] in _ORG_VERB_PREFIX:
+        return False
+
+    # (4) Concatenated fragments — two distinct CORPORATE-FORM suffix
+    # words (LLC, Inc, Kft, Co, GmbH, ...) in the same candidate is an
+    # adjacent-fragment artifact ("Wyoming LLC Ugly Co" / "Foo LLC Bar
+    # Inc"), never a real org. Compound descriptive suffixes are fine
+    # ("NeoTerra Property Group" has Property + Group; both are
+    # descriptive nouns and the pair is a real corporate naming shape).
+    stripped = [w.rstrip(".,;:") for w in tokens]
+    weak_suffix_hits = [w for w in stripped if w in _ORG_SUFFIX_WEAK]
+    if len(weak_suffix_hits) >= 2:
+        return False
+
+    # The trailing token (sans punctuation) is the suffix; everything before
+    # is the leading body.
+    last = stripped[-1]
+    leading = stripped[:-1]
+    n_leading_caps = sum(
+        1 for w in leading
+        if w and w[0:1].isupper() and w not in _ORG_ARTICLE_PREFIX
+    )
+
+    # (3) Article-prefixed single-cap compound ("The Founders Co").
+    if leading and leading[0] in _ORG_ARTICLE_PREFIX:
+        # Strip the article and re-evaluate against the suffix rules below.
+        leading = leading[1:]
+        n_leading_caps = sum(
+            1 for w in leading if w and w[0:1].isupper()
+        )
+
+    # (2) Weak suffix needs ≥2 leading cap tokens, unless the single
+    # leading token is itself a hyphenated / non-ASCII compound.
+    if last in _ORG_SUFFIX_WEAK:
+        if n_leading_caps >= 2:
+            return True
+        if n_leading_caps == 1 and _has_multiword_compound_shape(leading[0]):
+            return True
+        return False
+
+    # Strong suffix: ≥1 leading cap token is enough.
+    return n_leading_caps >= 1
+
 
 def _extract_org_candidates_from_facts(
     facts: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Walk ``facts`` → org candidates. Deduped (case-insensitive),
-    gated through ``_org_name_is_plausible``. Items are
+    gated through ``_looks_like_real_org`` (live-junk filter) and
+    ``_org_name_is_plausible`` (TLD-grounding filter). Items are
     ``{"name", "description", "source": "facts"}``."""
     if not facts:
         return []
@@ -964,6 +1065,8 @@ def _extract_org_candidates_from_facts(
             name = " ".join((raw or "").split()).rstrip(".,;:")
             # Bare suffix without leading proper-name tokens isn't an org.
             if not name or name in _ORG_SUFFIX_WORDS:
+                continue
+            if not _looks_like_real_org(name):
                 continue
             if not _org_name_is_plausible(name, facts_corpus):
                 continue

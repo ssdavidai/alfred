@@ -51,6 +51,94 @@ def test_empty_or_blank_facts_returns_empty():
         == _extract_org_candidates_from_facts([{"fact": ""}])
 
 
+# ---------------------------------------------------------------------------
+# Junk rejection — live 2026-05-23 onboarding produced ~30/85 junk orgs.
+# Rules: (1) verb-prefix patterns are sentence stems, not orgs; (2) weak
+# corporate-form suffixes (Co/Kft/LLC/GmbH/Inc/...) need ≥2 cap tokens
+# before, OR 1 leading token with hyphen/non-ASCII (multi-word compound);
+# (3) leading articles The/A + single-cap + suffix are not orgs; (4) two
+# distinct corporate-form suffix words = adjacent-fragment artifact.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("fact", [
+    "Uses GitHub Co for source control.", "Uses Docker Co.", "Uses Monzo Bank.",
+    "Uses Google Search Co heavily.", "Uses Kerítésrendszerek Kft.",
+    "Receives Stylers Group emails.", "Receives Co notifications.",
+    "Follows FT Partners on LinkedIn.", "Received RetconLine Kft invoice.",
+    "Sent FT Partners a note.", "Following Eleven Labs on socials.",
+    "Using Lovable Labs.", "From Stylers Group.", "To FT Partners.",
+    "Via Wise Business.", "By Lovable Labs.", "With FT Partners.",
+    "Through Monzo Bank.",
+])
+def test_verb_prefix_candidates_rejected(fact):
+    for cand in _names(fact):
+        first = cand.split()[0] if cand.split() else ""
+        assert first not in {
+            "Uses", "Receives", "Received", "Follows", "Sent", "Receive",
+            "Following", "Using", "From", "To", "Via", "By", "With", "Through",
+        }, (fact, cand)
+
+
+@pytest.mark.parametrize("fact", [
+    "AI Co is the parent.", "Alfred Co.", "Claude Co.", "Docker Co.",
+    "GitHub Co.", "Google Co.", "Hailey Co.", "Hungary Kft is the entity.",
+    "Kilo Co.", "Make Co.", "Pest Co.", "Product Co.", "Search Co.",
+    "Solopreneur Co.", "Zo Co.", "BOTANIQ Co is a brand.",
+])
+def test_single_cap_plus_weak_suffix_rejected(fact):
+    _WEAK = {"Co", "Kft", "Bt", "Zrt", "Nyrt", "Ltd", "LLC", "Inc",
+             "Corp", "GmbH", "AG", "SA", "PLC"}
+    for cand in _names(fact):
+        toks = cand.split()
+        if len(toks) == 2 and toks[1].rstrip(".") in _WEAK:
+            head = toks[0]
+            assert "-" in head or any(ord(c) > 127 for c in head), (fact, cand)
+
+
+@pytest.mark.parametrize("fact", [
+    "The Founders Co.", "The Solopreneur Co.", "A Founders Co for hire.",
+])
+def test_article_plus_single_cap_suffix_rejected(fact):
+    for cand in _names(fact):
+        assert cand.split()[:1] not in (["The"], ["A"]), (fact, cand)
+
+
+@pytest.mark.parametrize("fact", [
+    "Wyoming LLC Ugly Co operates.", "Foo LLC Bar Inc concatenated.",
+])
+def test_two_suffix_words_rejected(fact):
+    from src.activities.packs_opus import _ORG_SUFFIX_WEAK
+    for cand in _names(fact):
+        hits = sum(1 for w in cand.split() if w.rstrip(".") in _ORG_SUFFIX_WEAK)
+        assert hits <= 1, (fact, cand)
+
+
+@pytest.mark.parametrize("fact,expected", [
+    ("NeoTerra Property Group is a client.", "NeoTerra Property Group"),
+    ("Wise Business handles transfers.", "Wise Business"),
+    ("Gránit Bank is the bank.", "Gránit Bank"),
+    ("Hetzner Online GmbH runs the VPS.", "Hetzner Online GmbH"),
+    ("Krio Intézet Zrt holds shares.", "Krio Intézet Zrt"),
+    ("Szabó-Stubán Kft is the Hungarian entity.", "Szabó-Stubán Kft"),
+    ("Ugly Code LLC is the Wyoming entity.", "Ugly Code LLC"),
+    ("FT Partners is an advisory firm.", "FT Partners"),
+    ("Eleven Labs makes voice models.", "Eleven Labs"),
+    ("Lovable Labs ships landing pages.", "Lovable Labs"),
+    ("BVF Heating Solutions is a vendor.", "BVF Heating Solutions"),
+    ("Elektronika Vonala Security Kft installs alarms.",
+     "Elektronika Vonala Security Kft"),
+    ("Stylers Group works on the pipeline.", "Stylers Group"),
+    ("TRB Development Kft is the developer.", "TRB Development Kft"),
+    ("XXXLutz Lakberendezési Kft is a chain.", "XXXLutz Lakberendezési Kft"),
+    ("Monzo Bank handles the GBP.", "Monzo Bank"),
+    ("MBH Bank serves Hungary.", "MBH Bank"),
+    ("Erste Bank serves Hungary.", "Erste Bank"),
+])
+def test_real_orgs_still_accepted(fact, expected):
+    assert expected in _names(fact), (expected, _names(fact))
+
+
 def test_materialize_writes_orgs_when_pass_b_times_out():
     """E2E: matters have no related_orgs; facts name 5 orgs; Pass B
     raises TimeoutError. Pass A.5 materialises ≥ 4 anyway."""
