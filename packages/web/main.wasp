@@ -662,6 +662,19 @@ action setSignalActionMode {
   entities: []
 }
 
+// Agent autonomy — unified three-key settings (sir-matter-task #6,
+// /study#settings). Wraps GET /api/v1/settings (all three knobs in one
+// payload) + PUT /api/v1/settings/:key.
+query getAgentSettings {
+  fn: import { getAgentSettings } from "@src/dashboard/operations",
+  entities: []
+}
+
+action setAgentSetting {
+  fn: import { setAgentSetting } from "@src/dashboard/operations",
+  entities: []
+}
+
 // AgentPhone (Phase 8)
 query getPhoneConfig {
   fn: import { getPhoneConfig } from "@src/dashboard/operations",

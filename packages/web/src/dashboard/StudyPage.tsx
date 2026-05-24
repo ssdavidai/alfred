@@ -36,8 +36,8 @@ import {
   getModelCatalog,
   getVexaAutoJoin,
   setVexaAutoJoin,
-  getSignalActionMode,
-  setSignalActionMode,
+  getAgentSettings,
+  setAgentSetting,
   getWorkspaceFile,
   updateWorkspaceFile,
   listApiKeys,
@@ -56,7 +56,9 @@ import { ClaudeSetupSections } from "./ClaudePage";
 import {
   deriveSignalActionModeState,
   describeSource,
-  MODE_DESCRIPTIONS,
+  deriveAgentSettingsView,
+  type AgentSettingKey,
+  type AgentSettingView,
   type SignalActionMode,
 } from "./signalActionModeCore";
 
@@ -490,163 +492,218 @@ function SettingsSection() {
 }
 
 // ---------------------------------------------------------------------------
-// Agent autonomy — live / shadow toggle (Gap 3b)
+// Agent autonomy — three Live/Shadow toggles (Gap 3b + sir-matter-task #6)
 // ---------------------------------------------------------------------------
 //
-// Backed by GET/PUT /api/v1/settings/signal-action-mode (Lane I). Default
-// is "live". The env var SIGNAL_ACTION_LIVE_MODE still wins for emergencies
-// — when it's set, the response carries env_override_active=true and the
-// toggle here is disabled with a footnote explaining the situation (silent
-// no-op flips are exactly the failure mode this whole feature retires).
+// Backed by Lane I's unified settings endpoint:
+//   GET /api/v1/settings → { settings: { signal_action_mode, state_mutator_mode,
+//                                        auto_task_create_mode } }
+//   PUT /api/v1/settings/:key body { mode: "live"|"shadow" }
 //
-// On flip: optimistic update, refetch on success (in case the backend
-// normalised something — e.g. env-override flipped on between read and
-// write), revert + inline error on failure. Matches the existing
-// console.error + inline-message pattern used by VaultPage.
+// Three knobs, one shape each (mode + source + env_override_active). Default
+// is "live" everywhere. Env vars still win for emergencies — when one is
+// set, that key's response carries env_override_active=true and that toggle
+// is disabled with a footnote explaining the situation. Disabling is
+// per-key: env-override on one knob doesn't lock the others. Silent
+// no-op flips are exactly the failure mode this whole feature retires.
+//
+// On flip: optimistic update of the touched key, refetch on success (in
+// case the backend normalised something — e.g. env-override flipped on
+// between read and write), revert + inline error on failure. Matches
+// the existing console.error + inline-message pattern used by VaultPage.
 
 function AgentAutonomySection() {
   const { data, refetch, isFetching } = useQuery(
-    getSignalActionMode,
+    getAgentSettings,
     undefined,
     { retry: false },
   );
-  const state = deriveSignalActionModeState(data as any);
-  const [pending, setPending] = useState<SignalActionMode | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const view = deriveAgentSettingsView(data as any);
+  // Per-key in-flight state. Keyed by AgentSettingKey so flipping one
+  // toggle doesn't block the others (they're independent on the backend).
+  const [pending, setPending] = useState<
+    Partial<Record<AgentSettingKey, SignalActionMode>>
+  >({});
+  const [errors, setErrors] = useState<
+    Partial<Record<AgentSettingKey, string>>
+  >({});
 
-  // Optimistic mode: while a flip is in flight, render the requested mode
-  // so the toggle responds immediately. On settle, the refetch will either
-  // confirm it (sticks) or correct it (snaps back, error shown).
-  const displayMode: SignalActionMode = pending ?? state.mode;
-  const displayState = pending
-    ? deriveSignalActionModeState({
-        mode: pending,
-        // While in flight, treat the source as settings_file (we just set it
-        // from this toggle) UNLESS env-override is active — then nothing the
-        // toggle does matters and we keep the disabled state.
-        source: state.envOverrideActive ? "env_override" : "settings_file",
-        env_override_active: state.envOverrideActive,
-      })
-    : state;
-
-  async function flip(next: SignalActionMode) {
-    if (displayState.toggleDisabled) return;
-    if (next === displayMode) return;
-    setError(null);
-    setPending(next);
+  async function flip(key: AgentSettingKey, next: SignalActionMode) {
+    setErrors((e) => ({ ...e, [key]: undefined }));
+    setPending((p) => ({ ...p, [key]: next }));
     try {
-      await setSignalActionMode({ mode: next });
+      await setAgentSetting({ key, mode: next });
       // Refetch so we reflect whatever effective state the backend reports
       // (in particular, env-override might have flipped on between read
       // and write — we don't want to silently lie that the toggle landed).
       await refetch();
     } catch (e: any) {
-      console.error("setSignalActionMode failed", e);
-      setError(
-        String(e?.message || e || "Could not change autonomy mode.") +
+      console.error(`setAgentSetting(${key}) failed`, e);
+      setErrors((errs) => ({
+        ...errs,
+        [key]:
+          String(e?.message || e || "Could not change autonomy mode.") +
           " — Mode unchanged.",
-      );
+      }));
     } finally {
-      setPending(null);
+      setPending((p) => {
+        const { [key]: _, ...rest } = p;
+        return rest;
+      });
     }
   }
-
-  const footnote = describeSource(displayState);
 
   return (
     <div className="mb-12">
       <H>Agent autonomy</H>
       <Sub>How much I act on my own, before I bring it to you.</Sub>
 
-      <div
-        className="border-t border-rule grid grid-cols-[200px_1fr] gap-6 py-5 border-b items-start"
-      >
-        <div>
-          <div className="font-display italic text-[18px]">Mode</div>
+      <div className="border-t border-rule">
+        {view.map((entry, i) => (
+          <AgentAutonomyRow
+            key={entry.key}
+            entry={entry}
+            pending={pending[entry.key] ?? null}
+            error={errors[entry.key] ?? null}
+            isFetching={isFetching}
+            isLast={i === view.length - 1}
+            onFlip={(next) => flip(entry.key, next)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface AgentAutonomyRowProps {
+  entry: AgentSettingView;
+  pending: SignalActionMode | null;
+  error: string | null;
+  isFetching: boolean;
+  isLast: boolean;
+  onFlip: (next: SignalActionMode) => void;
+}
+
+function AgentAutonomyRow({
+  entry,
+  pending,
+  error,
+  isFetching,
+  isLast,
+  onFlip,
+}: AgentAutonomyRowProps) {
+  // Optimistic mode: while a flip is in flight, render the requested mode
+  // so the toggle responds immediately. On settle, the refetch will either
+  // confirm it (sticks) or correct it (snaps back, error shown).
+  const displayMode: SignalActionMode = pending ?? entry.state.mode;
+  const displayState = pending
+    ? deriveSignalActionModeState({
+        mode: pending,
+        // While in flight, treat the source as settings_file (we just set it
+        // from this toggle) UNLESS env-override is active — then nothing the
+        // toggle does matters and we keep the disabled state.
+        source: entry.state.envOverrideActive
+          ? "env_override"
+          : "settings_file",
+        env_override_active: entry.state.envOverrideActive,
+      })
+    : entry.state;
+  const footnote = describeSource(displayState);
+  const disabled = displayState.toggleDisabled || pending !== null;
+
+  function handle(m: SignalActionMode) {
+    if (disabled) return;
+    if (m === displayMode) return;
+    onFlip(m);
+  }
+
+  return (
+    <div
+      className={`grid grid-cols-[200px_1fr] gap-6 py-5 items-start ${
+        isLast ? "border-b border-rule" : "border-b border-rule"
+      }`}
+    >
+      <div>
+        <div className="font-display italic text-[18px]">{entry.label}</div>
+        <p
+          className="font-body text-[13px] mt-1"
+          style={{ color: "var(--marginalia)" }}
+        >
+          {entry.description}
+        </p>
+        {footnote && (
           <p
-            className="font-body text-[13px] mt-1"
+            className="font-mono text-[10px] uppercase tracking-[0.18em] mt-2"
+            style={{
+              color: displayState.envOverrideActive
+                ? "var(--brass)"
+                : "var(--marginalia)",
+            }}
+          >
+            {footnote}
+          </p>
+        )}
+      </div>
+
+      <div>
+        <div
+          className="inline-flex border"
+          style={{ borderColor: "var(--rule)" }}
+          role="radiogroup"
+          aria-label={`${entry.label} mode`}
+        >
+          {(["live", "shadow"] as const).map((m) => {
+            const active = displayMode === m;
+            const label = m === "live" ? "Live" : "Shadow";
+            return (
+              <button
+                key={m}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                disabled={disabled}
+                onClick={() => handle(m)}
+                className="font-mono text-[10px] uppercase tracking-[0.22em] px-4 py-2 border-r last:border-r-0"
+                style={{
+                  borderColor: "var(--rule)",
+                  background: active
+                    ? "color-mix(in oklab, var(--brass) 12%, transparent)"
+                    : "transparent",
+                  color: active ? "var(--ink)" : "var(--marginalia)",
+                  fontWeight: active ? 600 : 400,
+                  cursor: disabled ? "not-allowed" : "pointer",
+                  opacity: displayState.toggleDisabled && !active ? 0.5 : 1,
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        {pending && (
+          <p
+            className="font-body italic text-[12px] mt-2"
             style={{ color: "var(--marginalia)" }}
           >
-            {MODE_DESCRIPTIONS[displayMode]}
+            Saving…
           </p>
-          {footnote && (
-            <p
-              className="font-mono text-[10px] uppercase tracking-[0.18em] mt-2"
-              style={{
-                color: displayState.envOverrideActive
-                  ? "var(--brass)"
-                  : "var(--marginalia)",
-              }}
-            >
-              {footnote}
-            </p>
-          )}
-        </div>
-
-        <div>
-          <div
-            className="inline-flex border"
-            style={{ borderColor: "var(--rule)" }}
-            role="radiogroup"
-            aria-label="Agent autonomy mode"
+        )}
+        {!pending && isFetching && (
+          <p
+            className="font-body italic text-[12px] mt-2"
+            style={{ color: "var(--marginalia)" }}
           >
-            {(["live", "shadow"] as const).map((m) => {
-              const active = displayMode === m;
-              const label = m === "live" ? "Live" : "Shadow";
-              return (
-                <button
-                  key={m}
-                  type="button"
-                  role="radio"
-                  aria-checked={active}
-                  disabled={displayState.toggleDisabled || pending !== null}
-                  onClick={() => flip(m)}
-                  className="font-mono text-[10px] uppercase tracking-[0.22em] px-4 py-2 border-r last:border-r-0"
-                  style={{
-                    borderColor: "var(--rule)",
-                    background: active
-                      ? "color-mix(in oklab, var(--brass) 12%, transparent)"
-                      : "transparent",
-                    color: active ? "var(--ink)" : "var(--marginalia)",
-                    fontWeight: active ? 600 : 400,
-                    cursor:
-                      displayState.toggleDisabled || pending !== null
-                        ? "not-allowed"
-                        : "pointer",
-                    opacity:
-                      displayState.toggleDisabled && !active ? 0.5 : 1,
-                  }}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-          {pending && (
-            <p
-              className="font-body italic text-[12px] mt-2"
-              style={{ color: "var(--marginalia)" }}
-            >
-              Saving…
-            </p>
-          )}
-          {!pending && isFetching && (
-            <p
-              className="font-body italic text-[12px] mt-2"
-              style={{ color: "var(--marginalia)" }}
-            >
-              Refreshing…
-            </p>
-          )}
-          {error && (
-            <p
-              className="font-mono text-[11px] mt-2"
-              style={{ color: "var(--brass)" }}
-            >
-              {error}
-            </p>
-          )}
-        </div>
+            Refreshing…
+          </p>
+        )}
+        {error && (
+          <p
+            className="font-mono text-[11px] mt-2"
+            style={{ color: "var(--brass)" }}
+          >
+            {error}
+          </p>
+        )}
       </div>
     </div>
   );

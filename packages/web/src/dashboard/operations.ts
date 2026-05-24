@@ -649,6 +649,50 @@ export const setSignalActionMode: any = async (
 };
 
 // ============================================================
+// Agent autonomy — unified three-key settings (sir-matter-task #6)
+// ============================================================
+// Bridges the /study#settings "Agent autonomy" page to Lane I's unified
+// settings endpoint. Replaces the per-key getSignalActionMode for the
+// page load (one round-trip, three knobs) and adds a uniform PUT for
+// the per-toggle flip.
+//
+// GET /api/v1/settings →
+//   { settings: { signal_action_mode: {mode,source,env_override_active},
+//                 state_mutator_mode:  {...},
+//                 auto_task_create_mode: {...} } }
+//
+// PUT /api/v1/settings/:key body { mode: "live"|"shadow" } → updated row.
+//
+// The single-key getSignalActionMode/setSignalActionMode endpoints stay
+// shipped (Lane I keeps them as backwards-compat) — they remain exported
+// here for any other caller that wants just the one knob, but new code
+// should use the unified pair below.
+export const getAgentSettings: any = async (_args: void, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/settings" });
+};
+
+// `key` is a string at the wire so the SaaS proxy doesn't have to update
+// every time Lane I adds another autonomy knob — validation of "is this
+// a known key" lives in ctrl-api, and the UI side only ever sends one
+// of the three keys it has descriptors for.
+export const setAgentSetting: any = async (
+  args: { key: string; mode: "live" | "shadow" },
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  // Encode the key for the URL — these are well-known
+  // `signal_action_mode`-style identifiers but the path can convert
+  // underscores to hyphens transparently if the backend prefers either.
+  // We pass the key verbatim and let ctrl-api accept the canonical form.
+  return proxyToTenant(instance, {
+    method: "PUT",
+    path: `/api/v1/settings/${encodeURIComponent(args.key)}`,
+    body: { mode: args.mode },
+  });
+};
+
+// ============================================================
 // Agent Config
 // ============================================================
 export const getModelCatalog: GetModelCatalog<
