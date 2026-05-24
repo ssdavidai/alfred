@@ -627,8 +627,15 @@ export function registerAttentionRoutes(): void {
         resolution_note: note || null,
       });
       const auditPath = emitResolutionEvent(rec, "dispatched", note);
-      // Gap 4 — mint the mirrored decision (intent=delegate). Additive.
-      const decisionPath = mintDecisionMirror(rec, "dispatched", note);
+      // Gap 4 — mint the mirrored decision (intent=delegate). Additive on
+      // UI clicks (no decision in flight yet), suppressed when called from
+      // DecisionRouter (decision_origin set in the request body): the caller
+      // is already processing a decision and minting a mirror would create
+      // a 1/min loop where every router tick mints a fresh delegate decision
+      // via this endpoint (#218 incident 2026-05-24).
+      const decisionPath = decisionOrigin
+        ? null
+        : mintDecisionMirror(rec, "dispatched", note);
       sendJson(res, 200, {
         ok: true,
         id,
