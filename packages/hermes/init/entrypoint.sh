@@ -536,4 +536,64 @@ else
     fi
 fi
 
+# =============================================================================
+# 11. Stage the Plane first-boot admin bootstrap inputs (Sir #6, 2026-05-24).
+# Mirrors the Sure pattern: alfred-init stages email + generated password,
+# the separate `plane-init` one-shot service runs plane-bootstrap.py.
+# =============================================================================
+if [[ "${PLANE_ENABLED:-true}" != "true" ]]; then
+    echo "[init] PLANE_ENABLED!=true, skipping Plane bootstrap staging."
+else
+    OWNER_EMAIL="${OWNER_EMAIL:-${ACME_EMAIL:-}}"
+    if [[ -z "${OWNER_EMAIL:-}" ]]; then
+        echo "[init] ACTION REQUIRED: PLANE_ENABLED=true but OWNER_EMAIL/ACME_EMAIL is unset."
+        echo "[init]   Cannot stage Plane bootstrap without an admin email."
+    else
+        PLANE_EMAIL_FILE=/alfred-data/.plane-bootstrap-email
+        PLANE_PW_FILE=/alfred-data/.plane-bootstrap-password
+        PLANE_PW_DONE=/alfred-data/.plane-admin-password
+
+        OWNER_EMAIL_LOWER=$(echo "$OWNER_EMAIL" | tr '[:upper:]' '[:lower:]')
+        echo -n "$OWNER_EMAIL_LOWER" > "$PLANE_EMAIL_FILE"
+        chmod 644 "$PLANE_EMAIL_FILE" 2>/dev/null || true
+
+        # Skip password (re)generation if we've already finalized one — the
+        # done-file is only present after plane-init confirms is_setup_done.
+        if [[ -f "$PLANE_PW_DONE" && -s "$PLANE_PW_DONE" ]]; then
+            echo "[init] Plane admin already seeded, password preserved at $PLANE_PW_DONE"
+        elif [[ ! -f "$PLANE_PW_FILE" || ! -s "$PLANE_PW_FILE" ]]; then
+            # Plane requires zxcvbn score >= 3 — token_urlsafe(24)+suffix
+            # passes comfortably (high entropy, mixed classes).
+            PLANE_PW=$(python3 -c "import secrets; print(secrets.token_urlsafe(24) + '!Aa1')")
+            printf '%s' "$PLANE_PW" > "$PLANE_PW_FILE"
+            chmod 644 "$PLANE_PW_FILE" 2>/dev/null || true
+            echo "[init] Generated Plane bootstrap password"
+        else
+            chmod 644 "$PLANE_PW_FILE" 2>/dev/null || true
+            echo "[init] Plane bootstrap password already present, reusing"
+        fi
+
+        PLANE_SCRIPT_DIR=/alfred-data/plane-bootstrap
+        PLANE_SCRIPT_DST="$PLANE_SCRIPT_DIR/plane-bootstrap.py"
+        PLANE_SCRIPT_SRC=/setup/plane-bootstrap.py
+        if [[ -f "$PLANE_SCRIPT_SRC" ]]; then
+            mkdir -p "$PLANE_SCRIPT_DIR"
+            PLANE_SRC_HASH=$(md5sum "$PLANE_SCRIPT_SRC" | cut -d' ' -f1)
+            PLANE_HASH_FILE="$PLANE_SCRIPT_DIR/.plane-bootstrap.py.content-hash"
+            if [[ -f "$PLANE_HASH_FILE" && "$(cat "$PLANE_HASH_FILE")" == "$PLANE_SRC_HASH" && -f "$PLANE_SCRIPT_DST" ]]; then
+                echo "[init] plane-bootstrap.py unchanged, skipping copy"
+            else
+                cp "$PLANE_SCRIPT_SRC" "$PLANE_SCRIPT_DST"
+                echo "$PLANE_SRC_HASH" > "$PLANE_HASH_FILE"
+                chmod 644 "$PLANE_SCRIPT_DST" 2>/dev/null || true
+                echo "[init] Deployed plane-bootstrap.py"
+            fi
+        else
+            echo "[init] WARNING: $PLANE_SCRIPT_SRC missing — Plane admin auto-seed will fail."
+        fi
+
+        echo "[init] Plane bootstrap staged — the plane-init service will run plane-bootstrap.py."
+    fi
+fi
+
 echo "=== Init complete ==="
