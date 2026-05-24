@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the `alfred-vault` package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-05-24] — the operational-context release
+## [2026-05-24]
 
 Alfred Black goes from "a Hermes runtime with tools" to "an agent with a
 persistent operational understanding of the principal." The runtime now boots
@@ -323,7 +323,7 @@ not API changes.
 
 ---
 
-## [2026-05-20] — the platform release
+## [2026-05-20]
 
 The project that gave you the `alfred` CLI is now a complete, deployable
 platform. Alfred Black wraps the same dependable vault engine in everything you
