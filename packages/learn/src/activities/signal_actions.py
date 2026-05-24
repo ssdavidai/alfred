@@ -331,15 +331,59 @@ def _card_dedup_key(fm: dict[str, Any]) -> set[str]:
     return _tokenize(text + " " + str(proposal.get("what") or ""))
 
 
+def _card_headline_tokens(fm: dict[str, Any]) -> set[str]:
+    """Token signature of just the display_headline — Sir #2 layer 1.
+
+    The headline is the curator's distilled subject; two cards about the
+    same matter overlap heavily on headline even when raw_quote (full
+    email body) diverges across retries. That's the Rayon ×3 case the
+    full-body Jaccard misses: same actor + topic in the headline, three
+    different verbose email bodies.
+    """
+    return _tokenize(str(fm.get("display_headline") or ""))
+
+
+def _card_action_stem(fm: dict[str, Any]) -> str:
+    """First-3-token stem of action_proposal.what — Sir #2 layer 2.
+
+    "Reply to Rayon with updated card" and "Reply to Rayon about failed
+    payment" both stem to ``"reply to rayon"`` — same instruction,
+    different prose. The stem is intentionally short (3 tokens) so it
+    survives small wording differences but stays specific enough to not
+    collide across unrelated actions ("Reply to Mailgun" vs "Reply to
+    Rayon" stem differently because the third token diverges).
+    """
+    proposal = _parse_action_proposal(fm.get("action_proposal")) or {}
+    what = str(proposal.get("what") or "").strip()
+    if not what:
+        return ""
+    import re
+    parts = [p for p in re.split(r"[^A-Za-z0-9]+", what.lower()) if p]
+    return " ".join(parts[:3])
+
+
 async def _recent_open_card_exists(client: Any, fm: dict[str, Any]) -> str | None:
     """De-dup: a recent OPEN card on the same subject → its path, else None.
 
-    Reuses the wired ``list_records("needs_attention")`` path. Matches on
-    (a) same ``source_event_path`` or (b) ≥0.7 token-overlap subject. Fails
-    open (returns None) on a read error — a ctrl-api blip must not drop a card.
+    Reuses the wired ``list_records("needs_attention")`` path. Layered
+    matching (Sir #2 — Rayon ×3, Soft Murmur ×2 on the live desk):
+
+      1. Same ``source_event_path`` → dup (exact event re-emission).
+      2. Headline-only Jaccard ≥ 0.6 → dup (Rayon ×3: divergent email
+         bodies but the curator's distilled headline overlaps heavily).
+      3. Same first-3-token stem of ``action_proposal.what`` → dup
+         (Soft Murmur ×2: "Schedule call with Soft Murmur …" twice).
+      4. Original full-body Jaccard ≥ 0.7 → dup (legacy gate retained
+         for the close-paraphrase case the new layers don't cover).
+
+    Fails open (returns None) on a read error — a ctrl-api blip must
+    not drop a card. Conservative: each layer requires real overlap, so
+    genuinely distinct actions still card independently.
     """
     src_event = str(fm.get("source_event_path") or "").strip()
     my_tokens = _card_dedup_key(fm)
+    my_headline = _card_headline_tokens(fm)
+    my_stem = _card_action_stem(fm)
     try:
         existing = await client.list_records("needs_attention", limit=200)
     except Exception as exc:  # noqa: BLE001
@@ -353,8 +397,24 @@ async def _recent_open_card_exists(client: Any, fm: dict[str, Any]) -> str | Non
         if status and status not in ("pending", "open", "deferred"):
             continue
         path = str(rec.get("path") or efm.get("path") or "").strip()
+        # Layer 0 — same source event.
         if src_event and str(efm.get("source_event_path") or "").strip() == src_event:
             return path or "duplicate"
+        # Layer 1 — headline-only Jaccard.
+        other_headline = _card_headline_tokens(efm)
+        if (
+            my_headline and other_headline
+            and len(my_headline & other_headline)
+                / len(my_headline | other_headline) >= 0.6
+        ):
+            return path or "duplicate"
+        # Layer 2 — action_proposal.what first-3-token stem.
+        other_stem = _card_action_stem(efm)
+        if my_stem and other_stem and my_stem == other_stem:
+            return path or "duplicate"
+        # Layer 3 — legacy full-body Jaccard (kept as a safety net for
+        # the close-paraphrase case where headline + stem both diverge
+        # but the underlying content really is the same).
         other = _card_dedup_key(efm)
         if my_tokens and other and len(my_tokens & other) / len(my_tokens | other) >= 0.7:
             return path or "duplicate"
@@ -1905,7 +1965,9 @@ async def route_signal_action(
                 try:
                     await set_signal_status(signal_ref, "routed_suppressed",
                                             applied_at=_now_utc_iso(),
-                                            audit_record_ref="", config=cfg)
+                                            audit_record_ref="",
+                                            matched_instinct=matched_path,
+                                            config=cfg)
                 except httpx.HTTPError as exc:
                     logger.warning("signal_actions.route_signal_action: "
                                    "suppressed status write failed id=%s "
@@ -1946,7 +2008,10 @@ async def route_signal_action(
 
         # 9. Mark the signal in state.db (storage cutover #27). The
         # audit record ref goes into ``audit_record_path``; ``status``
-        # is the routing outcome.
+        # is the routing outcome; ``matched_instinct`` (Sir #4+#5) closes
+        # the signal→instinct loop so the /instincts UI, matter
+        # aggregator, and audit feeds can show "instinct X fired on
+        # signal Y" instead of treating every match as folklore.
         signal_status = (
             "routed_agent" if chosen_path == "agent" else "routed_human"
         )
@@ -1956,6 +2021,7 @@ async def route_signal_action(
                 signal_status,
                 applied_at=_now_utc_iso(),
                 audit_record_ref=audit_path,
+                matched_instinct=matched_path,
                 config=cfg,
             )
         except httpx.HTTPError as exc:

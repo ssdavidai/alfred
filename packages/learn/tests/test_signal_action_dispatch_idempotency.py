@@ -64,6 +64,7 @@ class _FakeStateDb:
         *,
         applied_at: str | None = None,
         audit_record_ref: str | None = None,
+        matched_instinct: str | None = None,
         config: Any = None,
     ) -> None:
         assert signal_ref == self.signal_id
@@ -72,6 +73,8 @@ class _FakeStateDb:
             self.frontmatter["applied_at"] = applied_at
         if audit_record_ref is not None:
             self.frontmatter["audit_record_path"] = audit_record_ref
+        if matched_instinct is not None:
+            self.frontmatter["matched_instinct"] = matched_instinct
         self.status_writes.append(status)
 
 
