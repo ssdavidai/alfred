@@ -57,9 +57,16 @@ def score_instinct(metadata: dict[str, Any], instinct: dict[str, Any]) -> Instin
     )
 
     # Keyword score: what fraction of instinct keywords appear in input?
+    # Sir gap 5b (2026-05-24): pass the input's full_text so multi-word
+    # pattern phrases ("payment failed", "update payment method") can
+    # match via substring — set intersection of single-word tokens
+    # against multi-word phrases was returning 0.0 every time on the
+    # live tenant (silently dropped all 31 unconfirmed instincts'
+    # subject_keywords into the void).
     keyword_score = _score_keyword_overlap(
         metadata.get("keywords", []),
         patterns["keyword_patterns"],
+        full_text=metadata.get("full_text", ""),
     )
 
     # Input type score: does the input type match?
@@ -122,19 +129,83 @@ def _score_patterns(input_values: list[str], patterns: list[str]) -> float:
     return matched / len(input_values)
 
 
-def _score_keyword_overlap(input_keywords: list[str], pattern_keywords: list[str]) -> float:
-    """Score keyword overlap between input and pattern. Returns 0.0–1.0."""
+def _score_keyword_overlap(
+    input_keywords: list[str],
+    pattern_keywords: list[str],
+    full_text: str = "",
+) -> float:
+    """Score keyword overlap between input and pattern. Returns 0.0–1.0.
+
+    Sir gap 5b (2026-05-24): the scorer used to do ONLY set
+    intersection of single-word ``input_keywords`` against
+    ``pattern_keywords``. That silently broke whenever an instinct's
+    ``subject_keywords`` carried multi-word phrases (the realistic
+    Opus-generated shape: "payment failed", "update payment method",
+    "card declined", etc.). Set intersection of words vs phrases is
+    always empty → keyword score = 0.0 → most instincts never matched.
+
+    Fix: a pattern "matches" if EITHER
+      (a) it appears as a substring of ``full_text`` (catches
+          multi-word phrases verbatim), OR
+      (b) all whitespace-separated tokens of the pattern appear in the
+          input keyword set (catches paraphrased variants:
+          "payment was unsuccessful" still tokenises to {payment,
+          unsuccessful} — pattern "payment failed" tokens
+          {payment,failed} don't ALL appear, so this branch rejects;
+          but pattern "card declined" would match a signal that says
+          "her card was declined yesterday" via this branch alone), OR
+      (c) (legacy compat) the pattern is itself a single word and
+          appears in ``input_keywords``.
+
+    Returns the fraction of patterns that matched. ``full_text`` is
+    lowercased once at the call site (``extract_input_metadata``)
+    so we can substring-match directly.
+    """
     if not pattern_keywords:
         return 0.0
 
     input_set = {k.lower() for k in input_keywords}
-    pattern_set = {k.lower() for k in pattern_keywords}
-
-    if not pattern_set:
+    full_text_lc = (full_text or "").lower()
+    if not input_set and not full_text_lc:
         return 0.0
 
-    overlap = input_set & pattern_set
-    return len(overlap) / len(pattern_set)
+    matched = 0
+    seen: set[str] = set()
+    for raw_pattern in pattern_keywords:
+        if not isinstance(raw_pattern, str):
+            continue
+        pattern = raw_pattern.lower().strip()
+        if not pattern or pattern in seen:
+            continue
+        seen.add(pattern)
+
+        # (a) substring match against the full input text — catches
+        # multi-word phrases verbatim.
+        if full_text_lc and pattern in full_text_lc:
+            matched += 1
+            continue
+
+        # (b) tokenised match — split the pattern into words and check
+        # that ALL of them appear in the input keyword set. Reject
+        # single-word patterns here (we'll catch those in (c) so the
+        # behaviour stays identical to the legacy single-word path
+        # when the pattern is a single word; otherwise a single-word
+        # pattern would double-match).
+        pattern_tokens = [t for t in pattern.split() if t]
+        if len(pattern_tokens) >= 2 and all(
+            t in input_set for t in pattern_tokens
+        ):
+            matched += 1
+            continue
+
+        # (c) legacy single-word path.
+        if len(pattern_tokens) == 1 and pattern_tokens[0] in input_set:
+            matched += 1
+            continue
+
+    if not seen:
+        return 0.0
+    return matched / len(seen)
 
 
 def _score_type_match(input_type: str, allowed_types: list[str]) -> float:

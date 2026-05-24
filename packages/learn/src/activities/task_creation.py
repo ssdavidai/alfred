@@ -7,6 +7,12 @@ an LLM proposes ``{title, description, due_at?}`` and we write a fresh
 ``task/<slug>.md`` record with full Steward frontmatter so the next
 Steward tick picks it up cleanly.
 
+Sir-matter-task #4 (2026-05-24): the env gate is now settings-aware
+and defaults to LIVE. Mirrors Fix-Loop-close + Fix C precedence:
+  1. Env STEWARD_SIGNAL_AUTOCREATE_TASKS (override; legacy true/false also accepted)
+  2. /alfred-data/settings.json key ``auto_task_create_mode``
+  3. Default "live" (was env-unset → no-op → 0 auto-tasks ever created)
+
 Why this lives in its own file
 ------------------------------
 ``signals.py`` already runs >1500 LOC and owns the signal extraction
@@ -117,9 +123,93 @@ TITLE_MAX_CHARS = 60
 # normal load.
 CACHE_MAX_ENTRIES = 10_000
 
-# Env var gating Phase 6.5. Default false — flip to "true" once smoke
-# tests confirm the LLM is producing sane title/description pairs.
+# Env var gating Phase 6.5. Sir-matter-task #4 (2026-05-24): retained
+# as an emergency override; new precedence reads settings.json first
+# and defaults to ``"live"``.
 ENV_AUTOCREATE_FLAG = "STEWARD_SIGNAL_AUTOCREATE_TASKS"
+
+# Sir-matter-task #4: settings-file-based user toggle. Mirrors
+# ``signal_actions._SIGNAL_ACTION_SETTINGS_PATH`` and
+# ``state_mutator._STATE_MUTATOR_SETTINGS_PATH`` — single shared file,
+# different keys, same fail-safe semantics.
+from pathlib import Path as _Path
+
+_AUTO_TASK_CREATE_SETTINGS_PATH = _Path("/alfred-data/settings.json")
+_AUTO_TASK_CREATE_SETTINGS_KEY = "auto_task_create_mode"
+_VALID_AUTO_TASK_CREATE_MODES = ("shadow", "live")
+_DEFAULT_AUTO_TASK_CREATE_MODE = "live"
+
+
+def _resolve_auto_task_create_mode() -> str:
+    """Return the effective live-mode for auto-task creation.
+
+    Sir-matter-task #4 (2026-05-24): default flipped from "off" to
+    ``"live"`` and a user-toggleable settings file added. Precedence:
+
+      1. Env ``STEWARD_SIGNAL_AUTOCREATE_TASKS`` if set (override).
+         Legacy ``"true"`` → live, ``"false"`` → shadow are accepted
+         for back-compat with deployments that still carry the old env.
+      2. ``/alfred-data/settings.json`` key ``auto_task_create_mode``.
+      3. Default ``"live"``.
+
+    Returns one of ``"shadow"`` (no-op) or ``"live"`` (do work).
+    Fail-safe: missing file silent, malformed JSON / unrecognised
+    value defaults to live with a warning.
+    """
+    import json as _json
+    import os as _os
+
+    # 1. Env override.
+    env_raw = _os.environ.get(ENV_AUTOCREATE_FLAG)
+    if env_raw is not None and env_raw.strip():
+        raw = env_raw.strip().lower()
+        # Legacy aliases — old deployments set true/false.
+        if raw == "true":
+            return "live"
+        if raw == "false":
+            return "shadow"
+        if raw in _VALID_AUTO_TASK_CREATE_MODES:
+            return raw
+        logger.warning(
+            "task_creation._resolve_auto_task_create_mode: unrecognised %s=%s "
+            "— falling back to settings/default",
+            ENV_AUTOCREATE_FLAG, raw,
+        )
+        # fall through
+
+    # 2. Settings file.
+    try:
+        if _AUTO_TASK_CREATE_SETTINGS_PATH.exists():
+            data = _json.loads(_AUTO_TASK_CREATE_SETTINGS_PATH.read_text())
+            value = (
+                data.get(_AUTO_TASK_CREATE_SETTINGS_KEY)
+                if isinstance(data, dict) else None
+            )
+            if isinstance(value, str):
+                raw = value.strip().lower()
+                if raw in _VALID_AUTO_TASK_CREATE_MODES:
+                    return raw
+                logger.warning(
+                    "task_creation._resolve_auto_task_create_mode: "
+                    "unrecognised settings.json %s=%s — using default %s",
+                    _AUTO_TASK_CREATE_SETTINGS_KEY, raw,
+                    _DEFAULT_AUTO_TASK_CREATE_MODE,
+                )
+    except (_json.JSONDecodeError, ValueError) as exc:
+        logger.warning(
+            "task_creation._resolve_auto_task_create_mode: settings.json "
+            "parse failed (%s) — using default %s",
+            exc, _DEFAULT_AUTO_TASK_CREATE_MODE,
+        )
+    except OSError as exc:
+        logger.warning(
+            "task_creation._resolve_auto_task_create_mode: settings.json "
+            "read failed (%s) — using default %s",
+            exc, _DEFAULT_AUTO_TASK_CREATE_MODE,
+        )
+
+    # 3. Default.
+    return _DEFAULT_AUTO_TASK_CREATE_MODE
 
 
 # ---------------------------------------------------------------------------
@@ -193,12 +283,15 @@ async def create_task_from_signal(signal: dict[str, Any]) -> str | None:
         )
         return None
 
-    # --- Step 2: env gate ---
-    enabled = (os.environ.get(ENV_AUTOCREATE_FLAG, "") or "").strip().lower()
-    if enabled != "true":
+    # --- Step 2: mode gate (sir-matter-task #4) ---
+    # Was: env-unset → off → 0 auto-tasks ever. Now: settings.json-aware,
+    # default live. Off-switch is either env=shadow/false OR
+    # settings.json key auto_task_create_mode=shadow.
+    mode = _resolve_auto_task_create_mode()
+    if mode != "live":
         logger.info(
-            "task_creation: %s != 'true' — no-op (source_event=%s)",
-            ENV_AUTOCREATE_FLAG, source_event_path,
+            "task_creation: auto_task_create_mode=%s — no-op (source_event=%s)",
+            mode, source_event_path,
         )
         return None
 
@@ -927,6 +1020,10 @@ def _render_task_content(
     # whose next_check_after is <= now.
     lines.append(f"next_check_after: {_yaml_inline_str(created_iso)}")
     lines.append(f"parent_matter: {_yaml_inline_str(parent_matter)}")
+    # Sir-matter-task #4: emit ``matter_ref`` alias so the matters
+    # aggregator's secondary key resolves identically. Mirrors Fix A's
+    # onboarding-task rich shape.
+    lines.append(f"matter_ref: {_yaml_inline_str(parent_matter)}")
     lines.append("pending_confirmation: false")
     lines.append("related_matters: []")
     lines.append("related_orgs: []")
@@ -935,8 +1032,17 @@ def _render_task_content(
     if source_event_path:
         lines.append(f"source_event: {_yaml_inline_str(source_event_path)}")
     lines.append("staleness_score: 0")
-    lines.append("state: open")
-    lines.append("status: todo")
+    # Sir-matter-task #4 (mirror Fix A): the matters aggregator reads
+    # ``state``; ``pending`` is the canonical newly-created value.
+    # TaskRunner filters on ``status in (queued, in_progress)`` so we
+    # land at ``queued`` (was ``todo`` — never picked up).
+    lines.append("state: pending")
+    lines.append("status: queued")
+    # Sir-matter-task #4: ``closure_predicate`` (singular) — optional
+    # field downstream tooling reads to distinguish "no predicate set"
+    # from "field missing". Closure_predicates (plural) live in
+    # ``signal_sources[*].name`` per the existing schema.
+    lines.append("closure_predicate: null")
     lines.append("surface_class: normal")
     lines.append("tags:")
     lines.append("  - auto-from-signal")

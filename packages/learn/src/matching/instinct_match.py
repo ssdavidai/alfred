@@ -20,27 +20,32 @@ answer for ambient/uncategorisable activity.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from src.matching.metadata import extract_input_metadata
 from src.matching.scorer import score_all_instincts
 
+logger = logging.getLogger("alfred-learn")
+
 
 # Threshold tuning: scorer weights sum to 1.0 (0.30 domain + 0.30 keywords +
 # 0.15 input_type + 0.15 attachment + 0.10 tags). A single sender_domain
 # match alone yields 0.30; we want strong-but-not-iron-clad matches.
 #
-# Gap 5b (2026-05-24): lowered 0.15 → 0.10. Live tenant has 31 unconfirmed
-# instincts that score sparsely (single moderate-keyword overlap of ~0.10–
-# 0.14 each) and were rejected here, leaving observations with
-# instinct_ref=null. The discretion gate downstream
-# (signal_actions._instinct_threshold + should_route_autonomously) still
-# filters low-obs-count / low-confidence matches through HUMAN, so
-# surfacing more candidates on the audit record cannot cause autonomous
-# misfires; it just gives the matter aggregator + /instincts UI something
-# to work with.
-MATCH_THRESHOLD = 0.10
+# Gap 5b (2026-05-24): lowered 0.15 → 0.10 (first pass). Then audit found
+# the deeper bug — scorer was doing set intersection of single-word input
+# keywords against multi-word pattern phrases, returning 0.0 every time.
+# Fix: scorer.py now does substring + tokenised match.
+#
+# With that in place, scoring for the live ``escalate-critical-payment-
+# failures`` instinct on a decision-flow observation lands at ~0.03
+# (keyword=0.09 × weight 0.30 + input_type=0 since decision→"other").
+# Lowered threshold 0.10 → 0.05 (per Sir's spec) so the decision-flow
+# observations actually pick up their instinct — the discretion gate
+# downstream filters anyway, so surfacing more candidates is safe.
+MATCH_THRESHOLD = 0.05
 
 
 def build_observation_metadata(
@@ -165,13 +170,34 @@ def best_instinct_path(
     if not scores:
         return None
     best = scores[0]
+
+    # Sir gap 5b (2026-05-24): surface the top score on every call so
+    # the live tenant log shows what the scorer is actually computing.
+    # Was a silent black box: 13 observations today had instinct_ref=
+    # None and no debug signal of WHY. INFO-level is fine — one log
+    # line per observation write is acceptable churn for the
+    # observability gain.
+    top_path = None
+    for p, fm in pairs:
+        if fm is best.instinct:
+            top_path = p
+            break
+    logger.info(
+        "instinct_match: top=%s score=%.4f threshold=%.4f domain=%.2f "
+        "keywords=%.2f input_type=%.2f attachment=%.2f tags=%.2f",
+        top_path or "?",
+        best.score,
+        MATCH_THRESHOLD,
+        best.breakdown.get("domain", 0.0),
+        best.breakdown.get("keywords", 0.0),
+        best.breakdown.get("input_type", 0.0),
+        best.breakdown.get("attachment", 0.0),
+        best.breakdown.get("tags", 0.0),
+    )
+
     if best.score < MATCH_THRESHOLD:
         return None
-    # Map back to path. The scorer preserves order so we can index.
-    for path, fm in pairs:
-        if fm is best.instinct:
-            return path
-    return None
+    return top_path
 
 
 def _normalise_sender_for_domain(sender: str) -> str:

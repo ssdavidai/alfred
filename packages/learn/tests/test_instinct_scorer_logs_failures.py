@@ -100,18 +100,20 @@ def test_scorer_exception_is_logged_as_warning(
     )
 
 
-def test_match_threshold_is_lowered_to_010() -> None:
-    """Gap 5b sub-fix: MATCH_THRESHOLD lowered 0.15 → 0.10.
+def test_match_threshold_is_lowered_to_005() -> None:
+    """Gap 5b second-pass: MATCH_THRESHOLD 0.10 → 0.05.
 
-    Rationale: live tenant has 31 unconfirmed instincts that score
-    sparsely (single-domain or moderate-keyword overlap). The discretion
-    gate downstream still filters anything that scores low + has few
-    observations through HUMAN, so we can afford to surface more
-    candidate matches on the audit record without changing autonomous
-    behaviour.
+    After the scorer's substring + tokenised match fix (signal text
+    + multi-word patterns now actually overlap), the decision-flow
+    observations still scored ~0.027 because they have no
+    ``input_type`` boost (source_kind=decision → input_type=other).
+    Lowering the threshold to 0.05 lets the decision-flow observations
+    pick up their instinct. The discretion gate downstream filters
+    anyway, so surfacing more candidates is safe.
     """
     from src.matching.instinct_match import MATCH_THRESHOLD
 
-    assert MATCH_THRESHOLD == pytest.approx(0.10), (
-        f"MATCH_THRESHOLD must be 0.10 after Gap 5b; got {MATCH_THRESHOLD!r}"
+    assert MATCH_THRESHOLD == pytest.approx(0.05), (
+        f"MATCH_THRESHOLD must be 0.05 after gap 5b second-pass; "
+        f"got {MATCH_THRESHOLD!r}"
     )

@@ -71,6 +71,43 @@ def _slugify(name: str) -> str:
     return s.strip("-")
 
 
+# Sir-matter-task #1 (2026-05-24): fallback matter for un-rooted onboarding
+# tasks. Matches the convention used by ``task_creation.DEFAULT_PARENT_MATTER``
+# and Steward's "orphan tasks land in matter/inbox.md" rule.
+_INBOX_MATTER_PATH = "matter/inbox.md"
+
+
+def _resolve_parent_matter_path(related_matter: str) -> str:
+    """Resolve a freeform Opus ``related_matter`` string to a canonical
+    ``matter/<slug>.md`` path.
+
+    Sir-matter-task #1: the matters aggregator (ctrl/src/api/routes/
+    matters.ts) reads ``parent_matter`` / ``matter_ref`` / ``project`` /
+    ``matter`` for task→matter linkage; the freeform ``related_matter``
+    field Opus emits ("Stripe billing migration") is invisible to it.
+    We slugify here so the path resolves via ``extractMatterRef``.
+
+    Empty / whitespace-only input falls back to ``matter/inbox.md`` —
+    Steward's canonical orphan home (see
+    ``task_creation.DEFAULT_PARENT_MATTER`` and the matter/inbox.md
+    body comment).
+
+    Note: this does NOT validate that the resolved matter exists. The
+    onboarding pipeline writes the matter pack FIRST and the errand
+    pack SECOND (see ``OnboardingV3Workflow``), so most freeform
+    ``related_matter`` strings emitted by the errand-pack prompt come
+    from the matter-pack list passed into ``matters_brief``; they should
+    already be on disk. For unresolved cases, ``inbox`` is the safety
+    net — ctrl-api's task seed scaffolds inbox.md if missing.
+    """
+    if not related_matter or not related_matter.strip():
+        return _INBOX_MATTER_PATH
+    slug = _slugify(related_matter)
+    if not slug:
+        return _INBOX_MATTER_PATH
+    return f"matter/{slug}.md"
+
+
 def _escape_yaml_scalar(value: str) -> str:
     """Return a single-quoted YAML scalar with embedded quotes escaped.
 
@@ -1922,10 +1959,36 @@ def _validate_errand(errand: dict[str, Any]) -> tuple[bool, str]:
 
 
 def _build_rich_errand_content(errand: dict[str, Any]) -> str:
-    """Render a validated errand dict as a markdown task record."""
+    """Render a validated errand dict as a markdown task record.
+
+    Sir-matter-task #1 (2026-05-24) — onboarding-time tasks must link
+    to a parent matter so ctrl-api's ``/matters/:id`` aggregator
+    (``ctrl/src/api/routes/matters.ts``) finds them. The freeform
+    ``related_matter`` string Opus emits is resolved into a canonical
+    ``matter/<slug>.md`` path; missing/blank falls back to the
+    ``matter/inbox.md`` orphan home (which Steward already treats as
+    the matter for un-rooted tasks).
+
+    Rich shape emitted (mirroring the live Steward-created tasks):
+      - ``state: pending`` (matters aggregator reads this)
+      - ``status: queued`` (TaskRunner filter; was ``todo`` → never picked up)
+      - ``parent_matter: matter/<slug>.md`` (matters forward ref)
+      - ``matter_ref: matter/<slug>.md`` (alias different readers use)
+      - ``signal_sources: []`` (Steward's source list — empty at onboarding)
+      - ``closure_predicate: null`` (optional; populated later)
+    The freeform ``related_matter`` string is retained for human
+    readability in the body and (when present) in frontmatter.
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     name = str(errand["name"]).strip()
-    status = str(errand.get("status", "todo")).strip().lower()
+    # Sir-matter-task #1: legacy ``todo`` ignored by TaskRunner. The
+    # ``status`` field on the input dict is the Opus-LLM choice; we
+    # normalise to ``queued`` so the very first TaskRunner tick after
+    # onboarding picks the task up. If Opus picked ``active`` /
+    # ``blocked`` we keep it (TaskRunner accepts both); only ``todo`` is
+    # rewritten.
+    raw_status = str(errand.get("status", "todo")).strip().lower()
+    status = "queued" if raw_status in ("todo", "queued", "") else raw_status
     owner = str(errand.get("owner", "human")).strip().lower()
     urgency = str(errand.get("urgency", "normal")).strip().lower()
     due_hint = str(errand.get("due_hint", "")).strip()
@@ -1935,20 +1998,40 @@ def _build_rich_errand_content(errand: dict[str, Any]) -> str:
     first_action = str(errand["first_action"]).strip()
     deps = [str(d).strip() for d in errand.get("dependencies", []) if str(d).strip()]
 
+    # Resolve the freeform related_matter string to a canonical
+    # ``matter/<slug>.md`` path. Empty / whitespace-only → inbox fallback.
+    parent_matter_path = _resolve_parent_matter_path(related_matter)
+
     fm_lines = [
         "---",
         "type: task",
         f"name: {_escape_yaml_scalar(name)}",
         f"status: {status}",
+        # Sir-matter-task #1: state is the matters aggregator's primary
+        # rollup field. ``pending`` is the canonical newly-created value.
+        f"state: pending",
         f"owner: {owner}",
         f"urgency: {urgency}",
         f"created: {now}",
         f"created_by: onboarding_pipeline",
         f"generated: true",
+        # Sir-matter-task #1: matter linkage — emit both keys because
+        # different readers (matters.ts, decisions, steward) look at
+        # different ones.
+        f"parent_matter: {_escape_yaml_scalar(parent_matter_path)}",
+        f"matter_ref: {_escape_yaml_scalar(parent_matter_path)}",
+        # Sir-matter-task #1: signal_sources is read unconditionally by
+        # Steward's evaluate_task; emit empty list so the type stays sane.
+        "signal_sources: []",
+        # Sir-matter-task #1: closure_predicate is optional; null at
+        # onboarding signals "no auto-close path known yet".
+        "closure_predicate: null",
     ]
     if due_hint:
         fm_lines.append(f"due_hint: {_escape_yaml_scalar(due_hint)}")
     if related_matter:
+        # Retain the freeform string for human readability — the new
+        # ``parent_matter`` / ``matter_ref`` fields handle machine resolution.
         fm_lines.append(f"related_matter: {_escape_yaml_scalar(related_matter)}")
     fm_lines += [
         f"tags: [onboarding, errand, auto-generated, {urgency}]",
