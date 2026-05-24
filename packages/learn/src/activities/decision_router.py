@@ -65,6 +65,7 @@ from typing import Any
 import httpx
 from temporalio import activity
 
+from src.activities.signal_actions import dispatch_action_to_agent
 from src.activities.state_mutator import (
     ObservedWindow,
     ProposedMutation,
@@ -427,9 +428,159 @@ async def route_decision(decision: dict[str, Any]) -> dict[str, Any]:
                         side_effects["needs_attention_audit"] = (
                             resp.json().get("audit_record_path")
                         )
-                    side_effects["re_routed_signal"] = (
-                        resp.json().get("re_routed_signal")
+                    re_routed_signal = resp.json().get("re_routed_signal")
+                    side_effects["re_routed_signal"] = re_routed_signal
+
+                    # #218 — Lane I's #216 fix marks the re-routed signal
+                    # ``status=routed_agent`` at mint time so
+                    # SignalRouterWorkflow's ``status='unrouted'`` filter
+                    # never picks it up — kills the runaway re-dispatch
+                    # loop. The side effect: ``signal_actions.route_signal_action``'s
+                    # ``principal_delegate_override`` branch (the prior
+                    # caller of ``dispatch_action_to_agent`` for delegate
+                    # clicks) is now unreachable from this path. So
+                    # DecisionRouter has to fire the agent directly here.
+                    #
+                    # Idempotency:
+                    #   * The state guard above (state != "open") catches
+                    #     a re-tick once we PATCH to ``executing`` below.
+                    #   * The ``dispatching`` guard catches a crashed/retried
+                    #     run between the mark and the executing PATCH.
+                    #   * Belt-and-suspenders: ``side_effects.agent_dispatched``
+                    #     is checked here so a re-route triggered through
+                    #     any other path (ops manual replay, an
+                    #     out-of-band state reset) does not re-fire.
+                    #
+                    # Failure handling: a dispatch failure (clerk timeout,
+                    # Hermes 5xx) is NON-fatal — we still flip the decision
+                    # to ``executing`` and stamp ``agent_dispatch_error``
+                    # for observability. The ctrl-api /dispatch POST above
+                    # already stamped ``decision_origin`` on the re-routed
+                    # signal so an outcome that DOES land (via a separate
+                    # path) is still matched back to this decision by
+                    # ``check_decision_outcomes``.
+                    already_dispatched = bool(
+                        side_effects.get("agent_dispatched")
                     )
+                    if not already_dispatched:
+                        # Pull action_proposal / target_path / matched_instinct
+                        # off the re-routed signal so we can construct the
+                        # canonical dispatch call. Best-effort: a signal read
+                        # failure logs + falls back to a minimal proposal
+                        # built from the decision's source_headline so the
+                        # agent still has something to act on.
+                        proposal: dict[str, Any] = {}
+                        target_path_for_dispatch: str | None = None
+                        matched_instinct_path = ""
+                        if (
+                            isinstance(re_routed_signal, str)
+                            and re_routed_signal
+                        ):
+                            try:
+                                from src.utils.signal_state import (
+                                    read_signal_record,
+                                )
+                                sig_rec = await read_signal_record(
+                                    re_routed_signal,
+                                )
+                                if isinstance(sig_rec, dict):
+                                    sig_fm = sig_rec.get("frontmatter") or {}
+                                    if isinstance(sig_fm, dict):
+                                        raw_proposal = sig_fm.get(
+                                            "action_proposal"
+                                        )
+                                        if isinstance(raw_proposal, dict):
+                                            proposal = raw_proposal
+                                        elif isinstance(raw_proposal, str):
+                                            try:
+                                                import json as _json
+                                                cand = _json.loads(raw_proposal)
+                                                if isinstance(cand, dict):
+                                                    proposal = cand
+                                            except (
+                                                ValueError, TypeError
+                                            ):
+                                                proposal = {}
+                                        tp_raw = sig_fm.get("target_path")
+                                        if (
+                                            isinstance(tp_raw, str)
+                                            and tp_raw.strip()
+                                        ):
+                                            target_path_for_dispatch = (
+                                                tp_raw.strip()
+                                            )
+                                        mi_raw = sig_fm.get("matched_instinct")
+                                        if (
+                                            isinstance(mi_raw, str)
+                                            and mi_raw.strip()
+                                        ):
+                                            matched_instinct_path = (
+                                                mi_raw.strip()
+                                            )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "decision_router.route_decision: "
+                                    "signal read for delegate dispatch "
+                                    "failed decision=%s signal=%s err=%s "
+                                    "— falling back to minimal proposal",
+                                    decision_id, re_routed_signal, exc,
+                                )
+
+                        if not proposal.get("what"):
+                            # The principal's note (if any) IS the task
+                            # — but even with no note, source_headline
+                            # is what the principal saw on the card.
+                            proposal = dict(proposal)
+                            proposal["what"] = (
+                                note or source_headline
+                                or f"Handle decision/{decision_id}.md"
+                            )
+
+                        try:
+                            dispatch_result = await dispatch_action_to_agent(
+                                proposal,
+                                target_path_for_dispatch,
+                                matched_instinct_path,
+                                source_signal_path=(
+                                    re_routed_signal
+                                    if isinstance(re_routed_signal, str)
+                                    else ""
+                                ),
+                                principal_note=note,
+                            )
+                            side_effects["agent_dispatched"] = True
+                            if isinstance(dispatch_result, dict):
+                                outcome_signal = dispatch_result.get(
+                                    "outcome_signal_path"
+                                )
+                                if outcome_signal:
+                                    side_effects["agent_outcome_signal"] = (
+                                        outcome_signal
+                                    )
+                                summary = dispatch_result.get(
+                                    "agent_response_summary"
+                                )
+                                if isinstance(summary, str) and summary:
+                                    side_effects[
+                                        "agent_response_summary"
+                                    ] = summary
+                            actions_taken.append("agent.dispatched")
+                        except Exception as exc:  # noqa: BLE001
+                            # Non-fatal. The decision still advances to
+                            # executing so check_decision_outcomes can
+                            # match any outcome that lands via the
+                            # ctrl-api decision_origin chain.
+                            err_msg = str(exc)[:500]
+                            side_effects["agent_dispatch_error"] = err_msg
+                            actions_taken.append("agent.dispatch_failed")
+                            logger.warning(
+                                "decision_router.route_decision: "
+                                "dispatch_action_to_agent failed "
+                                "decision=%s signal=%s err=%s — "
+                                "decision still advancing to executing",
+                                decision_id, re_routed_signal, exc,
+                            )
+
                     # Wait for the agent outcome before terminal flip.
                     next_state = "executing"
             elif intent == "noise":
