@@ -2,6 +2,8 @@
 //
 // One card per door into Alfred. Web/email/phone/vexa/omi pull live
 // data from the existing Wasp ops; Slack/Telegram are "Soon" placeholders.
+// Sir #8 — also surfaces a "Terminal" card with SSH info + the
+// `docker exec ... hermes` command for direct shell access.
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
@@ -14,8 +16,13 @@ import {
   removeAuthorizedNumber,
   getVexaAutoJoin,
   setVexaAutoJoin,
+  getSshInfo,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
+import {
+  deriveTerminalCardState,
+  type SshInfo,
+} from "./terminalCardCore";
 
 // F57/C14 — the email card reads the live ctrl-api status, not a phantom
 // Instance row. `inbox_address` is only present once `configured`.
@@ -33,6 +40,9 @@ interface PhoneConfig {
   recentActivity?: unknown[];
 }
 
+// Sir #8 — Terminal card shape lives in terminalCardCore so the pure
+// derivation (and its unit test) can stay free of React/Wasp imports.
+
 export default function ChannelsPage() {
   const { data: emailData, refetch: refetchEmail } = useQuery(
     getEmailChannelStatus,
@@ -49,6 +59,10 @@ export default function ChannelsPage() {
     undefined,
     { retry: false },
   );
+  // Sir #8 — SSH info for the Terminal card. ctrl-api returns nulls
+  // when SSH isn't provisioned yet; the card renders an empty state
+  // in that case.
+  const { data: sshData } = useQuery(getSshInfo, undefined, { retry: false });
   const email = (emailData as EmailChannelStatus | undefined) ?? {
     configured: false,
     inbox_address: null,
@@ -59,6 +73,13 @@ export default function ChannelsPage() {
     ? phone.authorizedNumbers
     : [];
   const vexaEnabled: boolean = Boolean((vexaData as any)?.enabled);
+  const ssh: SshInfo = (sshData as SshInfo | undefined) ?? {
+    hostname: null,
+    port: null,
+    user: null,
+    pubkey: null,
+    hermes_exec: null,
+  };
 
   // Email-form state (F57).
   const [emailKey, setEmailKey] = useState("");
@@ -463,9 +484,121 @@ export default function ChannelsPage() {
               on the Devices page.
             </p>
           </ChannelCard>
+
+          {/* Sir #8 — Terminal: SSH straight into the VM + `docker exec`
+              into Hermes for the chattiest, lowest-latency door. */}
+          <TerminalCard ssh={ssh} />
         </div>
       </section>
     </Frame>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sir #8 — Terminal card (state derivation lives in terminalCardCore)
+// ---------------------------------------------------------------------------
+
+export function TerminalCard({ ssh }: { ssh: SshInfo }) {
+  const { ready, sshTarget, hermesExec } = deriveTerminalCardState(ssh);
+
+  return (
+    <ChannelCard
+      name="Terminal"
+      address={ready ? sshTarget : "Set up your SSH key first"}
+      note="The shortest path: SSH in and talk to Hermes directly."
+      status={ready ? "active" : "available"}
+    >
+      {ready ? (
+        <div className="mt-5 space-y-5">
+          <PubkeyBlock pubkey={ssh.pubkey!} />
+          <ConnectBlock hermesExec={hermesExec} />
+          <p
+            className="font-body italic text-[12px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Add the key above to your <code>~/.ssh/authorized_keys</code>{" "}
+            (already done if you provisioned this VM), then SSH in and run
+            the command above to talk to Alfred directly.
+          </p>
+        </div>
+      ) : (
+        <div className="mt-5">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            No SSH key on file for this instance yet. Set one up in{" "}
+            <Link to="/study#credentials" className="btn-link">
+              Study › Credentials
+            </Link>
+            , then come back — the card will fill in automatically.
+          </p>
+        </div>
+      )}
+    </ChannelCard>
+  );
+}
+
+function PubkeyBlock({ pubkey }: { pubkey: string }) {
+  // The href is rebuilt every render but it's tiny (< 4KB) and React only
+  // re-mounts the anchor when the pubkey changes, so this is cheap. The
+  // Blob URL is leaked on unmount, which is fine for a card-sized control.
+  const href =
+    typeof window !== "undefined" && typeof Blob !== "undefined"
+      ? URL.createObjectURL(new Blob([pubkey], { type: "text/plain" }))
+      : "";
+  return (
+    <div>
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Public key
+      </div>
+      <pre
+        className="font-mono text-[11px] border border-rule p-3 whitespace-pre-wrap break-all max-h-32 overflow-y-auto"
+        style={{ color: "var(--ink)" }}
+      >
+        {pubkey}
+      </pre>
+      <a
+        href={href}
+        download="alfred-ssh-key.pub"
+        className="btn-ghost mt-2 inline-block"
+      >
+        Download key
+      </a>
+    </div>
+  );
+}
+
+function ConnectBlock({ hermesExec }: { hermesExec: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard?.writeText(hermesExec);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <div>
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Connect to Alfred
+      </div>
+      <div className="flex items-center gap-2">
+        <code
+          className="flex-1 font-mono text-[12px] border border-rule p-2 truncate"
+          style={{ color: "var(--ink)" }}
+        >
+          {hermesExec}
+        </code>
+        <button onClick={copy} className="btn-ghost">
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+    </div>
   );
 }
 
