@@ -8,8 +8,8 @@
 //
 // This test seeds a state.db signal, writes a needs_attention record whose
 // source_signal_path is that ULID, and POSTs /dispatch. Pre-fix it 400s with
-// ENOENT; post-fix it 200s and the signal status flips to 'unrouted' so the
-// SignalRouter picks it up.
+// ENOENT; post-fix it 200s and the signal status is stamped 'routed_agent'
+// (#216 — terminal so SignalRouterWorkflow does not loop on it).
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -98,11 +98,12 @@ describe("POST /needs-attention/:id/dispatch — state.db signal ULID (F3)", () 
     assert.equal(status, 200, `dispatch must 200, got ${status}: ${JSON.stringify(payload)}`);
     assert.equal(payload.status, "dispatched");
 
-    // The signal was re-armed to 'unrouted' so the router picks it up.
+    // #216: the signal is stamped 'routed_agent' (TERMINAL) so SignalRouter
+    // does NOT pick it up and loop on the dispatch.
     const sig = getStateDb()
       .prepare("SELECT status, payload_json FROM signal WHERE id = ?")
       .get(SIGNAL_ULID) as { status: string; payload_json: string | null };
-    assert.equal(sig.status, "unrouted", "signal must be re-armed to unrouted");
+    assert.equal(sig.status, "routed_agent", "signal must end in routed_agent (terminal — #216)");
     // decision_origin is stamped so the outcome can be matched to the intent.
     const pl = sig.payload_json ? JSON.parse(sig.payload_json) : {};
     assert.equal(pl.decision_origin, "decision/abc.md");

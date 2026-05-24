@@ -385,16 +385,32 @@ export async function dispatchSignalToAgent(
   rec: NeedsAttentionRecord,
   decisionOrigin?: string,
 ): Promise<{ outcome_signal_path: string | null; error: string | null }> {
-  // Re-route this needs_attention item back through the action router
-  // by triggering the al-signal-router schedule (which reads
-  // status=unrouted). We restore the source signal record's status to
-  // "unrouted" so the next router tick picks it up. The action will
-  // then go through route_signal_action's HIGH path if the
-  // STEWARD_SIGNAL_ACTION_LIVE_MODE env allows it.
+  // Stamp the source signal as a TERMINAL re-routed record so the rest
+  // of the delegate pipeline (decision_router → check_decision_outcomes,
+  // observation extractor) can match outcomes back to the principal's
+  // intent — WITHOUT re-arming it on SignalRouterWorkflow's pickup queue.
   //
-  // This endpoint does NOT directly call the openclaw subagent — that
-  // happens inside the activity, which is workflow-managed (Temporal).
-  // Bypassing the workflow would lose the audit trail + retry semantics.
+  // History (#216, 2026-05-24): the prior contract restored
+  // ``status=unrouted`` so SignalRouterWorkflow picked the signal up on
+  // its next 2-min tick and dispatched the agent. In practice this
+  // looped: Sir clicked Delegate ONCE, the signal got dispatched 10
+  // times over 10 minutes (one per router tick), each fire minted a
+  // fresh ``decision/<ts>.md`` and polluted the observation pool. The
+  // route_signal_action #54 idempotency guard only catches re-entries
+  // when the status is already ``dispatching|routed_agent|routed_human``
+  // — re-armed ``unrouted`` slipped past it on every tick.
+  //
+  // Option A (Sir-prescribed): mark ``status=routed_agent`` directly so
+  // SignalRouter's ``list_unrouted_signals`` query (status='unrouted')
+  // never returns this row. The terminal status mirrors the post-
+  // incident remediation Sir did by hand. Trade-off acknowledged: a
+  // re-routed signal can no longer be retried by SignalRouter — that
+  // affordance is severed in exchange for cutting the loop dead.
+  //
+  // ``decision_origin`` is still stamped into ``payload_json`` so an
+  // agent outcome that arrives later (via a separate path) can be
+  // matched back to the originating decision by source_signal_path
+  // chain — the linkage the calibration loop in T6.7.5 reads.
   const sourceSignal = String(rec.frontmatter.source_signal_path ?? "");
   if (!sourceSignal) {
     return {
@@ -404,8 +420,8 @@ export async function dispatchSignalToAgent(
   }
 
   // F3: a `source_signal_path` that is a bare ULID is a `state.db signal` row
-  // (signals were demoted out of the vault). Re-arm it there — flip
-  // status=unrouted and stamp decision_origin into payload_json — instead of
+  // (signals were demoted out of the vault). Stamp it terminal there —
+  // status=routed_agent + decision_origin into payload_json — instead of
   // doing fs.readFileSync(path.join(VAULT_PATH, ulid)) which always ENOENT'd
   // → 400 (the headline Delegate-fails bug).
   if (ULID_RE.test(sourceSignal)) {
@@ -432,13 +448,13 @@ export async function dispatchSignalToAgent(
     }
     if (decisionOrigin) payload.decision_origin = decisionOrigin;
     db.prepare(
-      "UPDATE signal SET status = 'unrouted', payload_json = ?, updated_at = datetime('now') WHERE id = ?",
+      "UPDATE signal SET status = 'routed_agent', payload_json = ?, updated_at = datetime('now') WHERE id = ?",
     ).run(JSON.stringify(payload), sourceSignal);
     return { outcome_signal_path: sourceSignal, error: null };
   }
 
   // Legacy path: a vault-relative `signal/….md` file. Patch its frontmatter
-  // status=unrouted so the router picks it up.
+  // status=routed_agent (#216) so the router does NOT pick it up.
   const sigPath = path.join(VAULT_PATH, sourceSignal);
   const sigResolved = path.resolve(sigPath);
   if (!sigResolved.startsWith(path.resolve(VAULT_PATH) + path.sep)) {
@@ -454,8 +470,8 @@ export async function dispatchSignalToAgent(
   if (!m) {
     return { outcome_signal_path: null, error: "source signal malformed" };
   }
-  let newFm = m[1].replace(/^status:.*$/m, "status: unrouted");
-  // Stamp the originating decision path onto the re-armed signal so
+  let newFm = m[1].replace(/^status:.*$/m, "status: routed_agent");
+  // Stamp the originating decision path onto the re-routed signal so
   // outcomes the agent writes later can be matched back to the
   // principal's intent. Idempotent: replace if present, append if not.
   if (decisionOrigin) {
