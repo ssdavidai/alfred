@@ -296,9 +296,22 @@ async def seed_observations_from_chore_runs(max_per_tick: int = 50) -> dict[str,
     # Sort by timestamp ascending so we process in chronological order
     new_entries.sort(key=lambda e: float(e.get("timestamp", 0)))
 
-    # Import write here to avoid circular import
-    from src.activities.vault import write_observation_record
+    # Gap 5c (2026-05-24): write to state.db (Store 2), not the vault.
+    # Post-storage-cutover (#26/#27), observations are machine
+    # bookkeeping — the canonical_path middleware on ctrl-api returns
+    # 422 for POST /api/v1/vault/records type=observation and suggests
+    # /api/v1/state/observations. Calling write_observation_record here
+    # was emitting 18× 422 per LearningWorkflow tick.
+    #
+    # Match the shape used by signal_observations.extract_obs_from_signal:
+    # subject="principal", kind="chore_run", summary=<run result>, and
+    # the rich observation dict (routing_decision, signals, reasoning, …)
+    # in payload so pattern detection can cluster on chore_slug later.
+    from datetime import datetime, timezone
+    from src.config import load_config
+    from src.utils.signal_state import StateClient
 
+    cfg = load_config()
     seeded = 0
     new_max_ts = last_ts
     for entry in new_entries:
@@ -310,14 +323,39 @@ async def seed_observations_from_chore_runs(max_per_tick: int = 50) -> dict[str,
                 result.errors,
             )
             continue
+        chore_slug = str(entry.get("chore_slug", "unknown"))
+        summary = str(entry.get("result_summary") or chore_slug)
+        ts_epoch = float(entry.get("timestamp", 0))
         try:
-            await write_observation_record(obs)
+            ts_iso = datetime.fromtimestamp(ts_epoch, tz=timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            ts_iso = datetime.now(timezone.utc).isoformat()
+        # Carry the full validator-shaped dict in payload so downstream
+        # consumers (pattern detection v1) keep the rich fields.
+        payload: dict[str, Any] = dict(obs)
+        payload["source"] = "chore_run"
+        payload["chore_slug"] = chore_slug
+        payload["was_dry_run"] = bool(entry.get("was_dry_run", False))
+        try:
+            async with StateClient(cfg) as sc:
+                await sc.create_observation(
+                    subject="principal",
+                    kind="chore_run",
+                    summary=summary,
+                    detail=obs.get("reasoning") or None,
+                    ts=ts_iso,
+                    confidence=1.0,
+                    status="open",
+                    payload=payload,
+                )
             seeded += 1
-            new_max_ts = max(new_max_ts, float(entry.get("timestamp", 0)))
+            new_max_ts = max(new_max_ts, ts_epoch)
             if seeded % 10 == 0:
                 activity.heartbeat(f"seed_observations: wrote {seeded} so far")
-        except Exception as exc:
-            logger.warning("seed_observations: write_observation_record failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "seed_observations: state.db create_observation failed: %s", exc
+            )
 
     if seeded > 0:
         cursor["chore_run_history_max_ts"] = new_max_ts

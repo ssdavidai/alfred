@@ -30,8 +30,17 @@ from src.matching.scorer import score_all_instincts
 # Threshold tuning: scorer weights sum to 1.0 (0.30 domain + 0.30 keywords +
 # 0.15 input_type + 0.15 attachment + 0.10 tags). A single sender_domain
 # match alone yields 0.30; we want strong-but-not-iron-clad matches.
-# 0.15 lets a single domain match, or moderate keyword overlap, through.
-MATCH_THRESHOLD = 0.15
+#
+# Gap 5b (2026-05-24): lowered 0.15 → 0.10. Live tenant has 31 unconfirmed
+# instincts that score sparsely (single moderate-keyword overlap of ~0.10–
+# 0.14 each) and were rejected here, leaving observations with
+# instinct_ref=null. The discretion gate downstream
+# (signal_actions._instinct_threshold + should_route_autonomously) still
+# filters low-obs-count / low-confidence matches through HUMAN, so
+# surfacing more candidates on the audit record cannot cause autonomous
+# misfires; it just gives the matter aggregator + /instincts UI something
+# to work with.
+MATCH_THRESHOLD = 0.10
 
 
 def build_observation_metadata(

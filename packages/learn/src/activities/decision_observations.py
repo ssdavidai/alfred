@@ -297,7 +297,16 @@ async def _match_instinct_for_observation(
             obs_fm, instincts, signal_fm=signal_fm, event_fm=event_fm,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.debug("instinct match skipped: %s", exc)
+        # Gap 5b (2026-05-24): was logger.debug — silently swallowed
+        # real scorer bugs (KeyError on a malformed instinct frontmatter,
+        # AttributeError on the metadata shape) so observations went out
+        # with instinct_ref=null and the audit fan-out had zero signal of
+        # the underlying issue. WARNING surfaces it to the prod logs.
+        logger.warning(
+            "instinct_match.scorer_failed: returning None; "
+            "fact=%r sender=%r topic=%r err=%s",
+            fact_clean, sender, topic, exc,
+        )
         return None
 
 

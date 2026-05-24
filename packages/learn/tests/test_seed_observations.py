@@ -1,10 +1,17 @@
-"""Tests for seed_observations_from_chore_runs (Plan F.2)."""
+"""Tests for seed_observations_from_chore_runs (Plan F.2).
+
+Storage cutover (Gap 5c, 2026-05-24): the seeder now writes to state.db
+via ``StateClient.create_observation`` (POST /api/v1/state/observations)
+instead of the vault writer. These tests patch ``StateClient`` to
+capture writes without hitting ctrl-api.
+"""
 from __future__ import annotations
 
 import asyncio
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from typing import Any
+from unittest.mock import patch
 
 from temporalio import activity
 from temporalio.testing import ActivityEnvironment
@@ -16,6 +23,54 @@ from src.activities.observe import (
     _write_seed_cursor,
     seed_observations_from_chore_runs,
 )
+
+
+class _FakeStateClient:
+    """In-memory StateClient stand-in. Default behavior: succeed and
+    record. Tests can install a ``raise_on_call`` index to simulate
+    partial failure (mirrors the original ``flaky_write`` test).
+    """
+
+    instances: list["_FakeStateClient"] = []
+    raise_on_call: set[int] = set()  # 1-indexed call numbers to raise on
+    _global_calls: int = 0
+
+    def __init__(self, config: Any) -> None:
+        self.calls: list[dict[str, Any]] = []
+        _FakeStateClient.instances.append(self)
+
+    async def __aenter__(self) -> "_FakeStateClient":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+    async def create_observation(self, **kwargs: Any) -> str:
+        _FakeStateClient._global_calls += 1
+        call_n = _FakeStateClient._global_calls
+        self.calls.append(kwargs)
+        if call_n in _FakeStateClient.raise_on_call:
+            raise RuntimeError(f"synthetic state.db failure on call #{call_n}")
+        return f"obs-{call_n}"
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.instances.clear()
+        cls.raise_on_call = set()
+        cls._global_calls = 0
+
+    @classmethod
+    def total_calls(cls) -> int:
+        return cls._global_calls
+
+
+def _install_fake_state_client(monkeypatch) -> None:
+    """Patch every binding that resolves to StateClient inside observe.py."""
+    _FakeStateClient.reset()
+    import src.utils.signal_state as ss
+    import src.utils.state_client as sc_mod
+    monkeypatch.setattr(sc_mod, "StateClient", _FakeStateClient)
+    monkeypatch.setattr(ss, "StateClient", _FakeStateClient)
 
 
 def _run_activity(*args):
@@ -135,7 +190,7 @@ class TestSeedObservationsFromChoreRuns:
         assert result["scanned"] == 0
         assert result["seeded"] == 0
 
-    def test_seeds_new_entries(self, tmp_path):
+    def test_seeds_new_entries(self, tmp_path, monkeypatch):
         history = tmp_path / "history.jsonl"
         cursor = tmp_path / "cursor.json"
         _seed_history(history, [
@@ -144,22 +199,21 @@ class TestSeedObservationsFromChoreRuns:
             {"timestamp": 300.0, "chore_slug": "c", "result_summary": "ok", "was_dry_run": True},
         ])
 
-        # Mock write_observation_record to avoid hitting real ctrl-api
+        _install_fake_state_client(monkeypatch)
         with patch.object(observe, "_CHORE_RUN_HISTORY_PATH", history), \
-             patch.object(observe, "_OBS_SEED_CURSOR_PATH", cursor), \
-             patch("src.activities.vault.write_observation_record",
-                   new=AsyncMock(return_value="path/to/obs.md")):
+             patch.object(observe, "_OBS_SEED_CURSOR_PATH", cursor):
             result = _run_activity()
 
         assert result["ok"] is True
         assert result["scanned"] == 3
         assert result["seeded"] == 3
         assert result["max_ts"] == 300.0
+        assert _FakeStateClient.total_calls() == 3
         # Cursor should have been updated
         c = json.loads(cursor.read_text())
         assert c["chore_run_history_max_ts"] == 300.0
 
-    def test_skips_already_processed(self, tmp_path):
+    def test_skips_already_processed(self, tmp_path, monkeypatch):
         history = tmp_path / "history.jsonl"
         cursor = tmp_path / "cursor.json"
         cursor.write_text(json.dumps({"chore_run_history_max_ts": 200.0}))
@@ -169,10 +223,9 @@ class TestSeedObservationsFromChoreRuns:
             {"timestamp": 300.0, "chore_slug": "c", "result_summary": "ok", "was_dry_run": False},
         ])
 
+        _install_fake_state_client(monkeypatch)
         with patch.object(observe, "_CHORE_RUN_HISTORY_PATH", history), \
-             patch.object(observe, "_OBS_SEED_CURSOR_PATH", cursor), \
-             patch("src.activities.vault.write_observation_record",
-                   new=AsyncMock(return_value="path")):
+             patch.object(observe, "_OBS_SEED_CURSOR_PATH", cursor):
             result = _run_activity()
 
         # Only entry at 300.0 should have been seeded
@@ -180,8 +233,9 @@ class TestSeedObservationsFromChoreRuns:
         assert result["skipped"] == 2  # 100 and 200 are <= 200
         assert result["seeded"] == 1
         assert result["max_ts"] == 300.0
+        assert _FakeStateClient.total_calls() == 1
 
-    def test_respects_max_per_tick(self, tmp_path):
+    def test_respects_max_per_tick(self, tmp_path, monkeypatch):
         history = tmp_path / "history.jsonl"
         cursor = tmp_path / "cursor.json"
         _seed_history(history, [
@@ -189,15 +243,15 @@ class TestSeedObservationsFromChoreRuns:
             for i in range(1, 21)
         ])
 
+        _install_fake_state_client(monkeypatch)
         with patch.object(observe, "_CHORE_RUN_HISTORY_PATH", history), \
-             patch.object(observe, "_OBS_SEED_CURSOR_PATH", cursor), \
-             patch("src.activities.vault.write_observation_record",
-                   new=AsyncMock(return_value="path")):
+             patch.object(observe, "_OBS_SEED_CURSOR_PATH", cursor):
             result = _run_activity(5)  # max_per_tick=5
 
         assert result["seeded"] == 5
+        assert _FakeStateClient.total_calls() == 5
 
-    def test_corrupt_lines_skipped(self, tmp_path):
+    def test_corrupt_lines_skipped(self, tmp_path, monkeypatch):
         history = tmp_path / "history.jsonl"
         cursor = tmp_path / "cursor.json"
         history.write_text(
@@ -206,15 +260,14 @@ class TestSeedObservationsFromChoreRuns:
             '{"timestamp": 2.0, "chore_slug": "b", "was_dry_run": false}\n'
         )
 
+        _install_fake_state_client(monkeypatch)
         with patch.object(observe, "_CHORE_RUN_HISTORY_PATH", history), \
-             patch.object(observe, "_OBS_SEED_CURSOR_PATH", cursor), \
-             patch("src.activities.vault.write_observation_record",
-                   new=AsyncMock(return_value="path")):
+             patch.object(observe, "_OBS_SEED_CURSOR_PATH", cursor):
             result = _run_activity()
 
         assert result["seeded"] == 2
 
-    def test_no_new_entries_no_cursor_update(self, tmp_path):
+    def test_no_new_entries_no_cursor_update(self, tmp_path, monkeypatch):
         history = tmp_path / "history.jsonl"
         cursor = tmp_path / "cursor.json"
         cursor.write_text(json.dumps({"chore_run_history_max_ts": 1000.0}))
@@ -222,10 +275,9 @@ class TestSeedObservationsFromChoreRuns:
             {"timestamp": 100.0, "chore_slug": "a", "was_dry_run": False},
         ])
 
+        _install_fake_state_client(monkeypatch)
         with patch.object(observe, "_CHORE_RUN_HISTORY_PATH", history), \
-             patch.object(observe, "_OBS_SEED_CURSOR_PATH", cursor), \
-             patch("src.activities.vault.write_observation_record",
-                   new=AsyncMock(return_value="path")):
+             patch.object(observe, "_OBS_SEED_CURSOR_PATH", cursor):
             result = _run_activity()
 
         assert result["seeded"] == 0
@@ -233,7 +285,7 @@ class TestSeedObservationsFromChoreRuns:
         c = json.loads(cursor.read_text())
         assert c["chore_run_history_max_ts"] == 1000.0
 
-    def test_write_failure_continues_processing(self, tmp_path):
+    def test_write_failure_continues_processing(self, tmp_path, monkeypatch):
         history = tmp_path / "history.jsonl"
         cursor = tmp_path / "cursor.json"
         _seed_history(history, [
@@ -242,19 +294,15 @@ class TestSeedObservationsFromChoreRuns:
             {"timestamp": 300.0, "chore_slug": "c", "result_summary": "ok", "was_dry_run": False},
         ])
 
-        # Have the second write fail
-        call_count = {"n": 0}
-        async def flaky_write(*args, **kwargs):
-            call_count["n"] += 1
-            if call_count["n"] == 2:
-                raise RuntimeError("vault offline")
-            return "path"
+        # Have the second create_observation call fail (mirrors the
+        # original flaky_write test — but on the state.db path now).
+        _install_fake_state_client(monkeypatch)
+        _FakeStateClient.raise_on_call = {2}
 
         with patch.object(observe, "_CHORE_RUN_HISTORY_PATH", history), \
-             patch.object(observe, "_OBS_SEED_CURSOR_PATH", cursor), \
-             patch("src.activities.vault.write_observation_record", new=flaky_write):
+             patch.object(observe, "_OBS_SEED_CURSOR_PATH", cursor):
             result = _run_activity()
 
         # 3 attempts, 1 failed, 2 succeeded
-        assert call_count["n"] == 3
+        assert _FakeStateClient.total_calls() == 3
         assert result["seeded"] == 2
