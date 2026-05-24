@@ -27,6 +27,7 @@
 // AND the human resolution.
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import yaml from "js-yaml";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, NotFoundError } from "../errors.js";
@@ -34,6 +35,7 @@ import { VAULT_PATH } from "./vault.js";
 import { attentionCache, invalidateVaultCachesForType } from "../vaultCache.js";
 import { appendAudit } from "./state.js";
 import { getStateDb } from "../../db/state.js";
+import { indexVaultWrite } from "../../db/vaultIndex.js";
 
 // A ULID is 26 chars of Crockford base32 (uppercase, no I/L/O/U). Signals were
 // demoted out of the vault's signal/ directory into the `state.db signal`
@@ -203,6 +205,174 @@ export function emitResolutionEvent(
   });
 
   return `event/${auditId}.md`;
+}
+
+// Gap 4 — the legacy needs-attention POST endpoints mirror the principal's
+// click into a `decision/<ts>-<short>.md` so DecisionRouterWorkflow picks it
+// up and downstream learning (observation extraction, matter timeline) fires
+// for clicks that didn't go through POST /api/v1/decisions. This is *additive*
+// — the legacy frontmatter patch + needs_attention_action audit must continue.
+// If the mirror write throws (e.g. vault disk full) we log + swallow; the
+// existing audit row is the contract this endpoint must honour.
+//
+// We mint the decision in `state=completed` because the legacy endpoints
+// already performed the synchronous source-record flip (writeFrontmatterPatch
+// above) — the workflow has nothing more to do beyond observation extraction,
+// for which a completed decision is fine.
+type LegacyAction = "done" | "dispatched" | "skipped";
+
+function legacyActionToIntent(action: LegacyAction): string {
+  // Maps the three legacy action names onto the canonical decision-intent
+  // vocab (see VALID_INTENTS in decisions.ts: delegate|defer|done|take_mine|noise).
+  //   done      → done       (Sir handled it manually)
+  //   dispatched→ delegate   (re-route to an agent)
+  //   skipped   → defer      (the existing POST /api/v1/decisions handler maps
+  //                           intent=defer → NA status=skipped, so we round-trip
+  //                           the same semantic the other direction)
+  if (action === "done") return "done";
+  if (action === "dispatched") return "delegate";
+  return "defer";
+}
+
+export function mintDecisionMirror(
+  rec: NeedsAttentionRecord,
+  action: LegacyAction,
+  note: string,
+): string | null {
+  try {
+    const decisionsDir = path.join(VAULT_PATH, "decision");
+    if (!fs.existsSync(decisionsDir)) {
+      fs.mkdirSync(decisionsDir, { recursive: true });
+    }
+    const nowIso = new Date().toISOString();
+    const ts = nowIso.replace(/:/g, "-").replace(/\..*$/, "Z");
+    const sourceRecord = rec.path; // e.g. "needs_attention/<id>.md"
+    const shortId = crypto
+      .createHash("sha256")
+      .update(`${sourceRecord}\x00${nowIso}`)
+      .digest("hex")
+      .slice(0, 8);
+    const id = `${ts}-${shortId}`;
+    const fullPath = path.join(decisionsDir, `${id}.md`);
+    const intent = legacyActionToIntent(action);
+
+    // Mirror the field ordering the canonical POST /api/v1/decisions writer
+    // uses (see renderDecisionRecord in decisions.ts) so downstream readers
+    // don't need a code path for "legacy-minted decisions".
+    const sourceHeadline =
+      typeof rec.frontmatter.display_headline === "string"
+        ? rec.frontmatter.display_headline
+        : typeof rec.frontmatter.action_what === "string"
+          ? rec.frontmatter.action_what
+          : null;
+    const matterRef =
+      rec.frontmatter.target_kind === "matter" &&
+      typeof rec.frontmatter.target_path === "string"
+        ? rec.frontmatter.target_path
+        : typeof rec.frontmatter.matter_ref === "string"
+          ? rec.frontmatter.matter_ref
+          : null;
+    const taskRef =
+      rec.frontmatter.target_kind === "task" &&
+      typeof rec.frontmatter.target_path === "string"
+        ? rec.frontmatter.target_path
+        : typeof rec.frontmatter.task_ref === "string"
+          ? rec.frontmatter.task_ref
+          : null;
+
+    const fields: Record<string, unknown> = {
+      type: "decision",
+      created: nowIso,
+      principal: "principal",
+      source: "needs_attention",
+      source_record: sourceRecord,
+      source_headline: sourceHeadline,
+      intent,
+      note: note || null,
+      matter_ref: matterRef,
+      task_ref: taskRef,
+      state: "completed",
+      outcome_record: null,
+      time_to_decision_ms: null,
+      reversed_at: null,
+      is_reversible: intent !== "delegate",
+      completed_at: nowIso,
+      side_effects: {
+        synchronous_flip: true,
+        actions: [`needs_attention.${action}`],
+        minted_by: "attention_legacy_endpoint",
+      },
+    };
+
+    // Hand-written YAML, same shape as renderDecisionRecord in decisions.ts
+    // (kept inline here to avoid an attention.ts ↔ decisions.ts import cycle —
+    // decisions.ts already imports readNeedsAttention/etc from this file).
+    const lines: string[] = ["---"];
+    const scalarOrder = [
+      "type", "created", "principal", "source", "source_record",
+      "source_headline", "intent", "note", "matter_ref", "task_ref",
+      "state", "outcome_record", "time_to_decision_ms",
+      "reversed_at", "is_reversible", "completed_at",
+    ];
+    const written = new Set<string>();
+    for (const k of scalarOrder) {
+      if (!(k in fields)) continue;
+      written.add(k);
+      const v = fields[k];
+      if (v === null || v === undefined) lines.push(`${k}: null`);
+      else if (typeof v === "boolean") lines.push(`${k}: ${v ? "true" : "false"}`);
+      else if (typeof v === "number") lines.push(`${k}: ${v}`);
+      else lines.push(`${k}: ${JSON.stringify(String(v))}`);
+    }
+    for (const [k, v] of Object.entries(fields)) {
+      if (written.has(k)) continue;
+      const dumped = yaml.dump({ [k]: v }, { lineWidth: 200 }).trimEnd();
+      lines.push(dumped);
+    }
+    lines.push("---");
+    lines.push("");
+    lines.push(`# Decision: ${intent} on needs_attention (legacy endpoint)`);
+    lines.push("");
+    lines.push(
+      `Principal clicked **${action}** on \`${sourceRecord}\` via the legacy ` +
+        `needs-attention endpoint at ${nowIso}.`,
+    );
+    if (note) {
+      lines.push("");
+      lines.push(`Note: ${note}`);
+    }
+    fs.writeFileSync(fullPath, lines.join("\n") + "\n", "utf-8");
+
+    // Index into state.db vault_index — every reader of decisions queries
+    // vault_index WHERE record_type='decision', so without this hook the
+    // mirror would be invisible to /api/v1/decisions + the Desk ledger.
+    indexVaultWrite(`decision/${id}.md`);
+
+    // Mirror the decision into state.db audit (parallel to what POST
+    // /api/v1/decisions does for principal-initiated decisions). The
+    // existing needs_attention_action audit row stays — it's the legacy
+    // calibration loop's reader.
+    appendAudit({
+      ts: nowIso,
+      action_type: "decision",
+      actor: "principal",
+      source: "needs_attention",
+      target_path: `decision/${id}.md`,
+      target_kind: "decision",
+      subject_ref: sourceRecord,
+      summary: `decision: ${intent} on needs_attention (legacy)`,
+      changes: { intent, state: "completed", note: note || null },
+      payload: { ...fields },
+    });
+
+    return `decision/${id}.md`;
+  } catch (err) {
+    console.warn(
+      `[attention] mintDecisionMirror failed for ${rec.id} (${action}); ` +
+        `legacy audit row still emitted: ${(err as Error).message}`,
+    );
+    return null;
+  }
 }
 
 export async function dispatchSignalToAgent(
@@ -392,11 +562,16 @@ export function registerAttentionRoutes(): void {
         resolution_note: note || null,
       });
       const auditPath = emitResolutionEvent(rec, "done", note);
+      // Gap 4 — also mint a decision/<ts>.md so DecisionRouterWorkflow
+      // picks the click up. Additive; failure here does NOT fail the
+      // request (the audit row is the existing contract).
+      const decisionPath = mintDecisionMirror(rec, "done", note);
       sendJson(res, 200, {
         ok: true,
         id,
         status: "done",
         audit_record_path: auditPath,
+        decision_record_path: decisionPath,
       });
     },
   );
@@ -430,12 +605,15 @@ export function registerAttentionRoutes(): void {
         resolution_note: note || null,
       });
       const auditPath = emitResolutionEvent(rec, "dispatched", note);
+      // Gap 4 — mint the mirrored decision (intent=delegate). Additive.
+      const decisionPath = mintDecisionMirror(rec, "dispatched", note);
       sendJson(res, 200, {
         ok: true,
         id,
         status: "dispatched",
         re_routed_signal: dispatchResult.outcome_signal_path,
         audit_record_path: auditPath,
+        decision_record_path: decisionPath,
       });
     },
   );
@@ -455,11 +633,14 @@ export function registerAttentionRoutes(): void {
         resolution_note: note || null,
       });
       const auditPath = emitResolutionEvent(rec, "skipped", note);
+      // Gap 4 — mint the mirrored decision (intent=defer). Additive.
+      const decisionPath = mintDecisionMirror(rec, "skipped", note);
       sendJson(res, 200, {
         ok: true,
         id,
         status: "skipped",
         audit_record_path: auditPath,
+        decision_record_path: decisionPath,
       });
     },
   );
