@@ -188,9 +188,9 @@ class TestBuildRichErrandContent:
     def test_frontmatter_fields_present(self):
         content = _build_rich_errand_content(self._good())
         assert "type: task" in content
-        # Sir-matter-task #1: status was ``todo`` (legacy), now ``queued`` —
-        # TaskRunner only picks up tasks at queued|in_progress, never todo.
-        assert "status: queued" in content
+        # Sir-matter-task #1: status was ``todo`` (legacy), now ``todo`` (validator-compatible) —
+        # TaskRunner picks up status=todo (validator vocab).
+        assert "status: todo" in content
         assert "owner: human" in content
         assert "urgency: high" in content
         assert "generated: true" in content

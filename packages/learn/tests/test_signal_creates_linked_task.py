@@ -7,7 +7,7 @@ record MUST land with the rich shape:
   - ``parent_matter`` = the signal's matter_ref
   - ``matter_ref``    = same (alias)
   - ``state: pending``
-  - ``status: queued``
+  - ``status: todo``
   - ``signal_sources`` populated with the source_event_path
 
 This pins the contract via the rendered frontmatter — we don't actually
@@ -80,9 +80,9 @@ def test_auto_task_carries_matter_ref_alias():
     assert mref == pm == "matter/foo.md"
 
 
-def test_auto_task_lands_state_pending_status_queued():
+def test_auto_task_lands_state_pending_status_todo():
     """Was ``state: open, status: todo`` — none of which TaskRunner
-    picks up. Now ``state: pending, status: queued`` so the first
+    picks up. Now ``state: pending, status: todo`` so the first
     TaskRunner tick after creation sees the task."""
     rendered = _render_task_content(
         title="t",
@@ -97,7 +97,7 @@ def test_auto_task_lands_state_pending_status_queued():
     fm = _frontmatter(rendered)
 
     assert _fm_field(fm, "state") == "pending"
-    assert _fm_field(fm, "status") == "queued"
+    assert _fm_field(fm, "status") == "todo"
 
 
 def test_auto_task_emits_closure_predicate_field():

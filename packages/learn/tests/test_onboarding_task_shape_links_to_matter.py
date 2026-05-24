@@ -11,11 +11,11 @@ Symptom on the live tenant (2026-05-24):
     (a freeform string) and ``status``.
 
 This test pins the new rich shape ``_build_rich_errand_content`` MUST
-emit so onboarding tasks land linked + queued for TaskRunner.
+emit so onboarding tasks land linked + todo (validator vocab) for TaskRunner.
 
 Required new frontmatter:
   - ``state: pending`` (matters aggregator reads this)
-  - ``status: queued`` (TaskRunner filter; replaces legacy ``todo``)
+  - ``status: todo`` (TaskRunner filter; replaces legacy ``todo``)
   - ``parent_matter: matter/<slug>.md`` (matters aggregator forward ref)
   - ``matter_ref: matter/<slug>.md`` (alias different readers use)
   - ``signal_sources: []`` (Steward's source-of-truth list)
@@ -95,19 +95,19 @@ def test_emits_state_pending():
     )
 
 
-def test_emits_status_queued_not_todo():
-    """TaskRunner filters on ``status in (queued, in_progress)``.
+def test_emits_status_todo_not_todo():
+    """TaskRunner filters on ``status=todo (alfred-vault validator vocab: active|blocked|cancelled|done|todo)``.
 
     Live tenant has 32 tasks at ``status: todo`` since cradle write —
     TaskRunner never picked them up because ``todo`` isn't in its
-    filter set. Onboarding writes must land on ``queued`` so the very
+    filter set. Onboarding writes must land on ``todo`` so the very
     first TaskRunner tick after onboarding sees them.
     """
     rendered = po._build_rich_errand_content(_BASE_ERRAND)
     fm = _frontmatter_block(rendered)
 
-    assert _fm_field(fm, "status") == "queued", (
-        "onboarding task must emit `status: queued` (was `todo`). "
+    assert _fm_field(fm, "status") == "todo", (
+        "onboarding task must emit `status: todo` (was `todo`). "
         "fm:\n" + fm
     )
 

@@ -14,7 +14,7 @@ Behaviour pinned here:
   a. A task whose ``related_matter`` (freeform Opus string) fuzzy-matches
      an existing matter's ``name`` frontmatter (Jaccard token overlap
      ≥ 0.5) is patched with ``parent_matter`` + ``matter_ref`` +
-     ``state: pending`` + ``status: queued``.
+     ``state: pending`` + ``status: todo``.
 
   b. A task with NO ``related_matter`` (or no fuzzy match) is stamped
      with the inbox fallback ``matter/inbox.md`` (Sir's chosen default).
@@ -147,7 +147,7 @@ async def test_task_with_matching_related_matter_gets_linked(vault_factory):
     assert updates.get("parent_matter") == "matter/stripe-billing-migration.md"
     assert updates.get("matter_ref") == "matter/stripe-billing-migration.md"
     assert updates.get("state") == "pending"
-    assert updates.get("status") == "queued"
+    assert updates.get("status") == "todo"
 
 
 async def test_task_with_no_related_matter_gets_inbox_fallback(vault_factory):
@@ -227,7 +227,7 @@ async def test_task_already_linked_is_skipped(vault_factory):
             "slug": "already-linked",
             "frontmatter": {
                 "type": "task",
-                "status": "queued",
+                "status": "todo",
                 "parent_matter": "matter/foo.md",
                 "matter_ref": "matter/foo.md",
             },
