@@ -76,36 +76,176 @@ def _slugify(name: str) -> str:
 # and Steward's "orphan tasks land in matter/inbox.md" rule.
 _INBOX_MATTER_PATH = "matter/inbox.md"
 
+# Sir-fresh-deploy #2 (2026-05-24): threshold for tier-2/tier-3 fuzzy
+# matching of an Opus freeform string (``related_matter`` or task ``name``)
+# against an existing matter's ``name``. Uses the overlap coefficient
+# (intersection / min cardinality) — the same metric ``_matter_near_dup_slug``
+# uses for matter dedup. 0.40 was chosen because the live-evidence orphan
+# tasks needed to bridge "subscription payments" → "Payments and subscription
+# continuity" (overlap 1.0) and "Robin daycare" → "Robin childcare logistics"
+# (overlap 0.5). The matter dedup uses 0.7 because it's protecting against
+# false MERGES of distinct matters; this resolver is doing the inverse
+# problem (linking instead of merging) so a looser threshold is safe — the
+# worst-case is a slightly-wrong link, not a lost matter record.
+_PARENT_MATTER_FUZZY_THRESHOLD = 0.40
 
-def _resolve_parent_matter_path(related_matter: str) -> str:
-    """Resolve a freeform Opus ``related_matter`` string to a canonical
-    ``matter/<slug>.md`` path.
 
-    Sir-matter-task #1: the matters aggregator (ctrl/src/api/routes/
-    matters.ts) reads ``parent_matter`` / ``matter_ref`` / ``project`` /
-    ``matter`` for task→matter linkage; the freeform ``related_matter``
-    field Opus emits ("Stripe billing migration") is invisible to it.
-    We slugify here so the path resolves via ``extractMatterRef``.
+def _resolve_parent_matter_path(
+    related_matter: str,
+    matter_index: list[dict[str, Any]] | None = None,
+    task_name: str = "",
+) -> str:
+    """Resolve a freeform Opus ``related_matter`` string to a real
+    ``matter/<slug>.md`` path that points at a matter the vault actually
+    has.
 
-    Empty / whitespace-only input falls back to ``matter/inbox.md`` —
-    Steward's canonical orphan home (see
-    ``task_creation.DEFAULT_PARENT_MATTER`` and the matter/inbox.md
-    body comment).
+    Four-tier resolution (cleanest match wins):
 
-    Note: this does NOT validate that the resolved matter exists. The
-    onboarding pipeline writes the matter pack FIRST and the errand
-    pack SECOND (see ``OnboardingV3Workflow``), so most freeform
-    ``related_matter`` strings emitted by the errand-pack prompt come
-    from the matter-pack list passed into ``matters_brief``; they should
-    already be on disk. For unresolved cases, ``inbox`` is the safety
-    net — ctrl-api's task seed scaffolds inbox.md if missing.
+      Tier 1 — exact slug match: slugify ``related_matter``; if
+               ``matter/<slug>.md`` is in ``matter_index`` return it.
+      Tier 2 — fuzzy name match (``related_matter``): overlap-coefficient
+               token-match of ``related_matter`` against each indexed
+               matter's ``name``. Best ≥ ``_PARENT_MATTER_FUZZY_THRESHOLD``
+               wins.
+      Tier 3 — fuzzy name match (``task_name``): same metric but against
+               the task's own NAME. Catches the case where Opus left
+               ``related_matter`` blank but the task title carries the
+               topic (folded in from old task #224).
+      Tier 4 — inbox fallback (``matter/inbox.md``).
+
+    Sir-fresh-deploy #2 (2026-05-24): the old single-arg version blindly
+    slugified the freeform string. On the live tenant, Opus paraphrased
+    ~30-50% of the time ("Stripe billing migration" instead of the real
+    "payments-and-subscription-continuity" slug), and we wrote phantom
+    paths that pointed at no real matter. The matters aggregator
+    (``ctrl/src/api/routes/matters.ts``) reads ``parent_matter`` for
+    task→matter linkage, so phantoms make every ``/matters/:id.tasks``
+    return ``[]``. Live evidence: 33 orphan tasks needed a hardcoded
+    MANUAL relinking dict to recover.
+
+    Back-compat: ``matter_index=None`` (the legacy call shape) means
+    we have NO validation surface, so the safe answer for any freeform
+    input is the inbox fallback — never a phantom path. A later
+    one-shot backfill (``task_backfill.backfill_orphan_task_matter_refs``)
+    can re-resolve these once a real matter list is available.
+
+    Determinism: ``matter_index`` is iterated in slug-sorted order so
+    ties between equally-scoring matters break the same way every time
+    (lexicographically smaller slug wins).
     """
-    if not related_matter or not related_matter.strip():
+    # Logger acquired here so the fuzzy-match log lines surface with
+    # the correct module qualifier (alfred-learn → packs_opus).
+    inbox_log_reason: str | None = None
+
+    # ---- Tier 0 — fast prelude ------------------------------------------
+    # Build a deterministic working list. ``matter_index`` may be:
+    #   * ``None``    → legacy call shape; no validation possible.
+    #   * ``[]``      → fresh tenant with no matters yet; same outcome.
+    #   * list[dict]  → the live shape, each ``{slug, name}``.
+    index: list[dict[str, Any]] = sorted(
+        (m for m in (matter_index or []) if isinstance(m, dict) and m.get("slug")),
+        key=lambda m: str(m.get("slug", "")),
+    )
+
+    related_matter_clean = (related_matter or "").strip()
+    task_name_clean = (task_name or "").strip()
+
+    if not index:
+        # Without an index we cannot tell a real matter from a phantom;
+        # inbox is the only safe answer. This is the back-compat branch
+        # for callers that haven't been updated to pass an index yet.
+        if related_matter_clean:
+            logger.warning(
+                "_resolve_parent_matter_path: no matter_index supplied; "
+                "freeform %r falls back to inbox to avoid phantom path",
+                related_matter_clean,
+            )
         return _INBOX_MATTER_PATH
-    slug = _slugify(related_matter)
-    if not slug:
-        return _INBOX_MATTER_PATH
-    return f"matter/{slug}.md"
+
+    # ---- Tier 1 — exact slug match --------------------------------------
+    if related_matter_clean:
+        slug = _slugify(related_matter_clean)
+        if slug:
+            target_path = f"matter/{slug}.md"
+            for m in index:
+                if str(m.get("slug", "")) == slug:
+                    return target_path
+
+    # ---- Tier 2 — fuzzy name match against ``related_matter`` -----------
+    if related_matter_clean:
+        cand_tokens = _matter_name_tokens(related_matter_clean)
+        if cand_tokens:
+            best_score = 0.0
+            best_slug: str | None = None
+            best_name: str | None = None
+            for m in index:
+                name = str(m.get("name", "")).strip()
+                if not name:
+                    continue
+                ex_tokens = _matter_name_tokens(name)
+                if not ex_tokens:
+                    continue
+                score = len(cand_tokens & ex_tokens) / min(
+                    len(cand_tokens), len(ex_tokens)
+                )
+                # Strict-> so tie-breaking falls through to the
+                # first matter in the slug-sorted iteration order.
+                if score > best_score:
+                    best_score = score
+                    best_slug = str(m.get("slug", ""))
+                    best_name = name
+            if best_slug and best_score >= _PARENT_MATTER_FUZZY_THRESHOLD:
+                logger.info(
+                    "_resolve_parent_matter_path: tier-2 fuzzy match "
+                    "related_matter=%r -> matter/%s.md (name=%r, score=%.2f)",
+                    related_matter_clean, best_slug, best_name, best_score,
+                )
+                return f"matter/{best_slug}.md"
+
+    # ---- Tier 3 — fuzzy name match against ``task_name`` ----------------
+    if task_name_clean:
+        cand_tokens = _matter_name_tokens(task_name_clean)
+        if cand_tokens:
+            best_score = 0.0
+            best_slug = None
+            best_name = None
+            for m in index:
+                name = str(m.get("name", "")).strip()
+                if not name:
+                    continue
+                ex_tokens = _matter_name_tokens(name)
+                if not ex_tokens:
+                    continue
+                score = len(cand_tokens & ex_tokens) / min(
+                    len(cand_tokens), len(ex_tokens)
+                )
+                if score > best_score:
+                    best_score = score
+                    best_slug = str(m.get("slug", ""))
+                    best_name = name
+            if best_slug and best_score >= _PARENT_MATTER_FUZZY_THRESHOLD:
+                logger.info(
+                    "_resolve_parent_matter_path: tier-3 fuzzy match "
+                    "task_name=%r -> matter/%s.md (name=%r, score=%.2f)",
+                    task_name_clean, best_slug, best_name, best_score,
+                )
+                return f"matter/{best_slug}.md"
+        inbox_log_reason = (
+            f"task_name={task_name_clean!r} did not fuzzy-match any matter"
+        )
+
+    # ---- Tier 4 — inbox fallback ----------------------------------------
+    if related_matter_clean or task_name_clean:
+        # WARNING-level so a fresh deploy where the inbox-fallback fires
+        # persistently surfaces the gap (e.g. a critical matter Opus
+        # consistently paraphrases beyond any fuzzy threshold).
+        logger.warning(
+            "_resolve_parent_matter_path: inbox fallback "
+            "(related_matter=%r, task_name=%r, indexed_matters=%d, reason=%s)",
+            related_matter_clean, task_name_clean, len(index),
+            inbox_log_reason or "no tier matched",
+        )
+    return _INBOX_MATTER_PATH
 
 
 def _escape_yaml_scalar(value: str) -> str:
@@ -1958,7 +2098,10 @@ def _validate_errand(errand: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
-def _build_rich_errand_content(errand: dict[str, Any]) -> str:
+def _build_rich_errand_content(
+    errand: dict[str, Any],
+    matter_index: list[dict[str, Any]] | None = None,
+) -> str:
     """Render a validated errand dict as a markdown task record.
 
     Sir-matter-task #1 (2026-05-24) — onboarding-time tasks must link
@@ -1968,6 +2111,14 @@ def _build_rich_errand_content(errand: dict[str, Any]) -> str:
     ``matter/<slug>.md`` path; missing/blank falls back to the
     ``matter/inbox.md`` orphan home (which Steward already treats as
     the matter for un-rooted tasks).
+
+    Sir-fresh-deploy #2 (2026-05-24) — the resolver now takes an
+    optional ``matter_index`` (``[{slug, name}, ...]`` of matters that
+    actually exist). When supplied, the resolver validates against real
+    matters first and only writes phantom-free paths. When absent
+    (legacy callers / test invocation), the resolver falls back to
+    inbox to avoid the phantom-path bug. Callers pass the matter pack
+    that's already in scope.
 
     Rich shape emitted (mirroring the live Steward-created tasks):
       - ``state: pending`` (matters aggregator reads this)
@@ -1999,8 +2150,15 @@ def _build_rich_errand_content(errand: dict[str, Any]) -> str:
     deps = [str(d).strip() for d in errand.get("dependencies", []) if str(d).strip()]
 
     # Resolve the freeform related_matter string to a canonical
-    # ``matter/<slug>.md`` path. Empty / whitespace-only → inbox fallback.
-    parent_matter_path = _resolve_parent_matter_path(related_matter)
+    # ``matter/<slug>.md`` path. Sir-fresh-deploy #2: pass the matter
+    # index AND the task NAME so we can fall through to fuzzy task-name
+    # resolution when ``related_matter`` is empty (folded in from old
+    # task #224). Inbox is the safety net.
+    parent_matter_path = _resolve_parent_matter_path(
+        related_matter,
+        matter_index=matter_index,
+        task_name=name,
+    )
 
     fm_lines = [
         "---",
@@ -2148,6 +2306,52 @@ async def generate_errand_pack_opus(onboard_path: str) -> dict[str, Any]:
     skipped_invalid = 0
     rejected_reasons: list[str] = []
     try:
+        # Sir-fresh-deploy #2 (2026-05-24): build the matter index ONCE
+        # from the live vault. The onboarding pipeline writes the matter
+        # pack BEFORE the errand pack (OnboardingV3Workflow), so the real
+        # matters are on disk by the time we get here. We also fold in
+        # ``matters_brief`` so a same-batch matter that hasn't been
+        # listed yet still resolves (defensive — matters_brief is the
+        # canonical pre-write artifact).
+        matter_index: list[dict[str, Any]] = []
+        try:
+            listed_matters = await client.list_records("matter", limit=1000)
+            for rec in listed_matters or []:
+                if not isinstance(rec, dict):
+                    continue
+                m_slug = rec.get("slug")
+                m_name = rec.get("name")
+                if not m_name:
+                    fm = rec.get("frontmatter")
+                    if isinstance(fm, dict):
+                        m_name = fm.get("name") or fm.get("title")
+                if isinstance(m_slug, str) and m_slug and isinstance(m_name, str) and m_name:
+                    matter_index.append({"slug": m_slug, "name": m_name})
+        except Exception as exc:
+            logger.warning(
+                "errand_pack_opus: list_records('matter') failed: %s "
+                "(matter validation disabled; all tasks will inbox-fallback)",
+                exc,
+            )
+        # Belt-and-braces: add matters_brief entries the listing missed
+        # (de-dup by slug). matters_brief is ``[{name: ...}, ...]`` —
+        # derive slugs locally.
+        seen_slugs = {m["slug"] for m in matter_index}
+        for m in matters_brief or []:
+            if not isinstance(m, dict):
+                continue
+            mb_name = m.get("name") or m.get("title")
+            if not isinstance(mb_name, str) or not mb_name.strip():
+                continue
+            mb_slug = _slugify(mb_name)
+            if mb_slug and mb_slug not in seen_slugs:
+                matter_index.append({"slug": mb_slug, "name": mb_name})
+                seen_slugs.add(mb_slug)
+        logger.info(
+            "errand_pack_opus: matter_index has %d entries",
+            len(matter_index),
+        )
+
         for errand in errands[:15]:
             ok, reason = _validate_errand(errand)
             if not ok:
@@ -2172,7 +2376,7 @@ async def generate_errand_pack_opus(onboard_path: str) -> dict[str, Any]:
                     slug, exc,
                 )
 
-            content = _build_rich_errand_content(errand)
+            content = _build_rich_errand_content(errand, matter_index=matter_index)
             try:
                 await client.write_record("task", slug, content)
                 created += 1
