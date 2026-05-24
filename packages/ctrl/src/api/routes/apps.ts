@@ -64,7 +64,7 @@ export function registerAppsRoutes(): void {
     checks.push(
       (async (): Promise<InstalledApp> => ({
         id: "vault",
-        name: "Vault",
+        name: "Vaultwarden",
         url: `https://vault.${domain}`,
         icon: "/app-icons/vaultwarden.svg",
         status: await checkHealth("http://vaultwarden:80/alive"),
