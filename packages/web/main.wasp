@@ -688,6 +688,12 @@ action rotateApprovalSecret {
   entities: []
 }
 
+// Sir #8 — Terminal channel on /channels reads SSH info from ctrl-api.
+query getSshInfo {
+  fn: import { getSshInfo } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
   entities: []
