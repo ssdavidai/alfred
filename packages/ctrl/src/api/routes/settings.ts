@@ -1,20 +1,37 @@
-// Settings endpoints — persist principal-facing toggles into a single
-// JSON file at /alfred-data/settings.json (override via ALFRED_DATA_DIR
+// Settings endpoints — persist principal-facing live↔shadow toggles into a
+// single JSON file at /alfred-data/settings.json (override via ALFRED_DATA_DIR
 // for tests).
 //
-// Today's only consumer is Gap 3b — Lane II's _resolve_mode reads
-// `signal_action_mode` from this same file. ctrl owns the write side so
-// the SaaS dashboard can flip live↔shadow without shelling onto the box.
+// This started life as the Gap-3b endpoint for `signal_action_mode` alone. It
+// has since grown to cover the wider family of mode flags Lane II's resolvers
+// look at (sir-matter-task #5). The registry below is the single place where
+// new flags get wired up — adding one means listing its env var, default, and
+// the valid value set. Endpoints and tests follow automatically.
 //
-// Read precedence (mirrors Lane II's _resolve_mode):
-//   1. env STEWARD_SIGNAL_ACTION_LIVE_MODE  (operator override, wins always)
-//   2. settings.json `signal_action_mode`   (principal-chosen)
-//   3. default `"live"`
+// Today's consumers:
+//   - signal_action_mode     → Lane II's _resolve_signal_action_mode
+//                              (env STEWARD_SIGNAL_ACTION_LIVE_MODE)
+//   - state_mutator_mode     → Lane II Fix C (env STEWARD_LIVE_MODE)
+//   - auto_task_create_mode  → Lane II Fix D (env STEWARD_SIGNAL_AUTOCREATE_TASKS)
 //
-// Write strategy: temp file + atomic rename. No real lockfile — this API
-// is single-process (one ctrl-api per tenant) and the temp+rename pair
-// guarantees the reader never sees a torn JSON. Other keys in
-// settings.json are preserved across writes.
+// Read precedence (mirrors Lane II's resolvers):
+//   1. env <ENV_VAR>           — operator override, wins always
+//   2. settings.json `<key>`   — principal-chosen, set via the SaaS dashboard
+//   3. registered default
+//
+// Endpoints:
+//   GET  /api/v1/settings        → { <key>: ResolvedMode, ... } for every key
+//   GET  /api/v1/settings/:key   → single ResolvedMode
+//   PUT  /api/v1/settings/:key   → body { mode } → writes settings.json
+//
+//   Legacy: GET/PUT /api/v1/settings/signal-action-mode (hyphenated)
+//   is kept as an alias for /api/v1/settings/signal_action_mode so Lane III's
+//   already-deployed UI keeps working.
+//
+// Write strategy: temp file + atomic rename. No real lockfile — this API is
+// single-process (one ctrl-api per tenant) and the temp+rename pair guarantees
+// the reader never sees a torn JSON. Read-modify-write so unrelated keys
+// already in settings.json are preserved across writes.
 import fs from "node:fs";
 import path from "node:path";
 import { addRoute } from "../server.js";
@@ -26,19 +43,56 @@ const DATA_DIR = process.env.ALFRED_DATA_DIR || "/alfred-data";
  *  not required to exist — GET tolerates a missing file. */
 export const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
-const ENV_OVERRIDE = "STEWARD_SIGNAL_ACTION_LIVE_MODE";
-
 type Mode = "live" | "shadow";
 type Source = "default" | "settings_file" | "env_override";
 
-function isMode(v: unknown): v is Mode {
-  return v === "live" || v === "shadow";
+interface KeyConfig {
+  env_var: string;
+  default: Mode;
+  valid: readonly Mode[];
 }
+
+/** The single registry of supported settings keys. Add new flags here. */
+const SETTINGS_KEYS = {
+  signal_action_mode: {
+    env_var: "STEWARD_SIGNAL_ACTION_LIVE_MODE",
+    default: "live",
+    valid: ["live", "shadow"],
+  },
+  state_mutator_mode: {
+    env_var: "STEWARD_LIVE_MODE",
+    default: "live",
+    valid: ["live", "shadow"],
+  },
+  auto_task_create_mode: {
+    env_var: "STEWARD_SIGNAL_AUTOCREATE_TASKS",
+    default: "live",
+    valid: ["live", "shadow"],
+  },
+} as const satisfies Record<string, KeyConfig>;
+
+type RegisteredKey = keyof typeof SETTINGS_KEYS;
 
 interface ResolvedMode {
   mode: Mode;
   source: Source;
   env_override_active: boolean;
+}
+
+/** Normalise the URL param: accept both hyphenated (legacy `signal-action-mode`)
+ *  and underscored (canonical `signal_action_mode`) forms. Lookup is then a
+ *  simple `key in SETTINGS_KEYS` check. */
+function normaliseKey(raw: string): string {
+  return raw.replace(/-/g, "_");
+}
+
+function isRegisteredKey(k: string): k is RegisteredKey {
+  return Object.prototype.hasOwnProperty.call(SETTINGS_KEYS, k);
+}
+
+function isValidValue(key: RegisteredKey, v: unknown): v is Mode {
+  const cfg = SETTINGS_KEYS[key];
+  return typeof v === "string" && (cfg.valid as readonly string[]).includes(v);
 }
 
 /** Load the settings file. Missing or malformed → `{}` + warn (so the
@@ -78,53 +132,83 @@ function writeSettings(next: Record<string, unknown>): void {
   fs.renameSync(tmp, SETTINGS_FILE);
 }
 
-/** Resolve the effective mode with the three-level precedence. Mirrors
- *  Lane II's _resolve_mode so GET reports exactly what the consumer sees. */
-function resolveMode(): ResolvedMode {
-  const envRaw = process.env[ENV_OVERRIDE];
+/** Resolve one key's effective mode with the three-level precedence. */
+function resolveKey(
+  key: RegisteredKey,
+  settings: Record<string, unknown>,
+): ResolvedMode {
+  const cfg = SETTINGS_KEYS[key];
+  const envRaw = process.env[cfg.env_var];
   if (envRaw !== undefined && envRaw !== "") {
     const envMode = envRaw.trim().toLowerCase();
-    if (isMode(envMode)) {
-      return { mode: envMode, source: "env_override", env_override_active: true };
+    if ((cfg.valid as readonly string[]).includes(envMode)) {
+      return {
+        mode: envMode as Mode,
+        source: "env_override",
+        env_override_active: true,
+      };
     }
-    // Env present but garbage — treat as no override (and let GET say so).
+    // Env present but garbage — treat as no override (and warn).
     console.warn(
-      `[settings] ${ENV_OVERRIDE}=${envRaw} is not 'live' or 'shadow'; ignoring`,
+      `[settings] ${cfg.env_var}=${envRaw} is not one of ${cfg.valid.join("|")}; ignoring`,
     );
   }
-  const settings = readSettings();
-  const fileMode = settings.signal_action_mode;
-  if (isMode(fileMode)) {
-    return { mode: fileMode, source: "settings_file", env_override_active: false };
+  const fileVal = settings[key];
+  if ((cfg.valid as readonly string[]).includes(fileVal as string)) {
+    return {
+      mode: fileVal as Mode,
+      source: "settings_file",
+      env_override_active: false,
+    };
   }
-  return { mode: "live", source: "default", env_override_active: false };
+  return { mode: cfg.default, source: "default", env_override_active: false };
+}
+
+function resolveAll(): Record<RegisteredKey, ResolvedMode> {
+  const settings = readSettings();
+  const out = {} as Record<RegisteredKey, ResolvedMode>;
+  for (const k of Object.keys(SETTINGS_KEYS) as RegisteredKey[]) {
+    out[k] = resolveKey(k, settings);
+  }
+  return out;
 }
 
 export function registerSettingsRoutes(): void {
-  addRoute(
-    "GET",
-    "/api/v1/settings/signal-action-mode",
-    async ({ res }) => {
-      sendJson(res, 200, resolveMode());
-    },
-  );
+  // ── Combined view ───────────────────────────────────────────────────────
+  addRoute("GET", "/api/v1/settings", async ({ res }) => {
+    sendJson(res, 200, resolveAll());
+  });
 
-  addRoute(
-    "PUT",
-    "/api/v1/settings/signal-action-mode",
-    async ({ res, body }) => {
-      const b = (body ?? {}) as Record<string, unknown>;
-      const requested = b.mode;
-      if (!isMode(requested)) {
-        throw new ValidationError(
-          `mode must be 'live' or 'shadow', got ${JSON.stringify(requested)}`,
-        );
-      }
-      const current = readSettings();
-      // Preserve any other keys (other toggles may share this file).
-      current.signal_action_mode = requested;
-      writeSettings(current);
-      sendJson(res, 200, resolveMode());
-    },
-  );
+  // ── Per-key GET (canonical + hyphenated alias) ──────────────────────────
+  addRoute("GET", "/api/v1/settings/:key", async ({ res, params }) => {
+    const key = normaliseKey(params.key);
+    if (!isRegisteredKey(key)) {
+      throw new ValidationError(
+        `unknown settings key ${JSON.stringify(params.key)}; known: ${Object.keys(SETTINGS_KEYS).join(", ")}`,
+      );
+    }
+    sendJson(res, 200, resolveKey(key, readSettings()));
+  });
+
+  // ── Per-key PUT (canonical + hyphenated alias) ──────────────────────────
+  addRoute("PUT", "/api/v1/settings/:key", async ({ res, params, body }) => {
+    const key = normaliseKey(params.key);
+    if (!isRegisteredKey(key)) {
+      throw new ValidationError(
+        `unknown settings key ${JSON.stringify(params.key)}; known: ${Object.keys(SETTINGS_KEYS).join(", ")}`,
+      );
+    }
+    const b = (body ?? {}) as Record<string, unknown>;
+    const requested = b.mode;
+    if (!isValidValue(key, requested)) {
+      throw new ValidationError(
+        `mode must be one of ${SETTINGS_KEYS[key].valid.join("|")} for key '${key}', got ${JSON.stringify(requested)}`,
+      );
+    }
+    const current = readSettings();
+    // Preserve any other keys (other toggles + Gap-3b legacy content).
+    current[key] = requested;
+    writeSettings(current);
+    sendJson(res, 200, resolveKey(key, current));
+  });
 }
