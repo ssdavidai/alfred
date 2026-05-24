@@ -21,15 +21,18 @@ from src.utils.vault_client import VaultClient
 
 @activity.defn
 async def fetch_queued_tasks() -> list[dict[str, Any]]:
-    """Fetch vault tasks with status=queued.
+    """Fetch vault tasks ready for the runner.
 
-    Reads each task's full content to get frontmatter fields (owner, tier, etc.)
-    then filters to AI-owned tasks only.
+    'queued' was the aspirational status in earlier comments but the
+    alfred-vault validator rejects it. Canonical 'not yet started' status
+    is 'todo' (validator vocab: active|blocked|cancelled|done|todo).
+    Reads each task's full content to get frontmatter fields (owner, tier,
+    etc.) then filters to AI-owned tasks only. Round-2 fix 2026-05-24.
     """
     config = load_config()
     client = VaultClient(config)
     try:
-        task_stubs = await client.list_records("task", status="queued")
+        task_stubs = await client.list_records("task", status="todo")
         tasks = []
         for stub in task_stubs:
             path = stub.get("path", "")

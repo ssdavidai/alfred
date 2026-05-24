@@ -1034,10 +1034,12 @@ def _render_task_content(
     lines.append("staleness_score: 0")
     # Sir-matter-task #4 (mirror Fix A): the matters aggregator reads
     # ``state``; ``pending`` is the canonical newly-created value.
-    # TaskRunner filters on ``status in (queued, in_progress)`` so we
-    # land at ``queued`` (was ``todo`` — never picked up).
+    # Round-2 fix 2026-05-24: alfred-vault validator vocab is
+    # active|blocked|cancelled|done|todo. 'queued' is REJECTED with HTTP
+    # 500 (the previous comment was aspirational). Use 'todo' — TaskRunner
+    # filters on status=todo to pick fresh tasks up.
     lines.append("state: pending")
-    lines.append("status: queued")
+    lines.append("status: todo")
     # Sir-matter-task #4: ``closure_predicate`` (singular) — optional
     # field downstream tooling reads to distinguish "no predicate set"
     # from "field missing". Closure_predicates (plural) live in

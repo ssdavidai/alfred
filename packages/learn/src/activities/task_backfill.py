@@ -271,7 +271,12 @@ async def backfill_orphan_task_matter_refs() -> dict[str, int]:
                 "parent_matter": target_matter,
                 "matter_ref": target_matter,
                 "state": "pending",
-                "status": "queued",
+                # alfred-vault validator vocab is active|blocked|cancelled|done|todo
+                # — 'queued' is rejected with HTTP 500. The stale comment in
+                # tasks.py:23 that says 'status=queued' is wrong. Use 'todo'
+                # (canonical 'not yet started'); TaskRunner filter is updated
+                # to match. See sir-matter-task round-2 incident 2026-05-24.
+                "status": "todo",
             }
             try:
                 await client.patch_frontmatter(path, updates)

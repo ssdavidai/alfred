@@ -1981,14 +1981,14 @@ def _build_rich_errand_content(errand: dict[str, Any]) -> str:
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     name = str(errand["name"]).strip()
-    # Sir-matter-task #1: legacy ``todo`` ignored by TaskRunner. The
-    # ``status`` field on the input dict is the Opus-LLM choice; we
-    # normalise to ``queued`` so the very first TaskRunner tick after
-    # onboarding picks the task up. If Opus picked ``active`` /
-    # ``blocked`` we keep it (TaskRunner accepts both); only ``todo`` is
-    # rewritten.
+    # Sir-matter-task round-2 fix: alfred-vault validator vocab is
+    # active|blocked|cancelled|done|todo. 'queued' is REJECTED with
+    # HTTP 500 — the previous comment in tasks.py:23 was aspirational,
+    # never matched the validator. Use 'todo' (canonical 'not yet
+    # started'); TaskRunner reads status=todo to pick tasks up.
+    _VALID_TASK_STATUS = {"active", "blocked", "cancelled", "done", "todo"}
     raw_status = str(errand.get("status", "todo")).strip().lower()
-    status = "queued" if raw_status in ("todo", "queued", "") else raw_status
+    status = raw_status if raw_status in _VALID_TASK_STATUS else "todo"
     owner = str(errand.get("owner", "human")).strip().lower()
     urgency = str(errand.get("urgency", "normal")).strip().lower()
     due_hint = str(errand.get("due_hint", "")).strip()
