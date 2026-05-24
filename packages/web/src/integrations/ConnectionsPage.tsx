@@ -735,7 +735,21 @@ function LauncherRow({ apps }: { apps: AppLink[] }) {
                 className="w-8 h-8 shrink-0 border border-rule font-display italic flex items-center justify-center"
                 style={{ color: "var(--brass)" }}
               >
-                {app.icon || app.name.slice(0, 1)}
+                {app.icon &&
+                (app.icon.startsWith("/") || app.icon.startsWith("http")) ? (
+                  // Sir #7a — icon was rendered as text (literal
+                  // "/app-icons/plane.svg") because the field is a URL not
+                  // an emoji. Render <img> for URL/path values; fall back
+                  // to the original glyph/initial for non-URL values.
+                  <img
+                    src={app.icon}
+                    alt={app.name}
+                    className="w-6 h-6"
+                    loading="lazy"
+                  />
+                ) : (
+                  app.icon || app.name.slice(0, 1)
+                )}
               </div>
               <div className="flex-1 min-w-0">
                 <div className="font-display text-[18px] truncate">
