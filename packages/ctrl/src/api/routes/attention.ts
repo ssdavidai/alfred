@@ -215,10 +215,16 @@ export function emitResolutionEvent(
 // If the mirror write throws (e.g. vault disk full) we log + swallow; the
 // existing audit row is the contract this endpoint must honour.
 //
-// We mint the decision in `state=completed` because the legacy endpoints
-// already performed the synchronous source-record flip (writeFrontmatterPatch
-// above) — the workflow has nothing more to do beyond observation extraction,
-// for which a completed decision is fine.
+// We mint the decision in `state=open` with `side_effects.synchronous_flip:
+// true` so DecisionRouterWorkflow picks it up and runs
+// extract_observation_from_decision (which closes the learning loop into
+// state.db `observation` + `instinct_ref`). The router's six
+// `if not synchronous_flip` guards (decision_router.py:194,307,426,479,486,
+// 563,586) cleanly skip the action paths — the legacy endpoint already
+// performed the synchronous source-record flip via writeFrontmatterPatch above.
+// Then the router flips state → completed itself. Minting as `completed`
+// (the previous shape) bypassed the observation extractor entirely and was
+// the proximate cause of "0 kind=decision observations" on the live tenant.
 type LegacyAction = "done" | "dispatched" | "skipped";
 
 function legacyActionToIntent(action: LegacyAction): string {
@@ -291,12 +297,12 @@ export function mintDecisionMirror(
       note: note || null,
       matter_ref: matterRef,
       task_ref: taskRef,
-      state: "completed",
+      state: "open",
       outcome_record: null,
       time_to_decision_ms: null,
       reversed_at: null,
       is_reversible: intent !== "delegate",
-      completed_at: nowIso,
+      completed_at: null,
       side_effects: {
         synchronous_flip: true,
         actions: [`needs_attention.${action}`],
@@ -361,7 +367,7 @@ export function mintDecisionMirror(
       target_kind: "decision",
       subject_ref: sourceRecord,
       summary: `decision: ${intent} on needs_attention (legacy)`,
-      changes: { intent, state: "completed", note: note || null },
+      changes: { intent, state: "open", note: note || null },
       payload: { ...fields },
     });
 
