@@ -342,6 +342,65 @@ EOF
 fi
 
 # =============================================================================
+# 5b. Seed matter/inbox.md — orphan fallback target (sir-fresh-deploy #1).
+#
+# The packs_opus._resolve_parent_matter_path() helper falls back to
+# `matter/inbox.md` when an Opus-emitted `related_matter` is empty or fails
+# to slugify into a known matter. The same path is hard-coded as
+# `task_creation.DEFAULT_PARENT_MATTER` and is the canonical "orphan home"
+# referenced by Steward and the matters aggregator. The comment in
+# packs_opus.py at the time of writing said "ctrl-api's task seed scaffolds
+# inbox.md if missing" — that was aspirational. Nothing in the stack creates
+# it. On a fresh deploy, the first batch of orphan tasks lands on
+# `parent_matter: matter/inbox.md` but the file doesn't exist → /matters
+# aggregator can't resolve them → 33 tasks went orphan on Sir's tenant
+# (2026-05-24) before they were manually relinked.
+#
+# Schema matches `packages/learn/scripts/migrate_inbox_matter.py`
+# `_build_inbox_content()` — the Steward Phase 0 fields are populated so
+# the schema migration doesn't need to revisit this record.
+#
+# Idempotent: only writes when the file is absent. A hand-edited inbox.md
+# is preserved untouched.
+# =============================================================================
+mkdir -p /vault/matter
+if [[ ! -f /vault/matter/inbox.md ]]; then
+    echo "[init] Seeding matter/inbox.md (orphan fallback target)..."
+    CREATED_NOW=$(date -u +%Y-%m-%dT%H:%M:%S+00:00)
+    cat > /vault/matter/inbox.md <<EOF
+---
+type: matter
+name: "Inbox"
+status: active
+state: open
+surface_class: none
+description: "Steward home for orphan tasks."
+last_steward_check_at:
+last_steward_outcome:
+next_check_after: $CREATED_NOW
+signal_sources: []
+pending_confirmation: false
+blocked_on:
+staleness_score: 0
+created: $CREATED_NOW
+created_by: init
+---
+
+# Inbox
+
+Steward home for orphan tasks. Tasks land here automatically when they're
+created without an explicit \`parent_matter\` (e.g. Opus-emitted errands
+whose \`related_matter\` string doesn't slugify into a known matter).
+
+Move them into a real matter by editing \`parent_matter\` on the task —
+the matters aggregator will follow the link on the next read.
+EOF
+    echo "[init] matter/inbox.md seeded"
+else
+    echo "[init] matter/inbox.md already present, preserving"
+fi
+
+# =============================================================================
 # 6. Render the per-profile Hermes config.yaml + .env.
 #
 # REPLACES the deleted OpenClaw steps:
