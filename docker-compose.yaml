@@ -955,6 +955,10 @@ services:
       - TRUSTED_PROXIES=0.0.0.0/0
       - FILE_SIZE_LIMIT=5242880
       - BUCKET_NAME=uploads
+    volumes:
+      # Caddyfile override: stock upstream's bare aliases collide with
+      # alfred-black's `web` service. Sir #6, 2026-05-24.
+      - ./caddy/plane-proxy.Caddyfile:/etc/caddy/Caddyfile:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/ >/dev/null 2>&1 || exit 1"]
       interval: 15s
@@ -1059,6 +1063,58 @@ services:
     command: ["bundle", "exec", "sidekiq"]
     mem_limit: 1g
     pids_limit: 512
+
+  # One-shot Plane admin auto-seed (Sir #6, 2026-05-24). Creates owner
+  # User + InstanceAdmin + flips is_setup_done=True via the ORM (HTTP
+  # sign-up is CSRF-guarded). Idempotent. Uses plane-backend image so
+  # Django settings live on PYTHONPATH for free.
+  plane-init:
+    image: makeplane/plane-backend:stable
+    restart: "no"
+    depends_on:
+      plane-api:
+        condition: service_healthy
+      plane-migrator:
+        condition: service_completed_successfully
+      init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=plane.settings.production
+      - DEBUG=0
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DATABASE_URL=postgresql://plane:${POSTGRES_PASSWORD}@plane-db:5432/plane
+      - POSTGRES_USER=plane
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=plane
+      - POSTGRES_HOST=plane-db
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@plane-redis:6379/0
+      - REDIS_HOST=plane-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - AMQP_URL=amqp://plane:${REDIS_PASSWORD}@plane-mq:5672/plane
+      - USE_MINIO=1
+      - AWS_ACCESS_KEY_ID=plane
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
+      - AWS_S3_ENDPOINT_URL=http://plane-minio:9000
+      - AWS_S3_BUCKET_NAME=uploads
+      - AWS_REGION=us-east-1
+    volumes:
+      - alfred_data:/alfred-data
+    working_dir: /code
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        if [ ! -f /alfred-data/plane-bootstrap/plane-bootstrap.py ]; then
+          echo "[plane-init] plane-bootstrap.py not staged at /alfred-data/plane-bootstrap/ — was alfred-init skipped?"
+          exit 1
+        fi
+        exec python manage.py shell -c "exec(open('/alfred-data/plane-bootstrap/plane-bootstrap.py').read())"
+    mem_limit: 512m
+    pids_limit: 256
 
   # One-shot bootstrap. Reuses the sure-web image; idempotent — bootstrap.rb
   # short-circuits if /alfred-data/.sure-api-key already exists.
