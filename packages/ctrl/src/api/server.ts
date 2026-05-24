@@ -49,6 +49,7 @@ import { registerVexaWebhookRoute } from "./routes/webhooks/vexa.js";
 import { registerStateRoutes } from "./routes/state.js";
 import { registerIngestRoutes } from "./routes/ingest.js";
 import { registerVaultIndexRoutes } from "./routes/vaultIndex.js";
+import { registerSystemRoutes } from "./routes/system.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -155,6 +156,7 @@ export function createApiServer(): http.Server {
   registerStateRoutes();
   registerIngestRoutes();
   registerVaultIndexRoutes();
+  registerSystemRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
