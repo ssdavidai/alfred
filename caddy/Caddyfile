@@ -55,3 +55,22 @@ mcp.{$DOMAIN} {
 	encode zstd gzip
 	reverse_proxy mcp-server:8787
 }
+
+# Hermes web dashboard — config/keys/sessions UI.
+# Surfaces API keys + session data, so it sits behind HTTP basic-auth.
+# Credentials are written by the init container into /opt/alfred/.env as
+# HERMES_DASHBOARD_USER (default 'admin') + HERMES_DASHBOARD_BCRYPT (Caddy-
+# compatible bcrypt). Raw password is preserved at
+# /alfred-data/.hermes-dashboard-password for the operator to retrieve.
+#
+# The hermes container's supervisor.sh launches `hermes dashboard --host
+# 0.0.0.0 --insecure` as a 4th supervised process — the dashboard binds on
+# the container's docker-bridge interface so Caddy can reach it at
+# hermes:9119 over the alfred-black_default network.
+hermes.{$DOMAIN} {
+	encode zstd gzip
+	basic_auth {
+		{$HERMES_DASHBOARD_USER} {$HERMES_DASHBOARD_BCRYPT}
+	}
+	reverse_proxy hermes:9119
+}
