@@ -196,16 +196,99 @@ _VALID_ENV_MODES = ("shadow", "live", "live_high_confidence_only")
 
 MAX_RETRIES = 3
 
+# Sir-matter-task #3 (2026-05-24): user-toggleable settings file shared
+# with ctrl-api (Lane I writes; we read). Mirrors the precedence
+# established in ``signal_actions._resolve_signal_action_mode``:
+#   1. Env STEWARD_LIVE_MODE (override; kept for ops emergency)
+#   2. /alfred-data/settings.json key ``state_mutator_mode``
+#   3. Default "live" (was "shadow" — left state_mutator in shadow for
+#      every fresh tenant, which is why 13 matters sat at
+#      ``current_state: null, signal_count_24h: 0`` on home.alfred.black)
+from pathlib import Path as _Path
+
+_STATE_MUTATOR_SETTINGS_PATH = _Path("/alfred-data/settings.json")
+_STATE_MUTATOR_SETTINGS_KEY = "state_mutator_mode"
+_DEFAULT_STATE_MUTATOR_MODE = "live"
+
+
+def _resolve_state_mutator_mode() -> str:
+    """Return the effective live-mode for state_mutator.
+
+    Sir-matter-task #3 (2026-05-24): default flipped from ``"shadow"``
+    to ``"live"`` and a user-toggleable settings file added so Sir can
+    flip the surface from /study without a redeploy.
+
+    Precedence:
+      1. Env ``STEWARD_LIVE_MODE`` if set (emergency override).
+      2. ``/alfred-data/settings.json`` key ``state_mutator_mode`` if
+         the file exists and the key is one of the valid modes.
+      3. Default ``"live"``.
+
+    Returns one of: ``"shadow"``, ``"live"``,
+    ``"live_high_confidence_only"``. Any read error (missing file,
+    malformed JSON, IO error) fail-safes to the default. Unrecognised
+    values (env or file) log a warning and fall back to the default.
+
+    Settings file is written by ctrl-api (Lane I owns the writer). On
+    a fresh tenant the file does not exist — that's the steady state
+    and must NOT emit a warning.
+    """
+    import json as _json
+
+    # 1. Env override.
+    env_raw = os.environ.get(STEWARD_LIVE_MODE_ENV)
+    if env_raw:
+        raw = env_raw.strip().lower()
+        if raw in _VALID_ENV_MODES:
+            return raw
+        logger.warning(
+            "state_mutator._resolve_state_mutator_mode: unrecognised %s=%s "
+            "— falling back to settings/default",
+            STEWARD_LIVE_MODE_ENV, raw,
+        )
+        # fall through to settings/default
+
+    # 2. Settings file.
+    try:
+        if _STATE_MUTATOR_SETTINGS_PATH.exists():
+            data = _json.loads(_STATE_MUTATOR_SETTINGS_PATH.read_text())
+            value = data.get(_STATE_MUTATOR_SETTINGS_KEY) if isinstance(data, dict) else None
+            if isinstance(value, str):
+                raw = value.strip().lower()
+                if raw in _VALID_ENV_MODES:
+                    return raw
+                logger.warning(
+                    "state_mutator._resolve_state_mutator_mode: "
+                    "unrecognised settings.json %s=%s — using default %s",
+                    _STATE_MUTATOR_SETTINGS_KEY, raw, _DEFAULT_STATE_MUTATOR_MODE,
+                )
+    except (_json.JSONDecodeError, ValueError) as exc:
+        logger.warning(
+            "state_mutator._resolve_state_mutator_mode: settings.json "
+            "parse failed (%s) — using default %s",
+            exc, _DEFAULT_STATE_MUTATOR_MODE,
+        )
+    except OSError as exc:
+        logger.warning(
+            "state_mutator._resolve_state_mutator_mode: settings.json "
+            "read failed (%s) — using default %s",
+            exc, _DEFAULT_STATE_MUTATOR_MODE,
+        )
+
+    # 3. Default.
+    return _DEFAULT_STATE_MUTATOR_MODE
+
 
 def _resolve_env_live_mode() -> str:
-    raw = (os.environ.get(STEWARD_LIVE_MODE_ENV) or "shadow").strip().lower()
-    if raw in _VALID_ENV_MODES:
-        return raw
-    logger.warning(
-        "state_mutator: unrecognised %s=%s — defaulting to shadow",
-        STEWARD_LIVE_MODE_ENV, raw,
-    )
-    return "shadow"
+    """Legacy resolver — kept as a thin alias to
+    ``_resolve_state_mutator_mode`` so the existing call sites in
+    ``apply_state_change_v2`` don't have to be touched.
+
+    Sir-matter-task #3 (2026-05-24): previously this read only the env
+    and defaulted to ``"shadow"``. New behaviour delegates to the
+    settings-aware resolver which defaults to ``"live"``.
+    """
+    return _resolve_state_mutator_mode()
 
 
 def _resolve_confidence_threshold(env_name: str, default: float) -> float:
