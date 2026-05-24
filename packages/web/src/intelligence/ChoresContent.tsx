@@ -180,6 +180,15 @@ export default function ChoresContent() {
   });
 
   const [actioningSlug, setActioningSlug] = useState<string | null>(null);
+  // Sir #3 — description was line-clamp-3, hiding 405-char user_facing
+  // descriptions like "Client Delivery Watch". Default to a 6-line clamp
+  // so density is preserved, but let the principal expand any single row
+  // to read the full text without leaving the page.
+  const [expandedDescriptions, setExpandedDescriptions] = useState<
+    Record<string, boolean>
+  >({});
+  const toggleDescription = (slug: string) =>
+    setExpandedDescriptions((prev) => ({ ...prev, [slug]: !prev[slug] }));
 
   // The ctrl-api list route returns either {chores: [...]} or just an array
   // depending on version — handle both shapes defensively.
@@ -339,11 +348,39 @@ export default function ChoresContent() {
                 </div>
 
                 {/* Description (user_facing_description if present, else opportunity description) */}
-                {(userFacingDescription || fallbackDescription) && (
-                  <p className="mt-1.5 text-xs text-muted-foreground line-clamp-3">
-                    {userFacingDescription || fallbackDescription}
-                  </p>
-                )}
+                {/* Sir #3 — clamp at 6 lines by default; expandable per-row. */}
+                {(userFacingDescription || fallbackDescription) && (() => {
+                  const descText = userFacingDescription || fallbackDescription;
+                  const isExpanded = !!expandedDescriptions[slug];
+                  // Only show toggle if description is long enough to plausibly clamp.
+                  const showToggle = String(descText).length > 240;
+                  return (
+                    <div className="mt-1.5">
+                      <p
+                        className={
+                          isExpanded
+                            ? "text-xs text-muted-foreground whitespace-pre-wrap"
+                            : "text-xs text-muted-foreground line-clamp-6"
+                        }
+                      >
+                        {descText}
+                      </p>
+                      {showToggle && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            toggleDescription(slug);
+                          }}
+                          className="mt-1 font-mono text-[0.6rem] uppercase tracking-[0.15em] text-gold/70 hover:text-gold"
+                        >
+                          {isExpanded ? "Show less" : "Show more"}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Metadata row */}
                 <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[0.6rem] text-muted-foreground/60">

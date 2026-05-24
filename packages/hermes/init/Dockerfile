@@ -69,6 +69,11 @@ COPY packages/hermes/init/sure-budget-mutate.rb     ./sure-budget-mutate.rb
 COPY packages/hermes/init/sure-export-mutate.rb     ./sure-export-mutate.rb
 COPY packages/hermes/init/sure-settings-mutate.rb   ./sure-settings-mutate.rb
 
+# Plane first-boot admin auto-seed — staged into /alfred-data by entrypoint.sh
+# step 11, executed by the separate `plane-init` compose service which
+# runs it under `python manage.py shell` inside makeplane/plane-backend.
+COPY packages/hermes/init/plane-bootstrap.py        ./plane-bootstrap.py
+
 # Alfred vault-daemon config template (the `alfred` Python package's config).
 COPY packages/hermes/config.yaml.tpl ./config.yaml.tpl
 

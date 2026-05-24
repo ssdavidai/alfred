@@ -125,6 +125,15 @@ export const rotateApprovalSecret = async (_args: unknown, context: any) => {
   });
 };
 
+// Sir #8 — SSH info for the /channels Terminal card. Backed by ctrl-api
+// GET /api/v1/system/ssh-info (Lane I owns the endpoint). Returns
+// { hostname, port, user, pubkey, hermes_exec } — each may be null
+// until SSH is provisioned. Shape mirrored in terminalCardCore.ts.
+export const getSshInfo = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/system/ssh-info" });
+};
+
 // ============================================================
 // Dashboard Home
 // ============================================================

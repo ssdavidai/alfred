@@ -2041,7 +2041,7 @@ PATTERNS DISCOVERED:
 Return your response as valid JSON matching this exact schema:
 
 {{
-  "brief": "Sir, ...[5-7 paragraphs of butler-quality prose]... At your disposal.",
+  "brief": "Sir, [one short intro paragraph — 3-5 sentences of butler prose acknowledging what you learned about the whole person].\\n\\n**This week, on your plate:**\\n\\n- **<name>** — <what>. <when>.\\n- **<name>** — <what>. <when>.\\n- **<name>** — <what>. <when>.\\n\\nAt your disposal.",
   "opportunities": [
     {{
       "id": "watch-subscriptions",
@@ -2070,15 +2070,64 @@ Return your response as valid JSON matching this exact schema:
 
 ## Rules for the brief
 
-- **About the whole person** — not a business report. Notice their family, health, hobbies, life outside work. A great butler knows the person, not just the professional.
-- **High EQ** — what drives them beyond money and career? What tensions do you sense between different parts of their life?
-- **Practically useful** — mention 3-5 things across their WHOLE life where you can help (not just work). Each thing must correspond to an opportunity in the list.
-- **Honest about uncertainty** — admit what you cannot see, ask gently to learn more.
-- **Butler-quality prose** — elegant, understated, warm, with personality. Not corporate. Not AI-sounding.
-- **Peculiar observations** — what did you find interesting, surprising, or endearing? Notice the HUMAN details.
-- **Length**: 5-7 paragraphs. No headers, no bullet points, no markdown formatting — just prose.
-- **Start** with "Sir," or "Ma'am," (infer from the data).
-- **End** with "At your disposal."
+The brief MUST have TWO sections, in this order. Sir #1: the first brief
+was eloquent future-tense narration ("I should keep an eye on...", "I'll
+learn the rhythm of your week") — beautiful, but useless. Sir opens his
+Desk and reads a letter, not a butler's day-plan. Fix: one short intro
+paragraph, then a bulleted action section grounded in the facts above.
+
+### Section 1 — Intro paragraph
+
+ONE short paragraph (3-5 sentences), butler-quality prose. Greet Sir,
+acknowledge what you learned about the whole person (family, health,
+hobbies, what brings them joy outside work — NOT a business report),
+and set up the actionable section that follows. High EQ but brief.
+Start with "Sir," or "Ma'am," (infer from the data).
+
+NO promises about future help in this paragraph. Promises live in the
+bullets below where they can be backed by a concrete `when` and a
+concrete `what`.
+
+### Section 2 — "This week, on your plate:"
+
+The brief's second section MUST carry the literal heading
+`**This week, on your plate:**` (or `## This week, on your plate`) on
+its own line, followed by a bulleted list.
+
+Each bullet follows the **name, what, when** schema and pulls from the
+facts above:
+
+  - `- **<name>** — <what>. <when>.`
+
+Where:
+  - **name**  = the actor / subject from the facts (e.g. "Rayon",
+    "Plex license", "Doctor follow-up", "Soft Murmur"). Bold it.
+  - **what**  = one concrete action Sir takes (reply, pay, confirm,
+    cancel, attend, sign). NO "I should...", NO "I will...". Sir is
+    the subject of the verb, not Alfred.
+  - **when** = a time anchor — a weekday, a date, a deadline ("by
+    Wednesday", "before June 1"), or "today"/"this week" if no
+    concrete date is in the facts. Never future-perfect prose.
+
+Include dollar amounts when the facts carry them ("$120 annual",
+"$42 declined"). Include who is waiting on a reply ("they are waiting
+on your roadmap reply since May 20"). These are the textures that turn
+narration into a day-plan.
+
+**Minimum 3 bullets, maximum 7.** If the facts genuinely don't support
+3 concrete time-anchored items, surface the 3 most concrete items the
+facts will support — a recurring renewal, an open reply, a chore — and
+mark `when` honestly ("this week — no fixed date yet").
+
+Each bullet must also correspond to one of the `opportunities` below,
+so the brief and the chore list stay one coherent proposal.
+
+### Brief-wide rules
+
+- NO markdown headers (`#`, `##`) outside the section labels above.
+- End the brief with "At your disposal." on its own line.
+- No wall-of-prose at letter length — the bulleted section IS the
+  substance; the intro paragraph is a frame, not the meat.
 
 ## Rules for opportunities
 
