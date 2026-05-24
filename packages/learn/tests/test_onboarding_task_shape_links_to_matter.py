@@ -200,18 +200,43 @@ def test_inbox_fallback_when_related_matter_whitespace():
     assert pm_clean == "matter/inbox.md"
 
 
-def test_freeform_related_matter_is_slugified_into_path():
-    """A freeform Opus name like "Stripe billing migration" becomes
-    ``matter/stripe-billing-migration.md`` so the matter aggregator's
-    ``extractMatterRef`` resolves it cleanly.
+def test_freeform_related_matter_resolves_against_real_matters():
+    """Sir-fresh-deploy #2 (2026-05-24) — the writer no longer blindly
+    slugifies the freeform Opus string into a phantom path. It validates
+    against the real matter index (passed by the caller).
+
+    Without an index (legacy single-arg call shape), the freeform is
+    rejected as unverifiable and the task lands in ``matter/inbox.md``
+    — the safe default. The OLD behaviour was to slugify into
+    ``matter/stripe-billing-migration.md`` even when no such matter
+    existed, leaving the task orphaned at a phantom path.
+
+    The exact-slug match (Tier 1) DOES recover the original convenience
+    when the slug already corresponds to a real matter — pinned below.
     """
     errand = dict(_BASE_ERRAND)
     errand["related_matter"] = "Stripe billing migration"
-    rendered = po._build_rich_errand_content(errand)
-    fm = _frontmatter_block(rendered)
 
-    pm_clean = (_fm_field(fm, "parent_matter") or "").strip().strip("'\"")
-    assert pm_clean == "matter/stripe-billing-migration.md"
+    # Legacy single-arg call → inbox (safe; no phantom).
+    rendered_no_index = po._build_rich_errand_content(errand)
+    fm_no_index = _frontmatter_block(rendered_no_index)
+    pm_no_index = (_fm_field(fm_no_index, "parent_matter") or "").strip().strip("'\"")
+    assert pm_no_index == "matter/inbox.md", (
+        "without a matter_index we cannot validate the freeform, so the "
+        "safe answer is inbox (never a phantom path)."
+    )
+
+    # With an index that DOES contain the slugified target → tier-1 hit.
+    matter_index = [{
+        "slug": "stripe-billing-migration",
+        "name": "Stripe billing migration",
+    }]
+    rendered_with_index = po._build_rich_errand_content(
+        errand, matter_index=matter_index
+    )
+    fm_with_index = _frontmatter_block(rendered_with_index)
+    pm_with_index = (_fm_field(fm_with_index, "parent_matter") or "").strip().strip("'\"")
+    assert pm_with_index == "matter/stripe-billing-migration.md"
 
 
 def test_legacy_related_matter_string_still_present_for_humans():
