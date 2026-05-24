@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Any
 
 from temporalio import activity
@@ -106,31 +107,79 @@ _INSTINCTS_CACHE_TTL_SECS = 300
 # Helpers — env / scoring / value coercion
 # ---------------------------------------------------------------------------
 
+_SIGNAL_ACTION_SETTINGS_PATH = Path("/alfred-data/settings.json")
+_SIGNAL_ACTION_SETTINGS_KEY = "signal_action_mode"
+_VALID_SIGNAL_ACTION_MODES = ("shadow", "live", "live_high_confidence_only")
+_DEFAULT_SIGNAL_ACTION_MODE = "live"
+
+
 def _resolve_signal_action_mode() -> str:
     """Return the effective live-mode for the signal action router.
 
-    Same shape as ``signal_mutations._resolve_signal_router_mode`` but
-    reads a separate env (``STEWARD_SIGNAL_ACTION_LIVE_MODE``) so the
-    autonomous-action surface can soak in shadow while the mutation
-    surface already runs live.
+    Gap 3b (2026-05-24): default flipped from ``"shadow"`` to ``"live"``
+    and a user-toggleable settings file added so Sir can flip the
+    surface from /study without a redeploy. Precedence:
+
+      1. Env ``STEWARD_SIGNAL_ACTION_LIVE_MODE`` if set (emergency
+         override — kept for ops).
+      2. ``/alfred-data/settings.json`` key ``signal_action_mode`` if
+         the file exists and the key is one of the valid modes.
+      3. Default ``"live"``.
 
     Returns one of: ``"shadow"``, ``"live"``,
-    ``"live_high_confidence_only"``. Anything unrecognised falls back
-    to ``"shadow"`` — when in doubt, don't dispatch.
+    ``"live_high_confidence_only"``. Any read error (missing file,
+    malformed JSON, IO error) fail-safes to the default. Unrecognised
+    values (env or file) log a warning and fall back to the default.
+
+    Settings file is written by ctrl-api (Lane I owns the writer). On
+    a fresh tenant the file does not exist — that's the steady state
+    and must NOT emit a warning.
     """
+    import json
     import os
 
-    raw = (
-        os.environ.get(SIGNAL_ACTION_LIVE_MODE_ENV) or "shadow"
-    ).strip().lower()
-    if raw in ("shadow", "live", "live_high_confidence_only"):
-        return raw
-    logger.warning(
-        "signal_actions._resolve_signal_action_mode: unrecognised %s=%s "
-        "— defaulting to shadow",
-        SIGNAL_ACTION_LIVE_MODE_ENV, raw,
-    )
-    return "shadow"
+    # 1. Env override.
+    env_raw = os.environ.get(SIGNAL_ACTION_LIVE_MODE_ENV)
+    if env_raw:
+        raw = env_raw.strip().lower()
+        if raw in _VALID_SIGNAL_ACTION_MODES:
+            return raw
+        logger.warning(
+            "signal_actions._resolve_signal_action_mode: unrecognised %s=%s "
+            "— falling back to settings/default",
+            SIGNAL_ACTION_LIVE_MODE_ENV, raw,
+        )
+        # fall through to settings/default
+
+    # 2. Settings file (shared with ctrl-api via /alfred-data/settings.json).
+    try:
+        if _SIGNAL_ACTION_SETTINGS_PATH.exists():
+            data = json.loads(_SIGNAL_ACTION_SETTINGS_PATH.read_text())
+            value = data.get(_SIGNAL_ACTION_SETTINGS_KEY) if isinstance(data, dict) else None
+            if isinstance(value, str):
+                raw = value.strip().lower()
+                if raw in _VALID_SIGNAL_ACTION_MODES:
+                    return raw
+                logger.warning(
+                    "signal_actions._resolve_signal_action_mode: "
+                    "unrecognised settings.json %s=%s — using default %s",
+                    _SIGNAL_ACTION_SETTINGS_KEY, raw, _DEFAULT_SIGNAL_ACTION_MODE,
+                )
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning(
+            "signal_actions._resolve_signal_action_mode: settings.json "
+            "parse failed (%s) — using default %s",
+            exc, _DEFAULT_SIGNAL_ACTION_MODE,
+        )
+    except OSError as exc:
+        logger.warning(
+            "signal_actions._resolve_signal_action_mode: settings.json "
+            "read failed (%s) — using default %s",
+            exc, _DEFAULT_SIGNAL_ACTION_MODE,
+        )
+
+    # 3. Default.
+    return _DEFAULT_SIGNAL_ACTION_MODE
 
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
