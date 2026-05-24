@@ -57,7 +57,7 @@ async function call(
     await m!.handler({
       req: { url: ROUTE, method } as any,
       res,
-      params: {},
+      params: m!.params,
       body,
       query: new URLSearchParams(),
     });
