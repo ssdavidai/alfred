@@ -183,7 +183,12 @@ export function registerClaudeSetupRoutes(): void {
           "Personal-finance app — accounts, transactions, transfers, budgets, holdings. ~80 tools wrapping the Sure Rails app.",
         mcp_url: tenantUrl ? `${tenantUrl}/sure/mcp` : null,
         skill_url: `${skillBase}/alfred-sure.md`,
-        enabled: !!process.env.SURE_API_KEY,
+        // Merged single-VM stack: sure-web is a sibling container in the same
+        // docker network; the stdio MCP bundle reaches it directly at
+        // http://sure-web:3000 without a per-tenant API token. (Pre-merge
+        // SaaS world gated on SURE_API_KEY; here that env var doesn't exist,
+        // so the gate hid the toolkit even though it was fully wired.)
+        enabled: true,
       },
       {
         id: "plane",
@@ -192,11 +197,13 @@ export function registerClaudeSetupRoutes(): void {
           "Project management — issues, comments, cycles, projects. v2 catalogue with sophisticated search.",
         mcp_url: tenantUrl ? `${tenantUrl}/plane/mcp` : null,
         skill_url: `${skillBase}/alfred-plane.md`,
-        enabled: !!process.env.PLANE_API_TOKEN,
+        // Same as Sure: plane-api is a sibling container reached at
+        // http://plane-api:8000; no per-tenant PLANE_API_TOKEN on merged stack.
+        enabled: true,
       },
       {
         id: "vaultwarden",
-        name: "Vault",
+        name: "Vaultwarden",
         description:
           "Secrets manager — list, search, get, create, update, delete vault items. Also rotates secrets into the running services via vault_refresh.",
         mcp_url: tenantUrl ? `${tenantUrl}/vaultwarden/mcp` : null,
