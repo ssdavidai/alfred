@@ -50,13 +50,18 @@ describe("F62 — claude-setup MCP URLs + gating", () => {
     assert.strictEqual(data.tenant_url, "https://mcp.test.alfred.black");
   });
 
-  it("gates vaultwarden on VAULTWARDEN_BW_PASSWORD and sure on SURE_API_KEY", async () => {
+  it("gates vaultwarden on VAULTWARDEN_BW_PASSWORD; sure + plane always-enabled on merged stack", async () => {
+    // Updated contract (2026-05-24): on the merged single-VM stack sure-web
+    // and plane-api are sibling docker-network containers reached at internal
+    // addresses by the stdio MCP bundle — no per-tenant SURE_API_KEY /
+    // PLANE_API_TOKEN to gate on. Pre-merge SaaS world gated on those vars;
+    // here the gate would hide always-wired toolkits.
     const { data } = await req("GET", "/api/v1/claude-setup");
     const byId: Record<string, any> = {};
     for (const a of data.apps) byId[a.id] = a;
     assert.strictEqual(byId.vaultwarden.enabled, true, "vaultwarden enabled via VAULTWARDEN_BW_PASSWORD");
-    assert.strictEqual(byId.sure.enabled, true, "sure enabled via SURE_API_KEY");
-    assert.strictEqual(byId.plane.enabled, false, "plane not provisioned");
+    assert.strictEqual(byId.sure.enabled, true, "sure always enabled on merged stack");
+    assert.strictEqual(byId.plane.enabled, true, "plane always enabled on merged stack");
     assert.strictEqual(byId.execute.enabled, true);
     assert.strictEqual(byId.alfred.enabled, true);
   });

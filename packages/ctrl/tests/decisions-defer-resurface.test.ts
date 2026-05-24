@@ -87,7 +87,17 @@ describe("C-B4 — defer writes state=open and a resurface contract", () => {
     );
   });
 
-  it("a non-defer intent with a synchronous flip still writes state=completed", async () => {
+  it("a non-defer intent with a synchronous flip writes state=open so the router runs extract_observation_from_decision (loop-close)", async () => {
+    // Updated contract (2026-05-24 loop-close): every decision is minted as
+    // state=open with synchronous_flip=true. DecisionRouterWorkflow picks it
+    // up, runs extract_observation_from_decision (the learning loop), and
+    // flips state→completed itself. The router's synchronous_flip guards
+    // (decision_router.py:194,307,426,479,486,563,586) cleanly skip the
+    // action paths the synchronous flip already performed.
+    //
+    // Pre-fix: done/noise/take_mine were minted as completed → router skipped
+    // them → 0 kind=decision observations ever landed in state.db → instincts
+    // could never learn from human decisions on the Desk.
     writeNa("done-card");
     const { status, payload } = await postDecision({
       source: "needs_attention",
@@ -97,8 +107,12 @@ describe("C-B4 — defer writes state=open and a resurface contract", () => {
     assert.equal(status, 201);
     assert.equal(
       payload.frontmatter.state,
-      "completed",
-      "done must keep its normal completed state",
+      "open",
+      "done must be minted state=open so the router can extract observation",
+    );
+    assert.ok(
+      payload.frontmatter.side_effects?.synchronous_flip,
+      "synchronous_flip:true must be set so the router knows to skip action paths",
     );
     assert.ok(
       !payload.frontmatter.side_effects || !("deferred" in payload.frontmatter.side_effects),

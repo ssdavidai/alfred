@@ -552,14 +552,20 @@ export function registerDecisionRoutes(): void {
     // (workflow writes the instinct), leave state=open.
     //
     // C-B4: `defer` MUST stay state=open even though its source flip ran
-    // synchronously. learn's decision_router only lists state=open decisions
-    // to parse the note → resurface_at → re-open the source NA at that time.
-    // Writing it `completed` (the old behavior) severed that chain — the card
-    // vanished and never came back.
-    const initialState: DecisionState =
-      synchronousFlipOk && intent !== "delegate" && intent !== "defer"
-        ? "completed"
-        : "open";
+    // synchronously. learn's decision_router only lists state=open decisions:
+    //   - for `defer`: parse note → resurface_at → re-open the NA at that time
+    //   - for `delegate`: actually dispatch the agent
+    //   - for `done` | `noise` | `take_mine`: run extract_observation_from_decision
+    //     to close the learning loop into state.db `observation`. The router's
+    //     existing `synchronous_flip` guards (decision_router.py:194,307,426,479,
+    //     486,563,586) cleanly skip the action paths the principal already
+    //     completed via the synchronous flip above.
+    // Writing as `completed` skipped the router entirely → no observation row →
+    // ReflectionWorkflow had no decision-side training data → instincts could
+    // never climb tiers from human decisions. Mint as `open` so the router
+    // closes the loop; it flips to `completed` itself after the observation
+    // lands.
+    const initialState: DecisionState = "open";
 
     // OBS-6: optional `principal` field on the body — defaults to
     // "principal" (Sir clicked) but signal_router POSTs with "alfred"
