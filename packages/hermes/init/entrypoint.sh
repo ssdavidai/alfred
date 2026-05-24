@@ -65,6 +65,28 @@ done
 echo "[init] Entity directories verified"
 
 # =============================================================================
+# 1b. Hermes' built-in memory dir — cross-container writable.
+#
+# Hermes' built-in memory feature reads MEMORY.md + USER.md from
+# $HERMES_HOME/memories/. Two containers touch this dir on different uids:
+#   - hermes runtime (uid 10000)  → reads the files
+#   - alfred-learn  (uid 1000)    → seeds them via personalize_opus
+# Without an explicit chmod, mkdir + the later `chown -R 10000:10000` step
+# leave this dir hermes-owned 0755 (or worse, root:root 0700 if the chown
+# is racy) and alfred-learn's seed silently fails with EACCES — the
+# MEMORY.md/USER.md surface stays empty and Hermes runs without the
+# personalised memory. 0777 is the simplest portable answer on this
+# single-tenant box where the volume is private to the stack, and it
+# matches the existing 0777 posture used for /alfred-data and its
+# siblings below. Init runs as root and owns the volumes, so chmod here
+# is durable — Hermes itself runs non-root and cannot fix this after the
+# fact. Live-confirmed regression 2026-05-23.
+MEMORIES_DIR="${HERMES_DATA_DIR}/memories"
+mkdir -p "$MEMORIES_DIR"
+chmod 0777 "$MEMORIES_DIR"
+echo "[init] memories dir ready at $MEMORIES_DIR (chmod 0777 for cross-container writes)"
+
+# =============================================================================
 # 2. Deploy skills + MCP bundle into each Hermes profile dir.
 #
 # A Hermes profile lives at ${HERMES_HOME}/profiles/<name>/. Each profile
