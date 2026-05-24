@@ -435,6 +435,68 @@ def _build_rich_matter_content(matter: dict[str, Any]) -> str:
     return "\n".join(fm_lines) + "\n\n" + "\n".join(body_parts)
 
 
+# ---------------------------------------------------------------------------
+# Matter near-dup slug dedup.
+#
+# Live 2026-05-23 onboarding re-ran the ``packs`` stage and produced 9 →
+# 18 matters because ``record_exists("matter", slug)`` only matches an
+# EXACT slug and Opus's matter names drift across runs (extra commas,
+# extra clauses, swapped word order). Examples drift-from-existing:
+#
+#   * 'NeoTerra / NTP client delivery'   vs 'NeoTerra/NTP client delivery'
+#   * 'Hungarian company and administration obligations'
+#                                        vs '... and personal administration'
+#   * 'Training and health optimization'
+#                                        vs 'Training, Muay Thai, and ...'
+#
+# Defence in depth: token-set OVERLAP COEFFICIENT (intersection /
+# min(|cand|, |existing|)), case + punctuation + whitespace insensitive.
+# Overlap coefficient (rather than Jaccard) is the right metric for
+# truncation-style drift — the same shape ``_dedupe_truncated_persons``
+# already uses. Threshold 0.7 was chosen because the live near-dup pairs
+# score 0.8-1.0 and unrelated matter pairs score 0.0; 0.65 would risk
+# 'Lumberjack and X' vs 'Public writing and Y' (overlap 0.6, debatable
+# whether they're the same matter). Exact-slug check stays as the fast
+# path so unchanged onboards pay no extra listing cost.
+# ---------------------------------------------------------------------------
+_MATTER_DEDUP_OVERLAP_THRESHOLD = 0.7
+
+
+def _matter_name_tokens(name: str) -> set[str]:
+    """Lowercase, strip punctuation, drop whitespace-only tokens. Stable
+    across the trivial drift Opus produces (case / slashes / commas)."""
+    import re as _re
+    if not name:
+        return set()
+    cleaned = _re.sub(r"[^\w\s]+", " ", name.casefold(), flags=_re.UNICODE)
+    return {t for t in cleaned.split() if t}
+
+
+def _matter_near_dup_slug(
+    candidate_name: str,
+    existing_names: list[str],
+) -> str | None:
+    """Return the first ``existing_names`` entry whose token-set overlap
+    coefficient with ``candidate_name`` is at least
+    ``_MATTER_DEDUP_OVERLAP_THRESHOLD``, else ``None``.
+
+    A "match" means the principal would read these as the same matter
+    (any difference is just Opus paraphrasing). The caller skips writing
+    the candidate and logs the collision so re-runs stay auditable.
+    """
+    cand = _matter_name_tokens(candidate_name)
+    if not cand:
+        return None
+    for existing in existing_names:
+        ex = _matter_name_tokens(existing)
+        if not ex:
+            continue
+        overlap = len(cand & ex) / min(len(cand), len(ex))
+        if overlap >= _MATTER_DEDUP_OVERLAP_THRESHOLD:
+            return existing
+    return None
+
+
 @activity.defn
 async def generate_matter_pack_opus(onboard_path: str) -> dict[str, Any]:
     """Opus-driven matter pack generator.
@@ -511,6 +573,23 @@ async def generate_matter_pack_opus(onboard_path: str) -> dict[str, Any]:
     skipped_existing = 0
     skipped_invalid = 0
     rejected_reasons: list[str] = []
+
+    # Cache existing matter names ONCE for the near-dup check (used
+    # below). Updated as we write so a same-batch near-dup is also
+    # caught.
+    existing_matter_names: list[str] = []
+    try:
+        listed = await client.list_records("matter", limit=1000)
+        for r in listed or []:
+            nm = r.get("name") or r.get("slug")
+            if nm:
+                existing_matter_names.append(nm)
+    except Exception as exc:
+        logger.warning(
+            "matter_pack_opus: list_records('matter') failed: %s (near-dup dedup disabled)",
+            exc,
+        )
+
     try:
         for matter in matters[:10]:
             ok, reason = _validate_matter(matter)
@@ -536,10 +615,25 @@ async def generate_matter_pack_opus(onboard_path: str) -> dict[str, Any]:
                     slug, exc,
                 )
 
+            # Near-dup check — catches the live-evidence drift where
+            # Opus produces 'NeoTerra / NTP client delivery' on a re-run
+            # against an existing 'NeoTerra/NTP client delivery'.
+            near_dup = _matter_near_dup_slug(matter["name"], existing_matter_names)
+            if near_dup is not None:
+                skipped_existing += 1
+                logger.info(
+                    "matter_pack_opus: skipping near-dup matter %r (overlaps existing %r)",
+                    matter["name"], near_dup,
+                )
+                continue
+
             content = _build_rich_matter_content(matter)
             try:
                 await client.write_record("matter", slug, content)
                 created += 1
+                # Append the just-written name so a later candidate in
+                # the same batch is also deduped against it.
+                existing_matter_names.append(matter["name"])
                 activity.heartbeat(f"matter_pack_opus: wrote matter/{slug}.md")
             except Exception as exc:
                 logger.error("matter_pack_opus: write failed for %s: %s", slug, exc)
@@ -551,8 +645,11 @@ async def generate_matter_pack_opus(onboard_path: str) -> dict[str, Any]:
             created, skipped_existing, skipped_invalid,
         )
 
-        # If Opus produced nothing valid, fall back so the user at least has records
-        if created == 0:
+        # If Opus produced nothing valid, fall back so the user at least
+        # has records. ``skipped_existing > 0`` means matters WERE valid
+        # but already in the vault (exact slug OR near-dup) — don't fall
+        # back, just report the dedup.
+        if created == 0 and skipped_existing == 0:
             logger.warning(
                 "matter_pack_opus: no valid matters created, falling back to rule-based"
             )
