@@ -859,11 +859,18 @@ async def mark_observations_processed(observations: list[dict[str, Any]]) -> Non
 
 @activity.defn
 async def rebuild_intuition_index() -> None:
-    """Rebuild the intuition/index.md from all active instincts."""
+    """Rebuild the intuition/index.md from all instincts.
+
+    Gap 3 (2026-05-24): dropped ``status="active"`` filter — live
+    tenants store every instinct as ``unconfirmed`` until Sir promotes
+    them on /instincts, and ``status="active"`` returned []. The index
+    page was empty for that reason. Listing unconfirmed instincts here
+    is safe (this is just an index, not a dispatch surface).
+    """
     config = load_config()
     client = VaultClient(config)
     try:
-        instincts = await client.list_records("instinct", status="active")
+        instincts = await client.list_records("instinct")
 
         content = """---
 type: index

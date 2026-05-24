@@ -560,7 +560,19 @@ async def _load_active_instincts(force: bool = False) -> list[dict[str, Any]]:
     client = VaultClient(cfg)
     try:
         try:
-            records = await client.list_records("instinct", status="active")
+            # Gap 3 (2026-05-24): drop the status="active" filter. On a
+            # fresh tenant *every* instinct is born ``status="unconfirmed"``
+            # — promotion to ``active`` is a manual /instincts step Sir
+            # has never run. Filtering here returned [] and every signal
+            # got matched_instinct=null.
+            #
+            # Safe because the discretion gate (~line 1825) routes
+            # low-observation-count instincts through HUMAN:
+            # get_discretion_threshold(<5 obs) = 0.95, which combined_
+            # confidence almost never clears. Loading unconfirmed
+            # instincts therefore cannot cause autonomous misfires —
+            # it just lets the matcher surface them on the audit record.
+            records = await client.list_records("instinct")
         except httpx.HTTPError as exc:
             logger.warning(
                 "signal_actions._load_active_instincts: list failed err=%s",
