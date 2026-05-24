@@ -383,6 +383,10 @@ services:
       # stack reads. ${COMPOSE_DIR_HOST} defaults to /opt/alfred (the merged
       # single-VM layout); override in .env for a different host path.
       - ${COMPOSE_DIR_HOST:-/opt/alfred}:/srv/alfred-black
+      # Host's authorized_keys, read-only, so GET /api/v1/system/ssh-info
+      # can surface the operator-installed pubkey on the /channels Terminal
+      # card. Sir #8, 2026-05-24.
+      - /root/.ssh/authorized_keys:/root/.ssh/authorized_keys:ro
     env_file:
       - .env
     environment:
