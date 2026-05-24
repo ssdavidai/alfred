@@ -252,7 +252,7 @@ def signal_row_to_record(row: dict[str, Any]) -> dict[str, Any]:
 
     # Routing-side fields the extractor doesn't set live only on the
     # column / on PATCH; surface them if present.
-    for k in ("applied_at", "audit_record_path"):
+    for k in ("applied_at", "audit_record_path", "matched_instinct"):
         if k in payload:
             fm.setdefault(k, payload[k])
 
@@ -325,25 +325,60 @@ async def set_signal_status(
     *,
     applied_at: str | None = None,
     audit_record_ref: str | None = None,
+    matched_instinct: str | None = None,
     config: Config | None = None,
 ) -> None:
     """Mark a signal's routing status in ``state.db``.
 
     Replaces the old ``patch_frontmatter_structured`` call that stamped
     ``status`` / ``applied_at`` / ``audit_record_path`` onto the markdown
-    record. ``applied_at`` + ``audit_record_ref`` (the audit row ULID)
+    record. ``applied_at`` + ``audit_record_ref`` + ``matched_instinct``
     are folded into ``payload`` so the rehydrated record still surfaces
     them.
+
+    Sir #4+#5 — close the signal→instinct loop. ``matched_instinct`` is
+    the vault path of the instinct the action router matched this signal
+    against. Without it the /instincts UI, matter aggregator, and audit
+    feeds all see "0 of N signals matched any instinct" — instincts
+    become dead inventory.
+
+    Payload merge contract — ctrl-api's PATCH /state/signals/:id route
+    OVERWRITES ``payload_json`` wholesale (no JSON merge). To avoid
+    clobbering the extractor's original payload (action_proposal,
+    reasoning, display_*, decision_required, …) we read the current row
+    first and merge our patch on top before sending. The read is a single
+    cheap GET; the alternative was watching the entire signal context
+    vanish on every status PATCH.
     """
     ref = normalise_signal_ref(signal_ref)
     if not ref:
         return
     cfg = config or load_config()
-    payload_patch: dict[str, Any] = {
-        "applied_at": applied_at or _now_iso(),
-        "audit_record_path": audit_record_ref or "",
-    }
+    import httpx
+
+    # Read-merge-write: pull the existing payload so we don't clobber
+    # action_proposal / reasoning / display_* on the column. A 404 here
+    # means the signal vanished — let the caller's PATCH 404 as well so
+    # the failure surfaces consistently.
+    existing_payload: dict[str, Any] = {}
     async with StateClient(cfg) as sc:
+        try:
+            row = await sc.get_signal(ref)
+            if isinstance(row, dict):
+                existing_payload = _coerce_payload(
+                    row.get("payload") or row.get("payload_json")
+                )
+        except httpx.HTTPStatusError as exc:
+            # 404 → row gone; fall through and let the PATCH below
+            # raise the same 404 (consistent caller-facing behaviour).
+            if exc.response is None or exc.response.status_code != 404:
+                raise
+
+        payload_patch: dict[str, Any] = dict(existing_payload)
+        payload_patch["applied_at"] = applied_at or _now_iso()
+        payload_patch["audit_record_path"] = audit_record_ref or ""
+        if matched_instinct:
+            payload_patch["matched_instinct"] = matched_instinct
         await sc.update_signal(ref, status=status, payload=payload_patch)
 
 

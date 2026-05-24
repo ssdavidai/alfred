@@ -1905,7 +1905,9 @@ async def route_signal_action(
                 try:
                     await set_signal_status(signal_ref, "routed_suppressed",
                                             applied_at=_now_utc_iso(),
-                                            audit_record_ref="", config=cfg)
+                                            audit_record_ref="",
+                                            matched_instinct=matched_path,
+                                            config=cfg)
                 except httpx.HTTPError as exc:
                     logger.warning("signal_actions.route_signal_action: "
                                    "suppressed status write failed id=%s "
@@ -1946,7 +1948,10 @@ async def route_signal_action(
 
         # 9. Mark the signal in state.db (storage cutover #27). The
         # audit record ref goes into ``audit_record_path``; ``status``
-        # is the routing outcome.
+        # is the routing outcome; ``matched_instinct`` (Sir #4+#5) closes
+        # the signal→instinct loop so the /instincts UI, matter
+        # aggregator, and audit feeds can show "instinct X fired on
+        # signal Y" instead of treating every match as folklore.
         signal_status = (
             "routed_agent" if chosen_path == "agent" else "routed_human"
         )
@@ -1956,6 +1961,7 @@ async def route_signal_action(
                 signal_status,
                 applied_at=_now_utc_iso(),
                 audit_record_ref=audit_path,
+                matched_instinct=matched_path,
                 config=cfg,
             )
         except httpx.HTTPError as exc:
