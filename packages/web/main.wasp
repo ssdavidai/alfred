@@ -651,6 +651,17 @@ action setVexaAutoJoin {
   entities: []
 }
 
+// Signal action mode — live / shadow toggle (Gap 3b, /study#settings)
+query getSignalActionMode {
+  fn: import { getSignalActionMode } from "@src/dashboard/operations",
+  entities: []
+}
+
+action setSignalActionMode {
+  fn: import { setSignalActionMode } from "@src/dashboard/operations",
+  entities: []
+}
+
 // AgentPhone (Phase 8)
 query getPhoneConfig {
   fn: import { getPhoneConfig } from "@src/dashboard/operations",

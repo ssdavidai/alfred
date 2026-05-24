@@ -618,6 +618,37 @@ export const setVexaAutoJoin: any = async (
 };
 
 // ============================================================
+// Signal action mode — live / shadow toggle (Gap 3b)
+// ============================================================
+// Bridges the /study#settings "Agent autonomy" toggle to ctrl-api's
+// settings/signal-action-mode route. Returns
+//   { mode: "live"|"shadow", source: "default"|"settings_file"|"env_override",
+//     env_override_active: boolean }
+// — env var still wins for emergencies, so when env_override_active=true the
+// UI disables the toggle (a flip would silently no-op until the env is unset).
+export const getSignalActionMode: any = async (
+  _args: void,
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/settings/signal-action-mode",
+  });
+};
+
+export const setSignalActionMode: any = async (
+  args: { mode: "live" | "shadow" },
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PUT",
+    path: "/api/v1/settings/signal-action-mode",
+    body: { mode: args.mode },
+  });
+};
+
+// ============================================================
 // Agent Config
 // ============================================================
 export const getModelCatalog: GetModelCatalog<
