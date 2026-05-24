@@ -105,11 +105,14 @@ describe("POST /api/v1/decisions delegate — non-optimistic (F2)", () => {
 
     const rec = readNeedsAttention(naId);
     assert.equal(rec!.frontmatter.status, "dispatched", "real card must end dispatched");
-    // The signal was re-armed.
+    // #216: the re-routed signal is stamped 'routed_agent' (TERMINAL) so
+    // SignalRouterWorkflow's `unrouted` pickup query does NOT return it.
+    // Prior contract was `unrouted`, which caused the dispatch loop today
+    // (2026-05-24) — 10 fires per click before the signal escaped.
     const sig = getStateDb()
       .prepare("SELECT status FROM signal WHERE id = ?")
       .get(REAL_SIGNAL) as { status: string };
-    assert.equal(sig.status, "unrouted");
+    assert.equal(sig.status, "routed_agent");
   });
 
   it("an advisory card (no real signal) is NOT dispatched and returns a clear result", async () => {
