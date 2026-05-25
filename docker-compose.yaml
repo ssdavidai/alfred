@@ -495,6 +495,14 @@ services:
       # change requires an alfred-learn restart to re-run register_schedules.
       - STEWARD_SIGNAL_EXTRACT_ENABLED=${STEWARD_SIGNAL_EXTRACT_ENABLED:-true}
       - STEWARD_SIGNAL_ROUTER_ENABLED=${STEWARD_SIGNAL_ROUTER_ENABLED:-true}
+      # Delegate dispatch — use the ephemeral-executor path (Phase 2 #22) so
+      # each principal-explicit delegate gets its own ``exec-<hash>`` Hermes
+      # session (audit boundary per task; no cross-contamination from the
+      # shared learn-clerk context). The legacy prompt was also patched to
+      # honour ``principal_note`` (signal_actions.py, 2026-05-25 EDITH
+      # repro), so both paths now route Sir's note as the canonical task —
+      # but ephemeral is the intended default and we cut over here.
+      - DISPATCH_USE_EPHEMERAL_EXECUTOR=${DISPATCH_USE_EPHEMERAL_EXECUTOR:-1}
       # Composio Python SDK writes its module-load cache under $HOME; the
       # container has no writable $HOME, so pin both to /tmp.
       - COMPOSIO_CACHE_DIR=/tmp/composio

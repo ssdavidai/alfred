@@ -1264,16 +1264,55 @@ async def dispatch_action_to_agent(
     due_clause = str(due_at) if due_at else "none"
     guidance_clause = instinct_description or "(no guidance text on record)"
 
-    legacy_prompt = (
-        "You are Alfred. Sir has an item that needs handling automatically "
-        f"per his instinct '{instinct_name}'.\n\n"
-        f"Action: {what}\n"
-        f"Suggested actor: {suggested_actor or 'unspecified'}\n"
-        f"Due: {due_clause}\n"
-        f"Target task/matter: {target_clause}\n\n"
-        f"Instinct guidance: {guidance_clause}\n\n"
-        "Do the action and report what you did in 1-2 sentences."
-    )
+    # Sir's note (when present) IS the canonical task. The auto-extracted
+    # ``action_proposal.what`` is just CONTEXT — the original signal headline
+    # the principal saw when he clicked Delegate. The agent must NEVER treat
+    # the proposal as the task when a principal note is present.
+    #
+    # This was the "EDITH failure" — Sir clicked Delegate on an EDITH-account
+    # signal and wrote "send me a reminder on telegram right now"; the agent
+    # weighted "Unlock or reset EDITH account" equally with Sir's actual ask
+    # and produced a confused half-execution (researched the account, never
+    # sent the reminder). 2026-05-25 reproduced verbatim on the Wyoming
+    # annual-report case — Sir's note "send me a reminder about this on
+    # Telegram right now in a dm" was silently dropped by the legacy prompt,
+    # the agent went off and "summarised research" on Firstbase, no Telegram
+    # message ever went out. The ephemeral path below already fixed this; this
+    # block extends the fix to the legacy path so DISPATCH_USE_EPHEMERAL_EXECUTOR
+    # is no longer load-bearing for principal-explicit delegates.
+    if principal_note:
+        legacy_prompt = (
+            "You are Alfred. The principal explicitly delegated this task "
+            "to you from /desk. Execute it concretely. You are NOT Sir-"
+            "facing — do not ask clarifying questions; do your best with "
+            "what you have and report honestly when blocked.\n\n"
+            f"Task (principal's instruction — this is the canonical prompt; "
+            f"execute exactly this):\n{principal_note}\n\n"
+            "Task context (the original signal Sir was looking at when he "
+            "delegated — do NOT execute this, it is just background for "
+            "why he asked):\n"
+            f"  - Signal: {what}\n"
+            f"  - Target: {target_clause}\n"
+            f"  - Due: {due_clause}\n"
+            f"  - Instinct guidance: {guidance_clause}\n\n"
+            "Your tool surface is the 5-app MCP catalog. To message Sir on "
+            "Telegram / Slack / email use `alfred__notify_principal`. "
+            "For task / matter / vault edits use the other `alfred__*` "
+            "tools. Read `/home/node/.openclaw/AGENTS.md` for the full "
+            "per-tool reference if you need it.\n\n"
+            "Report what you did in 1-2 sentences."
+        )
+    else:
+        legacy_prompt = (
+            "You are Alfred. Sir has an item that needs handling automatically "
+            f"per his instinct '{instinct_name}'.\n\n"
+            f"Action: {what}\n"
+            f"Suggested actor: {suggested_actor or 'unspecified'}\n"
+            f"Due: {due_clause}\n"
+            f"Target task/matter: {target_clause}\n\n"
+            f"Instinct guidance: {guidance_clause}\n\n"
+            "Do the action and report what you did in 1-2 sentences."
+        )
 
     # ---- Ephemeral-executor path (env-gated) ----
     # When DISPATCH_USE_EPHEMERAL_EXECUTOR is set, run this dispatch as
