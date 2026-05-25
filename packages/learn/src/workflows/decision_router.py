@@ -34,6 +34,7 @@ with workflow.unsafe.imports_passed_through():
         apply_decision_outcome_link_v2,
         check_decision_outcomes,
         list_decisions_by_state,
+        recover_stuck_dispatching,
         reverse_decision,
         route_decision,
     )
@@ -85,7 +86,17 @@ class DecisionRouterWorkflow:
                 await workflow.execute_activity(
                     route_decision,
                     d,
-                    start_to_close_timeout=timedelta(seconds=60),
+                    # 1000s envelope: route_decision's delegate branch
+                    # calls dispatch_action_to_agent, which posts to
+                    # the Hermes workers profile (:18790) — a clerk
+                    # call that can run 60–180s typical and ≤900s
+                    # ceiling. Before the 2026-05-25 Sir-incident
+                    # bump, the 60s budget timed out mid-dispatch,
+                    # stranding the decision at state=dispatching
+                    # with no visible recovery (workflow list filter
+                    # didn't see it). Matches signal_router.py:366
+                    # for route_signal_action.
+                    start_to_close_timeout=timedelta(seconds=1000),
                     retry_policy=_ROUTE_RETRY,
                 )
                 opens_processed += 1
@@ -98,6 +109,40 @@ class DecisionRouterWorkflow:
                 workflow.logger.info(
                     "decision_router: routed %d/%d opens", i + 1, len(opens),
                 )
+
+        # ---- Pass 1.5: stuck-dispatching recovery ----
+        # Sir-incident 2026-05-25: route_decision can time out
+        # mid-dispatch (clerk to Hermes workers), stranding the
+        # decision at state=dispatching. The workflow's normal
+        # list filter (open|reversed|executing) doesn't see
+        # ``dispatching`` cards, so without this sweep a stuck card is
+        # invisible forever. recover_stuck_dispatching PATCHes any
+        # ``dispatching`` decision older than 10 minutes to either
+        # ``executing`` (if agent_dispatched is true; the clerk
+        # completed but the final state-write got dropped) or back to
+        # ``open`` (presumed crash; let the next tick re-route).
+        # Audit-emitted so production can count occurrences.
+        recovery_result: dict | None = None
+        try:
+            recovery_result = await workflow.execute_activity(
+                recover_stuck_dispatching,
+                start_to_close_timeout=timedelta(seconds=60),
+                retry_policy=_ROUTE_RETRY,
+            )
+            if isinstance(recovery_result, dict) and recovery_result.get(
+                "recovered"
+            ):
+                workflow.logger.warning(
+                    "decision_router.recovery: unstuck %s stuck-dispatching "
+                    "decisions (reset_to_open=%s promoted_to_executing=%s)",
+                    recovery_result.get("recovered"),
+                    recovery_result.get("reset_to_open"),
+                    recovery_result.get("promoted_to_executing"),
+                )
+        except Exception as exc:  # noqa: BLE001
+            workflow.logger.warning(
+                "decision_router: recover_stuck_dispatching failed: %s", exc,
+            )
 
         # ---- Pass 2: reverse routing on undone decisions ----
         reverseds = await workflow.execute_activity(
@@ -198,12 +243,23 @@ class DecisionRouterWorkflow:
                             decision_id, task_ref, exc,
                         )
 
+        dispatching_recovered = 0
+        if isinstance(recovery_result, dict):
+            dispatching_recovered = int(
+                recovery_result.get("recovered") or 0
+            )
+
         workflow.logger.info(
-            "decision_router: opens=%d reverseds=%d outcomes_matched=%d",
-            opens_processed, reverseds_processed, outcomes_matched,
+            "decision_router: opens=%d reverseds=%d outcomes_matched=%d "
+            "dispatching_recovered=%d",
+            opens_processed,
+            reverseds_processed,
+            outcomes_matched,
+            dispatching_recovered,
         )
         return {
             "opens_processed": opens_processed,
             "reverseds_processed": reverseds_processed,
             "outcomes_matched": outcomes_matched,
+            "dispatching_recovered": dispatching_recovered,
         }

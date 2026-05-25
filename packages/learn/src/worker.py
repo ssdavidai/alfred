@@ -579,6 +579,7 @@ from src.activities.decision_router import (
     apply_decision_outcome_link_v2 as dr_apply_outcome_link_v2,
     check_decision_outcomes as dr_check_outcomes,
     list_decisions_by_state as dr_list_decisions,
+    recover_stuck_dispatching as dr_recover_stuck_dispatching,
     reverse_decision as dr_reverse_decision,
     route_decision as dr_route_decision,
 )
@@ -1076,6 +1077,11 @@ ALL_ACTIVITIES = [
     dr_route_decision,
     dr_reverse_decision,
     dr_check_outcomes,
+    # Sir-incident 2026-05-25: sweep stuck state=dispatching decisions
+    # older than 10 minutes (route_decision activity timed out
+    # mid-Hermes-dispatch, the workflow's normal list filter doesn't
+    # see ``dispatching`` cards). Recovers them to executing or open.
+    dr_recover_stuck_dispatching,
     # SM-D-W7: per-match task-side outcome linkage through
     # state_mutator v2. Workflow gates the fan-out behind
     # ``decision_router_outcome_state_mutator_v1`` patched gate.
