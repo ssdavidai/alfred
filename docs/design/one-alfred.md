@@ -243,16 +243,35 @@ Alfred is complete *within a channel*.
 
 **Outcome:** True one-Alfred-across-channels.
 
-## Open questions / verification before code
+## Verification (2026-05-25) — Hermes hook seams confirmed
 
-| # | Question | Why it matters |
+Probed Hermes source on home. The hooks needed for Pattern A + B both exist
+and fire on the **channel-inbound runtime path** (not just CLI):
+
+| Hook | Source | Use |
 |---|---|---|
-| 1 | Does `hermes hooks` support pre-turn hooks on the channel-inbound path (not just CLI)? | Pattern B depends on this. Need to read `hermes hooks --help` and the hook source. |
-| 2 | Can ctrl-api receive a Hermes webhook callback when a delivery completes (so we know the bytes Sir actually received)? | Pattern A's journal accuracy depends on this. May need a post-turn hook or an outbound proxy. |
-| 3 | How big does the injected context get before main's context window starts choking? | Need a windowing / summarisation policy on the journal. Hermes' `compression` feature is profile-level; we may need our own. |
-| 4 | What's the failure mode when the pre-turn hook is slow? | If the hook times out, does Hermes proceed without context, or fail the turn? We want graceful degradation. |
-| 5 | Does cron's `--deliver` callback when delivery fails (e.g., bot rate-limited)? | Need to confirm so the journal records 'delivery_failed' truthfully. |
-| 6 | How do existing tenants migrate? | The current `notify_principal` cron path exists for non-Sir tenants too. Migration must be backward-compatible. |
+| `pre_gateway_dispatch` | `gateway/run.py:5805` | **Pattern B inbound:** fires on every user-originated channel-inbound message (Telegram, Slack, etc.) BEFORE auth, BEFORE main processes anything. Receives the full `MessageEvent` (text, `source.platform`, `source.chat_id`). Return `{"action": "rewrite", "text": "<new>"}` to inject journal context. |
+| `pre_llm_call` | `gateway/run.py:5805+` (after auth) | Alternative inbound seam — same purpose, later in the stack. Payload: `session_id`, `user_message`, `conversation_history`, `is_first_turn`, `model`, `platform`. |
+| `post_llm_call` | `gateway/run.py:2953` | **Pattern A outbound:** journal what main actually composed (the bytes Sir will see). |
+| `transform_tool_result` | `agent/shell_hooks.py` | Mid-turn interceptor — could capture `send_message` results if we need byte-exact outbound. |
+| `on_session_start` / `on_session_finalize` / `on_session_reset` | `gateway/run.py:8308+` | Lifecycle bookkeeping. |
+
+The hook plugin mechanism is **Python plugins registered in
+`~/.hermes/config.yaml`** (`VALID_HOOKS` enum in `hermes_cli/plugins.py:128`).
+Plugins can `httpx`-call ctrl-api, do anything they need. Allowlist consent
+required first run (`~/.hermes/shell-hooks-allowlist.json`).
+
+**Bottom line:** the architecture above is achievable with native primitives.
+No Hermes fork. No upstream PR. The hook plugin is small, isolated, testable.
+
+## Remaining open questions (smaller, post-hook-verification)
+
+| # | Question | Mitigation |
+|---|---|---|
+| 1 | How big does the injected context get before main's context window chokes? | Windowing policy on the journal: last N exchanges within last M hours; summarise older. |
+| 2 | Pre-gateway-dispatch hook timeout behaviour? | Read `_invoke_hook` defaults; if hook errors are swallowed (logged-only), Sir's reply still goes through unjournalled — graceful degradation. |
+| 3 | Outbound journal accuracy when delivery fails (bot rate-limited, network blip)? | `post_llm_call` captures the *composed* text. Webhook delivery success/failure comes back to ctrl-api in the HTTP response — journal both. |
+| 4 | How do existing tenants migrate? | Hard switch (per Sir's decision): `notify_principal` MCP tool name unchanged, internal implementation repointed. |
 
 ## What stays the same
 
