@@ -2,9 +2,16 @@
  * /channels — Telegram card derivation tests.
  *
  * Covers the contract laid out in the lane brief:
- *   • derive each of the 4 visual states
+ *   • derive each of the 4 visual states (unconfigured / starting /
+ *     running / error)
+ *   • running-state branches on paired_chats: empty vs 1 vs many
  *   • isProbablyValidBotToken accept + reject
  *   • relativeTimeFromIso for just now / N min / N hours / N days
+ *
+ * The 2026-05-25 redesign dropped `primaryAction`/`secondaryActions` from
+ * TelegramCardState (the card no longer offers a "Pair this chat" mint-a-
+ * code surface — that subcommand never existed in hermes) and added
+ * `pairedChats` + `showChatList` derived from the API's `paired_chats`.
  *
  * Run with:  cd packages/web && npx tsx --test src/dashboard/telegramCardCore.test.ts
  */
@@ -22,59 +29,95 @@ import {
 const BASE: TelegramStatus = {
   configured: false,
   bot_handle: null,
-  last_message_at: null,
   state: "unconfigured",
   error: null,
+  paired_chats: [],
 };
 
 test("derive: unconfigured → setup state + BotFather hint", () => {
   const s = deriveTelegramCardState({ status: BASE });
   assert.equal(s.state, "unconfigured");
-  assert.equal(s.primaryAction, "Save token");
   assert.equal(s.showBotFatherHint, true);
+  assert.equal(s.showChatList, false);
   assert.equal(s.pill, "available");
 });
 
-test("derive: configured_starting → spinner copy, no actions", () => {
+test("derive: configured_starting → spinner copy, no chat list", () => {
   const s = deriveTelegramCardState({
     status: { ...BASE, configured: true, state: "configured_starting" },
   });
-  assert.equal(s.primaryAction, null);
-  assert.deepEqual(s.secondaryActions, []);
+  assert.equal(s.showChatList, false);
   assert.equal(s.pill, "starting");
+  assert.match(s.description, /restarting/i);
 });
 
-test("derive: configured_running → @handle + last_message_at + actions", () => {
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+test("derive: configured_running with 0 paired chats → 'DM the bot' nudge", () => {
   const s = deriveTelegramCardState({
     status: {
+      ...BASE,
       configured: true,
       bot_handle: "alfred_black_bot",
-      last_message_at: oneHourAgo,
       state: "configured_running",
-      error: null,
+      paired_chats: [],
     },
   });
   assert.equal(s.heading, "Connected as @alfred_black_bot");
-  assert.match(s.description, /1 hour ago/);
-  assert.equal(s.primaryAction, "Pair this chat");
-  assert.deepEqual(s.secondaryActions, ["Test connection", "Disconnect"]);
+  assert.match(s.description, /DM @alfred_black_bot/);
+  assert.equal(s.showChatList, false);
+  assert.equal(s.pairedChats.length, 0);
   assert.equal(s.pill, "active");
 });
 
-test("derive: error → verbatim message + Try again", () => {
+test("derive: configured_running with 1 paired chat → shows chat list + 'add another' hint", () => {
   const s = deriveTelegramCardState({
     status: {
+      ...BASE,
       configured: true,
-      bot_handle: null,
-      last_message_at: null,
+      bot_handle: "@alfred_black_bot",
+      state: "configured_running",
+      paired_chats: [
+        { id: "432094090", name: "David Szabo-Stuban", type: "dm" },
+      ],
+    },
+  });
+  assert.equal(s.showChatList, true);
+  assert.equal(s.pairedChats.length, 1);
+  assert.equal(s.pairedChats[0].name, "David Szabo-Stuban");
+  assert.match(s.description, /Authorised for 1 chat/);
+  assert.match(s.description, /from any other chat to add it/);
+});
+
+test("derive: configured_running with N paired chats → plural copy", () => {
+  const s = deriveTelegramCardState({
+    status: {
+      ...BASE,
+      configured: true,
+      bot_handle: "@alfred_black_bot",
+      state: "configured_running",
+      paired_chats: [
+        { id: 1, name: "Sir", type: "dm" },
+        { id: 2, name: "Family group", type: "group" },
+        { id: 3, name: null, type: null },
+      ],
+    },
+  });
+  assert.equal(s.pairedChats.length, 3);
+  assert.equal(s.pairedChats[2].name, "chat 3");
+  assert.match(s.description, /Authorised for 3 chats/);
+});
+
+test("derive: error → verbatim message + error pill", () => {
+  const s = deriveTelegramCardState({
+    status: {
+      ...BASE,
+      configured: true,
       state: "error",
       error: "401 Unauthorized — token rejected by Telegram",
     },
   });
   assert.equal(s.description, "401 Unauthorized — token rejected by Telegram");
-  assert.equal(s.primaryAction, "Try again");
   assert.equal(s.pill, "error");
+  assert.equal(s.showChatList, false);
 });
 
 // 9-digit id + 35-char secret = the canonical BotFather token shape.

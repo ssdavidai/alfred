@@ -718,8 +718,9 @@ query getSshInfo {
   entities: []
 }
 
-// Lane III — Telegram channel on /channels. Four ops, all proxied to
+// Lane III — Telegram channel on /channels. Five ops, all proxied to
 // ctrl-api under /api/v1/channels/telegram/* (Lane I owns the backend).
+// `pairTelegramChat` was removed 2026-05-25 — see operations.ts.
 query getTelegramChannelStatus {
   fn: import { getTelegramChannelStatus } from "@src/dashboard/operations",
   entities: []
@@ -730,8 +731,13 @@ action setTelegramBotToken {
   entities: []
 }
 
-action pairTelegramChat {
-  fn: import { pairTelegramChat } from "@src/dashboard/operations",
+action sendTelegramTest {
+  fn: import { sendTelegramTest } from "@src/dashboard/operations",
+  entities: []
+}
+
+action revokeTelegramChat {
+  fn: import { revokeTelegramChat } from "@src/dashboard/operations",
   entities: []
 }
 

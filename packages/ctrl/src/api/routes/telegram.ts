@@ -20,13 +20,17 @@
 //      "Telegram Bot Token" — that name is the lookup key.
 //   2. Token + per-platform settings live in the per-profile .env. Compose
 //      env is NOT touched.
-//   3. DM-pairing uses native `hermes pairing` CLI.
+//   3. Adding a new chat is "DM the bot first, then it appears here" —
+//      Hermes' `TELEGRAM_ALLOWED_USERS` allowlist handles authorisation.
+//      We do NOT mint pairing codes (that subcommand never existed in
+//      hermes; the earlier /pair route 500'd because of it). 2026-05-25.
 //
-// Four surfaces:
+// Five surfaces:
 //   GET    /api/v1/channels/telegram/status
 //   PUT    /api/v1/channels/telegram/token
-//   POST   /api/v1/channels/telegram/pair
-//   DELETE /api/v1/channels/telegram/token
+//   DELETE /api/v1/channels/telegram/token            — disconnect the bot
+//   POST   /api/v1/channels/telegram/test             — send a real test msg
+//   DELETE /api/v1/channels/telegram/chats/:user_id   — revoke a paired chat
 //
 // FAIL-SOFT POLICY. /status MUST NOT 5xx — the dashboard polls it. On any
 // upstream failure return state:"error" with the message in `error`; the UI
@@ -372,36 +376,93 @@ function restartHermes(): void {
   });
 }
 
-// ── hermes pairing CLI (DM pairing) — unchanged behaviour ─────────────────
-
-async function generatePairingCode(): Promise<{ code: string; expires_at: string }> {
-  let lastErr: unknown = null;
-  for (const sub of ["generate", "new", "mint"]) {
-    try {
-      const stdout = await dockerExec(HERMES_CONTAINER, [
-        ...HERMES_CMD, "-p", "main", "pairing", sub, "telegram",
-      ]);
-      const code = extractPairingCode(stdout);
-      if (!code) {
-        lastErr = new Error(`no code in output: ${stdout.slice(0, 120)}`);
-        continue;
-      }
-      return { code, expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString() };
-    } catch (e) { lastErr = e; }
+// ── Telegram bot API: sendMessage (for the "Send test message" button) ────
+//
+// Calls api.telegram.org/bot<token>/sendMessage directly — the Telegram
+// servers are public-internet, no Hermes round-trip needed. The bot only
+// needs the chat_id to send to, which lives in TELEGRAM_HOME_CHANNEL (the
+// user's own chat) for the dashboard's test path. If TELEGRAM_HOME_CHANNEL
+// isn't set we fall back to the first paired chat we can find.
+async function sendTelegramMessage(
+  token: string,
+  chatId: string,
+  text: string,
+): Promise<{ ok: true; message_id: number } | { ok: false; description: string }> {
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text }),
+      signal: AbortSignal.timeout(8_000),
+    });
+    const j = (await r.json()) as {
+      ok?: boolean;
+      description?: string;
+      result?: { message_id?: number };
+    };
+    if (j?.ok && typeof j.result?.message_id === "number") {
+      return { ok: true, message_id: j.result.message_id };
+    }
+    return { ok: false, description: j?.description ?? `HTTP ${r.status}` };
+  } catch (e) {
+    return {
+      ok: false,
+      description: e instanceof Error ? e.message : String(e),
+    };
   }
-  throw lastErr instanceof Error ? lastErr : new Error("hermes pairing: all variants failed");
 }
 
-function extractPairingCode(stdout: string): string | null {
-  const dashed = stdout.match(/\b([A-Z0-9]{3,6}-[A-Z0-9]{3,6}(?:-[A-Z0-9]{3,6})?)\b/);
-  if (dashed) return dashed[1];
-  const digits = stdout.match(/\b(\d{6})\b/);
-  if (digits) return digits[1];
-  for (const line of stdout.split("\n")) {
-    const t = line.trim();
-    if (/^[A-Z0-9-]{6,32}$/.test(t)) return t;
+// ── Revoke a paired chat ──────────────────────────────────────────────────
+//
+// Two stores agree-or-die: (a) `channel_directory.json` is the live
+// hermes-side directory, and (b) `TELEGRAM_ALLOWED_USERS` in the per-profile
+// .env is the allowlist the gateway enforces on incoming messages. To
+// actually revoke someone we strip them from BOTH and bounce Hermes so the
+// next message from that chat is rejected.
+async function revokeChatFromDirectory(userId: string): Promise<void> {
+  // 1) drop from channel_directory.json
+  const dirBlob = await readJsonFromContainer(CHANNEL_DIR_PATH);
+  if (dirBlob && typeof dirBlob === "object") {
+    const root = dirBlob as Record<string, unknown>;
+    const platforms = root.platforms as Record<string, unknown> | undefined;
+    const list = (platforms?.telegram as unknown[]) ?? [];
+    if (Array.isArray(list)) {
+      const filtered = list.filter((it) => {
+        if (typeof it !== "object" || it === null) return true;
+        const ii = it as Record<string, unknown>;
+        const id = String(ii.chat_id ?? ii.id ?? "");
+        return id !== userId;
+      });
+      if (platforms && filtered.length !== list.length) {
+        platforms.telegram = filtered;
+        (root as Record<string, unknown>).updated_at = new Date().toISOString();
+        const tmp = `${CHANNEL_DIR_PATH}.tmp.${process.pid}.${Date.now()}`;
+        await dockerExecWithStdin(
+          HERMES_CONTAINER,
+          ["sh", "-c", `cat > ${tmp} && mv ${tmp} ${CHANNEL_DIR_PATH}`],
+          JSON.stringify(root, null, 2) + "\n",
+          15_000,
+        );
+      }
+    }
   }
-  return null;
+  // 2) drop from the .env allowlist (TELEGRAM_ALLOWED_USERS is comma-separated)
+  const envMap: Record<string, string> = await readProfileEnv().catch(
+    () => ({}) as Record<string, string>,
+  );
+  const current = envMap.TELEGRAM_ALLOWED_USERS ?? "";
+  if (current) {
+    const next = current
+      .split(",")
+      .map((s: string) => s.trim())
+      .filter((s: string) => s && s !== userId)
+      .join(",");
+    if (next !== current) {
+      await writeProfileEnvKeys({
+        TELEGRAM_ALLOWED_USERS: next || null,
+      });
+    }
+  }
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────
@@ -517,9 +578,72 @@ export function registerTelegramRoutes(): void {
     sendJson(res, 200, { ok: true, state: "unconfigured" });
   });
 
-  // POST /pair — mint a DM-pairing code.
-  addRoute("POST", "/api/v1/channels/telegram/pair", async ({ res }) => {
-    const out = await generatePairingCode();
-    sendJson(res, 200, out);
+  // POST /test — send a one-shot test message to TELEGRAM_HOME_CHANNEL via
+  // the Telegram bot API. Used by the /channels "Send test message" button so
+  // the user can confirm the bot can actually deliver. We deliberately don't
+  // route through Hermes — this is a pure liveness check.
+  addRoute("POST", "/api/v1/channels/telegram/test", async ({ res }) => {
+    const envMap: Record<string, string> = await readProfileEnv().catch(
+      () => ({}) as Record<string, string>,
+    );
+    const token = envMap.TELEGRAM_BOT_TOKEN ?? "";
+    if (!token) {
+      throw new ValidationError(
+        "telegram is not configured (no bot token in the hermes profile)",
+      );
+    }
+    // Prefer TELEGRAM_HOME_CHANNEL; fall back to the first paired chat we
+    // know about so a user who set up via DM-pairing alone still gets a test.
+    let chatId = envMap.TELEGRAM_HOME_CHANNEL ?? "";
+    if (!chatId) {
+      const dirBlob = await readJsonFromContainer(CHANNEL_DIR_PATH);
+      const paired = parseChannelDirectory(dirBlob);
+      if (paired.length > 0) chatId = String(paired[0].id);
+    }
+    if (!chatId) {
+      sendJson(res, 200, {
+        ok: false,
+        error:
+          "no chat to send to — DM the bot once from your phone so it knows your chat_id, then try again",
+      });
+      return;
+    }
+    const stamp = new Date().toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+    const result = await sendTelegramMessage(
+      token,
+      chatId,
+      `🤵 Test message from your Alfred dashboard · ${stamp}`,
+    );
+    if (result.ok) {
+      sendJson(res, 200, {
+        ok: true,
+        chat_id: chatId,
+        message_id: result.message_id,
+        sent_at: new Date().toISOString(),
+      });
+    } else {
+      sendJson(res, 200, { ok: false, error: result.description });
+    }
   });
+
+  // DELETE /chats/:user_id — revoke a paired chat. Removes from
+  // channel_directory.json AND from TELEGRAM_ALLOWED_USERS, then bounces
+  // Hermes so the next message from that chat lands on the cold path.
+  addRoute(
+    "DELETE",
+    "/api/v1/channels/telegram/chats/:user_id",
+    async ({ res, params }) => {
+      const userId = String(params.user_id ?? "").trim();
+      if (!userId || !/^[0-9-]{1,20}$/.test(userId)) {
+        throw new ValidationError("user_id must be a numeric Telegram chat id");
+      }
+      await revokeChatFromDirectory(userId);
+      restartHermes();
+      sendJson(res, 200, { ok: true, revoked: userId });
+    },
+  );
 }

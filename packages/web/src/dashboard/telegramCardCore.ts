@@ -13,12 +13,23 @@ export type TelegramState =
   | "configured_running"
   | "error";
 
+export interface PairedChat {
+  id: string | number;
+  name: string | null;
+  type: string | null;
+}
+
 export interface TelegramStatus {
   configured: boolean;
   bot_handle: string | null;
-  last_message_at: string | null;
   state: TelegramState;
   error: string | null;
+  /**
+   * Chats currently authorised to talk to the bot — sourced from Hermes'
+   * `channel_directory.json`. Empty array when configured but no chat has
+   * messaged the bot yet.
+   */
+  paired_chats: PairedChat[];
 }
 
 export interface TelegramCardState {
@@ -28,10 +39,10 @@ export interface TelegramCardState {
   heading: string;
   /** Italic marginalia under the headline. */
   description: string;
-  /** Label for the primary action; null when there is none in this state. */
-  primaryAction: string | null;
-  /** Secondary actions (e.g. "Test connection", "Disconnect"). */
-  secondaryActions: string[];
+  /** Whether to render the paired-chats list in the body. */
+  showChatList: boolean;
+  /** The paired-chats list, normalised + name-defaulted for rendering. */
+  pairedChats: PairedChat[];
   /** True when the card should render the @BotFather setup hint. */
   showBotFatherHint: boolean;
   /** Pretty status pill ("Connected" / "Not connected" / "Starting" / "Error"). */
@@ -41,15 +52,36 @@ export interface TelegramCardState {
 const NULL_STATUS: TelegramStatus = {
   configured: false,
   bot_handle: null,
-  last_message_at: null,
   state: "unconfigured",
   error: null,
+  paired_chats: [],
 };
+
+function normalisePairedChats(raw: unknown): PairedChat[] {
+  if (!Array.isArray(raw)) return [];
+  const out: PairedChat[] = [];
+  for (const it of raw) {
+    if (typeof it !== "object" || it === null) continue;
+    const r = it as Record<string, unknown>;
+    const id = (r.id ?? r.chat_id) as string | number | undefined;
+    if (id === undefined || id === null || id === "") continue;
+    const name =
+      typeof r.name === "string" && r.name.trim()
+        ? r.name.trim()
+        : typeof r.title === "string" && r.title.trim()
+          ? r.title.trim()
+          : `chat ${id}`;
+    const type = typeof r.type === "string" ? r.type : null;
+    out.push({ id, name, type });
+  }
+  return out;
+}
 
 export function deriveTelegramCardState(args: {
   status: TelegramStatus | null | undefined;
 }): TelegramCardState {
   const status = args.status ?? NULL_STATUS;
+  const pairedChats = normalisePairedChats(status.paired_chats);
 
   switch (status.state) {
     case "configured_starting":
@@ -57,8 +89,8 @@ export function deriveTelegramCardState(args: {
         state: "configured_starting",
         heading: "Picking up the new token",
         description: "Hermes is restarting with the token you just saved.",
-        primaryAction: null,
-        secondaryActions: [],
+        showChatList: false,
+        pairedChats,
         showBotFatherHint: false,
         pill: "starting",
       };
@@ -69,17 +101,18 @@ export function deriveTelegramCardState(args: {
           ? status.bot_handle
           : `@${status.bot_handle}`
         : "your bot";
-      const last = status.last_message_at
-        ? relativeTimeFromIso(status.last_message_at)
-        : null;
+      const description =
+        pairedChats.length === 0
+          ? `DM ${handle} once from your phone — once it sees you, you'll appear here.`
+          : pairedChats.length === 1
+            ? `Authorised for 1 chat. DM ${handle} from any other chat to add it.`
+            : `Authorised for ${pairedChats.length} chats. DM ${handle} from any other chat to add it.`;
       return {
         state: "configured_running",
         heading: `Connected as ${handle}`,
-        description: last
-          ? `Last message ${last}.`
-          : "No messages yet — pair this chat to wake the bot up.",
-        primaryAction: "Pair this chat",
-        secondaryActions: ["Test connection", "Disconnect"],
+        description,
+        showChatList: pairedChats.length > 0,
+        pairedChats,
         showBotFatherHint: false,
         pill: "active",
       };
@@ -92,8 +125,8 @@ export function deriveTelegramCardState(args: {
         description:
           status.error?.trim() ||
           "Hermes couldn't start the Telegram adapter. Try the token again.",
-        primaryAction: "Try again",
-        secondaryActions: ["Disconnect"],
+        showChatList: false,
+        pairedChats,
         showBotFatherHint: false,
         pill: "error",
       };
@@ -105,8 +138,8 @@ export function deriveTelegramCardState(args: {
         heading: "Set up Telegram",
         description:
           "Paste a bot token below — Hermes will pick it up on the next message.",
-        primaryAction: "Save token",
-        secondaryActions: [],
+        showChatList: false,
+        pairedChats,
         showBotFatherHint: true,
         pill: "available",
       };

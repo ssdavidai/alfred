@@ -136,12 +136,18 @@ export const getSshInfo = async (_args: unknown, context: any) => {
 
 // Lane III — Telegram channel on /channels. Backed by Lane I's ctrl-api
 // endpoints under /api/v1/channels/telegram/*. Shape:
-//   getTelegramChannelStatus → { configured, bot_handle, last_message_at,
-//                                state, error }   (state lives in
-//                                telegramCardCore.TelegramState)
+//   getTelegramChannelStatus → { configured, bot_handle, state, error,
+//                                paired_chats: [{id,name,type}] }
+//                              (state lives in telegramCardCore.TelegramState)
 //   setTelegramBotToken      → 200 { ok, state }
-//   pairTelegramChat         → { code, expires_at }
+//   sendTelegramTest         → 200 { ok, chat_id?, message_id?, error? }
+//   revokeTelegramChat       → 200 { ok, revoked }
 //   disconnectTelegram       → 200 { ok, state: "unconfigured" }
+//
+// Note: there is NO `pair` action. "Pair this chat" used to call a hermes
+// CLI subcommand (`pairing mint`) that never existed and 500'd; the right
+// model is "DM the bot, then it appears in paired_chats" — Hermes uses the
+// TELEGRAM_ALLOWED_USERS allowlist, not pairing codes. Removed 2026-05-25.
 export const getTelegramChannelStatus = async (
   _args: unknown,
   context: any,
@@ -165,11 +171,26 @@ export const setTelegramBotToken = async (
   });
 };
 
-export const pairTelegramChat = async (_args: unknown, context: any) => {
+export const sendTelegramTest = async (_args: unknown, context: any) => {
   const instance = await getUserInstance(context);
   return proxyToTenant(instance, {
     method: "POST",
-    path: "/api/v1/channels/telegram/pair",
+    path: "/api/v1/channels/telegram/test",
+  });
+};
+
+export const revokeTelegramChat = async (
+  args: { chat_id: string },
+  context: any,
+) => {
+  if (!args?.chat_id?.toString().trim()) {
+    throw new HttpError(400, "chat_id required");
+  }
+  const instance = await getUserInstance(context);
+  const safe = encodeURIComponent(args.chat_id.toString().trim());
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: `/api/v1/channels/telegram/chats/${safe}`,
   });
 };
 

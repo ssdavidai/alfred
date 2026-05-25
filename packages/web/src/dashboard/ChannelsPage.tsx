@@ -19,7 +19,8 @@ import {
   getSshInfo,
   getTelegramChannelStatus,
   setTelegramBotToken,
-  pairTelegramChat,
+  sendTelegramTest,
+  revokeTelegramChat,
   disconnectTelegram,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
@@ -674,11 +675,13 @@ function TelegramCard() {
   const [showToken, setShowToken] = useState(false);
   const [saveBusy, setSaveBusy] = useState(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
-  // Running-state pairing
-  const [pairBusy, setPairBusy] = useState(false);
-  const [code, setCode] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
-  const [pairErr, setPairErr] = useState<string | null>(null);
+  // Test-message state — toast-style "✓ Sent…" / "✗ <reason>" line.
+  const [testBusy, setTestBusy] = useState(false);
+  const [testMsg, setTestMsg] = useState<
+    { kind: "ok" | "err"; text: string } | null
+  >(null);
+  // Per-chat revoke busy set (chat_id → in-flight).
+  const [revokeBusy, setRevokeBusy] = useState<Set<string>>(new Set());
   // Shared disconnect
   const [discBusy, setDiscBusy] = useState(false);
 
@@ -704,16 +707,49 @@ function TelegramCard() {
     }
   }
 
-  async function pair() {
-    setPairBusy(true);
-    setPairErr(null);
+  async function sendTest() {
+    if (testBusy) return;
+    setTestBusy(true);
+    setTestMsg(null);
     try {
-      const r: any = await pairTelegramChat({});
-      setCode(r?.code ?? null);
+      const r: any = await sendTelegramTest({});
+      if (r?.ok) {
+        setTestMsg({
+          kind: "ok",
+          text: "Sent — check your phone.",
+        });
+      } else {
+        setTestMsg({
+          kind: "err",
+          text: r?.error ?? "Telegram refused the message.",
+        });
+      }
     } catch (e: any) {
-      setPairErr(e?.message ?? e?.data?.error ?? "Couldn't get a code.");
+      setTestMsg({
+        kind: "err",
+        text: e?.message ?? e?.data?.error ?? "Couldn't reach the bot.",
+      });
     } finally {
-      setPairBusy(false);
+      setTestBusy(false);
+      setTimeout(() => setTestMsg(null), 6000);
+    }
+  }
+
+  async function revokeChat(chatId: string | number) {
+    const idStr = String(chatId);
+    if (revokeBusy.has(idStr)) return;
+    setRevokeBusy(new Set([...revokeBusy, idStr]));
+    try {
+      await revokeTelegramChat({ chat_id: idStr });
+      refetch();
+    } catch (e) {
+      console.error("telegram revoke failed", e);
+    } finally {
+      setRevokeBusy((prev) => {
+        const next = new Set(prev);
+        next.delete(idStr);
+        return next;
+      });
     }
   }
 
@@ -722,20 +758,12 @@ function TelegramCard() {
     setDiscBusy(true);
     try {
       await disconnectTelegram({});
-      setCode(null);
       refetch();
     } catch (e) {
       console.error("telegram disconnect failed", e);
     } finally {
       setDiscBusy(false);
     }
-  }
-
-  function copyCode() {
-    if (!code) return;
-    navigator.clipboard?.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
   }
 
   const address =
@@ -838,59 +866,80 @@ function TelegramCard() {
           >
             {card.description}
           </p>
-          {code ? (
+
+          {card.showChatList && (
             <div className="space-y-2">
               <div
                 className="font-mono text-[10px] uppercase tracking-[0.22em]"
                 style={{ color: "var(--marginalia)" }}
               >
-                Pairing code
+                Paired chats
               </div>
-              <div className="flex items-center gap-2">
-                <code
-                  className="flex-1 font-mono text-[20px] tracking-[0.35em] text-center border border-rule p-3"
-                  style={{ color: "var(--ink)" }}
-                >
-                  {code}
-                </code>
-                <button onClick={copyCode} className="btn-ghost">
-                  {copied ? "Copied" : "Copy"}
-                </button>
-              </div>
-              <p
-                className="font-body italic text-[12px]"
-                style={{ color: "var(--marginalia)" }}
-              >
-                DM <code>/start {code}</code> to your bot within 5 minutes.
-              </p>
-            </div>
-          ) : (
-            <div className="flex flex-wrap gap-3 items-baseline">
-              <button
-                onClick={pair}
-                disabled={pairBusy}
-                className="btn-ghost"
-              >
-                {pairBusy ? "…" : "Pair this chat"}
-              </button>
-              <button onClick={() => refetch()} className="btn-link">
-                Test connection
-              </button>
-              <button
-                onClick={disconnect}
-                disabled={discBusy}
-                className="btn-link"
-              >
-                Disconnect
-              </button>
+              <ul className="space-y-1">
+                {card.pairedChats.map((c) => {
+                  const idStr = String(c.id);
+                  const busy = revokeBusy.has(idStr);
+                  return (
+                    <li
+                      key={idStr}
+                      className="flex items-baseline gap-3 border-b border-rule/40 pb-1"
+                    >
+                      <span
+                        className="flex-1 font-body text-[13px]"
+                        style={{ color: "var(--ink)" }}
+                      >
+                        {c.name ?? `chat ${idStr}`}
+                        {c.type && (
+                          <span
+                            className="ml-2 font-mono text-[10px] uppercase tracking-[0.18em]"
+                            style={{ color: "var(--marginalia)" }}
+                          >
+                            {c.type}
+                          </span>
+                        )}
+                      </span>
+                      <button
+                        onClick={() => revokeChat(c.id)}
+                        disabled={busy}
+                        className="btn-link text-[11px]"
+                        title="Remove this chat from the allowlist"
+                      >
+                        {busy ? "…" : "Revoke"}
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
             </div>
           )}
-          {pairErr && (
-            <p
-              className="font-body italic text-[13px]"
-              style={{ color: "var(--brass)" }}
+
+          <div className="flex flex-wrap gap-3 items-baseline pt-1">
+            <button
+              onClick={sendTest}
+              disabled={testBusy}
+              className="btn-ghost"
             >
-              {pairErr}
+              {testBusy ? "…" : "Send test message"}
+            </button>
+            <button
+              onClick={disconnect}
+              disabled={discBusy}
+              className="btn-link"
+            >
+              Disconnect bot
+            </button>
+          </div>
+
+          {testMsg && (
+            <p
+              className="font-body italic text-[12px]"
+              style={{
+                color:
+                  testMsg.kind === "ok" ? "var(--marginalia)" : "var(--brass)",
+              }}
+            >
+              {testMsg.kind === "ok" ? "✓ " : "✗ "}
+              {testMsg.text}
             </p>
           )}
         </div>
