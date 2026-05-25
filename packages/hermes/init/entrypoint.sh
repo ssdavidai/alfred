@@ -430,6 +430,21 @@ for profile in "${PROFILES[@]}"; do
     echo "[init] Rendered Hermes profile: $profile"
 done
 
+# --- 6b. Ensure gateway.platforms.telegram on the main profile ---------------
+# Hermes' built-in Telegram platform is enabled iff config.yaml has the
+# `gateway.platforms.telegram` block; the token is then picked up from
+# TELEGRAM_BOT_TOKEN (gateway/config.py:1243). render_hermes.py is
+# seed-only (config.yaml is operator-owned), so this idempotent step
+# backfills the block on every boot. Preserves operator-set values
+# (e.g. `enabled: false`) untouched. Main profile only — workers/heavy
+# have no channels.
+MAIN_PROFILE_DIR="$HERMES_DATA_DIR/profiles/main"
+if [[ -f "$MAIN_PROFILE_DIR/config.yaml" ]]; then
+    python3 /setup/render_telegram_gateway.py "$MAIN_PROFILE_DIR"
+else
+    echo "[init] main profile config.yaml not present — skipping telegram-gateway step"
+fi
+
 # =============================================================================
 # 7. Permissions.
 #
