@@ -201,12 +201,27 @@ def _http_post_json(path: str, body: dict[str, Any]) -> Optional[dict[str, Any]]
 def _format_journal_context(entries: list[dict[str, Any]]) -> str:
     """Render journal entries into a system-context block.
 
-    Lays them out newest-last so main reads them in conversational order
-    (sender → reply → reminder). Marks outbound entries explicitly as "you"
-    (the agent) and inbound as "Sir" — this matters because the journal
-    sometimes records the bytes Sir saw before his actual session turn
-    landed, so the timing in the chat history can look off; the labels
-    anchor it.
+    HARD-WON FROM A LIVE TEST (2026-05-25, Sir incident):
+    Earlier framing said "Use it to maintain the illusion of one continuous
+    conversation" — and the LLM treated that as advisory. Sir messaged "hm?"
+    in reply to a delegate reminder Alfred had just sent; the journal
+    context block was injected with the reminder text, but main agent
+    answered "I don't remember sending you a reminder."
+
+    Why: from main's POV, its actual Hermes session history (`messages[]`)
+    had NO record of the reminder, because alfred-deliver delivers via the
+    direct Telegram bot API (not as a turn in main's session). The context
+    block was just text in a system tag the LLM could read or ignore. Given
+    a conflict between "system tag claims X" and "session history shows
+    nothing", a polite model defers to history.
+
+    The fix here: re-frame the block as AUTHORITATIVE first-person memory
+    that the assistant SHOULD treat as true even when it isn't in
+    `messages[]`. Drop the "illusion / Use it to maintain" hedge and use
+    direct first-person ownership ("YOU sent these"). Also explicitly tell
+    the assistant the canonical answer pattern when the user references one.
+
+    Lays entries out newest-last so main reads them in conversational order.
     """
     if not entries:
         return ""
@@ -214,11 +229,18 @@ def _format_journal_context(entries: list[dict[str, Any]]) -> str:
     in_order = list(reversed(entries))
     lines: list[str] = []
     lines.append(
-        "[system: one-alfred continuity context — recent exchanges with"
-        " the principal across channels. The principal does NOT see this"
-        " block. Use it to maintain the illusion of one continuous"
-        " conversation across the workers/main/heavy session split.]"
+        "[ALFRED-CONTINUITY — authoritative]"
     )
+    lines.append(
+        "The following are messages YOU (Alfred) sent to the principal,"
+        " and messages the principal sent you, across channels — including"
+        " ones delivered outside this session (by your background workers /"
+        " scheduled reminders / cron). These DID happen. Treat them as part"
+        " of your memory even if they are not in this session's chat history."
+        " When the principal references one (\"what was that reminder?\","
+        " \"the one you sent me\", \"hm?\"), the answer must come from here."
+    )
+    lines.append("")
     for e in in_order:
         ts = str(e.get("ts", ""))[:19]
         direction = str(e.get("direction", "?"))
@@ -226,12 +248,13 @@ def _format_journal_context(entries: list[dict[str, Any]]) -> str:
         message = str(e.get("message", "")).strip()
         if not message:
             continue
-        # Compact label: time + who + channel. Single line per exchange.
-        who = "you (Alfred)" if direction == "outbound" else "principal"
+        # Compact label. Use first-person ownership for outbound so the
+        # LLM internalises it as something IT said. Inbound is the principal.
+        who = "YOU → principal" if direction == "outbound" else "principal → YOU"
         # Truncate per-line to keep the context block bounded.
         snippet = message if len(message) <= 280 else message[:277] + "…"
-        lines.append(f"  · {ts} {who} on {channel}: {snippet}")
-    lines.append("[/system]")
+        lines.append(f"  [{ts}] {who} on {channel}: {snippet}")
+    lines.append("[/ALFRED-CONTINUITY]")
     return "\n".join(lines)
 
 
@@ -239,18 +262,17 @@ def _format_journal_context(entries: list[dict[str, Any]]) -> str:
 # Hook implementations
 # ---------------------------------------------------------------------------
 
-# Per-(channel, chat_id) latch: we only inject context on the FIRST inbound
-# of a session (or after a long idle gap). Re-injecting on every turn would
-# make main's prompt grow each turn — that's what Hermes' session history
-# already does for free. The journal context is a "wake-up nudge" for the
-# moment when main loses thread.
+# Latch: dedupe rapid duplicate inbounds only. 2026-05-25 dropped the 10-min
+# latch entirely after the Sir incident — Sir's "hm?" reply to a delegate
+# reminder needed context EVERY turn until the journal got into main's
+# session history (which on the cron/direct-delivery path never happens).
+# The journal is small (<20 entries × ~50 tokens) so re-injecting every
+# turn costs ~1k tokens of context — well within budget.
 #
-# Key: (channel, chat_id). Value: timestamp of last injection. Idle threshold
-# is hardcoded (10 min) — short enough that a returning Sir gets nudged again,
-# long enough that we don't spam main every turn of a multi-turn back-and-forth.
+# The 5s dedupe window catches double-fires of the same hook only.
 _LAST_INJECTION: dict[tuple[str, str], float] = {}
 _LATCH_LOCK = threading.Lock()
-_REINJECT_AFTER_S = 10 * 60
+_REINJECT_AFTER_S = 5
 
 
 def _should_inject(channel: str, chat_id: str) -> bool:
@@ -285,11 +307,16 @@ def _hook_pre_gateway_dispatch(
         )
         chat_id = getattr(source, "chat_id", None)
         text = getattr(event, "text", None) or ""
+        logger.info(
+            "[one-alfred] pre_gateway_dispatch fired platform=%s chat=%s text_len=%d",
+            platform, chat_id, len(text),
+        )
         if not platform or not chat_id or not text:
             return None
         channel = str(platform).lower()
         chat_id_str = str(chat_id)
         if not _should_inject(channel, chat_id_str):
+            logger.info("[one-alfred] pre_gateway_dispatch: latched (<5s) — skip")
             return None
 
         resp = _http_get_json(
@@ -325,23 +352,32 @@ def _hook_pre_gateway_dispatch(
 
 def _hook_post_llm_call(
     session_id: Optional[str] = None,
-    response_text: Optional[str] = None,
+    assistant_response: Optional[str] = None,
+    response_text: Optional[str] = None,  # legacy alias — kept for forward-compat
     platform: Optional[str] = None,
     **kwargs: Any,
 ) -> None:
     """Post-LLM hook — journal what main composed back to Sir.
 
-    This is the journal's outbound recorder for direct-reply turns (Sir
-    messages, main answers). For delegate-triggered outbound deliveries
-    via /api/v1/alfred-deliver, the journal is already populated by
-    ctrl-api — this hook only catches the in-session-reply case.
+    Hermes' run_agent.py:15895 invocation passes the response under the
+    kwarg name ``assistant_response`` (NOT ``response_text``) — verified
+    against Hermes' live source. The earlier ``response_text`` keyword was
+    a guess that silently no-op'd every call (2026-05-25 Sir incident:
+    Alfred's reply to "hm?" never landed in the journal). Both names are
+    now accepted for forward-compat; we prefer ``assistant_response``.
 
-    Hermes signature varies by version; we accept everything via kwargs.
+    This is the journal's outbound recorder for direct-reply turns (Sir
+    messages, main answers). Delegate-triggered outbound deliveries via
+    /api/v1/alfred-deliver journal themselves through ctrl-api; this
+    hook only catches the in-session-reply case.
     """
     if not _is_enabled():
         return
     try:
-        if not response_text or not platform or not session_id:
+        # Hermes uses ``assistant_response``; legacy callers may still pass
+        # ``response_text``. Take whichever is non-empty.
+        text = assistant_response or response_text
+        if not text or not platform or not session_id:
             return
         channel = str(platform).lower()
         if channel == "cli":
@@ -364,14 +400,13 @@ def _hook_post_llm_call(
                 "channel": channel,
                 "chat_id": chat_id,
                 "direction": "outbound",
-                "message": response_text,
+                "message": text,
                 "source_kind": "reply",
                 "hermes_session_id": sid,
                 "hermes_profile": "main",
                 "status": "delivered",
                 "metadata": {
-                    # Anything else the hook saw — useful for future debugging.
-                    "tool_calls": kwargs.get("tool_calls"),
+                    "model": kwargs.get("model"),
                 },
             },
         )
@@ -387,18 +422,25 @@ def _hook_pre_llm_call_inbound_journal(
 ) -> None:
     """Record Sir's actual inbound message in the journal (audit trail).
 
-    This is separate from the pre_gateway_dispatch rewrite — that hook
-    INJECTS context but doesn't journal. Pre-LLM is the moment when we
-    know main has accepted the (possibly-rewritten) text and is about to
-    process it; we want to journal Sir's ORIGINAL text, not the rewritten
-    one. The dispatch hook stashed the original in ``event.text``; we
-    re-read from ``user_message`` here which is the same canonical text
-    before our rewrite (the gateway passes both).
+    Hermes' pre_llm_call invocation passes
+    ``{session_id, user_message, conversation_history, is_first_turn, model,
+       platform}`` per _DEFAULT_PAYLOADS in hermes_cli/hooks.py — we use the
+    first three.
 
-    Best-effort: any failure here is logged but never blocks.
+    Strips the [ALFRED-CONTINUITY ...] context block (which
+    pre_gateway_dispatch may have prepended) so the journal records only
+    Sir's original text, not the rewrite.
+
+    Best-effort: any failure here is logged but never blocks. Logs a single
+    INFO line per fire so the hook's liveness is visible in `docker logs
+    hermes`.
     """
     if not _is_enabled():
         return
+    logger.info(
+        "[one-alfred] pre_llm_call fired session=%s platform=%s msg_len=%d",
+        session_id, platform, len(user_message or ""),
+    )
     try:
         if not user_message or not platform or not session_id:
             return
@@ -412,19 +454,23 @@ def _hook_pre_llm_call_inbound_journal(
                 chat_id = sid.split(marker, 1)[1].split(":")[0]
                 break
         if not chat_id:
+            logger.info("[one-alfred] pre_llm_call: no chat_id in session_id=%s — skip", sid)
             return
 
         # If the user_message we see already CONTAINS our context-block
         # marker, strip it — we rewrote it in pre_gateway_dispatch but want
-        # the journal to record only Sir's actual text.
+        # the journal to record only Sir's actual text. Tolerate BOTH the
+        # current marker shape (2026-05-25 redesign) and the original.
         clean = user_message
-        marker = "[system: one-alfred continuity context"
-        if marker in clean:
-            # Split on the closing tag we know we wrote.
-            end_tag = "[/system]"
-            idx = clean.find(end_tag)
-            if idx >= 0:
-                clean = clean[idx + len(end_tag):].lstrip()
+        for start_tag, end_tag in (
+            ("[ALFRED-CONTINUITY", "[/ALFRED-CONTINUITY]"),
+            ("[system: one-alfred continuity context", "[/system]"),
+        ):
+            if start_tag in clean:
+                idx = clean.find(end_tag)
+                if idx >= 0:
+                    clean = clean[idx + len(end_tag):].lstrip()
+                    break
 
         _http_post_json(
             "/api/v1/alfred-journal",
