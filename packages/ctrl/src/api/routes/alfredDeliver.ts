@@ -4,27 +4,30 @@
 // THE PATTERN-A ENDPOINT
 // ----------------------
 // This is what every caller — `notify_principal` MCP, workers' delegate
-// completion, autonomous instinct dispatches — invokes when Alfred has
-// something to say to Sir. ctrl-api owns the entire delivery:
+// completion path, autonomous instinct dispatches — invokes when Alfred
+// has something to say to Sir. ctrl-api owns the entire delivery:
 //
-//   1. Resolve channel + chat_id (auto-pick if not specified, exactly like
-//      the old notify_principal flow).
+//   1. Resolve channel + chat_id (auto-pick if not specified).
 //   2. Append a `pending` outbound entry to alfred_journal (so the journal
 //      is the source of truth even before the bytes go out).
-//   3. Compose a butler-voice prompt via the Hermes main-profile webhook
-//      subscription `alfred-deliver` (registered lazily on first call). The
-//      webhook prompt template is the "butler getting a slip" pattern Sir
-//      asked for — main composes IN ITS VOICE, no byte-echo.
-//   4. Wait for the webhook to acknowledge delivery.
-//   5. Update the journal entry to `delivered` (or `failed`) with the bytes
-//      Sir actually saw.
+//   3. Send the bytes to the channel via the channel-specific API.
+//   4. Update the journal entry to `delivered` (or `failed`) with the
+//      exact bytes Sir saw.
 //
-// Why a webhook subscription on main and not just calling /v1/runs directly?
-// Because Hermes' `/v1/runs` route uses the api_server toolset that
-// DELIBERATELY EXCLUDES `send_message` — a top-level API run has no way to
-// reach a channel. Webhook subscriptions with `--deliver=<platform>:<chat_id>`
-// DO have that delivery path. See notifications.ts module comments for the
-// full archaeology (issue #45 + Hermes v2026.5.16 source).
+// COMPOSITION: it's the CALLER's responsibility to pass butler-voice text
+// in `message`. The workers agent that completes a delegate composes its
+// own reply in butler voice (its prompt frames it as Alfred — see
+// packages/learn/src/activities/signal_actions.py `legacy_prompt` /
+// `executor_prompt`). ctrl-api delivers verbatim. There is NO second
+// "compose" pass here, no byte-echo cron job. The old "ROLE: deterministic
+// message-relay job" approach has been retired entirely.
+//
+// CONTINUITY: the actual "one Alfred" UX promise comes from the journal
+// itself, not from any composition magic. The Hermes one-alfred plugin's
+// pre_gateway_dispatch hook reads recent journal entries on every inbound
+// message from Sir and injects them as system context — so when Sir replies
+// to a delegate outcome, main has full memory of what Alfred said earlier,
+// regardless of WHICH internal session composed those bytes.
 //
 // THE PATTERN-A SURFACE
 // ---------------------
@@ -32,13 +35,18 @@
 //     body: { message: string, channel?: "auto"|"telegram"|"slack"|"email",
 //             urgency?: "normal"|"high", to?: string,
 //             source_kind?: string, source_ref?: string,
+//             principal_note?: string, source_headline?: string, summary?: string,
 //             metadata?: object }
-//     returns: { ok, journal_id, channel, chat_id, delivered_bytes }
+//     returns: { ok, journal_id, channel, chat_id, message, journal }
+//
+//   POST /api/v1/delegate-outcomes
+//     workers→ctrl-api hand-off; forwards summary to /alfred-deliver when
+//     the delegate carried a Sir-facing principal_note.
 //
 // THE PATTERN-A INVARIANT
 // -----------------------
 // EVERY Alfred-to-Sir message — outbound on any channel, for any reason —
-// goes through this endpoint. There are no parallel delivery paths. Sir
+// goes through this endpoint. There is no parallel delivery path. Sir
 // perceives one Alfred because there IS one delivery surface.
 // ============================================================================
 
@@ -53,46 +61,9 @@ import {
   resolvePrincipal,
 } from "../../db/alfredJournal.js";
 import { resolveDeliveryTarget } from "../hermes-sessions.js";
+import { dockerExec } from "../helpers.js";
 
-// ── Config ────────────────────────────────────────────────────────────────
-
-const GATEWAY_URL =
-  process.env.HERMES_GATEWAY_URL ||
-  process.env.OPENCLAW_GATEWAY_URL ||
-  "http://hermes:18789";
-
-const WEBHOOK_BASE =
-  process.env.HERMES_WEBHOOK_BASE ||
-  process.env.HERMES_GATEWAY_URL ||
-  "http://hermes:18789";
-
-const GATEWAY_TOKEN_PATHS = [
-  "/alfred-data/.gateway-token",
-  "/mnt/encrypted/alfred/.gateway-token",
-  "/app/data/.gateway-token",
-];
-
-function getGatewayToken(): string {
-  for (const p of GATEWAY_TOKEN_PATHS) {
-    try {
-      const t = fs.readFileSync(p, "utf-8").trim();
-      if (t) return t;
-    } catch {
-      /* try next */
-    }
-  }
-  return process.env.HERMES_API_KEY || process.env.OPENCLAW_GATEWAY_TOKEN || "";
-}
-
-// The webhook secret. Same value as the gateway token — these are internal
-// network calls inside the compose namespace.
-function getWebhookSecret(): string {
-  return getGatewayToken() || "alfred-deliver-noauth-dev";
-}
-
-const WEBHOOK_ROUTE_NAME = "alfred-deliver";
-
-// ── Auto-target resolution (mirrors notifications.ts) ─────────────────────
+// ── Channel resolution (mirrors notifications.ts auto-target) ─────────────
 
 function resolveAutoTarget(): { to: string; channel: string } | undefined {
   return resolveDeliveryTarget("last");
@@ -101,143 +72,155 @@ function resolveRecipient(channel: string): string | undefined {
   return resolveDeliveryTarget(channel)?.to;
 }
 
-// ── Butler-voice webhook prompt ───────────────────────────────────────────
+// ── Per-channel byte delivery ─────────────────────────────────────────────
 //
-// This replaces the "ROLE: You are a deterministic message-relay job"
-// byte-echo from notifications.ts:189. Sir explicitly asked for the OPPOSITE:
-// "the butler gets a slip and says 'Sir, here's the reminder you asked me to
-// do'". So main's prompt now frames it that way.
-//
-// The template uses Hermes' {dot.notation} payload reference. ctrl-api POSTs
-// the payload + auth, the webhook handler renders the template into the
-// prompt for main's agent, main composes the message in its voice, the
-// Telegram adapter delivers.
-const BUTLER_PROMPT_TEMPLATE = `You are Alfred — the principal's butler. A background process has just
-finished work the principal asked you to do, and is handing you a slip.
-You are the SAME Alfred the principal has been talking to on this channel;
-do not introduce yourself.
+// One adapter per channel. Each adapter is responsible for getting the
+// exact bytes onto Sir's device using the channel's own API. Failure is
+// surfaced as `{ ok: false, error: <reason> }` so the caller can journal
+// truthfully — never a silent no-op.
 
-The slip:
-  - The principal's original ask: "{principal_note}"
-  - What you were investigating / handling: "{source_headline}"
-  - The result: "{summary}"
-
-Deliver this to the principal on {channel} in your voice. Keep it tight —
-one or two sentences. Do not list steps, do not preamble. Treat this as a
-single message in an ongoing conversation: warm, deferential, specific.
-You are NOT writing a status report; you are speaking to a person who
-asked you for something a few minutes ago.`;
-
-// ── Webhook lifecycle — register the subscription once, idempotently ──────
-
-interface WebhookSubscriptionRecord {
-  ready: boolean;
-  lastCheck: number;
+interface DeliveryResult {
+  ok: boolean;
+  error?: string;
+  // Hermes-side session reference, if we know it. Hermes' channel adapters
+  // run inside the main profile and have already bound a session for Sir's
+  // chat; we don't get the session_id from a bot-API send, so this is
+  // typically null on the outbound path.
+  hermes_session_id?: string | null;
 }
-const _webhookState: WebhookSubscriptionRecord = { ready: false, lastCheck: 0 };
 
-async function ensureWebhookSubscription(): Promise<void> {
-  // Skip if we've verified recently.
-  if (_webhookState.ready && Date.now() - _webhookState.lastCheck < 60_000) {
-    return;
-  }
-  const token = getGatewayToken();
+/**
+ * Telegram delivery — direct Bot API call (api.telegram.org).
+ *
+ * The bot token lives in the hermes container's per-profile .env
+ * (`$HERMES_HOME/profiles/main/.env` — TELEGRAM_BOT_TOKEN). We read it
+ * via `docker exec hermes cat`. Telegram receives the bytes on the
+ * chat_id; from Sir's phone it looks like @alfred_black_the_butler_bot
+ * sent the message — same as inbound replies.
+ */
+async function deliverTelegram(
+  chatId: string,
+  text: string,
+): Promise<DeliveryResult> {
+  // Lazy-read the token. Cache for 60s — restart-bouncing the hermes
+  // container shouldn't slow every send.
+  const token = await getTelegramBotToken();
   if (!token) {
-    throw new Error(
-      "no gateway token available — cannot create Hermes webhook subscription",
-    );
+    return { ok: false, error: "no TELEGRAM_BOT_TOKEN in hermes main profile .env" };
   }
-  // GET /webhooks (list) — see if the route already exists.
-  const r = await fetch(`${GATEWAY_URL}/api/webhooks`, {
-    headers: { Authorization: `Bearer ${token}` },
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!r.ok && r.status !== 404) {
-    throw new Error(`hermes /api/webhooks list returned ${r.status}`);
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId, text }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    const j = (await r.json().catch(() => ({}))) as {
+      ok?: boolean;
+      description?: string;
+    };
+    if (j?.ok) return { ok: true };
+    return {
+      ok: false,
+      error: j?.description ?? `Telegram returned HTTP ${r.status}`,
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+    };
   }
-  const list = (r.ok ? await r.json() : { subscriptions: [] }) as {
-    subscriptions?: Array<{ name?: string }>;
-  };
-  const subs = Array.isArray(list?.subscriptions) ? list.subscriptions : [];
-  const exists = subs.some((s) => s?.name === WEBHOOK_ROUTE_NAME);
-  if (exists) {
-    _webhookState.ready = true;
-    _webhookState.lastCheck = Date.now();
-    return;
-  }
-  // Create it. The schema mirrors `hermes webhook subscribe`:
-  //   name, prompt, deliver, deliver-chat-id (per-call), secret
-  const createBody = {
-    name: WEBHOOK_ROUTE_NAME,
-    prompt: BUTLER_PROMPT_TEMPLATE,
-    description:
-      "alfred-deliver — the single outbound surface from ctrl-api to Sir's channel. Butler-voice composition by main; delivery via the configured Telegram/Slack adapter. See packages/ctrl/src/api/routes/alfredDeliver.ts.",
-    secret: getWebhookSecret(),
-    // We pass deliver per-call via the payload (cross-platform via
-    // {deliver_chat_id} so the same route handles Telegram + Slack + Email).
-    deliver: "{deliver}",
-    deliver_chat_id: "{deliver_chat_id}",
-  };
-  const c = await fetch(`${GATEWAY_URL}/api/webhooks`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(createBody),
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!c.ok) {
-    const txt = await c.text().catch(() => "");
-    throw new Error(
-      `hermes webhook subscribe failed: ${c.status} ${txt.slice(0, 200)}`,
-    );
-  }
-  _webhookState.ready = true;
-  _webhookState.lastCheck = Date.now();
 }
 
-import crypto from "node:crypto";
+let _tgTokenCache: { value: string; at: number } | null = null;
+const TG_TOKEN_TTL_MS = 60_000;
 
-async function invokeWebhook(
-  payload: Record<string, unknown>,
-): Promise<{ ok: boolean; status: number; body: string }> {
-  const secret = getWebhookSecret();
-  const bodyJson = JSON.stringify(payload);
-  // HMAC-SHA256 over the raw body — same scheme Hermes' webhook handler
-  // validates with (`_validate_signature` in gateway/platforms/webhook.py).
-  const sig = crypto
-    .createHmac("sha256", secret)
-    .update(bodyJson)
-    .digest("hex");
-
-  const r = await fetch(`${WEBHOOK_BASE}/webhooks/${WEBHOOK_ROUTE_NAME}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Hub-Signature-256": `sha256=${sig}`,
-      "X-Request-ID": `alfred-deliver-${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`,
-    },
-    body: bodyJson,
-    signal: AbortSignal.timeout(60_000),
-  });
-  const text = await r.text().catch(() => "");
-  return { ok: r.ok, status: r.status, body: text };
+async function getTelegramBotToken(): Promise<string | null> {
+  const now = Date.now();
+  if (_tgTokenCache && now - _tgTokenCache.at < TG_TOKEN_TTL_MS) {
+    return _tgTokenCache.value || null;
+  }
+  try {
+    const stdout = await dockerExec("hermes", [
+      "sh",
+      "-c",
+      "grep ^TELEGRAM_BOT_TOKEN= $HERMES_HOME/profiles/main/.env 2>/dev/null | cut -d= -f2-",
+    ]);
+    const token = stdout.trim().replace(/^["']|["']$/g, "");
+    _tgTokenCache = { value: token, at: now };
+    return token || null;
+  } catch (e) {
+    console.warn("[alfred-deliver] failed to read telegram bot token:", e);
+    return null;
+  }
 }
 
-// ── Route ─────────────────────────────────────────────────────────────────
+/**
+ * Slack delivery — placeholder. Sir's setup today is Telegram-only; when
+ * Slack lands, this adapter follows the same shape: read bot token from
+ * the channel's stored credentials, POST to Slack Web API, return
+ * DeliveryResult.
+ */
+async function deliverSlack(
+  _chatId: string,
+  _text: string,
+): Promise<DeliveryResult> {
+  return {
+    ok: false,
+    error: "slack delivery not wired yet — see packages/ctrl/docs/design/one-alfred.md",
+  };
+}
+
+async function deliverEmail(
+  _chatId: string,
+  _text: string,
+): Promise<DeliveryResult> {
+  return {
+    ok: false,
+    error: "email delivery not wired yet — see packages/ctrl/docs/design/one-alfred.md",
+  };
+}
+
+async function deliverByChannel(
+  channel: string,
+  chatId: string,
+  text: string,
+): Promise<DeliveryResult> {
+  switch (channel) {
+    case "telegram":
+      return deliverTelegram(chatId, text);
+    case "slack":
+      return deliverSlack(chatId, text);
+    case "email":
+      return deliverEmail(chatId, text);
+    case "webchat":
+      return {
+        ok: false,
+        error:
+          "channel=webchat is not a deliverable messaging platform — webchat is the in-dashboard chat, not a push surface",
+      };
+    default:
+      return {
+        ok: false,
+        error: `channel=${channel} has no delivery adapter yet`,
+      };
+  }
+}
+
+// ── Routes ────────────────────────────────────────────────────────────────
 
 export function registerAlfredDeliverRoutes(): void {
   // POST /api/v1/alfred-deliver — Alfred says X to Sir.
   //
-  // This is the ONLY outbound surface. notify_principal (MCP) and any other
-  // delivery caller now route through here.
+  // This is the ONLY outbound surface. notify_principal MCP and any other
+  // delivery caller route through here. The journal entry is created
+  // BEFORE the channel send, then updated to delivered|failed with the
+  // exact bytes — so a network blip mid-send produces an audit trail
+  // (journal entry with status=pending OR status=failed + delivery_error),
+  // not a silent no-op.
   addRoute("POST", "/api/v1/alfred-deliver", async ({ res, body }) => {
     const b = (body ?? {}) as Record<string, unknown>;
 
-    // Validate the message text — non-empty string.
     const message =
       typeof b.message === "string" ? b.message.trim() : "";
     if (!message) {
@@ -255,7 +238,7 @@ export function registerAlfredDeliverRoutes(): void {
     const explicitTo =
       typeof b.to === "string" && b.to.length > 0 ? (b.to as string) : undefined;
 
-    // Resolve channel + chat_id.
+    // ── Channel + recipient resolution.
     let channel: string;
     let to: string | undefined;
     if (channelHint === "auto") {
@@ -283,22 +266,14 @@ export function registerAlfredDeliverRoutes(): void {
       return;
     }
 
-    if (channel === "webchat") {
-      sendJson(res, 424, {
-        ok: false,
-        error: "channel=webchat is not a Hermes-deliverable messaging platform",
-      });
-      return;
-    }
-
-    // ── Journal as pending. We do this BEFORE attempting delivery so the
-    // journal is durable even if delivery itself fails.
+    // ── Journal as pending BEFORE attempting delivery. If the deploy crashes
+    // mid-flight, the journal records "we tried to send X but didn't confirm".
     const db = getStateDb();
-    // Lazy-bind the (channel, chat_id) → owner principal on first outbound.
-    // Sir is the only principal today; future household members will need a
-    // different policy here.
-    const existingPrincipal = resolvePrincipal(db, channel, to);
-    if (!existingPrincipal) {
+
+    // Lazy-bind (channel, chat_id) → owner principal on first outbound.
+    // Sir is the only principal today; future household members will need
+    // a different policy here (and ideally a UI for picking principal).
+    if (!resolvePrincipal(db, channel, to)) {
       try {
         bindPrincipalChannel(db, channel, to, "owner");
       } catch (e) {
@@ -308,112 +283,53 @@ export function registerAlfredDeliverRoutes(): void {
         );
       }
     }
+
     const pending = appendJournal(db, {
       channel,
       chat_id: to,
       direction: "outbound",
-      message, // initial; will be overwritten with composed bytes on delivery
+      message,
       status: "pending",
-      source_kind:
-        typeof b.source_kind === "string" ? b.source_kind : null,
-      source_ref:
-        typeof b.source_ref === "string" ? b.source_ref : null,
+      source_kind: typeof b.source_kind === "string" ? b.source_kind : null,
+      source_ref: typeof b.source_ref === "string" ? b.source_ref : null,
       metadata: {
         urgency,
-        original_message: message,
         principal_note:
           typeof b.principal_note === "string" ? b.principal_note : null,
         source_headline:
           typeof b.source_headline === "string" ? b.source_headline : null,
-        summary: typeof b.summary === "string" ? b.summary : message,
+        summary: typeof b.summary === "string" ? b.summary : null,
         ...(typeof b.metadata === "object" && b.metadata
           ? (b.metadata as Record<string, unknown>)
           : {}),
       },
     });
 
-    // ── Make sure the webhook subscription is registered.
-    try {
-      await ensureWebhookSubscription();
-    } catch (e) {
-      const errMsg = e instanceof Error ? e.message : String(e);
-      markJournalDelivered(db, pending.id, {
-        status: "failed",
-        delivery_error: `webhook subscription unavailable: ${errMsg}`,
-      });
-      sendJson(res, 502, {
-        ok: false,
-        journal_id: pending.id,
-        error: `hermes webhook subscription unavailable: ${errMsg}`,
-      });
-      return;
-    }
-
-    // ── Fire the webhook. The payload's {dot.notation} fields populate the
-    // butler-voice template; deliver / deliver_chat_id route the response.
-    const payload = {
-      deliver: channel,
-      deliver_chat_id: to,
-      channel,
-      principal_note:
-        typeof b.principal_note === "string"
-          ? b.principal_note
-          : "(no note)",
-      source_headline:
-        typeof b.source_headline === "string"
-          ? b.source_headline
-          : "(no headline)",
-      summary: typeof b.summary === "string" ? b.summary : message,
-    };
-
-    let result: { ok: boolean; status: number; body: string };
-    try {
-      result = await invokeWebhook(payload);
-    } catch (e) {
-      const errMsg = e instanceof Error ? e.message : String(e);
-      markJournalDelivered(db, pending.id, {
-        status: "failed",
-        delivery_error: errMsg,
-      });
-      sendJson(res, 502, {
-        ok: false,
-        journal_id: pending.id,
-        error: errMsg,
-      });
-      return;
-    }
+    // ── Deliver the bytes via the channel adapter.
+    const result = await deliverByChannel(channel, to, message);
 
     if (!result.ok) {
-      markJournalDelivered(db, pending.id, {
+      const updated = markJournalDelivered(db, pending.id, {
         status: "failed",
-        delivery_error: `webhook returned ${result.status}: ${result.body.slice(0, 200)}`,
+        delivery_error: result.error ?? "unknown delivery error",
       });
       sendJson(res, 502, {
         ok: false,
         journal_id: pending.id,
-        error: `webhook returned ${result.status}`,
-        detail: result.body.slice(0, 500),
+        channel,
+        chat_id: to,
+        error: result.error ?? "delivery failed",
+        journal: updated,
       });
       return;
     }
 
-    // The webhook response includes the delivered text + status. Parse what
-    // we can; on any parse error fall back to "best effort" — the bytes did
-    // go out, we just don't know exactly what.
-    let deliveredBytes = message;
-    try {
-      const parsed = JSON.parse(result.body) as {
-        delivered_text?: string;
-        response?: string;
-      };
-      deliveredBytes = parsed.delivered_text ?? parsed.response ?? message;
-    } catch {
-      /* fall back to the requested message */
-    }
-
+    // Success — finalise the journal entry. The bytes Sir saw ARE the
+    // message we delivered (no recomposition), so we don't override the
+    // message field on the way through.
     const updated = markJournalDelivered(db, pending.id, {
       status: "delivered",
-      message: deliveredBytes,
+      hermes_session_id: result.hermes_session_id ?? null,
     });
 
     sendJson(res, 200, {
@@ -421,21 +337,19 @@ export function registerAlfredDeliverRoutes(): void {
       journal_id: pending.id,
       channel,
       chat_id: to,
-      delivered_bytes: deliveredBytes,
+      message,
       journal: updated,
     });
   });
 
   // POST /api/v1/delegate-outcomes — workers→ctrl-api hand-off.
   //
-  // Workers does the work, then POSTs the structured outcome here. This
-  // endpoint:
-  //   1. Records the outcome (TODO: separate audit table; for now use the
-  //      journal metadata).
-  //   2. If the delegate carried a principal_note asking to be pinged,
-  //      forwards the summary to alfred-deliver.
-  //   3. Returns delivery status so the workers caller can stamp it on the
-  //      decision side-effects.
+  // Workers does the work, then POSTs the structured outcome here. When a
+  // principal_note is present (Sir explicitly asked for a Sir-facing
+  // result, e.g. "remind me on Telegram"), we forward the agent's summary
+  // text to /alfred-deliver as the message body. No second composition —
+  // the agent's summary IS the butler-voice text (its prompt frames it
+  // as Alfred). See packages/learn/src/activities/signal_actions.py.
   addRoute("POST", "/api/v1/delegate-outcomes", async ({ res, body }) => {
     const b = (body ?? {}) as Record<string, unknown>;
     const decisionId =
@@ -449,13 +363,9 @@ export function registerAlfredDeliverRoutes(): void {
       typeof b.channel === "string" ? b.channel : "auto";
 
     if (!decisionId || !summary) {
-      throw new ValidationError(
-        "decision_id and summary are required",
-      );
+      throw new ValidationError("decision_id and summary are required");
     }
 
-    // No principal_note → no Sir-facing delivery. Workers should still
-    // record the audit, but Alfred has nothing to say.
     if (!principalNote.trim()) {
       sendJson(res, 200, {
         ok: true,
@@ -466,16 +376,12 @@ export function registerAlfredDeliverRoutes(): void {
       return;
     }
 
-    // Forward to alfred-deliver. Same-process, just call the route handler's
-    // logic by issuing a synthetic POST. Simpler: duplicate the small bit
-    // of resolve+deliver code inline rather than HTTP-self-call.
-    //
-    // For now: best-effort fetch to localhost. Same machine, same process,
-    // no overhead worth dodging.
+    // Forward to /alfred-deliver. Same-process self-call keeps the entire
+    // resolve+journal+deliver logic in one place.
     const aas = process.env.AAS_API_KEY || "";
     const port = process.env.AAS_PORT || "3100";
     const deliverBody = {
-      message: summary, // initial; main will compose butler-voice from template
+      message: summary,
       channel: channelHint,
       source_kind: "delegate",
       source_ref: decisionId,
@@ -492,7 +398,7 @@ export function registerAlfredDeliverRoutes(): void {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(deliverBody),
-        signal: AbortSignal.timeout(70_000),
+        signal: AbortSignal.timeout(30_000),
       });
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e);
@@ -518,3 +424,8 @@ export function registerAlfredDeliverRoutes(): void {
     });
   });
 }
+
+// Mark `fs` as referenced — kept in scope for future channel adapters that
+// need to read from disk (e.g. email send via a queue file). The `_` prefix
+// would be more idiomatic but tsc's noUnusedLocals doesn't see imports.
+void fs;
