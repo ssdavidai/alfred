@@ -191,6 +191,34 @@ if [[ -d /opt/hermes-lcm && ! -e "$HERMES_HOME/profiles/main/plugins/hermes-lcm"
     log "installed hermes-lcm plugin -> \$HERMES_HOME/profiles/main/plugins/hermes-lcm"
 fi
 
+# --- one-alfred plugin (the user-facing continuity layer) -------------------
+# Sir's principle: the user must feel they're talking to ONE Alfred, always.
+# Hermes' main/workers/heavy session split would otherwise mean a delegate-
+# completion message lands in a synthetic session that main has no memory
+# of. The one-alfred plugin closes that gap via three hooks:
+#   * pre_gateway_dispatch — inject ctrl-api's alfred_journal as context
+#     into main's inbound text on every channel-inbound message
+#   * pre_llm_call         — journal Sir's inbound message (audit)
+#   * post_llm_call        — journal main's outbound reply (audit)
+# Source baked at /opt/one-alfred by the Dockerfile. Main only — workers +
+# heavy never speak to Sir directly. See packages/ctrl/docs/design/one-alfred.md.
+#
+# REINSTALL ON IMAGE UPDATE: unlike hermes-lcm which is pinned to a SHA, this
+# plugin ships with our image and evolves with our releases. We refresh the
+# install on every supervisor boot if the source mtime is newer — keeps
+# updates simple (docker compose pull + restart is enough; no manual nuke).
+if [[ -d /opt/one-alfred ]]; then
+    mkdir -p "$HERMES_HOME/profiles/main/plugins"
+    DEST="$HERMES_HOME/profiles/main/plugins/one-alfred"
+    if [[ ! -d "$DEST" ]] \
+       || [[ /opt/one-alfred/__init__.py -nt "$DEST/__init__.py" ]] \
+       || [[ /opt/one-alfred/plugin.yaml -nt "$DEST/plugin.yaml" ]]; then
+        rm -rf "$DEST"
+        cp -r /opt/one-alfred "$DEST"
+        log "installed one-alfred plugin -> \$HERMES_HOME/profiles/main/plugins/one-alfred"
+    fi
+fi
+
 # --- LCM load-verification (background) --------------------------------------
 # hermes-lcm loads silently on success — no startup log line. A broken
 # install (wrong dir, partial copy, plugin contract mismatch with the

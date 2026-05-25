@@ -1,0 +1,4 @@
+name: one-alfred
+version: 0.1.0
+description: "One Alfred — bridges Hermes' per-session boundaries by injecting the ctrl-api journal into main's inbound context. See packages/ctrl/docs/design/one-alfred.md."
+author: "Alfred Black"

@@ -1,459 +1,216 @@
 /**
- * Tests for POST /api/v1/notifications — native Hermes channel delivery.
+ * Tests for POST /api/v1/notifications — the legacy entry point.
  *
- * Issue #45 replaced the silent no-op (a hangover from the retired
- * hermes-shim `message` handler, #40) with real delivery via a Hermes
- * `main`-profile cron job: create a one-shot-ish cron job with
- * `deliver=<channel>:<to>`, trigger it for immediate execution, poll the
- * job for its run outcome, then delete it.
+ * HISTORY (2026-05-25 hard switch — docs/design/one-alfred.md).
+ * The route was originally the direct cron-job delivery path with a
+ * deterministic byte-echo prompt. The new architecture moves the actual
+ * delivery + journalling into POST /api/v1/alfred-deliver; /notifications
+ * is now a thin forwarder that preserves the legacy body + response shape
+ * so `notify_principal` MCP callers keep working unchanged.
  *
- * These tests stub global `fetch` to simulate the Hermes `main` gateway's
- * cron HTTP API:
- *   - POST   /api/jobs            → returns a stable job id
- *   - POST   /api/jobs/{id}/run   → 200
- *   - GET    /api/jobs/{id}       → scripted job states per successive poll
- *   - DELETE /api/jobs/{id}       → 200
+ * What we test here is the forwarder behaviour only:
+ *   1. Missing message → 400.
+ *   2. A successful forward maps alfred-deliver's response to the
+ *      legacy { status:"delivered", delivered:true, channel, to, jobId }
+ *      shape (jobId = journal_id).
+ *   3. A failed forward (alfred-deliver returned non-ok) surfaces the
+ *      error and returns delivered:false.
  *
- * Covered behaviour:
- *   1. A job that runs ok with no delivery error → delivered:true (200).
- *   2. A job whose run records last_delivery_error → delivered:false (502).
- *   3. A job whose agent run errors → delivered:false (502).
- *   4. A missing message → 400 validation error.
- *   5. channel=webchat → 424 (no Hermes channel adapter to deliver onto).
+ * The deep coverage of channel resolution, journal-pending writes,
+ * Hermes webhook composition, delivery success/failure handling, etc.
+ * lives at the live /api/v1/alfred-deliver path. This test file is
+ * intentionally thin — it only proves the forwarder bridges shape
+ * correctly.
  */
-
 import { mock, describe, it, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import http from "node:http";
-import type { AddressInfo } from "node:net";
 
-// ---------------------------------------------------------------------------
-// fs mock — getGatewayToken() reads a token from disk, and (C8)
-// pickPrimaryChannel()/resolveDeliveryTarget read the Hermes session index.
-//
-// The session index is a per-test fixture: setSessions([...]) installs the
-// SessionEntry-shaped objects that the sessions.json read returns. Any read of
-// a path ending in sessions.json yields that fixture; every other read yields
-// the gateway token.
-// ---------------------------------------------------------------------------
-
-let sessionsFixture: Record<string, any> = {};
-function setSessions(entries: Array<Record<string, any>>): void {
-  sessionsFixture = {};
-  entries.forEach((e, i) => {
-    sessionsFixture[e.session_key ?? `s${i}`] = e;
-  });
-}
-
+// fs mock — getGatewayToken() reads from disk at module import. The new
+// forwarder doesn't need the token, but downstream helpers still do.
 const fsReadFileSync = mock.fn((p: any) => {
-  if (typeof p === "string" && p.endsWith("sessions.json")) {
-    return JSON.stringify(sessionsFixture);
+  if (typeof p === "string" && p.endsWith(".gateway-token")) {
+    return "stub-gateway-token-for-tests";
   }
-  return "fake-gateway-token";
+  if (typeof p === "string" && p.endsWith("sessions.json")) {
+    return "{}";
+  }
+  throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
 });
-const fsMock = {
+const fsExistsSync = mock.fn(() => true);
+// streams.ts mkdir's its data dir at import time — stub it so transitively
+// importing server.js (and therefore streams.ts) doesn't ENOENT in tests.
+const fsMkdirSync = mock.fn(() => undefined);
+const fsWriteFileSync = mock.fn(() => undefined);
+const fsAppendFileSync = mock.fn(() => undefined);
+const fsStatSync = mock.fn(() => ({ size: 0 }));
+const fsBundle = {
   readFileSync: fsReadFileSync,
-  writeFileSync: mock.fn(() => {}),
-  readdirSync: mock.fn(() => [] as any[]),
-  mkdirSync: mock.fn(),
-  existsSync: mock.fn(() => true),
-  statSync: mock.fn(() => ({ mtimeMs: 0, isDirectory: () => false, isFile: () => true })),
-  unlinkSync: mock.fn(),
-  renameSync: mock.fn(),
-  appendFileSync: mock.fn(),
-  openSync: mock.fn(() => 0),
-  readSync: mock.fn(() => 0),
-  closeSync: mock.fn(),
-  createReadStream: mock.fn(() => ({ pipe: mock.fn(), on: mock.fn() })),
-  Dirent: class Dirent { name = ""; isFile() { return true; } isDirectory() { return false; } },
-  promises: { mkdir: mock.fn(async () => undefined), writeFile: mock.fn(async () => undefined) },
+  existsSync: fsExistsSync,
+  mkdirSync: fsMkdirSync,
+  writeFileSync: fsWriteFileSync,
+  appendFileSync: fsAppendFileSync,
+  statSync: fsStatSync,
 };
 mock.module("node:fs", {
-  defaultExport: fsMock,
-  namedExports: {
-    readFileSync: fsMock.readFileSync,
-    writeFileSync: fsMock.writeFileSync,
-    readdirSync: fsMock.readdirSync,
-    mkdirSync: fsMock.mkdirSync,
-    existsSync: fsMock.existsSync,
-    statSync: fsMock.statSync,
-    unlinkSync: fsMock.unlinkSync,
-    renameSync: fsMock.renameSync,
-    appendFileSync: fsMock.appendFileSync,
-    openSync: fsMock.openSync,
-    readSync: fsMock.readSync,
-    closeSync: fsMock.closeSync,
-    createReadStream: fsMock.createReadStream,
-    Dirent: fsMock.Dirent,
+  defaultExport: fsBundle,
+  namedExports: fsBundle,
+});
+
+// fetch mock — intercept the self-call to /api/v1/alfred-deliver.
+type FetchReply = { ok: boolean; status: number; body: Record<string, unknown> };
+let nextReply: FetchReply = {
+  ok: true,
+  status: 200,
+  body: {
+    ok: true,
+    journal_id: "01STUBJOURNAL",
+    channel: "telegram",
+    chat_id: "432094090",
+    delivered_bytes: "Sir, here's your reminder.",
   },
-});
-
-mock.module("node:child_process", {
-  namedExports: {
-    execFile: mock.fn((..._args: any[]) => {
-      const cb = _args[_args.length - 1];
-      if (typeof cb === "function") cb(null, "{}", "");
-    }),
-    spawn: mock.fn(() => ({
-      stderr: { on: mock.fn() },
-      stdin: { write: mock.fn(), end: mock.fn() },
-      on: mock.fn(),
-    })),
-  },
-});
-
-// Speed up the delivery poll loop for tests.
-process.env.HERMES_NOTIFY_POLL_INTERVAL_MS = "20";
-process.env.HERMES_NOTIFY_TIMEOUT_MS = "2000";
-
-// ---------------------------------------------------------------------------
-// Server setup
-// ---------------------------------------------------------------------------
-
-const { createApiServer } = await import("../src/api/server.js");
-
-let server: http.Server;
-
-before(async () => {
-  server = createApiServer();
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-});
-
-after(async () => {
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-});
-
-// ---------------------------------------------------------------------------
-// fetch stub — simulates the Hermes main-gateway cron HTTP API.
-// ---------------------------------------------------------------------------
-
-interface CronScenario {
-  // Sequential job states returned by successive GET /api/jobs/{id} polls.
-  // The last entry repeats forever if the poll runs longer than the list.
-  jobStates: Array<{
-    last_status?: string | null;
-    last_error?: string | null;
-    last_delivery_error?: string | null;
-  } | null>;
-  createFails?: boolean;
-}
-
-let scenario: CronScenario = { jobStates: [{ last_status: null }] };
-let pollCallIndex = 0;
-let createdJobId = "test-job-id";
-const calls: { method: string; url: string; body?: any }[] = [];
+};
+const fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
 
 const originalFetch = globalThis.fetch;
+globalThis.fetch = ((url: any, init?: RequestInit) => {
+  const u = String(url);
+  fetchCalls.push({ url: u, init });
+  if (!u.includes("/api/v1/alfred-deliver")) {
+    throw new Error(`unexpected fetch in /notifications test: ${u}`);
+  }
+  return Promise.resolve(
+    new Response(JSON.stringify(nextReply.body), {
+      status: nextReply.status,
+      headers: { "Content-Type": "application/json" },
+    }),
+  );
+}) as typeof fetch;
 
-function installFetchStub() {
-  (globalThis as any).fetch = async (url: string, opts: any) => {
-    const method = (opts?.method ?? "GET").toUpperCase();
-    let body: any;
-    try { body = opts?.body ? JSON.parse(opts.body) : undefined; } catch { /* ignore */ }
-    calls.push({ method, url, body });
+process.env.AAS_API_KEY = "stub-aas-key";
+process.env.AAS_PORT = "3100";
 
-    // POST /api/jobs — create a job.
-    if (method === "POST" && /\/api\/jobs$/.test(url)) {
-      if (scenario.createFails) {
-        return new Response("boom", { status: 500 });
-      }
-      return new Response(
-        JSON.stringify({ job: { id: createdJobId } }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }
+const { registerNotificationRoutes } = await import(
+  "../src/api/routes/notifications.js"
+);
+const { matchRoute } = await import("../src/api/server.js");
 
-    // POST /api/jobs/{id}/run — trigger immediate execution.
-    if (method === "POST" && /\/api\/jobs\/[^/]+\/run$/.test(url)) {
-      return new Response(JSON.stringify({ job: { id: createdJobId } }), {
-        status: 200, headers: { "content-type": "application/json" },
-      });
-    }
+registerNotificationRoutes();
 
-    // DELETE /api/jobs/{id} — cleanup.
-    if (method === "DELETE" && /\/api\/jobs\/[^/]+$/.test(url)) {
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
-    }
-
-    // GET /api/jobs/{id} — scripted job state.
-    if (method === "GET" && /\/api\/jobs\/[^/]+$/.test(url)) {
-      const idx = Math.min(pollCallIndex, scenario.jobStates.length - 1);
-      pollCallIndex += 1;
-      const slot = scenario.jobStates[idx];
-      if (slot === null) {
-        return new Response(JSON.stringify({ error: "Job not found" }), { status: 404 });
-      }
-      return new Response(
-        JSON.stringify({ job: { id: createdJobId, ...slot } }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }
-
-    return new Response("not stubbed: " + url, { status: 404 });
-  };
-}
-
-function restoreFetch() {
-  (globalThis as any).fetch = originalFetch;
-}
-
-beforeEach(() => {
-  installFetchStub();
-  pollCallIndex = 0;
-  calls.length = 0;
-  // Default: a single most-recent Telegram DM session on record.
-  setSessions([
-    {
-      session_key: "tg-1",
-      platform: "telegram",
-      chat_type: "dm",
-      updated_at: "2026-05-20T10:00:00Z",
-      origin: { platform: "telegram", chat_id: "55501", chat_type: "dm" },
+async function callNotify(
+  body: unknown,
+): Promise<{ status: number; payload: Record<string, unknown> }> {
+  const match = matchRoute("POST", "/api/v1/notifications");
+  assert.ok(match, "POST /api/v1/notifications must be registered");
+  let status = 0;
+  let payload: Record<string, unknown> = {};
+  const res: any = {
+    statusCode: 0,
+    setHeader() {},
+    writeHead(s: number) {
+      status = s;
     },
-  ]);
-});
-
-after(() => {
-  restoreFetch();
-});
-
-// ---------------------------------------------------------------------------
-// HTTP helper
-// ---------------------------------------------------------------------------
-
-async function req(
-  method: string,
-  path: string,
-  body?: unknown,
-): Promise<{ status: number; data: any }> {
-  const addr = server.address() as AddressInfo;
-  const payload = body !== undefined ? JSON.stringify(body) : undefined;
-  return new Promise((resolve, reject) => {
-    const r = http.request(
-      {
-        hostname: "127.0.0.1",
-        port: addr.port,
-        path,
-        method,
-        headers: {
-          ...(payload
-            ? {
-                "Content-Type": "application/json",
-                "Content-Length": String(Buffer.byteLength(payload)),
-              }
-            : {}),
-        },
-      },
-      (response) => {
-        const chunks: Buffer[] = [];
-        response.on("data", (c: Buffer) => chunks.push(c));
-        response.on("end", () => {
-          const text = Buffer.concat(chunks).toString("utf-8");
-          let data: any = text;
-          try { data = JSON.parse(text); } catch { /* keep as text */ }
-          resolve({ status: response.statusCode || 0, data });
-        });
-      },
-    );
-    r.on("error", reject);
-    if (payload) r.write(payload);
-    r.end();
-  });
+    end(b: string) {
+      try {
+        payload = JSON.parse(b);
+      } catch {
+        payload = { raw: b };
+      }
+    },
+  };
+  try {
+    await match!.handler({
+      req: { method: "POST", headers: {} } as any,
+      res,
+      params: {},
+      body,
+      query: new URLSearchParams(),
+    });
+  } catch (e: any) {
+    // The route's ValidationError + NotFoundError + the like normally bubble
+    // up to server.ts's handleError which translates them to HTTP statuses;
+    // we replicate that translation here for the tests since we don't go
+    // through the full server.
+    if (e?.statusCode) {
+      status = e.statusCode;
+      try {
+        payload = { error: { code: e.code, message: e.message } };
+      } catch {
+        /* leave payload */
+      }
+    } else {
+      throw e;
+    }
+  }
+  return { status: status || res.statusCode, payload };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe("POST /api/v1/notifications — native Hermes channel delivery", () => {
-  it("delivers via a triggered Hermes cron job and returns delivered:true", async () => {
-    scenario = {
-      jobStates: [
-        { last_status: null },                                  // not run yet
-        { last_status: "ok", last_delivery_error: null },        // delivered
-      ],
+describe("POST /api/v1/notifications (forwarder)", () => {
+  beforeEach(() => {
+    fetchCalls.length = 0;
+    nextReply = {
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        journal_id: "01STUBJOURNAL",
+        channel: "telegram",
+        chat_id: "432094090",
+        delivered_bytes: "Sir, here's your reminder.",
+      },
     };
-
-    const r = await req("POST", "/api/v1/notifications", {
-      message: "Sir, the overnight categorization run finished.",
-      channel: "telegram",
-      to: "12345",
-      urgency: "normal",
-    });
-
-    assert.equal(r.status, 200);
-    assert.equal(r.data.delivered, true);
-    assert.equal(r.data.status, "delivered");
-    assert.equal(r.data.channel, "telegram");
-    assert.equal(r.data.to, "12345");
-
-    // The job was created with deliver="telegram:12345" and triggered.
-    const create = calls.find((c) => c.method === "POST" && /\/api\/jobs$/.test(c.url));
-    assert.ok(create, "should POST /api/jobs");
-    assert.equal(create!.body.deliver, "telegram:12345");
-    assert.ok(
-      String(create!.body.prompt).includes("Sir, the overnight categorization run finished."),
-      "prompt should carry the verbatim message",
-    );
-    assert.ok(
-      calls.some((c) => c.method === "POST" && /\/api\/jobs\/[^/]+\/run$/.test(c.url)),
-      "should trigger the job for immediate execution",
-    );
   });
 
-  it("reports a real delivery failure (502) when last_delivery_error is set", async () => {
-    scenario = {
-      jobStates: [
-        { last_status: null },
-        { last_status: "ok", last_delivery_error: "telegram: chat not found" },
-      ],
-    };
-
-    const r = await req("POST", "/api/v1/notifications", {
-      message: "test",
-      channel: "telegram",
-      to: "99999",
-    });
-
-    assert.equal(r.status, 502);
-    assert.equal(r.data.delivered, false);
-    assert.ok(/telegram: chat not found/.test(r.data.error), "error should surface the delivery failure");
-  });
-
-  it("reports a real error (502) when the cron agent run fails", async () => {
-    scenario = {
-      jobStates: [
-        { last_status: "error", last_error: "model timeout" },
-      ],
-    };
-
-    const r = await req("POST", "/api/v1/notifications", {
-      message: "test",
-      channel: "slack",
-      to: "C0123",
-    });
-
-    assert.equal(r.status, 502);
-    assert.equal(r.data.delivered, false);
-    assert.ok(/model timeout/.test(r.data.error));
-  });
-
-  it("rejects a missing message with a 400", async () => {
-    const r = await req("POST", "/api/v1/notifications", {
-      channel: "telegram",
-      to: "12345",
-    });
+  it("returns 400 when message is missing", async () => {
+    const r = await callNotify({});
     assert.equal(r.status, 400);
   });
 
-  it("rejects channel=webchat with a 424 — not a Hermes-deliverable platform", async () => {
-    const r = await req("POST", "/api/v1/notifications", {
-      message: "test",
-      channel: "webchat",
-      to: "someone",
-    });
-    assert.equal(r.status, 424);
-    assert.equal(r.data.status, "error");
-    assert.ok(/webchat/.test(r.data.error));
+  it("returns 400 when message is empty", async () => {
+    const r = await callNotify({ message: "   " });
+    assert.equal(r.status, 400);
   });
 
-  it("never returns a silent noop — the #40 no-op shape is gone", async () => {
-    scenario = {
-      jobStates: [{ last_status: "ok", last_delivery_error: null }],
-    };
-    const r = await req("POST", "/api/v1/notifications", {
-      message: "hello",
+  it("forwards to alfred-deliver and maps the response to the legacy shape", async () => {
+    const r = await callNotify({
+      message: "ping me",
       channel: "telegram",
-      to: "12345",
+      to: "432094090",
+      urgency: "normal",
     });
-    assert.notEqual(r.data.noop, true, "response must not carry noop:true");
-    assert.equal(r.data.delivered, true);
+    assert.equal(r.status, 200);
+    assert.equal(r.payload.delivered, true);
+    assert.equal(r.payload.status, "delivered");
+    assert.equal(r.payload.channel, "telegram");
+    assert.equal(r.payload.to, "432094090");
+    // jobId is the journal_id under the new path — same role (stable handle).
+    assert.equal(r.payload.jobId, "01STUBJOURNAL");
+    // Confirms the forward actually fired.
+    assert.equal(fetchCalls.length, 1);
+    const sent = JSON.parse(fetchCalls[0].init!.body as string);
+    assert.equal(sent.message, "ping me");
+    assert.equal(sent.channel, "telegram");
+    assert.equal(sent.to, "432094090");
+  });
+
+  it("propagates downstream errors as delivered:false with the original status", async () => {
+    nextReply = {
+      ok: false,
+      status: 502,
+      body: {
+        ok: false,
+        journal_id: "01PENDINGFAIL",
+        error: "hermes webhook returned 503",
+      },
+    };
+    const r = await callNotify({ message: "ping", channel: "telegram", to: "x" });
+    assert.equal(r.status, 502);
+    assert.equal(r.payload.delivered, false);
+    assert.equal(r.payload.status, "error");
+    assert.equal(r.payload.error, "hermes webhook returned 503");
+    assert.equal(r.payload.jobId, "01PENDINGFAIL");
   });
 });
 
-// ---------------------------------------------------------------------------
-// C8 — channel:"auto" resolves a DELIVERABLE channel from the Hermes session
-// index, never webchat→424 when any deliverable channel exists. The legacy
-// pickPrimaryChannel() read the Hermes-init-deleted openclaw.json and fell
-// through to "webchat", 424-ing the default channel.
-// ---------------------------------------------------------------------------
-
-describe("POST /api/v1/notifications — C8 auto-channel resolution", () => {
-  it("default channel:auto resolves the deliverable channel + recipient from the session index", async () => {
-    setSessions([
-      {
-        session_key: "tg-1",
-        platform: "telegram",
-        chat_type: "dm",
-        updated_at: "2026-05-20T10:00:00Z",
-        origin: { platform: "telegram", chat_id: "55501", chat_type: "dm" },
-      },
-    ]);
-    scenario = {
-      jobStates: [
-        { last_status: null },
-        { last_status: "ok", last_delivery_error: null },
-      ],
-    };
-
-    // No channel and no `to` — the default "auto" path.
-    const r = await req("POST", "/api/v1/notifications", {
-      message: "Sir, your brief is ready.",
-    });
-
-    assert.equal(r.status, 200, "auto must not 424 when a deliverable session exists");
-    assert.equal(r.data.delivered, true);
-    assert.equal(r.data.channel, "telegram");
-    assert.equal(r.data.to, "55501");
-
-    const create = calls.find((c) => c.method === "POST" && /\/api\/jobs$/.test(c.url));
-    assert.ok(create, "should POST /api/jobs");
-    assert.equal(create!.body.deliver, "telegram:55501");
-  });
-
-  it("auto prefers the most-recently-active deliverable channel, skipping webchat", async () => {
-    setSessions([
-      // most recent is webchat — must be skipped, not chosen
-      {
-        session_key: "wc-1",
-        platform: "webchat",
-        chat_type: "dm",
-        updated_at: "2026-05-20T12:00:00Z",
-        origin: { platform: "webchat", chat_id: "web-abc", chat_type: "dm" },
-      },
-      {
-        session_key: "sl-1",
-        platform: "slack",
-        chat_type: "dm",
-        updated_at: "2026-05-20T11:00:00Z",
-        origin: { platform: "slack", chat_id: "D0123", chat_type: "dm" },
-      },
-    ]);
-    scenario = {
-      jobStates: [
-        { last_status: null },
-        { last_status: "ok", last_delivery_error: null },
-      ],
-    };
-
-    const r = await req("POST", "/api/v1/notifications", {
-      message: "test",
-      channel: "auto",
-    });
-
-    assert.equal(r.status, 200);
-    assert.equal(r.data.channel, "slack", "auto must skip webchat and pick a deliverable channel");
-    assert.equal(r.data.to, "D0123");
-  });
-
-  it("auto with no deliverable session on record 424s honestly (no webchat fabrication)", async () => {
-    setSessions([]); // fresh tenant — no inbound messages yet
-    const r = await req("POST", "/api/v1/notifications", {
-      message: "test",
-    });
-    assert.equal(r.status, 424);
-    assert.equal(r.data.status, "error");
-    // Must NOT claim webchat — there is simply no recipient yet.
-    assert.notEqual(r.data.channel, "webchat");
-  });
+after(() => {
+  globalThis.fetch = originalFetch;
 });

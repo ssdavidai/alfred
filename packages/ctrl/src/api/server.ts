@@ -52,6 +52,8 @@ import { registerVaultIndexRoutes } from "./routes/vaultIndex.js";
 import { registerSystemRoutes } from "./routes/system.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
 import { registerTelegramRoutes } from "./routes/telegram.js";
+import { registerAlfredJournalRoutes } from "./routes/alfredJournal.js";
+import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -161,6 +163,12 @@ export function createApiServer(): http.Server {
   registerSystemRoutes();
   registerSettingsRoutes();
   registerTelegramRoutes();
+  // The one-Alfred continuity layer — alfred_journal + principal mapping
+  // (the persistence + lookup surface) plus alfred-deliver (the unified
+  // outbound delivery endpoint). Sir-facing UX invariant: there is only
+  // ONE Alfred, always. See docs/design/one-alfred.md.
+  registerAlfredJournalRoutes();
+  registerAlfredDeliverRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();

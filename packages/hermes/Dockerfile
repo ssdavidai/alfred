@@ -113,6 +113,22 @@ RUN git clone https://github.com/stephenschoettler/hermes-lcm /opt/hermes-lcm \
     && rm -rf /opt/hermes-lcm/.git
 
 # =============================================================================
+# Bake the `one-alfred` plugin (the user-facing continuity layer).
+# =============================================================================
+# Sir's principle: the user must feel they are talking to ONE Alfred, always.
+# Hermes' main/workers/heavy profile split + per-session keying means a
+# delegate-completion message lands in a synthetic session that main's actual
+# Telegram session has no memory of. The one-alfred plugin closes that gap by
+# (a) injecting ctrl-api's alfred_journal into main's inbound context via
+# pre_gateway_dispatch, and (b) journalling Sir's replies + main's responses
+# via pre_llm_call + post_llm_call. See packages/ctrl/docs/design/one-alfred.md.
+#
+# Lives at /opt/one-alfred in the image; supervisor.sh deploys it into
+# $HERMES_HOME/profiles/main/plugins/one-alfred at first boot (main only —
+# workers/heavy never speak to Sir directly so they don't need the bridge).
+COPY packages/hermes/plugins/one-alfred /opt/one-alfred
+
+# =============================================================================
 # Bake the MCP bundle.
 # =============================================================================
 # The 5-app stdio bundle + its node_modules, plus the ctrl-server.mjs HTTP

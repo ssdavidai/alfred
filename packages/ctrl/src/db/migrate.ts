@@ -15,6 +15,7 @@
 //     the single-file bundle with no filesystem read at runtime.
 import type { DatabaseSync } from "node:sqlite";
 import m0001 from "./migrations/0001_fix_pack.sql";
+import m0002 from "./migrations/0002_alfred_journal.sql";
 
 interface Migration {
   version: number;
@@ -23,7 +24,10 @@ interface Migration {
 }
 
 // Ordered, append-only. Each version is applied exactly once, in order.
-const MIGRATIONS: Migration[] = [{ version: 1, name: "fix_pack", sql: m0001 }];
+const MIGRATIONS: Migration[] = [
+  { version: 1, name: "fix_pack",       sql: m0001 },
+  { version: 2, name: "alfred_journal", sql: m0002 },
+];
 
 /**
  * Apply every migration whose version is greater than the DB's current

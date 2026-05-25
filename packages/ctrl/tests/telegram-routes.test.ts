@@ -385,22 +385,19 @@ describe("Lane I — /api/v1/channels/telegram/* (per-profile .env)", () => {
     assert.ok(restartCall, "expected hermes restart on DELETE");
   });
 
-  it("POST /pair → returns { code, expires_at }", async () => {
-    dockerExecOverride = async (_svc, command) => {
-      if (command.includes("pairing")) {
-        return "Pairing code: ABC-123-XYZ (expires in 1 hour)\n";
-      }
-      return defaultDockerExec(_svc, command);
-    };
-    const { status, payload } = await call(
-      "POST",
-      "/api/v1/channels/telegram/pair",
-    );
-    assert.equal(status, 200, JSON.stringify(payload));
-    assert.ok(typeof payload.code === "string" && payload.code.length > 0, "code missing");
-    assert.ok(
-      typeof payload.expires_at === "string" && !Number.isNaN(Date.parse(payload.expires_at)),
-      `expires_at must be ISO, got ${payload.expires_at}`,
+  // POST /pair was removed 2026-05-25 — the underlying `hermes pairing mint`
+  // CLI subcommand never existed (the real CLI is list/approve/revoke/clear).
+  // The unified Telegram card on /channels now uses POST /test (send a real
+  // probe) + DELETE /chats/:user_id (revoke an existing pairing). See
+  // packages/ctrl/src/api/routes/telegram.ts module header.
+  //
+  // Direct matchRoute (not the call() helper which asserts registration) so
+  // we can assert the *absence* of the route.
+  it("POST /pair is NOT registered (route removed 2026-05-25)", () => {
+    assert.equal(
+      matchRoute("POST", "/api/v1/channels/telegram/pair"),
+      null,
+      "/api/v1/channels/telegram/pair must NOT be re-introduced",
     );
   });
 });

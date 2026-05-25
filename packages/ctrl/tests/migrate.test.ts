@@ -32,13 +32,26 @@ describe("state.db migration runner", () => {
     db.close();
   });
 
-  it("runMigrations adds processed_at and bumps user_version to 1", () => {
+  it("runMigrations adds processed_at and bumps user_version to latest", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(schema);
     const v = runMigrations(db);
-    assert.equal(v, 1, "migrated to version 1");
-    assert.equal(userVersion(db), 1);
-    assert.ok(cols(db, "observation").includes("processed_at"), "processed_at present after migrate");
+    // The latest version moves as new migrations land. Today: 2
+    // (0001_fix_pack + 0002_alfred_journal).
+    assert.equal(v, 2, "migrated to latest version");
+    assert.equal(userVersion(db), 2);
+    assert.ok(cols(db, "observation").includes("processed_at"), "0001: processed_at present after migrate");
+    // 0002: alfred_journal + alfred_principal tables present.
+    const tables = (
+      db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as {
+        name: string;
+      }[]
+    ).map((r) => r.name);
+    assert.ok(tables.includes("alfred_journal"), "0002: alfred_journal table created");
+    assert.ok(
+      tables.includes("alfred_principal"),
+      "0002: alfred_principal table created",
+    );
     db.close();
   });
 
@@ -47,12 +60,19 @@ describe("state.db migration runner", () => {
     db.exec(schema);
     runMigrations(db);
     const v2 = runMigrations(db);
-    assert.equal(v2, 1);
+    assert.equal(v2, 2);
     assert.equal(
       cols(db, "observation").filter((c) => c === "processed_at").length,
       1,
       "no duplicate-column error on re-run",
     );
+    // Owner principal stays a single row (INSERT OR IGNORE).
+    const ownerCount = (
+      db
+        .prepare("SELECT COUNT(*) as n FROM alfred_principal WHERE id='owner'")
+        .get() as { n: number }
+    ).n;
+    assert.equal(ownerCount, 1, "owner principal is inserted once, not duplicated");
     db.close();
   });
 });

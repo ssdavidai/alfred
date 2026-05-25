@@ -392,20 +392,35 @@ async function deliverViaCron(
 
 export function registerNotificationRoutes(): void {
   // POST /api/v1/notifications — agent-initiated channel notification to Sir.
-  // Used by `notify_principal` (MCP) and any platform code pushing to Sir.
   //
-  // Body: {
-  //   message:  string (required)          — the text Sir sees
-  //   channel?: "slack" | "telegram" | …   — defaults to tenant's primary
-  //   to?:      channel-specific recipient — auto-resolved if omitted
-  //   urgency?: "low" | "normal" | "high"  — tags the cron job name
-  // }
+  // HISTORY (2026-05-25 hard switch).
+  // ─────────────────────────────────
+  // This route was originally the direct cron-job delivery path: build a
+  // Hermes main-profile cron job with a "ROLE: deterministic message-relay"
+  // prompt that BYTE-ECHOED whatever the agent wrote. That implementation
+  // shipped before the "one-Alfred" UX principle (the user must feel they're
+  // talking to ONE Alfred, always — not a relay-bot and not a channel-pusher).
+  // See docs/design/one-alfred.md.
   //
-  // DELIVERY (issue #45): real channel delivery via a Hermes `main`-profile
-  // cron job with `deliver=<channel>:<to>`. See the module header for why
-  // this is the verified mechanism and why `/v1/runs` is not. The old
-  // hermes-shim `message` no-op (retired in #40) is gone — this path now
-  // genuinely puts a message on the channel.
+  // The hard switch: this route is now a thin forwarder to
+  // POST /api/v1/alfred-deliver — the unified butler-voice delivery path
+  // that:
+  //   (a) journals the exchange in alfred_journal (so Sir's main session
+  //       knows about it on his next reply, via the one-alfred plugin's
+  //       pre_gateway_dispatch hook),
+  //   (b) composes the message in main's actual butler voice rather than
+  //       byte-echoing whatever the workers agent dumped in,
+  //   (c) returns delivered:true only when the channel adapter confirms.
+  //
+  // The body shape, response shape, and error semantics are preserved so
+  // `notify_principal` MCP callers and any third-party code calling this
+  // endpoint keep working unmodified. Tool name unchanged, behaviour upgraded.
+  //
+  // The OLD cron-based helpers (deliverViaCron, the deterministic-relay
+  // prompt, the wrap_response / repeat:2 / sentinel-fence machinery) are
+  // dead code as of this switch and will be removed in a follow-up sweep.
+  // They're left in the file for one release in case the new path needs
+  // an emergency revert.
   addRoute("POST", "/api/v1/notifications", async ({ res, body }) => {
     const b = body as Record<string, unknown> | undefined;
 
@@ -413,91 +428,67 @@ export function registerNotificationRoutes(): void {
       throw new ValidationError("message is required");
     }
 
-    const message = b.message as string;
-    const urgency = typeof b.urgency === "string" ? b.urgency : "normal";
-    const channelHint = typeof b.channel === "string" && b.channel.length > 0
-      ? b.channel
-      : "auto";
+    // Forward to /api/v1/alfred-deliver. Same-process self-call — keeps the
+    // entire validation + channel-resolution + journalling logic in one
+    // place (alfredDeliver.ts) rather than smearing it across two routes.
+    const aas = process.env.AAS_API_KEY || "";
+    const port = process.env.AAS_PORT || "3100";
 
-    const explicitTo = typeof b.to === "string" && b.to.length > 0
-      ? (b.to as string)
-      : undefined;
+    const forwardBody: Record<string, unknown> = {
+      message: b.message,
+    };
+    if (typeof b.channel === "string") forwardBody.channel = b.channel;
+    if (typeof b.to === "string") forwardBody.to = b.to;
+    if (typeof b.urgency === "string") forwardBody.urgency = b.urgency;
+    if (typeof b.source_kind === "string") forwardBody.source_kind = b.source_kind;
+    if (typeof b.source_ref === "string") forwardBody.source_ref = b.source_ref;
+    if (typeof b.principal_note === "string")
+      forwardBody.principal_note = b.principal_note;
+    if (typeof b.source_headline === "string")
+      forwardBody.source_headline = b.source_headline;
+    if (typeof b.summary === "string") forwardBody.summary = b.summary;
 
-    let channel: string;
-    let to: string | undefined;
-
-    if (channelHint === "auto") {
-      // C8: resolve the default channel + recipient from the Hermes session
-      // index — the most-recently-active DELIVERABLE channel (never webchat).
-      const auto = resolveAutoTarget();
-      if (auto) {
-        channel = auto.channel;
-        // An explicit body.to overrides the resolved recipient but keeps the
-        // resolved (deliverable) channel.
-        to = explicitTo ?? auto.to;
-      } else {
-        // No deliverable session on record (fresh tenant, no inbound message).
-        sendJson(res, 424, {
-          status: "error",
-          error:
-            "channel=auto could not resolve a deliverable channel — Sir has no " +
-            "inbound message on any messaging platform yet. Pass body.channel " +
-            "and body.to explicitly, or have Sir send one message first.",
-        });
-        return;
-      }
-    } else {
-      channel = channelHint;
-      to = explicitTo ?? resolveRecipient(channel);
-    }
-
-    if (!to) {
-      sendJson(res, 424, {
+    let resp: Response;
+    try {
+      resp = await fetch(`http://127.0.0.1:${port}/api/v1/alfred-deliver`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${aas}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(forwardBody),
+        signal: AbortSignal.timeout(70_000),
+      });
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e);
+      console.error(
+        `[notifications→alfred-deliver] forward failed: ${errMsg}`,
+      );
+      sendJson(res, 502, {
         status: "error",
-        error: `no recipient on channel=${channel} — pass body.to explicitly or have Sir send at least one inbound message first`,
+        delivered: false,
+        error: `alfred-deliver unreachable: ${errMsg}`,
       });
       return;
     }
-
-    // webchat has no Hermes channel adapter to deliver onto — Hermes' cron
-    // `deliver` targets a connected messaging platform. Surface this honestly
-    // rather than create a cron job the scheduler can never route.
-    if (channel === "webchat") {
-      sendJson(res, 424, {
-        status: "error",
-        error:
-          "channel=webchat is not a Hermes-deliverable messaging platform — " +
-          "pick a connected channel (slack/telegram/discord/whatsapp/signal) or pass body.channel explicitly",
-      });
-      return;
+    const text = await resp.text().catch(() => "");
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      /* leave parsed = {} */
     }
-
-    const result = await deliverViaCron(channel, to, message, urgency);
-
-    if (result.ok) {
-      sendJson(res, 200, {
-        status: "delivered",
-        delivered: true,
-        channel,
-        to,
-        urgency,
-        jobId: result.jobId,
-      });
-      return;
-    }
-
-    // Real delivery failure — never a silent noop. 502: ctrl-api reached but
-    // the downstream Hermes delivery path failed.
-    console.error(
-      `[notifications] delivery failed — channel=${channel} to=${to} urgency=${urgency}: ${result.error}`,
-    );
-    sendJson(res, 502, {
-      status: "error",
-      delivered: false,
-      channel,
-      to,
-      jobId: result.jobId,
-      error: result.error,
+    // Map alfred-deliver's response shape to the legacy notifications
+    // response shape (status/delivered/channel/to/jobId/error). jobId is
+    // now journal_id — same role: a stable handle the caller can grep
+    // logs / metrics with.
+    sendJson(res, resp.status, {
+      status: resp.ok ? "delivered" : "error",
+      delivered: Boolean(parsed.ok),
+      channel: parsed.channel,
+      to: parsed.chat_id,
+      jobId: parsed.journal_id,
+      ...(parsed.error ? { error: parsed.error } : {}),
     });
   });
 }
