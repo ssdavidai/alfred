@@ -105,6 +105,200 @@ async def list_decisions_by_state(state: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------
+# Stuck-dispatching recovery (Sir-incident 2026-05-25)
+# ---------------------------------------------------------------------
+
+
+# A ``state=dispatching`` decision is in flight for as long as
+# route_decision is mid-dispatch (Hermes clerk call). After
+# DISPATCHING_STALE_MINUTES has passed and the decision is still
+# ``dispatching``, the activity is presumed dead and the decision is
+# stuck. The workflow's normal list filter (open|reversed|executing)
+# doesn't see ``dispatching``, so without this recovery the card is
+# invisible forever.
+#
+# 10 minutes is the heuristic: longer than the Hermes 900s ceiling on
+# the workers profile is the strict upper bound (900s ≈ 15min), but
+# in practice clerk completes in 60-180s on the delegate path. 10min
+# gives ~3-10x slack over typical, surfaces a stuck card within one
+# Reflection window (daily 2am), and won't race a healthy slow
+# clerk. If we ever see false-positive recoveries (clerk completed
+# at minute 12 while we already PATCHed to executing) the only
+# downside is that check_decision_outcomes picks up the executing
+# decision normally — no double-dispatch (#55 idempotency holds).
+DISPATCHING_STALE_MINUTES = 10
+
+
+def _parse_iso(ts: str) -> datetime | None:
+    """Parse the ISO timestamp ctrl-api writes for ``created`` (always
+    UTC, trailing ``Z``). Returns None on any parse failure so the
+    recovery pass degrades to skip rather than crash."""
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    s = ts.strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+@activity.defn
+async def recover_stuck_dispatching() -> dict[str, Any]:
+    """Sweep ``state=dispatching`` decisions older than
+    ``DISPATCHING_STALE_MINUTES`` and unstick them.
+
+    Two branches, by ``side_effects.agent_dispatched``:
+
+      * ``True`` → the Hermes call landed but the final ``executing``
+        PATCH was dropped (route_decision's activity timed out
+        between the dispatch and the state-write). PATCH to
+        ``executing`` so check_decision_outcomes picks it up.
+      * ``False`` / missing → presume the dispatch crashed. PATCH back
+        to ``open`` so the next tick's route_decision pass re-routes
+        cleanly (the #55 idempotency guard relies on ``dispatching``
+        being a recent thing; an old ``dispatching`` is treated as
+        crashed).
+
+    Every PATCH is audit-logged via ``POST /api/v1/state/audit`` with
+    ``action_type=state-change`` and ``source=decision_router.recovery``
+    so production can count occurrences.
+
+    Returns ``{scanned, recovered, reset_to_open,
+    promoted_to_executing}`` for observability.
+    """
+    scanned = 0
+    recovered = 0
+    reset_to_open = 0
+    promoted_to_executing = 0
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        minutes=DISPATCHING_STALE_MINUTES,
+    )
+
+    async with _http() as client:
+        resp = await client.get(
+            "/api/v1/decisions?state=dispatching&limit=500",
+        )
+        resp.raise_for_status()
+        rows = resp.json().get("decisions", []) or []
+        scanned = len(rows)
+
+        for d in rows:
+            decision_id = str(d.get("id") or "").strip()
+            if not decision_id:
+                continue
+            created = _parse_iso(str(d.get("created") or ""))
+            if created is None:
+                # Missing/unparseable created — be conservative and
+                # skip. Workflow logs scanned-vs-recovered so a
+                # systematic skip surfaces.
+                continue
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if created > cutoff:
+                continue  # still in flight, leave alone
+
+            side_effects = d.get("side_effects") or {}
+            if not isinstance(side_effects, dict):
+                side_effects = {}
+            agent_dispatched = bool(side_effects.get("agent_dispatched"))
+
+            new_state = "executing" if agent_dispatched else "open"
+            reason = (
+                "agent_dispatched=true; final state-write dropped — "
+                "promoting to executing"
+                if agent_dispatched
+                else "agent_dispatched=false/missing; presumed crash — "
+                "resetting to open for re-routing"
+            )
+
+            try:
+                patch_resp = await client.patch(
+                    f"/api/v1/decisions/{decision_id}",
+                    json={"state": new_state},
+                )
+                patch_resp.raise_for_status()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "decision_router.recover_stuck_dispatching: PATCH "
+                    "failed decision=%s new_state=%s err=%s",
+                    decision_id, new_state, exc,
+                )
+                continue
+
+            recovered += 1
+            if new_state == "executing":
+                promoted_to_executing += 1
+            else:
+                reset_to_open += 1
+
+            # Audit-emit so production can count. We post directly to
+            # /api/v1/state/audit (the StateClient envelope) rather
+            # than going through StateClient here — the existing _http
+            # client already holds the same bearer token and base URL,
+            # so this keeps the activity dependency-light and parity
+            # with the rest of decision_router's HTTP calls.
+            try:
+                audit_resp = await client.post(
+                    "/api/v1/state/audit",
+                    json={
+                        "action_type": "state-change",
+                        "actor": "decision_router",
+                        "source": "decision_router.recovery",
+                        "target_path": f"decision/{decision_id}.md",
+                        "target_kind": "decision",
+                        "summary": (
+                            f"recovery: decision/{decision_id} "
+                            f"dispatching → {new_state} "
+                            f"({reason})"
+                        ),
+                        "changes": {
+                            "state": {
+                                "from": "dispatching",
+                                "to": new_state,
+                            },
+                            "age_minutes": (
+                                (
+                                    datetime.now(timezone.utc) - created
+                                ).total_seconds()
+                                / 60.0
+                            ),
+                            "agent_dispatched": agent_dispatched,
+                        },
+                        "mode": "live",
+                    },
+                )
+                # Best-effort: an audit-write failure doesn't roll
+                # back the recovery PATCH that already landed.
+                if audit_resp.status_code >= 400:
+                    logger.warning(
+                        "decision_router.recover_stuck_dispatching: "
+                        "audit POST returned %s for decision=%s",
+                        audit_resp.status_code, decision_id,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "decision_router.recover_stuck_dispatching: "
+                    "audit POST failed decision=%s err=%s",
+                    decision_id, exc,
+                )
+
+            logger.warning(
+                "decision_router.recover_stuck_dispatching: "
+                "unstuck decision=%s dispatching → %s (%s)",
+                decision_id, new_state, reason,
+            )
+
+    return {
+        "scanned": scanned,
+        "recovered": recovered,
+        "reset_to_open": reset_to_open,
+        "promoted_to_executing": promoted_to_executing,
+    }
+
+
+# ---------------------------------------------------------------------
 # Forward routing (state=open → executing | completed)
 # ---------------------------------------------------------------------
 
