@@ -718,6 +718,28 @@ query getSshInfo {
   entities: []
 }
 
+// Lane III — Telegram channel on /channels. Four ops, all proxied to
+// ctrl-api under /api/v1/channels/telegram/* (Lane I owns the backend).
+query getTelegramChannelStatus {
+  fn: import { getTelegramChannelStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+action setTelegramBotToken {
+  fn: import { setTelegramBotToken } from "@src/dashboard/operations",
+  entities: []
+}
+
+action pairTelegramChat {
+  fn: import { pairTelegramChat } from "@src/dashboard/operations",
+  entities: []
+}
+
+action disconnectTelegram {
+  fn: import { disconnectTelegram } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
   entities: []

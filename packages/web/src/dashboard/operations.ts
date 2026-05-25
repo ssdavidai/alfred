@@ -134,6 +134,53 @@ export const getSshInfo = async (_args: unknown, context: any) => {
   return proxyToTenant(instance, { path: "/api/v1/system/ssh-info" });
 };
 
+// Lane III — Telegram channel on /channels. Backed by Lane I's ctrl-api
+// endpoints under /api/v1/channels/telegram/*. Shape:
+//   getTelegramChannelStatus → { configured, bot_handle, last_message_at,
+//                                state, error }   (state lives in
+//                                telegramCardCore.TelegramState)
+//   setTelegramBotToken      → 200 { ok, state }
+//   pairTelegramChat         → { code, expires_at }
+//   disconnectTelegram       → 200 { ok, state: "unconfigured" }
+export const getTelegramChannelStatus = async (
+  _args: unknown,
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/telegram/status",
+  });
+};
+
+export const setTelegramBotToken = async (
+  args: { token: string },
+  context: any,
+) => {
+  if (!args?.token?.trim()) throw new HttpError(400, "token required");
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PUT",
+    path: "/api/v1/channels/telegram/token",
+    body: { token: args.token.trim() },
+  });
+};
+
+export const pairTelegramChat = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/telegram/pair",
+  });
+};
+
+export const disconnectTelegram = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: "/api/v1/channels/telegram/token",
+  });
+};
+
 // ============================================================
 // Dashboard Home
 // ============================================================

@@ -17,12 +17,21 @@ import {
   getVexaAutoJoin,
   setVexaAutoJoin,
   getSshInfo,
+  getTelegramChannelStatus,
+  setTelegramBotToken,
+  pairTelegramChat,
+  disconnectTelegram,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import {
   deriveTerminalCardState,
   type SshInfo,
 } from "./terminalCardCore";
+import {
+  deriveTelegramCardState,
+  isProbablyValidBotToken,
+  type TelegramStatus,
+} from "./telegramCardCore";
 
 // F57/C14 — the email card reads the live ctrl-api status, not a phantom
 // Instance row. `inbox_address` is only present once `configured`.
@@ -468,22 +477,10 @@ export default function ChannelsPage() {
             </p>
           </ChannelCard>
 
-          {/* Telegram — native Hermes adapter */}
-          <ChannelCard
-            name="Telegram"
-            address="Native adapter"
-            note="For when you're abroad."
-            status="available"
-          >
-            <p
-              className="font-body italic text-[13px] mt-4"
-              style={{ color: "var(--marginalia)" }}
-            >
-              Built into the Hermes runtime. Pair a Telegram bot token in
-              the Hermes config; first contact is confirmed by DM pairing
-              on the Devices page.
-            </p>
-          </ChannelCard>
+          {/* Telegram — Lane III: live card backed by ctrl-api. The four
+              visual states (unconfigured / configured_starting /
+              configured_running / error) come from telegramCardCore. */}
+          <TelegramCard />
 
           {/* Sir #8 — Terminal: SSH straight into the VM + `docker exec`
               into Hermes for the chattiest, lowest-latency door. */}
@@ -602,6 +599,8 @@ function ConnectBlock({ hermesExec }: { hermesExec: string }) {
   );
 }
 
+type ChannelStatus = "active" | "available" | "soon" | "starting" | "error";
+
 function ChannelCard({
   name,
   address,
@@ -612,29 +611,32 @@ function ChannelCard({
   name: string;
   address: string;
   note: string;
-  status: "active" | "available" | "soon";
+  status: ChannelStatus;
   children?: React.ReactNode;
 }) {
+  const pillColor =
+    status === "active" || status === "error"
+      ? "var(--brass)"
+      : "var(--marginalia)";
+  const pillText =
+    status === "active"
+      ? "Connected"
+      : status === "soon"
+        ? "Coming soon"
+        : status === "starting"
+          ? "Starting"
+          : status === "error"
+            ? "Needs attention"
+            : "Not connected";
   return (
     <div className="border border-rule p-6 card-hover h-full">
       <div className="flex items-baseline justify-between mb-3">
         <span className="font-display text-3xl">{name}</span>
         <span
           className="font-mono text-[10px] uppercase tracking-[0.22em] font-extrabold"
-          style={{
-            color:
-              status === "active"
-                ? "var(--brass)"
-                : status === "soon"
-                  ? "var(--marginalia)"
-                  : "var(--marginalia)",
-          }}
+          style={{ color: pillColor }}
         >
-          {status === "active"
-            ? "Connected"
-            : status === "soon"
-              ? "Coming soon"
-              : "Not connected"}
+          {pillText}
         </span>
       </div>
       <div
@@ -648,5 +650,274 @@ function ChannelCard({
       </div>
       {children}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Lane III — Telegram card. State derivation lives in telegramCardCore;
+// the component below is the React surface + form plumbing only. All four
+// visual states render inline off the derived `card.state` so we avoid a
+// fan-out of tiny sub-components.
+// ---------------------------------------------------------------------------
+
+function TelegramCard() {
+  const { data: statusData, refetch } = useQuery(
+    getTelegramChannelStatus,
+    undefined,
+    { retry: false },
+  );
+  const status = (statusData as TelegramStatus | undefined) ?? null;
+  const card = deriveTelegramCardState({ status });
+
+  // Setup-state form
+  const [token, setToken] = useState("");
+  const [showToken, setShowToken] = useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveErr, setSaveErr] = useState<string | null>(null);
+  // Running-state pairing
+  const [pairBusy, setPairBusy] = useState(false);
+  const [code, setCode] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [pairErr, setPairErr] = useState<string | null>(null);
+  // Shared disconnect
+  const [discBusy, setDiscBusy] = useState(false);
+
+  const trimmed = token.trim();
+  const tokenValid = isProbablyValidBotToken(trimmed);
+  const tokenHint =
+    trimmed.length > 0 && !tokenValid
+      ? "That doesn't look like a bot token (shape is digits:secret)."
+      : null;
+
+  async function save() {
+    if (!tokenValid) return;
+    setSaveBusy(true);
+    setSaveErr(null);
+    try {
+      await setTelegramBotToken({ token: trimmed });
+      setToken("");
+      refetch();
+    } catch (e: any) {
+      setSaveErr(e?.message ?? e?.data?.error ?? "Couldn't save the token.");
+    } finally {
+      setSaveBusy(false);
+    }
+  }
+
+  async function pair() {
+    setPairBusy(true);
+    setPairErr(null);
+    try {
+      const r: any = await pairTelegramChat({});
+      setCode(r?.code ?? null);
+    } catch (e: any) {
+      setPairErr(e?.message ?? e?.data?.error ?? "Couldn't get a code.");
+    } finally {
+      setPairBusy(false);
+    }
+  }
+
+  async function disconnect() {
+    if (discBusy) return;
+    setDiscBusy(true);
+    try {
+      await disconnectTelegram({});
+      setCode(null);
+      refetch();
+    } catch (e) {
+      console.error("telegram disconnect failed", e);
+    } finally {
+      setDiscBusy(false);
+    }
+  }
+
+  function copyCode() {
+    if (!code) return;
+    navigator.clipboard?.writeText(code);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  const address =
+    card.state === "configured_running"
+      ? card.heading
+      : card.state === "configured_starting"
+        ? "Restarting…"
+        : card.state === "error"
+          ? "Token rejected"
+          : "Not yet configured";
+
+  return (
+    <ChannelCard
+      name="Telegram"
+      address={address}
+      note="For when you're abroad."
+      status={card.pill}
+    >
+      {card.state === "unconfigured" && (
+        <div className="mt-5 space-y-3">
+          <div
+            className="font-mono text-[10px] uppercase tracking-[0.22em]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Bot token
+          </div>
+          <div className="flex gap-2 items-baseline">
+            <input
+              type={showToken ? "text" : "password"}
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+              placeholder="123456789:ABC-…"
+              className="flex-1 bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+            />
+            <button
+              type="button"
+              onClick={() => setShowToken((s) => !s)}
+              className="btn-link"
+            >
+              {showToken ? "Hide" : "Show"}
+            </button>
+            <button
+              onClick={save}
+              disabled={saveBusy || !tokenValid}
+              className="btn-ghost"
+            >
+              {saveBusy ? "…" : "Save token"}
+            </button>
+          </div>
+          {tokenHint && (
+            <p
+              className="font-body italic text-[12px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {tokenHint}
+            </p>
+          )}
+          <p
+            className="font-body italic text-[12px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Get one from @BotFather on Telegram: send <code>/newbot</code>,
+            give it a name and a username, and paste the token it returns
+            above.
+          </p>
+          {saveErr && (
+            <p
+              className="font-body italic text-[13px]"
+              style={{ color: "var(--brass)" }}
+            >
+              {saveErr}
+            </p>
+          )}
+        </div>
+      )}
+
+      {card.state === "configured_starting" && (
+        <div className="mt-5 flex items-baseline gap-2">
+          <span
+            className="font-mono text-[12px] animate-pulse"
+            style={{ color: "var(--marginalia)" }}
+          >
+            ●
+          </span>
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Hermes is picking up the new token. This usually takes a few
+            seconds.
+          </p>
+        </div>
+      )}
+
+      {card.state === "configured_running" && (
+        <div className="mt-5 space-y-4">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            {card.description}
+          </p>
+          {code ? (
+            <div className="space-y-2">
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Pairing code
+              </div>
+              <div className="flex items-center gap-2">
+                <code
+                  className="flex-1 font-mono text-[20px] tracking-[0.35em] text-center border border-rule p-3"
+                  style={{ color: "var(--ink)" }}
+                >
+                  {code}
+                </code>
+                <button onClick={copyCode} className="btn-ghost">
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+              <p
+                className="font-body italic text-[12px]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                DM <code>/start {code}</code> to your bot within 5 minutes.
+              </p>
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-3 items-baseline">
+              <button
+                onClick={pair}
+                disabled={pairBusy}
+                className="btn-ghost"
+              >
+                {pairBusy ? "…" : "Pair this chat"}
+              </button>
+              <button onClick={() => refetch()} className="btn-link">
+                Test connection
+              </button>
+              <button
+                onClick={disconnect}
+                disabled={discBusy}
+                className="btn-link"
+              >
+                Disconnect
+              </button>
+            </div>
+          )}
+          {pairErr && (
+            <p
+              className="font-body italic text-[13px]"
+              style={{ color: "var(--brass)" }}
+            >
+              {pairErr}
+            </p>
+          )}
+        </div>
+      )}
+
+      {card.state === "error" && (
+        <div className="mt-5 space-y-3">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--brass)" }}
+          >
+            {card.description}
+          </p>
+          <div className="flex gap-3 items-baseline">
+            <button onClick={() => refetch()} className="btn-ghost">
+              Try again
+            </button>
+            <button
+              onClick={disconnect}
+              disabled={discBusy}
+              className="btn-link"
+            >
+              Disconnect
+            </button>
+          </div>
+        </div>
+      )}
+    </ChannelCard>
   );
 }
