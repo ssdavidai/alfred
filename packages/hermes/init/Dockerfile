@@ -43,15 +43,12 @@ RUN pip install --no-cache-dir --no-deps /alfred-src
 
 # Jinja2 — renders the per-profile Hermes config.yaml + .env from .njk
 # templates (Nunjucks `.njk` is a Jinja2-compatible subset here).
-# ruamel.yaml — round-trip mutator for render_telegram_gateway.py;
-# PyYAML safe_load→safe_dump would strip every comment in config.yaml.
-RUN pip install --no-cache-dir "jinja2==3.1.6" "ruamel.yaml==0.18.6"
+RUN pip install --no-cache-dir "jinja2==3.1.6"
 
 # Build context is the alfred-black monorepo root. All COPY paths below are
 # repo-relative.
 COPY packages/hermes/init/entrypoint.sh        ./entrypoint.sh
 COPY packages/hermes/init/render_hermes.py     ./render_hermes.py
-COPY packages/hermes/init/render_telegram_gateway.py ./render_telegram_gateway.py
 COPY packages/hermes/init/sure-bootstrap.rb    ./sure-bootstrap.rb
 COPY packages/hermes/init/sure-mutate-base.rb  ./sure-mutate-base.rb
 COPY packages/hermes/init/sure-account-mutate.rb    ./sure-account-mutate.rb

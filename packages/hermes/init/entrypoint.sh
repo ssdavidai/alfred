@@ -430,20 +430,17 @@ for profile in "${PROFILES[@]}"; do
     echo "[init] Rendered Hermes profile: $profile"
 done
 
-# --- 6b. Ensure gateway.platforms.telegram on the main profile ---------------
-# Hermes' built-in Telegram platform is enabled iff config.yaml has the
-# `gateway.platforms.telegram` block; the token is then picked up from
-# TELEGRAM_BOT_TOKEN (gateway/config.py:1243). render_hermes.py is
-# seed-only (config.yaml is operator-owned), so this idempotent step
-# backfills the block on every boot. Preserves operator-set values
-# (e.g. `enabled: false`) untouched. Main profile only — workers/heavy
-# have no channels.
-MAIN_PROFILE_DIR="$HERMES_DATA_DIR/profiles/main"
-if [[ -f "$MAIN_PROFILE_DIR/config.yaml" ]]; then
-    python3 /setup/render_telegram_gateway.py "$MAIN_PROFILE_DIR"
-else
-    echo "[init] main profile config.yaml not present — skipping telegram-gateway step"
-fi
+# --- 6b. Telegram gateway block — INTENTIONALLY UNMANAGED HERE --------------
+# Earlier init revisions ran render_telegram_gateway.py to seed a
+# `gateway.platforms.telegram` block in main/config.yaml. Live inspection
+# (2026-05-25) showed Hermes' running gateway reads platform secrets
+# directly from the per-profile $HERMES_HOME/profiles/main/.env file
+# (TELEGRAM_BOT_TOKEN/TELEGRAM_ALLOWED_USERS/TELEGRAM_HOME_CHANNEL) and
+# its channel_directory.json — config.yaml's platforms block is unused on
+# the live build. Sir's bot works with `platforms: {}` in config.yaml.
+# Telegram configuration is therefore owned by `ctrl-api`'s PUT
+# /api/v1/channels/telegram/token, which writes the per-profile .env via
+# `docker exec` and bounces the gateway. No init-time step required.
 
 # =============================================================================
 # 7. Permissions.

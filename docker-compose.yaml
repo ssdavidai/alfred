@@ -286,12 +286,14 @@ services:
       # never killed mid-flight (silent data loss). MUST stay ≥ the largest
       # Temporal execution_timeout before #48 moves any workflow to cron.
       - HERMES_CRON_TIMEOUT=1800
-      # Telegram bot token — Hermes picks this up natively in
-      # gateway/platforms/telegram.py (gateway/config.py:1243). Token is
-      # written into /opt/alfred/.env by ctrl-api PUT /api/v1/channels/
-      # telegram/token (Vaultwarden is the canonical store). `:-` default
-      # = empty when unset (Hermes treats empty as platform disabled).
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      # NOTE: TELEGRAM_BOT_TOKEN is intentionally NOT passed through here.
+      # Hermes' gateway reads platform secrets from each profile's per-profile
+      # .env file ($HERMES_HOME/profiles/main/.env), NOT from the container
+      # environment. ctrl-api's PUT /api/v1/channels/telegram/token writes
+      # the token directly into that file via `docker exec` and SIGTERMs the
+      # gateway so the supervisor restarts and picks it up. Surfacing the
+      # token as a compose env var here would be misleading dead config —
+      # Hermes ignores it and the file in the hermes_data volume wins.
     healthcheck:
       # the hermes image (python:3.12-slim base) ships curl, not wget.
       # Probe BOTH gateways: main :18789 (chat/onboarding) AND workers :18790
