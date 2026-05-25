@@ -391,9 +391,110 @@ async def transcribe_audio_group(group: list[dict[str, Any]]) -> dict[str, Any]:
 
 # Platform-level Groq API key — shared across all tenants.
 # Groq runs whisper-large-v3 on their LPU hardware (~3s per 5min audio).
-# Set GROQ_API_KEY in the tenant's .env file. The init container provisions it.
-_GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+#
+# Storage canonical (Phase 6b, 2026-05-25): the key lives in Vaultwarden
+# and is served by ctrl-api at GET /api/v1/credentials/groq-api-key.
+# alfred-learn fetches it at transcription time via _get_groq_api_key().
+# A 5-minute process-local cache caps the ctrl-api round-trip cost.
+#
+# Env fallback (GROQ_API_KEY in the tenant .env, provisioned by the init
+# container) is preserved for backward compatibility — existing deploys
+# that haven't migrated to Vaultwarden continue to work.
 _GROQ_API_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+_GROQ_CREDENTIAL_PATH = "/api/v1/credentials/groq-api-key"
+_GROQ_KEY_CACHE_TTL_SECONDS = 5 * 60
+
+# Process-local cache: {"value": <key>, "expires_at": <epoch_seconds>}.
+# Reset on any non-200 response so key rotation (DELETE + PUT in the UI)
+# recovers within one tick.
+_groq_key_cache: dict[str, Any] = {}
+
+
+def _reset_groq_key_cache() -> None:
+    """Clear the in-process Groq key cache (used by tests + after non-200)."""
+    _groq_key_cache.clear()
+
+
+async def _get_groq_api_key() -> str:
+    """Resolve the Groq API key, preferring ctrl-api (Vaultwarden) over env.
+
+    Order of precedence:
+      1. Process-local cache, if not expired.
+      2. ctrl-api GET /api/v1/credentials/groq-api-key (3s timeout).
+         * 200 → cache + return data["api_key"].
+         * 404 → invalidate cache, fall through to env.
+         * Any other status OR network error → invalidate cache, log
+           warning, fall through to env.
+      3. os.environ.get("GROQ_API_KEY", "") — backward-compat env fallback.
+    """
+    now = time.time()
+    cached = _groq_key_cache.get("value")
+    cached_expiry = _groq_key_cache.get("expires_at", 0)
+    if cached and now < cached_expiry:
+        return cached
+
+    config = load_config()
+    aas_api_key = os.environ.get("AAS_API_KEY", "")
+    headers: dict[str, str] = {}
+    if aas_api_key:
+        headers["Authorization"] = f"Bearer {aas_api_key}"
+
+    try:
+        async with httpx.AsyncClient(
+            base_url=config.alfred_ctrl_url,
+            timeout=3.0,
+            headers=headers,
+        ) as client:
+            resp = await client.get(_GROQ_CREDENTIAL_PATH)
+
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+            except Exception as exc:
+                logger.warning(
+                    "[omi] ctrl-api returned 200 for groq-api-key but "
+                    "JSON parse failed (%s); falling back to env",
+                    exc,
+                )
+                _reset_groq_key_cache()
+                return os.environ.get("GROQ_API_KEY", "")
+            key = data.get("api_key", "")
+            if key:
+                _groq_key_cache["value"] = key
+                _groq_key_cache["expires_at"] = now + _GROQ_KEY_CACHE_TTL_SECONDS
+                return key
+            # 200 with no key in body — treat like a non-200 (don't cache).
+            logger.warning(
+                "[omi] ctrl-api returned 200 for groq-api-key with empty "
+                "api_key; falling back to env"
+            )
+            _reset_groq_key_cache()
+            return os.environ.get("GROQ_API_KEY", "")
+
+        if resp.status_code == 404:
+            # Vaultwarden item not configured — silent fallback to env.
+            # Invalidate any prior cached value so a freshly-deleted key
+            # doesn't keep getting served.
+            _reset_groq_key_cache()
+            return os.environ.get("GROQ_API_KEY", "")
+
+        # Any other status: log + fall back to env, invalidate cache.
+        logger.warning(
+            "[omi] ctrl-api returned %d fetching groq-api-key; "
+            "falling back to env GROQ_API_KEY",
+            resp.status_code,
+        )
+        _reset_groq_key_cache()
+        return os.environ.get("GROQ_API_KEY", "")
+    except Exception as exc:
+        # Network error / timeout / etc. — fall back to env.
+        logger.warning(
+            "[omi] ctrl-api unreachable fetching groq-api-key (%s); "
+            "falling back to env GROQ_API_KEY",
+            exc,
+        )
+        _reset_groq_key_cache()
+        return os.environ.get("GROQ_API_KEY", "")
 
 
 async def _transcribe_groq(wav_bytes: bytes, duration_seconds: float) -> dict[str, Any]:
@@ -408,8 +509,13 @@ async def _transcribe_groq(wav_bytes: bytes, duration_seconds: float) -> dict[st
         tmp.write(wav_bytes)
         tmp_path = tmp.name
 
-    if not _GROQ_API_KEY:
-        logger.error("[omi] GROQ_API_KEY not set — cannot transcribe audio")
+    groq_api_key = await _get_groq_api_key()
+    if not groq_api_key:
+        logger.error(
+            "[omi] GROQ_API_KEY unavailable (ctrl-api + env both empty) "
+            "— cannot transcribe audio"
+        )
+        os.unlink(tmp_path)
         return {"text": "", "language": "", "language_probability": 0}
 
     try:
@@ -417,7 +523,7 @@ async def _transcribe_groq(wav_bytes: bytes, duration_seconds: float) -> dict[st
             with open(tmp_path, "rb") as audio_file:
                 resp = await client.post(
                     _GROQ_API_URL,
-                    headers={"Authorization": f"Bearer {_GROQ_API_KEY}"},
+                    headers={"Authorization": f"Bearer {groq_api_key}"},
                     data={
                         "model": "whisper-large-v3",
                         "response_format": "verbose_json",
