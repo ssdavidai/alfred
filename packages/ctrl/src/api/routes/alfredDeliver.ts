@@ -62,6 +62,7 @@ import {
 } from "../../db/alfredJournal.js";
 import { resolveDeliveryTarget } from "../hermes-sessions.js";
 import { dockerExec } from "../helpers.js";
+import { slackPostMessage } from "./slack.js";
 
 // ── Channel resolution (mirrors notifications.ts auto-target) ─────────────
 
@@ -156,19 +157,53 @@ async function getTelegramBotToken(): Promise<string | null> {
 }
 
 /**
- * Slack delivery — placeholder. Sir's setup today is Telegram-only; when
- * Slack lands, this adapter follows the same shape: read bot token from
- * the channel's stored credentials, POST to Slack Web API, return
- * DeliveryResult.
+ * Slack delivery — direct chat.postMessage call.
+ *
+ * The bot token lives in the hermes container's per-profile .env
+ * (`$HERMES_HOME/profiles/main/.env` — `SLACK_BOT_TOKEN`). We read it via
+ * `docker exec hermes cat` (60s cache, same shape as the Telegram adapter).
+ * Slack receives the bytes on `chat_id` (channel id, user id for DM-to-self,
+ * or group id); the bot must already be a member of the channel for posts
+ * to land. Failure surfaces as `{ ok: false, error }` so the journal
+ * records the truth.
  */
 async function deliverSlack(
-  _chatId: string,
-  _text: string,
+  chatId: string,
+  text: string,
 ): Promise<DeliveryResult> {
-  return {
-    ok: false,
-    error: "slack delivery not wired yet — see packages/ctrl/docs/design/one-alfred.md",
-  };
+  const token = await getSlackBotToken();
+  if (!token) {
+    return {
+      ok: false,
+      error: "no SLACK_BOT_TOKEN in hermes main profile .env",
+    };
+  }
+  const r = await slackPostMessage(token, chatId, text);
+  if (r.ok) return { ok: true };
+  return { ok: false, error: r.error };
+}
+
+let _slackTokenCache: { value: string; at: number } | null = null;
+const SLACK_TOKEN_TTL_MS = 60_000;
+
+async function getSlackBotToken(): Promise<string | null> {
+  const now = Date.now();
+  if (_slackTokenCache && now - _slackTokenCache.at < SLACK_TOKEN_TTL_MS) {
+    return _slackTokenCache.value || null;
+  }
+  try {
+    const stdout = await dockerExec("hermes", [
+      "sh",
+      "-c",
+      "grep ^SLACK_BOT_TOKEN= $HERMES_HOME/profiles/main/.env 2>/dev/null | cut -d= -f2-",
+    ]);
+    const token = stdout.trim().replace(/^["']|["']$/g, "");
+    _slackTokenCache = { value: token, at: now };
+    return token || null;
+  } catch (e) {
+    console.warn("[alfred-deliver] failed to read slack bot token:", e);
+    return null;
+  }
 }
 
 async function deliverEmail(

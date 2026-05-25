@@ -22,6 +22,11 @@ import {
   sendTelegramTest,
   revokeTelegramChat,
   disconnectTelegram,
+  getSlackChannelStatus,
+  getSlackManifest,
+  setSlackTokens,
+  sendSlackTest,
+  disconnectSlack,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import {
@@ -33,6 +38,12 @@ import {
   isProbablyValidBotToken,
   type TelegramStatus,
 } from "./telegramCardCore";
+import {
+  deriveSlackCardState,
+  isProbablyValidSlackBotToken,
+  isProbablyValidSlackAppToken,
+  type SlackStatus,
+} from "./slackCardCore";
 
 // F57/C14 — the email card reads the live ctrl-api status, not a phantom
 // Instance row. `inbox_address` is only present once `configured`.
@@ -461,22 +472,10 @@ export default function ChannelsPage() {
             </Link>
           </ChannelCard>
 
-          {/* Slack — native Hermes adapter */}
-          <ChannelCard
-            name="Slack"
-            address="Native adapter"
-            note="DMs and mentions, in your team's workspace."
-            status="available"
-          >
-            <p
-              className="font-body italic text-[13px] mt-4"
-              style={{ color: "var(--marginalia)" }}
-            >
-              Built into the Hermes runtime. Add a Slack bot token to the
-              Hermes config and Alfred answers in your workspace — same
-              memory as the desk.
-            </p>
-          </ChannelCard>
+          {/* Slack — Lane III: live card backed by ctrl-api, mirror of
+              TelegramCard. The four visual states + workspace info come
+              from slackCardCore. */}
+          <SlackCard />
 
           {/* Telegram — Lane III: live card backed by ctrl-api. The four
               visual states (unconfigured / configured_starting /
@@ -911,6 +910,406 @@ function TelegramCard() {
                 })}
               </ul>
             </div>
+          )}
+
+          <div className="flex flex-wrap gap-3 items-baseline pt-1">
+            <button
+              onClick={sendTest}
+              disabled={testBusy}
+              className="btn-ghost"
+            >
+              {testBusy ? "…" : "Send test message"}
+            </button>
+            <button
+              onClick={disconnect}
+              disabled={discBusy}
+              className="btn-link"
+            >
+              Disconnect bot
+            </button>
+          </div>
+
+          {testMsg && (
+            <p
+              className="font-body italic text-[12px]"
+              style={{
+                color:
+                  testMsg.kind === "ok" ? "var(--marginalia)" : "var(--brass)",
+              }}
+            >
+              {testMsg.kind === "ok" ? "✓ " : "✗ "}
+              {testMsg.text}
+            </p>
+          )}
+        </div>
+      )}
+
+      {card.state === "error" && (
+        <div className="mt-5 space-y-3">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--brass)" }}
+          >
+            {card.description}
+          </p>
+          <div className="flex gap-3 items-baseline">
+            <button onClick={() => refetch()} className="btn-ghost">
+              Try again
+            </button>
+            <button
+              onClick={disconnect}
+              disabled={discBusy}
+              className="btn-link"
+            >
+              Disconnect
+            </button>
+          </div>
+        </div>
+      )}
+    </ChannelCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Lane III — Slack card. State derivation in slackCardCore; the component
+// below is the React surface only. Mirrors TelegramCard.
+//
+// THE SETUP UX (manifest paste, per Sir's 2026-05-25 design choice):
+//   1. Read the manifest JSON from ctrl-api (`hermes slack manifest`).
+//   2. Show it in a copy-paste box pointing at api.slack.com/apps "From an
+//      app manifest" wizard.
+//   3. Two token inputs (bot xoxb-…, app xapp-…) + Phase-2 optional fields
+//      (home_channel, allowed_users, allowed_channels).
+//   4. Save → ctrl-api PUT /tokens → vault write + .env write + hermes restart
+//   5. UI re-polls /status; card flips to configured_starting → running once
+//      Slack's auth.test confirms the bot token.
+// ---------------------------------------------------------------------------
+
+function SlackCard() {
+  const { data: statusData, refetch } = useQuery(
+    getSlackChannelStatus,
+    undefined,
+    { retry: false },
+  );
+  const status = (statusData as SlackStatus | undefined) ?? null;
+  const card = deriveSlackCardState({ status });
+
+  // Setup-state form
+  const [botToken, setBotToken] = useState("");
+  const [appToken, setAppToken] = useState("");
+  const [showSecrets, setShowSecrets] = useState(false);
+  const [allowedUsers, setAllowedUsers] = useState("");
+  const [homeChannel, setHomeChannel] = useState("");
+  const [allowedChannels, setAllowedChannels] = useState("");
+  const [showOptions, setShowOptions] = useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveErr, setSaveErr] = useState<string | null>(null);
+
+  // Test-message state.
+  const [testBusy, setTestBusy] = useState(false);
+  const [testMsg, setTestMsg] = useState<
+    { kind: "ok" | "err"; text: string } | null
+  >(null);
+
+  // Disconnect.
+  const [discBusy, setDiscBusy] = useState(false);
+
+  // Manifest — fetched lazily once the user expands the setup wizard.
+  const { data: manifestData } = useQuery(
+    getSlackManifest,
+    undefined,
+    { retry: false, enabled: card.state === "unconfigured" } as any,
+  );
+  const manifestJson =
+    (manifestData as { manifest?: string } | undefined)?.manifest ?? "";
+
+  const trimmedBot = botToken.trim();
+  const trimmedApp = appToken.trim();
+  const botValid = isProbablyValidSlackBotToken(trimmedBot);
+  const appValid = isProbablyValidSlackAppToken(trimmedApp);
+  const tokensValid = botValid && appValid;
+  const botHint =
+    trimmedBot.length > 0 && !botValid
+      ? "Bot token must look like xoxb-…"
+      : null;
+  const appHint =
+    trimmedApp.length > 0 && !appValid
+      ? "App token must look like xapp-…"
+      : null;
+
+  async function save() {
+    if (!tokensValid) return;
+    setSaveBusy(true);
+    setSaveErr(null);
+    try {
+      await setSlackTokens({
+        bot_token: trimmedBot,
+        app_token: trimmedApp,
+        allowed_users: allowedUsers.trim() || undefined,
+        home_channel: homeChannel.trim() || undefined,
+        allowed_channels: allowedChannels.trim() || undefined,
+      });
+      setBotToken("");
+      setAppToken("");
+      refetch();
+    } catch (e: any) {
+      setSaveErr(e?.message ?? e?.data?.error ?? "Couldn't save the tokens.");
+    } finally {
+      setSaveBusy(false);
+    }
+  }
+
+  async function sendTest() {
+    if (testBusy) return;
+    setTestBusy(true);
+    setTestMsg(null);
+    try {
+      const r: any = await sendSlackTest({});
+      if (r?.ok) {
+        setTestMsg({ kind: "ok", text: "Sent — check Slack." });
+      } else {
+        setTestMsg({
+          kind: "err",
+          text: r?.error ?? "Slack refused the message.",
+        });
+      }
+    } catch (e: any) {
+      setTestMsg({
+        kind: "err",
+        text: e?.message ?? e?.data?.error ?? "Couldn't reach Slack.",
+      });
+    } finally {
+      setTestBusy(false);
+      setTimeout(() => setTestMsg(null), 6000);
+    }
+  }
+
+  async function disconnect() {
+    if (discBusy) return;
+    setDiscBusy(true);
+    try {
+      await disconnectSlack({});
+      refetch();
+    } catch (e) {
+      console.error("slack disconnect failed", e);
+    } finally {
+      setDiscBusy(false);
+    }
+  }
+
+  function copyManifest() {
+    if (manifestJson) {
+      navigator.clipboard?.writeText(manifestJson);
+    }
+  }
+
+  const address =
+    card.state === "configured_running"
+      ? card.workspace.team ?? card.heading
+      : card.state === "configured_starting"
+        ? "Restarting…"
+        : card.state === "error"
+          ? "Token rejected"
+          : "Not yet configured";
+
+  return (
+    <ChannelCard
+      name="Slack"
+      address={address}
+      note="DMs and mentions, in your team's workspace."
+      status={card.pill}
+    >
+      {card.state === "unconfigured" && (
+        <div className="mt-5 space-y-4">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            {card.description}
+          </p>
+
+          {/* Manifest box — copy-paste into api.slack.com/apps */}
+          <div className="space-y-2">
+            <div className="flex items-baseline justify-between">
+              <div
+                className="font-mono text-[10px] uppercase tracking-[0.22em]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                Step 1 · Slack app manifest
+              </div>
+              <button onClick={copyManifest} className="btn-link text-[11px]">
+                Copy
+              </button>
+            </div>
+            <pre
+              className="font-mono text-[11px] border border-rule p-2 overflow-auto max-h-48 whitespace-pre-wrap"
+              style={{ color: "var(--ink)" }}
+            >
+              {manifestJson || "(loading…)"}
+            </pre>
+            <p
+              className="font-body italic text-[12px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Paste this at{" "}
+              <a
+                href="https://api.slack.com/apps?new_app=1"
+                target="_blank"
+                rel="noreferrer"
+                className="underline"
+              >
+                api.slack.com/apps
+              </a>{" "}
+              → Create New App → From an app manifest. Pick your workspace, then
+              install. After install, go to OAuth & Permissions (Bot Token) and
+              Settings → Basic Information → App-Level Tokens (with{" "}
+              <code>connections:write</code>).
+            </p>
+          </div>
+
+          {/* Two-token form */}
+          <div className="space-y-3">
+            <div
+              className="font-mono text-[10px] uppercase tracking-[0.22em]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              Step 2 · Paste both tokens
+            </div>
+            <div className="flex gap-2 items-baseline">
+              <input
+                type={showSecrets ? "text" : "password"}
+                value={botToken}
+                onChange={(e) => setBotToken(e.target.value)}
+                placeholder="xoxb-… (Bot User OAuth Token)"
+                className="flex-1 bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+              />
+              <button
+                type="button"
+                onClick={() => setShowSecrets((s) => !s)}
+                className="btn-link"
+              >
+                {showSecrets ? "Hide" : "Show"}
+              </button>
+            </div>
+            {botHint && (
+              <p
+                className="font-body italic text-[12px]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                {botHint}
+              </p>
+            )}
+            <input
+              type={showSecrets ? "text" : "password"}
+              value={appToken}
+              onChange={(e) => setAppToken(e.target.value)}
+              placeholder="xapp-… (App-Level Token)"
+              className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+            />
+            {appHint && (
+              <p
+                className="font-body italic text-[12px]"
+                style={{ color: "var(--marginalia)" }}
+              >
+                {appHint}
+              </p>
+            )}
+
+            {/* Phase-2 options — folded by default */}
+            <button
+              type="button"
+              onClick={() => setShowOptions((s) => !s)}
+              className="btn-link text-[11px]"
+            >
+              {showOptions ? "Hide options" : "Options (allowlist + home channel)"}
+            </button>
+            {showOptions && (
+              <div className="space-y-2 border-l border-rule/40 pl-3">
+                <input
+                  type="text"
+                  value={homeChannel}
+                  onChange={(e) => setHomeChannel(e.target.value)}
+                  placeholder="SLACK_HOME_CHANNEL — channel id for proactive notifications (optional)"
+                  className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[11px]"
+                />
+                <input
+                  type="text"
+                  value={allowedUsers}
+                  onChange={(e) => setAllowedUsers(e.target.value)}
+                  placeholder="SLACK_ALLOWED_USERS — comma-separated user ids (empty = everyone)"
+                  className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[11px]"
+                />
+                <input
+                  type="text"
+                  value={allowedChannels}
+                  onChange={(e) => setAllowedChannels(e.target.value)}
+                  placeholder="SLACK_ALLOWED_CHANNELS — comma-separated channel ids (empty = all)"
+                  className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[11px]"
+                />
+              </div>
+            )}
+
+            <div className="flex gap-3 items-baseline">
+              <button
+                onClick={save}
+                disabled={saveBusy || !tokensValid}
+                className="btn-ghost"
+              >
+                {saveBusy ? "…" : "Save & Connect"}
+              </button>
+            </div>
+            {saveErr && (
+              <p
+                className="font-body italic text-[13px]"
+                style={{ color: "var(--brass)" }}
+              >
+                {saveErr}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {card.state === "configured_starting" && (
+        <div className="mt-5 flex items-baseline gap-2">
+          <span
+            className="font-mono text-[12px] animate-pulse"
+            style={{ color: "var(--marginalia)" }}
+          >
+            ●
+          </span>
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            {card.description}
+          </p>
+        </div>
+      )}
+
+      {card.state === "configured_running" && (
+        <div className="mt-5 space-y-4">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            {card.description}
+          </p>
+
+          {card.workspace.url && (
+            <p
+              className="font-body italic text-[12px]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              <a
+                href={card.workspace.url}
+                target="_blank"
+                rel="noreferrer"
+                className="underline"
+              >
+                Open workspace ↗
+              </a>
+            </p>
           )}
 
           <div className="flex flex-wrap gap-3 items-baseline pt-1">

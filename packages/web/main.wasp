@@ -746,6 +746,33 @@ action disconnectTelegram {
   entities: []
 }
 
+// Lane III — Slack channel on /channels. Five ops backed by ctrl-api
+// /api/v1/channels/slack/*. Mirrors the Telegram op set; same shape.
+query getSlackChannelStatus {
+  fn: import { getSlackChannelStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+query getSlackManifest {
+  fn: import { getSlackManifest } from "@src/dashboard/operations",
+  entities: []
+}
+
+action setSlackTokens {
+  fn: import { setSlackTokens } from "@src/dashboard/operations",
+  entities: []
+}
+
+action sendSlackTest {
+  fn: import { sendSlackTest } from "@src/dashboard/operations",
+  entities: []
+}
+
+action disconnectSlack {
+  fn: import { disconnectSlack } from "@src/dashboard/operations",
+  entities: []
+}
+
 query getAgentConfig {
   fn: import { getAgentConfig } from "@src/dashboard/operations",
   entities: []

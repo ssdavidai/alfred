@@ -202,6 +202,74 @@ export const disconnectTelegram = async (_args: unknown, context: any) => {
   });
 };
 
+// Lane III — Slack channel on /channels. Mirrors the Telegram op set; backed
+// by Lane I's ctrl-api endpoints under /api/v1/channels/slack/*. Shape:
+//   getSlackChannelStatus → { configured, state, error, workspace:{team,…},
+//                              allowed_users, home_channel, allowed_channels }
+//   getSlackManifest      → { manifest: string, error?: string }
+//   setSlackTokens        → 200 { ok, state }
+//   sendSlackTest         → 200 { ok, channel?, ts?, error? }
+//   disconnectSlack       → 200 { ok, state: "unconfigured" }
+export const getSlackChannelStatus = async (
+  _args: unknown,
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/slack/status",
+  });
+};
+
+export const getSlackManifest = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    path: "/api/v1/channels/slack/manifest",
+  });
+};
+
+export const setSlackTokens = async (
+  args: {
+    bot_token: string;
+    app_token: string;
+    allowed_users?: string;
+    home_channel?: string;
+    allowed_channels?: string;
+  },
+  context: any,
+) => {
+  if (!args?.bot_token?.trim() || !args?.app_token?.trim()) {
+    throw new HttpError(400, "bot_token and app_token are required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PUT",
+    path: "/api/v1/channels/slack/tokens",
+    body: {
+      bot_token: args.bot_token.trim(),
+      app_token: args.app_token.trim(),
+      allowed_users: args.allowed_users?.trim() ?? "",
+      home_channel: args.home_channel?.trim() ?? "",
+      allowed_channels: args.allowed_channels?.trim() ?? "",
+    },
+  });
+};
+
+export const sendSlackTest = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/slack/test",
+  });
+};
+
+export const disconnectSlack = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "DELETE",
+    path: "/api/v1/channels/slack/tokens",
+  });
+};
+
 // ============================================================
 // Dashboard Home
 // ============================================================

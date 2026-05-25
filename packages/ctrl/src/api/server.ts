@@ -52,6 +52,7 @@ import { registerVaultIndexRoutes } from "./routes/vaultIndex.js";
 import { registerSystemRoutes } from "./routes/system.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
 import { registerTelegramRoutes } from "./routes/telegram.js";
+import { registerSlackRoutes } from "./routes/slack.js";
 import { registerAlfredJournalRoutes } from "./routes/alfredJournal.js";
 import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
 
@@ -163,6 +164,7 @@ export function createApiServer(): http.Server {
   registerSystemRoutes();
   registerSettingsRoutes();
   registerTelegramRoutes();
+  registerSlackRoutes();
   // The one-Alfred continuity layer — alfred_journal + principal mapping
   // (the persistence + lookup surface) plus alfred-deliver (the unified
   // outbound delivery endpoint). Sir-facing UX invariant: there is only

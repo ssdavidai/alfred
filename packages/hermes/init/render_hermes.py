@@ -157,7 +157,14 @@ def _preserve_switched_model_block(rendered: str, config_path: Path) -> str:
 
 _RUNTIME_KEY_PREFIXES: tuple[str, ...] = (
     "TELEGRAM_",
-    "SLACK_BOT_",
+    # SLACK_* covers the runtime-managed slack triplet
+    # (SLACK_BOT_TOKEN, SLACK_APP_TOKEN, SLACK_ALLOWED_USERS) plus the
+    # optional SLACK_HOME_CHANNEL / SLACK_ALLOWED_CHANNELS Phase-2 keys.
+    # 2026-05-25: broadened from SLACK_BOT_ to SLACK_ when /channels Slack
+    # card landed — without it init would wipe SLACK_APP_TOKEN on every
+    # re-render, identical to the Telegram regression that prompted this
+    # whole preservation mechanism.
+    "SLACK_",
     "DISCORD_BOT_",
     "WHATSAPP_",
     "SIGNAL_",
