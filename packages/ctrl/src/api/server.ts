@@ -51,6 +51,7 @@ import { registerIngestRoutes } from "./routes/ingest.js";
 import { registerVaultIndexRoutes } from "./routes/vaultIndex.js";
 import { registerSystemRoutes } from "./routes/system.js";
 import { registerSettingsRoutes } from "./routes/settings.js";
+import { registerTelegramRoutes } from "./routes/telegram.js";
 
 export interface RouteParams {
   [key: string]: string;
@@ -159,6 +160,7 @@ export function createApiServer(): http.Server {
   registerVaultIndexRoutes();
   registerSystemRoutes();
   registerSettingsRoutes();
+  registerTelegramRoutes();
 
   const server = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const start = Date.now();
