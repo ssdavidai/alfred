@@ -1,70 +1,157 @@
 # CLAUDE.md
 
-Guidance for Claude Code (claude.ai/code) working in the `alfred-black` repo.
+Guidance for Claude Code (claude.ai/code) and human contributors working in
+the `alfred-black` repo. This file is **the source of truth** for: what this
+system is, how it's organized, the contracts everything else honours, the
+fix-fan-out protocol, and the gotchas you'll otherwise relearn the hard way.
 
-## What this repo is
+If you're new — read this end-to-end **once**, then keep it open as
+reference. Most production incidents we've shipped through map cleanly to a
+section here.
 
-`alfred-black` is the single-VM, `docker compose up` reframing of the
-`alfred-platform` SaaS fleet: **one repo, one VM, one stack** — no Hetzner
-auto-provisioning, no Tailscale, no Cloudflare, no billing. The AI runtime is
-**Hermes Agent** (`NousResearch/hermes-agent`), which replaces OpenClaw's
-two-container split with a single isolated runtime running two profiles.
+---
 
-The full design is in `docs/PLAN.md` (Parts A–I) — read it before making
-structural changes.
+## 1. What this repo is
 
-## Structure
+`alfred-black` is the single-VM, `docker compose up` reframing of the old
+`alfred-platform` SaaS fleet: **one repo, one VM, one stack**. No Hetzner
+auto-provisioning, no Tailscale, no Cloudflare provisioning, no billing.
+
+The AI runtime is **Hermes Agent** (`NousResearch/hermes-agent`), which
+replaces OpenClaw's two-container split with one Docker image running
+three isolated profiles (`main` / `workers` / `heavy`).
+
+Target outcome: a user with a Linux VM can `git clone`, fill `.env`, run
+`./scripts/bootstrap.sh`, then `docker compose up -d`, and have a working
+Alfred at `https://<their-domain>` with TLS, the dashboard, all 5 sidecars
+(Plane, Sure, Vaultwarden, Hermes, the chat surface), and the full
+intelligence layer.
+
+The full design rationale is in `docs/PLAN.md` (Parts A–I). Read it before
+making structural changes.
+
+---
+
+## 2. Repo structure
 
 ```
 alfred-black/
-├── docker-compose.yaml      # single static stack — pull-only, never builds
-├── .env.example             # single env template
-├── scripts/bootstrap.sh     # generates secrets, validates .env, run once pre-`up`
-├── caddy/Caddyfile          # bundled reverse proxy + automatic Let's Encrypt
+├── docker-compose.yaml      single static stack — pull-only, never builds
+├── .env.example             single env template
+├── scripts/
+│   ├── bootstrap.sh         generates secrets, validates .env (run once pre-`up`)
+│   └── hooks/               the commit gate (see §11)
+├── caddy/
+│   └── Caddyfile            reverse proxy + automatic Let's Encrypt TLS
 ├── packages/
-│   ├── web/        ← the Wasp dashboard (auth + UI; proxies to ctrl-api)
-│   ├── ctrl/       ← ctrl-api: the tenant API server (:3100) + the four-store layer
-│   ├── learn/      ← alfred-learn: the Temporal intelligence layer
-│   ├── mcp-server/ ← the MCP server bundle
-│   ├── vault-init/ ← Vaultwarden bootstrap
-│   └── hermes/     ← the Hermes runtime image
-└── docs/PLAN.md    ← the complete plan
-```
-
-## Build commands
-
-Each package builds independently. `docker compose up` only **pulls** images.
-
-```sh
-cd packages/ctrl && npm ci && node build.mjs   # → dist/api.mjs (the only ctrl artefact)
-cd packages/ctrl && npm test                   # node:test suite
+│   ├── web/                 Wasp dashboard (auth + UI; proxies to ctrl-api)
+│   ├── ctrl/                ctrl-api: tenant API server (:3100) + 4-store layer
+│   ├── learn/               alfred-learn: Temporal intelligence layer (Python)
+│   ├── mcp-server/          5-app MCP bundle (alfred/sure/plane/vaultwarden/execute)
+│   ├── vault-init/          Vaultwarden bootstrap
+│   └── hermes/              Hermes runtime image (Dockerfile + supervisor.sh + init/)
+├── docs/
+│   ├── PLAN.md              the complete plan
+│   ├── FAILURE-MODES.md     ranked bug catalogue
+│   ├── FIX-PLAN.md          lane fan-out plan
+│   └── FIX-CONTRACTS.md     frozen cross-lane interfaces (Cn…)
+├── deploy/                  CUTOVER.md and ops runbooks
+├── debug/                   ignored — investigation outputs land here
+└── CLAUDE.md                this file
 ```
 
 ---
 
-## The four-store architecture (PLAN.md Part I)
+## 3. Quick start (fresh deploy)
+
+```bash
+# 1. Clone, copy env template
+git clone https://github.com/ssdavidai/alfred.git
+cd alfred
+cp .env.example .env
+
+# 2. Fill required vars in .env: DOMAIN, ACME_EMAIL, OWNER_NAME, OWNER_EMAIL,
+#    ANTHROPIC_API_KEY (or OPENROUTER_API_KEY), COMPOSIO_API_KEY.
+#    Optional: GOOGLE_CLIENT_*, SENDGRID_API_KEY, VEXA_ENABLED.
+
+# 3. Generate auto-secrets (AAS_API_KEY, COLUMN_ENCRYPTION_KEY, JWT_SECRET,
+#    HERMES_API_SERVER_KEY, plane/sure DB passwords, vaultwarden admin token,
+#    MCP_APPROVAL_SECRET) — idempotent.
+./scripts/bootstrap.sh
+
+# 4. Point DNS A records at the VM:
+#    @ → VM-IP, plane → same, sure → same, vault → same, mcp → same, api → same
+#    (Caddy auto-issues a cert per host via HTTP-01; cert persists in caddy_data volume.)
+
+# 5. Up
+docker compose up -d
+# Optional: `--profile vexa` to enable the 9-container transcript stack.
+
+# 6. First signup at https://${DOMAIN} becomes the owner; lands on /desk.
+```
+
+**Minimum VM spec**: 48 GB RAM (32 GB will OOM under load), 4+ vCPU, 80+ GB
+disk. With Vexa: 56–64 GB.
+
+---
+
+## 4. Vocabulary — the principal's surface
+
+Alfred Black has 14 pages. Use these names everywhere (URL paths, code
+comments, agent prompts, docs). The redesign moved away from `/dashboard/*`
+sub-routes; that vocab is dead.
+
+| Page | URL | Purpose |
+|------|-----|---------|
+| **Desk** | `/desk` | Today's decision queue + audit ledger (the daily landing) |
+| **Brief** | `/brief` | The daily letterpress brief |
+| **Vault** | `/vault` | Three-pane Obsidian view of the principal's vault |
+| **Matters** | `/matters`, `/matters/:id` | Aggregator across the household |
+| **Instincts** | `/instincts` | Asking / Confirming / Acting tiers |
+| **Decisions** | `/decisions` | Audit feed with HANDLED/HELD/ASKED filters |
+| **Chores** | `/chores`, `/chores/:slug` | The principal's recurring work |
+| **Connections** | `/connections` | Composio catalogue + sibling-surface launcher |
+| **Channels** | `/channels` | Email + phone + vexa + omi + Terminal cards |
+| **Tools** | `/tools` | Gateway allowlist viewer |
+| **Claude** | `/claude` | MCP setup + Skill + secrets |
+| **Study** | `/study` | Unified back office (settings, credentials, API keys, audit, theme) |
+| **Household** | `/household` | RULES.md editor + chores |
+| **Staff** | `/staff` | Small staff of specialists, marketing surface |
+
+The **onboarding ritual** is sequential, not a single page:
+```
+/awaken → /reading-the-room → /verify → /soul →
+/composing → /preparing → /first-brief → /desk
+```
+
+`/onboarding` redirects to `/awaken`. `/dashboard` (legacy) thin-redirects
+to `/desk`. `/triage` → `/desk`. `/back-office` → `/study`.
+
+---
+
+## 5. The four-store architecture (PLAN.md Part I)
 
 > **The vault is the principal's published output, not the system's database.**
 
 alfred-black persists data in **four stores**, not one markdown directory:
 
-| # | Store | Backing | Owner |
-|---|-------|---------|-------|
-| 1 | **Vault** | Markdown (`vault_data` volume) | alfred daemon, via ctrl-api |
-| 2 | **`alfred-state.db`** | SQLite + WAL + sqlite-vec (`state_data`) | **ctrl-api — sole writer** |
-| 3 | **Cold archive** | DuckDB/Parquet | deferred |
-| 4 | **`ingest.db`** | SQLite (`ingest_data`) | ctrl-api — sole writer |
+| # | Store | Backing | Sole writer | Purpose |
+|---|-------|---------|-------------|---------|
+| 1 | **Vault** | Markdown (`vault_data` volume) | ctrl-api (via alfred daemon) | The principal's published surface |
+| 2 | **`alfred-state.db`** | SQLite + WAL + sqlite-vec (`state_data`) | **ctrl-api** | Machine working memory |
+| 3 | **Cold archive** | DuckDB/Parquet | deferred (Phase 3) | Forensic long tail (>90d) |
+| 4 | **`ingest.db`** | SQLite (`ingest_data`) | ctrl-api | Raw inbound stream events (7d TTL) |
 
-The operational store is named **`alfred-state.db`** (not `state.db`) to avoid
-a filename collision with Hermes' own gateway-session store at
-`$HERMES_HOME/state.db` — a different file in a different container.
+The operational store is named **`alfred-state.db`** (not `state.db`) to
+avoid a filename collision with Hermes' own gateway-session store at
+`$HERMES_HOME/state.db`.
 
-Full detail: `packages/ctrl/docs/STORAGE-ARCHITECTURE.md`.
+**Full detail**: `packages/ctrl/docs/STORAGE-ARCHITECTURE.md`.
 
-### The promotion contract — HARD RULE
+### 5.1 The promotion contract — HARD RULE
 
-> **A record exists in the vault only if the principal has a reason to read or
-> edit it. Everything else is SQLite.**
+> **A record exists in the vault only if the principal has a reason to read
+> or edit it. Everything else is SQLite.**
 
 The vault (Store 1) holds **exactly 12 canonical record types**:
 
@@ -72,147 +159,720 @@ The vault (Store 1) holds **exactly 12 canonical record types**:
 matter  task  note  person  org  place  asset  chore  instinct  decision  briefing  daybook
 ```
 
-(plus the `SOUL.md` / `RULES.md` singletons and `_templates/`).
+Plus the `SOUL.md` / `RULES.md` singletons and `_templates/`.
 
-**ctrl-api is the sole vault writer**, and it **enforces this in code**: every
-vault write route calls `assertCanonicalVaultPath()`
-(`packages/ctrl/src/db/promotionContract.ts`) before touching the filesystem.
-A write to a non-canonical path is rejected with HTTP 422
-`PROMOTION_CONTRACT_VIOLATION`. **No audit-class or signal/observation record
-can ever be written as markdown.**
+**ctrl-api is the sole vault writer**, and it **enforces this in code**:
+every vault write route calls `assertCanonicalVaultPath()`
+(`packages/ctrl/src/db/promotionContract.ts`) before touching the
+filesystem. A write to a non-canonical path returns HTTP 422
+`PROMOTION_CONTRACT_VIOLATION` with a `suggestion` field pointing at the
+right endpoint.
 
-Demoted record types and their correct store:
+**Demoted record types** and their correct store:
 
-- `signal-action` / `steward-action` / `desk-action` / `state-change` /
-  `needs_attention_action` / `event` → `alfred-state.db` **`audit`** table.
-- `signal` → `alfred-state.db` **`signal`**; `observation` / `pattern_proposal` /
-  `synthesis` / `contradiction` / `assumption` / `constraint` →
-  `alfred-state.db` **`observation`**.
-- `stream_event` → `ingest.db` **`stream_event`**.
+| Demoted type | Goes to |
+|---|---|
+| `signal-action` / `steward-action` / `desk-action` / `state-change` / `needs_attention_action` / `auto-task-created` / `event` | `alfred-state.db` **`audit`** table (via `POST /api/v1/audit`) |
+| `signal` | `alfred-state.db` **`signal`** (via `POST /api/v1/signals`) |
+| `observation` / `pattern_proposal` / `synthesis` / `contradiction` / `assumption` / `constraint` | `alfred-state.db` **`observation`** (via `POST /api/v1/observations`) |
+| `stream_event` | `ingest.db` **`stream_event`** (via `POST /api/v1/streams/events`) |
 
-### Single-writer discipline
+Vault operator paths that **bypass** the canonical-12 check:
+`_templates/`, `_archive/`, `_migrated*/`, `_rescue/`, `_raw/`,
+`_migrate/`, `inbox/`, `SOUL.md`, `RULES.md`, `CLAUDE.md`.
 
-ctrl-api is the **only** process with a write handle to `alfred-state.db` and
-`ingest.db`. `alfred-learn` and the alfred vault daemon write through ctrl-api
-HTTP endpoints — never directly. Other services may open the files read-only.
-This eliminates SQLite multi-process write contention and makes the
-`vault_index` read-index drift structurally impossible.
+### 5.2 Single-writer discipline
 
-When adding code that needs to persist a record, ask: *does the principal have
-a reason to read or edit it?* If yes → a canonical vault type via the vault
-routes. If no → `alfred-state.db` (working memory / audit) or `ingest.db` (raw
-stream) via the `/api/v1/state/*` and `/api/v1/ingest/*` endpoints. Never add a
-new vault directory.
+ctrl-api is the **only** process with a write handle to `alfred-state.db`
+and `ingest.db`. `alfred-learn` and the alfred vault daemon write through
+ctrl-api HTTP endpoints — never directly. Other services may open the
+files read-only. This eliminates SQLite multi-process write contention and
+makes the `vault_index` read-index drift structurally impossible.
+
+When adding code that needs to persist a record:
+- Does the principal read or edit it directly? → canonical vault type via
+  the vault routes.
+- Does the UI read a derived view? → SQLite table (audit/signal/observation/…).
+- Neither? → SQLite or stream log (ephemeral).
+
+**Never add a new vault directory.**
 
 ---
 
-## Hermes runtime
+## 6. State machines
+
+This is the part most teams get wrong: there are **multiple status/state
+fields**, with different vocabularies, owned by different writers. Confusion
+between them is the #1 source of "I clicked the button and nothing
+happened" bugs.
+
+### 6.1 Matter
+
+Canonical type. `vault/matter/<slug>.md` (Obsidian-readable).
+
+**Two parallel state surfaces**:
+- `status` — `active | dormant | completed | archived` (principal-facing
+  lifecycle; written by Steward / state-mutator)
+- `current_state` (2-4 sentence narrative paragraph) + `as_of` (ISO
+  timestamp) per RFC #884 (the "Living Narratives" layer). Owned by
+  `NightlyNarrativeWorkflow` (`packages/learn/src/activities/nightly_narrative.py`).
+
+**Roll-up `state`** — `done | active | waiting` — derived at read time from
+linked tasks (`packages/ctrl/src/api/routes/matters.ts:486–497`,
+`deriveMatterState`). `done` = all tasks done/archived; `active` = any
+in_progress; `waiting` = otherwise.
+
+**Transition primitive**: `state_mutator.apply_state_change_v2`
+(`packages/learn/src/activities/state_mutator.py`). Every transition writes
+a `state_change` audit row to alfred-state.db AND patches frontmatter.
+
+**Mode-gated**: `state_mutator_mode` setting (see §8). Default `"live"`.
+
+### 6.2 Task
+
+Canonical type. `vault/task/<slug>.md`.
+
+**THREE different fields that look like they mean state**:
+- `status` — alfred-vault validator vocab: **`active | blocked | cancelled | done | todo`**.
+  This is the field the alfred-vault Python daemon enforces; any other value (e.g.
+  the historic `queued` from comments) is rejected with HTTP 500.
+- `state` — the matters-aggregator vocab: **`pending | in_progress | done | archived`**.
+  `matters.ts:454` `normalizeTaskState` reads this.
+- `current_state` / `as_of` — narrative layer, same as matters.
+
+Both `status` and `state` coexist; writers must set both. **Validator-compatible
+defaults for a fresh task**: `status: todo, state: pending`.
+
+**Required linkage fields**:
+- `parent_matter: matter/<slug>.md` — the matters aggregator looks here
+- `matter_ref: matter/<slug>.md` — alias different readers use; set both
+- `signal_sources: []` — task-creation provenance
+- `closure_predicate: null` (or a real predicate) — for auto-close watcher
+
+**Closure paths**:
+1. Principal click on Desk → `decision/<ts>.md (intent=done)` → `DecisionRouter` → status flip.
+2. `TaskClosureWatcherWorkflow` (every 5 min) — matches inbound signals
+   against open tasks' `closure_predicate`. Two predicate styles:
+   - **Deterministic** (`evaluate_predicate`) — e.g. `gmail_thread_reply`,
+     `gmail_from_subject`, `calendar_event_accepted`, `payment_to_merchant`.
+   - **LLM** (`assess_closure`) — clerk call, auto-close if `confidence ≥ 0.80`.
+3. `archival_sweep.py` moves terminal-archived tasks aside.
+
+**Auto-create from signals**: gated by `auto_task_create_mode` setting
+(default `"live"`). `task_creation.create_task_from_signal` writes the rich
+shape with `parent_matter` populated from `signal.matter_ref`.
+
+**Onboarding errand-pack**: `packs_opus._build_rich_errand_content` writes
+new tasks with the rich shape; `_resolve_parent_matter_path` does 4-tier
+matter resolution (exact slug → fuzzy related_matter → fuzzy task name →
+inbox fallback). `matter/inbox.md` is auto-seeded by the init container.
+
+### 6.3 Decision
+
+Canonical type. `vault/decision/<ts>-<sha8>.md`.
+
+**State**: `open | executing | completed | reversed`.
+
+Three write paths — **all of them mint `state: open` so DecisionRouter
+runs `extract_observation_from_decision` (the learning loop closer)**:
+
+1. **`POST /api/v1/decisions`** (DeskPage native) — Sir clicks Done/Defer/Noise/Delegate/Take-mine; ctrl-api synchronously flips the source NA card (sets `side_effects.synchronous_flip: true`) and writes the decision.
+2. **`POST /api/v1/admin/needs-attention/:id/{done,dispatch,skip}`** (legacy Steward Phase 6.4 surface) — older UI path; `attention.ts` performs the same NA flip + emits the legacy `needs_attention_action` audit + **mints a mirror decision** via `mintDecisionMirror` *unless* `decision_origin` is set in the body (which only DecisionRouter does, preventing a recursive loop — see §15).
+3. **Signal-router autonomous fire** — `signal_actions.route_signal_action` with `principal: alfred` + `decision_origin: instinct_fire`.
+
+**The synchronous_flip guards**: `route_decision`
+(`packages/learn/src/activities/decision_router.py`) has 6 `if not
+synchronous_flip` guards (lines 194, 307, 426, 479, 486, 563, 586). They
+skip the action paths when the source-record flip already happened
+synchronously — but `extract_observation_from_decision` at line 647 has
+NO such guard, so the observation always lands.
+
+**Delegate has a fourth piece**: after Lane I #216 severed signal-router's
+`principal_delegate_override` path, DecisionRouter calls
+`dispatch_action_to_agent` directly when intent=delegate. Three idempotency
+layers prevent double-firing (state guard + `dispatching` mark + `side_effects.agent_dispatched`).
+
+### 6.4 Signal
+
+Demoted to `alfred-state.db.signal` table. Never a vault record.
+
+**Status vocabulary**: `unrouted | routed_human | routed_agent | routed_suppressed | dispatching | agent_responded`.
+
+`SignalRouterWorkflow` filters `status='unrouted'`. Once routed, the signal
+becomes terminal from the router's perspective — only `dispatching` is
+reachable from `unrouted` in the live state machine.
+
+**`matched_instinct` column** stamped by `route_signal_action` when the
+matcher finds a match (Lane II Gap 5b fix: the scorer now matches
+substrings + multi-word patterns; was structurally returning 0).
+
+### 6.5 Chore
+
+Canonical type. `vault/chore/<slug>.md` + matching `.py` workflow class
+under `/alfred-data/user-chores/`.
+
+Schedule lives in Temporal (one `chore-<slug>` schedule per chore). Cron
+fires the registered workflow class via the dynamic loader at worker boot.
+**`workflow_class_name` frontmatter MUST match the `@workflow.defn(name=...)`
+of the deployed `.py`** (capitalization-sensitive — has bitten us; see §15).
+
+First 3 runs are quarantine dry-runs (`quarantine: true, quarantine_remaining: 3`),
+then `record_chore_run` writes both vault frontmatter (`last_run`,
+`last_result`, body run-log line) AND
+`/alfred-data/chore-run-history.jsonl`.
+
+Weekly `ChorePromotionReflectionWorkflow` (Sunday 03:00) drafts a GitHub PR
+for chores with 20+ live runs ≥95% success.
+
+### 6.6 Instinct
+
+Canonical type. `vault/instinct/<slug>.md`.
+
+**Tiers**: `Asking → Confirming → Acting`. Tier promotion is **clerk-driven** —
+`ReflectionWorkflow` (daily 02:00 UTC) feeds accumulated observations to Opus,
+which proposes `apply_instinct_change` calls. `apply_instinct_change` is the
+SOLE writer of `observation_count`, `confidence_score`, and `tier`.
+
+**Status**: `unconfirmed | active | deprecated` — **do NOT filter the matcher
+on `status='active'`**. Lane II Gap 3 fix: `_load_active_instincts` accepts
+all non-deprecated instincts. The discretion gate at signal_actions:1825 is
+the real safety belt (high threshold for low-observation_count instincts).
+
+**Discretion threshold**: per-instinct, computed from `observation_count`
+via `matching/discretion.py`. The `live_observation_count` (ctrl-api
+enrichment) takes precedence over the snapshotted `observation_count`.
+
+---
+
+## 7. The signal pipeline (end-to-end)
+
+```
+inbound webhook / composio poll / agent action
+       ↓ POST /api/v1/streams/events
+ingest.db.stream_event (7d TTL)
+       ↓ EventProcessorWorkflow (every 2 min)
+   marks processed_at; signals routed directly from ingest.db (#78 Design-B)
+       ↓ SignalExtractWorkflow (every 5 min, gated on STEWARD_SIGNAL_EXTRACT_ENABLED)
+   chunked extraction via clerk → alfred-state.db.signal (status=unrouted)
+   + extract_observation_from_signal → state.db.observation (kind=signal)
+       ↓ SignalRouterWorkflow (every 2 min, gated on STEWARD_SIGNAL_ROUTER_ENABLED)
+   _load_active_instincts → _match_best_instinct (substring + multi-word) → discretion gate
+       ↓ branch:
+   ┌─────────────────────┬─────────────────────┬─────────────────────┐
+   │ HIGH (autonomous)   │ HUMAN               │ SUPPRESSED          │
+   │ /v1/runs dispatch   │ needs_attention/    │ P0-2 dedup gate     │
+   │ + instinct_fire     │ <ts>-<id>.md card   │ tripped             │
+   │   decision          │                     │                     │
+   └─────────────────────┴─────────────────────┴─────────────────────┘
+       ↓ principal clicks on /desk
+   POST /api/v1/decisions (or legacy /admin/needs-attention/:id/{done,dispatch,skip})
+   → decision/<ts>.md (state=open, synchronous_flip=true)
+       ↓ DecisionRouterWorkflow (every 60s)
+   route_decision → side-effects (skipped if synchronous_flip)
+                  → extract_observation_from_decision (ALWAYS — no guard)
+                  → state.db.observation (kind=decision, instinct_ref stamped)
+                  → state=completed (or =executing for delegate, then =completed on outcome)
+       ↓ ReflectionWorkflow (daily 02:00 UTC)
+   accumulated observations → Opus proposes instinct changes
+   → apply_instinct_change → observation_count/confidence_score/tier updated
+   → next signal scoring uses the new bar
+```
+
+The **loop closes** at `extract_observation_from_decision`. The whole
+campaign on 2026-05-24 was about making sure this loop actually fires for
+every Desk click (it didn't for done/noise/delegate until then) — see
+§16 for the incident history.
+
+---
+
+## 8. The three mode flags
+
+Three settings flags control how aggressively Alfred acts. **All default
+`"live"`** (do the thing); flipped to `"shadow"` they record what would
+have happened but don't act.
+
+| Flag | Controls | Default | Env override |
+|------|----------|---------|--------------|
+| `signal_action_mode` | Whether SignalRouter dispatches autonomously when discretion clears the bar (vs always going HUMAN) | `live` | `STEWARD_SIGNAL_ACTION_LIVE_MODE` |
+| `state_mutator_mode` | Whether `state_mutator` patches matter/task frontmatter (vs only writing the audit row) | `live` | `STEWARD_LIVE_MODE` |
+| `auto_task_create_mode` | Whether signals auto-create tasks (`task_creation.create_task_from_signal`) | `live` | `STEWARD_SIGNAL_AUTOCREATE_TASKS` |
+
+**Resolution precedence** (per Lane II resolvers):
+1. Env var (override — for emergencies)
+2. `/alfred-data/settings.json` key (UI toggle persists here)
+3. **Default `"live"`**
+
+**UI**: `/study#settings` → "Agent autonomy" section, 3 toggles. Calls
+`GET/PUT /api/v1/settings[/:key]` (ctrl-api `routes/settings.ts`).
+
+---
+
+## 9. Hermes runtime
 
 OpenClaw is replaced by **Hermes**. In ctrl-api code:
 
-- The runtime container is `hermes` (compose service). The in-container CLI is
-  `hermes` (`HERMES_CMD` / `HERMES_CONTAINER` in `src/api/helpers.ts`).
-- Hermes runs two profiles — `main` (:18789, user-facing) and `workers`
-  (:18790, background) — each with its own `config.yaml` under the
-  `hermes_data` volume.
-- ctrl-api reaches the runtime through the **hermes-shim**, which preserves the
-  OpenClaw `POST /tools/invoke` contract — so most caller logic is unchanged.
-- ctrl-api routes live under `/api/v1/hermes/*`; the old `/api/v1/openclaw/*`
-  prefix is kept as an alias for one release, then dropped.
+- Runtime container is `hermes` (compose service)
+- In-container CLI: `hermes` (`HERMES_CMD` / `HERMES_CONTAINER` in `helpers.ts`)
+- **Three supervised profiles** (per `packages/hermes/docker/supervisor.sh`):
+  - `main` profile, API port **18789** — user-facing chat, memory enabled
+  - `workers` profile, API port **18790** — background agents (clerk, curator, janitor, distiller, ephemeral runs), concurrency capped
+  - `heavy` profile, API port **18791** — heavy reasoning (Opus / GPT-5.5-class) for onboarding + Reflection
+- Each profile has its own `config.yaml`, `.env`, SQLite SessionStore, MCP
+  server registrations under `$HERMES_HOME/profiles/<name>/`
+- The init container renders profile config + writes `/alfred-data/.gateway-token`
+- `auth.json` is generated for the `main` profile and propagated to
+  workers + heavy at supervisor startup (idempotent, one OAuth identity)
+- The `main` profile's `SOUL.md` is consolidated to `$HERMES_HOME/SOUL.md`
+  at supervisor boot so Hermes loads the Alfred persona (NOT the stock
+  Nous identity)
+- `hermes-lcm` plugin is baked at `/opt/hermes-lcm` and installed into
+  the `main` profile's `plugins/` dir (verified via `verify_lcm()` background probe)
 
-## Deploy batching
+### 9.1 API contract
 
-One PR per logical change. After a push that triggers CI, wait for the deploy
-to finish and verify before pushing the next change. Don't batch unrelated
-fixes into rapid pushes.
+Hermes speaks the **OpenAI Responses API natively** — no shim:
+- `POST http://hermes:18789/v1/responses` (main)
+- `POST http://hermes:18790/v1/runs` (workers — ephemeral runs)
+- `POST http://hermes:18791/v1/responses` (heavy)
 
-## Bug-fixing protocol (SOURCE OF TRUTH — this is how bugs get fixed here)
+All calls carry `Authorization: Bearer ${HERMES_API_SERVER_KEY}` (the
+gateway token from `/alfred-data/.gateway-token`).
+
+### 9.2 MCP servers
+
+Each Hermes profile registers 6 MCP servers in its `config.yaml`:
+
+| Name | Type | What it surfaces |
+|------|------|------------------|
+| `alfred-ctrl` | HTTP | The ctrl-api itself (40+ routes) |
+| `alfred` | stdio (Node) | Vault read/write + agent delegation + workflow orchestration |
+| `sure` | stdio (Node) | Sure personal-finance ~80 tools |
+| `plane` | stdio (Node) | Plane project management (v2 catalogue) |
+| `vaultwarden` | stdio (Node) | Vault items list/search/get/CRUD + vault_refresh |
+| `execute` | stdio (Node) | Composio surface — every connected third-party app via one execute primitive |
+
+Source for the 5 stdio apps: `packages/mcp-server/src/` (compiled bundle
+copied into the Hermes image at build time). The 6th `alfred-ctrl` is an
+HTTP proxy to ctrl-api.
+
+### 9.3 NOT used
+
+- **Hermes web dashboard** (`hermes dashboard`): the upstream v0.14.0 wheel
+  ships neither the React source nor a pre-built `web_dist/`. We deployed
+  it briefly on 2026-05-24, hit "Frontend not built", reverted (commit
+  `ce6c177`). Use `hermes config` / `hermes profile` / `hermes auth` CLI
+  inside the container instead.
+
+---
+
+## 10. ctrl-api — the dashboard backend (`:3100`)
+
+Zero-dependency Node 22 app, dual role: CLI/TUI (pre-merge) AND HTTP API
+(now). On `alfred-black` only the API role remains (`packages/ctrl/src/api/`).
+
+### 10.1 Build
+
+esbuild bundles `src/api/standalone.ts` → `dist/api.mjs` (single ESM
+file). `.sql` / `.njk` / `.md` / `.yaml` files load as text strings via
+the esbuild loader config in `build.mjs`. `ssh2` is external.
+
+```sh
+cd packages/ctrl
+npm ci                 # required first time + if you've cd'd around
+npm run build          # → dist/api.mjs
+npm test               # node:test suite (~440 tests)
+```
+
+### 10.2 Route layout
+
+`src/api/routes/` — ~40 files, one per surface. Notable:
+
+| Route file | Surface |
+|------------|---------|
+| `vault.ts` | The promotion-contract-enforced vault PATCH/POST/GET. Body must wrap in `{set: {…}}` / `{append: {…}}` / `{body_append: …}` — bare field-keyed bodies are silently no-op'd (see §15). |
+| `attention.ts` | Legacy needs_attention surface; mirrors decisions when `decision_origin` is unset (`mintDecisionMirror`) — see §15 for the recursion guard. |
+| `decisions.ts` | New unified decision write path. Mints `state: open` always; the router closes the loop. |
+| `settings.ts` | `GET/PUT /api/v1/settings[/:key]` for the 3 mode flags. Atomic write via temp+rename to `/alfred-data/settings.json`. |
+| `system.ts` | `GET /api/v1/system/ssh-info` (SSH pubkey for the /channels Terminal card). |
+| `chores.ts` | List/get/pause/resume/delete/trigger; list omits `quarantine_remaining` (#229 — file followup if you want it). |
+| `matters.ts` | The matter aggregator. Reads `parent_matter`/`matter_ref`/`project` from task fm. List endpoint at line 757; detail endpoint may diverge from list (filed #229). |
+
+### 10.3 `state.db` migrations
+
+Numbered SQL files in `packages/ctrl/src/db/migrations/`, applied
+transactionally on ctrl-api boot. **Never edit a migration after it has
+merged — append a new one.** See `packages/ctrl/CLAUDE.md` §state.db
+migrations for the rules.
+
+---
+
+## 11. The bug-fixing protocol (SOURCE OF TRUTH — this is how bugs get fixed here)
 
 Two modes: **investigate** (read-only fan-out → reports) then **fix**
-(gate-protected lane fan-out). The point is to run as many parallel agents as
-the work allows **without conflicts or contract violations** — by making a bad
-commit *impossible to land*, not by trusting agents to behave. Anchored by
-`docs/FAILURE-MODES.md` (the audit), `docs/FIX-PLAN.md` (the lane plan),
-`docs/FIX-CONTRACTS.md` (frozen cross-lane interfaces), and `scripts/hooks/`
-(the commit gate).
+(gate-protected lane fan-out). The point is to run as many parallel agents
+as the work allows **without conflicts or contract violations** — by making
+a bad commit *impossible to land*, not by trusting agents to behave.
 
-### Mode A — Investigation fan-out (read-only)
-For mapping unknown breakage (e.g. a pass over the live product):
-- **One agent per issue**, scoped narrowly, run as parallel background agents.
+### 11.1 Mode A — Investigation fan-out (read-only)
+
+For mapping unknown breakage (e.g. a sweep over the live product):
+
+- **One agent per issue**, scoped narrowly, run as parallel background agents
 - **Strictly read-only**: no code edits, no live writes. Say so explicitly
   ("no POST/PUT/DELETE, no `docker` writes"); require each agent to **disclose
-  any unavoidable probe side-effect** (a connect/init probe *can* mint stray
-  rows — it happened).
-- Each writes ONE report to a git-ignored **`debug/<MMDD>/<issue>-findings.md`**:
+  any unavoidable probe side-effect**
+- Each writes ONE report to a git-ignored `debug/<MMDD>/<issue>-findings.md`:
   exact code path (`file:line`), live evidence, **root-cause vs environmental
   caveat** (separate real bugs from credit/quota/stale-deploy noise), a "desired
-  happy path", and a prioritized list.
+  happy path", and a prioritized list
 - Track each as a task; surface each as it lands; then **synthesize** all
   reports into one plan grouped by **cross-cutting root cause** (most symptoms
-  collapse into a few seams).
+  collapse into a few seams)
 - Live access is read-only SSH; **inline the SSH options on every call** (a
-  shell variable won't word-split under zsh).
+  shell variable won't word-split under zsh)
 
-### Mode B — Fix fan-out (gate-protected, parallel-safe)
+### 11.2 Mode B — Fix fan-out (gate-protected, parallel-safe)
+
 1. **Rank bugs in `FAILURE-MODES.md` with the exact code path. Failing-test-first:**
    write a red repro test, then fix to green — never fix against an assumption.
-2. **Phase 0 first, sequentially (orchestrator only):** build shared foundations
-   everything sits on (migration runner, the contracts, the gate). These are
-   forbidden-zone files; nothing parallel starts until they land.
+
+2. **Phase 0 first, sequentially (orchestrator only):** build shared
+   foundations everything sits on (migration runner, the contracts, the gate).
+   These are forbidden-zone files; nothing parallel starts until they land.
+
 3. **Freeze the contracts** (`FIX-CONTRACTS.md`, C1…) *before any lane codes*.
    A consumer lane builds against the frozen shape and never needs the
    provider's code. **If a contract is wrong, the lane STOPs and reports — it
    never improvises across the boundary.**
-4. **Package-scoped lanes**, non-overlapping glob territory (→ conflict-free
-   merges by construction): **I**·ctrl `packages/ctrl/**` · **II**·learn
-   `packages/learn/**` · **III**·web `packages/web/**` · **IV**·alfred-vault
-   `packages/alfred-vault/**` · **V**·edges/infra (`packages/{hermes,mcp-server,vault-init}/**`,
-   `scripts/**`, `caddy/**`, `docker-compose.yaml`, `.env.example`, `Makefile`,
-   `docs/**`). **At most one agent per lane at a time** — lanes parallel, tasks
-   within a lane serial.
-5. **The commit gate makes violations impossible to land** (`scripts/hooks/`,
-   `bash scripts/hooks/install.sh` sets `core.hooksPath`, inherited by every
-   worktree). On `git commit`, `check_lane.py` rejects the diff if it: (a) leaves
-   the lane's `allowed` globs, (b) touches the **forbidden zone** (`schema.sql`,
-   `db/migrations/**`, `migrate.ts`, `api/server.ts`, `**/CONTRACT.md`, the
-   `FIX-*`/`FAILURE-MODES` docs, `scripts/hooks/**`, `CLAUDE.md`), (c) exceeds
-   **~200 net LOC**, or (d) fails the lane **VERIFY** (build / `tsc` / pytest /
-   `compose config` — the regression gate). The lane is declared by a `.lane`
-   manifest at the worktree root (`{"lane":"II","verify":"…"}`). The **main
-   checkout (no `.lane`) is `phase0`** — orchestrator, allow-all. A linked
-   worktree with **no `.lane` is rejected** (fail-safe). **Never use
-   `ALFRED_SKIP_VERIFY`.**
-6. **Agent brief** = LANE / GOAL (one sentence) / ALLOWED + FORBIDDEN globs /
-   VERIFY / CONTRACT (the package `CONTRACT.md` + the relevant `FIX-CONTRACTS.md`
-   clause) / SCOPE ~200 LOC (if bigger, STOP and report) / WHEN DONE: 3-line PR
-   note, start nothing else. Standing preamble: *first action — write `.lane`;
-   read your contracts; touch only ALLOWED; code against the frozen contracts; a
-   blocked commit means re-scope, not override.*
-7. **Sequence vs parallelize.** Fan out lanes **in parallel** when their globs
-   are disjoint **and** the boundary contract is frozen. **Sequence** (provider
-   PR → consumer PR) when a consumer needs a provider's new shape, or when a
-   "disjoint" file turns out shared (move it to the forbidden zone, Phase-0-owned,
-   and lanes consume it). Merge order = **providers before consumers**. The gate
-   surfaces any cross-lane collision *immediately* as a blocked commit, never as
-   a tangled merge.
-8. **One PR per logical change → build → deploy to the verify VM → smoke → only
-   then the next PR.** Push to `main` lets CI build `:latest`; never clobber a
-   production `:latest` or push public `main` without explicit confirmation —
-   verify on a throwaway tag/VM first.
 
-### Hard-won rules (these bit me — do not relearn them)
-- **`isolation: worktree` does NOT guarantee isolation.** Agents have shared the
-  working tree and overwritten each other's `.lane`. Either confirm each agent
-  got a real separate worktree, **or** run coordinated cross-package work
-  yourself in the main checkout (phase0), one commit at a time. **Always
-  `git show --stat` each agent's commit** to confirm it touched only its own
-  files before trusting it.
-- **Agents must never run `npm install/ci/prune`** — it corrupts the shared
-  symlinked `node_modules`. VERIFY uses existing deps.
-- **Stage only your own files** (`git add <paths>`, never `git add -A`) — never
-  sweep up `node_modules`/lockfile churn or another lane's work.
+4. **Package-scoped lanes**, non-overlapping glob territory (→ conflict-free
+   merges by construction):
+
+   | Lane | Glob | Owns |
+   |------|------|------|
+   | **I**·ctrl | `packages/ctrl/**` | ctrl-api routes, the 4-store layer, settings |
+   | **II**·learn | `packages/learn/**` | Temporal activities, the intelligence layer, scoring |
+   | **III**·web | `packages/web/**` | Wasp app, dashboard pages, operations.ts |
+   | **IV**·alfred-vault | `packages/alfred-vault/**` | The Python vault daemon (separate package `alfred-vault` 1.0+) |
+   | **V**·edges/infra | `packages/{hermes,mcp-server,vault-init}/**`, `scripts/**`, `caddy/**`, `docker-compose.yaml`, `.env.example`, `Makefile`, `docs/**` | All non-package config |
+
+   **At most one agent per lane at a time** — lanes parallel, tasks within
+   a lane serial.
+
+5. **The commit gate makes violations impossible to land**
+   (`scripts/hooks/`, `bash scripts/hooks/install.sh` sets `core.hooksPath`,
+   inherited by every worktree). On `git commit`, `check_lane.py` rejects
+   the diff if it:
+   - (a) leaves the lane's `allowed` globs (lane-jumping)
+   - (b) touches the **forbidden zone** (`schema.sql`, `db/migrations/**`,
+     `migrate.ts`, `api/server.ts`, `**/CONTRACT.md`, the `FIX-*` /
+     `FAILURE-MODES` docs, `scripts/hooks/**`, `CLAUDE.md`)
+   - (c) exceeds **~200 net LOC**, or
+   - (d) fails the lane **VERIFY** (build / `tsc` / pytest / `compose
+     config` — the regression gate)
+
+   The lane is declared by a `.lane` manifest at the worktree root:
+   `{"lane":"II","verify":"…","scope_limit":300}`.
+   The **main checkout (no `.lane`) is `phase0`** — orchestrator, allow-all.
+   A linked worktree with **no `.lane` is rejected** (fail-safe).
+   **Never use `ALFRED_SKIP_VERIFY`.**
+
+6. **Agent brief** = LANE / GOAL (one sentence) / ALLOWED + FORBIDDEN globs
+   / VERIFY / CONTRACT (the package `CONTRACT.md` + the relevant
+   `FIX-CONTRACTS.md` clause) / SCOPE ~200 LOC (if bigger, STOP and report)
+   / WHEN DONE: 3-line PR note, start nothing else. Standing preamble:
+   *first action — write `.lane`; read your contracts; touch only ALLOWED;
+   code against the frozen contracts; a blocked commit means re-scope, not override.*
+
+7. **Sequence vs parallelize**. Fan out lanes **in parallel** when their
+   globs are disjoint **and** the boundary contract is frozen. **Sequence**
+   (provider PR → consumer PR) when a consumer needs a provider's new
+   shape, or when a "disjoint" file turns out shared (move it to the
+   forbidden zone, Phase-0-owned, and lanes consume it). Merge order =
+   **providers before consumers**. The gate surfaces any cross-lane
+   collision *immediately* as a blocked commit, never as a tangled merge.
+
+8. **One PR per logical change → build → deploy → smoke → only then the
+   next PR.** Push to `main` lets CI build `:latest`; never clobber a
+   production `:latest` or push public `main` without explicit confirmation
+   — verify on a throwaway tag/VM first.
+
+### 11.3 Hard-won rules (these bit me — do not relearn them)
+
+- **`isolation: worktree` does NOT guarantee isolation.** Agents have
+  shared the working tree and overwritten each other's `.lane`. Either
+  confirm each agent got a real separate worktree, **or** run coordinated
+  cross-package work yourself in the main checkout (phase0), one commit at
+  a time. **Always `git show --stat` each agent's commit** to confirm it
+  touched only its own files before trusting it.
+- **Agents must never run `npm install/ci/prune`** — it corrupts the
+  shared symlinked `node_modules`. VERIFY uses existing deps.
+  Orchestrator-only: `npm ci` if needed for a fresh worktree.
+- **Stage only your own files** (`git add <paths>`, never `git add -A`) —
+  never sweep up `node_modules`/lockfile churn or another lane's work.
 - **Clean up a stale `.lane`** before an orchestrator (phase0) commit — a
   leftover lane marker blocks a legitimate cross-cutting commit.
 - Forbidden-zone files (contracts, migrations, `schema.sql`, `server.ts`,
-  `scripts/hooks/**`, `CLAUDE.md`) are **orchestrator-only**, edited centrally —
-  never inside a lane.
+  `scripts/hooks/**`, `CLAUDE.md`) are **orchestrator-only**, edited
+  centrally — never inside a lane.
+- **Hot-patch + `force-recreate` destroys the patch** — `docker compose up
+  -d --force-recreate` creates a new container from the image, losing any
+  `docker cp` overlays. Use `docker restart` (preserves) when you've
+  hot-patched files into a running container.
+- **The lane gate's regression VERIFY must actually pass.** Don't push
+  failing tests to fix them in a follow-up — the gate exists to catch this.
+  If you broke an existing test by changing the contract, **update the
+  test as part of the same commit** (commit `e3c1ad2` is the lesson).
+
+---
+
+## 12. CI workflows (`.github/workflows/`)
+
+Path-filtered, push-to-main:
+
+| Workflow | Trigger paths | Output |
+|----------|--------------|--------|
+| `build-web.yml` | `packages/web/**` | `ssdavidai00/alfred-web:latest` + `alfred-web-client:latest` |
+| `build-ctrl-api.yml` | `packages/ctrl/**` | `ssdavidai00/alfred-ctrl-api:latest` |
+| `build-learn.yml` | `packages/learn/**` | `ssdavidai00/alfred-learn:latest` (longest pole, ~25 min) |
+| `build-hermes.yml` | `packages/hermes/**` (Dockerfile, supervisor.sh, configs) | `ssdavidai00/alfred-black-hermes:latest` |
+| `build-init.yml` | `packages/hermes/init/**`, `packages/ctrl/src/templates/**`, hermes-config templates | `ssdavidai00/alfred-init:latest` |
+| `build-mcp-server.yml` | `packages/mcp-server/**` | `ssdavidai00/alfred-mcp-server:latest` |
+| `ci-check.yml` | * (all) | `tsc --noEmit` + `pytest` + `docker compose config` |
+| `gitleaks.yml` | * (all) | Secret scanning |
+
+`docker compose up` **never builds** — it pulls `:latest` for every
+service. CI is the only path that publishes new images.
+
+---
+
+## 13. Deploy paths
+
+On the VM:
+
+| Path | What |
+|------|------|
+| `/opt/alfred/docker-compose.yaml` | The active compose file (rsync'd from repo on deploys, or `git pull` for clones) |
+| `/opt/alfred/caddy/Caddyfile` | Caddy reverse-proxy config |
+| `/opt/alfred/.env` | Required + auto-generated env vars (bootstrap.sh manages this) |
+| `/var/lib/docker/volumes/alfred-black_vault_data/_data/` | The vault (markdown files) |
+| `/var/lib/docker/volumes/alfred-black_state_data/_data/` | alfred-state.db + WAL |
+| `/var/lib/docker/volumes/alfred-black_ingest_data/_data/` | ingest.db + WAL |
+| `/var/lib/docker/volumes/alfred-black_alfred_data/_data/` | Shared scratch (.gateway-token, settings.json, .hermes-* etc.) |
+| `/var/lib/docker/volumes/alfred-black_hermes_data/_data/` | $HERMES_HOME (profiles, SOUL.md, sessions, plugins) |
+| `/var/lib/docker/volumes/alfred-black_caddy_data/_data/` | LE certs (PRESERVE across redeploys to avoid rate limits) |
+
+**Deploy via**: `docker compose pull && docker compose up -d` after a
+relevant image rebuilds in CI. Rsync the Caddyfile / compose file from
+the repo when they change (those aren't in any image).
+
+---
+
+## 14. Onboarding (the principal's first session)
+
+Sequential ritual at `/awaken → … → /first-brief → /desk`. Behind the
+scenes:
+
+1. **Gmail OAuth + Composio account creation** (steps `/composing` /
+   `/preparing`) — backfilled via `alfred-learn` activities.
+2. **Stream pull** — `composio_pull` activity pulls ~100 days of email
+   (chunked + paginated to stay under Temporal's 4MB gRPC limit; #180).
+3. **Fact extraction** — `extract_facts_opus` runs **chunked**
+   (chunk_threshold=500, chunk_size=400) so it doesn't hit Hermes' "max
+   compression attempts" context overflow (#193).
+4. **Pattern discovery** — `discover_patterns_opus` (LLM proposes instinct
+   templates from the extracted facts).
+5. **Personalization** — `personalize_opus` writes:
+   - `/vault/USER.md` (~1375 chars cap; sentence-boundary truncate)
+   - `/vault/SOUL.md` (the Alfred persona, consolidated to `$HERMES_HOME/SOUL.md` by hermes supervisor)
+   - `/vault/RULES.md` (standing rules — editable on `/household`)
+   - `/hermes-state/memories/MEMORY.md` (~2200 chars cap)
+   - `/hermes-state/memories/USER.md` (~1375 chars cap)
+6. **Pack materialization** — `generate_matter_pack_opus`,
+   `generate_errand_pack_opus`, `generate_chore_template_code` write the
+   vault records. New tasks born via `_build_rich_errand_content` carry
+   `parent_matter`, `matter_ref`, `state: pending`, `status: todo`,
+   `signal_sources`, `closure_predicate`.
+7. **Day-one seeding** — `seed_day_one_desk_cards` activity picks
+   time-anchored matters + `activity_score` + key_people count for
+   the principal's first /desk landing (#196).
+8. **Brief composition** — `write_brief_opus` writes the first brief
+   (intro paragraph + "This week, on your plate" actionable bulleted list
+   pulled from matters with `next_action_due` + open chores + payment-failure signals).
+
+---
+
+## 15. Common gotchas (concrete; you'll hit these)
+
+### 15.1 vault PATCH body shape
+
+`PATCH /api/v1/vault/records/<path>` requires the body to wrap fields in
+`{set: {…}}` / `{append: {…}}` / `{body_append: …}` / `{json_set: {…}}` /
+`{body_set: …}`. **A bare field-keyed body returns 200 with no-op** (the
+`hasCliArgs` check at `vault.ts:976` short-circuits before
+`dockerExec`). Lost an hour on this 2026-05-24.
+
+### 15.2 task `status` vs `state`
+
+Different fields, different vocabularies:
+- `status`: alfred-vault validator vocab — `active|blocked|cancelled|done|todo`
+- `state`: matters-aggregator vocab — `pending|in_progress|done|archived`
+
+**Writers must set BOTH**. `status: queued` was an aspirational comment
+in `tasks.py:23` — the validator rejects it with HTTP 500. Use
+`status: todo` (canonical "not yet started") and `state: pending`.
+
+### 15.3 The decision-mirror recursion
+
+The legacy `/admin/needs-attention/:id/dispatch` endpoint mints a mirror
+`decision/<ts>.md` (Sir #4 from 2026-05-24 morning), useful for UI clicks.
+But DecisionRouter ALSO calls `/dispatch` as part of processing delegate
+decisions — without a guard, this creates a fresh decision every minute
+forever, each one firing the agent.
+
+**Guard**: `attention.ts` skips `mintDecisionMirror` if
+`body.decision_origin` is set (which DecisionRouter passes; UI clicks
+don't). See commit `4466c68` and §6.3.
+
+### 15.4 Web client deploy
+
+The web is **two containers**, not one:
+- `web` — the Wasp server (auth + API + operations at `:3000`)
+- `web-client` — the static SPA nginx serves it from a separate container
+
+UI changes need `web-client` redeployed too, plus a hard browser refresh.
+This bit Sir hard on 2026-05-22.
+
+### 15.5 Onboarding's `_resolve_parent_matter_path`
+
+4-tier matter resolution (Lane II sir-fresh-deploy #2):
+1. Exact slug match (`matter/<slugified(related_matter)>.md` exists in matter_index)
+2. Fuzzy `related_matter` text vs matter names (overlap coefficient ≥ 0.40)
+3. Fuzzy task `name` vs matter names (same threshold) — for when `related_matter` is empty
+4. **`matter/inbox.md` fallback** — auto-seeded by the init container (Lane V sir-fresh-deploy #1)
+
+If you skip the validation step, you get phantom matter paths and the
+matters aggregator can't find tasks. Fixed 2026-05-24.
+
+### 15.6 Hermes dashboard ≠ usable
+
+The pip wheel ships no `web_dist/` and no `web/` source. The dashboard
+backend runs fine but returns `{"error":"Frontend not built"}` for every
+request. We hooked it up, then reverted (commit `ce6c177`). Use the
+`hermes config` / `hermes profile` / `hermes auth` CLI inside the container
+instead.
+
+### 15.7 Cron-DOW autocorrect on chores
+
+`chore_generation._autocorrect_cron_dow_for_description` rewrites
+weekdays→1-5 in the cron before validation (#181 fix). Don't fight the
+validator — let the autocorrect run.
+
+### 15.8 The instinct scorer's tokenization
+
+Lane II's Gap 5b fix: `_score_keyword_overlap` was doing set intersection
+between SINGLE-WORD input tokens and MULTI-WORD pattern phrases. Result:
+ALWAYS 0.0 for every live instinct. No threshold could rescue it.
+**Fix**: substring of full text + all-pattern-tokens-in-keyword-set +
+legacy single-word, MATCH_THRESHOLD = 0.05. Live signal scores jumped
+0.0 → 0.20. Same root cause is structurally possible elsewhere — if
+you're doing token overlap, **check the tokenizers on both sides match**.
+
+### 15.9 SSH to the box
+
+```sh
+ssh -o ConnectTimeout=15 -o ServerAliveInterval=10 -o BatchMode=yes \
+    -o StrictHostKeyChecking=accept-new -o IdentityAgent=none \
+    -i ~/.ssh/alfred-black-verify root@<VM-IP>
+```
+
+`-o IdentityAgent=none` is **required** if you have 1Password's SSH agent
+running — it hijacks identity selection. The `-i` arg won't help without
+the `IdentityAgent=none` opt.
+
+### 15.10 Backups
+
+`vault_data` is the principal's published surface — back it up.
+`caddy_data` holds LE certs — back it up to avoid rate limits on rebuild.
+`state_data` / `ingest_data` / `alfred_data` / `hermes_data` are
+recoverable but contain history — back them up if you care about the
+audit trail / observations / instinct training data.
+
+---
+
+## 16. Recent incident history (the why behind quirky code)
+
+| Date | Incident | Fix commit(s) |
+|------|----------|---------------|
+| 2026-05-24 | Hermes web dashboard at hermes.{$DOMAIN} (Sir reverted; upstream wheel ships no web bundle) | `fc91b16`, `9f40199` → reverted `ce6c177` |
+| 2026-05-24 | `_resolve_parent_matter_path` was slugifying blindly + `matter/inbox.md` not auto-seeded → 33 orphan tasks on live tenant | Lane V `b0bc0cc` (inbox seed) + Lane II `935692f` (4-tier resolver) |
+| 2026-05-24 | Task `status: queued` rejected by alfred-vault validator → backfill 100% errored | orchestrator `eed3799` + tests `e3c1ad2` |
+| 2026-05-24 | Onboarding wrote degenerate task shape (no `parent_matter`/`state`/`closure_predicate`) → 32 tasks orphaned from matters; state_mutator silent; auto-task-create silent | Lane II `dbaca81` (5 commits: onboarding rich shape + backfill activity + state_mutator default-live + auto-task-create default-live + Gap 5b scorer root cause) + Lane I `8affe83` (settings multi-key) + Lane III `a025357` (3-toggle UI) |
+| 2026-05-24 | DecisionRouter delegate path mints fresh mirror decision every cycle → recursive loop, agent fires each minute | orchestrator `4466c68` (`/dispatch` skips mirror when `decision_origin` set) |
+| 2026-05-24 | Lane I #216 fix severed signal-router's `principal_delegate_override` → Delegate clicks never fire the agent | Lane II `6a8052f` (DecisionRouter calls `dispatch_action_to_agent` directly) |
+| 2026-05-24 | Delegate dispatch creates `status=unrouted` signal → SignalRouter re-dispatches every cycle (Sir's 1 click → 10 dispatches) | Lane I `c551c00` (#216: mint signal `status=routed_agent` terminal) |
+| 2026-05-24 | DeskPage `POST /api/v1/decisions` minted `state=completed` for done/noise/take_mine → DecisionRouter skipped → 0 `kind=decision` observations | orchestrator `31fa11f` (always mint `state=open`) + `e8905e4` (same for legacy attention mirror) |
+| 2026-05-24 | Signal pipeline loop broken: instinct filter on `status=active` (none live), `state_mutator` default shadow, scorer structurally 0, chore-obs to wrong store | Lane II `c27e6e3` + Lane I `8affe83` + Lane III `de34f6d` |
+| 2026-05-24 | 5 Sir-listed UX bugs (brief shape, /desk dups, /chores truncate, /connections icons, /channels Terminal card, Plane blank, Vault→Vaultwarden, ssh-info endpoint) | Lanes I/II/III/V — 4 PRs across 1,978 LOC + 30 tests |
+| 2026-05-24 | test.alfred.black → home.alfred.black domain swap | one `.env` flip; Caddy auto-reissued 6 LE certs |
+| 2026-05-23 | Onboarding personalize_opus truncated USER.md from 1407 → 53 chars (rfind-first bug) | sentence-boundary truncate with floor_fraction |
+| 2026-05-23 | hermes-lcm plugin baked but not loaded | `verify_lcm()` background probe in supervisor + per-profile plugin dir |
+| 2026-05-22+ | The 21-finding fix-fan-out pass (debug/0522 reports → 8 image deploys → fixes-as-PRs) | The :harden campaign — see GH #128/#129/#118 |
+
+---
+
+## 17. References — read these when you touch the relevant area
+
+- `docs/PLAN.md` — the complete plan (Parts A–I)
+- `docs/FAILURE-MODES.md` — ranked bug catalogue
+- `docs/FIX-PLAN.md` — lane fan-out plan
+- `docs/FIX-CONTRACTS.md` — frozen cross-lane interfaces
+- `packages/ctrl/docs/STORAGE-ARCHITECTURE.md` — the 4-store model
+- `packages/ctrl/CONTRACT.md` — what ctrl-api provides + requires
+- `packages/learn/CONTRACT.md` — what alfred-learn provides + requires
+- `packages/learn/SPEC.md` — full intelligence-layer spec (6 workflows, terminology)
+- `packages/learn/docs/STATE-MUTATION.md` — state-mutator contract (#889 spec §5.2)
+- `packages/learn/CLAUDE.md` — terminology constraints (observation/instinct/intuition/reflection/judgment/discretion/clerk)
+- `packages/web/main.wasp` — the Wasp app config (routes, queries, actions, jobs, entities)
+- `packages/hermes/Dockerfile` — runtime image build
+- `packages/hermes/docker/supervisor.sh` — the 3-process supervisor
+- `packages/hermes/init/entrypoint.sh` — vault scaffold, Hermes profile rendering, password generation
+- `caddy/Caddyfile` — Caddy ingress with `{$DOMAIN}` substitution
+- `scripts/hooks/check_lane.py` — the commit gate (read this before opening a PR)
+- `CHANGELOG.md` — bare-date release tags
+
+---
+
+## 18. Engineering principles (the why behind the structure)
+
+- **Markdown is wrong for a database.** The four-store split (vault for the
+  principal, alfred-state.db for the machine, ingest.db for raw, cold for
+  forensics) is not a refactor — it's the foundational design. Never add a
+  vault directory to "make a thing easier."
+- **One writer per store.** ctrl-api is the only process with write
+  handles to alfred-state.db / ingest.db. Other services HTTP-POST.
+- **The promotion contract is enforced at the gate** (`assertCanonicalVaultPath`),
+  not by convention. Adding a non-canonical vault dir is a 422 + a code
+  smell.
+- **Lanes parallel; gate enforces.** Don't trust agents to behave — make
+  bad commits impossible to land.
+- **Failing-test-first.** A test asserting the current (broken) behavior
+  is not a regression — it's a baseline. Update assertions in the same
+  commit that updates contracts.
+- **Hot-patch is a tool; reproducible builds are the home.** Push the same
+  fix as a CI commit before you go to bed — `docker compose up
+  --force-recreate` will eat your overlay otherwise.
+- **The principal reads markdown; the machine reads SQLite.** If a UI
+  surface only renders aggregations, those tables live in alfred-state.db.
+  If the principal will open it in Obsidian and tweak the wording, it's a
+  vault record.
+- **Reflection closes the loop.** The whole point of the signal pipeline
+  is that human decisions on /desk become observations become tier
+  promotions. If observations aren't landing in `state.db`, the system
+  isn't learning — and that's a bug to fix urgently, not a "we'll iterate" item.
+
+---
+
+*This file is forbidden-zone (lane gate rejects edits inside any lane).
+Update via orchestrator (phase0) commit when the architecture or
+contracts change.*
