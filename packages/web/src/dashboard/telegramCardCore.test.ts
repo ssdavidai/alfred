@@ -122,6 +122,11 @@ test("derive: error → verbatim message + error pill", () => {
 
 // 9-digit id + 35-char secret = the canonical BotFather token shape.
 const GOOD_TOKEN = "123456789:ABCdefGHIjklMNOpqrSTUvwxYZ012345678";
+// Modern Telegram tokens commonly run longer (45+ chars after the colon).
+// 2026-05-25: Sir's real token rejected by the stricter 35-exact rule —
+// we now accept ≥30, open-ended (mirrors Hermes' own setup wizard regex).
+const MODERN_TOKEN_46 =
+  "8939474742:AAEa1B2c3D4e5F6g7H8i9J0k_lMnOpQrStUvWxYz-01234";
 
 test("isProbablyValidBotToken: accepts canonical shape, rejects malformed", () => {
   assert.equal(isProbablyValidBotToken(GOOD_TOKEN), true);
@@ -129,10 +134,29 @@ test("isProbablyValidBotToken: accepts canonical shape, rejects malformed", () =
     isProbablyValidBotToken("987654321:ABC-DEF1234ghIkl-zyx57W2v1u123ew_X1"),
     true,
   );
+  // Modern long-form tokens must validate too.
+  assert.equal(
+    isProbablyValidBotToken(MODERN_TOKEN_46),
+    true,
+    "modern Telegram tokens (>35 char secret) must validate — Hermes accepts them",
+  );
+  // Surrounding whitespace is trimmed before validation.
   assert.equal(isProbablyValidBotToken(`  ${GOOD_TOKEN}  `), true);
   assert.equal(isProbablyValidBotToken("nope"), false);
+  // ≥30 chars after the colon is the floor — 29 still rejects.
+  assert.equal(
+    isProbablyValidBotToken("123456789:" + "A".repeat(29)),
+    false,
+    "29-char secret is below the floor (need ≥30)",
+  );
   assert.equal(isProbablyValidBotToken("123456789:tooShort"), false);
   assert.equal(isProbablyValidBotToken(""), false);
+  // Secret with disallowed char (+, /, =) still rejects.
+  assert.equal(
+    isProbablyValidBotToken("123456789:" + "A".repeat(34) + "+"),
+    false,
+    "secret with + must reject — [A-Za-z0-9_-] only",
+  );
 });
 
 test("relativeTimeFromIso: just now / N min / N hours / N days", () => {

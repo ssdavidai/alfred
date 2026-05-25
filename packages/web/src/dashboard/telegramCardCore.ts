@@ -147,9 +147,14 @@ export function deriveTelegramCardState(args: {
 }
 
 // Telegram bot tokens look like `123456789:ABC-DEF1234ghIkl-zyx57W2v1u123ew11`.
-// Bot IDs are 8-12 digits today; the secret is 35 chars of [A-Za-z0-9_-].
-// The pattern is documented at core.telegram.org/bots/api#authorizing-your-bot.
-const BOT_TOKEN_RE = /^\d{8,12}:[A-Za-z0-9_-]{35}$/;
+// The original BotFather format was 8-12 digits + exactly 35 chars after the
+// colon; Telegram has since expanded both halves and modern tokens commonly
+// run longer. Hermes' own setup wizard validates `^\d+:[A-Za-z0-9_-]{30,}$`
+// (hermes_cli/setup.py) — we mirror that floor so a token Hermes accepts is
+// one our UI accepts. The ctrl-api side (telegram.ts BOT_TOKEN_RE) carries
+// the SAME regex; they must stay in sync. 2026-05-25 relaxed from the
+// 35-exact rule after Sir's real token rejected as malformed.
+const BOT_TOKEN_RE = /^\d{8,15}:[A-Za-z0-9_-]{30,}$/;
 
 export function isProbablyValidBotToken(s: string): boolean {
   if (typeof s !== "string") return false;

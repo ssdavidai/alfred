@@ -55,9 +55,16 @@ const PROFILE_ENV_PATH = `${MAIN_PROFILE_DIR}/.env`;
 const GATEWAY_STATE_PATH = `${MAIN_PROFILE_DIR}/gateway_state.json`;
 const CHANNEL_DIR_PATH = `${MAIN_PROFILE_DIR}/channel_directory.json`;
 const VAULT_ITEM_NAME = "Telegram Bot Token";
-// BotFather token shape: <8-12 digit bot id>:<35-char secret>. Mirrored on
-// the web side as isProbablyValidBotToken in telegramCardCore.ts.
-const BOT_TOKEN_RE = /^\d{8,12}:[A-Za-z0-9_-]{35}$/;
+// BotFather token shape: <bot_id digits>:<secret>. The original BotFather
+// format was 8-12 digits + exactly 35 char secret; Telegram has since
+// expanded both halves over time and modern tokens commonly exceed 35
+// chars. Hermes' own setup wizard uses the more permissive
+// `^\d+:[A-Za-z0-9_-]{30,}$` (hermes_cli/setup.py) — we mirror that here
+// so a token Hermes accepts is one we accept. 2026-05-25: Sir hit a 400
+// on his real token under the stricter 35-char rule; relaxing to ≥30,
+// open-ended. Mirrored on the web side as isProbablyValidBotToken in
+// telegramCardCore.ts.
+const BOT_TOKEN_RE = /^\d{8,15}:[A-Za-z0-9_-]{30,}$/;
 
 type TelegramState =
   | "unconfigured"
