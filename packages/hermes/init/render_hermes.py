@@ -135,6 +135,113 @@ def _preserve_switched_model_block(rendered: str, config_path: Path) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Runtime-key preservation — the "merge-preserve" path for .env.
+# ---------------------------------------------------------------------------
+#
+# Some env keys are SET AT RUNTIME by ctrl-api UI surfaces, not at init time:
+#   • TELEGRAM_BOT_TOKEN / TELEGRAM_ALLOWED_USERS / TELEGRAM_HOME_CHANNEL —
+#     written by /channels → Save Token (telegram.ts: writeProfileEnvKeys).
+#     2026-05-25: a `docker compose up -d --no-deps init` cycle silently
+#     wiped Sir's manually-set token because the .env was re-rendered from
+#     scratch — Sir clicked Delegate, the workers agent composed butler-voice
+#     text, called notify_principal, ctrl-api journalled pending, then the
+#     Telegram bot API send failed with "no TELEGRAM_BOT_TOKEN".
+#   • Future: SLACK_BOT_TOKEN, DISCORD_BOT_TOKEN, MATRIX_ACCESS_TOKEN, etc.
+#
+# Each prefix listed below is read from the EXISTING .env (if any) and
+# re-emitted into the freshly-rendered output IF the rendered output does
+# not already set the same key. The template still wins for ANY key it
+# explicitly renders — so an operator can't accidentally pin a stale
+# provider key by hand-editing the file.
+
+_RUNTIME_KEY_PREFIXES: tuple[str, ...] = (
+    "TELEGRAM_",
+    "SLACK_BOT_",
+    "DISCORD_BOT_",
+    "WHATSAPP_",
+    "SIGNAL_",
+    "MATRIX_",
+    "MATTERMOST_",
+    "BLUEBUBBLES_",
+)
+
+
+def _parse_env_keys(text: str) -> dict[str, str]:
+    """Lightweight .env parser — KEY=VALUE lines, comments ignored.
+
+    Mirrors python-dotenv enough for our purposes: strips surrounding
+    quotes, tolerates CRLF, ignores blank/comment lines, and is forgiving
+    about whitespace around `=`. We deliberately do NOT support shell
+    interpolation, multiline values, or `export ` prefixes — Hermes' own
+    reader is the source of truth at runtime; this parse is only used to
+    detect "is this key already set in the rendered output?"
+    """
+    out: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        eq = line.find("=")
+        if eq <= 0:
+            continue
+        key = line[:eq].strip()
+        val = line[eq + 1 :]
+        if val.endswith("\r"):
+            val = val[:-1]
+        if (val.startswith('"') and val.endswith('"')) or (
+            val.startswith("'") and val.endswith("'")
+        ):
+            val = val[1:-1]
+        out[key] = val
+    return out
+
+
+def _merge_preserve_runtime_keys(rendered: str, env_path: Path) -> str:
+    """Append runtime-managed keys (TELEGRAM_*, SLACK_*, …) from the
+    existing .env to the freshly-rendered output, if they aren't already
+    present in the render.
+    """
+    if not env_path.exists():
+        return rendered
+    try:
+        existing_text = env_path.read_text(encoding="utf-8")
+    except OSError:
+        return rendered
+    existing = _parse_env_keys(existing_text)
+    rendered_keys = set(_parse_env_keys(rendered).keys())
+
+    preserved: list[tuple[str, str]] = []
+    for key, val in existing.items():
+        if key in rendered_keys:
+            continue
+        if not any(key.startswith(p) for p in _RUNTIME_KEY_PREFIXES):
+            continue
+        preserved.append((key, val))
+
+    if not preserved:
+        return rendered
+
+    keys_summary = ", ".join(k for k, _ in preserved)
+    print(f"[render] preserving runtime-managed keys from existing .env: {keys_summary}")
+    footer_lines = [
+        "",
+        "# -----------------------------------------------------------------------------",
+        "# Runtime-managed keys (preserved across init re-renders).",
+        "# Set by ctrl-api UI surfaces (e.g. /channels → Save Token). Do not edit by",
+        "# hand here — re-paste via the corresponding UI to keep Vaultwarden in sync.",
+        "# -----------------------------------------------------------------------------",
+    ]
+    for key, val in preserved:
+        footer_lines.append(f"{key}={val}")
+    suffix = "\n".join(footer_lines) + "\n"
+    if not rendered.endswith("\n"):
+        rendered = rendered + "\n"
+    return rendered + suffix
+
+
 def main() -> int:
     if len(sys.argv) != 5:
         print(
@@ -249,6 +356,20 @@ def main() -> int:
         aas_api_key=os.environ.get("AAS_API_KEY", ""),
     )
     env_path = profile_dir / ".env"
+    # Merge-preserve runtime-managed keys.
+    #
+    # Some env keys live in this file but are set at RUNTIME via ctrl-api UI
+    # surfaces (e.g. /channels → Save Token → writeProfileEnvKeys in
+    # packages/ctrl/src/api/routes/telegram.ts), NOT at init time. Without
+    # preservation, every `docker compose up -d --no-deps init` cycle wipes
+    # them and the user has to re-paste from the UI (or, worse, lose the
+    # value if it wasn't also saved in Vaultwarden).
+    #
+    # We use an EXPLICIT allowlist of runtime-key prefixes (not a "preserve
+    # everything not in the template" rule) so an operator who hand-edits the
+    # file with a stale provider key doesn't accidentally pin that stale
+    # value across re-renders.
+    env_out = _merge_preserve_runtime_keys(env_out, env_path)
     env_path.write_text(env_out, encoding="utf-8")
     # .env carries the API key + provider keys — restrict it.
     env_path.chmod(0o600)
