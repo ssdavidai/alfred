@@ -50,9 +50,9 @@ The prompt should be **Sir-facing** — write what the user receives, not "remin
 
 ```js
 hermes__run({
-  prompt: "Research the current Hungarian VAT changes for 2026 — focus on changes affecting small companies and EVs. Produce a one-page summary in plain prose (no markdown bullets) covering: (1) what changed, (2) effective dates, (3) action items for Szabó-Stubán Kft. Email the summary to Sir at david@szabostuban.com.",
+  prompt: "Research the current VAT changes for the principal's tax jurisdiction — focus on changes affecting small companies and EVs. Produce a one-page summary in plain prose (no markdown bullets) covering: (1) what changed, (2) effective dates, (3) action items for the principal's main operating company. Email the summary to the principal's primary inbox.",
   profile: "workers",
-  return_via: { channel: "email", chat_id: "david@szabostuban.com" },
+  return_via: { channel: "email" },  // omit chat_id → defaults to the principal's primary on that channel
 })
 ```
 
