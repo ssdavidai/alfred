@@ -10,7 +10,8 @@
 # restarts will hit Let's Encrypt rate limits.
 #
 # DNS: before `docker compose up -d`, point these A-records at the VM's
-# public IP — `@` (apex), `plane`, `sure`, `vault`, `mcp`, `sms`, `voice`.
+# public IP — `@` (apex), `plane`, `sure`, `vault`, `mcp`, `sms`, `voice`,
+# `paperclip`.
 # Caddy self-heals ACME on retry, so a stale record only delays the
 # first cert.
 
@@ -25,7 +26,7 @@
 #
 # EXCEPT: a small set of PUBLIC ctrl-api webhook paths must be reachable
 # on the apex domain because third-party services (OMI, Plane, Vexa,
-# arbitrary stream webhooks) compose their callback URLs from
+# Paperclip, arbitrary stream webhooks) compose their callback URLs from
 # TENANT_BASE_URL which is the apex (e.g. https://home.alfred.black).
 # Without this path-level handler, those requests would land on the SPA
 # nginx and get a 405 (POST on a static-file server). These paths are
@@ -43,7 +44,7 @@
 	# shared-secret `?token=` query param against AGENTMAIL_WEBHOOK_TOKEN
 	# baked into the URL configured in the AgentMail console.
 	@public_webhooks {
-		path /api/v1/streams/omi/* /api/v1/plane/webhook /api/v1/webhooks/plane/steward /api/v1/webhooks/vexa /api/v1/webhooks/in/* /api/v1/channels/email/inbound
+		path /api/v1/streams/omi/* /api/v1/plane/webhook /api/v1/webhooks/plane/steward /api/v1/webhooks/vexa /api/v1/webhooks/in/* /api/v1/channels/email/inbound /api/v1/channels/paperclip/*
 	}
 	handle @public_webhooks {
 		reverse_proxy ctrl-api:3100
@@ -94,6 +95,16 @@ vault.{$DOMAIN} {
 mcp.{$DOMAIN} {
 	encode zstd gzip
 	reverse_proxy mcp-server:8787
+}
+
+# Paperclip — AI-agent orchestration ("the company"). Paperclip's React UI
+# and REST API both live on :3100; the apex public-webhook rule above
+# additionally exposes /api/v1/channels/paperclip/* on ctrl-api for
+# Paperclip → alfred-black heartbeats (P2/Lane I validates them with
+# PAPERCLIP_HEARTBEAT_SECRET).
+paperclip.{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy paperclip:3100
 }
 
 # SMS — Twilio inbound webhook endpoint for Hermes' SMS gateway adapter.
