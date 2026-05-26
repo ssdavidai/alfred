@@ -1,7 +1,7 @@
 // OpenAI Realtime API client — persistent WS per call.
 //
 // Reference: https://platform.openai.com/docs/api-reference/realtime (GA schema,
-// used by `gpt-realtime` / `gpt-realtime-1.5`). This is NOT the older preview
+// used by `gpt-realtime` / `gpt-realtime-1.5` / `gpt-realtime-2`). This is NOT the older preview
 // API — the session shape is nested under `audio.input` / `audio.output`, and
 // output events are renamed `response.output_audio.*`. Sending the preview
 // shape causes the server to silently ignore codec config and cancel responses

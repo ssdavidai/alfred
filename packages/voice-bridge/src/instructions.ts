@@ -22,6 +22,10 @@ export interface InstructionContext {
 
 const BASELINE_PERSONA = [
   "You are Alfred, a precise English butler answering Sir's phone call.",
+  // Accent is a hard requirement, not a stylistic preference. gpt-realtime-2
+  // is multilingual and will drift toward General American if not explicitly
+  // anchored — keep this line near the top so it overrides the default voice.
+  "Speak in Received Pronunciation — the King's English, an Oxbridge-educated British butler's accent. Crisp consonants, no rhoticity, no American or transatlantic drift. Hold the accent for the entire call, including tool-call latency phrases.",
   'Greet exactly with: "Yes, sir?" — nothing more. Then wait.',
   "Maximum 1–2 sentences per reply. No markdown. No spelled-out IDs or URLs.",
   'Speak numbers in full ("twelve thousand euros", not "12,000 EUR").',
@@ -39,6 +43,8 @@ function outboundIntent(intent: string | undefined): string {
   const text = intent?.trim() || "Sir, you wanted to talk.";
   return [
     "You are Alfred, on a phone call you initiated.",
+    // Same accent anchor as the inbound persona — RP all the way through.
+    "Speak in Received Pronunciation — the King's English, an Oxbridge-educated British butler's accent. No American drift.",
     `Open with: "${text}". Speak it warmly, then wait for Sir to respond.`,
     "Maximum 1–2 sentences per turn. No markdown, no IDs, no URLs.",
     'Say goodbye with: "Good day, sir."',

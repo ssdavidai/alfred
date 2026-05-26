@@ -38,9 +38,12 @@ export const config = {
   singleVmMode: optional("ENABLE_SINGLE_VM_MODE", "") === "1",
   ownerPhoneNumber: optional("TWILIO_PHONE_NUMBER", ""),
 
-  // OpenAI Realtime config. Default model tracks the latest GA slug.
+  // OpenAI Realtime config. Default model tracks the latest GA slug —
+  // 2026-05-26: bumped gpt-realtime-1.5 → gpt-realtime-2 (GA model with
+  // better non-American accent stability, which we lean on for the
+  // Received-Pronunciation butler persona).
   openaiApiKey: required("OPENAI_API_KEY"),
-  openaiModel: optional("OPENAI_REALTIME_MODEL", "gpt-realtime-1.5"),
+  openaiModel: optional("OPENAI_REALTIME_MODEL", "gpt-realtime-2"),
   openaiVoice: optional("OPENAI_REALTIME_VOICE", "cedar"),
 
   // Per-call hard cap to prevent runaway minutes
