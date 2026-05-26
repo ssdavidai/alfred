@@ -37,7 +37,7 @@ const WEBHOOK_ENDPOINT_DIR = path.join(VAULT_ROOT, "webhook_endpoint");
 
 // Composio REST API bases
 const COMPOSIO_API_V3 = "https://backend.composio.dev/api/v3";
-const COMPOSIO_API_V2 = "https://backend.composio.dev/api/v2";
+// v2 was retired ~May 2026 — every endpoint we used is now HTTP 410.
 
 // Paths — alfred-black named volumes (PLAN.md Part E).
 const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
@@ -711,9 +711,15 @@ async function generateComposioSkill(
   connId: string,
   apiKey: string,
 ): Promise<{ actions_count: number; skill_path: string; written_paths: string[] }> {
-  // Fetch actions from Composio v2 API
+  // Fetch actions from Composio v3 API. The v2 /actions endpoint was retired
+  // (returns HTTP 410); every connection authorised after the cutoff produced
+  // a SKILL.md with `0 available actions`, which made the agent confidently
+  // declare "I can't reach Google Calendar" while the underlying OAuth was
+  // ACTIVE. v3 uses `/tools?toolkit_slug=<slug>` and emits each action as
+  // `{slug, name, description, ...}` — slug is the API identifier (what v2
+  // called `name`), `name` is the human display string.
   const resp = await fetch(
-    `${COMPOSIO_API_V2}/actions?apps=${encodeURIComponent(toolkit)}&limit=50`,
+    `${COMPOSIO_API_V3}/tools?toolkit_slug=${encodeURIComponent(toolkit)}&limit=50`,
     { headers: { "x-api-key": apiKey } },
   );
 
@@ -721,11 +727,14 @@ async function generateComposioSkill(
   if (resp.ok) {
     const data = (await resp.json()) as any;
     const items = Array.isArray(data.items) ? data.items : [];
-    actions = items.map((t: any) => ({
-      slug: t.name ?? t.slug ?? "",
-      description: (t.description ?? "").slice(0, 120),
-      type: classifyAction(t.name ?? t.slug ?? ""),
-    }));
+    actions = items.map((t: any) => {
+      const slug = (t.slug ?? t.name ?? "") as string;
+      return {
+        slug,
+        description: (t.description ?? "").slice(0, 120),
+        type: classifyAction(slug),
+      };
+    });
   }
 
   const emoji = TOOLKIT_EMOJI[toolkit] || "🔌";
@@ -2435,12 +2444,14 @@ export function registerIntegrationRoutes(): void {
       }
 
       // 2. Fetch Composio's current action catalog for this toolkit.
-      // Composio's v2 /actions caps at 500 items/page. GitHub ships ~400
-      // actions — the old limit=100 missed the renamed
-      // GITHUB_LIST_NOTIFICATIONS_FOR_THE_AUTHENTICATED_USER (was on page 2),
-      // which made Sir's github stream appear permanently stale.
+      // v3 `/tools?toolkit_slug=...&limit=500` replaced the retired v2
+      // `/actions?apps=...` endpoint. GitHub ships ~400 actions — anything
+      // smaller than `limit=500` misses GITHUB_LIST_NOTIFICATIONS_FOR_THE_
+      // AUTHENTICATED_USER on page 2, which historically made Sir's github
+      // stream appear permanently stale. In v3 the action identifier is
+      // `slug` (was `name` in v2); `name` is the human display label.
       const actionsResp = await fetch(
-        `${COMPOSIO_API_V2}/actions?apps=${encodeURIComponent(toolkit)}&limit=500`,
+        `${COMPOSIO_API_V3}/tools?toolkit_slug=${encodeURIComponent(toolkit)}&limit=500`,
         { headers: { "x-api-key": apiKey } },
       );
       if (!actionsResp.ok) {
@@ -2453,7 +2464,7 @@ export function registerIntegrationRoutes(): void {
 
       const catalogSlugs = new Set<string>();
       for (const t of tools) {
-        const s = (t.name ?? t.slug ?? "") as string;
+        const s = (t.slug ?? t.name ?? "") as string;
         if (s) catalogSlugs.add(s);
       }
 
@@ -2952,8 +2963,9 @@ export function registerIntegrationRoutes(): void {
     const apiKey = getComposioApiKey();
     const toolkit = params.toolkit;
     try {
+      // v3 `/tools` — see generateComposioSkill above for why v2 is dead.
       const resp = await fetch(
-        `${COMPOSIO_API_V2}/actions?apps=${encodeURIComponent(toolkit)}&limit=50`,
+        `${COMPOSIO_API_V3}/tools?toolkit_slug=${encodeURIComponent(toolkit)}&limit=50`,
         { headers: { "x-api-key": apiKey } },
       );
       if (!resp.ok) {
@@ -2965,7 +2977,7 @@ export function registerIntegrationRoutes(): void {
       sendJson(res, 200, {
         toolkit,
         actions: items.map((t: any) => ({
-          slug: t.name ?? t.slug ?? "",
+          slug: t.slug ?? t.name ?? "",
           description: t.description ?? "",
         })),
         count: items.length,
