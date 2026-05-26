@@ -8,7 +8,7 @@
 // Express-based; the rest of the platform uses node:http but the SDK auth
 // surface we depend on is non-negotiable here.
 
-import express from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import { randomUUID, createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -20,7 +20,7 @@ import { loadEnv } from "./env.js";
 import { OAuthStorage } from "./oauth/storage.js";
 import { SqliteOAuthProvider, issueAuthCode, timingSafeEqual } from "./oauth/provider.js";
 import type { MCPProps } from "./oauth/provider.js";
-import { getToolsForApp, isAppId, SUPPORTED_APPS } from "./tools/registry.js";
+import { type AppId, getToolsForApp, isAppId, SUPPORTED_APPS } from "./tools/registry.js";
 import type { CtrlContext } from "./tools/types.js";
 import { runTool } from "./tools/types.js";
 
@@ -187,10 +187,49 @@ async function main() {
   // concurrent-chat count. If we ever need to multi-replica, swap to a
   // shared session store keyed off SQLite or Redis.
 
+  // Programmatic-client shortcut. claude.ai goes through the human-typed
+  // /approve form once and rides OAuth bearer tokens after that. Scripts /
+  // curl / other MCP clients can skip the OAuth dance entirely by sending
+  // `Authorization: Bearer <MCP_APPROVAL_SECRET>`. The check runs BEFORE
+  // requireBearerAuth: on a match we synthesize the same `extra` shape an
+  // OAuth-authed call would carry (appId + tenantLabel) and short-circuit;
+  // on a miss we fall through to the OAuth verifier untouched.
+  //
+  // Same secret, same scope as the /approve form. The blast radius of
+  // leaking MCP_APPROVAL_SECRET is unchanged — it could already mint an
+  // OAuth token via /approve. This bypass just removes the round-trip.
+  const approvalSecretBypass = (appId: AppId) =>
+    (req: Request, _res: Response, next: NextFunction) => {
+      const header = req.headers.authorization;
+      if (typeof header !== "string" || !header.startsWith("Bearer ")) {
+        return next();
+      }
+      const token = header.slice("Bearer ".length).trim();
+      if (!token) return next();
+      if (!timingSafeEqual(token, env.MCP_APPROVAL_SECRET)) {
+        return next(); // wrong token → let requireBearerAuth try OAuth
+      }
+      // Synthesize the AuthInfo shape requireBearerAuth would have set.
+      // `expiresAt` is omitted: the approval-secret bearer doesn't expire
+      // (it has no per-token lifetime; rotation = .env edit + restart).
+      (req as Request & { auth?: unknown }).auth = {
+        token,
+        clientId: "approval-secret-bypass",
+        scopes: [],
+        extra: {
+          appId,
+          tenantLabel: env.TENANT_LABEL,
+        } satisfies MCPProps,
+      };
+      next();
+    };
+
   for (const appId of SUPPORTED_APPS) {
     // Per-app bearer middleware so the WWW-Authenticate challenge points at
     // the per-app metadata URL — that's what makes claude.ai send the right
-    // `resource` param into /authorize.
+    // `resource` param into /authorize. Runs AFTER approvalSecretBypass:
+    // if the bypass already populated req.auth, the SDK treats this as a
+    // valid token and skips the OAuth verifier.
     const auth = requireBearerAuth({
       verifier: provider,
       resourceMetadataUrl: new URL(
@@ -251,7 +290,7 @@ async function main() {
     };
 
     const path = `/${appId}/mcp`;
-    app.all(path, auth, express.json(), async (req, res) => {
+    app.all(path, approvalSecretBypass(appId), auth, express.json(), async (req, res) => {
       try {
         const sessionHeader = req.headers["mcp-session-id"];
         const sessionId = Array.isArray(sessionHeader) ? sessionHeader[0] : sessionHeader;
