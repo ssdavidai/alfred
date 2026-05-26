@@ -33,6 +33,7 @@ const BASE: SmsStatus = {
   phone_number: null,
   account_sid_masked: null,
   allowed_users: "",
+  allow_all: true,
 };
 
 test("derive: unconfigured → setup state with available pill", () => {

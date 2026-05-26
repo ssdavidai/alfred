@@ -800,12 +800,30 @@ query getSmsAuthorizedUsers {
   entities: []
 }
 
+// Lane III (SMS allowlist, 2026-05-26) — Open / Allowlist toggle on the
+// Phone card. Wraps ctrl-api PUT /api/v1/channels/sms/allowlist
+// ({ allow_all, allowed_users }), which writes the values into the
+// hermes-main .env and bounces the container.
+action setSmsAllowlist {
+  fn: import { setSmsAllowlist } from "@src/dashboard/operations",
+  entities: []
+}
+
 // Lane III (voice) — read-only voice channel status. Backed by ctrl-api
 // /api/v1/channels/voice/status (Lane I). Voice has no operator-facing
 // settings (reuses Twilio creds from SMS), so this query is the only
 // Wasp op the VoiceSection card needs.
 query getVoiceChannelStatus {
   fn: import { getVoiceChannelStatus } from "@src/dashboard/operations",
+  entities: []
+}
+
+// Lane III (voice allowlist, 2026-05-26) — Open / Allowlist toggle on the
+// Phone card. Wraps ctrl-api PUT /api/v1/channels/voice/allowlist
+// ({ allow_all, allowed_callers }), which writes VOICE_ALLOW_ALL_CALLERS /
+// VOICE_ALLOWED_CALLERS into the compose .env and recreates voice-bridge.
+action setVoiceAllowlist {
+  fn: import { setVoiceAllowlist } from "@src/dashboard/operations",
   entities: []
 }
 

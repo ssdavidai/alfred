@@ -308,6 +308,29 @@ export const getVoiceChannelStatus = async (
   });
 };
 
+// Lane III (voice allowlist, 2026-05-26) — Open / Allowlist toggle backed by
+// ctrl-api PUT /api/v1/channels/voice/allowlist. Body:
+//   { allow_all?: boolean, allowed_callers?: string }
+// Returns: { ok, allow_all, allowed_callers }. ctrl-api validates each entry
+// of `allowed_callers` as E.164 and rejects with 400 on bad input.
+export const setVoiceAllowlist = async (
+  args: { allow_all?: boolean; allowed_callers?: string },
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PUT",
+    path: "/api/v1/channels/voice/allowlist",
+    body: {
+      allow_all: args?.allow_all === true,
+      allowed_callers:
+        typeof args?.allowed_callers === "string"
+          ? args.allowed_callers.trim()
+          : "",
+    },
+  });
+};
+
 export const setSmsCredentials = async (
   args: {
     account_sid: string;
@@ -336,6 +359,28 @@ export const setSmsCredentials = async (
       auth_token: args.auth_token.trim(),
       phone_number: args.phone_number.trim(),
       allowed_users: args.allowed_users?.trim() ?? "",
+    },
+  });
+};
+
+// Lane III (SMS allowlist, 2026-05-26) — Open / Allowlist toggle backed by
+// ctrl-api PUT /api/v1/channels/sms/allowlist. Body:
+//   { allow_all?: boolean, allowed_users?: string }
+// Returns: { ok, allow_all, allowed_users }. ctrl-api validates each entry
+// of `allowed_users` as E.164 and rejects with 400 on bad input — we let
+// that surface to the caller verbatim (same as the credentials endpoint).
+export const setSmsAllowlist = async (
+  args: { allow_all?: boolean; allowed_users?: string },
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "PUT",
+    path: "/api/v1/channels/sms/allowlist",
+    body: {
+      allow_all: args?.allow_all === true,
+      allowed_users:
+        typeof args?.allowed_users === "string" ? args.allowed_users.trim() : "",
     },
   });
 };

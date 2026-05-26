@@ -29,9 +29,11 @@ import {
   disconnectSlack,
   getSmsChannelStatus,
   setSmsCredentials,
+  setSmsAllowlist,
   sendSmsTest,
   disconnectSms,
   getVoiceChannelStatus,
+  setVoiceAllowlist,
   getOmiChannelStatus,
   setOmiGroqKey,
   disconnectOmiGroqKey,
@@ -1301,6 +1303,198 @@ function SectionDivider({ label }: { label: string }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// AllowlistEditor — shared Open / Allowlist toggle (2026-05-26).
+//
+// Used by both SmsSection (allowed_users) and VoiceSection (allowed_callers).
+// The two channels have identical UX shape — radio toggle + CSV input — so
+// they share one component. The differences are: the kind label
+// ("texters" vs "callers"), the field name on the wire, and which Wasp
+// action gets called on save. Everything else (E.164 hint, count line,
+// save-disabled-when-empty-in-restrict-mode) is shared.
+//
+// Visual style matches the rest of /channels: var(--ink) / var(--marginalia)
+// / var(--brass), monospace labels in uppercase letterspaced caps, italic
+// body for descriptive lines.
+// ---------------------------------------------------------------------------
+
+interface AllowlistEditorProps {
+  /** Initial state from /status — "" means no allowlist saved yet. */
+  initialAllowAll: boolean;
+  initialEntries: string;
+  /** Singular subject ("texter" / "caller") used in the muted-italic copy. */
+  subjectSingular: string;
+  /** Verb used in the muted-italic open-mode line ("text" / "call"). */
+  verbOpen: string;
+  /** Async save callback — receives the final shape; the editor handles UI state. */
+  onSave: (next: {
+    allow_all: boolean;
+    entries: string;
+  }) => Promise<unknown>;
+}
+
+function AllowlistEditor({
+  initialAllowAll,
+  initialEntries,
+  subjectSingular,
+  verbOpen,
+  onSave,
+}: AllowlistEditorProps) {
+  // The radio's source of truth is local state, seeded from status. We
+  // intentionally do NOT keep this in sync with status after first mount —
+  // mid-edit, the operator's choice wins until they hit Save.
+  const [mode, setMode] = useState<"open" | "allowlist">(
+    initialAllowAll ? "open" : "allowlist",
+  );
+  const [entries, setEntries] = useState<string>(initialEntries);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [savedFlash, setSavedFlash] = useState(false);
+
+  const trimmed = entries.trim();
+  const count = trimmed
+    ? trimmed
+        .split(",")
+        .map((p) => p.trim())
+        .filter(Boolean).length
+    : 0;
+  const canSave =
+    !busy && (mode === "open" || (mode === "allowlist" && count > 0));
+
+  async function handleSave() {
+    if (!canSave) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await onSave({
+        allow_all: mode === "open",
+        entries: mode === "open" ? "" : trimmed,
+      });
+      setSavedFlash(true);
+      setTimeout(() => setSavedFlash(false), 1800);
+    } catch (e: any) {
+      setErr(
+        e?.message ??
+          e?.data?.error ??
+          "Couldn't save the allowlist. Check the format and try again.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 border-l border-rule/40 pl-3">
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em]"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Who can {verbOpen} Alfred
+      </div>
+
+      {/* Radio toggle — two mutually exclusive modes. */}
+      <div className="flex flex-wrap gap-4 items-baseline">
+        <label className="flex items-baseline gap-2 cursor-pointer">
+          <input
+            type="radio"
+            name={`allowlist-mode-${subjectSingular}`}
+            checked={mode === "open"}
+            onChange={() => setMode("open")}
+            disabled={busy}
+          />
+          <span
+            className="font-mono text-[12px]"
+            style={{ color: "var(--ink)" }}
+          >
+            Open
+          </span>
+        </label>
+        <label className="flex items-baseline gap-2 cursor-pointer">
+          <input
+            type="radio"
+            name={`allowlist-mode-${subjectSingular}`}
+            checked={mode === "allowlist"}
+            onChange={() => setMode("allowlist")}
+            disabled={busy}
+          />
+          <span
+            className="font-mono text-[12px]"
+            style={{ color: "var(--ink)" }}
+          >
+            Allowlist
+          </span>
+        </label>
+      </div>
+
+      {/* Status line — what the persisted state says, before the editor. */}
+      {mode === "open" ? (
+        <p
+          className="font-body italic text-[12px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Open — anyone can {verbOpen} Alfred.
+        </p>
+      ) : (
+        <p
+          className="font-body italic text-[12px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          {count === 0
+            ? `No ${subjectSingular}s yet — paste E.164 numbers below.`
+            : `Allowlist: ${count} ${subjectSingular}${count === 1 ? "" : "s"}.`}
+        </p>
+      )}
+
+      <input
+        type="text"
+        value={entries}
+        onChange={(e) => setEntries(e.target.value)}
+        placeholder="+15551234567, +442345..."
+        disabled={mode === "open" || busy}
+        className="w-full bg-transparent border px-2 py-1 font-mono text-[11px]"
+        style={{
+          borderColor: "var(--rule)",
+          color: "var(--ink)",
+          opacity: mode === "open" ? 0.4 : 1,
+        }}
+      />
+
+      <div className="flex flex-wrap gap-3 items-baseline">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={!canSave}
+          className="font-mono text-[10px] uppercase tracking-[0.22em] px-2 py-1 border"
+          style={{
+            borderColor: "var(--ink)",
+            color: "var(--ink)",
+            opacity: canSave ? 1 : 0.5,
+          }}
+        >
+          {busy ? "saving..." : "save"}
+        </button>
+        {savedFlash && (
+          <span
+            className="font-body italic text-[12px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            ✓ Saved.
+          </span>
+        )}
+      </div>
+
+      {err && (
+        <p
+          className="font-body italic text-[12px]"
+          style={{ color: "var(--brass)" }}
+        >
+          {err}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function SmsSection() {
   const { data: statusData, refetch } = useQuery(
     getSmsChannelStatus,
@@ -1569,30 +1763,23 @@ function SmsSection() {
             </p>
           )}
 
-          {/* Allowed-senders panel — fold-out, sourced from status */}
-          <div className="space-y-2 border-l border-rule/40 pl-3">
-            <div
-              className="font-mono text-[10px] uppercase tracking-[0.22em]"
-              style={{ color: "var(--marginalia)" }}
-            >
-              Allowed senders
-            </div>
-            {status?.allowed_users ? (
-              <p
-                className="font-mono text-[12px]"
-                style={{ color: "var(--ink)" }}
-              >
-                {status.allowed_users}
-              </p>
-            ) : (
-              <p
-                className="font-body italic text-[12px]"
-                style={{ color: "var(--marginalia)" }}
-              >
-                Anyone may text {card.phoneNumber ?? "the bot"}.
-              </p>
-            )}
-          </div>
+          {/* Allowlist editor — Open / Allowlist toggle backed by
+              setSmsAllowlist (2026-05-26). Re-mounts on status change so
+              the initial seed is always the persisted server state. */}
+          <AllowlistEditor
+            key={`sms-${status?.allow_all ? "open" : "list"}-${status?.allowed_users ?? ""}`}
+            initialAllowAll={status?.allow_all ?? true}
+            initialEntries={status?.allowed_users ?? ""}
+            subjectSingular="texter"
+            verbOpen="text"
+            onSave={async ({ allow_all, entries }) => {
+              await setSmsAllowlist({
+                allow_all,
+                allowed_users: entries,
+              });
+              refetch();
+            }}
+          />
 
           <div className="flex flex-wrap gap-3 items-baseline pt-1">
             <button
@@ -1817,6 +2004,27 @@ function VoiceSection() {
         >
           Calling number: {card.callingNumber}
         </p>
+      )}
+
+      {/* Allowlist editor — show as long as voice is past the unconfigured
+          stage (i.e. compose service exists + SMS creds are set). We render
+          it even in needs-openai-key state so the operator can lock down
+          the bridge before pasting the key. */}
+      {card.state !== "unconfigured" && (
+        <AllowlistEditor
+          key={`voice-${status?.allow_all ? "open" : "list"}-${status?.allowed_callers ?? ""}`}
+          initialAllowAll={status?.allow_all ?? true}
+          initialEntries={status?.allowed_callers ?? ""}
+          subjectSingular="caller"
+          verbOpen="call"
+          onSave={async ({ allow_all, entries }) => {
+            await setVoiceAllowlist({
+              allow_all,
+              allowed_callers: entries,
+            });
+            refetch();
+          }}
+        />
       )}
     </div>
   );

@@ -22,6 +22,8 @@ export interface SmsStatus {
   account_sid_masked: string | null;
   /** Comma-separated allowlist of E.164 numbers permitted to text the bot. */
   allowed_users: string;
+  /** True when any sender is allowed (default-open policy, no env var set). */
+  allow_all: boolean;
 }
 
 export interface SmsCardState {
@@ -43,6 +45,7 @@ const NULL_STATUS: SmsStatus = {
   phone_number: null,
   account_sid_masked: null,
   allowed_users: "",
+  allow_all: true,
 };
 
 /**

@@ -106,6 +106,44 @@ function renderTwiml(opts: {
   );
 }
 
+/**
+ * TwiML body that hangs up disallowed callers immediately. Twilio plays a
+ * busy signal then ends the call — no audio frames consumed, no Realtime
+ * session opened, no OpenAI cost. The /channels Phone card surfaces both
+ * the allowlist and the open/closed toggle so the operator can flip it.
+ */
+function renderRejectTwiml(): string {
+  return (
+    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    "<Response>\n" +
+    "  <Reject reason=\"busy\"/>\n" +
+    "</Response>\n"
+  );
+}
+
+/**
+ * Caller-allowlist check. Default policy: OPEN — anyone can call. Lock down
+ * by setting VOICE_ALLOWED_CALLERS to a comma-separated E.164 list (and
+ * leaving VOICE_ALLOW_ALL_CALLERS unset or "false"). Matches `From` exactly;
+ * loose matching would let attackers spoof a prefix.
+ */
+function isCallerAllowed(from: string): boolean {
+  const allowAll = (process.env.VOICE_ALLOW_ALL_CALLERS || "").trim().toLowerCase() === "true";
+  if (allowAll) return true;
+  const list = (process.env.VOICE_ALLOWED_CALLERS || "").trim();
+  if (!list) {
+    // Default-open: if neither env var is set, accept all callers. Matches
+    // the SMS adapter's behaviour and avoids "set up everything but voice
+    // mysteriously rejects every call" UX surprise.
+    return true;
+  }
+  const allowed = new Set(list.split(",").map((s) => s.trim()).filter(Boolean));
+  // Strip the display-name shape (`"Name" <+E164>`) if Twilio ever sends one.
+  const m = from.match(/<([^>]+)>/);
+  const normalised = (m ? m[1] : from).trim();
+  return allowed.has(normalised);
+}
+
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -226,6 +264,19 @@ export async function handleTwimlInbound(
     To: params.get("To") ?? "",
     CallSid: params.get("CallSid") ?? "",
   };
+
+  // Caller allowlist — VOICE_ALLOWED_CALLERS / VOICE_ALLOW_ALL_CALLERS in the
+  // compose .env, set via /channels Phone card → PUT /api/v1/channels/voice/allowlist.
+  // Default policy: OPEN. Disallowed callers get a <Reject> and never reach
+  // gpt-realtime, so they cost zero OpenAI credits.
+  if (!isCallerAllowed(callParams.From)) {
+    console.log(
+      `[twiml] reject disallowed caller from=${callParams.From} sid=${callParams.CallSid}`,
+    );
+    res.writeHead(200, { "Content-Type": "application/xml; charset=utf-8" });
+    res.end(renderRejectTwiml());
+    return;
+  }
 
   // Build the wss URL. Twilio strips query strings from <Stream url=...>,
   // so the sig must travel inside <Parameter>, not the URL.

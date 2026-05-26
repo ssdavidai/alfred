@@ -74,6 +74,8 @@ interface SmsStatus {
   phone_number: string | null;
   account_sid_masked: string | null;
   allowed_users: string; // comma-separated E.164; "" if unset
+  /** When true, SMS_ALLOW_ALL_USERS is on — anyone can text the number. */
+  allow_all: boolean;
 }
 
 // ── vault-cli helpers (mirror of telegram.ts / slack.ts) ──────────────────
@@ -210,8 +212,23 @@ const SMS_ENV_KEYS = [
   "TWILIO_AUTH_TOKEN",
   "TWILIO_PHONE_NUMBER",
   "SMS_ALLOWED_USERS",
+  "SMS_ALLOW_ALL_USERS",
+  // Hermes' SMS adapter refuses to start without SMS_WEBHOOK_URL set and
+  // defaults SMS_WEBHOOK_HOST to 127.0.0.1 (unreachable from other compose
+  // containers — Caddy → hermes:8080 would 502). We write both alongside
+  // the Twilio credentials so a fresh install never hits the "saved creds
+  // but no inbound replies" trap; ${DOMAIN} comes from the compose .env.
+  "SMS_WEBHOOK_URL",
+  "SMS_WEBHOOK_HOST",
 ] as const;
 type SmsEnvKey = (typeof SMS_ENV_KEYS)[number];
+
+/** Public URL Hermes' SMS adapter validates X-Twilio-Signature against.
+ *  Reads ${DOMAIN} so this works on every alfred-black host without code edits. */
+function smsWebhookUrl(): string {
+  const dom = (process.env.DOMAIN || "").trim();
+  return dom ? `https://sms.${dom}/webhooks/twilio` : "";
+}
 
 async function readProfileEnv(): Promise<Record<string, string>> {
   const raw = await dockerExec(HERMES_CONTAINER, [
@@ -512,6 +529,7 @@ export function registerSmsRoutes(): void {
     const token = envMap.TWILIO_AUTH_TOKEN ?? "";
     const phone = envMap.TWILIO_PHONE_NUMBER ?? "";
     const allowed = envMap.SMS_ALLOWED_USERS ?? "";
+    const allowAll = (envMap.SMS_ALLOW_ALL_USERS ?? "").toLowerCase() === "true";
     const configured = Boolean(sid && token && phone);
 
     if (envErr) {
@@ -522,6 +540,7 @@ export function registerSmsRoutes(): void {
         phone_number: null,
         account_sid_masked: null,
         allowed_users: "",
+        allow_all: false,
       } satisfies SmsStatus);
       return;
     }
@@ -533,6 +552,7 @@ export function registerSmsRoutes(): void {
         phone_number: null,
         account_sid_masked: null,
         allowed_users: "",
+        allow_all: false,
       } satisfies SmsStatus);
       return;
     }
@@ -549,6 +569,7 @@ export function registerSmsRoutes(): void {
         phone_number: phone,
         account_sid_masked: maskAccountSid(sid),
         allowed_users: allowed,
+        allow_all: allowAll,
       } satisfies SmsStatus);
       return;
     }
@@ -560,7 +581,37 @@ export function registerSmsRoutes(): void {
       phone_number: phone,
       account_sid_masked: maskAccountSid(sid),
       allowed_users: allowed,
+      allow_all: allowAll,
     } satisfies SmsStatus);
+  });
+
+  // PUT /allowlist — set SMS_ALLOWED_USERS + SMS_ALLOW_ALL_USERS without
+  // re-validating credentials. Lets the UI toggle inbound-sender policy
+  // independently from a credential rotation.
+  addRoute("PUT", "/api/v1/channels/sms/allowlist", async ({ res, body }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const allowAll = b.allow_all === true;
+    let allowedUsers: string | null = null;
+    if (!allowAll) {
+      const raw = typeof b.allowed_users === "string" ? b.allowed_users.trim() : "";
+      if (raw) {
+        const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
+        for (const p of parts) {
+          if (!E164_RE.test(p)) {
+            throw new ValidationError(
+              `allowed_users must be comma-separated E.164 numbers — "${p}" is not`,
+            );
+          }
+        }
+        allowedUsers = parts.join(",");
+      }
+    }
+    await writeProfileEnvKeys({
+      SMS_ALLOWED_USERS: allowedUsers,
+      SMS_ALLOW_ALL_USERS: allowAll ? "true" : null,
+    });
+    restartHermes();
+    sendJson(res, 200, { ok: true, allow_all: allowAll, allowed_users: allowedUsers ?? "" });
   });
 
   // PUT /credentials — validate against Twilio + vault upsert (3 items) +
@@ -625,6 +676,14 @@ export function registerSmsRoutes(): void {
       TWILIO_ACCOUNT_SID: sid,
       TWILIO_AUTH_TOKEN: token,
       TWILIO_PHONE_NUMBER: phone,
+      // Persist the two webhook bind variables alongside credentials so the
+      // SMS adapter doesn't silently refuse to start (SMS_WEBHOOK_URL is
+      // mandatory) or bind to 127.0.0.1 (the SMS_WEBHOOK_HOST default,
+      // unreachable from sibling compose containers — Caddy → hermes:8080
+      // would 502). Idempotent: existing operator-set values still take
+      // precedence because writeProfileEnvKeys is a merge, not a replace.
+      SMS_WEBHOOK_URL: smsWebhookUrl() || null,
+      SMS_WEBHOOK_HOST: "0.0.0.0",
     };
     if (typeof b.allowed_users === "string") {
       updates.SMS_ALLOWED_USERS = allowedUsers;

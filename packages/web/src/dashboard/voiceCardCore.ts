@@ -39,6 +39,10 @@ export interface VoiceStatus {
   compose_service_exists: boolean;
   /** True when OPENAI_API_KEY is set in the compose .env. */
   openai_key_set: boolean;
+  /** Comma-separated E.164 numbers permitted to call the bridge. "" if unset. */
+  allowed_callers: string;
+  /** True when any caller is allowed (default-open policy, no env vars set). */
+  allow_all: boolean;
 }
 
 export interface VoiceCardState {
@@ -60,6 +64,8 @@ const NULL_STATUS: VoiceStatus = {
   calling_number: null,
   compose_service_exists: false,
   openai_key_set: false,
+  allowed_callers: "",
+  allow_all: true,
 };
 
 export function deriveVoiceCardState(args: {

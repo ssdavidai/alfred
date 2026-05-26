@@ -37,6 +37,8 @@ const BASE: VoiceStatus = {
   calling_number: null,
   compose_service_exists: false,
   openai_key_set: false,
+  allowed_callers: "",
+  allow_all: true,
 };
 
 test("derive: unconfigured + compose missing → 'Voice not deployed' card", () => {

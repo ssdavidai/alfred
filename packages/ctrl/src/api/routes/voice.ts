@@ -64,6 +64,10 @@ interface VoiceStatus {
    *  voice-bridge via env_file). The UI surfaces an inline input when this
    *  is false so the operator can paste the key without leaving /channels. */
   openai_key_set: boolean;
+  /** Comma-separated E.164 numbers allowed to call Alfred. "" when unset. */
+  allowed_callers: string;
+  /** When true, VOICE_ALLOW_ALL_CALLERS is on — anyone can call the Twilio number. */
+  allow_all: boolean;
 }
 
 // ── Compose probe ─────────────────────────────────────────────────────────
@@ -224,6 +228,26 @@ function readComposeEnvKey(key: string): string {
   return "";
 }
 
+// ── Voice allowlist reader ────────────────────────────────────────────────
+//
+// VOICE_ALLOWED_CALLERS / VOICE_ALLOW_ALL_CALLERS live in the compose .env
+// alongside the other voice-bridge env. The bridge reads them via env_file:
+// the TwiML responder (packages/voice-bridge/src/twiml.ts) checks the caller
+// `From` field against the allowlist and rejects disallowed callers with
+// <Reject reason="busy"/>. ctrl-api keeps a read-side view here so the
+// /channels Phone card can surface the current setting.
+
+function readVoiceAllowlist(): {
+  allowed_callers: string;
+  allow_all: boolean;
+} {
+  const allowed = readComposeEnvKey("VOICE_ALLOWED_CALLERS").trim();
+  const allowAll =
+    readComposeEnvKey("VOICE_ALLOW_ALL_CALLERS").trim().toLowerCase() ===
+    "true";
+  return { allowed_callers: allowed, allow_all: allowAll };
+}
+
 // ── Container logs tail (for state="error" details) ───────────────────────
 
 async function tailVoiceBridgeLogs(): Promise<string> {
@@ -250,6 +274,7 @@ export function registerVoiceRoutes(): void {
     // OPENAI_API_KEY is required for voice-bridge to talk to gpt-realtime.
     // Read it eagerly so every return path can include the flag.
     const openaiKeySet = readComposeEnvKey("OPENAI_API_KEY").length > 0;
+    const allowlist = readVoiceAllowlist();
 
     // Case 1: voice-bridge service isn't deployed on this VM yet. This is
     // the "Phase-2 orchestrator hasn't merged the compose change" state —
@@ -262,6 +287,8 @@ export function registerVoiceRoutes(): void {
         calling_number: null,
         compose_service_exists: false,
         openai_key_set: openaiKeySet,
+        allowed_callers: allowlist.allowed_callers,
+        allow_all: allowlist.allow_all,
       } satisfies VoiceStatus);
       return;
     }
@@ -276,6 +303,8 @@ export function registerVoiceRoutes(): void {
         calling_number: null,
         compose_service_exists: false,
         openai_key_set: openaiKeySet,
+        allowed_callers: allowlist.allowed_callers,
+        allow_all: allowlist.allow_all,
       } satisfies VoiceStatus);
       return;
     }
@@ -293,6 +322,8 @@ export function registerVoiceRoutes(): void {
         calling_number: null,
         compose_service_exists: true,
         openai_key_set: openaiKeySet,
+        allowed_callers: allowlist.allowed_callers,
+        allow_all: allowlist.allow_all,
       } satisfies VoiceStatus);
       return;
     }
@@ -311,6 +342,8 @@ export function registerVoiceRoutes(): void {
         calling_number: phone,
         compose_service_exists: true,
         openai_key_set: false,
+        allowed_callers: allowlist.allowed_callers,
+        allow_all: allowlist.allow_all,
       } satisfies VoiceStatus);
       return;
     }
@@ -349,6 +382,63 @@ export function registerVoiceRoutes(): void {
       calling_number: phone,
       compose_service_exists: true,
       openai_key_set: true,
+      allowed_callers: allowlist.allowed_callers,
+      allow_all: allowlist.allow_all,
     } satisfies VoiceStatus);
+  });
+
+  // PUT /allowlist — set VOICE_ALLOWED_CALLERS + VOICE_ALLOW_ALL_CALLERS in
+  // the compose .env (the file voice-bridge reads via env_file). voice-bridge
+  // is recreated so the new env is picked up. The TwiML responder enforces
+  // the allowlist on every inbound call.
+  addRoute("PUT", "/api/v1/channels/voice/allowlist", async ({ res, body }) => {
+    const b = (body ?? {}) as Record<string, unknown>;
+    const allowAll = b.allow_all === true;
+    let allowedCallers: string | null = null;
+    const E164 = /^\+[1-9]\d{1,14}$/;
+    if (!allowAll) {
+      const raw =
+        typeof b.allowed_callers === "string" ? b.allowed_callers.trim() : "";
+      if (raw) {
+        const parts = raw
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        for (const p of parts) {
+          if (!E164.test(p)) {
+            throw new Error(
+              `allowed_callers must be comma-separated E.164 numbers — "${p}" is not`,
+            );
+          }
+        }
+        allowedCallers = parts.join(",");
+      }
+    }
+
+    // Write directly to COMPOSE_DIR/.env via the credentials.ts merge writer.
+    // We import the helper lazily to avoid a top-level dep cycle.
+    const { patchEnv } = await import("./credentials.js");
+    patchEnv({
+      VOICE_ALLOWED_CALLERS: allowedCallers,
+      VOICE_ALLOW_ALL_CALLERS: allowAll ? "true" : null,
+    });
+
+    // Recreate voice-bridge so the new env lands. `--no-deps --force-recreate`
+    // limits the blast radius to the one container.
+    dockerComposeCmd([
+      "up",
+      "-d",
+      "--no-deps",
+      "--force-recreate",
+      VOICE_COMPOSE_SERVICE,
+    ]).catch((err) => {
+      console.error("[voice/allowlist] recreate failed:", err);
+    });
+
+    sendJson(res, 200, {
+      ok: true,
+      allow_all: allowAll,
+      allowed_callers: allowedCallers ?? "",
+    });
   });
 }
