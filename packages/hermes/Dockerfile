@@ -104,49 +104,16 @@ RUN pip install --no-cache-dir \
 # so the Slack adapter's else-branch hits `continue` and the file never
 # reaches the agent. Same gap on Telegram & Discord adapters by inheritance.
 #
-# Two edits, applied in-place to the pip-installed copy of the gateway
-# package:
-#   1. base.py — add .html/.htm with text/html mime
-#   2. slack.py — add .html/.htm to TEXT_INJECT_EXTENSIONS so small HTML
-#                 (≤100KB) gets inlined as text rather than just attached
-#
-# The patch is idempotent + verifies post-edit (the `grep -q` lines fail
-# the build if the needle drifts between Hermes releases). When we bump
-# HERMES_REF, those greps will catch any upstream rename and we can
-# either re-author the patch or drop it (if upstream finally accepts HTML).
+# See patch_upstream_hermes.py for the full rationale; the script is
+# idempotent and tripwire'd so a future HERMES_REF bump that moves the
+# upstream needle fails the build loudly.
 #
 # Sir 2026-05-26 — local-only durable fix for an upstream Hermes bug.
-RUN set -eux \
- && python3 -c "$(cat <<'PY'
-import pathlib, sys
-def patch(path, needle, insertion, label):
-    p = pathlib.Path(path)
-    src = p.read_text()
-    if '\".html\"' in src and '\".htm\"' in src:
-        print(f'{label}: already patched, skipping')
-        return
-    if needle not in src:
-        print(f'{label}: NEEDLE_NOT_FOUND in {path}; Hermes upstream may have moved this hunk', file=sys.stderr)
-        sys.exit(2)
-    p.write_text(src.replace(needle, insertion, 1))
-    print(f'{label}: patched')
-
-patch(
-    '/usr/local/lib/python3.12/site-packages/gateway/platforms/base.py',
-    '    \".zip\": \"application/zip\",',
-    '    \".html\": \"text/html\",\n    \".htm\": \"text/html\",\n    \".zip\": \"application/zip\",',
-    'base.py:SUPPORTED_DOCUMENT_TYPES',
-)
-patch(
-    '/usr/local/lib/python3.12/site-packages/gateway/platforms/slack.py',
-    '                        \".yaml\", \".yml\", \".toml\", \".ini\", \".cfg\",',
-    '                        \".yaml\", \".yml\", \".toml\", \".ini\", \".cfg\",\n                        \".html\", \".htm\",',
-    'slack.py:TEXT_INJECT_EXTENSIONS',
-)
-PY
-)" \
+COPY patch_upstream_hermes.py /tmp/patch_upstream_hermes.py
+RUN python3 /tmp/patch_upstream_hermes.py \
  && grep -q '"\.html": "text/html"' /usr/local/lib/python3.12/site-packages/gateway/platforms/base.py \
- && grep -q '"\.html", "\.htm"' /usr/local/lib/python3.12/site-packages/gateway/platforms/slack.py
+ && grep -q '"\.html", "\.htm"' /usr/local/lib/python3.12/site-packages/gateway/platforms/slack.py \
+ && rm /tmp/patch_upstream_hermes.py
 
 # =============================================================================
 # Bake the hermes-lcm plugin (lossless cross-session context engine).
