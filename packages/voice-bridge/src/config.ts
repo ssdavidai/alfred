@@ -46,6 +46,12 @@ export const config = {
   openaiModel: optional("OPENAI_REALTIME_MODEL", "gpt-realtime-2"),
   openaiVoice: optional("OPENAI_REALTIME_VOICE", "cedar"),
 
+  // Twilio account auth token — used to verify X-Twilio-Signature on the
+  // inbound TwiML webhook. When empty we still serve TwiML but log a
+  // warning. Set this in /opt/alfred/.env (or via the /channels SMS card)
+  // to enable strict signature validation.
+  twilioAuthToken: optional("TWILIO_AUTH_TOKEN", ""),
+
   // Per-call hard cap to prevent runaway minutes
   maxCallSeconds: Number(optional("MAX_CALL_SECONDS", "1800")),
   // Idle hangup if no audio either way (Phase 9 hardening)

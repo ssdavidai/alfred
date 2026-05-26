@@ -26,6 +26,7 @@ import crypto from "crypto";
 import { WebSocketServer } from "ws";
 import { config } from "./config.js";
 import { VoiceCall } from "./voice-call.js";
+import { handleTwimlInbound, TWIML_INBOUND_PATH } from "./twiml.js";
 
 export function verifySig(tenantId: string, sig: string | null | undefined): boolean {
   if (!sig) return false;
@@ -82,6 +83,20 @@ const httpServer = http.createServer((req, res) => {
   if (req.url === "/metrics") {
     res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4" });
     res.end(renderMetrics());
+    return;
+  }
+  // Twilio "A CALL COMES IN" webhook — returns TwiML pointing at the
+  // WSS endpoint below. See twiml.ts for the full handler + the security
+  // model (X-Twilio-Signature verification, fail-soft when token unset).
+  if (req.url === TWIML_INBOUND_PATH) {
+    handleTwimlInbound(req, res).catch((err) => {
+      console.error("[twiml] handler error", err);
+      bumpMetric("errors");
+      if (!res.headersSent) {
+        res.writeHead(500);
+        res.end();
+      }
+    });
     return;
   }
   res.writeHead(404);
