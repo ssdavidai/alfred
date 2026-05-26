@@ -353,6 +353,28 @@ mcp_servers:
     timeout: 120
     connect_timeout: 60
 
+  # --- paperclip: Paperclip's first-party MCP server (paperclip.ing) -------
+  # Wraps Paperclip's REST API as 48 stdio tools (companies, employees,
+  # issues, projects, routines, approvals, …). Unlike the 5-app bundle
+  # above — which lives in packages/mcp-server — paperclip is sourced
+  # directly from upstream npm (@paperclipai/mcp-server, pinned in the
+  # Hermes Dockerfile via PAPERCLIP_MCP_REF) so we don't reimplement 48
+  # tools per Paperclip release. Trade-off documented in the Dockerfile +
+  # the plan (Sir 2026-05-26, P1).
+  #
+  # PAPERCLIP_API_KEY is issued by Paperclip's better-auth UI on first
+  # signup — NOT auto-generated. Until it's set in /opt/alfred/.env this
+  # MCP server starts but every tool call 401s; the skill file routes the
+  # principal to paperclip.<DOMAIN> Settings → API keys.
+  paperclip:
+    command: "node"
+    args: ["/opt/paperclip-mcp/node_modules/@paperclipai/mcp-server/dist/stdio.js"]
+    env:
+      PAPERCLIP_API_URL: "http://paperclip:3100/api"
+      PAPERCLIP_API_KEY: "${PAPERCLIP_API_KEY}"
+    timeout: 120
+    connect_timeout: 60
+
 {%- if is_main %}
 # =============================================================================
 # Gateway platforms — built-in messaging adapters

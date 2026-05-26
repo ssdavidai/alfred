@@ -147,6 +147,32 @@ RUN git clone https://github.com/stephenschoettler/hermes-lcm /opt/hermes-lcm \
 COPY packages/hermes/plugins/one-alfred /opt/one-alfred
 
 # =============================================================================
+# Bake @paperclipai/mcp-server (Paperclip's first-party MCP server).
+# =============================================================================
+# 48 first-party Paperclip tools (companies, employees, issues, projects,
+# routines, approvals, …) wired through Paperclip's REST API. Published by
+# paperclipai to npm; we pin a version-tagged release for reproducibility.
+#
+# This is a DELIBERATE divergence from the five-app stdio bundle convention
+# (alfred/sure/plane/vaultwarden/execute live in packages/mcp-server). For
+# Paperclip we use the upstream package directly because reimplementing 48
+# tools is duplicative + every Paperclip release would mean re-curating the
+# wrapper. Trade-off: voice-bridge won't have Paperclip tools yet (it
+# connects to packages/mcp-server's HTTP surface only); follow-up PR can add
+# a curated wrapper there if voice use-cases emerge. See plan: Paperclip P1,
+# Sir 2026-05-26.
+#
+# Hermes loads this via the `paperclip` block in hermes-config.yaml.njk's
+# mcp_servers list; PAPERCLIP_API_KEY (issued by Paperclip's better-auth UI
+# — NOT auto-generated, see scripts/bootstrap.sh) and PAPERCLIP_API_URL are
+# injected via env.
+ARG PAPERCLIP_MCP_REF=2026.525.0
+RUN mkdir -p /opt/paperclip-mcp \
+ && npm install --prefix /opt/paperclip-mcp --no-audit --no-fund \
+        "@paperclipai/mcp-server@${PAPERCLIP_MCP_REF}" \
+ && test -f /opt/paperclip-mcp/node_modules/@paperclipai/mcp-server/dist/stdio.js
+
+# =============================================================================
 # Bake the MCP bundle.
 # =============================================================================
 # The 5-app stdio bundle + its node_modules, plus the ctrl-server.mjs HTTP
