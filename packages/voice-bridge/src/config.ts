@@ -63,6 +63,16 @@ export const config = {
   // we want for that misconfiguration (loud, debuggable).
   mcpApprovalSecret: optional("MCP_APPROVAL_SECRET", ""),
 
+  // OPTIONAL external MCP servers, beyond the 6 baked-in mcp-server apps.
+  // Used for tenant-specific surfaces — e.g. joe.alfred.black wires in a
+  // 7th server `cdsk` (Contractor's Desk) at https://joe.ngrok.pizza/mcp/mcp.
+  // Format: comma-separated `name=url` pairs; optional `=bearer` if the
+  // external server needs an Authorization header.
+  //   MCP_EXTERNAL_SERVERS="cdsk=https://joe.ngrok.pizza/mcp/mcp"
+  //   MCP_EXTERNAL_SERVERS="cdsk=https://x/mcp,xyz=https://y/mcp=BEARER"
+  // Empty by default — no external servers on a stock tenant.
+  mcpExternalServers: optional("MCP_EXTERNAL_SERVERS", ""),
+
   // Per-call hard cap to prevent runaway minutes
   maxCallSeconds: Number(optional("MAX_CALL_SECONDS", "1800")),
   // Idle hangup if no audio either way (Phase 9 hardening)

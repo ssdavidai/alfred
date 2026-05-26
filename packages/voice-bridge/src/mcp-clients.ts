@@ -28,19 +28,30 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { config } from "./config.js";
 
-// 6 servers: the original 5 (Sir's world) + hermes (the runtime itself — added
-// 2026-05-26 so the voice agent can schedule reminders + delegate background
-// work, not just act on the vault/finances/etc.).
+// 6 built-in servers: the original 5 (Sir's world) + hermes (the runtime
+// itself — added 2026-05-26 so the voice agent can schedule reminders +
+// delegate background work, not just act on the vault/finances/etc.).
+// All 6 live under MCP_SERVER_URL (the per-tenant mcp-server container)
+// at `<base>/<app>/mcp` and authenticate with MCP_APPROVAL_SECRET.
 const APPS = ["alfred", "sure", "plane", "vaultwarden", "execute", "hermes"] as const;
-type App = (typeof APPS)[number];
 
 /** Separator we use to prefix MCP tool names. Two underscores so it never
  *  collides with an actual tool name (MCP tools use single-underscore /
  *  kebab-case). Also legal in OpenAI Realtime's function-name grammar. */
 const PREFIX_SEP = "__";
 
+/** One MCP server target — built-in or external. Lower-case ASCII names
+ *  only (any other characters get sanitised on parse below). */
+interface McpTarget {
+  name: string;
+  url: string;
+  /** Bearer token. Empty for unauth endpoints; defaults to the
+   *  MCP_APPROVAL_SECRET for built-in servers. */
+  bearer: string;
+}
+
 interface McpToolDef {
-  serverApp: App;
+  serverName: string;
   originalName: string;
   /** `<server>__<tool>` — what OpenAI Realtime sees and the dispatcher matches on. */
   prefixedName: string;
@@ -48,15 +59,52 @@ interface McpToolDef {
   inputSchema: Record<string, unknown>;
 }
 
-const clients = new Map<App, Client>();
+const clients = new Map<string, Client>();
 const toolCatalog: McpToolDef[] = [];
 
-async function connectOne(app: App): Promise<void> {
-  const baseUrl = config.mcpServerUrl.replace(/\/+$/, "");
-  const url = new URL(`${baseUrl}/${app}/mcp`);
+/** Parse MCP_EXTERNAL_SERVERS env var (see config.ts comment for format).
+ *  Returns the same McpTarget shape connectOne consumes. Per-tenant
+ *  external servers — e.g. `cdsk=https://joe.ngrok.pizza/mcp/mcp` for
+ *  the Contractor's Desk on Joe's tenant.
+ *
+ *  Why a flat env var rather than a config file: this is set per-tenant
+ *  via docker-compose.override.yaml on the host (the durable seam for
+ *  tenant-specific patches that survives docker compose pull), so a
+ *  string env var is the right granularity. */
+function parseExternalServers(raw: string): McpTarget[] {
+  if (!raw.trim()) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((entry): McpTarget | null => {
+      // Form: `name=url` or `name=url=bearer`. Split on the FIRST `=` for
+      // the name, then on the LAST `=` after the URL for the optional
+      // bearer. URLs contain no `=` in practice; if a query-string `?k=v`
+      // appears, the LAST-`=` heuristic still works because the bearer
+      // (when set) is plain alphanumeric/hex.
+      const eq1 = entry.indexOf("=");
+      if (eq1 < 0) return null;
+      const name = entry.slice(0, eq1).trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+      const rest = entry.slice(eq1 + 1).trim();
+      if (!name || !rest) return null;
+      // If `rest` contains `=` AFTER the URL scheme, treat the trailing
+      // segment as the bearer. Conservative: require an https:// prefix
+      // and split only when there's a non-URL-shaped suffix after a `=`.
+      const tail = rest.lastIndexOf("=");
+      if (tail > 0 && !rest.slice(tail + 1).includes("/")) {
+        return { name, url: rest.slice(0, tail), bearer: rest.slice(tail + 1) };
+      }
+      return { name, url: rest, bearer: "" };
+    })
+    .filter((t): t is McpTarget => !!t);
+}
+
+async function connectOne(target: McpTarget): Promise<void> {
+  const url = new URL(target.url);
   const headers: Record<string, string> = {};
-  if (config.mcpApprovalSecret) {
-    headers.Authorization = `Bearer ${config.mcpApprovalSecret}`;
+  if (target.bearer) {
+    headers.Authorization = `Bearer ${target.bearer}`;
   }
   const transport = new StreamableHTTPClientTransport(url, {
     requestInit: { headers },
@@ -69,7 +117,7 @@ async function connectOne(app: App): Promise<void> {
     await client.connect(transport);
   } catch (err) {
     console.warn(
-      `[mcp] connect ${app} failed (continuing without it):`,
+      `[mcp] connect ${target.name} failed (continuing without it):`,
       err instanceof Error ? err.message : String(err),
     );
     return;
@@ -79,16 +127,16 @@ async function connectOne(app: App): Promise<void> {
     listed = await client.listTools();
   } catch (err) {
     console.warn(
-      `[mcp] tools/list ${app} failed (continuing without it):`,
+      `[mcp] tools/list ${target.name} failed (continuing without it):`,
       err instanceof Error ? err.message : String(err),
     );
     return;
   }
   for (const tool of listed.tools ?? []) {
     toolCatalog.push({
-      serverApp: app,
+      serverName: target.name,
       originalName: tool.name,
-      prefixedName: `${app}${PREFIX_SEP}${tool.name}`,
+      prefixedName: `${target.name}${PREFIX_SEP}${tool.name}`,
       description: tool.description ?? "",
       inputSchema: (tool.inputSchema as Record<string, unknown>) ?? {
         type: "object",
@@ -96,8 +144,8 @@ async function connectOne(app: App): Promise<void> {
       },
     });
   }
-  clients.set(app, client);
-  console.log(`[mcp] connected ${app}: ${(listed.tools ?? []).length} tools`);
+  clients.set(target.name, client);
+  console.log(`[mcp] connected ${target.name}: ${(listed.tools ?? []).length} tools`);
 }
 
 /**
@@ -108,7 +156,14 @@ async function connectOne(app: App): Promise<void> {
 export async function connectAllMcp(): Promise<void> {
   // Reset state so reconnects don't double-count.
   toolCatalog.length = 0;
-  await Promise.allSettled(APPS.map(connectOne));
+  const baseUrl = config.mcpServerUrl.replace(/\/+$/, "");
+  const builtIn: McpTarget[] = APPS.map((app) => ({
+    name: app,
+    url: `${baseUrl}/${app}/mcp`,
+    bearer: config.mcpApprovalSecret,
+  }));
+  const external = parseExternalServers(config.mcpExternalServers);
+  await Promise.allSettled([...builtIn, ...external].map(connectOne));
   console.log(
     `[mcp] catalog: ${toolCatalog.length} tools across ` +
       `${clients.size} servers (${[...clients.keys()].join(", ") || "none"})`,
@@ -142,11 +197,11 @@ export async function dispatchMcp(
   if (!def) {
     return { ok: false, error: `unknown MCP tool: ${prefixedName}` };
   }
-  const client = clients.get(def.serverApp);
+  const client = clients.get(def.serverName);
   if (!client) {
     return {
       ok: false,
-      error: `MCP server '${def.serverApp}' not connected (was the bypass-token rejected at boot?)`,
+      error: `MCP server '${def.serverName}' not connected (was the bypass-token rejected at boot?)`,
     };
   }
   try {
@@ -163,7 +218,12 @@ export async function dispatchMcp(
   }
 }
 
-/** Used by voice-call.ts to detect that a tool name belongs to MCP. */
+/** Used by voice-call.ts to detect that a tool name belongs to MCP.
+ *  Matches the prefix shape `<server>__<tool>` against any server we
+ *  actually connected to (built-in or external) — using the live
+ *  catalog rather than a hardcoded APPS list so external servers from
+ *  MCP_EXTERNAL_SERVERS route correctly. */
 export function isMcpToolName(name: string): boolean {
-  return name.includes(PREFIX_SEP) && APPS.some((a) => name.startsWith(`${a}${PREFIX_SEP}`));
+  if (!name.includes(PREFIX_SEP)) return false;
+  return toolCatalog.some((t) => t.prefixedName === name);
 }
