@@ -85,55 +85,93 @@ interface VoiceContextBundle {
   openMatters: Array<{ name: string; summary?: string }>;
   openTasks: Array<{ name: string; due?: string; summary?: string }>;
   recentSessions: Array<{ at: string; channel: string; summary: string }>;
-  composioToolkits: Array<{
-    toolkit: string;
-    actions: Array<{ name: string; description: string }>;
-  }>;
+  /** Per-MCP-server skill cheatsheets. Replaces the v1 `composioToolkits`
+   *  action-by-action dump: voice-bridge has 150 prefixed MCP tools
+   *  (`alfred__*`, `sure__*`, `plane__*`, `vaultwarden__*`, `execute__*`)
+   *  already declared in `session.update tools` — the OpenAI Realtime
+   *  model reads tool schemas natively, so the prompt only needs to teach
+   *  WHEN to reach for each server, not WHAT each tool does. One entry
+   *  per server-aligned skill: alfred-vault-operations (alfred),
+   *  alfred-sure-operations (sure), alfred-plane-operations (plane),
+   *  alfred-connected-apps (execute / composio). vaultwarden has no
+   *  dedicated skill — its 14 tool schemas are self-describing.
+   *  `body` carries the SKILL.md description + H1 intro (~600 chars
+   *  each) — enough to anchor server selection, small enough not to
+   *  saturate attention and let memory-md Hungarian content code-switch
+   *  the agent (the symptom that triggered this redesign). */
+  skills: Array<{ name: string; description: string; body: string }>;
   generatedAt: string;
 }
 
-function readComposioToolkits(): Array<{
-  toolkit: string;
-  actions: Array<{ name: string; description: string }>;
-}> {
-  const skillsDir = SKILLS_DIR;
-  let dirs: string[];
+// The 4 ops skills the voice agent gets a cheatsheet for. Each maps to one of
+// the 5 MCP servers voice-bridge connects to (see voice-bridge/src/mcp-clients.ts).
+// vaultwarden has no entry — its 14 tool schemas are self-describing and the
+// agent reaches for them via the `vaultwarden__*` prefix without needing prose.
+const VOICE_OPS_SKILLS = [
+  "alfred-vault-operations",   // alfred MCP — vault read/write
+  "alfred-sure-operations",    // sure MCP — personal finance
+  "alfred-plane-operations",   // plane MCP — work / projects
+  "alfred-connected-apps",     // execute MCP — composio third-party apps
+] as const;
+
+/** Read SKILL.md, return `{description, body}` where description is the
+ *  frontmatter `description:` value and body is the H1 + first paragraph
+ *  (everything from `# ` to the first `## ` heading, capped at `maxBody`
+ *  chars). Returns null when the file isn't there or has no frontmatter
+ *  description — those skills just get omitted from the bundle instead
+ *  of carrying a junk record.
+ *
+ *  Why H1+first-paragraph rather than the whole skill body: alfred-sure-
+ *  operations is 1095 lines / 73 KB — injecting that wholesale into every
+ *  voice session prompt drowns the persona and inflates token cost. The
+ *  H1+intro tells the model when to reach for the server; the tool schemas
+ *  on the OpenAI side carry the per-action details. */
+function readSkillSummary(
+  name: string,
+  maxBody = 800,
+): { description: string; body: string } | null {
+  const skillPath = `${SKILLS_DIR}/${name}/SKILL.md`;
+  let raw: string;
   try {
-    dirs = fs
-      .readdirSync(skillsDir)
-      .filter((d: string) => d.startsWith("alfred-composio-"));
+    raw = fs.readFileSync(skillPath, "utf-8");
   } catch {
-    return [];
+    return null;
   }
-  const out: Array<{
-    toolkit: string;
-    actions: Array<{ name: string; description: string }>;
-  }> = [];
-  for (const d of dirs) {
-    const toolkit = d.replace(/^alfred-composio-/, "");
-    const skillPath = `${skillsDir}/${d}/SKILL.md`;
-    let body: string;
-    try {
-      body = fs.readFileSync(skillPath, "utf-8");
-    } catch {
-      continue;
+  // Pull `description:` out of the YAML frontmatter (line-anchored, single-line).
+  const fmMatch = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
+  let description = "";
+  let bodyStart = 0;
+  if (fmMatch) {
+    const fm = fmMatch[1];
+    const descLine = fm.match(/^description:\s*(.+)$/m);
+    if (descLine) {
+      description = descLine[1].trim().replace(/^["']|["']$/g, "");
     }
-    // Extract rows of the "## Actions" markdown table.
-    //   | `ACTION_NAME` | type | description |
-    const actions: Array<{ name: string; description: string }> = [];
-    const tableMatch = body.match(/##\s*Actions[\s\S]+?(?=\n##|\n?$)/);
-    const tableSrc = tableMatch ? tableMatch[0] : "";
-    const rowRe = /\|\s*`([A-Z][A-Z0-9_]+)`\s*\|[^|]*\|\s*([^|\n]+?)\s*\|/g;
-    let m: RegExpExecArray | null;
-    while ((m = rowRe.exec(tableSrc)) !== null) {
-      actions.push({
-        name: m[1],
-        description: m[2].slice(0, 120).trim(),
-      });
-    }
-    if (actions.length > 0) out.push({ toolkit, actions });
+    bodyStart = fmMatch[0].length;
   }
-  return out;
+  if (!description) return null;
+  // Body = from the H1 to the first H2; clipped to maxBody.
+  const tail = raw.slice(bodyStart);
+  const h1Idx = tail.search(/^#\s+/m);
+  const startsAt = h1Idx >= 0 ? h1Idx : 0;
+  const tailFromH1 = tail.slice(startsAt);
+  const h2Match = tailFromH1.match(/\n##\s+/);
+  const end = h2Match && typeof h2Match.index === "number"
+    ? h2Match.index
+    : tailFromH1.length;
+  const body = tailFromH1.slice(0, end).trim().slice(0, maxBody);
+  return { description, body };
+}
+
+/** Strip the "Last user: …" suffix that alfred_journal records on voice
+ *  session summaries. Leaving it in echoes whatever language Sir last
+ *  spoke (Hungarian, Spanish, …) back into the next session prompt —
+ *  which, against a one-paragraph English persona competing with a
+ *  five-KB MEMORY.md, was the proximate cause of the gpt-realtime-2
+ *  code-switching regression on 2026-05-26. The agent doesn't need the
+ *  quote — the freshness signal is the whole point of the section. */
+function sanitizeSessionSummary(summary: string): string {
+  return summary.replace(/\s*Last user:[\s\S]*$/i, "").trim();
 }
 
 function readFileSafe(path: string, max = 16_000): string {
@@ -208,23 +246,37 @@ function parseFrontmatter(raw: string): Record<string, unknown> {
 }
 
 function buildVoiceContext(): VoiceContextBundle {
-  const memoryMd = readFileSafe(`${VAULT_PATH}/MEMORY.md`, 8_000);
+  // MEMORY.md is shared with the text agents, where the full corpus matters.
+  // For voice we truncate hard — the field is mostly principal-biography in
+  // mixed Hungarian/English; injecting all 5–8 KB of it competes with the
+  // English persona and was a contributing factor to the 2026-05-26 code-
+  // switching regression. 1200 chars keeps the top-of-file most-critical
+  // names without the long company-by-company tail. (Text agents still
+  // load the full MEMORY.md via their own loader path.)
+  const memoryMd = readFileSafe(`${VAULT_PATH}/MEMORY.md`, 1_200);
   const voiceSkill = readFileSafe(
     `${SKILLS_DIR}/alfred-voice/SKILL.md`,
-    8_000,
+    10_000,
   );
   const openMatters = listVaultRecords("matter", "active");
   const openTasks = listVaultRecords("task", "active");
 
   // Recent main-agent sessions across channels: pulled from alfred_journal,
   // scoped to the owner principal (Telegram + Slack + SMS + voice all bind to
-  // 'owner' on first contact). Phase 4 fix — until 2026-05-25 this tailed
-  // streams/system-openclaw-sessions.jsonl, which is an OpenClaw-era file
-  // that doesn't exist on the Hermes-only stack; the section therefore
-  // never appeared in the primer. queryRecentJournal returns BOTH directions
-  // (Sir's inbound + Alfred's outbound) so the voice agent sees full turns
-  // of the recent conversation context, not just half of it.
+  // 'owner' on first contact). The summary is sanitized — we drop the
+  // "Last user: …" quote so non-English last-utterances don't echo back as
+  // bilingual primer signal (see sanitizeSessionSummary above).
   const recentSessions = safeRecentJournal();
+
+  // Per-server skill cheatsheets for the 4 MCP servers that have one. Each
+  // gets the SKILL.md description + H1 intro paragraph (≈600 chars), not
+  // the full body — the agent uses the tool schemas declared via
+  // session.update tools for per-action detail.
+  const skills: Array<{ name: string; description: string; body: string }> = [];
+  for (const name of VOICE_OPS_SKILLS) {
+    const s = readSkillSummary(name);
+    if (s) skills.push({ name, ...s });
+  }
 
   return {
     memoryMd,
@@ -232,7 +284,7 @@ function buildVoiceContext(): VoiceContextBundle {
     openMatters,
     openTasks,
     recentSessions,
-    composioToolkits: readComposioToolkits(),
+    skills,
     generatedAt: new Date().toISOString(),
   };
 }
@@ -253,14 +305,19 @@ function safeRecentJournal(): Array<{
       { principal_id: "owner" },
       { limit: 20, within_hours: 168 }, // last 7 days
     );
-    return entries.map((e) => ({
-      at: e.ts,
-      channel: e.channel,
-      // Truncate to 200 chars so a single long message doesn't blow the
-      // primer budget; the agent reads the freshness signal, not the body.
-      summary:
-        e.message.length > 200 ? e.message.slice(0, 200) + "…" : e.message,
-    }));
+    return entries.map((e) => {
+      // Strip the "Last user: …" suffix before truncating — leaving it in
+      // would echo Sir's last utterance verbatim into the next session
+      // prompt (Hungarian/Spanish/etc.), which against an English persona
+      // is a strong code-switching signal. Sanitize first, then truncate
+      // to 200 chars so the freshness summary stays compact.
+      const cleaned = sanitizeSessionSummary(e.message);
+      return {
+        at: e.ts,
+        channel: e.channel,
+        summary: cleaned.length > 200 ? cleaned.slice(0, 200) + "…" : cleaned,
+      };
+    });
   } catch (err) {
     console.warn(
       "[voice-context] recent-journal query failed (non-blocking):",

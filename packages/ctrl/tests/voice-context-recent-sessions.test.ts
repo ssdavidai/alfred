@@ -86,15 +86,36 @@ test("safeRecentJournal truncates long messages with a … suffix", () => {
   // Truncation must be present so one verbose message doesn't blow the
   // primer budget. The exact cap (200 chars) is a soft contract — what
   // we pin is "the truncation logic exists, and it ends in an ellipsis".
+  // The variable holding the length-check is `cleaned`, not `message`,
+  // because sanitizeSessionSummary runs first (see test below).
   assert.match(
     PHONE_TS,
-    /message\.length\s*>\s*200/,
-    "must check for messages over 200 chars",
+    /cleaned\.length\s*>\s*200/,
+    "must check for sanitized messages over 200 chars",
   );
   assert.match(
     PHONE_TS,
     /slice\(0,\s*200\)\s*\+\s*["']…["']/,
     "must truncate to 200 chars + ellipsis",
+  );
+});
+
+test("safeRecentJournal strips 'Last user: …' suffix before truncating", () => {
+  // The alfred_journal voice records carry the last user utterance verbatim
+  // in the summary. Leaving it in echoed whatever language Sir last spoke
+  // (Hungarian, Spanish, …) back into the next session prompt — against
+  // a one-paragraph English persona, that was the code-switching cause on
+  // 2026-05-26. Strip the suffix before the 200-char cap so primer stays
+  // English-anchored.
+  assert.match(
+    PHONE_TS,
+    /function\s+sanitizeSessionSummary[\s\S]{0,400}Last user:/i,
+    "must define sanitizeSessionSummary that strips 'Last user: …'",
+  );
+  assert.match(
+    PHONE_TS,
+    /sanitizeSessionSummary\s*\(\s*e\.message\s*\)/,
+    "safeRecentJournal must call sanitizeSessionSummary(e.message) before truncating",
   );
 });
 
