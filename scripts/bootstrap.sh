@@ -134,9 +134,15 @@ AUTO_SECRETS=(
 	VEXA_MINIO_PASSWORD
 	VEXA_ADMIN_API_TOKEN
 	VEXA_INTERNAL_API_SECRET
-	PAPERCLIP_API_KEY
 	PAPERCLIP_BETTER_AUTH_SECRET
 	PAPERCLIP_HEARTBEAT_SECRET
+	# PAPERCLIP_API_KEY is NOT auto-generated — Paperclip's better-auth
+	# issues API keys through its own UI flow (signup → settings → keys),
+	# and the value must be one Paperclip itself recognises. Leave the
+	# key blank in .env; after first signup at https://paperclip.<DOMAIN>,
+	# generate a key in Paperclip's UI and paste it into /opt/alfred/.env.
+	# Hermes' MCP server will return NOT_CONFIGURED-style errors until the
+	# value is real; that's the right loud-failure mode.
 )
 
 # Ensure the file ends with a newline before we append.

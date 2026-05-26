@@ -71,6 +71,21 @@ export function registerAppsRoutes(): void {
       }))(),
     );
 
+    // Paperclip — the company simulation (paperclip.ing). Alfred runs as
+    // a "managed employee" here; the principal sees companies / employees
+    // / issues / boards. Always-on per Sir 2026-05-26. Healthcheck probes
+    // the web UI root because Paperclip's docs don't document /api/health
+    // yet — same fallback Lane V uses for the container healthcheck.
+    checks.push(
+      (async (): Promise<InstalledApp> => ({
+        id: "paperclip",
+        name: "Paperclip",
+        url: `https://paperclip.${domain}`,
+        icon: "/app-icons/paperclip.svg",
+        status: await checkHealth("http://paperclip:3100/"),
+      }))(),
+    );
+
     // Vexa — meeting transcript dashboard (Steward Phase 4 — #840). Vexa
     // itself runs as a separate compose project at /opt/alfred/vexa/; the
     // ``vexa-dashboard`` service in that stack joins the alfred_default
