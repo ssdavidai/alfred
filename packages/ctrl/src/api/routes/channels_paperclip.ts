@@ -51,6 +51,7 @@
 // alfred_journal write for self-tests, avoiding log churn.
 
 import crypto from "node:crypto";
+import fs from "node:fs";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, ApiError } from "../errors.js";
 import { getStateDb } from "../../db/state.js";
@@ -296,17 +297,52 @@ function extractHermesText(resp: unknown): string {
   return "";
 }
 
+/** Read API_SERVER_KEY for the main Hermes profile out of its rendered
+ *  .env. Matches the pattern in hermes.ts `readHermesApiKey()` — the
+ *  per-profile key is the one Hermes' gateway actually validates against;
+ *  /opt/alfred/.env's HERMES_API_SERVER_KEY is a *seed* for first-boot
+ *  but Hermes regenerates it per profile if absent (we observed a
+ *  mismatch live: opt/.env=64 chars, profile/.env=43 chars). The .env
+ *  file is the source of truth at runtime. ctrl-api has hermes_data
+ *  bind-mounted at /hermes-state.
+ *
+ *  Override via HERMES_CONFIG_DIR for tests (mirrors hermes.ts:387). */
+function readHermesMainApiKey(): string | null {
+  const baseDir = process.env.HERMES_CONFIG_DIR ?? "/hermes-state/profiles";
+  const envPath = `${baseDir}/main/.env`;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(envPath, "utf-8");
+  } catch {
+    return null;
+  }
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#")) continue;
+    const eq = t.indexOf("=");
+    if (eq < 0) continue;
+    if (t.slice(0, eq).trim() === "API_SERVER_KEY") {
+      return t.slice(eq + 1).trim();
+    }
+  }
+  return null;
+}
+
 async function callHermes(
   sessionKey: string,
   input: string,
 ): Promise<HermesCallResult | HermesCallFailure> {
   const url = `${HERMES_MAIN_URL}/v1/responses`;
-  const apiKey = process.env.HERMES_API_SERVER_KEY ?? "";
+  // Hermes' /v1/responses validates the Bearer against
+  // /hermes-state/profiles/main/.env's API_SERVER_KEY — NOT /opt/alfred/
+  // .env's HERMES_API_SERVER_KEY. Same key-resolution pattern as
+  // hermes.ts `readHermesApiKey()`.
+  const apiKey = readHermesMainApiKey() ?? "";
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Hermes-Session-Key": sessionKey,
   };
-  if (apiKey) headers["X-Hermes-API-Key"] = apiKey;
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
   let resp: Response;
   try {

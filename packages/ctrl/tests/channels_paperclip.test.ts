@@ -55,7 +55,17 @@ process.env.AAS_PORT = "3100";
 delete process.env.PAPERCLIP_HEARTBEAT_SECRET;
 delete process.env.PAPERCLIP_API_KEY;
 process.env.HERMES_GATEWAY_URL = "http://hermes-stub:18789";
-process.env.HERMES_API_SERVER_KEY = "test-hermes-key";
+// channels_paperclip reads its Hermes-main API key from a per-profile
+// .env file (matches hermes.ts:387 pattern) — not from HERMES_API_SERVER_KEY
+// directly, because the per-profile key is the one Hermes' gateway actually
+// validates against. Stub that file location via HERMES_CONFIG_DIR.
+const hermesProfilesDir = path.join(tmp, "hermes-profiles");
+fs.mkdirSync(path.join(hermesProfilesDir, "main"), { recursive: true });
+fs.writeFileSync(
+  path.join(hermesProfilesDir, "main", ".env"),
+  "API_SERVER_KEY=test-hermes-key\n",
+);
+process.env.HERMES_CONFIG_DIR = hermesProfilesDir;
 
 // ── fetch mock ─────────────────────────────────────────────────────────────
 //
