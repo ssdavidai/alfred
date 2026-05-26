@@ -175,19 +175,23 @@ test("derive: null status (no data yet) → missing_secret with empty fields", (
 });
 
 test("derive: malformed recent_runs entry is dropped or normalised", () => {
+  // The runtime normaliser must survive garbage from the wire — null entries,
+  // strings instead of objects, unknown status enums, non-numeric durations.
+  // Tests must cast through `unknown` because the statically-typed shape
+  // forbids this on purpose; the *whole point* is that the runtime defends
+  // against an API that has drifted.
   const card = derivePaperclipCardState(
     {
       ...BASE,
       has_signing_secret: true,
       last_heartbeat_at: isoMinutesAgo(1),
-      // @ts-expect-error — intentionally mixed shape for the runtime normaliser
       recent_runs: [
         null,
         "not-an-object",
         { run_id: "ok", paperclip_agent_id: "a", task_id: "t", ts: "", status: "ok", duration_ms: 100 },
-        // bad status string → normalises to "ok"
+        // bad status string → normalises to "ok"; non-numeric duration → 0
         { run_id: "bs", paperclip_agent_id: "a", task_id: "t2", ts: "", status: "blew_up", duration_ms: "fast" },
-      ],
+      ] as unknown as PaperclipStatus["recent_runs"],
     },
     FROZEN_NOW,
   );
