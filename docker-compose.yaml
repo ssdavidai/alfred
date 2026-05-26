@@ -391,10 +391,15 @@ services:
       # stack reads. ${COMPOSE_DIR_HOST} defaults to /opt/alfred (the merged
       # single-VM layout); override in .env for a different host path.
       - ${COMPOSE_DIR_HOST:-/opt/alfred}:/srv/alfred-black
-      # Host's authorized_keys, read-only, so GET /api/v1/system/ssh-info
-      # can surface the operator-installed pubkey on the /channels Terminal
-      # card. Sir #8, 2026-05-24.
-      - /root/.ssh/authorized_keys:/root/.ssh/authorized_keys:ro
+      # Host's authorized_keys, READ-WRITE — GET /api/v1/system/ssh-info
+      # surfaces the operator-installed pubkey on the /channels Terminal
+      # card (Sir #8, 2026-05-24); POST/DELETE /api/v1/system/ssh-keys
+      # let the operator add/revoke keys from the same card (Sir self-
+      # contained-card rework, 2026-05-26). RW is intentional and safe:
+      # ctrl-api is already the trust-root for the VM (docker socket,
+      # vault writes, secret rotation); the bootstrap line is locked at
+      # the API layer to prevent UI lockout.
+      - /root/.ssh/authorized_keys:/root/.ssh/authorized_keys
     env_file:
       - .env
     environment:

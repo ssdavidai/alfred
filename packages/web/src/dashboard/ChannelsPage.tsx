@@ -16,7 +16,9 @@ import {
   removeAuthorizedNumber,
   getVexaAutoJoin,
   setVexaAutoJoin,
-  getSshInfo,
+  listSshKeys,
+  addSshKey,
+  revokeSshKey,
   getTelegramChannelStatus,
   setTelegramBotToken,
   sendTelegramTest,
@@ -42,8 +44,10 @@ import {
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import {
-  deriveTerminalCardState,
-  type SshInfo,
+  deriveTerminalCardStateV2,
+  isProbablyValidPubkey,
+  toKeyRows,
+  type SshKeys,
 } from "./terminalCardCore";
 import {
   deriveTelegramCardState,
@@ -107,10 +111,9 @@ export default function ChannelsPage() {
     undefined,
     { retry: false },
   );
-  // Sir #8 — SSH info for the Terminal card. ctrl-api returns nulls
-  // when SSH isn't provisioned yet; the card renders an empty state
-  // in that case.
-  const { data: sshData } = useQuery(getSshInfo, undefined, { retry: false });
+  // (TerminalCard pulls its own data via listSshKeys — see below. Sir
+  // 2026-05-26: getSshInfo is no longer the Terminal card's primary
+  // source, but is kept as an exported query for any other consumers.)
   const email = (emailData as EmailChannelStatus | undefined) ?? {
     configured: false,
     inbox_address: null,
@@ -121,13 +124,6 @@ export default function ChannelsPage() {
     ? phone.authorizedNumbers
     : [];
   const vexaEnabled: boolean = Boolean((vexaData as any)?.enabled);
-  const ssh: SshInfo = (sshData as SshInfo | undefined) ?? {
-    hostname: null,
-    port: null,
-    user: null,
-    pubkey: null,
-    hermes_exec: null,
-  };
 
   // Email-form state (F57).
   const [emailKey, setEmailKey] = useState("");
@@ -392,8 +388,10 @@ export default function ChannelsPage() {
           <TelegramCard />
 
           {/* Sir #8 — Terminal: SSH straight into the VM + `docker exec`
-              into Hermes for the chattiest, lowest-latency door. */}
-          <TerminalCard ssh={ssh} />
+              into Hermes for the chattiest, lowest-latency door. Sir
+              2026-05-26: card is fully self-contained — generate / paste /
+              revoke keys inline, no redirect to /study. */}
+          <TerminalCard />
         </div>
       </section>
     </Frame>
@@ -401,87 +399,74 @@ export default function ChannelsPage() {
 }
 
 // ---------------------------------------------------------------------------
-// Sir #8 — Terminal card (state derivation lives in terminalCardCore)
+// Sir #8 — Terminal card. Self-contained as of 2026-05-26: connect-commands
+// always shown, add-key (generate or paste) + revoke-key happen inline,
+// no redirect to /study. Backed by ctrl-api /api/v1/system/ssh-keys.
+// State derivation lives in terminalCardCore (pure, unit-tested).
 // ---------------------------------------------------------------------------
 
-export function TerminalCard({ ssh }: { ssh: SshInfo }) {
-  const { ready, sshTarget, hermesExec } = deriveTerminalCardState(ssh);
+const EMPTY_SSH_KEYS: SshKeys = {
+  host: "",
+  port: 22,
+  user: "root",
+  container: "alfred-black-hermes-1",
+  exec_command: "docker exec -it alfred-black-hermes-1 hermes",
+  keys: [],
+};
+
+export function TerminalCard() {
+  const { data: keysData, refetch } = useQuery(listSshKeys, undefined, {
+    retry: false,
+  });
+  const data: SshKeys = (keysData as SshKeys | undefined) ?? EMPTY_SSH_KEYS;
+  const view = deriveTerminalCardStateV2(data);
+  const rows = toKeyRows(data.keys);
 
   return (
     <ChannelCard
       name="Terminal"
-      address={ready ? sshTarget : "Set up your SSH key first"}
+      address={view.sshTarget || "Connect once your VM has a domain"}
       note="The shortest path: SSH in and talk to Hermes directly."
-      status={ready ? "active" : "available"}
+      status={view.status}
     >
-      {ready ? (
-        <div className="mt-5 space-y-5">
-          <PubkeyBlock pubkey={ssh.pubkey!} />
-          <ConnectBlock hermesExec={hermesExec} />
-          <p
-            className="font-body italic text-[12px]"
-            style={{ color: "var(--marginalia)" }}
-          >
-            Add the key above to your <code>~/.ssh/authorized_keys</code>{" "}
-            (already done if you provisioned this VM), then SSH in and run
-            the command above to talk to Alfred directly.
-          </p>
-        </div>
-      ) : (
-        <div className="mt-5">
-          <p
-            className="font-body italic text-[13px]"
-            style={{ color: "var(--marginalia)" }}
-          >
-            No SSH key on file for this instance yet. Set one up in{" "}
-            <Link to="/study#credentials" className="btn-link">
-              Study › Credentials
-            </Link>
-            , then come back — the card will fill in automatically.
-          </p>
-        </div>
-      )}
+      <div className="mt-5 space-y-6">
+        <CommandRow
+          label="SSH in"
+          command={view.sshCommand}
+          hint="From your laptop, once the key below is on this VM."
+        />
+        <CommandRow
+          label="Then talk to Alfred"
+          command={view.hermesExec}
+          hint="Run inside the VM — drops you into Hermes' chat REPL."
+        />
+
+        <KeyList rows={rows} onRevoke={refetch} />
+
+        <AddKeyBlock
+          keygenCommand={view.sshKeygenCommand}
+          onAdded={refetch}
+        />
+      </div>
     </ChannelCard>
   );
 }
 
-function PubkeyBlock({ pubkey }: { pubkey: string }) {
-  // The href is rebuilt every render but it's tiny (< 4KB) and React only
-  // re-mounts the anchor when the pubkey changes, so this is cheap. The
-  // Blob URL is leaked on unmount, which is fine for a card-sized control.
-  const href =
-    typeof window !== "undefined" && typeof Blob !== "undefined"
-      ? URL.createObjectURL(new Blob([pubkey], { type: "text/plain" }))
-      : "";
-  return (
-    <div>
-      <div
-        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
-        style={{ color: "var(--marginalia)" }}
-      >
-        Public key
-      </div>
-      <pre
-        className="font-mono text-[11px] border border-rule p-3 whitespace-pre-wrap break-all max-h-32 overflow-y-auto"
-        style={{ color: "var(--ink)" }}
-      >
-        {pubkey}
-      </pre>
-      <a
-        href={href}
-        download="alfred-ssh-key.pub"
-        className="btn-ghost mt-2 inline-block"
-      >
-        Download key
-      </a>
-    </div>
-  );
-}
-
-function ConnectBlock({ hermesExec }: { hermesExec: string }) {
+// One-line copyable command block. Used for both SSH + docker exec.
+function CommandRow({
+  label,
+  command,
+  hint,
+}: {
+  label: string;
+  command: string;
+  hint?: string;
+}) {
   const [copied, setCopied] = useState(false);
+  const disabled = !command;
   const copy = () => {
-    navigator.clipboard?.writeText(hermesExec);
+    if (disabled) return;
+    navigator.clipboard?.writeText(command);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
@@ -491,19 +476,337 @@ function ConnectBlock({ hermesExec }: { hermesExec: string }) {
         className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
         style={{ color: "var(--marginalia)" }}
       >
-        Connect to Alfred
+        {label}
       </div>
       <div className="flex items-center gap-2">
         <code
           className="flex-1 font-mono text-[12px] border border-rule p-2 truncate"
           style={{ color: "var(--ink)" }}
         >
-          {hermesExec}
+          {command || "—"}
         </code>
-        <button onClick={copy} className="btn-ghost">
+        <button onClick={copy} disabled={disabled} className="btn-ghost">
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
+      {hint && (
+        <p
+          className="font-body italic text-[11px] mt-1"
+          style={{ color: "var(--marginalia)" }}
+        >
+          {hint}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Installed-keys list. Bootstrap rows render with a 🔒 and no Revoke.
+function KeyList({
+  rows,
+  onRevoke,
+}: {
+  rows: ReturnType<typeof toKeyRows>;
+  onRevoke: () => Promise<unknown>;
+}) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function doRevoke(fingerprint: string) {
+    setBusy(fingerprint);
+    setError(null);
+    try {
+      await revokeSshKey({ fingerprint });
+      await onRevoke();
+    } catch (e: any) {
+      setError(e?.message || "Failed to revoke key");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div>
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Keys on this VM
+      </div>
+      {rows.length === 0 ? (
+        <p
+          className="font-body italic text-[13px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          None yet. Add one below — generate a fresh keypair or paste your
+          existing public key.
+        </p>
+      ) : (
+        <ul className="space-y-2">
+          {rows.map((r) => (
+            <li
+              key={r.fingerprint}
+              className="grid grid-cols-[auto_1fr_auto] gap-3 items-baseline border border-rule p-2"
+            >
+              <span className="font-mono text-[10px]" style={{ color: "var(--marginalia)" }}>
+                {r.type.replace(/^ssh-/, "")}
+              </span>
+              <div className="min-w-0">
+                <code className="block font-mono text-[11px] truncate" style={{ color: "var(--ink)" }}>
+                  {r.fingerprint}
+                </code>
+                <span
+                  className="block font-body italic text-[11px] truncate"
+                  style={{ color: "var(--marginalia)" }}
+                >
+                  {r.comment}
+                </span>
+              </div>
+              {r.bootstrap ? (
+                <span
+                  className="font-mono text-[10px] uppercase tracking-[0.18em]"
+                  style={{ color: "var(--marginalia)" }}
+                  title={r.lockReason}
+                >
+                  Bootstrap · locked
+                </span>
+              ) : (
+                <button
+                  onClick={() => doRevoke(r.fingerprint)}
+                  disabled={busy === r.fingerprint}
+                  className="btn-link"
+                >
+                  {busy === r.fingerprint ? "Revoking…" : "Revoke"}
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {error && (
+        <p
+          className="font-body italic text-[11px] mt-2"
+          style={{ color: "var(--brass)" }}
+        >
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// Add-a-key block: Generate OR paste-your-own. The generate path opens
+// a modal-ish reveal in-card with a one-time download of the private
+// key; the paste path is plain validate + POST.
+function AddKeyBlock({
+  keygenCommand,
+  onAdded,
+}: {
+  keygenCommand: string;
+  onAdded: () => Promise<unknown>;
+}) {
+  const [busy, setBusy] = useState<"none" | "generate" | "paste">("none");
+  const [error, setError] = useState<string | null>(null);
+  const [pasted, setPasted] = useState("");
+  const [comment, setComment] = useState("");
+  const [generated, setGenerated] = useState<{
+    privateKey: string;
+    fingerprint: string;
+  } | null>(null);
+
+  const pasteIsValid = isProbablyValidPubkey(pasted);
+
+  async function doGenerate() {
+    setBusy("generate");
+    setError(null);
+    try {
+      const res: any = await addSshKey({
+        generate: true,
+        comment: comment.trim() || undefined,
+      });
+      if (!res?.private_key) {
+        throw new Error("Server returned no private key");
+      }
+      setGenerated({ privateKey: res.private_key, fingerprint: res.fingerprint });
+      setComment("");
+      await onAdded();
+    } catch (e: any) {
+      setError(e?.message || "Failed to generate key");
+    } finally {
+      setBusy("none");
+    }
+  }
+
+  async function doPaste() {
+    setBusy("paste");
+    setError(null);
+    try {
+      await addSshKey({ pubkey: pasted });
+      setPasted("");
+      await onAdded();
+    } catch (e: any) {
+      setError(e?.message || "Failed to add key");
+    } finally {
+      setBusy("none");
+    }
+  }
+
+  // After a successful generate, show the one-time private-key reveal
+  // INSTEAD of the form. The user dismisses it; we don't retain.
+  if (generated) {
+    return (
+      <GeneratedKeyReveal
+        privateKey={generated.privateKey}
+        fingerprint={generated.fingerprint}
+        onDismiss={() => setGenerated(null)}
+      />
+    );
+  }
+
+  return (
+    <div>
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em] mb-2"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Add a key
+      </div>
+
+      {/* Generate path */}
+      <div className="space-y-2 mb-4">
+        <div className="flex gap-2 items-baseline">
+          <input
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            placeholder="Label (optional, e.g. 'laptop')"
+            className="flex-1 bg-transparent border border-rule px-2 py-1 font-mono text-[12px]"
+          />
+          <button
+            onClick={doGenerate}
+            disabled={busy !== "none"}
+            className="btn-ghost"
+          >
+            {busy === "generate" ? "Generating…" : "Generate new key"}
+          </button>
+        </div>
+        <p
+          className="font-body italic text-[11px]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Creates an ed25519 keypair on this VM. You'll get one chance to
+          download the private half — we don't keep it.
+        </p>
+      </div>
+
+      {/* Or paste path */}
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.18em] mb-2 mt-4"
+        style={{ color: "var(--marginalia)" }}
+      >
+        — or paste an existing public key —
+      </div>
+      <div className="space-y-2">
+        <textarea
+          value={pasted}
+          onChange={(e) => setPasted(e.target.value)}
+          placeholder="ssh-ed25519 AAAAC3Nz... user@laptop"
+          rows={3}
+          className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[11px]"
+        />
+        <div className="flex items-baseline justify-between gap-2">
+          <p
+            className="font-body italic text-[11px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Or run on your laptop first:{" "}
+            <code className="font-mono">{keygenCommand}</code>
+          </p>
+          <button
+            onClick={doPaste}
+            disabled={busy !== "none" || !pasted.trim() || !pasteIsValid}
+            className="btn-ghost shrink-0"
+          >
+            {busy === "paste" ? "Adding…" : "Add this key"}
+          </button>
+        </div>
+        {pasted.trim() && !pasteIsValid && (
+          <p
+            className="font-body italic text-[11px]"
+            style={{ color: "var(--brass)" }}
+          >
+            That doesn't look like an OpenSSH public-key line.
+          </p>
+        )}
+      </div>
+
+      {error && (
+        <p
+          className="font-body italic text-[12px] mt-3"
+          style={{ color: "var(--brass)" }}
+        >
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// One-time reveal of a freshly-generated private key. Dismissed → gone
+// from the UI; the server never stored it. Browsers may keep the Blob
+// URL in memory until the tab closes, which is acceptable here (single-
+// owner VM, single-tab session).
+function GeneratedKeyReveal({
+  privateKey,
+  fingerprint,
+  onDismiss,
+}: {
+  privateKey: string;
+  fingerprint: string;
+  onDismiss: () => void;
+}) {
+  const href =
+    typeof window !== "undefined" && typeof Blob !== "undefined"
+      ? URL.createObjectURL(
+          new Blob([privateKey], { type: "application/x-pem-file" }),
+        )
+      : "";
+  const filename = `alfred-${fingerprint.replace(/^SHA256:/, "").slice(0, 10)}`;
+  return (
+    <div className="border border-rule p-4 space-y-3">
+      <div
+        className="font-mono text-[10px] uppercase tracking-[0.22em]"
+        style={{ color: "var(--brass)" }}
+      >
+        Your new private key — download now
+      </div>
+      <p
+        className="font-body italic text-[12px]"
+        style={{ color: "var(--marginalia)" }}
+      >
+        This will not be shown again. Save the file, then{" "}
+        <code className="font-mono">chmod 600 ~/Downloads/{filename}</code>{" "}
+        and use it with <code className="font-mono">ssh -i &lt;path&gt;</code>.
+      </p>
+      <pre
+        className="font-mono text-[10px] border border-rule p-3 whitespace-pre-wrap break-all max-h-40 overflow-y-auto"
+        style={{ color: "var(--ink)" }}
+      >
+        {privateKey}
+      </pre>
+      <div className="flex items-baseline gap-3">
+        <a href={href} download={filename} className="btn-ghost">
+          Download {filename}
+        </a>
+        <button onClick={onDismiss} className="btn-link">
+          I've saved it — dismiss
+        </button>
+      </div>
+      <p
+        className="font-body text-[11px]"
+        style={{ color: "var(--marginalia)" }}
+      >
+        Fingerprint: <code className="font-mono">{fingerprint}</code>
+      </p>
     </div>
   );
 }

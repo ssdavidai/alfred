@@ -718,6 +718,25 @@ query getSshInfo {
   entities: []
 }
 
+// Self-contained Terminal card (Sir 2026-05-26): list + add (generate or
+// paste) + revoke SSH keys, all from the /channels card itself. ctrl-api
+// owns the file (the host's authorized_keys, bind-mounted RW); the
+// bootstrap key is locked from the UI side.
+query listSshKeys {
+  fn: import { listSshKeys } from "@src/dashboard/operations",
+  entities: []
+}
+
+action addSshKey {
+  fn: import { addSshKey } from "@src/dashboard/operations",
+  entities: []
+}
+
+action revokeSshKey {
+  fn: import { revokeSshKey } from "@src/dashboard/operations",
+  entities: []
+}
+
 // Lane III — Telegram channel on /channels. Five ops, all proxied to
 // ctrl-api under /api/v1/channels/telegram/* (Lane I owns the backend).
 // `pairTelegramChat` was removed 2026-05-25 — see operations.ts.

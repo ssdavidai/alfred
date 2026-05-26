@@ -75,6 +75,7 @@ RUN apt-get update \
        ca-certificates \
        python3 \
        python3-yaml \
+       openssh-client \
        docker.io \
   && rm -rf /var/lib/apt/lists/* \
   && case "${TARGETARCH}" in \

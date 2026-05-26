@@ -134,6 +134,58 @@ export const getSshInfo = async (_args: unknown, context: any) => {
   return proxyToTenant(instance, { path: "/api/v1/system/ssh-info" });
 };
 
+// Self-contained Terminal card (Sir 2026-05-26). Three ops, all proxied
+// to ctrl-api under /api/v1/system/ssh-keys.
+//
+//   listSshKeys   → { host, port, user, container, exec_command,
+//                     keys: [{ fingerprint, type, comment, bootstrap }] }
+//   addSshKey     → { pubkey?: string }            BYO pubkey path
+//                  | { generate: true, comment? }  server-side keygen
+//                  → 201 { ok, fingerprint, type, comment, private_key? }
+//                  private_key only on generate, NEVER stored
+//   revokeSshKey  → { fingerprint }
+//                  → 200 { ok, revoked }
+//                  refused (409) if fingerprint is the bootstrap key
+export const listSshKeys = async (_args: unknown, context: any) => {
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, { path: "/api/v1/system/ssh-keys" });
+};
+
+export const addSshKey = async (
+  args: { pubkey?: string; generate?: boolean; comment?: string },
+  context: any,
+) => {
+  const instance = await getUserInstance(context);
+  const body: Record<string, unknown> = {};
+  if (args?.generate) body.generate = true;
+  if (typeof args?.pubkey === "string" && args.pubkey.trim()) {
+    body.pubkey = args.pubkey.trim();
+  }
+  if (typeof args?.comment === "string" && args.comment.trim()) {
+    body.comment = args.comment.trim();
+  }
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/system/ssh-keys",
+    body,
+  });
+};
+
+export const revokeSshKey = async (
+  args: { fingerprint: string },
+  context: any,
+) => {
+  if (typeof args?.fingerprint !== "string" || !args.fingerprint.trim()) {
+    throw new HttpError(400, "fingerprint required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/system/ssh-keys/revoke",
+    body: { fingerprint: args.fingerprint.trim() },
+  });
+};
+
 // Lane III — Telegram channel on /channels. Backed by Lane I's ctrl-api
 // endpoints under /api/v1/channels/telegram/*. Shape:
 //   getTelegramChannelStatus → { configured, bot_handle, state, error,
