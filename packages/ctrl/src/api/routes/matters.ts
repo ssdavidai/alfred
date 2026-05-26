@@ -619,7 +619,7 @@ function buildMatterIndex(): MatterIndexResult {
   // task stem → MatterTask (for cross-matter lookup in pass 3)
   const tasksByStem = new Map<
     string,
-    { task: MatterTask; matterRefs: Set<string>; created: string }
+    { task: MatterTask; matterRefs: Set<string>; created: string; archived: boolean }
   >();
   // signal path → { fm, body }; we use this when expanding the timeline
   // so we don't have to re-read the file.
@@ -788,7 +788,14 @@ function buildMatterIndex(): MatterIndexResult {
             : null,
       };
       const created = String(taskFm.created ?? taskFm.updated ?? "");
-      tasksByStem.set(stem, { task, matterRefs, created });
+      // Pre-compute archived-ness here while we still have the raw frontmatter
+      // — the per-matter composition loop below needs it to keep `tasks[]`
+      // and `counts.tasks` consistent (both must drop archived entries).
+      // Previously `counts.tasks` filtered via `isArchivedTaskFm(k.rec.fm)`
+      // in Pass 3 but `tasks[]` accepted everything, so detail.tasks.length
+      // > list.counts.tasks for any matter with even one archived task. (#229)
+      const archived = isArchivedTaskFm(taskFm);
+      tasksByStem.set(stem, { task, matterRefs, created, archived });
     }
 
     // Collect all candidate matter refs from this record (for the
@@ -918,6 +925,11 @@ function buildMatterIndex(): MatterIndexResult {
   // matter's own `tasks:` frontmatter array.
   // -------------------------------------------------------------------------
   for (const [stem, entry] of tasksByStem) {
+    // Archived tasks are excluded from `tasks[]` so it agrees with the
+    // Pass-3 `counts.tasks` derivation (both drop archived). The link
+    // still appears in `vault_by_category.tasks` for browseability — that
+    // bucket is intentionally inclusive.
+    if (entry.archived) continue;
     // From task→matter refs.
     for (const matterId of entry.matterRefs) {
       const matter = byId.get(matterId);
