@@ -3,10 +3,14 @@
 // derived states unit-test under node:test.
 //
 // Phase 2 (voice-bridge promotion, 2026-05-25): voice is a real compose
-// service alongside the SMS adapter. The card is **read-only** because
-// voice reuses the Twilio credentials configured by the SMS section
-// above — the card's job is to surface deploy-readiness, not configure
-// anything.
+// service alongside the SMS adapter.
+//
+// 2026-05-26 (OPENAI_API_KEY inline): voice has ONE operator-facing
+// setting after all — OPENAI_API_KEY drives gpt-realtime on the Twilio
+// Media Streams socket. When `openai_key_set=false` the card surfaces an
+// inline password input (same shape as OmiCard's needs_groq_key state),
+// so the operator can paste the key without context-switching to
+// /study#credentials. Twilio credentials still reuse the SMS section.
 //
 // The states map 1:1 to ctrl-api's GET /api/v1/channels/voice/status
 // `state` field. Lane I owns the endpoint; this derivation is the only
@@ -33,6 +37,8 @@ export interface VoiceStatus {
   calling_number: string | null;
   /** True when the voice-bridge compose service is present on this VM. */
   compose_service_exists: boolean;
+  /** True when OPENAI_API_KEY is set in the compose .env. */
+  openai_key_set: boolean;
 }
 
 export interface VoiceCardState {
@@ -43,6 +49,8 @@ export interface VoiceCardState {
   pill: "active" | "available" | "starting" | "error";
   /** True when the operator needs to set up SMS first (voice reuses Twilio creds). */
   needsSmsFirst: boolean;
+  /** True when OPENAI_API_KEY is missing — UI shows the inline paste box. */
+  needsOpenaiKey: boolean;
 }
 
 const NULL_STATUS: VoiceStatus = {
@@ -51,6 +59,7 @@ const NULL_STATUS: VoiceStatus = {
   error: null,
   calling_number: null,
   compose_service_exists: false,
+  openai_key_set: false,
 };
 
 export function deriveVoiceCardState(args: {
@@ -69,6 +78,7 @@ export function deriveVoiceCardState(args: {
         callingNumber: status.calling_number,
         pill: "starting",
         needsSmsFirst: false,
+        needsOpenaiKey: false,
       };
 
     case "configured_running":
@@ -81,6 +91,7 @@ export function deriveVoiceCardState(args: {
         callingNumber: formatPhoneNumber(status.calling_number) || null,
         pill: "active",
         needsSmsFirst: false,
+        needsOpenaiKey: false,
       };
 
     case "error":
@@ -93,15 +104,29 @@ export function deriveVoiceCardState(args: {
         callingNumber: status.calling_number,
         pill: "error",
         needsSmsFirst: false,
+        needsOpenaiKey: false,
       };
 
     case "unconfigured":
     default:
-      // Two unconfigured shapes:
-      //   • compose_service_exists=false → voice-bridge not deployed yet
-      //   • compose_service_exists=true  → service present, waiting for
-      //     SMS creds (voice reuses them; no extra UI to surface).
-      if (status.compose_service_exists) {
+      // Three unconfigured shapes (resolved by ctrl-api in this order):
+      //   • compose_service_exists=false   → voice-bridge not deployed yet
+      //   • compose_service_exists=true  && !configured            → SMS not set up
+      //   • compose_service_exists=true  && configured && !openai → operator owes us the OpenAI key
+      if (!status.compose_service_exists) {
+        return {
+          state: "unconfigured",
+          heading: "Voice not deployed",
+          description:
+            "Voice calls are powered by a separate bridge service. It hasn't " +
+            "been deployed to this VM yet — re-run `docker compose up -d`.",
+          callingNumber: null,
+          pill: "available",
+          needsSmsFirst: false,
+          needsOpenaiKey: false,
+        };
+      }
+      if (!status.configured) {
         return {
           state: "unconfigured",
           heading: "Set up SMS first",
@@ -111,17 +136,21 @@ export function deriveVoiceCardState(args: {
           callingNumber: null,
           pill: "available",
           needsSmsFirst: true,
+          needsOpenaiKey: false,
         };
       }
+      // Configured + deployed, missing OpenAI key — the inline-input case.
       return {
         state: "unconfigured",
-        heading: "Voice not deployed",
+        heading: "Add your OpenAI key",
         description:
-          "Voice calls are powered by a separate bridge service. It hasn't " +
-          "been deployed to this VM yet — re-run `docker compose up -d`.",
-        callingNumber: null,
+          "Voice calls route audio through gpt-realtime, so the voice bridge " +
+          "needs an OpenAI API key. Paste yours below — it's stored in this " +
+          "VM's .env and never leaves the box.",
+        callingNumber: formatPhoneNumber(status.calling_number) || null,
         pill: "available",
         needsSmsFirst: false,
+        needsOpenaiKey: !status.openai_key_set,
       };
   }
 }

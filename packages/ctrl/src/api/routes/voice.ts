@@ -3,23 +3,25 @@
 //   GET /api/v1/channels/voice/status
 //
 // A read-only status endpoint for the Phase-2 voice card. There is NO
-// PUT / DELETE / test on this surface — voice doesn't have its own
-// credentials, it reuses the SMS configuration (specifically
-// TWILIO_PHONE_NUMBER from the hermes-main per-profile .env). The whole
-// point of the route is to tell the dashboard whether the voice-bridge
-// container is deployed-and-healthy on this VM, so the redesigned
-// /channels card knows whether to show "Voice not deployed yet" or
-// "Voice connected, calling number +1…".
+// PUT / DELETE / test on this surface — voice's only operator-facing
+// setting (OPENAI_API_KEY) is set via PATCH /api/v1/admin/credentials,
+// the same path every other credential takes. The status endpoint
+// surfaces `openai_key_set` so the UI can render an inline input when
+// it's missing instead of pointing the operator at /study.
 //
-// Resolution table (frozen contract from the Phase-2 spec):
+// Resolution table:
 //
-//   compose_service_exists=false                           → state="unconfigured"
-//   compose_service_exists=true  && !configured           → state="unconfigured"
-//   compose_service_exists=true  && configured && healthy → state="configured_running"
-//   compose_service_exists=true  && configured && starting → state="configured_starting"
-//   compose_service_exists=true  && configured && unhealthy → state="error"
+//   compose_service_exists=false                                          → state="unconfigured"
+//   compose_service_exists=true  && !configured                          → state="unconfigured"
+//   compose_service_exists=true  && configured && !openai_key_set        → state="unconfigured"  (UI shows the OpenAI input)
+//   compose_service_exists=true  && configured && openai_key_set && healthy   → state="configured_running"
+//   compose_service_exists=true  && configured && openai_key_set && starting  → state="configured_starting"
+//   compose_service_exists=true  && configured && openai_key_set && unhealthy → state="error"
 //
 // `configured`     = TWILIO_PHONE_NUMBER is set in the hermes-main /.env.
+// `openai_key_set` = OPENAI_API_KEY is set in the compose /.env (the file
+//                    PATCH /admin/credentials writes; voice-bridge reads it
+//                    via env_file).
 // `calling_number` = the value of TWILIO_PHONE_NUMBER (reuses SMS).
 //
 // FAIL-SOFT POLICY: /status MUST NOT 5xx — the dashboard polls it. On any
@@ -29,9 +31,11 @@
 // merged the compose change yet), so it MUST resolve to state="unconfigured"
 // with error=null.
 
+import fs from "node:fs";
+
 import { addRoute } from "../server.js";
 import { sendJson } from "../errors.js";
-import { dockerExec, dockerComposeCmd } from "../helpers.js";
+import { dockerExec, dockerComposeCmd, COMPOSE_DIR } from "../helpers.js";
 
 // Hermes-main per-profile .env path INSIDE the hermes runtime container.
 // Mirrors the SMS / Telegram routes — `HERMES_HOME=/hermes-state` is the
@@ -56,6 +60,10 @@ interface VoiceStatus {
   error: string | null;
   calling_number: string | null;
   compose_service_exists: boolean;
+  /** True when OPENAI_API_KEY is set in the compose-level .env (read by
+   *  voice-bridge via env_file). The UI surfaces an inline input when this
+   *  is false so the operator can paste the key without leaving /channels. */
+  openai_key_set: boolean;
 }
 
 // ── Compose probe ─────────────────────────────────────────────────────────
@@ -180,6 +188,42 @@ async function readProfileEnvKey(key: string): Promise<string> {
   return "";
 }
 
+// ── Compose-level .env reader (the file PATCH /admin/credentials writes) ──
+//
+// voice-bridge reads OPENAI_API_KEY through compose's `env_file: .env`, so
+// the file at COMPOSE_DIR/.env is the source of truth — NOT process.env on
+// ctrl-api (which only refreshes when ctrl-api itself is recreated). Read
+// the file directly so we see PATCH writes on the next /status poll without
+// a ctrl-api restart.
+
+function readComposeEnvKey(key: string): string {
+  const path = `${COMPOSE_DIR}/.env`;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(path, "utf-8");
+  } catch {
+    return "";
+  }
+  for (const line of raw.split("\n")) {
+    const t = line.replace(/^﻿/, "");
+    if (!t || t.trimStart().startsWith("#")) continue;
+    const eq = t.indexOf("=");
+    if (eq <= 0) continue;
+    const k = t.slice(0, eq).trim();
+    if (k !== key) continue;
+    let v = t.slice(eq + 1);
+    if (v.endsWith("\r")) v = v.slice(0, -1);
+    if (
+      (v.startsWith('"') && v.endsWith('"')) ||
+      (v.startsWith("'") && v.endsWith("'"))
+    ) {
+      v = v.slice(1, -1);
+    }
+    return v.trim();
+  }
+  return "";
+}
+
 // ── Container logs tail (for state="error" details) ───────────────────────
 
 async function tailVoiceBridgeLogs(): Promise<string> {
@@ -203,6 +247,9 @@ export function registerVoiceRoutes(): void {
   // GET /status — fail-soft. NEVER 5xx (dashboard polls it).
   addRoute("GET", "/api/v1/channels/voice/status", async ({ res }) => {
     const probe = await probeComposeService();
+    // OPENAI_API_KEY is required for voice-bridge to talk to gpt-realtime.
+    // Read it eagerly so every return path can include the flag.
+    const openaiKeySet = readComposeEnvKey("OPENAI_API_KEY").length > 0;
 
     // Case 1: voice-bridge service isn't deployed on this VM yet. This is
     // the "Phase-2 orchestrator hasn't merged the compose change" state —
@@ -214,6 +261,7 @@ export function registerVoiceRoutes(): void {
         error: null,
         calling_number: null,
         compose_service_exists: false,
+        openai_key_set: openaiKeySet,
       } satisfies VoiceStatus);
       return;
     }
@@ -227,6 +275,7 @@ export function registerVoiceRoutes(): void {
         error: probe.error,
         calling_number: null,
         compose_service_exists: false,
+        openai_key_set: openaiKeySet,
       } satisfies VoiceStatus);
       return;
     }
@@ -243,11 +292,30 @@ export function registerVoiceRoutes(): void {
         error: null,
         calling_number: null,
         compose_service_exists: true,
+        openai_key_set: openaiKeySet,
       } satisfies VoiceStatus);
       return;
     }
 
-    // Configured — pivot on container Health / State.
+    // Configured-but-no-OpenAI-key: voice-bridge will crash-loop on
+    // "OPENAI_API_KEY env var is required". Don't report this as an "error"
+    // (operator-facing error semantically means "I tried, something broke")
+    // — report it as `unconfigured` with openai_key_set=false. The UI
+    // surfaces an inline input so the key can be pasted without leaving
+    // /channels.
+    if (!openaiKeySet) {
+      sendJson(res, 200, {
+        configured: true,
+        state: "unconfigured",
+        error: null,
+        calling_number: phone,
+        compose_service_exists: true,
+        openai_key_set: false,
+      } satisfies VoiceStatus);
+      return;
+    }
+
+    // Configured + OpenAI key set — pivot on container Health / State.
     const health = (probe.row?.Health ?? "").toLowerCase();
     const state = (probe.row?.State ?? "").toLowerCase();
 
@@ -280,6 +348,7 @@ export function registerVoiceRoutes(): void {
       error,
       calling_number: phone,
       compose_service_exists: true,
+      openai_key_set: true,
     } satisfies VoiceStatus);
   });
 }

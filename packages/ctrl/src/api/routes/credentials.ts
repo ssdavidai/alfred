@@ -29,8 +29,8 @@ const KNOWN_CREDENTIALS: CredentialDef[] = [
   {
     key: "OPENAI_API_KEY",
     label: "OpenAI",
-    description: "GPT-4, GPT-4o, and other OpenAI models",
-    used_by: ["OpenClaw agents (if model requires it)"],
+    description: "GPT-4, GPT-4o, gpt-realtime. Required for voice calls — voice-bridge uses gpt-realtime over the Twilio Media Streams socket.",
+    used_by: ["voice-bridge (gpt-realtime)", "Hermes agents (if model requires it)"],
   },
   {
     key: "XAI_API_KEY",
@@ -247,25 +247,40 @@ export function registerCredentialRoutes(): void {
     // instead of waiting up to an hour for the cache to expire.
     invalidateModelCatalogCache();
 
+    // Choose which services to recreate based on which credentials changed.
+    // Every credential rotation needs openclaw/hermes + alfred picked up
+    // (their env is the LLM provider keys). OPENAI_API_KEY ALSO drives
+    // voice-bridge — without this, setting the key via the /channels Phone
+    // card surfaces "saved" but the container keeps crash-looping until the
+    // next manual restart.
+    const changedKeys = new Set(Object.keys(updates));
+    const services = ["openclaw", "alfred"];
+    if (changedKeys.has("OPENAI_API_KEY")) {
+      services.push("voice-bridge");
+    }
+
     // Respond immediately, then restart only the containers that need
     // the new API keys. CRITICAL: ctrl-api also uses env_file: .env,
     // so `docker compose up -d` would recreate ALL containers including
     // ctrl-api itself — causing a 502 cascade. Instead, selectively
-    // recreate only openclaw and alfred using --no-deps to prevent
-    // Docker Compose from also recreating their dependencies (ctrl-api).
+    // recreate using --no-deps to prevent Docker Compose from also
+    // recreating dependencies (ctrl-api).
     sendJson(res, 200, {
       message: "Credentials updated. Services are restarting (may take ~30s).",
-      restarted: ["openclaw", "alfred"],
+      restarted: services,
     });
 
-    // Fire-and-forget: recreate only openclaw and alfred with new env.
-    // --no-deps prevents Docker from touching ctrl-api or temporal.
-    // Sequential: openclaw must be healthy before alfred can start.
-    dockerComposeCmd(["up", "-d", "--no-deps", "--force-recreate", "openclaw"]).then(() =>
-      dockerComposeCmd(["up", "-d", "--no-deps", "--force-recreate", "alfred"])
-    ).catch((err) => {
-      console.error("Background container restart failed:", err);
-    });
+    // Fire-and-forget: recreate each service sequentially so we don't
+    // contend with health-checks. Sequential = openclaw → alfred → (voice).
+    (async () => {
+      for (const svc of services) {
+        try {
+          await dockerComposeCmd(["up", "-d", "--no-deps", "--force-recreate", svc]);
+        } catch (err) {
+          console.error(`Background restart of ${svc} failed:`, err);
+        }
+      }
+    })();
   });
 
   // POST /api/v1/admin/vault/refresh — pull every secret out of Vaultwarden,

@@ -4,7 +4,7 @@
 // data from the existing Wasp ops; Slack/Telegram are "Soon" placeholders.
 // Sir #8 — also surfaces a "Terminal" card with SSH info + the
 // `docker exec ... hermes` command for direct shell access.
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import {
   useQuery,
@@ -1665,13 +1665,50 @@ function SmsSection() {
 // ---------------------------------------------------------------------------
 
 function VoiceSection() {
-  const { data: statusData } = useQuery(
+  const { data: statusData, refetch } = useQuery(
     getVoiceChannelStatus,
     undefined,
     { retry: false },
   );
   const status = (statusData as VoiceStatus | undefined) ?? null;
   const card = deriveVoiceCardState({ status });
+
+  // OpenAI-key inline form. Same shape as OmiCard's needs_groq_key flow:
+  // password input + Save → PATCH /admin/credentials → ctrl-api restarts
+  // voice-bridge → /status flips to configured_running on next poll.
+  const [openaiKey, setOpenaiKey] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveErr, setSaveErr] = useState<string | null>(null);
+
+  const saveOpenaiKey = useCallback(async () => {
+    const v = openaiKey.trim();
+    if (!v) return;
+    setSaveBusy(true);
+    setSaveErr(null);
+    try {
+      const resp = await fetch("/api/v1/admin/credentials", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ OPENAI_API_KEY: v }),
+        credentials: "include",
+      });
+      if (!resp.ok) {
+        const j = await resp.json().catch(() => ({}));
+        throw new Error(
+          (j as { error?: string }).error || `HTTP ${resp.status}`,
+        );
+      }
+      setOpenaiKey("");
+      // voice-bridge needs ~30s to restart with the new env; let the poll
+      // catch the new state on its own cadence.
+      setTimeout(() => refetch(), 2_000);
+    } catch (e) {
+      setSaveErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaveBusy(false);
+    }
+  }, [openaiKey, refetch]);
 
   const pillColor =
     card.pill === "active"
@@ -1710,6 +1747,73 @@ function VoiceSection() {
       >
         {card.description}
       </p>
+
+      {card.needsOpenaiKey && (
+        <div className="mt-2 space-y-2">
+          <div className="flex items-center gap-2">
+            <input
+              type={showKey ? "text" : "password"}
+              placeholder="sk-..."
+              value={openaiKey}
+              onChange={(e) => setOpenaiKey(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              disabled={saveBusy}
+              className="flex-1 rounded-sm border bg-transparent px-2 py-1 font-mono text-[12px]"
+              style={{
+                borderColor: "var(--rule)",
+                color: "var(--ink)",
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => setShowKey((s) => !s)}
+              className="font-mono text-[10px] uppercase tracking-[0.22em]"
+              style={{ color: "var(--marginalia)" }}
+              disabled={saveBusy}
+            >
+              {showKey ? "hide" : "show"}
+            </button>
+            <button
+              type="button"
+              onClick={saveOpenaiKey}
+              disabled={saveBusy || !openaiKey.trim()}
+              className="font-mono text-[10px] uppercase tracking-[0.22em] px-2 py-1 border"
+              style={{
+                borderColor: "var(--ink)",
+                color: "var(--ink)",
+                opacity: saveBusy || !openaiKey.trim() ? 0.5 : 1,
+              }}
+            >
+              {saveBusy ? "saving..." : "save"}
+            </button>
+          </div>
+          {saveErr && (
+            <p
+              className="font-mono text-[11px]"
+              style={{ color: "var(--brass)" }}
+            >
+              {saveErr}
+            </p>
+          )}
+          <p
+            className="font-body italic text-[12px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Get a key at{" "}
+            <a
+              href="https://platform.openai.com/api-keys"
+              target="_blank"
+              rel="noreferrer"
+              className="underline"
+              style={{ color: "var(--marginalia)" }}
+            >
+              platform.openai.com/api-keys
+            </a>
+            . After saving, the voice bridge restarts (~30s).
+          </p>
+        </div>
+      )}
 
       {card.state === "configured_running" && card.callingNumber && (
         <p

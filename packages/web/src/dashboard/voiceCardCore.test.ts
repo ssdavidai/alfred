@@ -36,6 +36,7 @@ const BASE: VoiceStatus = {
   error: null,
   calling_number: null,
   compose_service_exists: false,
+  openai_key_set: false,
 };
 
 test("derive: unconfigured + compose missing → 'Voice not deployed' card", () => {
@@ -48,15 +49,55 @@ test("derive: unconfigured + compose missing → 'Voice not deployed' card", () 
   assert.equal(s.callingNumber, null);
 });
 
-test("derive: unconfigured + compose present → 'Set up SMS first' card", () => {
+test("derive: unconfigured + compose present + no Twilio → 'Set up SMS first' card", () => {
   const s = deriveVoiceCardState({
     status: { ...BASE, compose_service_exists: true },
   });
   assert.equal(s.state, "unconfigured");
   assert.equal(s.pill, "available");
   assert.equal(s.needsSmsFirst, true);
+  assert.equal(s.needsOpenaiKey, false);
   assert.match(s.heading, /SMS first/i);
   assert.match(s.description, /reuse.*Twilio/i);
+});
+
+test("derive: configured + no OpenAI key → 'Add your OpenAI key' inline form", () => {
+  // The scenario this PR is built for: voice-bridge is deployed AND has
+  // a Twilio number, but the OpenAI key (gpt-realtime) isn't set yet.
+  // The card must render needsOpenaiKey=true so the inline input shows.
+  const s = deriveVoiceCardState({
+    status: {
+      ...BASE,
+      configured: true,
+      compose_service_exists: true,
+      calling_number: "+15550100",
+      openai_key_set: false,
+    },
+  });
+  assert.equal(s.state, "unconfigured");
+  assert.equal(s.pill, "available");
+  assert.equal(s.needsSmsFirst, false);
+  assert.equal(s.needsOpenaiKey, true);
+  assert.match(s.heading, /OpenAI key/i);
+  assert.match(s.description, /gpt-realtime/);
+  assert.equal(s.callingNumber, "+1 555 0100");
+});
+
+test("derive: configured + OpenAI key set + running → needsOpenaiKey=false", () => {
+  // Anti-regression: once the key is set and voice-bridge is running, the
+  // input MUST go away.
+  const s = deriveVoiceCardState({
+    status: {
+      ...BASE,
+      configured: true,
+      compose_service_exists: true,
+      state: "configured_running",
+      calling_number: "+15550100",
+      openai_key_set: true,
+    },
+  });
+  assert.equal(s.state, "configured_running");
+  assert.equal(s.needsOpenaiKey, false);
 });
 
 test("derive: configured_starting → spinner copy + starting pill", () => {
