@@ -56,6 +56,7 @@ import { registerSlackRoutes } from "./routes/slack.js";
 import { registerSmsRoutes } from "./routes/sms.js";
 import { registerVoiceRoutes } from "./routes/voice.js";
 import { registerOmiChannelRoutes } from "./routes/channels_omi.js";
+import { registerPaperclipChannelRoutes } from "./routes/channels_paperclip.js";
 import { registerAlfredJournalRoutes } from "./routes/alfredJournal.js";
 import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
 
@@ -171,6 +172,7 @@ export function createApiServer(): http.Server {
   registerSmsRoutes();
   registerVoiceRoutes();
   registerOmiChannelRoutes();
+  registerPaperclipChannelRoutes();
   // The one-Alfred continuity layer — alfred_journal + principal mapping
   // (the persistence + lookup surface) plus alfred-deliver (the unified
   // outbound delivery endpoint). Sir-facing UX invariant: there is only
@@ -217,7 +219,11 @@ export function createApiServer(): http.Server {
         pathname === "/api/v1/webhooks/plane/steward" ||
         pathname === "/api/v1/webhooks/vexa" ||
         pathname.startsWith("/api/v1/webhooks/in/") ||
-        pathname === "/api/v1/channels/email/inbound";
+        pathname === "/api/v1/channels/email/inbound" ||
+        // Paperclip heartbeat is HMAC-validated (X-Paperclip-Signature over
+        // <ts>.<raw-body>), not bearer-authed. Lane V's Caddy
+        // @public_webhooks matcher passes /api/v1/channels/paperclip/* through.
+        pathname === "/api/v1/channels/paperclip/heartbeat";
       if (!isPublic) {
         // Pass method+pathname so the scoped-token path can check the
         // route allowlist (see auth.ts VOICE_BRIDGE_ALLOWLIST). The master
