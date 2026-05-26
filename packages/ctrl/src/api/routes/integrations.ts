@@ -44,17 +44,24 @@ const ALFRED_DATA_DIR = process.env.ALFRED_DATA_DIR ?? "/alfred-data";
 const STREAMS_DIR = `${ALFRED_DATA_DIR}/streams`;
 const STREAM_CONFIGS_DIR = path.join(STREAMS_DIR, "configs");
 
-// Hermes per-profile workspace skill dirs. Hermes resolves profile state
-// under HERMES_HOME (default /opt/data — see packages/hermes/Dockerfile);
-// each profile's workspace skills live at
-// ${HERMES_HOME}/profiles/<profile>/workspace/skills. The Composio skill-gen
-// flow writes the alfred-composio-<toolkit> skill folders here. Note: skill
-// files are genuine workspace files, NOT Hermes runtime config — connecting a
-// Composio app no longer touches any config.yaml (see the long comment below).
+// Hermes per-profile skill dirs. Hermes resolves profile state under
+// HERMES_HOME (default /opt/data — see packages/hermes/Dockerfile); each
+// profile's skills live at ${HERMES_HOME}/profiles/<profile>/skills — the
+// Hermes-native location that hermes-init writes the platform skill suite
+// to and that the Hermes runtime reads from. The Composio skill-gen flow
+// writes the alfred-composio-<toolkit> folders to the SAME dir so the voice
+// primer + Hermes agent see the same catalogue. Skill files are workspace
+// content, NOT Hermes runtime config — connecting a Composio app does not
+// touch config.yaml (see the long comment further down).
+//
+// Earlier versions of these constants pointed at a parallel
+// `<profile>/workspace/skills/` directory that ctrl-api wrote to but
+// nothing read; entrypoint.sh ships a one-time consolidation step that
+// migrates leftover composio dirs.
 const HERMES_HOME = process.env.HERMES_HOME ?? "/opt/data";
 const HERMES_PROFILES_DIR = process.env.HERMES_CONFIG_DIR ?? `${HERMES_HOME}/profiles`;
-const OPENCLAW_SKILLS_DIR = `${HERMES_PROFILES_DIR}/main/workspace/skills`;
-const OPENCLAW_WORKERS_SKILLS_DIR = `${HERMES_PROFILES_DIR}/workers/workspace/skills`;
+const OPENCLAW_SKILLS_DIR = `${HERMES_PROFILES_DIR}/main/skills`;
+const OPENCLAW_WORKERS_SKILLS_DIR = `${HERMES_PROFILES_DIR}/workers/skills`;
 
 // Reconnect ledger — tracks (old_connection_id → new_connection_id) pairs from
 // the /reconnect endpoint so the old connection can be deleted 1h after the

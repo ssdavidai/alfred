@@ -99,6 +99,40 @@ for profile in "${PROFILES[@]}"; do
     echo "[init] Profile dir ready: $PROFILE_DIR"
 done
 
+# --- 2.0. One-time skill consolidation ---------------------------------------
+# Earlier builds of ctrl-api wrote `alfred-composio-<toolkit>/` skill
+# folders to `<profile>/workspace/skills/`, while hermes-init wrote the
+# platform skill suite (alfred-voice, alfred-connected-apps, …) to
+# `<profile>/skills/` — the Hermes-native location that Hermes itself
+# reads from. The voice/SMS primer reader matched ctrl-api's path, so the
+# composio dirs were visible to the primer but invisible to Hermes, and
+# the platform skills the other way around. ctrl-api now writes + reads
+# at the Hermes-native location only; this block migrates leftover
+# composio dirs from older deployments and removes the empty parallel
+# tree so it can never re-divide the catalogue.
+for profile in "${PROFILES[@]}"; do
+    LEGACY_SKILLS_DIR="$HERMES_DATA_DIR/profiles/$profile/workspace/skills"
+    CANONICAL_SKILLS_DIR="$HERMES_DATA_DIR/profiles/$profile/skills"
+    if [[ -d "$LEGACY_SKILLS_DIR" ]]; then
+        moved=0
+        for entry in "$LEGACY_SKILLS_DIR"/*; do
+            [[ -e "$entry" ]] || continue
+            name=$(basename "$entry")
+            if [[ -e "$CANONICAL_SKILLS_DIR/$name" ]]; then
+                # Canonical wins — drop the stale duplicate.
+                rm -rf "$entry"
+            else
+                mv "$entry" "$CANONICAL_SKILLS_DIR/$name"
+                moved=$((moved + 1))
+            fi
+        done
+        rmdir "$LEGACY_SKILLS_DIR" 2>/dev/null || true
+        if [[ "$moved" -gt 0 ]]; then
+            echo "[init] Consolidated $moved legacy skill dir(s) into $CANONICAL_SKILLS_DIR ($profile)"
+        fi
+    fi
+done
+
 # --- 2a. Vault-worker skills (curator/janitor/distiller) ---------------------
 # From the `alfred` Python package — for the vault-worker daemons. Deployed
 # into BOTH profiles (the workers profile runs them; main carries them too

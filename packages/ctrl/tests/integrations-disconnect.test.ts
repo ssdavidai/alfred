@@ -236,10 +236,11 @@ process.env.COMPOSIO_USER_ID = "alfred-test-user";
 await import("../src/api/routes/integrations.js");
 const { createApiServer } = await import("../src/api/server.js");
 
-// Hermes profile workspace skill dirs — HERMES_HOME defaults to /opt/data, so
-// profiles live at /opt/data/profiles/<profile>/workspace/skills.
-const SKILLS_DIR = "/opt/data/profiles/main/workspace/skills";
-const WORKERS_SKILLS_DIR = "/opt/data/profiles/workers/workspace/skills";
+// Hermes per-profile skill dirs — HERMES_HOME defaults to /opt/data, so
+// profiles live at /opt/data/profiles/<profile>/skills (the Hermes-native
+// location; an older parallel `workspace/skills/` dir was retired).
+const SKILLS_DIR = "/opt/data/profiles/main/skills";
+const WORKERS_SKILLS_DIR = "/opt/data/profiles/workers/skills";
 
 let server: http.Server;
 

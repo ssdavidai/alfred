@@ -57,7 +57,7 @@ const claudeSetup = await import("../src/api/routes/claudeSetup.js");
 const phone = await import("../src/api/routes/phone.js");
 const workspace = await import("../src/api/routes/workspace.js");
 
-const EXPECTED_SKILLS_DIR = "/opt/data/profiles/main/workspace/skills";
+const EXPECTED_SKILLS_DIR = "/opt/data/profiles/main/skills";
 const EXPECTED_VAULT = "/vault";
 
 describe("skills / SOUL / MEMORY path resolution", () => {

@@ -27,17 +27,21 @@ const VAULT_PATH = process.env.VAULT_PATH ?? "/vault";
 const STREAMS_DIR = `${process.env.ALFRED_DATA_DIR ?? "/alfred-data"}/streams`;
 
 // Skills vs SOUL/MEMORY split (merged single-VM stack — no openclaw mount):
-//   * SKILLS (alfred-composio-*, alfred-voice) live under the Hermes
-//     per-profile workspace skills dir — the SAME location integrations.ts
-//     WRITES them to. Mirror its authoritative constants or the voice/SMS
-//     context bundle finds zero skills.
+//   * SKILLS (alfred-composio-*, alfred-voice, and the rest of the platform
+//     skill suite) live at the Hermes-canonical per-profile location:
+//     `<HERMES_HOME>/profiles/<profile>/skills`. The hermes-init container
+//     deploys platform skills here and Hermes reads from here. ctrl-api's
+//     Composio skill generator must write to the same dir or the voice/SMS
+//     primer + Hermes runtime read different directories. (For ~2 months
+//     ctrl-api wrote to a parallel `workspace/skills/` dir that Hermes
+//     never read — see entrypoint.sh's one-time consolidation step.)
 //   * SOUL.md / MEMORY.md are vault-canonical top-level files → vault root.
 // The old `/mnt/encrypted/openclaw/workspace` host path does not exist here,
 // which is what made the voice agent "not know who Sir is" at call start.
 const HERMES_HOME = process.env.HERMES_HOME ?? "/opt/data";
 const HERMES_PROFILES_DIR =
   process.env.HERMES_CONFIG_DIR ?? `${HERMES_HOME}/profiles`;
-const SKILLS_DIR = `${HERMES_PROFILES_DIR}/main/workspace/skills`;
+const SKILLS_DIR = `${HERMES_PROFILES_DIR}/main/skills`;
 
 // Exported for the path-resolution regression test (see
 // tests/skills-soul-memory-paths.test.ts).
