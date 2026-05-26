@@ -54,14 +54,18 @@ export interface VoiceContextBundle {
   openMatters: Array<{ name: string; summary?: string }>;
   openTasks: Array<{ name: string; due?: string; summary?: string }>;
   recentSessions: Array<{ at: string; channel: string; summary: string }>;
-  // Connected Composio toolkits, with the exact action names + one-line
-  // descriptions the voice agent can pass to `composio_execute`. Without this
-  // the agent tends to hallucinate plausible-sounding action names (e.g.
-  // `GOOGLECALENDAR_LIST_EVENTS` vs the real `GOOGLECALENDAR_EVENTS_LIST`).
-  composioToolkits?: Array<{
-    toolkit: string;
-    actions: Array<{ name: string; description: string }>;
-  }>;
+  // Per-MCP-server skill cheatsheets — one entry per server that has a
+  // corresponding ops skill (vault-operations for alfred, sure-operations
+  // for sure, plane-operations for plane, connected-apps for execute).
+  // Each carries the SKILL.md description + H1 intro paragraph (~600 chars)
+  // so the model knows WHEN to reach for each server. Per-tool detail is
+  // in the tool schemas declared via session.update tools.
+  //
+  // Replaces the v1 `composioToolkits` action-dump (49+ action rows of
+  // English-noise prose that diluted the persona on 2026-05-26 and let
+  // bilingual primer content code-switch the agent). The model uses
+  // `execute__list_composio_tools` on demand if it ever needs to enumerate.
+  skills?: Array<{ name: string; description: string; body: string }>;
   generatedAt: string;
 }
 

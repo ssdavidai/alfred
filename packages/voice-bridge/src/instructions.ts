@@ -85,20 +85,21 @@ function formatContextPrimer(bundle: VoiceContextBundle): string {
     sections.push(`## Recent conversations across channels\n\n${lines.join("\n")}`);
   }
 
-  if (bundle.composioToolkits?.length) {
-    // Inline the exact action names for every connected Composio app, so the
-    // voice agent doesn't hallucinate slugs. Kept compact (name + <=120-char
-    // description per action). Without this primer, `composio_execute` calls
-    // routinely guess wrong and produce "I couldn't retrieve your calendar"
-    // responses.
-    const toolkitBlocks = bundle.composioToolkits.map((tk) => {
-      const lines = tk.actions.map(
-        (a) => `- \`${a.name}\` — ${a.description}`,
-      );
-      return `### ${tk.toolkit}\n\n${lines.join("\n")}`;
+  if (bundle.skills?.length) {
+    // Per-MCP-server skill cheatsheets. The OpenAI Realtime session already
+    // has all 150 `<server>__<tool>` schemas in its tools list (wired by
+    // voice-bridge's MCP client — see mcp-clients.ts); this block teaches the
+    // model WHEN to reach for each server, using the SKILL.md description +
+    // H1 intro. v1 of this section dumped every Composio action by name and
+    // description (~3 KB of English noise) — that diluted the persona against
+    // a Hungarian-flavoured MEMORY.md and let the model code-switch. The new
+    // shape keeps the persona dominant and the primer small.
+    const blocks = bundle.skills.map((s) => {
+      const head = `### ${s.name}\n\n_${s.description}_`;
+      return s.body ? `${head}\n\n${s.body}` : head;
     });
     sections.push(
-      `## Available composio_execute actions\n\nCall via \`composio_execute({action, arguments})\`. Use the EXACT action name below; do not paraphrase.\n\n${toolkitBlocks.join("\n\n")}`,
+      `## Connected tools\n\nYou have 150 MCP tools across five servers (\`alfred__*\`, \`sure__*\`, \`plane__*\`, \`vaultwarden__*\`, \`execute__*\`) — call them by name. The skill notes below tell you WHEN to reach for each server; per-tool detail is in the tool schemas.\n\n${blocks.join("\n\n")}`,
     );
   }
 
