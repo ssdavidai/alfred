@@ -348,6 +348,278 @@ export function registerHermesRoutes(): void {
       prime_enabled: primeEnabled,
     });
   });
+
+  // ─── 6th-MCP-server routes (#256 — hermes-mcp): runs / models / cron ───
+  //
+  // The voice agent (OpenAI Realtime via voice-bridge) gets a 6th MCP server
+  // — `hermes` — that surfaces the runtime itself: schedule reminders,
+  // delegate background work, list active runs, inspect models. The other 5
+  // MCP servers act on Sir's world; this one acts on Alfred-the-runtime.
+  //
+  // Two transports under the hood:
+  //   * HTTP — runs / models. Calls hermes:18789 (main) or :18790 (workers).
+  //     API key is profile-scoped, read from /hermes-state/profiles/<p>/.env
+  //     at call time (no caching — a hermes rebuild rotates the key without
+  //     bouncing ctrl-api).
+  //   * docker exec — cron. Hermes' /v1/* HTTP API doesn't expose cron;
+  //     the `hermes cron {list,create,remove}` CLI is the contract surface.
+  //
+  // Auth at the ingress is the same AAS_API_KEY bearer the rest of
+  // /api/v1/* requires; mcp-server proxies through here exactly like the
+  // alfred / sure / plane / vaultwarden / execute MCP apps do.
+  // See packages/mcp-server/src/tools/hermes.ts for the tool defs and
+  // packages/hermes/workspace-template/skills/alfred-hermes-operations/
+  // SKILL.md for the agent-facing contract.
+
+  type Profile = "main" | "workers";
+  const HERMES_MAIN_API_URL =
+    process.env.HERMES_GATEWAY_URL ?? "http://hermes:18789";
+  const HERMES_WORKERS_API_URL =
+    process.env.HERMES_WORKERS_GATEWAY_URL ?? "http://hermes:18790";
+
+  function parseProfile(raw: unknown, fallback: Profile): Profile {
+    return raw === "main" || raw === "workers" ? raw : fallback;
+  }
+  function profileBaseUrl(p: Profile): string {
+    return p === "workers" ? HERMES_WORKERS_API_URL : HERMES_MAIN_API_URL;
+  }
+
+  /** Read API_SERVER_KEY for the given Hermes profile out of its .env. */
+  function readHermesApiKey(p: Profile): string | null {
+    const envPath = `${HERMES_CONFIG_DIR}/${p}/.env`;
+    let raw: string;
+    try {
+      raw = fs.readFileSync(envPath, "utf-8");
+    } catch {
+      return null;
+    }
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq < 0) continue;
+      if (trimmed.slice(0, eq).trim() === "API_SERVER_KEY") {
+        return trimmed.slice(eq + 1).trim();
+      }
+    }
+    return null;
+  }
+
+  async function hermesHttp(
+    profile: Profile,
+    method: "GET" | "POST",
+    path: string,
+    body?: unknown,
+  ): Promise<{ status: number; data: unknown }> {
+    const key = readHermesApiKey(profile);
+    if (!key) {
+      return {
+        status: 500,
+        data: {
+          error: "HERMES_KEY_MISSING",
+          detail: `Hermes API key not found at ${HERMES_CONFIG_DIR}/${profile}/.env — has hermes-init run?`,
+        },
+      };
+    }
+    const url = `${profileBaseUrl(profile)}${path}`;
+    const init: RequestInit & { signal: AbortSignal } = {
+      method,
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      signal: AbortSignal.timeout(15_000),
+    };
+    if (body !== undefined && method === "POST") {
+      init.body = JSON.stringify(body);
+    }
+    let resp: Response;
+    try {
+      resp = await fetch(url, init);
+    } catch (err: any) {
+      return {
+        status: 502,
+        data: {
+          error: "HERMES_UNREACHABLE",
+          detail: `${url}: ${err?.message ?? String(err)}`,
+        },
+      };
+    }
+    const text = await resp.text();
+    let data: unknown;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = text;
+    }
+    return { status: resp.status, data };
+  }
+
+  function tryJsonParse(text: string): {
+    json?: unknown;
+    raw?: string;
+  } {
+    const trimmed = text.trim();
+    if (!trimmed) return { json: null };
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        return { json: JSON.parse(trimmed) };
+      } catch {
+        /* fall through to raw */
+      }
+    }
+    return { raw: text };
+  }
+
+  // GET /api/v1/hermes/models?profile=main|workers
+  // Returns the OpenAI-API `/v1/models` shape (Hermes treats profiles as
+  // "models" for compat with OpenAI SDKs).
+  addRoute("GET", "/api/v1/hermes/models", async ({ res, query }) => {
+    const profile = parseProfile(query.get("profile"), "main");
+    const out = await hermesHttp(profile, "GET", "/v1/models");
+    sendJson(res, out.status, out.data ?? {});
+  });
+
+  // POST /api/v1/hermes/runs
+  //   body: { prompt, profile?, model?, return_via?, session_id? }
+  // Forwards to Hermes `POST /v1/runs`. `return_via:{channel,chat_id?}` gets
+  // appended to the prompt as a trailing instruction so the run knows where
+  // to deliver its result (Hermes' API has no native parameter for this).
+  addRoute("POST", "/api/v1/hermes/runs", async ({ res, body }) => {
+    const b = (body as Record<string, unknown>) || {};
+    const prompt = b.prompt;
+    if (typeof prompt !== "string" || !prompt.trim()) {
+      sendJson(res, 400, { error: "prompt (string) is required" });
+      return;
+    }
+    const profile = parseProfile(b.profile, "workers");
+    const model = typeof b.model === "string" ? b.model : undefined;
+    const sessionId =
+      typeof b.session_id === "string" ? b.session_id : undefined;
+
+    let finalPrompt = prompt.trim();
+    const rv = b.return_via;
+    if (rv && typeof rv === "object" && !Array.isArray(rv)) {
+      const ch = (rv as any).channel;
+      const cid = (rv as any).chat_id;
+      if (typeof ch === "string" && ch) {
+        const where = typeof cid === "string" && cid ? `${ch}:${cid}` : ch;
+        finalPrompt =
+          `${finalPrompt}\n\nWhen complete, deliver the result via the ${where} channel.`;
+      }
+    }
+
+    const hermesBody: Record<string, unknown> = { input: finalPrompt };
+    if (model) hermesBody.model = model;
+    if (sessionId) hermesBody.session_id = sessionId;
+
+    const out = await hermesHttp(profile, "POST", "/v1/runs", hermesBody);
+    const payload =
+      out.data && typeof out.data === "object"
+        ? (out.data as Record<string, unknown>)
+        : {};
+    sendJson(res, out.status, { profile, ...payload });
+  });
+
+  // POST /api/v1/hermes/runs/:id/stop?profile=
+  addRoute(
+    "POST",
+    "/api/v1/hermes/runs/:id/stop",
+    async ({ res, params, query }) => {
+      const profile = parseProfile(query.get("profile"), "workers");
+      const out = await hermesHttp(
+        profile,
+        "POST",
+        `/v1/runs/${encodeURIComponent(params.id)}/stop`,
+      );
+      sendJson(res, out.status, out.data ?? {});
+    },
+  );
+
+  // GET /api/v1/hermes/cron?profile=main
+  addRoute("GET", "/api/v1/hermes/cron", async ({ res, query }) => {
+    const profile = parseProfile(query.get("profile"), "main");
+    const stdout = await dockerExec(HERMES_CONTAINER, [
+      ...HERMES_CMD,
+      "--profile",
+      profile,
+      "cron",
+      "list",
+    ]);
+    const parsed = tryJsonParse(stdout);
+    sendJson(res, 200, { profile, ...parsed });
+  });
+
+  // POST /api/v1/hermes/cron
+  //   body: { prompt, when, channel?, chat_id?, profile? }
+  //   `when` is ISO-8601 OR a 5-field cron expression — Hermes accepts both.
+  addRoute("POST", "/api/v1/hermes/cron", async ({ res, body }) => {
+    const b = (body as Record<string, unknown>) || {};
+    const prompt = b.prompt;
+    const when = b.when;
+    if (typeof prompt !== "string" || !prompt.trim()) {
+      sendJson(res, 400, { error: "prompt (string) is required" });
+      return;
+    }
+    if (typeof when !== "string" || !when.trim()) {
+      sendJson(res, 400, {
+        error:
+          "when (string — ISO-8601 timestamp or cron expression) is required",
+      });
+      return;
+    }
+    const profile = parseProfile(b.profile, "main");
+    const channel = typeof b.channel === "string" ? b.channel : undefined;
+    const chatId = typeof b.chat_id === "string" ? b.chat_id : undefined;
+
+    // Mark the prompt so a fired job knows the delivery target. Hermes
+    // cron forwards the prompt verbatim to the profile's run pipeline;
+    // the gateway adapters then route on the [scheduled→…] marker.
+    const finalPrompt = channel
+      ? `${prompt.trim()}\n\n[scheduled→${channel}${chatId ? `:${chatId}` : ""}]`
+      : prompt.trim();
+
+    const args = [
+      ...HERMES_CMD,
+      "--profile",
+      profile,
+      "cron",
+      "create",
+      "--when",
+      when,
+      "--prompt",
+      finalPrompt,
+    ];
+    if (channel) args.push("--channel", channel);
+    if (chatId) args.push("--chat-id", chatId);
+
+    const stdout = await dockerExec(HERMES_CONTAINER, args);
+    const parsed = tryJsonParse(stdout);
+    sendJson(res, 201, {
+      profile,
+      when,
+      channel: channel ?? null,
+      ...parsed,
+    });
+  });
+
+  // DELETE /api/v1/hermes/cron/:id?profile=main
+  addRoute(
+    "DELETE",
+    "/api/v1/hermes/cron/:id",
+    async ({ res, params, query }) => {
+      const profile = parseProfile(query.get("profile"), "main");
+      const stdout = await dockerExec(HERMES_CONTAINER, [
+        ...HERMES_CMD,
+        "--profile",
+        profile,
+        "cron",
+        "remove",
+        params.id,
+      ]);
+      sendJson(res, 200, { profile, ok: true, output: stdout.trim() });
+    },
+  );
 }
 
 // -----------------------------------------------------------------------------
