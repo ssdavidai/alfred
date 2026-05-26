@@ -11,10 +11,22 @@ interface InstalledApp {
   status: AppStatus;
 }
 
-async function checkHealth(url: string): Promise<AppStatus> {
+async function checkHealth(
+  url: string,
+  opts: { host?: string } = {},
+): Promise<AppStatus> {
+  // Some apps (Paperclip, anything behind a "trusted origins" middleware)
+  // 403 requests whose Host header doesn't match the configured public
+  // hostname — internal probes via compose DNS (paperclip:3100) trip that
+  // check. `opts.host` lets the caller override the Host header so the
+  // probe carries the app's real production hostname while still hitting
+  // the compose-internal address. Plane/Sure/Vault don't need this.
+  const headers: Record<string, string> = {};
+  if (opts.host) headers.Host = opts.host;
   try {
     const resp = await fetch(url, {
       method: "GET",
+      headers,
       signal: AbortSignal.timeout(2000),
     });
     return resp.ok ? "up" : "down";
@@ -77,17 +89,20 @@ export function registerAppsRoutes(): void {
     //
     // Health probe: /sign-in (Paperclip's unauthenticated entry page,
     // returns 200). The web-root '/' returns 403 — better-auth rejects
-    // unauthed visits before the React shell renders — which would
-    // misread as 'down' even on a perfectly healthy box. /sign-in is the
-    // semantic 'is the app up?' probe (verified 2026-05-26 against
-    // ghcr.io/paperclipai/paperclip@sha256:711d29717..).
+    // unauthed visits before the React shell renders.
+    //
+    // Host-header override: Paperclip 403s requests whose Host doesn't
+    // match its PAPERCLIP_PUBLIC_URL hostname (trusted-origins guard).
+    // We hit compose DNS but carry the public Host so the guard accepts.
     checks.push(
       (async (): Promise<InstalledApp> => ({
         id: "paperclip",
         name: "Paperclip",
         url: `https://paperclip.${domain}`,
         icon: "/app-icons/paperclip.svg",
-        status: await checkHealth("http://paperclip:3100/sign-in"),
+        status: await checkHealth("http://paperclip:3100/sign-in", {
+          host: `paperclip.${domain}`,
+        }),
       }))(),
     );
 
