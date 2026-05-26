@@ -36,6 +36,7 @@ import {
   setOmiGroqKey,
   disconnectOmiGroqKey,
   sendOmiTest,
+  updateCredentials,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
 import {
@@ -1687,18 +1688,12 @@ function VoiceSection() {
     setSaveBusy(true);
     setSaveErr(null);
     try {
-      const resp = await fetch("/api/v1/admin/credentials", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ OPENAI_API_KEY: v }),
-        credentials: "include",
-      });
-      if (!resp.ok) {
-        const j = await resp.json().catch(() => ({}));
-        throw new Error(
-          (j as { error?: string }).error || `HTTP ${resp.status}`,
-        );
-      }
+      // Use the Wasp action — it proxies through the server's tenantProxy
+      // with the master AAS_API_KEY. A raw fetch to `/api/v1/admin/credentials`
+      // from the browser lands on the SPA nginx (no API server in front of it
+      // on alfred-black), which returns 405. The action surface is the only
+      // working path from the dashboard.
+      await updateCredentials({ OPENAI_API_KEY: v });
       setOpenaiKey("");
       // voice-bridge needs ~30s to restart with the new env; let the poll
       // catch the new state on its own cadence.
