@@ -190,53 +190,60 @@ async function main() {
   // Programmatic-client shortcut. claude.ai goes through the human-typed
   // /approve form once and rides OAuth bearer tokens after that. Scripts /
   // curl / other MCP clients can skip the OAuth dance entirely by sending
-  // `Authorization: Bearer <MCP_APPROVAL_SECRET>`. The check runs BEFORE
-  // requireBearerAuth: on a match we synthesize the same `extra` shape an
-  // OAuth-authed call would carry (appId + tenantLabel) and short-circuit;
-  // on a miss we fall through to the OAuth verifier untouched.
+  // `Authorization: Bearer <MCP_APPROVAL_SECRET>`.
   //
-  // Same secret, same scope as the /approve form. The blast radius of
-  // leaking MCP_APPROVAL_SECRET is unchanged — it could already mint an
-  // OAuth token via /approve. This bypass just removes the round-trip.
-  const approvalSecretBypass = (appId: AppId) =>
-    (req: Request, _res: Response, next: NextFunction) => {
-      const header = req.headers.authorization;
-      if (typeof header !== "string" || !header.startsWith("Bearer ")) {
-        return next();
-      }
-      const token = header.slice("Bearer ".length).trim();
-      if (!token) return next();
-      if (!timingSafeEqual(token, env.MCP_APPROVAL_SECRET)) {
-        return next(); // wrong token → let requireBearerAuth try OAuth
-      }
-      // Synthesize the AuthInfo shape requireBearerAuth would have set.
-      // `expiresAt` is omitted: the approval-secret bearer doesn't expire
-      // (it has no per-token lifetime; rotation = .env edit + restart).
-      (req as Request & { auth?: unknown }).auth = {
-        token,
-        clientId: "approval-secret-bypass",
-        scopes: [],
-        extra: {
-          appId,
-          tenantLabel: env.TENANT_LABEL,
-        } satisfies MCPProps,
-      };
-      next();
-    };
-
-  for (const appId of SUPPORTED_APPS) {
-    // Per-app bearer middleware so the WWW-Authenticate challenge points at
-    // the per-app metadata URL — that's what makes claude.ai send the right
-    // `resource` param into /authorize. Runs AFTER approvalSecretBypass:
-    // if the bypass already populated req.auth, the SDK treats this as a
-    // valid token and skips the OAuth verifier.
-    const auth = requireBearerAuth({
+  // The wrapper short-circuits: if the bearer matches MCP_APPROVAL_SECRET
+  // (constant-time compare), we synthesize the same `req.auth` shape
+  // requireBearerAuth would and call next() WITHOUT invoking the OAuth
+  // verifier. Otherwise we delegate to the real requireBearerAuth, which
+  // does its full token-lookup-and-reject dance.
+  //
+  // (Earlier "chain bypass + requireBearerAuth via next()" pattern was
+  // wrong — the SDK middleware ignores a pre-set req.auth and re-verifies
+  // the header itself, so every approval-secret call hit "Invalid or
+  // expired access token". The wrap-and-replace pattern below is the
+  // only shape that works.)
+  //
+  // Same secret, same scope as the /approve form. The blast radius of a
+  // leaked MCP_APPROVAL_SECRET is unchanged — it could already mint a
+  // full OAuth token via /approve. This bypass just removes the round-trip.
+  const authOrApprovalSecret = (appId: AppId) => {
+    const realAuth = requireBearerAuth({
       verifier: provider,
       resourceMetadataUrl: new URL(
         `/.well-known/oauth-protected-resource/${appId}/mcp`,
         issuerUrl,
       ).href,
     });
+    return (req: Request, res: Response, next: NextFunction) => {
+      const header = req.headers.authorization;
+      if (typeof header === "string" && header.startsWith("Bearer ")) {
+        const token = header.slice("Bearer ".length).trim();
+        if (token && timingSafeEqual(token, env.MCP_APPROVAL_SECRET)) {
+          // Approval secret match — synthesize the AuthInfo shape the
+          // tool dispatcher expects in `extra.authInfo.extra`, and skip
+          // the OAuth verifier entirely.
+          (req as Request & { auth?: unknown }).auth = {
+            token,
+            clientId: "approval-secret-bypass",
+            scopes: [],
+            extra: {
+              appId,
+              tenantLabel: env.TENANT_LABEL,
+            } satisfies MCPProps,
+          };
+          return next();
+        }
+      }
+      // Anything else (no header, malformed, mismatched secret) → defer to
+      // the standard OAuth verifier.
+      return realAuth(req, res, next);
+    };
+  };
+
+  for (const appId of SUPPORTED_APPS) {
+    // Per-app combined auth: approval-secret bypass OR OAuth bearer.
+    const auth = authOrApprovalSecret(appId);
 
     const tools = getToolsForApp(appId);
 
@@ -290,7 +297,7 @@ async function main() {
     };
 
     const path = `/${appId}/mcp`;
-    app.all(path, approvalSecretBypass(appId), auth, express.json(), async (req, res) => {
+    app.all(path, auth, express.json(), async (req, res) => {
       try {
         const sessionHeader = req.headers["mcp-session-id"];
         const sessionId = Array.isArray(sessionHeader) ? sessionHeader[0] : sessionHeader;
