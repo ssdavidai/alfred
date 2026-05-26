@@ -8,8 +8,18 @@ import { ALL_PLANE_TOOLS } from "./plane.js";
 import { ALL_ALFRED_TOOLS } from "./alfred.js";
 import { ALL_VAULTWARDEN_TOOLS } from "./vaultwarden.js";
 import { ALL_EXECUTE_TOOLS } from "./execute.js";
+import { ALL_HERMES_TOOLS } from "./hermes.js";
 
-export type AppId = "sure" | "plane" | "alfred" | "vaultwarden" | "execute";
+// `hermes` — 6th MCP server (added 2026-05-26). Surfaces the Hermes runtime
+// itself (scheduling, run delegation, model selection) so the voice agent
+// can schedule reminders and delegate background work.
+export type AppId =
+  | "sure"
+  | "plane"
+  | "alfred"
+  | "vaultwarden"
+  | "execute"
+  | "hermes";
 
 export const SUPPORTED_APPS: ReadonlySet<AppId> = new Set([
   "sure",
@@ -17,6 +27,7 @@ export const SUPPORTED_APPS: ReadonlySet<AppId> = new Set([
   "alfred",
   "vaultwarden",
   "execute",
+  "hermes",
 ]);
 
 export function isAppId(value: string): value is AppId {
@@ -29,6 +40,7 @@ const REGISTRY: Record<AppId, ToolDef[]> = {
   alfred: ALL_ALFRED_TOOLS,
   vaultwarden: ALL_VAULTWARDEN_TOOLS,
   execute: ALL_EXECUTE_TOOLS,
+  hermes: ALL_HERMES_TOOLS,
 };
 
 export function getToolsForApp(app: AppId): ToolDef[] {

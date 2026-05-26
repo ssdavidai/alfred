@@ -9,7 +9,7 @@
 // Invoke as:
 //   node dist/bin/stdio-app.js <appId>
 //
-// Where <appId> ∈ SUPPORTED_APPS = {alfred, sure, plane, vaultwarden, execute}.
+// Where <appId> ∈ SUPPORTED_APPS = {alfred, sure, plane, vaultwarden, execute, hermes}.
 //
 // Environment:
 //   CTRL_API_URL   — base URL for ctrl-api (default: http://ctrl-api:3100)

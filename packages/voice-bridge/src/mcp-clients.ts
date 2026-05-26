@@ -28,7 +28,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { config } from "./config.js";
 
-const APPS = ["alfred", "sure", "plane", "vaultwarden", "execute"] as const;
+// 6 servers: the original 5 (Sir's world) + hermes (the runtime itself — added
+// 2026-05-26 so the voice agent can schedule reminders + delegate background
+// work, not just act on the vault/finances/etc.).
+const APPS = ["alfred", "sure", "plane", "vaultwarden", "execute", "hermes"] as const;
 type App = (typeof APPS)[number];
 
 /** Separator we use to prefix MCP tool names. Two underscores so it never
