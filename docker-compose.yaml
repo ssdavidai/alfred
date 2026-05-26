@@ -587,6 +587,23 @@ services:
       # calling identity surfaced to the realtime agent's system prompt.
       ENABLE_SINGLE_VM_MODE: "1"
       TWILIO_PHONE_NUMBER: ${TWILIO_PHONE_NUMBER:-}
+      # Twilio Auth Token — enables X-Twilio-Signature validation on the
+      # inbound /twiml/inbound webhook. Lax mode (warning-log only) when
+      # empty, strict mode the moment a token is set.
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      # Caller allowlist (set via /channels Phone card → PUT /api/v1/channels/
+      # voice/allowlist). Default policy is OPEN: with both empty, every
+      # caller is accepted. Disallowed callers get a <Reject> TwiML, never
+      # reaching gpt-realtime — zero OpenAI cost on rejection.
+      VOICE_ALLOWED_CALLERS: ${VOICE_ALLOWED_CALLERS:-}
+      VOICE_ALLOW_ALL_CALLERS: ${VOICE_ALLOW_ALL_CALLERS:-}
+      # MCP-client wiring (see packages/voice-bridge/src/mcp-clients.ts).
+      # voice-bridge connects as a programmatic client to mcp-server's five
+      # per-app HTTP endpoints (alfred / sure / plane / vaultwarden / execute)
+      # so the voice agent's tool surface mirrors Hermes-main's. The bypass
+      # added in #44/#45 accepts MCP_APPROVAL_SECRET as a Bearer.
+      MCP_SERVER_URL: http://mcp-server:8787
+      MCP_APPROVAL_SECRET: ${MCP_APPROVAL_SECRET}
       MAX_CALL_SECONDS: "1800"
       IDLE_HANGUP_SECONDS: "60"
     healthcheck:
