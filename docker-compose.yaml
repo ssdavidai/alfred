@@ -1249,6 +1249,44 @@ services:
     mem_limit: 512m
     pids_limit: 256
 
+  # ── Paperclip — AI-agent orchestration / "the company" ──────────────
+  # Paperclip ("if OpenClaw is an employee, Paperclip is the company") is
+  # the agent-team control plane: org charts, ticketing, delegation,
+  # governance, costs. Hermes calls into it; the principal browses it
+  # at https://paperclip.${DOMAIN}.
+  #
+  # Embedded Postgres: Paperclip ships PG inside the same container, so
+  # — unlike Sure/Plane — there is NO separate paperclip-db sidecar.
+  # All state lives in the paperclip_data volume.
+  #
+  # Healthcheck: Paperclip's docs do not document /api/health (verified
+  # 2026-05-26 at docs.paperclip.ing + github.com/paperclipai/paperclip),
+  # so we probe the web UI root with wget. If a future Paperclip release
+  # ships /api/health, switch to `curl -fsS http://127.0.0.1:3100/api/health`
+  # for a tighter liveness signal.
+  paperclip:
+    image: ghcr.io/paperclipai/paperclip@sha256:711d29717855abbd84d0e576a0a07daff8e9007a229fb8220d8203d492e886e4
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - HOST=0.0.0.0
+      - PAPERCLIP_HOME=/paperclip
+      - BETTER_AUTH_SECRET=${PAPERCLIP_BETTER_AUTH_SECRET}
+      - PAPERCLIP_PUBLIC_URL=https://paperclip.${DOMAIN}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - paperclip_data:/paperclip
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    mem_limit: 1g
+    pids_limit: 512
+
   # ── Vexa — transcript bot stack (profile: vexa) ─────────────────────
   # `docker compose --profile vexa up -d`. 9 services, ~3 GB resident.
   # Folded inline here (the alfred-platform fleet ran Vexa as a separate
@@ -1513,6 +1551,7 @@ volumes:
   plane_uploads:
   sure_pgdata:
   sure_redis:
+  paperclip_data:
   vexa_redis:
   vexa_postgres:
   vexa_minio:
