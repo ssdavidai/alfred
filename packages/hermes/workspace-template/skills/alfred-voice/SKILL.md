@@ -44,12 +44,37 @@ The Voice Bridge primer tells you Sir's phone number (e.g. `Caller: +15555550100
 
 ## Tool surface
 
-Same tools as text mode:
+Voice has only TWO function-tools wired into the OpenAI Realtime session — but `self` is wide:
 
-- `self({endpoint, method?, body?, query?})` — call this tenant's ctrl-api. See the platform `TOOLS.md` for the endpoint catalogue. Use for vault, streams, learning, schedules, workers, admin, phone outbound.
+- `self({endpoint, method?, body?, query?})` — call this tenant's ctrl-api. EVERY operation Hermes-main does over its MCP servers (alfred, sure, plane, vaultwarden, execute) is ALSO reachable from `self`, because ctrl-api proxies all of them. The MCP layer is a thin wrapper; the actual API surface is ctrl-api. So you can do anything-text-mode-can-do via `self` — just call the underlying ctrl-api endpoint directly instead of an MCP tool name.
 - `composio_execute({action, arguments})` — third-party app actions (Gmail, Calendar, GitHub, Notion, Slack, Drive). See per-app `alfred-composio-*` skills.
 
-You can do everything on the phone that you can do over text — read vault, create tasks, send emails, schedule events, post Slack messages. Use them.
+You can do EVERYTHING on the phone that you can do over text. Don't tell Sir "I can't do that on voice" — call `self` first.
+
+### MCP-tool ↔ self() endpoint cheatsheet
+
+The five MCP servers Hermes-main connects to (`alfred`, `sure`, `plane`, `vaultwarden`, `execute`) all wrap ctrl-api endpoints. Use these from voice via `self`:
+
+| Hermes MCP tool (text mode) | `self()` endpoint (voice mode) |
+|---|---|
+| `alfred.search_vault` | `GET /api/v1/vault/search?q=…` |
+| `alfred.list_vault_by_type` | `GET /api/v1/vault/list/<type>` |
+| `alfred.get_vault_record` / `create_vault_record` | `GET` / `POST /api/v1/vault/records/<slug>` |
+| `alfred.list_decisions` / `get_decision` | `GET /api/v1/decisions` / `GET /api/v1/decisions/:id` |
+| `alfred.list_briefings` / `get_briefing` | `GET /api/v1/briefings` / `GET /api/v1/briefings/:date/:period` |
+| `alfred.notify_principal` | `POST /api/v1/alfred-deliver` |
+| `sure.list_accounts` / `list_transactions` | `GET /api/v1/sure/accounts` / `GET /api/v1/sure/transactions` |
+| `sure.create_transaction` | `POST /api/v1/sure/transactions` |
+| `sure.get_balance_sheet` / `list_categories` | `GET /api/v1/sure/balance-sheet` / `GET /api/v1/sure/categories` |
+| `plane.list_projects` / `list_issues` / `list_cycles` | `GET /api/v1/plane/projects` / `GET /api/v1/plane/issues` / `GET /api/v1/plane/cycles` |
+| `plane.create_issue` / `update_issue` | `POST /api/v1/plane/issues` / `PATCH /api/v1/plane/issues/:id` |
+| `plane.post_issue_comment` | `POST /api/v1/plane/issues/:id/comments` |
+| `vaultwarden.list_vault_items` / `search_vault_items` | `GET /api/v1/vaultwarden/items` / `GET /api/v1/vaultwarden/items/search?q=…` |
+| `vaultwarden.get_vault_item` / `create_vault_item` | `GET` / `POST /api/v1/vaultwarden/items` |
+| `execute.list_composio_tools` / `list_connections` | `GET /api/v1/integrations/composio/tools` / `GET /api/v1/integrations/composio/connections` |
+| `execute.composio_execute` | `composio_execute({action, arguments})` — this one IS a first-class tool |
+
+When in doubt, ASSUME the endpoint exists at `/api/v1/<area>/<noun>` and try. ctrl-api 404s back cheaply with the registered routes nearby; that's a fine way to discover the surface mid-call. Latency-mask with "One moment, sir." while you probe.
 
 ## Cross-channel awareness
 
