@@ -1,3 +1,5 @@
+import http from "node:http";
+import { URL } from "node:url";
 import { addRoute } from "../server.js";
 import { sendJson } from "../errors.js";
 
@@ -20,19 +22,57 @@ async function checkHealth(
   // hostname — internal probes via compose DNS (paperclip:3100) trip that
   // check. `opts.host` lets the caller override the Host header so the
   // probe carries the app's real production hostname while still hitting
-  // the compose-internal address. Plane/Sure/Vault don't need this.
-  const headers: Record<string, string> = {};
-  if (opts.host) headers.Host = opts.host;
+  // the compose-internal address.
+  //
+  // Node's built-in fetch (undici) silently drops manual Host headers
+  // because it reserves Host from the URL itself. For the Host-override
+  // case we fall back to node:http directly. Plane/Sure/Vault use the
+  // fast-path (fetch, no header override) — they don't have trusted-
+  // origins guards.
+  if (opts.host) {
+    return await checkHealthWithHost(url, opts.host);
+  }
   try {
     const resp = await fetch(url, {
       method: "GET",
-      headers,
       signal: AbortSignal.timeout(2000),
     });
     return resp.ok ? "up" : "down";
   } catch {
     return "down";
   }
+}
+
+function checkHealthWithHost(url: string, host: string): Promise<AppStatus> {
+  return new Promise((resolve) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return resolve("down");
+    }
+    const req = http.request(
+      {
+        method: "GET",
+        hostname: parsed.hostname,
+        port: parsed.port || 80,
+        path: parsed.pathname + parsed.search,
+        headers: { Host: host },
+        timeout: 2000,
+      },
+      (res) => {
+        const status = res.statusCode ?? 0;
+        res.resume(); // drain
+        resolve(status >= 200 && status < 400 ? "up" : "down");
+      },
+    );
+    req.on("error", () => resolve("down"));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve("down");
+    });
+    req.end();
+  });
 }
 
 export function registerAppsRoutes(): void {
