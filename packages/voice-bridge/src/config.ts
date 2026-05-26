@@ -52,6 +52,17 @@ export const config = {
   // to enable strict signature validation.
   twilioAuthToken: optional("TWILIO_AUTH_TOKEN", ""),
 
+  // MCP-client wiring (see mcp-clients.ts). voice-bridge connects to each
+  // of mcp-server's per-app HTTP endpoints as a programmatic client, the
+  // same five servers Hermes-main connects to over stdio. The internal
+  // docker URL avoids a Caddy hop on every tool call.
+  mcpServerUrl: optional("MCP_SERVER_URL", "http://mcp-server:8787"),
+  // Bearer token the bypass added in PR #44/#45 accepts. When this is
+  // empty voice-bridge falls back to no auth and the MCP servers reject
+  // every tools/call — surfacing as agent errors mid-call, which is what
+  // we want for that misconfiguration (loud, debuggable).
+  mcpApprovalSecret: optional("MCP_APPROVAL_SECRET", ""),
+
   // Per-call hard cap to prevent runaway minutes
   maxCallSeconds: Number(optional("MAX_CALL_SECONDS", "1800")),
   // Idle hangup if no audio either way (Phase 9 hardening)

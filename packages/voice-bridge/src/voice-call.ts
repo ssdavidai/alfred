@@ -37,6 +37,11 @@ import {
   dispatchSelf,
   serializeToolResult,
 } from "./tools.js";
+import {
+  dispatchMcp,
+  getMcpToolDefs,
+  isMcpToolName,
+} from "./mcp-clients.js";
 
 export interface VoiceCallOpts {
   tenantId: string;
@@ -124,7 +129,12 @@ export class VoiceCall {
           intent: this.opts.intent,
           voiceContext: this.voiceCtx,
         }),
-        tools: ALL_TOOLS,
+        // ALL_TOOLS = static [self, composio_execute]. MCP tools are merged in
+        // dynamically — server.ts already called connectAllMcp() at boot, so
+        // by the time a call lands the catalog is populated. Empty list is
+        // a soft failure (every MCP server was unreachable at boot); voice
+        // still works on self + composio.
+        tools: [...ALL_TOOLS, ...getMcpToolDefs()],
       });
     } catch (err) {
       console.error(`[call ${this.callId}] OpenAI Realtime connect failed`, err);
@@ -297,6 +307,10 @@ export class VoiceCall {
       result = await dispatchSelf(this.tenantCtx, args);
     } else if (name === "composio_execute") {
       result = await dispatchComposioExecute(this.tenantCtx, args);
+    } else if (isMcpToolName(name)) {
+      // <server>__<tool> shape — route to the MCP client we connected at
+      // voice-bridge boot. See mcp-clients.ts for the dispatcher.
+      result = await dispatchMcp(name, args);
     } else {
       result = { ok: false, error: `Unknown tool: ${name}` };
     }

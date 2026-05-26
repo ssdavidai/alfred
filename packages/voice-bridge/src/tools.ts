@@ -72,6 +72,13 @@ export const COMPOSIO_EXECUTE_TOOL = {
   },
 };
 
+/**
+ * Static tool list (always present). The voice agent ALSO gets a dynamic
+ * set of MCP tools merged at session.update time — see voice-call.ts and
+ * mcp-clients.ts. `self` and `composio_execute` stay here for the cases
+ * MCP doesn't cover (raw ctrl-api endpoints + Composio actions selected
+ * at runtime).
+ */
 export const ALL_TOOLS = [SELF_TOOL, COMPOSIO_EXECUTE_TOOL];
 
 // ── Dispatcher ───────────────────────────────────────────────────────────────

@@ -27,6 +27,7 @@ import { WebSocketServer } from "ws";
 import { config } from "./config.js";
 import { VoiceCall } from "./voice-call.js";
 import { handleTwimlInbound, TWIML_INBOUND_PATH } from "./twiml.js";
+import { connectAllMcp } from "./mcp-clients.js";
 
 export function verifySig(tenantId: string, sig: string | null | undefined): boolean {
   if (!sig) return false;
@@ -147,6 +148,14 @@ httpServer.on("upgrade", (req, socket, head) => {
 
 httpServer.listen(config.port, () => {
   console.log(`[voice-bridge] listening on :${config.port}`);
+});
+
+// Connect to every MCP server at boot. Best-effort: per-server failures are
+// logged and voice still works with whatever connected. Awaiting this would
+// add 1-3s to startup for no value — calls come tens of seconds later, the
+// catalog is populated long before the first session.update.
+void connectAllMcp().catch((err) => {
+  console.error("[mcp] connectAllMcp threw (continuing):", err);
 });
 
 // Surface uncaught failures rather than dying silently.
