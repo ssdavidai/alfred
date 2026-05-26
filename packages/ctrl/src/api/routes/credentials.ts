@@ -108,6 +108,17 @@ const KNOWN_CREDENTIALS: CredentialDef[] = [
     description: "Shared secret between ctrl-api/voice-bridge and the SaaS internal Twilio endpoints (Bearer auth). Generated at provision time.",
     used_by: ["ctrl-api phone routes", "voice-bridge", "SaaS internal endpoints"],
   },
+  // AgentMail webhook secret. AgentMail does not sign its webhooks, so the
+  // public `/api/v1/channels/email/inbound` endpoint validates a shared
+  // `?token=` query param against this value. Bake the token into the URL
+  // configured in the AgentMail console. Rotate by setting a new value here
+  // and updating the console — old value stops accepting immediately.
+  {
+    key: "AGENTMAIL_WEBHOOK_TOKEN",
+    label: "AgentMail webhook token",
+    description: "Shared secret for inbound AgentMail webhook delivery. The agentmail.to console webhook URL must include ?token=<this value>. Generate with `openssl rand -hex 32` and update both places.",
+    used_by: ["ctrl-api /api/v1/channels/email/inbound"],
+  },
 ];
 
 /** Protected keys that cannot be modified via this endpoint. */

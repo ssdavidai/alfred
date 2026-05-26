@@ -1,15 +1,31 @@
 // Email channel inbound handler.
 //
-// Called by the SaaS webhook receiver at
-// packages/saas/app/src/server/agentmailReceiver.ts when an inbound email
-// comes from an authorized sender. We start a one-shot Hermes run with the
-// email pre-loaded as the run input plus an envelope of metadata
-// (from/to/cc/subject/thread_id/message_id), so the main agent can read,
-// reason, and reply via /api/v1/email/reply.
+// alfred-black ingress shape (post-SaaS-retirement):
+//
+//   AgentMail (their cloud, alfred@agent.szabostuban.com)
+//      |  POST https://home.alfred.black/api/v1/channels/email/inbound?token=<SECRET>
+//      v
+//   Caddy apex (@public_webhooks matcher)
+//      |  reverse_proxy ctrl-api:3100
+//      v
+//   ctrl-api  ← this handler
+//      |  POST /v1/runs (Hermes main profile)
+//      v
+//   Hermes  → alfred-email-channel skill → reply via /api/v1/email/reply
+//
+// Auth: AgentMail does not sign its webhooks (no header documented), so we
+// gate on a shared-secret `?token=` baked into the URL configured in the
+// AgentMail console. The path itself is marked public in server.ts so the
+// master AAS_API_KEY isn't required.
+//
+// Filters (matched against Hermes' native email adapter behaviour):
+//   - drop emails from noreply@ / mailer-daemon@ / no-reply@ / bounce@
+//   - drop Auto-Submitted (RFC 3834), Precedence: bulk|list|junk,
+//     List-Unsubscribe — RFC-flagged automated mail
+//   - drop self-loops (from == AGENTMAIL_INBOX_ADDRESS)
 //
 // Fire-and-forget: we respond 202 immediately and let the run proceed in
-// the background. Failures to start are logged; the message is still safe
-// because the SaaS receiver also buffers a StreamEvent fallback.
+// the background. Failures to start are logged.
 //
 // Phase 2: calls Hermes `POST /v1/runs` natively against the Hermes API
 // server's canonical port (the hermes-shim was retired in issue #40). The
@@ -94,11 +110,116 @@ function buildChannelPrompt(message: any): string {
   ].join("\n");
 }
 
+// Match RFC 2822 local-parts (case-insensitive) that indicate an automated
+// sender — Hermes' native email adapter drops these silently. The address
+// is parsed by `extractLocalPart`, so we match on local-part alone.
+const AUTOMATED_LOCAL_PARTS = new Set([
+  "noreply",
+  "no-reply",
+  "no_reply",
+  "donotreply",
+  "do-not-reply",
+  "do_not_reply",
+  "mailer-daemon",
+  "mailerdaemon",
+  "postmaster",
+  "bounce",
+  "bounces",
+  "notification",
+  "notifications",
+]);
+
+function extractLocalPart(addr: string): string {
+  // Accept either `user@host` or `Display Name <user@host>` shapes.
+  const m = addr.match(/<([^>]+)>/);
+  const email = (m ? m[1] : addr).trim().toLowerCase();
+  const at = email.indexOf("@");
+  return at > 0 ? email.slice(0, at) : email;
+}
+
+function isAutomatedSender(from: string): boolean {
+  if (!from) return false;
+  return AUTOMATED_LOCAL_PARTS.has(extractLocalPart(from));
+}
+
+function hasBulkHeader(headers: Record<string, string> | undefined): boolean {
+  if (!headers || typeof headers !== "object") return false;
+  // Normalize header lookup (RFC headers are case-insensitive).
+  const lower: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (typeof v === "string") lower[k.toLowerCase()] = v;
+  }
+  // RFC 3834 Auto-Submitted: anything other than "no" means automated.
+  const autoSub = (lower["auto-submitted"] || "").toLowerCase();
+  if (autoSub && autoSub !== "no") return true;
+  // Precedence: bulk | list | junk
+  const prec = (lower["precedence"] || "").toLowerCase();
+  if (prec === "bulk" || prec === "list" || prec === "junk") return true;
+  // List-Unsubscribe present at all → mailing list
+  if (lower["list-unsubscribe"]) return true;
+  return false;
+}
+
+function isSelfLoop(from: string): boolean {
+  const ourAddr = (process.env.AGENTMAIL_INBOX_ADDRESS || "").trim().toLowerCase();
+  if (!ourAddr) return false;
+  // Compare local-part@host of the from-address against ours.
+  const m = from.match(/<([^>]+)>/);
+  const fromEmail = (m ? m[1] : from).trim().toLowerCase();
+  return fromEmail === ourAddr;
+}
+
 export function registerChannelsEmailRoutes(): void {
-  addRoute("POST", "/api/v1/channels/email/inbound", async ({ res, body }) => {
-    const b = (body ?? {}) as { message?: any; event_id?: string };
+  addRoute("POST", "/api/v1/channels/email/inbound", async ({ res, body, query }) => {
+    // Shared-secret token: AgentMail doesn't sign its webhooks, so the public
+    // path is gated by a `?token=` query param we configure in their console.
+    // When AGENTMAIL_WEBHOOK_TOKEN is unset, the endpoint reverts to internal-
+    // only (refuses every call) — fail closed.
+    const expected = (process.env.AGENTMAIL_WEBHOOK_TOKEN || "").trim();
+    const provided = (query.get("token") || "").trim();
+    if (!expected) {
+      console.warn(
+        "[channels-email] AGENTMAIL_WEBHOOK_TOKEN unset — rejecting inbound (fail-closed)",
+      );
+      sendJson(res, 403, { error: { code: "WEBHOOK_TOKEN_NOT_CONFIGURED" } });
+      return;
+    }
+    if (!provided || provided !== expected) {
+      console.warn("[channels-email] webhook token mismatch — rejecting");
+      sendJson(res, 401, { error: { code: "INVALID_WEBHOOK_TOKEN" } });
+      return;
+    }
+
+    const b = (body ?? {}) as {
+      message?: any;
+      event_id?: string;
+    };
     if (!b.message || typeof b.message !== "object") {
       throw new ValidationError("`message` required");
+    }
+
+    // Resolve from-address (AgentMail emits `from_` as a single-element array).
+    const fromAddr: string = Array.isArray(b.message.from_)
+      ? String(b.message.from_[0] ?? "")
+      : String(b.message.from ?? b.message.from_ ?? "");
+
+    // Filter 1: automated/noreply senders. Silent drop, 202 to keep AgentMail happy.
+    if (isAutomatedSender(fromAddr)) {
+      console.log(`[channels-email] drop automated sender: ${fromAddr}`);
+      sendJson(res, 202, { accepted: false, reason: "automated_sender" });
+      return;
+    }
+    // Filter 2: bulk/list mail via RFC headers.
+    if (hasBulkHeader(b.message.headers)) {
+      console.log(`[channels-email] drop bulk/list mail from: ${fromAddr}`);
+      sendJson(res, 202, { accepted: false, reason: "bulk_or_list" });
+      return;
+    }
+    // Filter 3: self-loop (Alfred's own outbound landing back in the inbox).
+    if (isSelfLoop(fromAddr)) {
+      console.log(`[channels-email] drop self-loop from: ${fromAddr}`);
+      sendJson(res, 202, { accepted: false, reason: "self_loop" });
+      return;
     }
 
     const token = getGatewayToken();
@@ -112,9 +233,9 @@ export function registerChannelsEmailRoutes(): void {
 
     // Fire-and-forget Hermes run on the main profile. We intentionally don't
     // await the response — the run takes tens of seconds to minutes and
-    // AgentMail has a 5s webhook budget upstream (already satisfied — SaaS
-    // 204'd before this point). `session_id` correlates the run to the email
-    // thread so a follow-up reply on the same thread chains the conversation.
+    // AgentMail has a 5s webhook budget upstream. `session_id` correlates the
+    // run to the email thread so a follow-up reply on the same thread chains
+    // the conversation.
     const sessionId = `email-${b.message?.thread_id ?? b.message?.message_id ?? b.event_id ?? Date.now()}`;
     const run = fetch(`${HERMES_GATEWAY_URL}/v1/runs`, {
       method: "POST",

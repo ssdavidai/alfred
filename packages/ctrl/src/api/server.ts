@@ -206,12 +206,18 @@ export function createApiServer(): http.Server {
 
       // Public routes that authenticate via their own mechanism (e.g. webhook token,
       // HMAC signature).
+      //
+      // /api/v1/channels/email/inbound is the AgentMail webhook target. AgentMail
+      // does not sign its webhook payloads (their docs cover REST + webhooks but no
+      // signature scheme), so the handler enforces a shared-secret `?token=` query
+      // param against AGENTMAIL_WEBHOOK_TOKEN — same model as OMI's inbound stream.
       const isPublic =
         pathname.startsWith("/api/v1/streams/omi/") ||
         pathname === "/api/v1/plane/webhook" ||
         pathname === "/api/v1/webhooks/plane/steward" ||
         pathname === "/api/v1/webhooks/vexa" ||
-        pathname.startsWith("/api/v1/webhooks/in/");
+        pathname.startsWith("/api/v1/webhooks/in/") ||
+        pathname === "/api/v1/channels/email/inbound";
       if (!isPublic) {
         // Pass method+pathname so the scoped-token path can check the
         // route allowlist (see auth.ts VOICE_BRIDGE_ALLOWLIST). The master

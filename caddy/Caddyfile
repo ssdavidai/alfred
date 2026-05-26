@@ -36,10 +36,27 @@
 
 	# Public webhook paths → ctrl-api directly. Exact prefixes only;
 	# anything else on the apex falls through to the SPA below.
+	#
+	# /api/v1/channels/email/inbound is included so AgentMail can POST
+	# inbound emails to alfred-black directly. AgentMail does not sign
+	# its webhooks (per their docs), so the handler validates a
+	# shared-secret `?token=` query param against AGENTMAIL_WEBHOOK_TOKEN
+	# baked into the URL configured in the AgentMail console.
 	@public_webhooks {
-		path /api/v1/streams/omi/* /api/v1/plane/webhook /api/v1/webhooks/plane/steward /api/v1/webhooks/vexa /api/v1/webhooks/in/*
+		path /api/v1/streams/omi/* /api/v1/plane/webhook /api/v1/webhooks/plane/steward /api/v1/webhooks/vexa /api/v1/webhooks/in/* /api/v1/channels/email/inbound
 	}
 	handle @public_webhooks {
+		reverse_proxy ctrl-api:3100
+	}
+
+	# Legacy AgentMail URL — the old SaaS exposed `/webhooks/agentmail`
+	# (which proxied to the tenant ctrl-api over Tailscale). On alfred-black
+	# we still see this URL in existing AgentMail console configurations,
+	# so we transparently rewrite it to the canonical endpoint. The
+	# ?token=... query string is preserved automatically by uri replace.
+	@legacy_agentmail_webhook path /webhooks/agentmail
+	handle @legacy_agentmail_webhook {
+		uri replace /webhooks/agentmail /api/v1/channels/email/inbound
 		reverse_proxy ctrl-api:3100
 	}
 
