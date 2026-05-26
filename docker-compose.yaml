@@ -1259,11 +1259,12 @@ services:
   # — unlike Sure/Plane — there is NO separate paperclip-db sidecar.
   # All state lives in the paperclip_data volume.
   #
-  # Healthcheck: Paperclip's docs do not document /api/health (verified
-  # 2026-05-26 at docs.paperclip.ing + github.com/paperclipai/paperclip),
-  # so we probe the web UI root with wget. If a future Paperclip release
-  # ships /api/health, switch to `curl -fsS http://127.0.0.1:3100/api/health`
-  # for a tighter liveness signal.
+  # Healthcheck: Paperclip's docs do not document /api/health and the web
+  # root (/) returns 403 to unauthenticated visits (better-auth rejects
+  # before the React shell renders). The unauthed entry page /sign-in
+  # returns 200 and is the right "is the app up?" probe (verified
+  # 2026-05-26). If a future Paperclip release ships /api/health, switch
+  # to `curl -fsS http://127.0.0.1:3100/api/health` for a tighter signal.
   paperclip:
     image: ghcr.io/paperclipai/paperclip@sha256:711d29717855abbd84d0e576a0a07daff8e9007a229fb8220d8203d492e886e4
     restart: unless-stopped
@@ -1279,7 +1280,7 @@ services:
     volumes:
       - paperclip_data:/paperclip
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/ >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/sign-in >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 30

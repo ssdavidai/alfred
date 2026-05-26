@@ -73,16 +73,21 @@ export function registerAppsRoutes(): void {
 
     // Paperclip — the company simulation (paperclip.ing). Alfred runs as
     // a "managed employee" here; the principal sees companies / employees
-    // / issues / boards. Always-on per Sir 2026-05-26. Healthcheck probes
-    // the web UI root because Paperclip's docs don't document /api/health
-    // yet — same fallback Lane V uses for the container healthcheck.
+    // / issues / boards. Always-on per Sir 2026-05-26.
+    //
+    // Health probe: /sign-in (Paperclip's unauthenticated entry page,
+    // returns 200). The web-root '/' returns 403 — better-auth rejects
+    // unauthed visits before the React shell renders — which would
+    // misread as 'down' even on a perfectly healthy box. /sign-in is the
+    // semantic 'is the app up?' probe (verified 2026-05-26 against
+    // ghcr.io/paperclipai/paperclip@sha256:711d29717..).
     checks.push(
       (async (): Promise<InstalledApp> => ({
         id: "paperclip",
         name: "Paperclip",
         url: `https://paperclip.${domain}`,
         icon: "/app-icons/paperclip.svg",
-        status: await checkHealth("http://paperclip:3100/"),
+        status: await checkHealth("http://paperclip:3100/sign-in"),
       }))(),
     );
 
