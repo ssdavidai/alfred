@@ -1,0 +1,78 @@
+# Build + push alfred-black-paperclip — the upstream
+# ghcr.io/paperclipai/paperclip image overlaid with our patched
+# hermes-paperclip-adapter (HTTP-mode execute() against the tenant's
+# local hermes container at :18789). See packages/paperclip/DESIGN.md.
+name: build-paperclip
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/paperclip/**"
+      - ".github/workflows/build-paperclip.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: build-paperclip-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-adapter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install adapter deps
+        working-directory: packages/paperclip/adapter
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        working-directory: packages/paperclip/adapter
+        run: npm run typecheck
+
+      - name: Build adapter
+        working-directory: packages/paperclip/adapter
+        run: npm run build
+
+      - name: Unit tests
+        working-directory: packages/paperclip/adapter
+        run: npm test
+
+  build:
+    runs-on: ubuntu-latest
+    needs: test-adapter
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: packages/paperclip/dockerfiles/paperclip.Dockerfile
+          # Single platform — upstream paperclip image is amd64-only today
+          # (the digest pin in the Dockerfile resolves to a linux/amd64
+          # manifest). Re-evaluate when upstream ships multi-arch.
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ssdavidai00/alfred-black-paperclip:latest
+            ssdavidai00/alfred-black-paperclip:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
