@@ -56,13 +56,16 @@ describe("claude-setup approval secret (F63/C16)", () => {
     assert.ok("last_rotated_at" in payload, "GET must carry last_rotated_at");
   });
 
-  it("GET never echoes vault_login.master_password (when present)", async () => {
-    // master_password should be null even though VAULTWARDEN_BW_PASSWORD set.
+  it("GET echoes vault_login.master_password so the dashboard can show it behind Reveal", async () => {
+    // Unlike the approval secret (which gets rotated), the Vaultwarden master
+    // password is something the principal needs to retrieve every time they
+    // sign into the vault, so /settings#agent reveals it on demand. This route
+    // sends the actual value; the UI handles the Reveal + Copy toggle.
     process.env.VAULTWARDEN_BW_PASSWORD = "vw-secret-123";
     try {
       const { payload } = await call("GET", "/api/v1/claude-setup");
       if (payload.vault_login) {
-        assert.equal(payload.vault_login.master_password, null, "master_password must not be echoed");
+        assert.equal(payload.vault_login.master_password, "vw-secret-123", "master_password must be echoed so the dashboard can show it");
         assert.equal(payload.vault_login.master_password_set, true, "vault_login must signal the password is set");
       }
     } finally {

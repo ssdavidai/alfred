@@ -251,14 +251,22 @@ export function registerClaudeSetupRoutes(): void {
     // is served at vault.${DOMAIN} (no per-tenant subdomain prefix). (F62)
     const bwUser = process.env.BW_USER || process.env.OWNER_EMAIL || null;
     const bwPassword = process.env.VAULTWARDEN_BW_PASSWORD || process.env.BW_PASSWORD || null;
-    // F63/C16 — same reveal-once treatment for the Vaultwarden master password:
-    // never echo it; surface only that it is set. (Rotation for it is out of
-    // scope here — it lives in Vaultwarden's own flow.)
+    // Surface the Vaultwarden master password to the dashboard. The
+    // earlier F63/C16-style "reveal-once" treatment was wrong for this
+    // credential: unlike the approval secret (which gets rotated and
+    // re-issued), the master password is something the principal needs
+    // to retrieve every time they sign into Vaultwarden — so it must
+    // be readable from /settings#agent behind a Reveal toggle, the same
+    // way every other persistent secret in that panel works. The
+    // dashboard already implements the Reveal + Copy UX (SettingsPage
+    // around the Vault Login card); this route just needs to actually
+    // send the value. `master_password_set` stays for older clients
+    // that gated UI on it. Rotation for it is still out of scope.
     const vaultLogin = bwPassword && domain
       ? {
           url: `https://vault.${domain}`,
           email: bwUser,
-          master_password: null,
+          master_password: bwPassword,
           master_password_set: true,
         }
       : null;
