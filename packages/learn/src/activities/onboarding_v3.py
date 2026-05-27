@@ -16,6 +16,7 @@ Steps:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -889,6 +890,43 @@ def _fact_text_key(fact: Any) -> str:
     return " ".join(text.lower().split())
 
 
+def _chunk_fingerprint(chunk: list[dict[str, Any]]) -> str:
+    """Stable fingerprint for an email chunk (idempotency key for #83).
+
+    A SHA-256 over the chunk's identifying fields. The result is the
+    key into ``onboard["facts_partial"]`` so a Temporal retry can
+    short-circuit any chunk whose work is already on disk.
+
+    Order-stable + content-stable: ``chunk_emails_for_extraction`` is
+    deterministic (it slices a list it received in input order), so
+    the SAME corpus produces the SAME fingerprints across activity
+    retries. A re-onboarding with the SAME emails fingerprints
+    identically — that's the desired idempotency, and the stage
+    cleanup at the end of ``extract_facts_opus`` wipes
+    ``facts_partial`` so a re-onboarding with DIFFERENT emails
+    doesn't pick up stale partials.
+
+    We hash the per-email subject/from/date (not the full snippet) —
+    enough to make a collision astronomically unlikely while keeping
+    the digest cheap. ``hashlib.sha256`` is in stdlib (no new
+    dependency).
+    """
+    h = hashlib.sha256()
+    for e in chunk:
+        if not isinstance(e, dict):
+            continue
+        # Tab-separated and newline-terminated → no field can spoof a
+        # delimiter without changing the digest.
+        h.update("\t".join((
+            str(e.get("from", "")),
+            str(e.get("to", "")),
+            str(e.get("subject", "")),
+            str(e.get("date", "")),
+        )).encode("utf-8"))
+        h.update(b"\n")
+    return h.hexdigest()
+
+
 def _dedup_identity_candidates(candidates: list[dict]) -> list[dict]:
     """Last-wins dedup of identity-fact candidates by ``field``.
 
@@ -987,6 +1025,40 @@ BEHAVIORAL ANALYSIS (pre-computed from email metadata — use as ground truth):
     n_chunks = len(chunks)
     is_chunked = n_chunks > 1
 
+    # ---------------------------------------------------------------
+    # Incremental persistence — durability across activity retries (#83)
+    # ---------------------------------------------------------------
+    # Failure mode this guards against: a multi-chunk corpus where one
+    # chunk hits a transient Hermes/Nous stream drop, OR the cumulative
+    # wall-time of the loop exceeds ``start_to_close_timeout`` (15 min).
+    # Pre-fix, ``onboard["facts"]`` was persisted ONLY after the full
+    # loop, so any of these failure modes discarded ALL chunks' work
+    # on the activity-level retry. On miguel.alfred.black 2026-05-27,
+    # 4 chunks at ~8 min each blew the 15-min budget after chunk 2 and
+    # every retry restarted from chunk 0 with no progress.
+    #
+    # Design: ``onboard["facts_partial"]`` is a dict keyed by
+    # ``_chunk_fingerprint(chunk)`` carrying the per-chunk extraction
+    # result. After each chunk's LLM call returns, we write the entry
+    # AND ``_write_onboard`` immediately. On retry, we hash each chunk
+    # at loop entry and reuse any partial whose fingerprint is present
+    # — the LLM call is skipped entirely.
+    #
+    # Residual blast radius this does NOT cover:
+    #   * process death (SIGKILL, container OOM) between ``_call_llm``
+    #     returning and ``_write_onboard`` completing — that window is
+    #     <100ms and ``_write_onboard`` itself is fsync+rename atomic,
+    #     so the file is either pre-chunk-N or post-chunk-N, never
+    #     torn. The retry just re-runs chunk N.
+    #   * an operator ``mv onboard.json`` — that's an explicit reset
+    #     and the cleanup is intentional.
+    #   * a change to chunk shape (chunker rewrite, sampler shift) —
+    #     fingerprints differ → partials are unused → safe.
+    facts_partial: dict[str, Any] = onboard.get("facts_partial") or {}
+    if not isinstance(facts_partial, dict):  # defensive: corrupted shape
+        facts_partial = {}
+    chunks_resumed = 0
+
     # Per-chunk extraction. A 402 / credit-exhaustion error short-
     # circuits the WHOLE stage (we have no credits — every following
     # chunk will fail too); other errors per chunk are logged and the
@@ -997,6 +1069,28 @@ BEHAVIORAL ANALYSIS (pre-computed from email metadata — use as ground truth):
     chunks_with_failure = 0
 
     for i, chunk in enumerate(chunks):
+        fp = _chunk_fingerprint(chunk)
+
+        # Resume path: this chunk's work is already durable from a
+        # previous attempt. Skip the LLM call entirely.
+        cached = facts_partial.get(fp)
+        if isinstance(cached, dict):
+            chunk_facts = cached.get("facts") or []
+            chunk_identity = cached.get("identity") or []
+            chunks_resumed += 1
+            activity.heartbeat(
+                f"Extracting facts: chunk {i + 1}/{n_chunks} resumed "
+                f"({len(chunk_facts)} facts cached)"
+            )
+            for f in chunk_facts:
+                key = _fact_text_key(f)
+                if not key or key in seen_fact_keys:
+                    continue
+                seen_fact_keys.add(key)
+                facts.append(f)
+            identity_candidates.extend(chunk_identity)
+            continue
+
         activity.heartbeat(
             f"Extracting facts: chunk {i + 1}/{n_chunks} ({len(chunk)} emails)"
         )
@@ -1017,6 +1111,11 @@ BEHAVIORAL ANALYSIS (pre-computed from email metadata — use as ground truth):
             # failure in multi-chunk mode → log + continue so the
             # surviving chunks still contribute (resilience above
             # individual-chunk recovery).
+            #
+            # NOTE for #83: we do NOT persist a failed chunk to
+            # ``facts_partial``. The next retry SHOULD re-attempt this
+            # chunk — the surviving chunks are already durable, so
+            # only the failed ones cost LLM calls on retry.
             sentinel = _handle_llm_degraded(
                 "facts", onboard_path, exc,
                 activity_name="extract_facts_opus",
@@ -1046,6 +1145,30 @@ BEHAVIORAL ANALYSIS (pre-computed from email metadata — use as ground truth):
             logger.warning(
                 "onboarding_v3: chunk %d/%d produced 0 facts (raw len=%d)",
                 i + 1, n_chunks, len(raw or ""),
+            )
+
+        # ---- DURABILITY POINT (#83) ----
+        # Persist this chunk's result to onboard.json BEFORE accepting
+        # it into the in-memory merge. If the next chunk's LLM call
+        # hangs and Temporal kills the activity, this chunk's work
+        # survives in ``facts_partial`` and the retry will reuse it.
+        # We persist BOTH empty AND non-empty chunks: an empty chunk
+        # is a real LLM call we don't want to repeat.
+        facts_partial[fp] = {
+            "facts": chunk_facts,
+            "identity": chunk_identity,
+            "n_emails": len(chunk),
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        onboard["facts_partial"] = facts_partial
+        try:
+            _write_onboard(onboard_path, onboard)
+        except Exception as write_exc:  # noqa: BLE001
+            # Bookkeeping must not poison the run. Worst case: this
+            # chunk gets re-extracted on retry — same as pre-fix.
+            logger.warning(
+                "onboarding_v3: chunk %d/%d facts_partial persist failed: %s",
+                i + 1, n_chunks, write_exc,
             )
 
         # String-equality dedup, case-insensitive + whitespace-collapsed.
@@ -1096,14 +1219,20 @@ BEHAVIORAL ANALYSIS (pre-computed from email metadata — use as ground truth):
 
     logger.info(
         "onboarding_v3: extracted %d facts, %d key identity facts from %d "
-        "chunk(s) (%d emails total, %d chunk failure(s))",
+        "chunk(s) (%d emails total, %d chunk failure(s), %d chunk(s) "
+        "resumed from facts_partial)",
         len(facts), len(key_identity_facts), n_chunks, len(emails),
-        chunks_with_failure,
+        chunks_with_failure, chunks_resumed,
     )
 
     onboard["facts"] = facts
     onboard["key_identity_facts"] = key_identity_facts
     onboard["progress"]["facts_count"] = len(facts)
+    # Stage complete — wipe the per-chunk scratch so a future
+    # re-onboarding with a DIFFERENT corpus doesn't pick up stale
+    # partials (the fingerprints would miss, but better to keep the
+    # file slim — partials for 5000 emails are non-trivial bytes).
+    onboard.pop("facts_partial", None)
     _write_onboard(onboard_path, onboard)
 
     # Stage narration — Alfred working out who you are (best-effort, via Hermes).
