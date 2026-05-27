@@ -22,9 +22,18 @@ import assert from "node:assert/strict";
 import {
   buildPendingRowsWhere,
   reconcileBatch,
+  type ComposioConnectionSnapshot,
   type PendingRow,
   type ReconcileDeps,
 } from "./reconcileCore";
+
+// Stub that should never be called in tests whose row is already ACTIVE.
+// Wrapped in a factory so each test can assert independently whether it was
+// invoked. Tests that exercise the INITIATED→ACTIVE lift path supply their
+// own stub instead.
+function neverFetchComposio(): ComposioConnectionSnapshot {
+  throw new Error("fetchComposioConnection must not be called for ACTIVE rows");
+}
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -78,6 +87,9 @@ function makeRow(overrides: Partial<PendingRow> & {
     userId: overrides.userId ?? "user-david",
     connectionId: overrides.connectionId,
     toolkit: overrides.toolkit,
+    // Default ACTIVE so the existing tests preserve their prior semantics.
+    // INITIATED→ACTIVE coverage lives in its own block below.
+    status: overrides.status ?? "ACTIVE",
     autoConfigState: overrides.autoConfigState ?? "pending",
     lastSyncedAt: overrides.lastSyncedAt ?? new Date(0),
     // Single-VM: no per-user instance — the reconciler always hits the one
@@ -121,6 +133,7 @@ test("reconcileBatch: fires auto-config on a pending ACTIVE row and flips it to 
         actions_count: 12,
       };
     },
+    fetchComposioConnection: async () => neverFetchComposio(),
   };
 
   const summary = await reconcileBatch(
@@ -165,6 +178,7 @@ test("reconcileBatch: marks the row 'error' when the tenant call rejects", async
     fetchAutoConfig: async () => {
       throw new Error("tenant auto-config returned 502: bad gateway");
     },
+    fetchComposioConnection: async () => neverFetchComposio(),
   };
 
   const summary = await reconcileBatch(
@@ -222,6 +236,7 @@ test("reconcileBatch: respects the per-tick concurrency cap", async () => {
       inFlight--;
       return { stream_created: "x", actions_count: 0 };
     },
+    fetchComposioConnection: async () => neverFetchComposio(),
   };
 
   const rows = ids.map((i) =>
@@ -242,7 +257,9 @@ test("reconcileBatch: respects the per-tick concurrency cap", async () => {
 
 test("buildPendingRowsWhere: includes pending rows unconditionally", () => {
   const where = buildPendingRowsWhere(new Date("2026-04-29T10:00:00Z"), 5 * 60 * 1000);
-  assert.strictEqual(where.status, "ACTIVE");
+  // The reconciler now picks up ACTIVE + INITIATED rows (the latter so the
+  // safety net can catch webhooks that never fired).
+  assert.deepStrictEqual(where.status, { in: ["ACTIVE", "INITIATED"] });
   assert.ok(Array.isArray(where.OR));
   const pendingPredicate = where.OR.find((p: any) => p.autoConfigState === "pending");
   assert.ok(pendingPredicate, "must include `autoConfigState: pending`");
@@ -250,6 +267,16 @@ test("buildPendingRowsWhere: includes pending rows unconditionally", () => {
     Object.keys(pendingPredicate).length,
     1,
     "pending predicate should NOT carry a lastSyncedAt filter",
+  );
+});
+
+test("buildPendingRowsWhere: status filter accepts both ACTIVE and INITIATED", () => {
+  const where = buildPendingRowsWhere(new Date("2026-05-27T10:00:00Z"), 5 * 60 * 1000);
+  assert.ok(where.status?.in, "status must be an `in` filter, not an equality");
+  assert.ok(where.status.in.includes("ACTIVE"), "ACTIVE must remain in the filter");
+  assert.ok(
+    where.status.in.includes("INITIATED"),
+    "INITIATED must be in the filter so the safety net picks up rows where the webhook never fired (joe.alfred.black, 2026-05-27)",
   );
 });
 
@@ -265,4 +292,243 @@ test("buildPendingRowsWhere: error rows must be older than the backoff window", 
     expectedCutoff.getTime(),
     "error rows touched within the backoff window stay out of this tick",
   );
+});
+
+// ---------------------------------------------------------------------------
+// INITIATED → ACTIVE safety net
+//
+// Regression coverage for the joe.alfred.black incident (2026-05-27): the
+// inbound Composio webhook failed to flip the local row from INITIATED to
+// ACTIVE for 36 minutes while Composio's API was reporting ACTIVE the whole
+// time. The reconciler now consults Composio directly for INITIATED rows
+// and lifts the local row before continuing with auto-config.
+// ---------------------------------------------------------------------------
+
+test("reconcileBatch: INITIATED + Composio ACTIVE → lifts row to ACTIVE + fires auto-config", async () => {
+  const fakeRows: FakeRow[] = [{
+    connectionId: "ca_gmail_joe",
+    userId: "user-david",
+    toolkit: "gmail",
+    status: "INITIATED",                       // ← stuck — webhook never fired
+    autoConfigState: "pending",
+    autoConfigError: null,
+    autoConfiguredAt: null,
+    streamsCreated: 0,
+    toolsEnabled: 0,
+    skillName: null,
+    lastSyncedAt: new Date(0),
+  }];
+  const delegate = makeFakeDelegate(fakeRows);
+  const composioCalls: string[] = [];
+  const autoConfigCalls: string[] = [];
+
+  const deps: ReconcileDeps = {
+    delegate,
+    fetchComposioConnection: async (connectionId) => {
+      composioCalls.push(connectionId);
+      return { status: "ACTIVE" };             // Composio confirms truth
+    },
+    fetchAutoConfig: async (_instance, connectionId) => {
+      autoConfigCalls.push(connectionId);
+      return {
+        stream_created: "composio-gmail-gmail-fetch-emails",
+        skill_generated: "/skills/alfred-composio-gmail",
+        actions_count: 7,
+      };
+    },
+  };
+
+  const summary = await reconcileBatch(
+    [makeRow({ connectionId: "ca_gmail_joe", toolkit: "gmail", status: "INITIATED" })],
+    deps,
+  );
+
+  assert.deepStrictEqual(summary, {
+    attempted: 1,
+    configured: 1,
+    errored: 0,
+    skipped: 0,
+  });
+  assert.deepStrictEqual(composioCalls, ["ca_gmail_joe"], "Composio API queried once");
+  assert.deepStrictEqual(autoConfigCalls, ["ca_gmail_joe"], "auto-config fired exactly once");
+  const updated = delegate.rows.get("ca_gmail_joe")!;
+  assert.strictEqual(updated.status, "ACTIVE", "row lifted to ACTIVE");
+  assert.strictEqual(updated.autoConfigState, "configured");
+  assert.strictEqual(updated.toolsEnabled, 7);
+});
+
+test("reconcileBatch: INITIATED + Composio still INITIATED → skip, no autoconfig, no error", async () => {
+  const fakeRows: FakeRow[] = [{
+    connectionId: "ca_drive_joe",
+    userId: "user-david",
+    toolkit: "googledrive",
+    status: "INITIATED",
+    autoConfigState: "pending",
+    autoConfigError: null,
+    autoConfiguredAt: null,
+    streamsCreated: 0,
+    toolsEnabled: 0,
+    skillName: null,
+    lastSyncedAt: new Date(0),
+  }];
+  const delegate = makeFakeDelegate(fakeRows);
+  let autoConfigCalled = false;
+
+  const deps: ReconcileDeps = {
+    delegate,
+    fetchComposioConnection: async () => ({ status: "INITIATED" }),
+    fetchAutoConfig: async () => {
+      autoConfigCalled = true;
+      return {};
+    },
+  };
+
+  const summary = await reconcileBatch(
+    [makeRow({ connectionId: "ca_drive_joe", toolkit: "googledrive", status: "INITIATED" })],
+    deps,
+  );
+
+  assert.deepStrictEqual(summary, {
+    attempted: 1,
+    configured: 0,
+    errored: 0,
+    skipped: 1,
+  });
+  assert.strictEqual(autoConfigCalled, false, "auto-config must NOT fire while Composio is still INITIATED");
+  const row = delegate.rows.get("ca_drive_joe")!;
+  assert.strictEqual(row.status, "INITIATED", "row stays INITIATED");
+  assert.strictEqual(row.autoConfigState, "pending", "autoConfigState stays pending (no error mark)");
+  assert.strictEqual(row.autoConfigError, null, "no error string recorded — Composio simply hasn't completed OAuth yet");
+});
+
+test("reconcileBatch: INITIATED + Composio FAILED → skip, leave local row alone", async () => {
+  const fakeRows: FakeRow[] = [{
+    connectionId: "ca_calendar_joe",
+    userId: "user-david",
+    toolkit: "googlecalendar",
+    status: "INITIATED",
+    autoConfigState: "pending",
+    autoConfigError: null,
+    autoConfiguredAt: null,
+    streamsCreated: 0,
+    toolsEnabled: 0,
+    skillName: null,
+    lastSyncedAt: new Date(0),
+  }];
+  const delegate = makeFakeDelegate(fakeRows);
+  let autoConfigCalled = false;
+
+  const deps: ReconcileDeps = {
+    delegate,
+    fetchComposioConnection: async () => ({ status: "FAILED" }),
+    fetchAutoConfig: async () => {
+      autoConfigCalled = true;
+      return {};
+    },
+  };
+
+  const summary = await reconcileBatch(
+    [makeRow({ connectionId: "ca_calendar_joe", toolkit: "googlecalendar", status: "INITIATED" })],
+    deps,
+  );
+
+  assert.deepStrictEqual(summary, {
+    attempted: 1,
+    configured: 0,
+    errored: 0,
+    skipped: 1,
+  });
+  assert.strictEqual(autoConfigCalled, false);
+  const row = delegate.rows.get("ca_calendar_joe")!;
+  assert.strictEqual(row.status, "INITIATED", "do not mirror Composio's FAILED — the principal may retry OAuth");
+  assert.strictEqual(row.autoConfigState, "pending", "no error mark — the failure is on Composio's side");
+  assert.strictEqual(row.autoConfigError, null);
+});
+
+test("reconcileBatch: INITIATED + Composio returns null (transport/404) → skip cleanly", async () => {
+  const fakeRows: FakeRow[] = [{
+    connectionId: "ca_slack_joe",
+    userId: "user-david",
+    toolkit: "slack",
+    status: "INITIATED",
+    autoConfigState: "pending",
+    autoConfigError: null,
+    autoConfiguredAt: null,
+    streamsCreated: 0,
+    toolsEnabled: 0,
+    skillName: null,
+    lastSyncedAt: new Date(0),
+  }];
+  const delegate = makeFakeDelegate(fakeRows);
+  let autoConfigCalled = false;
+
+  const deps: ReconcileDeps = {
+    delegate,
+    fetchComposioConnection: async () => null,        // 404, network error, etc.
+    fetchAutoConfig: async () => {
+      autoConfigCalled = true;
+      return {};
+    },
+  };
+
+  const summary = await reconcileBatch(
+    [makeRow({ connectionId: "ca_slack_joe", toolkit: "slack", status: "INITIATED" })],
+    deps,
+  );
+
+  assert.strictEqual(summary.skipped, 1);
+  assert.strictEqual(summary.configured, 0);
+  assert.strictEqual(summary.errored, 0);
+  assert.strictEqual(autoConfigCalled, false);
+  const row = delegate.rows.get("ca_slack_joe")!;
+  assert.strictEqual(row.status, "INITIATED");
+  assert.strictEqual(row.autoConfigState, "pending");
+});
+
+test("reconcileBatch: ACTIVE row does NOT query Composio (cost-flat regression guard)", async () => {
+  // This is the existing common path. We re-pin it explicitly to lock in
+  // the invariant that the safety-net fetch only runs for INITIATED rows.
+  const fakeRows: FakeRow[] = [{
+    connectionId: "ca_gmail_active",
+    userId: "user-david",
+    toolkit: "gmail",
+    status: "ACTIVE",
+    autoConfigState: "pending",
+    autoConfigError: null,
+    autoConfiguredAt: null,
+    streamsCreated: 0,
+    toolsEnabled: 0,
+    skillName: null,
+    lastSyncedAt: new Date(0),
+  }];
+  const delegate = makeFakeDelegate(fakeRows);
+  let composioCalled = false;
+
+  const deps: ReconcileDeps = {
+    delegate,
+    fetchComposioConnection: async () => {
+      composioCalled = true;
+      return { status: "ACTIVE" };
+    },
+    fetchAutoConfig: async () => ({
+      stream_created: "composio-gmail-gmail-fetch-emails",
+      skill_generated: "/skills/alfred-composio-gmail",
+      actions_count: 4,
+    }),
+  };
+
+  const summary = await reconcileBatch(
+    [makeRow({ connectionId: "ca_gmail_active", toolkit: "gmail" })],
+    deps,
+  );
+
+  assert.strictEqual(summary.configured, 1);
+  assert.strictEqual(
+    composioCalled,
+    false,
+    "ACTIVE rows must NOT spend a Composio API call per tick — keeps the common-case cost flat",
+  );
+  const row = delegate.rows.get("ca_gmail_active")!;
+  assert.strictEqual(row.status, "ACTIVE");
+  assert.strictEqual(row.autoConfigState, "configured");
 });

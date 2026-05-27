@@ -14,6 +14,7 @@ import {
   applyAutoConfigResult,
   markAutoConfigError,
   markAutoConfigRunning,
+  markStatusActive,
 } from "./connectionRepo";
 
 // Per-tick concurrency cap. We don't want to flood any one tenant with
@@ -32,11 +33,32 @@ export interface PendingRow {
   userId: string;
   connectionId: string;
   toolkit: string;
+  /**
+   * The local mirror of Composio's connection status. Historically the
+   * reconciler only looked at rows whose status was already `ACTIVE`, but
+   * the inbound webhook can silently fail to flip the row from `INITIATED`
+   * (see the joe.alfred.black incident, 2026-05-27 — Gmail sat at
+   * INITIATED for 36 minutes while Composio reported ACTIVE). The
+   * reconciler now picks up `INITIATED` rows too and resolves their
+   * status from Composio's API as ground truth.
+   */
+  status: string;
   autoConfigState: string;
   lastSyncedAt: Date;
   user: {
     id: string;
   };
+}
+
+/**
+ * Subset of the Composio `GET /api/v3/connected_accounts/{id}` response
+ * the reconciler needs. We only consume `status`; keeping the shape narrow
+ * makes the test stub trivial. `null` means "Composio replied with 404 or
+ * a transport error" — the reconciler treats those the same as "not yet
+ * ACTIVE" and lets the next tick try again.
+ */
+export interface ComposioConnectionSnapshot {
+  status: string;
 }
 
 export interface ReconcileDeps {
@@ -45,6 +67,16 @@ export interface ReconcileDeps {
     instance: PendingRowInstance,
     connectionId: string,
   ) => Promise<any>;
+  /**
+   * Fetch the live connection state from Composio. Only called for rows
+   * whose local status is `INITIATED` — the common ACTIVE case stays at
+   * one Composio fetch per tick (the auto-config call itself). Return
+   * `null` if Composio rejects the request or the network call fails; the
+   * reconciler will skip the row and retry on the next tick.
+   */
+  fetchComposioConnection: (
+    connectionId: string,
+  ) => Promise<ComposioConnectionSnapshot | null>;
   concurrency?: number;
 }
 
@@ -95,6 +127,60 @@ export async function reconcileOne(
   // gate — go straight to marking the row running and firing auto-config.
   const instance: PendingRowInstance = {};
 
+  // ───────────────────────────────────────────────────────────────────────
+  // INITIATED safety net.
+  //
+  // The inbound Composio webhook is supposed to flip the local row from
+  // INITIATED → ACTIVE the moment OAuth completes. When it doesn't (handler
+  // missing, request lost, header-validation throw, …) the row stays at
+  // INITIATED forever and the principal sees "still connecting…" while
+  // Composio shows the account as live.
+  //
+  // For rows the SaaS still has at INITIATED we ask Composio directly: if
+  // their API reports ACTIVE we flip the local row and continue with
+  // auto-config exactly as we would have if the webhook had fired. For
+  // anything else (still INITIATED, FAILED, EXPIRED, …) we leave the row
+  // alone and let the next tick try again. We do not mark `error`: the
+  // failure is on Composio's side, not the tenant's.
+  // ───────────────────────────────────────────────────────────────────────
+  if (row.status === "INITIATED") {
+    let snapshot: ComposioConnectionSnapshot | null;
+    try {
+      snapshot = await deps.fetchComposioConnection(row.connectionId);
+    } catch (err: any) {
+      console.info(
+        `[reconcileComposioAutoConfig] composio-status fetch failed for ${row.toolkit}/${row.connectionId} (will retry next tick): ${err?.message ?? err}`,
+      );
+      return { outcome: "skipped" };
+    }
+    if (!snapshot) {
+      console.info(
+        `[reconcileComposioAutoConfig] composio reports no row for ${row.toolkit}/${row.connectionId} (404 or transport error) — will retry next tick`,
+      );
+      return { outcome: "skipped" };
+    }
+    if (snapshot.status !== "ACTIVE") {
+      console.info(
+        `[reconcileComposioAutoConfig] ${row.toolkit}/${row.connectionId} still ${snapshot.status} on Composio's side — leaving local row at INITIATED`,
+      );
+      return { outcome: "skipped" };
+    }
+    // Composio's truth says ACTIVE. Flip the local row, then fall through
+    // to the existing auto-config path.
+    try {
+      await markStatusActive(deps.delegate, row.userId, row.connectionId);
+      console.info(
+        `[reconcileComposioAutoConfig] lifted ${row.toolkit}/${row.connectionId}: INITIATED → ACTIVE per Composio API`,
+      );
+    } catch (err: any) {
+      console.error(
+        `[reconcileComposioAutoConfig] markStatusActive failed for ${row.toolkit}/${row.connectionId}: ${err?.message ?? err}`,
+      );
+      // Treat as a skip — next tick will retry the lift.
+      return { outcome: "skipped" };
+    }
+  }
+
   try {
     await markAutoConfigRunning(deps.delegate, row.userId, row.connectionId);
   } catch (err) {
@@ -136,8 +222,11 @@ export async function reconcileOne(
  * reconciliation. Exported so the test can mirror the production query
  * predicate against the same fake-row inputs.
  *
- * - `status: "ACTIVE"` — Composio's truth. The reconciler only touches
- *   connections Composio reports as live.
+ * - `status in {ACTIVE, INITIATED}` — ACTIVE is the common case; INITIATED
+ *   covers the joe.alfred.black incident where the inbound webhook failed
+ *   to flip the row and Composio's API was the only source of truth.
+ *   `reconcileOne` consults Composio for INITIATED rows and lifts them
+ *   in-band before continuing to auto-config.
  * - `autoConfigState in {pending, error}` — `configured` rows are done,
  *   `running` rows are mid-flight from another caller.
  * - `error` rows additionally must be older than `errorBackoffMs` so we
@@ -146,7 +235,7 @@ export async function reconcileOne(
 export function buildPendingRowsWhere(now: Date, errorBackoffMs: number): any {
   const cutoff = new Date(now.getTime() - errorBackoffMs);
   return {
-    status: "ACTIVE",
+    status: { in: ["ACTIVE", "INITIATED"] },
     OR: [
       { autoConfigState: "pending" },
       {

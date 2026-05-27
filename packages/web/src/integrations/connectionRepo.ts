@@ -100,6 +100,34 @@ export async function markAutoConfigRunning(
 }
 
 /**
+ * Flip a row's `status` from whatever it was (typically `INITIATED`) to
+ * `ACTIVE`. Used by the reconciler when Composio's API confirms the
+ * connection is live but the inbound webhook never flipped our row.
+ *
+ * Intentionally narrow: this only writes `status` + `lastSyncedAt`, never
+ * touches `autoConfigState`. The reconciler still drives the auto-config
+ * lifecycle (running → configured | error) through the existing helpers.
+ */
+export async function markStatusActive(
+  delegate: Delegate,
+  userId: string,
+  connectionId: string,
+): Promise<void> {
+  const existing = await delegate.findUnique({
+    where: { connectionId },
+  });
+  if (!existing || existing.userId !== userId) return;
+  if (existing.status === "ACTIVE") return; // already there — no-op
+  await delegate.update({
+    where: { connectionId },
+    data: {
+      status: "ACTIVE",
+      lastSyncedAt: new Date(),
+    },
+  });
+}
+
+/**
  * Apply the auto-config result returned by the tenant's ctrl-api to the
  * SaaS row. Result shape is whatever integrations.ts:/auto-config returned
  * — see the inline `summary` object there.
