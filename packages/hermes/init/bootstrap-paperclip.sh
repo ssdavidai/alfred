@@ -154,34 +154,60 @@ paperclip_onboard() {
 # the URL verbatim on success (banner format, observed on home 2026-05-27).
 # We grab stdout+stderr together — early Paperclip builds wrote the banner to
 # stderr and the live one writes it to stdout; tolerate either.
+#
+# Retry on parse failure with a short delay — on fresh tenants `onboard`
+# OOMs while trying to start a duplicate server (mem_limit 1g is tight),
+# which can take paperclip itself down briefly. The subsequent bootstrap-
+# ceo `docker exec` then either fails outright or produces output with no
+# 'Invite URL:' line. A 15-second sleep + 2 retries reliably catches this
+# (live-confirmed on zsolt 2026-05-27).
 paperclip_bootstrap_ceo() {
     local container="$1"
     local out_file
     out_file=$(mktemp)
-    log "running 'pnpm paperclipai auth bootstrap-ceo' (as node)…"
-    if ! docker exec --user node "$container" pnpm paperclipai auth bootstrap-ceo >"$out_file" 2>&1; then
-        log "ERROR: 'pnpm paperclipai auth bootstrap-ceo' failed; output:"
-        sed 's/^/  /' "$out_file" || true
-        rm -f "$out_file"
-        return 1
-    fi
-    local url
-    # Paperclip prints exactly: "Invite URL: https://…". Anchor on that
-    # prefix to avoid catching unrelated https://… mentions in the banner.
-    url=$(grep -oE 'Invite URL: https?://[^[:space:]]+' "$out_file" | head -n1 | sed -E 's/^Invite URL: //')
+    local attempts=3
+    for attempt in $(seq 1 $attempts); do
+        log "running 'pnpm paperclipai auth bootstrap-ceo' (attempt $attempt/$attempts, as node)…"
+        if docker exec --user node "$container" pnpm paperclipai auth bootstrap-ceo >"$out_file" 2>&1; then
+            local url
+            url=$(grep -oE 'Invite URL: https?://[^[:space:]]+' "$out_file" | head -n1 | sed -E 's/^Invite URL: //')
+            if [[ -n "$url" ]]; then
+                log "captured invite URL: $url"
+                # Write atomically (.tmp then rename) so a partial write never
+                # leaves ctrl-api reading a truncated URL.
+                local tmp="${INVITE_FILE}.tmp"
+                printf '%s\n' "$url" > "$tmp"
+                chmod 0644 "$tmp" 2>/dev/null || true
+                mv "$tmp" "$INVITE_FILE"
+                log "wrote $INVITE_FILE"
+                rm -f "$out_file"
+                return 0
+            fi
+            log "  attempt $attempt: command succeeded but no 'Invite URL:' in output (paperclip may be recovering)"
+        else
+            log "  attempt $attempt: 'pnpm paperclipai auth bootstrap-ceo' exited non-zero"
+        fi
+        if [[ $attempt -lt $attempts ]]; then
+            # Wait for paperclip to settle (an OOM during onboard can briefly
+            # kill paperclip; compose restarts it but the healthcheck takes
+            # ~20s to flip back to healthy).
+            log "  sleeping 20s before retry…"
+            sleep 20
+            # Re-verify paperclip is healthy before retrying (up to 60s).
+            local waited=0
+            while [[ $waited -lt 60 ]]; do
+                local h
+                h=$(docker inspect "$container" --format '{{.State.Health.Status}}' 2>/dev/null || echo missing)
+                if [[ "$h" = "healthy" ]]; then break; fi
+                sleep 5
+                waited=$((waited + 5))
+            done
+        fi
+    done
+    log "ERROR: could not capture 'Invite URL:' after $attempts attempts; last output:"
+    sed 's/^/  /' "$out_file" || true
     rm -f "$out_file"
-    if [[ -z "$url" ]]; then
-        log "ERROR: could not parse 'Invite URL:' from bootstrap-ceo output"
-        return 1
-    fi
-    log "captured invite URL: $url"
-    # Write atomically (.tmp then rename) so a partial write never leaves
-    # ctrl-api reading a truncated URL.
-    local tmp="${INVITE_FILE}.tmp"
-    printf '%s\n' "$url" > "$tmp"
-    chmod 0644 "$tmp" 2>/dev/null || true
-    mv "$tmp" "$INVITE_FILE"
-    log "wrote $INVITE_FILE"
+    return 1
 }
 
 # --- main ---
