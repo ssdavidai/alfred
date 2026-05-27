@@ -15,10 +15,19 @@
  * Auth
  * ----
  * Shared secret `AAS_API_KEY` — the same secret used in the other direction
- * (web → ctrl-api). The middleware swaps out Wasp's default authMiddleware
- * (which expects a session cookie) for a Bearer-token check against
- * `process.env.AAS_API_KEY`. The endpoint is NOT user-facing; it's
- * compose-network-only and never crosses the Caddy public surface.
+ * (web → ctrl-api). It arrives in the `X-AAS-API-Key` header (NOT the
+ * standard `Authorization: Bearer ...`). Reason: Wasp's per-route `auth`
+ * middleware runs BEFORE the api fn's own middlewareConfigFn and tries to
+ * validate any Bearer token as a user session token — a service-side key
+ * gets rejected with `{"message":"Invalid credentials"}` before our
+ * handler ever runs. Using a custom header sidesteps that gate cleanly.
+ * (The `userApiProxy` pattern works only because its `alf_*` keys never
+ * pass through the auth gate — Wasp's middleware lets requests with NO
+ * Authorization header fall through to the handler.) The middleware
+ * deletion is kept as a defence-in-depth no-op.
+ *
+ * The endpoint is NOT user-facing; it's compose-network-only and never
+ * crosses the Caddy public surface.
  *
  * Why this isn't an action
  * ------------------------
@@ -100,10 +109,17 @@ export const finalizeComposioWebhook = async (
     });
     return;
   }
-  const auth = req.headers.authorization ?? "";
-  if (!auth.startsWith("Bearer ") || auth.slice(7) !== AAS_API_KEY) {
+  // Service-token comes in on a custom header — see the file-header
+  // comment for why this isn't `Authorization: Bearer ...`. Both lower-
+  // and original-case lookups since express's req.headers is lower-cased
+  // but some test harnesses preserve the original casing.
+  const headerValue =
+    (req.headers["x-aas-api-key"] as string | undefined) ??
+    (req.headers["X-AAS-API-Key"] as string | undefined) ??
+    "";
+  if (!headerValue || headerValue !== AAS_API_KEY) {
     res.status(401).json({
-      error: { code: "UNAUTHORIZED", message: "Bearer AAS_API_KEY required" },
+      error: { code: "UNAUTHORIZED", message: "X-AAS-API-Key header required" },
     });
     return;
   }

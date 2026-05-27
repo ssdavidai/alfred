@@ -321,10 +321,21 @@ async function flipRowOnWeb(connectionId: string): Promise<FlipResult> {
   const url = `${WEB_BASE_URL.replace(/\/$/, "")}${WEB_FINALIZE_PATH}`;
   let resp: Response;
   try {
+    // IMPORTANT: do NOT send `Authorization: Bearer ...` here. Wasp's
+    // global `auth` middleware sits in front of every `api` route and
+    // tries to validate any Bearer token as a Wasp user session token —
+    // a service-side key gets rejected with `{"message":"Invalid
+    // credentials"}` BEFORE the route's own middlewareConfigFn can run.
+    // (Confirmed live: bundle wires `[auth, ...customMiddleware]` for
+    // every api route. The middlewareConfigFn `.delete("authMiddleware")`
+    // only affects the express-global hook, not the per-route shim.)
+    // Wasp's auth middleware passes through when the Authorization
+    // header is absent / non-Bearer, so we ship the secret on a custom
+    // header that the web handler picks up on its own.
     resp = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        "X-AAS-API-Key": apiKey,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ connectionId, status: "ACTIVE" }),

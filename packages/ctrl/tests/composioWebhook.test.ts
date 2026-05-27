@@ -61,7 +61,7 @@ const originalFetch = globalThis.fetch;
 interface WebCall {
   url: string;
   method: string;
-  authorization: string;
+  aasApiKey: string;
   body: any;
 }
 const webCalls: WebCall[] = [];
@@ -80,14 +80,19 @@ globalThis.fetch = (async (input: any, init?: any) => {
   const method = (init?.method ?? "GET").toUpperCase();
   if (url.endsWith("/webhook/composio/finalize") && method === "POST") {
     const headers = init?.headers ?? {};
-    const authorization = headers.Authorization ?? headers.authorization ?? "";
+    // ctrl-api ships the AAS key on `X-AAS-API-Key` — see comment in
+    // composioWebhook.ts:flipRowOnWeb for why this isn't `Authorization`.
+    const aasApiKey =
+      headers["X-AAS-API-Key"] ??
+      headers["x-aas-api-key"] ??
+      "";
     let body: any = null;
     try {
       body = JSON.parse(String(init?.body ?? "null"));
     } catch {
       body = null;
     }
-    webCalls.push({ url, method, authorization, body });
+    webCalls.push({ url, method, aasApiKey, body });
     return makeJsonResponse(webResponseBody, webResponseStatus);
   }
   throw new Error(`unexpected fetch in composioWebhook test: ${method} ${url}`);
@@ -258,7 +263,7 @@ describe("/api/v1/composio/webhook — connected_account.updated → ACTIVE flip
       webCalls[0].url,
       "http://web-stub:3000/webhook/composio/finalize",
     );
-    assert.equal(webCalls[0].authorization, "Bearer test-aas-api-key");
+    assert.equal(webCalls[0].aasApiKey, "test-aas-api-key");
     assert.equal(webCalls[0].body.connectionId, "ca_active_001");
     assert.equal(webCalls[0].body.status, "ACTIVE");
   });
