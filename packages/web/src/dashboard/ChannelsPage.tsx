@@ -2801,6 +2801,21 @@ function PaperclipCard() {
         </div>
       )}
 
+      {/* needs_admin_signup — paperclip-init has captured the CEO invite
+          URL but no admin has signed up yet. The principal clicks the
+          big "Set up your Paperclip account →" button (opens new tab),
+          completes Paperclip's first-run signup, comes back; the next
+          /status poll flips to "needs_api_key" and the panel below
+          takes over. Replaces the 6-step manual SSH ritual (2026-05-27). */}
+      {card.status === "needs_admin_signup" && (
+        <PaperclipAdminSignupPanel
+          adminInviteUrl={card.adminInviteUrl}
+          paperclipOrigin={card.paperclipOrigin}
+          description={card.description}
+          onRefetch={refetch}
+        />
+      )}
+
       {/* needs_api_key — Paperclip is up but the principal hasn't walked
           its own setup ritual yet (P3). Two-click path: "Open Paperclip"
           → they sign up + generate an API key → paste here. Once the
@@ -3066,18 +3081,117 @@ function PaperclipCard() {
 }
 
 // ---------------------------------------------------------------------------
+// Paperclip admin-signup click-through panel (2026-05-27).
+//
+// Rendered when card.status === "needs_admin_signup". The paperclip-init
+// compose service runs `pnpm paperclipai onboard` + `pnpm paperclipai auth
+// bootstrap-ceo` automatically on first boot and writes the captured
+// "Invite URL: …" to /alfred-data/paperclip-ceo-invite.txt. ctrl-api reads
+// that file and surfaces it as `admin_invite_url`. The principal:
+//
+//   1. Clicks the big "Set up your Paperclip account →" button (new tab).
+//   2. Signs up in Paperclip's normal first-run flow (claim instance,
+//      pick a password).
+//   3. Comes back to this card; the next /status poll flips to
+//      "needs_api_key" and the PaperclipApiKeyPanel below carries them
+//      through generating + pasting an API key.
+//
+// Zero CLI. Replaces the 6-step SSH ritual Sir walked through on home.
+//
+// Edge case — invite URL not yet present (paperclip-init still running on
+// a freshly-deployed tenant): we render a "preparing your invite…"
+// placeholder + a Re-check button so the principal can poll. Once
+// adminInviteUrl arrives, the click-through CTA appears.
+// ---------------------------------------------------------------------------
+
+function PaperclipAdminSignupPanel({
+  adminInviteUrl,
+  paperclipOrigin,
+  description,
+  onRefetch,
+}: {
+  adminInviteUrl: string;
+  paperclipOrigin: string;
+  description: string;
+  onRefetch: () => unknown;
+}) {
+  const ready = Boolean(adminInviteUrl);
+  return (
+    <div className="mt-5 space-y-5">
+      <p
+        className="font-body italic text-[13px]"
+        style={{ color: "var(--marginalia)" }}
+      >
+        {description}
+      </p>
+
+      {ready ? (
+        <a
+          href={adminInviteUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          // Mirror PaperclipApiKeyPanel's button class so the visual
+          // language is identical — same fonts, same hover, same height.
+          className="btn-ghost inline-block"
+        >
+          Set up your Paperclip account →
+        </a>
+      ) : (
+        <div className="space-y-2">
+          <p
+            className="font-body italic text-[12px]"
+            style={{ color: "var(--brass)" }}
+          >
+            Preparing your invite — this usually takes about 30 seconds after
+            the Paperclip container boots.
+          </p>
+          <button
+            type="button"
+            onClick={() => onRefetch()}
+            className="btn-ghost"
+          >
+            Re-check
+          </button>
+        </div>
+      )}
+
+      <p
+        className="font-body italic text-[11px]"
+        style={{ color: "var(--marginalia)" }}
+      >
+        After you sign up, come back here and the card will move you to the
+        next step (paste an API key from Paperclip → Settings → API keys).
+      </p>
+
+      {/* Secondary deep-link, kept available in case the invite link
+          expires and the principal needs to start over via Paperclip's
+          /sign-in page. Mirrors the same "Open Paperclip →" affordance
+          PaperclipApiKeyPanel ships. */}
+      {paperclipOrigin && (
+        <a
+          href={paperclipOrigin}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="font-mono text-[10px] uppercase tracking-[0.22em] underline"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Open Paperclip directly →
+        </a>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // P3 — Paperclip API-key paste panel.
 //
-// Rendered when card.status === "needs_api_key". Paperclip's authenticated
-// mode requires the principal to walk Paperclip's own first-run ritual
-// (CEO invite, signup, claim instance) — we can't auto-bootstrap because
-// the ritual writes through Paperclip's internal tables, not its REST API.
-// So the card guides the principal:
+// Rendered when card.status === "needs_api_key". Paperclip's API-key
+// issuance is gated by their better-auth UI, so we can't auto-bootstrap
+// that step. The card guides the principal:
 //
-//   1. "Open Paperclip" button → paperclip.<DOMAIN> in a new tab.
-//   2. They sign up + complete Paperclip's setup.
-//   3. They generate an API key (Settings → API keys).
-//   4. They paste it back here; ctrl-api validates round-trip, writes
+//   1. They've already signed up via the needs_admin_signup CTA above.
+//   2. Inside Paperclip: Settings → API keys → Generate.
+//   3. Paste it back here; ctrl-api validates round-trip, writes
 //      PAPERCLIP_API_KEY into /opt/alfred/.env + the hermes profile's
 //      .env, and kicks hermes-main so the MCP server picks it up.
 //

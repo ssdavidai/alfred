@@ -610,33 +610,66 @@ function recordAuthFailure(body: unknown, kind: "auth_failed" | "replay"): void 
 
 // ── Paperclip setup-state probe ───────────────────────────────────────────
 //
-// Paperclip's auto-bootstrap turned out to be a much bigger lift than the
-// integration was worth (Paperclip's `authenticated` mode requires a
-// CEO-invite ritual that touches multiple internal tables; `local_trusted`
-// mode needs additional config the container won't boot without). So the
-// /channels card carries the principal through Paperclip's own setup with
-// a polished click-through UX instead. Sir 2026-05-27.
-//
 // `setup_state` drives which sub-card the UI renders:
-//   * "needs_api_key"  — Paperclip is reachable but our PAPERCLIP_API_KEY
-//                        is blank → tell the principal to sign up at
-//                        paperclip.<DOMAIN>, then paste a Settings → API
-//                        keys value back here.
-//   * "configured"     — PAPERCLIP_API_KEY set and Paperclip accepts it
-//                        (probed: /api/companies returns 200, NOT 401/403).
-//   * "auth_failed"    — key set but Paperclip rejects → key likely
-//                        expired/revoked; prompt for a new one.
-//   * "unreachable"    — paperclip:3100 not responding → container down /
-//                        not deployed.
+//   * "needs_admin_signup" — Paperclip's `paperclip-init` one-shot has
+//                            written /alfred-data/paperclip-ceo-invite.txt
+//                            but no admin user has accepted yet. Paperclip's
+//                            /sign-in page returns the "Instance setup
+//                            required" wall. The card surfaces the invite
+//                            URL as `admin_invite_url` so the principal
+//                            clicks once and signs up — zero CLI. (Added
+//                            2026-05-27 after Sir's 6-step manual recovery.)
+//   * "needs_api_key"      — Paperclip is reachable AND past its
+//                            instance-setup wall but our PAPERCLIP_API_KEY
+//                            is blank → tell the principal to paste a
+//                            Settings → API keys value from Paperclip.
+//   * "configured"         — PAPERCLIP_API_KEY set and Paperclip accepts it
+//                            (probed: /api/companies returns 200, NOT 401/403).
+//   * "auth_failed"        — key set but Paperclip rejects → key likely
+//                            expired/revoked; prompt for a new one.
+//   * "unreachable"        — paperclip:3100 not responding → container down /
+//                            not deployed.
 type PaperclipSetupState =
+  | "needs_admin_signup"
   | "needs_api_key"
   | "configured"
   | "auth_failed"
   | "unreachable";
 
+// Where paperclip-init writes the captured "Invite URL: …" from
+// `pnpm paperclipai auth bootstrap-ceo`. Bind-mounted into ctrl-api as
+// /alfred-data already (matches the other /alfred-data files we read here).
+const PAPERCLIP_INVITE_PATH = "/alfred-data/paperclip-ceo-invite.txt";
+
+/** Read the captured CEO invite URL written by the paperclip-init
+ *  bootstrap script. Returns null when the file is missing/empty/garbage
+ *  — the caller decides whether that means "still onboarding" or "old
+ *  tenant pre-paperclip-init". */
+function readPaperclipInviteUrl(): string | null {
+  // Override for tests — same pattern as HERMES_CONFIG_DIR above.
+  const p = process.env.PAPERCLIP_INVITE_FILE ?? PAPERCLIP_INVITE_PATH;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(p, "utf-8");
+  } catch {
+    return null;
+  }
+  const url = raw.trim();
+  if (!url) return null;
+  // Defensive: only surface http(s) URLs — if the file is corrupted with
+  // a stray banner line, hide it rather than render garbage as a link.
+  if (!/^https?:\/\//.test(url)) return null;
+  return url;
+}
+
 const PAPERCLIP_URL = "http://paperclip:3100";
 
-async function probeSetupState(): Promise<PaperclipSetupState> {
+interface SetupProbeResult {
+  state: PaperclipSetupState;
+  admin_invite_url: string | null;
+}
+
+async function probeSetupState(): Promise<SetupProbeResult> {
   const apiKey = process.env.PAPERCLIP_API_KEY?.trim();
   // Paperclip's better-auth checks Host header against PAPERCLIP_PUBLIC_URL —
   // same trusted-origins quirk apps.ts already handles. Use the public host.
@@ -645,7 +678,10 @@ async function probeSetupState(): Promise<PaperclipSetupState> {
   }`;
   // Reach the compose-internal address but spoof Host. Node fetch drops
   // manual Host; fall back to node:http (same trick as apps.ts).
-  function probe(path: string, withAuth: boolean): Promise<number> {
+  function probe(
+    path: string,
+    withAuth: boolean,
+  ): Promise<{ status: number; body: string }> {
     return new Promise((resolve) => {
       const headers: Record<string, string> = { Host: host };
       if (withAuth && apiKey) headers.Authorization = `Bearer ${apiKey}`;
@@ -659,31 +695,80 @@ async function probeSetupState(): Promise<PaperclipSetupState> {
           timeout: 3000,
         },
         (resp) => {
-          resp.resume();
-          resolve(resp.statusCode ?? 0);
+          const chunks: Buffer[] = [];
+          // Cap body capture so a misbehaving Paperclip can't blow up
+          // ctrl-api memory. 64 KB is more than enough for the
+          // "Instance setup required" sentinel which lives in the first
+          // ~2 KB of the HTML response.
+          const LIMIT = 64 * 1024;
+          let total = 0;
+          let truncated = false;
+          resp.on("data", (c: Buffer) => {
+            if (truncated) return;
+            total += c.length;
+            if (total > LIMIT) {
+              truncated = true;
+              chunks.push(c.subarray(0, c.length - (total - LIMIT)));
+              resp.resume(); // drain remainder without buffering
+              return;
+            }
+            chunks.push(c);
+          });
+          resp.on("end", () => {
+            resolve({
+              status: resp.statusCode ?? 0,
+              body: Buffer.concat(chunks).toString("utf-8"),
+            });
+          });
         },
       );
-      req.on("error", () => resolve(0));
+      req.on("error", () => resolve({ status: 0, body: "" }));
       req.on("timeout", () => {
         req.destroy();
-        resolve(0);
+        resolve({ status: 0, body: "" });
       });
       req.end();
     });
   }
   if (!apiKey) {
-    // Confirm Paperclip is at least reachable before saying "needs key".
+    // Confirm Paperclip is at least reachable. The /sign-in body is the
+    // canonical way to distinguish "instance-setup wall" from "fully
+    // onboarded but our key is missing" — Paperclip prints a verbatim
+    // "Instance setup required" page on the former (live-confirmed on
+    // home pre-bootstrap 2026-05-27). We match on the literal phrase so
+    // a copy-tweak by Paperclip downstream doesn't silently flip
+    // tenants back to "needs_api_key" without an invite link.
     const ping = await probe("/sign-in", false);
-    if (ping === 0) return "unreachable";
-    return "needs_api_key";
+    if (ping.status === 0) {
+      return { state: "unreachable", admin_invite_url: null };
+    }
+    if (
+      ping.body.includes("Instance setup required") ||
+      ping.body.includes("instance setup required")
+    ) {
+      // Surface the invite URL we captured at init-time. When the file
+      // isn't yet present (paperclip-init still running / disabled),
+      // null tells the UI to fall through to a degraded message.
+      return {
+        state: "needs_admin_signup",
+        admin_invite_url: readPaperclipInviteUrl(),
+      };
+    }
+    return { state: "needs_api_key", admin_invite_url: null };
   }
   const probed = await probe("/api/companies", true);
-  if (probed === 0) return "unreachable";
-  if (probed === 401 || probed === 403) return "auth_failed";
+  if (probed.status === 0) {
+    return { state: "unreachable", admin_invite_url: null };
+  }
+  if (probed.status === 401 || probed.status === 403) {
+    return { state: "auth_failed", admin_invite_url: null };
+  }
   // 200 = configured. 404 etc. would be unexpected — treat as auth_failed
   // so the UI prompts for a fresh key.
-  if (probed >= 200 && probed < 300) return "configured";
-  return "auth_failed";
+  if (probed.status >= 200 && probed.status < 300) {
+    return { state: "configured", admin_invite_url: null };
+  }
+  return { state: "auth_failed", admin_invite_url: null };
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────
@@ -697,18 +782,25 @@ export function registerPaperclipChannelRoutes(): void {
   addRoute("GET", "/api/v1/channels/paperclip/status", async ({ res }) => {
     const configured = Boolean(process.env.PAPERCLIP_API_KEY);
     const hasSecret = Boolean(process.env.PAPERCLIP_HEARTBEAT_SECRET);
-    const setupState = await probeSetupState();
+    const probe = await probeSetupState();
     const domain =
       process.env.DOMAIN ?? process.env.TENANT_DOMAIN ?? "alfred.black";
-    sendJson(res, 200, {
+    const payload: Record<string, unknown> = {
       configured,
       heartbeat_url: heartbeatUrl(),
       has_signing_secret: hasSecret,
       last_heartbeat_at: lastHeartbeatAt,
       recent_runs: recentRuns.slice(),
-      setup_state: setupState,
+      setup_state: probe.state,
       paperclip_origin: `https://paperclip.${domain}`,
-    });
+    };
+    // Only surface admin_invite_url when we actually need the principal to
+    // click through it. Other states must NOT leak it — once they've signed
+    // up the invite is stale and surfacing it would be confusing.
+    if (probe.state === "needs_admin_signup" && probe.admin_invite_url) {
+      payload.admin_invite_url = probe.admin_invite_url;
+    }
+    sendJson(res, 200, payload);
   });
 
   // POST /api-key — the principal pastes their freshly-generated Paperclip

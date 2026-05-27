@@ -41,6 +41,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import http from "node:http";
 import type { ServerResponse } from "node:http";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "channels-paperclip-"));
@@ -66,6 +67,12 @@ fs.writeFileSync(
   "API_SERVER_KEY=test-hermes-key\n",
 );
 process.env.HERMES_CONFIG_DIR = hermesProfilesDir;
+// paperclip-init writes the captured "Invite URL: …" to this file. Tests
+// drive `setup_state === "needs_admin_signup"` by writing / deleting this
+// path. (Production path is /alfred-data/paperclip-ceo-invite.txt; the
+// override lives in channels_paperclip.ts under PAPERCLIP_INVITE_FILE.)
+const paperclipInviteFile = path.join(tmp, "paperclip-ceo-invite.txt");
+process.env.PAPERCLIP_INVITE_FILE = paperclipInviteFile;
 
 // ── fetch mock ─────────────────────────────────────────────────────────────
 //
@@ -76,6 +83,7 @@ process.env.HERMES_CONFIG_DIR = hermesProfilesDir;
 //     opening a real HTTP socket.
 
 const originalFetch = globalThis.fetch;
+const originalHttpRequest = http.request;
 
 let hermesOk = true;
 let hermesText = "I have logged the task and will report progress shortly.";
@@ -83,6 +91,96 @@ let hermesStatus = 200;
 let hermesShouldThrow = false;
 let hermesShouldTimeout = false;
 const hermesCalls: { url: string; sessionKey: string; input: string }[] = [];
+
+// ── paperclip:3100 mock ──────────────────────────────────────────────────
+//
+// probeSetupState() calls `http.request({hostname:"paperclip", port:3100,
+// path:"/sign-in" | "/api/companies", …})`. In the production stack that
+// resolves through Docker DNS; in the test harness `paperclip` does not
+// resolve at all (the default test environment routes those probes to
+// req.on("error") → status 0 → "unreachable"). To cover the new
+// `needs_admin_signup` branch, intercept http.request at the module level
+// and return a stub response whose body carries (or doesn't carry) the
+// "Instance setup required" sentinel string.
+//
+// State is set per-test via paperclipHttpStub.set(…) — same posture as the
+// hermesOk / hermesShouldThrow flags above.
+
+type PaperclipProbe = {
+  status: number;
+  body: string;
+};
+
+const paperclipHttpStub = {
+  // Default: paperclip not reachable (matches the live "no sidecar" case).
+  signIn: null as PaperclipProbe | null,
+  apiCompanies: null as PaperclipProbe | null,
+};
+
+// Minimal stub of an IncomingMessage — enough for the probe's data/end
+// handlers and resp.resume() (the route uses both shapes).
+function fakeIncomingMessage(p: PaperclipProbe) {
+  const handlers: Record<string, ((arg?: any) => void)[]> = {};
+  const msg: any = {
+    statusCode: p.status,
+    on(ev: string, cb: (arg?: any) => void) {
+      (handlers[ev] ||= []).push(cb);
+      return msg;
+    },
+    resume() {
+      // Drain — fire end immediately for the probe paths that don't read body.
+      setImmediate(() => (handlers["end"] || []).forEach((cb) => cb()));
+    },
+  };
+  // Deliver body bytes async to match real http semantics.
+  setImmediate(() => {
+    if (p.body) {
+      (handlers["data"] || []).forEach((cb) =>
+        cb(Buffer.from(p.body, "utf-8")),
+      );
+    }
+    (handlers["end"] || []).forEach((cb) => cb());
+  });
+  return msg;
+}
+
+(http as any).request = ((options: any, cb?: (resp: any) => void) => {
+  const host = options?.hostname ?? "";
+  const path = options?.path ?? "";
+  if (host === "paperclip") {
+    // Build a minimal ClientRequest-like object that fires either our
+    // stubbed response or an "error" if we have no probe configured.
+    const reqHandlers: Record<string, ((arg?: any) => void)[]> = {};
+    const req: any = {
+      on(ev: string, h: (arg?: any) => void) {
+        (reqHandlers[ev] ||= []).push(h);
+        return req;
+      },
+      end() {
+        let probe: PaperclipProbe | null = null;
+        if (path === "/sign-in") probe = paperclipHttpStub.signIn;
+        else if (path === "/api/companies")
+          probe = paperclipHttpStub.apiCompanies;
+        if (probe) {
+          setImmediate(() => cb?.(fakeIncomingMessage(probe!)));
+        } else {
+          setImmediate(() =>
+            (reqHandlers["error"] || []).forEach((h) =>
+              h(new Error("paperclip not stubbed")),
+            ),
+          );
+        }
+        return req;
+      },
+      destroy() {},
+      setTimeout() {},
+    };
+    return req;
+  }
+  // Anything else — fall through to the real implementation (the tests
+  // don't drive any other http.request calls today).
+  return (originalHttpRequest as any)(options, cb);
+}) as typeof http.request;
 
 function makeJsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -265,10 +363,19 @@ describe("/api/v1/channels/paperclip/* — Lane I", () => {
     hermesCalls.length = 0;
     delete process.env.PAPERCLIP_HEARTBEAT_SECRET;
     delete process.env.PAPERCLIP_API_KEY;
+    paperclipHttpStub.signIn = null;
+    paperclipHttpStub.apiCompanies = null;
+    // Reset the invite file between tests so probes don't leak state.
+    try {
+      fs.unlinkSync(paperclipInviteFile);
+    } catch {
+      /* file may not exist */
+    }
   });
 
   after(() => {
     globalThis.fetch = originalFetch;
+    (http as any).request = originalHttpRequest;
   });
 
   describe("GET /status", () => {
@@ -292,6 +399,94 @@ describe("/api/v1/channels/paperclip/* — Lane I", () => {
       assert.equal(r.status, 200);
       assert.equal(r.payload.configured, true);
       assert.equal(r.payload.has_signing_secret, true);
+    });
+
+    it("setup_state=needs_admin_signup + admin_invite_url when Paperclip shows the instance-setup wall and the invite file is present", async () => {
+      // Paperclip's /sign-in body on a fresh sidecar:
+      paperclipHttpStub.signIn = {
+        status: 200,
+        body:
+          "<!DOCTYPE html><html><body>" +
+          "<h1>Instance setup required</h1>" +
+          "<p>Run pnpm paperclipai auth bootstrap-ceo to claim this instance.</p>" +
+          "</body></html>",
+      };
+      // paperclip-init writes the captured invite URL here.
+      const invite =
+        "https://paperclip.test.alfred.black/admin/setup?token=abc123";
+      fs.writeFileSync(paperclipInviteFile, invite + "\n");
+
+      const r = await invokeRoute("GET", "/api/v1/channels/paperclip/status");
+      assert.equal(r.status, 200);
+      assert.equal(r.payload.setup_state, "needs_admin_signup");
+      assert.equal(r.payload.admin_invite_url, invite);
+    });
+
+    it("needs_admin_signup with no invite file → setup_state surfaces but admin_invite_url is absent", async () => {
+      // paperclip-init might not have completed yet (or compose hasn't been
+      // restarted). The card should still show the right state so the UI
+      // can show a degraded "still preparing your invite…" message.
+      paperclipHttpStub.signIn = {
+        status: 200,
+        body: "<h1>Instance setup required</h1>",
+      };
+      // No invite file written.
+      const r = await invokeRoute("GET", "/api/v1/channels/paperclip/status");
+      assert.equal(r.status, 200);
+      assert.equal(r.payload.setup_state, "needs_admin_signup");
+      assert.equal(r.payload.admin_invite_url, undefined);
+    });
+
+    it("setup_state=needs_api_key when /sign-in is up and NOT showing the instance-setup wall", async () => {
+      // Past the admin-signup wall, but PAPERCLIP_API_KEY is still unset.
+      paperclipHttpStub.signIn = {
+        status: 200,
+        body:
+          "<!DOCTYPE html><html><body>" +
+          "<form><input name='email'/><input name='password' type='password'/>" +
+          "<button>Sign in</button></form></body></html>",
+      };
+      // Even if the invite file is present, we must NOT surface it on
+      // needs_api_key — the principal has already signed up; the URL is stale.
+      fs.writeFileSync(
+        paperclipInviteFile,
+        "https://paperclip.test.alfred.black/admin/setup?token=stale\n",
+      );
+
+      const r = await invokeRoute("GET", "/api/v1/channels/paperclip/status");
+      assert.equal(r.status, 200);
+      assert.equal(r.payload.setup_state, "needs_api_key");
+      assert.equal(r.payload.admin_invite_url, undefined);
+    });
+
+    it("setup_state=configured when PAPERCLIP_API_KEY is set and /api/companies returns 200", async () => {
+      process.env.PAPERCLIP_API_KEY = "pck_real_key";
+      paperclipHttpStub.apiCompanies = { status: 200, body: "[]" };
+      const r = await invokeRoute("GET", "/api/v1/channels/paperclip/status");
+      assert.equal(r.status, 200);
+      assert.equal(r.payload.setup_state, "configured");
+      assert.equal(r.payload.admin_invite_url, undefined);
+    });
+
+    it("setup_state=auth_failed when /api/companies rejects the key", async () => {
+      process.env.PAPERCLIP_API_KEY = "pck_revoked";
+      paperclipHttpStub.apiCompanies = { status: 401, body: "" };
+      const r = await invokeRoute("GET", "/api/v1/channels/paperclip/status");
+      assert.equal(r.status, 200);
+      assert.equal(r.payload.setup_state, "auth_failed");
+    });
+
+    it("admin_invite_url is hidden when the invite file holds garbage", async () => {
+      paperclipHttpStub.signIn = {
+        status: 200,
+        body: "Instance setup required",
+      };
+      // Non-URL content (e.g. a stray banner line snuck through the parser).
+      fs.writeFileSync(paperclipInviteFile, "not-actually-a-url\n");
+
+      const r = await invokeRoute("GET", "/api/v1/channels/paperclip/status");
+      assert.equal(r.payload.setup_state, "needs_admin_signup");
+      assert.equal(r.payload.admin_invite_url, undefined);
     });
   });
 

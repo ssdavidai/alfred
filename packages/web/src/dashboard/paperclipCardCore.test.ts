@@ -153,6 +153,48 @@ test("derive: connected — allRuns clamps at 10 even if API returns more", () =
   assert.equal(card.allRuns.length, 10);
 });
 
+test("derive: needs_admin_signup — paperclip-init wrote the invite, principal hasn't claimed yet", () => {
+  // Card state when ctrl-api's probeSetupState saw the "Instance setup
+  // required" wall on /sign-in AND paperclip-init wrote the invite URL.
+  const card = derivePaperclipCardState(
+    {
+      ...BASE,
+      has_signing_secret: true,
+      setup_state: "needs_admin_signup",
+      admin_invite_url:
+        "https://paperclip.home.alfred.black/admin/setup?token=abc123",
+    },
+    FROZEN_NOW,
+  );
+  assert.equal(card.status, "needs_admin_signup");
+  assert.equal(card.pillLabel, "Setup required");
+  assert.equal(card.pillTone, "available");
+  assert.equal(card.canTest, false);
+  assert.equal(
+    card.adminInviteUrl,
+    "https://paperclip.home.alfred.black/admin/setup?token=abc123",
+  );
+  // Copy explicitly mentions the one-click setup.
+  assert.match(card.heading, /admin/i);
+});
+
+test("derive: needs_admin_signup with no invite URL → state surfaces, adminInviteUrl empty", () => {
+  // paperclip-init may still be running on a freshly-deployed tenant.
+  // The card should still pick the right state so the UI can render a
+  // "preparing your invite…" placeholder.
+  const card = derivePaperclipCardState(
+    {
+      ...BASE,
+      has_signing_secret: true,
+      setup_state: "needs_admin_signup",
+      // admin_invite_url omitted — ctrl-api withholds when file missing.
+    },
+    FROZEN_NOW,
+  );
+  assert.equal(card.status, "needs_admin_signup");
+  assert.equal(card.adminInviteUrl, "");
+});
+
 test("derive: missing_secret state takes precedence over any last_heartbeat_at", () => {
   // Defensive: even if ctrl-api returns last_heartbeat_at + has_signing_secret=false
   // (shouldn't happen, but we should fail loudly to "Setup required").

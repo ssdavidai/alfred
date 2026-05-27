@@ -28,7 +28,21 @@ RUN npm run build
 FROM python:3.12-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    rsync gettext-base git && \
+    rsync gettext-base git ca-certificates curl gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# docker-ce-cli only — bootstrap-paperclip.sh shells out to `docker exec`
+# / `docker inspect` against the paperclip sidecar (via the docker socket
+# bind-mounted on the paperclip-init compose service). We pull JUST the
+# CLI from Docker's apt repo so we don't drag in containerd / runc the
+# way Debian's `docker.io` meta-package would. ~30 MB installed.
+RUN install -m 0755 -d /etc/apt/keyrings && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg && \
+    chmod a+r /etc/apt/keyrings/docker.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" \
+        > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends docker-ce-cli && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /setup
@@ -50,6 +64,11 @@ RUN pip install --no-cache-dir "jinja2==3.1.6"
 COPY packages/hermes/init/entrypoint.sh        ./entrypoint.sh
 COPY packages/hermes/init/render_hermes.py     ./render_hermes.py
 COPY packages/hermes/init/render_sms_gateway.py ./render_sms_gateway.py
+# Paperclip auto-bootstrap. Invoked as the entrypoint of the sibling
+# `paperclip-init` compose service (see docker-compose.yaml). Not run by
+# this image's default entrypoint.sh — keeps the main init container
+# focused on filesystem scaffolding (no docker.sock there).
+COPY packages/hermes/init/bootstrap-paperclip.sh ./bootstrap-paperclip.sh
 COPY packages/hermes/init/sure-bootstrap.rb    ./sure-bootstrap.rb
 COPY packages/hermes/init/sure-mutate-base.rb  ./sure-mutate-base.rb
 COPY packages/hermes/init/sure-account-mutate.rb    ./sure-account-mutate.rb
@@ -104,6 +123,6 @@ COPY packages/mcp-server/instructions/alfred-custom-instructions.md ./AGENTS.md
 # persona at /vault/SOUL.md takes precedence when present (see entrypoint).
 COPY packages/hermes/init/SOUL.md ./SOUL.md
 
-RUN chmod +x entrypoint.sh
+RUN chmod +x entrypoint.sh bootstrap-paperclip.sh
 
 ENTRYPOINT ["./entrypoint.sh"]

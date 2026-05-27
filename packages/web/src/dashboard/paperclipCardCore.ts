@@ -31,16 +31,25 @@
 
 export type PaperclipStatusState =
   | "missing_secret"
+  | "needs_admin_signup"
   | "needs_api_key"
   | "awaiting"
   | "connected";
 
 // P3 — Paperclip's setup-state, probed by ctrl-api against paperclip:3100
 // (with the right Host header). See route comments in channels_paperclip.ts
-// for the four values. The card uses this to render the new sign-up + paste-
+// for the values. The card uses this to render the new sign-up + paste-
 // API-key sub-card when the principal hasn't completed Paperclip's own
 // onboarding ritual yet.
+//
+// 2026-05-27 — added `needs_admin_signup`. The paperclip-init compose
+// service runs `pnpm paperclipai auth bootstrap-ceo` automatically and
+// writes the resulting "Invite URL: …" to /alfred-data/paperclip-ceo-
+// invite.txt. ctrl-api reads that file and surfaces the URL in
+// `admin_invite_url`; the card renders a one-click "Set up your
+// Paperclip account →" button. Replaces 6 manual SSH steps.
 export type PaperclipSetupState =
+  | "needs_admin_signup"
   | "needs_api_key"
   | "configured"
   | "auth_failed"
@@ -73,6 +82,13 @@ export interface PaperclipStatus {
    *  last_heartbeat_at the old way (back-compat). */
   setup_state?: PaperclipSetupState;
   paperclip_origin?: string;
+  /** The CEO-invite URL captured by `paperclip-init` (`pnpm paperclipai
+   *  auth bootstrap-ceo`'s "Invite URL: …" banner). Only populated when
+   *  `setup_state === "needs_admin_signup"`; on other states the URL is
+   *  stale (the admin already signed up) and ctrl-api intentionally
+   *  withholds it. Card renders a single click-through "Set up your
+   *  Paperclip account →" button when present. */
+  admin_invite_url?: string;
 }
 
 export interface PaperclipCardState {
@@ -107,6 +123,15 @@ export interface PaperclipCardState {
    * null when we don't have a heartbeat yet.
    */
   lastHeartbeatRelative: string | null;
+  /**
+   * CEO-invite URL from `paperclip-init`. Non-empty only when
+   * `status === "needs_admin_signup"` AND ctrl-api supplied the URL.
+   * The React layer renders a click-through button when this is set,
+   * and a degraded "still preparing your invite…" message when the
+   * state is needs_admin_signup but this is empty (paperclip-init may
+   * still be running on a freshly-deployed tenant).
+   */
+  adminInviteUrl: string;
 }
 
 const NULL_STATUS: PaperclipStatus = {
@@ -195,6 +220,8 @@ export function derivePaperclipCardState(
   const hasMoreRuns = allRuns.length > visibleRuns.length;
   const heartbeatUrl = typeof s.heartbeat_url === "string" ? s.heartbeat_url : "";
   const paperclipOrigin = derivePaperclipOrigin(heartbeatUrl);
+  const adminInviteUrl =
+    typeof s.admin_invite_url === "string" ? s.admin_invite_url : "";
   const lastHeartbeatRelative =
     typeof s.last_heartbeat_at === "string" && s.last_heartbeat_at
       ? relativeTimeFromIso(s.last_heartbeat_at, now)
@@ -216,15 +243,46 @@ export function derivePaperclipCardState(
       hasMoreRuns,
       allRuns,
       lastHeartbeatRelative,
+      adminInviteUrl: "",
+    };
+  }
+
+  // 2026-05-27 — paperclip-init has captured the CEO invite URL but no
+  // admin has signed up yet (Paperclip's /sign-in still shows the
+  // "Instance setup required" wall). Surface the URL as a one-click
+  // setup button. ZERO CLI; replaces the 6-step SSH ritual Sir hit on
+  // 2026-05-27. Pill stays "Setup required" so the principal's eye
+  // catches it. canTest stays false — no heartbeat path until past
+  // admin signup.
+  //
+  // If admin_invite_url is empty (paperclip-init still running on a
+  // freshly-deployed tenant), the React layer renders a degraded
+  // "preparing your invite…" message — see PaperclipAdminSignupPanel.
+  if (s.setup_state === "needs_admin_signup") {
+    return {
+      status: "needs_admin_signup",
+      pillLabel: "Setup required",
+      pillTone: "available",
+      heading: "Claim your Paperclip admin account",
+      description:
+        "Your Paperclip instance is up but needs an admin. One-time setup — " +
+        "click the button to claim it, sign up in Paperclip, then come " +
+        "back here.",
+      heartbeatUrl,
+      paperclipOrigin: s.paperclip_origin || paperclipOrigin,
+      canTest: false,
+      visibleRuns,
+      hasMoreRuns,
+      allRuns,
+      lastHeartbeatRelative,
+      adminInviteUrl,
     };
   }
 
   // P3 — Paperclip's own setup ritual hasn't been walked yet. We can't
-  // auto-bootstrap Paperclip (it requires a CEO invite written through its
-  // own DB), so the card carries the principal through Paperclip's UI:
-  // "Open Paperclip → sign up → generate API key → paste it here". Once
-  // pasted, ctrl-api writes the key into the runtime and the card flips
-  // to "awaiting" (then "connected" once the first heartbeat arrives).
+  // auto-bootstrap Paperclip's API-key issuance (it lives behind better-
+  // auth in their UI), so the card carries the principal through that
+  // last step: paste the key once it's been generated.
   //
   // setup_state is set by ctrl-api ≥ P3. When the upstream is older and
   // omits the field, fall through to the legacy awaiting/connected path
@@ -249,6 +307,7 @@ export function derivePaperclipCardState(
       hasMoreRuns,
       allRuns,
       lastHeartbeatRelative,
+      adminInviteUrl: "",
     };
   }
 
@@ -269,6 +328,7 @@ export function derivePaperclipCardState(
       hasMoreRuns,
       allRuns,
       lastHeartbeatRelative,
+      adminInviteUrl: "",
     };
   }
 
@@ -287,6 +347,7 @@ export function derivePaperclipCardState(
     hasMoreRuns,
     allRuns,
     lastHeartbeatRelative,
+    adminInviteUrl: "",
   };
 }
 

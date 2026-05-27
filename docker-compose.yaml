@@ -1288,6 +1288,40 @@ services:
     mem_limit: 1g
     pids_limit: 512
 
+  # ── paperclip-init — one-shot CEO-invite auto-bootstrap ──────────────
+  # Paperclip's first-run requires two CLI commands inside the container:
+  #   1. `pnpm paperclipai onboard -y --bind lan`     → writes config.json + .env
+  #   2. `pnpm paperclipai auth bootstrap-ceo`        → prints the invite URL
+  # Without them the principal hits the "Instance setup required" wall on
+  # paperclip.<DOMAIN>/sign-in and has no path forward without SSH access
+  # (live-observed on home 2026-05-27, 6 manual steps to recover).
+  #
+  # This one-shot service reuses the alfred-init image (the script ships
+  # there at /setup/bootstrap-paperclip.sh) but:
+  #   * mounts /var/run/docker.sock RO so it can `docker exec` into paperclip
+  #     as the `node` user (uid 1000) — running as root creates an ownership
+  #     trap on paperclip_data;
+  #   * mounts alfred_data:/alfred-data so the parsed "Invite URL: …" lands
+  #     at /alfred-data/paperclip-ceo-invite.txt, where ctrl-api reads it
+  #     and surfaces it on the /channels Paperclip card (needs_admin_signup
+  #     setup_state, see channels_paperclip.ts).
+  #
+  # Idempotent: re-runs are a no-op once the invite file + paperclip's
+  # config.json are both present.
+  paperclip-init:
+    image: ssdavidai00/alfred-init:latest
+    restart: "no"
+    depends_on:
+      paperclip:
+        condition: service_healthy
+    volumes:
+      - alfred_data:/alfred-data
+      # RO socket — the script only invokes `docker exec` / `docker inspect`.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    entrypoint: ["./bootstrap-paperclip.sh"]
+    mem_limit: 256m
+    pids_limit: 256
+
   # ── Vexa — transcript bot stack (profile: vexa) ─────────────────────
   # `docker compose --profile vexa up -d`. 9 services, ~3 GB resident.
   # Folded inline here (the alfred-platform fleet ran Vexa as a separate
