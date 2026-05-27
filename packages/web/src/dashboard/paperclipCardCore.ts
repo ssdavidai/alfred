@@ -31,8 +31,20 @@
 
 export type PaperclipStatusState =
   | "missing_secret"
+  | "needs_api_key"
   | "awaiting"
   | "connected";
+
+// P3 — Paperclip's setup-state, probed by ctrl-api against paperclip:3100
+// (with the right Host header). See route comments in channels_paperclip.ts
+// for the four values. The card uses this to render the new sign-up + paste-
+// API-key sub-card when the principal hasn't completed Paperclip's own
+// onboarding ritual yet.
+export type PaperclipSetupState =
+  | "needs_api_key"
+  | "configured"
+  | "auth_failed"
+  | "unreachable";
 
 export type PaperclipRunStatus =
   | "ok"
@@ -56,6 +68,11 @@ export interface PaperclipStatus {
   has_signing_secret: boolean;
   last_heartbeat_at: string | null;
   recent_runs: PaperclipRun[];
+  /** P3 fields — present on /status responses ≥ P3. Older ctrl-api may
+   *  omit them; the card falls back to deriving from has_signing_secret +
+   *  last_heartbeat_at the old way (back-compat). */
+  setup_state?: PaperclipSetupState;
+  paperclip_origin?: string;
 }
 
 export interface PaperclipCardState {
@@ -202,6 +219,39 @@ export function derivePaperclipCardState(
     };
   }
 
+  // P3 — Paperclip's own setup ritual hasn't been walked yet. We can't
+  // auto-bootstrap Paperclip (it requires a CEO invite written through its
+  // own DB), so the card carries the principal through Paperclip's UI:
+  // "Open Paperclip → sign up → generate API key → paste it here". Once
+  // pasted, ctrl-api writes the key into the runtime and the card flips
+  // to "awaiting" (then "connected" once the first heartbeat arrives).
+  //
+  // setup_state is set by ctrl-api ≥ P3. When the upstream is older and
+  // omits the field, fall through to the legacy awaiting/connected path
+  // (PAPERCLIP_API_KEY was historically expected to be set manually
+  // before the card was first viewed).
+  if (s.setup_state === "needs_api_key" || s.setup_state === "auth_failed") {
+    const needsAuth = s.setup_state === "auth_failed";
+    return {
+      status: "needs_api_key",
+      pillLabel: needsAuth ? "Key rejected" : "Setup required",
+      pillTone: needsAuth ? "error" : "available",
+      heading: needsAuth
+        ? "Paperclip rejected the API key"
+        : "Finish Paperclip's setup",
+      description: needsAuth
+        ? "The saved key is no longer valid. Generate a new one in Paperclip → Settings → API keys, then paste it below."
+        : "Paperclip is reachable but Alfred can't talk to it yet. Two clicks: sign up in Paperclip, then paste an API key here.",
+      heartbeatUrl,
+      paperclipOrigin: s.paperclip_origin || paperclipOrigin,
+      canTest: false,
+      visibleRuns,
+      hasMoreRuns,
+      allRuns,
+      lastHeartbeatRelative,
+    };
+  }
+
   if (s.last_heartbeat_at === null || s.last_heartbeat_at === "") {
     return {
       status: "awaiting",
@@ -213,7 +263,7 @@ export function derivePaperclipCardState(
         "create the Alfred employee. Once Paperclip pings you, this card " +
         "lights up.",
       heartbeatUrl,
-      paperclipOrigin,
+      paperclipOrigin: s.paperclip_origin || paperclipOrigin,
       canTest: true,
       visibleRuns,
       hasMoreRuns,

@@ -284,6 +284,26 @@ export const sendPaperclipTest = async (_args: unknown, context: any) => {
   });
 };
 
+// P3 — operator pastes their freshly-generated Paperclip API key here.
+// ctrl-api validates round-trip against Paperclip, writes it to
+// /opt/alfred/.env + /hermes-state/profiles/main/.env, then kicks
+// hermes-main so the paperclip MCP server picks up the key without a
+// full container restart.
+export const setPaperclipApiKey = async (
+  args: { api_key: string },
+  context: any,
+) => {
+  if (typeof args?.api_key !== "string" || !args.api_key.trim()) {
+    throw new HttpError(400, "api_key required");
+  }
+  const instance = await getUserInstance(context);
+  return proxyToTenant(instance, {
+    method: "POST",
+    path: "/api/v1/channels/paperclip/api-key",
+    body: { api_key: args.api_key.trim() },
+  });
+};
+
 // Lane III — Slack channel on /channels. Mirrors the Telegram op set; backed
 // by Lane I's ctrl-api endpoints under /api/v1/channels/slack/*. Shape:
 //   getSlackChannelStatus → { configured, state, error, workspace:{team,…},

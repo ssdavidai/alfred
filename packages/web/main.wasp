@@ -780,6 +780,13 @@ action sendPaperclipTest {
   entities: []
 }
 
+// P3 — Paperclip setup: the principal pastes their generated API key here
+// and ctrl-api wires it into the runtime (Hermes + .env).
+action setPaperclipApiKey {
+  fn: import { setPaperclipApiKey } from "@src/dashboard/operations",
+  entities: []
+}
+
 // Lane III — Slack channel on /channels. Five ops backed by ctrl-api
 // /api/v1/channels/slack/*. Mirrors the Telegram op set; same shape.
 query getSlackChannelStatus {

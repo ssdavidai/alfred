@@ -52,6 +52,7 @@
 
 import crypto from "node:crypto";
 import fs from "node:fs";
+import http from "node:http";
 import { addRoute } from "../server.js";
 import { sendJson, ValidationError, ApiError } from "../errors.js";
 import { getStateDb } from "../../db/state.js";
@@ -607,21 +608,227 @@ function recordAuthFailure(body: unknown, kind: "auth_failed" | "replay"): void 
   });
 }
 
+// ── Paperclip setup-state probe ───────────────────────────────────────────
+//
+// Paperclip's auto-bootstrap turned out to be a much bigger lift than the
+// integration was worth (Paperclip's `authenticated` mode requires a
+// CEO-invite ritual that touches multiple internal tables; `local_trusted`
+// mode needs additional config the container won't boot without). So the
+// /channels card carries the principal through Paperclip's own setup with
+// a polished click-through UX instead. Sir 2026-05-27.
+//
+// `setup_state` drives which sub-card the UI renders:
+//   * "needs_api_key"  — Paperclip is reachable but our PAPERCLIP_API_KEY
+//                        is blank → tell the principal to sign up at
+//                        paperclip.<DOMAIN>, then paste a Settings → API
+//                        keys value back here.
+//   * "configured"     — PAPERCLIP_API_KEY set and Paperclip accepts it
+//                        (probed: /api/companies returns 200, NOT 401/403).
+//   * "auth_failed"    — key set but Paperclip rejects → key likely
+//                        expired/revoked; prompt for a new one.
+//   * "unreachable"    — paperclip:3100 not responding → container down /
+//                        not deployed.
+type PaperclipSetupState =
+  | "needs_api_key"
+  | "configured"
+  | "auth_failed"
+  | "unreachable";
+
+const PAPERCLIP_URL = "http://paperclip:3100";
+
+async function probeSetupState(): Promise<PaperclipSetupState> {
+  const apiKey = process.env.PAPERCLIP_API_KEY?.trim();
+  // Paperclip's better-auth checks Host header against PAPERCLIP_PUBLIC_URL —
+  // same trusted-origins quirk apps.ts already handles. Use the public host.
+  const host = `paperclip.${
+    process.env.DOMAIN ?? process.env.TENANT_DOMAIN ?? "alfred.black"
+  }`;
+  // Reach the compose-internal address but spoof Host. Node fetch drops
+  // manual Host; fall back to node:http (same trick as apps.ts).
+  function probe(path: string, withAuth: boolean): Promise<number> {
+    return new Promise((resolve) => {
+      const headers: Record<string, string> = { Host: host };
+      if (withAuth && apiKey) headers.Authorization = `Bearer ${apiKey}`;
+      const req = http.request(
+        {
+          method: "GET",
+          hostname: "paperclip",
+          port: 3100,
+          path,
+          headers,
+          timeout: 3000,
+        },
+        (resp) => {
+          resp.resume();
+          resolve(resp.statusCode ?? 0);
+        },
+      );
+      req.on("error", () => resolve(0));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(0);
+      });
+      req.end();
+    });
+  }
+  if (!apiKey) {
+    // Confirm Paperclip is at least reachable before saying "needs key".
+    const ping = await probe("/sign-in", false);
+    if (ping === 0) return "unreachable";
+    return "needs_api_key";
+  }
+  const probed = await probe("/api/companies", true);
+  if (probed === 0) return "unreachable";
+  if (probed === 401 || probed === 403) return "auth_failed";
+  // 200 = configured. 404 etc. would be unexpected — treat as auth_failed
+  // so the UI prompts for a fresh key.
+  if (probed >= 200 && probed < 300) return "configured";
+  return "auth_failed";
+}
+
 // ── Routes ────────────────────────────────────────────────────────────────
 
 export function registerPaperclipChannelRoutes(): void {
   // GET /status — always 200; operator card needs every field populated.
+  // setup_state extends the original P2 contract (configured/has_signing_secret
+  // stay for back-compat); the card uses setup_state to drive the new
+  // click-through flow. paperclip_origin is the public URL the principal
+  // signs up at — pre-derived here so the card doesn't re-do hostname math.
   addRoute("GET", "/api/v1/channels/paperclip/status", async ({ res }) => {
     const configured = Boolean(process.env.PAPERCLIP_API_KEY);
     const hasSecret = Boolean(process.env.PAPERCLIP_HEARTBEAT_SECRET);
+    const setupState = await probeSetupState();
+    const domain =
+      process.env.DOMAIN ?? process.env.TENANT_DOMAIN ?? "alfred.black";
     sendJson(res, 200, {
       configured,
       heartbeat_url: heartbeatUrl(),
       has_signing_secret: hasSecret,
       last_heartbeat_at: lastHeartbeatAt,
       recent_runs: recentRuns.slice(),
+      setup_state: setupState,
+      paperclip_origin: `https://paperclip.${domain}`,
     });
   });
+
+  // POST /api-key — the principal pastes their freshly-generated Paperclip
+  // API key here. We validate it round-trips against Paperclip, then write
+  // it to BOTH locations Hermes reads:
+  //   * /srv/alfred-black/.env (== host /opt/alfred/.env) — durable across
+  //     re-init, the canonical operator-facing env file
+  //   * /hermes-state/profiles/main/.env — what the running Hermes gateway
+  //     reads at boot; we update this so a `docker compose restart hermes`
+  //     picks up the new key without waiting for a full init re-render
+  //
+  // Then we restart hermes-main's gateway process (via docker exec) so the
+  // paperclip MCP server picks up PAPERCLIP_API_KEY immediately. The full
+  // container doesn't need to restart — just the gateway.
+  addRoute(
+    "POST",
+    "/api/v1/channels/paperclip/api-key",
+    async ({ res, body }) => {
+      const b = (body ?? {}) as { api_key?: unknown };
+      if (typeof b.api_key !== "string" || !b.api_key.trim()) {
+        throw new ValidationError("api_key (string) is required");
+      }
+      const key = b.api_key.trim();
+      // Validate by round-tripping against Paperclip /api/companies.
+      const host = `paperclip.${
+        process.env.DOMAIN ?? process.env.TENANT_DOMAIN ?? "alfred.black"
+      }`;
+      const ok = await new Promise<boolean>((resolve) => {
+        const req = http.request(
+          {
+            method: "GET",
+            hostname: "paperclip",
+            port: 3100,
+            path: "/api/companies",
+            headers: { Host: host, Authorization: `Bearer ${key}` },
+            timeout: 5000,
+          },
+          (resp) => {
+            resp.resume();
+            const code = resp.statusCode ?? 0;
+            resolve(code >= 200 && code < 300);
+          },
+        );
+        req.on("error", () => resolve(false));
+        req.on("timeout", () => {
+          req.destroy();
+          resolve(false);
+        });
+        req.end();
+      });
+      if (!ok) {
+        throw new ApiError(
+          400,
+          "INVALID_KEY",
+          "Paperclip rejected this API key. Generate a new one in Paperclip → Settings → API keys and try again.",
+        );
+      }
+      // Atomic .env update — read existing, set/replace PAPERCLIP_API_KEY,
+      // write back. Mirrors the secret-set pattern used by other channel
+      // routes.
+      function upsertEnvKey(path: string, k: string, v: string): void {
+        let raw = "";
+        try {
+          raw = fs.readFileSync(path, "utf-8");
+        } catch {
+          // file may not exist on a partially-bootstrapped tenant —
+          // create it
+        }
+        const lines = raw.split("\n");
+        let found = false;
+        for (let i = 0; i < lines.length; i++) {
+          const t = lines[i].trim();
+          if (!t || t.startsWith("#")) continue;
+          const eq = t.indexOf("=");
+          if (eq < 0) continue;
+          if (t.slice(0, eq).trim() === k) {
+            lines[i] = `${k}=${v}`;
+            found = true;
+            break;
+          }
+        }
+        if (!found) {
+          if (raw.length > 0 && !raw.endsWith("\n")) lines.push("");
+          lines.push(`${k}=${v}`);
+        }
+        const out = lines.join("\n");
+        fs.writeFileSync(path, out.endsWith("\n") ? out : out + "\n", {
+          mode: 0o600,
+        });
+      }
+      // 1. /opt/alfred/.env (durable)
+      upsertEnvKey("/srv/alfred-black/.env", "PAPERCLIP_API_KEY", key);
+      // 2. /hermes-state/profiles/main/.env (immediate)
+      upsertEnvKey(
+        `${process.env.HERMES_CONFIG_DIR ?? "/hermes-state/profiles"}/main/.env`,
+        "PAPERCLIP_API_KEY",
+        key,
+      );
+      // 3. process.env in this container so subsequent /status calls see
+      //    the new key without a restart.
+      process.env.PAPERCLIP_API_KEY = key;
+      // 4. Kick hermes-main's gateway process so the paperclip MCP server
+      //    re-spawns with the new key. Best-effort — if docker exec fails
+      //    (e.g. socket unmounted in dev), the principal can restart hermes
+      //    manually. We do not block on this.
+      try {
+        const { execSync } = await import("node:child_process");
+        execSync(
+          `docker exec alfred-black-hermes-1 pkill -f "main gateway run" || true`,
+          { stdio: "ignore", timeout: 5000 },
+        );
+      } catch {
+        /* best-effort */
+      }
+      sendJson(res, 200, {
+        ok: true,
+        setup_state: "configured" as PaperclipSetupState,
+      });
+    },
+  );
 
   // POST /heartbeat — Paperclip's HTTP adapter target. Public-facing; the
   // X-Paperclip-Signature header is the only auth. The route is registered

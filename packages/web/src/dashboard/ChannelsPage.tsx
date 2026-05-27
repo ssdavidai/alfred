@@ -42,6 +42,7 @@ import {
   sendOmiTest,
   getPaperclipChannelStatus,
   sendPaperclipTest,
+  setPaperclipApiKey,
   updateCredentials,
 } from "wasp/client/operations";
 import { Frame } from "../client/components/ab/Frame";
@@ -2800,6 +2801,19 @@ function PaperclipCard() {
         </div>
       )}
 
+      {/* needs_api_key — Paperclip is up but the principal hasn't walked
+          its own setup ritual yet (P3). Two-click path: "Open Paperclip"
+          → they sign up + generate an API key → paste here. Once the
+          key validates, the card flips to "awaiting". */}
+      {card.status === "needs_api_key" && (
+        <PaperclipApiKeyPanel
+          paperclipOrigin={card.paperclipOrigin}
+          isReauth={card.pillLabel === "Key rejected"}
+          description={card.description}
+          onSaved={refetch}
+        />
+      )}
+
       {/* awaiting — secret set, no heartbeat yet. The webhook URL is the
           hero artifact: Sir pastes it into Paperclip's HTTP-adapter UI
           when creating the Alfred employee. */}
@@ -3048,5 +3062,146 @@ function PaperclipCard() {
         </div>
       )}
     </ChannelCard>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// P3 — Paperclip API-key paste panel.
+//
+// Rendered when card.status === "needs_api_key". Paperclip's authenticated
+// mode requires the principal to walk Paperclip's own first-run ritual
+// (CEO invite, signup, claim instance) — we can't auto-bootstrap because
+// the ritual writes through Paperclip's internal tables, not its REST API.
+// So the card guides the principal:
+//
+//   1. "Open Paperclip" button → paperclip.<DOMAIN> in a new tab.
+//   2. They sign up + complete Paperclip's setup.
+//   3. They generate an API key (Settings → API keys).
+//   4. They paste it back here; ctrl-api validates round-trip, writes
+//      PAPERCLIP_API_KEY into /opt/alfred/.env + the hermes profile's
+//      .env, and kicks hermes-main so the MCP server picks it up.
+//
+// On success the card auto-flips to "awaiting" (heartbeat URL ready to
+// paste into Paperclip's HTTP-adapter agent setup). Same one-time-paste
+// UX as the SSH-key "generate + download" panel.
+// ---------------------------------------------------------------------------
+
+function PaperclipApiKeyPanel({
+  paperclipOrigin,
+  isReauth,
+  description,
+  onSaved,
+}: {
+  paperclipOrigin: string;
+  isReauth: boolean;
+  description: string;
+  onSaved: () => Promise<unknown>;
+}) {
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    const trimmed = apiKey.trim();
+    if (!trimmed) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const r: any = await setPaperclipApiKey({ api_key: trimmed });
+      if (r?.ok) {
+        setApiKey("");
+        await onSaved();
+      } else {
+        setError("Paperclip didn't accept that key. Try generating a fresh one.");
+      }
+    } catch (e: any) {
+      setError(e?.message ?? "Couldn't save the key. Check the ctrl-api logs.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-5 space-y-5">
+      <p
+        className="font-body italic text-[13px]"
+        style={{ color: isReauth ? "var(--brass)" : "var(--marginalia)" }}
+      >
+        {description}
+      </p>
+
+      {!isReauth && (
+        <ol
+          className="space-y-2 font-body text-[13px]"
+          style={{ color: "var(--ink)" }}
+        >
+          <li>
+            <span style={{ color: "var(--marginalia)" }}>1.</span>{" "}
+            Open Paperclip and finish its first-run setup (sign up, claim
+            the instance).
+          </li>
+          <li>
+            <span style={{ color: "var(--marginalia)" }}>2.</span>{" "}
+            Inside Paperclip: <code className="font-mono">Settings →
+            API keys → Generate</code>.
+          </li>
+          <li>
+            <span style={{ color: "var(--marginalia)" }}>3.</span>{" "}
+            Paste the generated key below. Alfred takes it from there.
+          </li>
+        </ol>
+      )}
+
+      {paperclipOrigin && (
+        <a
+          href={paperclipOrigin}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="btn-ghost inline-block"
+        >
+          Open Paperclip →
+        </a>
+      )}
+
+      <div className="space-y-2">
+        <div
+          className="font-mono text-[10px] uppercase tracking-[0.22em]"
+          style={{ color: "var(--marginalia)" }}
+        >
+          Paste API key
+        </div>
+        <textarea
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          placeholder="pck_… (from Paperclip Settings → API keys)"
+          rows={2}
+          className="w-full bg-transparent border border-rule px-2 py-1 font-mono text-[11px]"
+        />
+        <div className="flex items-baseline justify-between gap-2">
+          <p
+            className="font-body italic text-[11px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            Alfred validates the key against Paperclip and only persists it
+            if it works.
+          </p>
+          <button
+            onClick={save}
+            disabled={busy || !apiKey.trim()}
+            className="btn-ghost shrink-0"
+          >
+            {busy ? "Validating…" : isReauth ? "Update key" : "Save & connect"}
+          </button>
+        </div>
+        {error && (
+          <p
+            className="font-body italic text-[12px]"
+            style={{ color: "var(--brass)" }}
+          >
+            {error}
+          </p>
+        )}
+      </div>
+    </div>
   );
 }
