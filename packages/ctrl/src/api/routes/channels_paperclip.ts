@@ -611,25 +611,36 @@ function recordAuthFailure(body: unknown, kind: "auth_failed" | "replay"): void 
 // ── Paperclip setup-state probe ───────────────────────────────────────────
 //
 // `setup_state` drives which sub-card the UI renders:
+//   * "ready"              — Paperclip is fully seeded by paperclip-init:
+//                            PAPERCLIP_AGENT_TOKEN is in the host .env,
+//                            company "Alfred" + CEO agent "hermes" exist
+//                            in Paperclip. The principal NEVER sees the
+//                            wizard — the card shows "Open Paperclip →"
+//                            with the company/agent labels inline.
+//                            (Added 2026-05-27 in the full-seed PR.)
 //   * "needs_admin_signup" — Paperclip's `paperclip-init` one-shot has
 //                            written /alfred-data/paperclip-ceo-invite.txt
 //                            but no admin user has accepted yet. Paperclip's
 //                            /sign-in page returns the "Instance setup
 //                            required" wall. The card surfaces the invite
 //                            URL as `admin_invite_url` so the principal
-//                            clicks once and signs up — zero CLI. (Added
-//                            2026-05-27 after Sir's 6-step manual recovery.)
+//                            clicks once and signs up — zero CLI.
+//                            (Fallback path when the headless seed in steps
+//                            6–11 of bootstrap-paperclip.sh failed partway.)
 //   * "needs_api_key"      — Paperclip is reachable AND past its
 //                            instance-setup wall but our PAPERCLIP_API_KEY
 //                            is blank → tell the principal to paste a
 //                            Settings → API keys value from Paperclip.
-//   * "configured"         — PAPERCLIP_API_KEY set and Paperclip accepts it
-//                            (probed: /api/companies returns 200, NOT 401/403).
+//   * "configured"         — Legacy: PAPERCLIP_API_KEY set and Paperclip
+//                            accepts it. Pre-dates the full-seed flow;
+//                            kept for tenants who pasted a key by hand
+//                            before the headless seed shipped.
 //   * "auth_failed"        — key set but Paperclip rejects → key likely
 //                            expired/revoked; prompt for a new one.
 //   * "unreachable"        — paperclip:3100 not responding → container down /
 //                            not deployed.
 type PaperclipSetupState =
+  | "ready"
   | "needs_admin_signup"
   | "needs_api_key"
   | "configured"
@@ -667,9 +678,80 @@ const PAPERCLIP_URL = "http://paperclip:3100";
 interface SetupProbeResult {
   state: PaperclipSetupState;
   admin_invite_url: string | null;
+  /** When state === "ready", the company name + id from the headless seed
+   *  (e.g. "Alfred" / "449a5cf9-…"). Used by the card to show the inline
+   *  "Alfred · hermes (CEO)" label. Null on all other states. */
+  seed_company_name: string | null;
+  seed_company_id: string | null;
+  seed_agent_name: string | null;
+  seed_agent_id: string | null;
+}
+
+// Pre-mounted file path for /alfred-data/paperclip-seed-credentials.json
+// (mode 0600) — written by step 11a of bootstrap-paperclip.sh. Used to
+// surface the seed metadata (company/agent names, ids) on the /channels
+// card. The password is intentionally NOT exposed via /status; the
+// principal can read the file directly on the host if they need to.
+const PAPERCLIP_SEED_CREDENTIALS_PATH = "/alfred-data/paperclip-seed-credentials.json";
+
+/** Read non-sensitive seed metadata (no password, no token). Returns null
+ *  when the file is missing/malformed — callers fall back to env vars. */
+function readSeedMetadata(): {
+  company_name: string | null;
+  company_id: string | null;
+  agent_name: string | null;
+  agent_id: string | null;
+} | null {
+  const p =
+    process.env.PAPERCLIP_SEED_CREDENTIALS_FILE ??
+    PAPERCLIP_SEED_CREDENTIALS_PATH;
+  let raw: string;
+  try {
+    raw = fs.readFileSync(p, "utf-8");
+  } catch {
+    return null;
+  }
+  try {
+    const j = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      company_name: typeof j.company === "string" ? j.company : null,
+      company_id: typeof j.company_id === "string" ? j.company_id : null,
+      agent_name: typeof j.agent === "string" ? j.agent : null,
+      agent_id: typeof j.agent_id === "string" ? j.agent_id : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 async function probeSetupState(): Promise<SetupProbeResult> {
+  // ── ready: headless seed completed (bootstrap-paperclip.sh steps 6–11) ──
+  // PAPERCLIP_AGENT_TOKEN in env is the authoritative "fully seeded"
+  // marker — step 11b writes it to /opt/alfred/.env, which compose loads
+  // into ctrl-api via env_file. The seed-credentials.json carries the
+  // human-readable company + agent names for the card label; we read it
+  // best-effort and fall back to env defaults if missing.
+  //
+  // We do NOT roundtrip against paperclip:3100 here to confirm the
+  // company/agent still exist — that would make every /status response
+  // hit the upstream and slow the dashboard, and the seed is meant to
+  // be durable (the principal would have to manually delete the agent
+  // in Paperclip's UI for this to be wrong).
+  if (process.env.PAPERCLIP_AGENT_TOKEN?.trim()) {
+    const meta = readSeedMetadata();
+    return {
+      state: "ready",
+      admin_invite_url: null,
+      seed_company_name:
+        meta?.company_name ?? process.env.PAPERCLIP_SEED_COMPANY ?? "Alfred",
+      seed_company_id:
+        meta?.company_id ?? process.env.PAPERCLIP_COMPANY_ID ?? null,
+      seed_agent_name:
+        meta?.agent_name ?? process.env.PAPERCLIP_SEED_AGENT_NAME ?? "hermes",
+      seed_agent_id: meta?.agent_id ?? process.env.PAPERCLIP_AGENT_ID ?? null,
+    };
+  }
+
   const apiKey = process.env.PAPERCLIP_API_KEY?.trim();
   // Paperclip's better-auth checks Host header against PAPERCLIP_PUBLIC_URL —
   // same trusted-origins quirk apps.ts already handles. Use the public host.
@@ -730,11 +812,20 @@ async function probeSetupState(): Promise<SetupProbeResult> {
       req.end();
     });
   }
+  // Shared "no seed metadata" tail so the non-ready branches don't have
+  // to re-spell the seed_* nulls (they only matter on `ready`).
+  const noSeed = {
+    seed_company_name: null,
+    seed_company_id: null,
+    seed_agent_name: null,
+    seed_agent_id: null,
+  } as const;
+
   if (!apiKey) {
     // Confirm Paperclip is at least reachable.
     const ping = await probe("/sign-in", false);
     if (ping.status === 0) {
-      return { state: "unreachable", admin_invite_url: null };
+      return { state: "unreachable", admin_invite_url: null, ...noSeed };
     }
     // Heuristic: when `paperclip-init` has captured an invite URL into
     // /alfred-data/paperclip-ceo-invite.txt, the principal is presumed to
@@ -752,28 +843,32 @@ async function probeSetupState(): Promise<SetupProbeResult> {
     // can drive the card to `configured` from either branch.
     const inviteUrl = readPaperclipInviteUrl();
     if (inviteUrl) {
-      return { state: "needs_admin_signup", admin_invite_url: inviteUrl };
+      return {
+        state: "needs_admin_signup",
+        admin_invite_url: inviteUrl,
+        ...noSeed,
+      };
     }
     // No invite captured — legacy fallback. Either paperclip-init hasn't
     // run yet (rare; service runs once at compose-up), the bootstrap
     // failed (caller can re-run), or this is an old deploy that never
     // had paperclip-init. The existing PR #73 paste-API-key panel handles
     // this gracefully.
-    return { state: "needs_api_key", admin_invite_url: null };
+    return { state: "needs_api_key", admin_invite_url: null, ...noSeed };
   }
   const probed = await probe("/api/companies", true);
   if (probed.status === 0) {
-    return { state: "unreachable", admin_invite_url: null };
+    return { state: "unreachable", admin_invite_url: null, ...noSeed };
   }
   if (probed.status === 401 || probed.status === 403) {
-    return { state: "auth_failed", admin_invite_url: null };
+    return { state: "auth_failed", admin_invite_url: null, ...noSeed };
   }
   // 200 = configured. 404 etc. would be unexpected — treat as auth_failed
   // so the UI prompts for a fresh key.
   if (probed.status >= 200 && probed.status < 300) {
-    return { state: "configured", admin_invite_url: null };
+    return { state: "configured", admin_invite_url: null, ...noSeed };
   }
-  return { state: "auth_failed", admin_invite_url: null };
+  return { state: "auth_failed", admin_invite_url: null, ...noSeed };
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────
@@ -804,6 +899,24 @@ export function registerPaperclipChannelRoutes(): void {
     // up the invite is stale and surfacing it would be confusing.
     if (probe.state === "needs_admin_signup" && probe.admin_invite_url) {
       payload.admin_invite_url = probe.admin_invite_url;
+    }
+    // Surface seed metadata only when state === "ready" so the dashboard
+    // card can render "Alfred · hermes (CEO)" inline. We intentionally do
+    // not leak company/agent ids on other states — they're only meaningful
+    // once the headless seed has actually landed the records.
+    if (probe.state === "ready") {
+      if (probe.seed_company_name) {
+        payload.seed_company_name = probe.seed_company_name;
+      }
+      if (probe.seed_company_id) {
+        payload.seed_company_id = probe.seed_company_id;
+      }
+      if (probe.seed_agent_name) {
+        payload.seed_agent_name = probe.seed_agent_name;
+      }
+      if (probe.seed_agent_id) {
+        payload.seed_agent_id = probe.seed_agent_id;
+      }
     }
     sendJson(res, 200, payload);
   });

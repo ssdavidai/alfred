@@ -2764,7 +2764,9 @@ function PaperclipCard() {
         : "Receiving tasks"
       : card.status === "awaiting"
         ? "Paperclip employee — awaiting first task"
-        : "Setup required";
+        : card.status === "ready"
+          ? card.seedLabel || "Alfred · hermes (CEO)"
+          : "Setup required";
 
   const runsToShow = runsExpanded ? card.allRuns : card.visibleRuns;
 
@@ -2798,6 +2800,59 @@ function PaperclipCard() {
               Send test heartbeat
             </button>
           </div>
+        </div>
+      )}
+
+      {/* ready — full-seed headless redeem completed. The principal sees
+          a single CTA ("Open Paperclip →") plus the inline company / agent
+          label. NO wizard. (2026-05-27 full-seed PR.) */}
+      {card.status === "ready" && (
+        <div className="mt-5 space-y-4">
+          <p
+            className="font-body italic text-[13px]"
+            style={{ color: "var(--marginalia)" }}
+          >
+            {card.description}
+          </p>
+          {card.seedLabel && (
+            <div
+              className="font-mono text-[11px] uppercase tracking-[0.22em]"
+              style={{ color: "var(--marginalia)" }}
+            >
+              {card.seedLabel}
+            </div>
+          )}
+          <div className="flex flex-wrap gap-3 items-baseline pt-1">
+            {card.paperclipOrigin && (
+              <a
+                href={card.paperclipOrigin}
+                target="_blank"
+                rel="noreferrer"
+                className="btn-ghost"
+              >
+                Open Paperclip →
+              </a>
+            )}
+            <button
+              onClick={sendTest}
+              disabled={testBusy || !card.canTest}
+              className="btn-ghost"
+            >
+              {testBusy ? "…" : "Send test heartbeat"}
+            </button>
+          </div>
+          {testMsg && (
+            <p
+              className="font-body italic text-[12px]"
+              style={{
+                color:
+                  testMsg.kind === "ok" ? "var(--marginalia)" : "var(--brass)",
+              }}
+            >
+              {testMsg.kind === "ok" ? "✓ " : "✗ "}
+              {testMsg.text}
+            </p>
+          )}
         </div>
       )}
 

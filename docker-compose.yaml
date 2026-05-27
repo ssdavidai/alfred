@@ -440,6 +440,15 @@ services:
       # it explicitly (env_file also injects it) so the bridge is unambiguous —
       # without it every Sure proxy returns NOT_CONFIGURED and finance is blank.
       - SURE_API_KEY=${SURE_API_KEY:-}
+      # Paperclip full-seed token tuple — bootstrap-paperclip.sh step 11b
+      # writes these into /opt/alfred/.env on first boot. Listed explicitly
+      # here so it's obvious which vars ctrl-api consumes (channels_paperclip
+      # .ts reads PAPERCLIP_AGENT_TOKEN as the authoritative "ready" marker).
+      # env_file already injects them; the `:-` default lets compose parse
+      # before the seed has run.
+      - PAPERCLIP_AGENT_TOKEN=${PAPERCLIP_AGENT_TOKEN:-}
+      - PAPERCLIP_AGENT_ID=${PAPERCLIP_AGENT_ID:-}
+      - PAPERCLIP_COMPANY_ID=${PAPERCLIP_COMPANY_ID:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:3100/api/v1/learning/status -H \"Authorization: Bearer $AAS_API_KEY\" || exit 1"]
       interval: 10s
@@ -1314,10 +1323,29 @@ services:
     depends_on:
       paperclip:
         condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # The script reads DOMAIN to construct default
+      # PAPERCLIP_BASE_URL=https://paperclip.${DOMAIN}.
+      - DOMAIN=${DOMAIN}
+      # Operator overrides for the headless seed (defaults baked into the
+      # script if blank). PAPERCLIP_SEED_* env_file already covers, but we
+      # list them so it's obvious which knobs the seed honours.
+      - PAPERCLIP_SEED_EMAIL=${PAPERCLIP_SEED_EMAIL:-}
+      - PAPERCLIP_SEED_NAME=${PAPERCLIP_SEED_NAME:-}
+      - PAPERCLIP_SEED_COMPANY=${PAPERCLIP_SEED_COMPANY:-}
     volumes:
       - alfred_data:/alfred-data
       # RO socket — the script only invokes `docker exec` / `docker inspect`.
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      # The host compose dir, bind-mounted RW so step 11b can persist
+      # PAPERCLIP_AGENT_TOKEN/_AGENT_ID/_COMPANY_ID into /opt/alfred/.env
+      # (== /srv/alfred-black/.env inside the container — same path
+      # ctrl-api uses to read/write the .env). Without this mount the
+      # full seed cannot complete; only the legacy invite-file fallback
+      # would land.
+      - ${COMPOSE_DIR_HOST:-/opt/alfred}:/srv/alfred-black
     entrypoint: ["./bootstrap-paperclip.sh"]
     mem_limit: 256m
     pids_limit: 256

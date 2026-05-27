@@ -96,3 +96,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: shellcheck bootstrap.sh
         run: shellcheck scripts/bootstrap.sh
+      - name: shellcheck bootstrap-paperclip.sh
+        # The paperclip-init container's entrypoint. Drift breaks the
+        # zero-CLI Paperclip seed for every new tenant, so we lint it
+        # alongside the host bootstrap script.
+        run: shellcheck packages/hermes/init/bootstrap-paperclip.sh

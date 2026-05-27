@@ -33,6 +33,7 @@ export type PaperclipStatusState =
   | "missing_secret"
   | "needs_admin_signup"
   | "needs_api_key"
+  | "ready"
   | "awaiting"
   | "connected";
 
@@ -49,6 +50,7 @@ export type PaperclipStatusState =
 // `admin_invite_url`; the card renders a one-click "Set up your
 // Paperclip account →" button. Replaces 6 manual SSH steps.
 export type PaperclipSetupState =
+  | "ready"
   | "needs_admin_signup"
   | "needs_api_key"
   | "configured"
@@ -89,6 +91,13 @@ export interface PaperclipStatus {
    *  withholds it. Card renders a single click-through "Set up your
    *  Paperclip account →" button when present. */
   admin_invite_url?: string;
+  /** Headless-seed metadata. Present only when setup_state === "ready"
+   *  (i.e. bootstrap-paperclip.sh steps 6–11 completed). The card uses
+   *  these to render "Alfred · hermes (CEO)" inline beneath the heading. */
+  seed_company_name?: string;
+  seed_company_id?: string;
+  seed_agent_name?: string;
+  seed_agent_id?: string;
 }
 
 export interface PaperclipCardState {
@@ -132,6 +141,10 @@ export interface PaperclipCardState {
    * still be running on a freshly-deployed tenant).
    */
   adminInviteUrl: string;
+  /** "Alfred · hermes (CEO)"-style label rendered beneath the heading
+   * when `status === "ready"`. Empty on all other states. The React
+   * layer is responsible for typography; this is just the text. */
+  seedLabel: string;
 }
 
 const NULL_STATUS: PaperclipStatus = {
@@ -244,6 +257,48 @@ export function derivePaperclipCardState(
       allRuns,
       lastHeartbeatRelative,
       adminInviteUrl: "",
+      seedLabel: "",
+    };
+  }
+
+  // 2026-05-27 (full-seed PR) — bootstrap-paperclip.sh steps 6–11 completed:
+  // PAPERCLIP_AGENT_TOKEN is in ctrl-api's env, company "Alfred" + CEO agent
+  // "hermes" exist in Paperclip. The principal NEVER sees the wizard.
+  //
+  // Behaviour:
+  //   * pillLabel = "Ready" (tone: active so it draws the eye).
+  //   * heading hints at the seeded company.
+  //   * seedLabel renders "Alfred · hermes (CEO)" inline.
+  //   * Test button enabled (heartbeat path is wired the moment the
+  //     headless seed lands the agent token).
+  if (s.setup_state === "ready") {
+    const company =
+      typeof s.seed_company_name === "string" && s.seed_company_name.length
+        ? s.seed_company_name
+        : "Alfred";
+    const agent =
+      typeof s.seed_agent_name === "string" && s.seed_agent_name.length
+        ? s.seed_agent_name
+        : "hermes";
+    const seedLabel = `${company} · ${agent} (CEO)`;
+    return {
+      status: "ready",
+      pillLabel: "Ready",
+      pillTone: "active",
+      heading: "Paperclip is set up",
+      description:
+        // Lean copy — the seedLabel + the "Open Paperclip" CTA are doing
+        // the heavy lifting. No CLI in sight.
+        "Your company is seeded and Alfred is registered as CEO. Open Paperclip to file tasks; heartbeats will flow back here as the agent works.",
+      heartbeatUrl,
+      paperclipOrigin: s.paperclip_origin || paperclipOrigin,
+      canTest: true,
+      visibleRuns,
+      hasMoreRuns,
+      allRuns,
+      lastHeartbeatRelative,
+      adminInviteUrl: "",
+      seedLabel,
     };
   }
 
@@ -276,6 +331,7 @@ export function derivePaperclipCardState(
       allRuns,
       lastHeartbeatRelative,
       adminInviteUrl,
+      seedLabel: "",
     };
   }
 
@@ -308,6 +364,7 @@ export function derivePaperclipCardState(
       allRuns,
       lastHeartbeatRelative,
       adminInviteUrl: "",
+      seedLabel: "",
     };
   }
 
@@ -329,6 +386,7 @@ export function derivePaperclipCardState(
       allRuns,
       lastHeartbeatRelative,
       adminInviteUrl: "",
+      seedLabel: "",
     };
   }
 
@@ -348,6 +406,7 @@ export function derivePaperclipCardState(
     allRuns,
     lastHeartbeatRelative,
     adminInviteUrl: "",
+    seedLabel: "",
   };
 }
 
