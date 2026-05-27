@@ -126,13 +126,28 @@ already_bootstrapped() {
 # Run paperclip's onboarding ritual (config.json + .env) as the `node` user.
 # -y skips prompts; --bind lan trusts compose-network callers (the alternative
 # `local` is loopback-only and breaks heartbeats from sibling containers).
+#
+# Quirk: `paperclipai onboard` performs its doctor checks + writes config.json
+# THEN tries to start a Paperclip server on port 3100. The paperclip container
+# is already serving on 3100 (compose started it before we ran), so the start
+# step fails with "Port 3100 is already in use" and the command exits 1 —
+# even though the side effect we cared about (config.json on disk) succeeded.
+# Live-observed on joe + rj 2026-05-27. We swallow the non-zero exit when
+# config.json appears afterward.
 paperclip_onboard() {
     local container="$1"
     log "running 'pnpm paperclipai onboard -y --bind lan' (as node)…"
-    if ! docker exec --user node "$container" pnpm paperclipai onboard -y --bind lan; then
-        log "ERROR: 'pnpm paperclipai onboard' failed"
-        return 1
+    local rc=0
+    docker exec --user node "$container" pnpm paperclipai onboard -y --bind lan || rc=$?
+    # Verify the side effect — config.json on disk — regardless of exit code.
+    if docker exec --user node "$container" test -s /paperclip/instances/default/config.json >/dev/null 2>&1; then
+        if [[ $rc -ne 0 ]]; then
+            log "  (onboard exited $rc, but config.json is present — known port-3100 race; treating as success)"
+        fi
+        return 0
     fi
+    log "ERROR: 'pnpm paperclipai onboard' failed (exit=$rc) and config.json is absent"
+    return 1
 }
 
 # Run bootstrap-ceo and capture the "Invite URL: …" line. Paperclip prints
