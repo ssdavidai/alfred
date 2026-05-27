@@ -1,0 +1,28 @@
+{
+  "name": "@alfred-black/hermes-paperclip-adapter-http",
+  "version": "0.2.0-alfred.1",
+  "description": "Local fork of hermes-paperclip-adapter@0.2.0 that calls hermes:18789/v1/responses via HTTP instead of spawning a hermes CLI binary. Tenant-only. Not published.",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js",
+    "./server": "./dist/server/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "node --test --import tsx tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.7.0"
+  }
+}
