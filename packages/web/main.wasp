@@ -482,6 +482,20 @@ api userApiProxy {
   httpRoute: (ALL, "/user-api")
 }
 
+// Composio webhook finalize hop. Internal endpoint called by ctrl-api after
+// it receives + verifies a Composio `connected_account.updated → ACTIVE`
+// webhook. Auth is shared-secret AAS_API_KEY (same secret ctrl-api ↔ web
+// already use for the proxy hop in the opposite direction). Flips the
+// ComposioConnection row's `status` to ACTIVE so the existing 1-min
+// reconciler picks it up on its next tick. See
+// packages/ctrl/src/api/routes/composioWebhook.ts for the rationale.
+api finalizeComposioWebhook {
+  fn: import { finalizeComposioWebhook } from "@src/integrations/composioWebhookFinalize",
+  entities: [ComposioConnection],
+  middlewareConfigFn: import { finalizeComposioWebhookMiddleware } from "@src/integrations/composioWebhookFinalize",
+  httpRoute: (POST, "/webhook/composio/finalize")
+}
+
 // Dashboard queries and actions (proxy to tenant API)
 query getDashboardData {
   fn: import { getDashboardData } from "@src/dashboard/operations",

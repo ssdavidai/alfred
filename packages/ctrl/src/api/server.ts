@@ -57,6 +57,7 @@ import { registerSmsRoutes } from "./routes/sms.js";
 import { registerVoiceRoutes } from "./routes/voice.js";
 import { registerOmiChannelRoutes } from "./routes/channels_omi.js";
 import { registerPaperclipChannelRoutes } from "./routes/channels_paperclip.js";
+import { registerComposioWebhookRoutes } from "./routes/composioWebhook.js";
 import { registerAlfredJournalRoutes } from "./routes/alfredJournal.js";
 import { registerAlfredDeliverRoutes } from "./routes/alfredDeliver.js";
 
@@ -173,6 +174,7 @@ export function createApiServer(): http.Server {
   registerVoiceRoutes();
   registerOmiChannelRoutes();
   registerPaperclipChannelRoutes();
+  registerComposioWebhookRoutes();
   // The one-Alfred continuity layer — alfred_journal + principal mapping
   // (the persistence + lookup surface) plus alfred-deliver (the unified
   // outbound delivery endpoint). Sir-facing UX invariant: there is only
@@ -223,7 +225,13 @@ export function createApiServer(): http.Server {
         // Paperclip heartbeat is HMAC-validated (X-Paperclip-Signature over
         // <ts>.<raw-body>), not bearer-authed. Lane V's Caddy
         // @public_webhooks matcher passes /api/v1/channels/paperclip/* through.
-        pathname === "/api/v1/channels/paperclip/heartbeat";
+        pathname === "/api/v1/channels/paperclip/heartbeat" ||
+        // Composio webhook is HMAC-validated against COMPOSIO_WEBHOOK_SECRET
+        // (Standard-Webhooks scheme on `webhook-signature` / older shape on
+        // `x-composio-signature`). Composio cannot send a Bearer header so
+        // the global auth gate must not pre-empt the HMAC check. See
+        // routes/composioWebhook.ts for the full auth model.
+        pathname === "/api/v1/composio/webhook";
       if (!isPublic) {
         // Pass method+pathname so the scoped-token path can check the
         // route allowlist (see auth.ts VOICE_BRIDGE_ALLOWLIST). The master
@@ -255,7 +263,10 @@ export function createApiServer(): http.Server {
       const isRawBody =
         pathname === "/api/v1/plane/webhook" ||
         pathname === "/api/v1/webhooks/plane/steward" ||
-        pathname === "/api/v1/webhooks/vexa";
+        pathname === "/api/v1/webhooks/vexa" ||
+        // Composio's Standard-Webhooks scheme signs the raw body, so the
+        // handler must see the exact bytes — see routes/composioWebhook.ts.
+        pathname === "/api/v1/composio/webhook";
       const query = new URLSearchParams(qIdx >= 0 ? url.slice(qIdx + 1) : "");
 
       const matched = matchRoute(method, pathname);
